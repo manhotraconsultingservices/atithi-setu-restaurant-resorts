@@ -44265,7 +44265,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-outstanding-plus-8-locales',
+    commit_marker: 'fix-accounting-routes-404-shadow',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -44332,6 +44332,229 @@ ${data.tenant.name}`;
   console.log('[boot] Atithi-Setu build:', JSON.stringify(BUILD_VERSION));
   app.get('/api/version', (_req: Request, res: Response) => {
     res.json(BUILD_VERSION);
+  });
+
+  // ── Late-registered routes relocated above the /api 404 catch-all so they
+  //    are actually reachable (integrations sync-jobs + accounting suite). ──
+  // ── Manual retry endpoint for DEAD jobs ───────────────────────────────
+  app.post("/api/restaurant/:id/integrations/sync-jobs/:jobId/retry", authenticate, restaurantStaff, requireTabAccess('DELIVERY'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM pending_sync_jobs WHERE id = ?", [req.params.jobId]);
+      if (!job) return res.status(404).json({ error: "Job not found" });
+      if (job.status === 'DONE') return res.status(409).json({ error: "Job already DONE — nothing to retry" });
+      // Reset attempts + push next_attempt_at to NOW so the worker picks it up next cycle
+      await db.run(
+        `UPDATE pending_sync_jobs
+            SET status = 'PENDING', attempts = 0,
+                next_attempt_at = CURRENT_TIMESTAMP, last_error = NULL
+          WHERE id = ?`,
+        [req.params.jobId]
+      );
+      res.json({ success: true, message: "Job queued for immediate retry" });
+    } catch (err) {
+      console.error("Retry sync-job error:", err);
+      res.status(500).json({ error: "Failed to retry job" });
+    }
+  });
+
+  // List sync jobs (status filter, limit) — drives the future Sync Health UI
+  app.get("/api/restaurant/:id/integrations/sync-jobs", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { status, channel } = req.query as any;
+      const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+      const conds: string[] = [];
+      const params: any[] = [];
+      if (status) { conds.push("status = ?"); params.push(String(status).toUpperCase()); }
+      if (channel) { conds.push("channel = ?"); params.push(String(channel).toUpperCase()); }
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const rows: any[] = await db.query(
+        `SELECT id, job_type, channel, status, attempts, max_attempts,
+                next_attempt_at, last_error, created_at, completed_at
+           FROM pending_sync_jobs
+           ${whereSql}
+          ORDER BY created_at DESC LIMIT ${limit}`,
+        params
+      );
+      const counts: any = await db.get(
+        `SELECT
+            COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+            COUNT(*) FILTER (WHERE status = 'FAILED') AS failed,
+            COUNT(*) FILTER (WHERE status = 'DEAD') AS dead,
+            COUNT(*) FILTER (WHERE status = 'DONE' AND completed_at > NOW() - INTERVAL '24 hours') AS done_24h
+           FROM pending_sync_jobs`
+      ).catch(() => null);
+      res.json({ jobs: rows, counts: counts || {} });
+    } catch (err) {
+      console.error("List sync-jobs error:", err);
+      res.status(500).json({ error: "Failed to list sync jobs" });
+    }
+  });
+
+  // ─── Accounting API endpoints ───────────────────────────────────────────────
+
+  const _acctOwnerOnly = (req: AuthRequest, res: Response): boolean => {
+    const role = String(req.user?.role || '');
+    if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) { res.status(403).json({ error: 'Forbidden' }); return false; }
+    return true;
+  };
+
+  app.get("/api/restaurant/:id/accounting/chart-of-accounts", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM chart_of_accounts WHERE is_active = 1 ORDER BY display_order, code", []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/gl-entries", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to, account, source_type } = req.query as Record<string, string>;
+      const params: any[] = [req.params.id];
+      const clauses: string[] = ['restaurant_id = ?'];
+      if (from)        { clauses.push('entry_date >= ?'); params.push(from); }
+      if (to)          { clauses.push('entry_date <= ?'); params.push(to); }
+      if (account)     { clauses.push('account_code = ?'); params.push(account); }
+      if (source_type) { clauses.push('source_type = ?'); params.push(source_type); }
+      const rows = await db.query(
+        `SELECT * FROM gl_entries WHERE ${clauses.join(' AND ')} AND is_reversed = 0
+         ORDER BY entry_date DESC, created_at DESC LIMIT 2000`,
+        params
+      );
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/trial-balance", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as Record<string, string>;
+      const params: any[] = [req.params.id];
+      const dateClauses: string[] = [];
+      if (from) { dateClauses.push('g.entry_date >= ?'); params.push(from); }
+      if (to)   { dateClauses.push('g.entry_date <= ?'); params.push(to); }
+      const dateWhere = dateClauses.length ? `AND ${dateClauses.join(' AND ')}` : '';
+      const rows = await db.query(
+        `SELECT g.account_code, g.account_name,
+                COALESCE(c.type, 'UNKNOWN') AS account_type,
+                COALESCE(c.display_order, 999) AS display_order,
+                SUM(g.dr_amount) AS dr_total,
+                SUM(g.cr_amount) AS cr_total
+         FROM gl_entries g
+         LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+         WHERE g.restaurant_id = ? ${dateWhere} AND g.is_reversed = 0
+         GROUP BY g.account_code, g.account_name
+         HAVING dr_total > 0 OR cr_total > 0
+         ORDER BY display_order, g.account_code`,
+        params
+      );
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // GST OUTSTANDING — net GST payable to the government, read straight from the
+  // posted General Ledger. Output GST (credit balance of the GST-Payable
+  // liability accounts) minus Input Tax Credit (debit balance of the ITC
+  // Receivable asset accounts). This endpoint ONLY reads (SELECT/SUM over
+  // gl_entries) — it never writes, posts, or changes any accounting figure, so
+  // it cannot affect existing books. Owner-only, like every accounting view.
+  app.get("/api/restaurant/:id/accounting/gst-outstanding", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as Record<string, string>;
+      const OUTPUT_CODES = ['2200', '2210', '2220']; // GST Payable — CGST / SGST / IGST (liability)
+      const ITC_CODES    = ['1300', '1310', '1320']; // ITC Receivable — CGST / SGST / IGST (asset)
+      const allCodes = [...OUTPUT_CODES, ...ITC_CODES];
+      const ph = allCodes.map(() => '?').join(',');
+      const params: any[] = [req.params.id, ...allCodes];
+      let dateWhere = '';
+      if (from) { dateWhere += ' AND entry_date >= ?'; params.push(from); }
+      if (to)   { dateWhere += ' AND entry_date <= ?'; params.push(to); }
+      const rows: any[] = await db.query(
+        `SELECT account_code, account_name,
+                COALESCE(SUM(dr_amount), 0) AS dr, COALESCE(SUM(cr_amount), 0) AS cr
+           FROM gl_entries
+          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph})${dateWhere}
+          GROUP BY account_code, account_name
+          ORDER BY account_code`,
+        params
+      ).catch(() => []);
+      const round = (n: number) => Math.round(Number(n) * 100) / 100;
+      let output_gst = 0, input_tax_credit = 0;
+      const breakdown: any[] = [];
+      for (const r of rows) {
+        const dr = Number(r.dr || 0), cr = Number(r.cr || 0);
+        const isOutput = OUTPUT_CODES.includes(String(r.account_code));
+        // Liability accounts carry a credit balance; asset (ITC) accounts a debit balance.
+        const balance = isOutput ? (cr - dr) : (dr - cr);
+        if (isOutput) output_gst += balance; else input_tax_credit += balance;
+        breakdown.push({ account_code: r.account_code, account_name: r.account_name, kind: isOutput ? 'OUTPUT' : 'ITC', dr: round(dr), cr: round(cr), balance: round(balance) });
+      }
+      output_gst = round(output_gst);
+      input_tax_credit = round(input_tax_credit);
+      const net_outstanding = round(output_gst - input_tax_credit);
+      res.json({ from: from || null, to: to || null, output_gst, input_tax_credit, net_outstanding, breakdown });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.post("/api/restaurant/:id/accounting/journal-entries", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { entry_date, narration, lines } = req.body;
+      if (!Array.isArray(lines) || lines.length < 2) return res.status(400).json({ error: 'At least 2 lines required' });
+      const glLines: GlLine[] = lines.map((l: any) => ({
+        account_code: String(l.account_code || ''),
+        account_name: String(l.account_name || l.account_code || ''),
+        dr_amount: Number(l.dr_amount || 0),
+        cr_amount: Number(l.cr_amount || 0),
+        narration: narration || l.narration,
+      }));
+      const seq = await getNextTenantSequence(db, 'journal');
+      const journalRef = `MJ-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+      const date = String(entry_date || new Date().toISOString().slice(0, 10));
+      await _postGlEntries(db, req.params.id, journalRef, date, 'MANUAL_JOURNAL', null, glLines,
+        req.user?.id || (req.user as any)?.email || null);
+      res.status(201).json({ journal_ref: journalRef, lines: glLines.length });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/tds-payable", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { status } = req.query as Record<string, string>;
+      const params: any[] = [req.params.id];
+      let where = 'restaurant_id = ?';
+      if (status) { where += ' AND status = ?'; params.push(status); }
+      const rows = await db.query(
+        `SELECT * FROM tds_payable_ledger WHERE ${where} ORDER BY payment_date DESC`, params);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.patch("/api/restaurant/:id/accounting/tds-payable/:tdsId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { challan_number, challan_date, bsr_code, status } = req.body;
+      await db.run(
+        `UPDATE tds_payable_ledger SET
+           challan_number = ?, challan_date = ?, bsr_code = ?,
+           status = COALESCE(?, status)
+         WHERE id = ? AND restaurant_id = ?`,
+        [challan_number || null, challan_date || null, bsr_code || null,
+         status || null, req.params.tdsId, req.params.id]
+      );
+      const row = await db.get("SELECT * FROM tds_payable_ledger WHERE id = ?", [req.params.tdsId]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
   // API 404 Handler - MUST be before SPA fallback
@@ -46243,226 +46466,6 @@ ${data.tenant.name}`;
   }, { timezone: 'Asia/Kolkata' });
   console.log('[menu-dirty] Menu sync-dirty scanner started — every 15 min');
 
-  // ── Manual retry endpoint for DEAD jobs ───────────────────────────────
-  app.post("/api/restaurant/:id/integrations/sync-jobs/:jobId/retry", authenticate, restaurantStaff, requireTabAccess('DELIVERY'), async (req: AuthRequest, res: Response) => {
-    try {
-      const db = await getTenantDb(req.params.id);
-      const job: any = await db.get("SELECT * FROM pending_sync_jobs WHERE id = ?", [req.params.jobId]);
-      if (!job) return res.status(404).json({ error: "Job not found" });
-      if (job.status === 'DONE') return res.status(409).json({ error: "Job already DONE — nothing to retry" });
-      // Reset attempts + push next_attempt_at to NOW so the worker picks it up next cycle
-      await db.run(
-        `UPDATE pending_sync_jobs
-            SET status = 'PENDING', attempts = 0,
-                next_attempt_at = CURRENT_TIMESTAMP, last_error = NULL
-          WHERE id = ?`,
-        [req.params.jobId]
-      );
-      res.json({ success: true, message: "Job queued for immediate retry" });
-    } catch (err) {
-      console.error("Retry sync-job error:", err);
-      res.status(500).json({ error: "Failed to retry job" });
-    }
-  });
-
-  // List sync jobs (status filter, limit) — drives the future Sync Health UI
-  app.get("/api/restaurant/:id/integrations/sync-jobs", authenticate, async (req: AuthRequest, res: Response) => {
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { status, channel } = req.query as any;
-      const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
-      const conds: string[] = [];
-      const params: any[] = [];
-      if (status) { conds.push("status = ?"); params.push(String(status).toUpperCase()); }
-      if (channel) { conds.push("channel = ?"); params.push(String(channel).toUpperCase()); }
-      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-      const rows: any[] = await db.query(
-        `SELECT id, job_type, channel, status, attempts, max_attempts,
-                next_attempt_at, last_error, created_at, completed_at
-           FROM pending_sync_jobs
-           ${whereSql}
-          ORDER BY created_at DESC LIMIT ${limit}`,
-        params
-      );
-      const counts: any = await db.get(
-        `SELECT
-            COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
-            COUNT(*) FILTER (WHERE status = 'FAILED') AS failed,
-            COUNT(*) FILTER (WHERE status = 'DEAD') AS dead,
-            COUNT(*) FILTER (WHERE status = 'DONE' AND completed_at > NOW() - INTERVAL '24 hours') AS done_24h
-           FROM pending_sync_jobs`
-      ).catch(() => null);
-      res.json({ jobs: rows, counts: counts || {} });
-    } catch (err) {
-      console.error("List sync-jobs error:", err);
-      res.status(500).json({ error: "Failed to list sync jobs" });
-    }
-  });
-
-  // ─── Accounting API endpoints ───────────────────────────────────────────────
-
-  const _acctOwnerOnly = (req: AuthRequest, res: Response): boolean => {
-    const role = String(req.user?.role || '');
-    if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) { res.status(403).json({ error: 'Forbidden' }); return false; }
-    return true;
-  };
-
-  app.get("/api/restaurant/:id/accounting/chart-of-accounts", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
-    try {
-      const db = await getTenantDb(req.params.id);
-      const rows = await db.query("SELECT * FROM chart_of_accounts WHERE is_active = 1 ORDER BY display_order, code", []);
-      res.json(rows);
-    } catch (err: any) { res.status(500).json({ error: err?.message }); }
-  });
-
-  app.get("/api/restaurant/:id/accounting/gl-entries", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { from, to, account, source_type } = req.query as Record<string, string>;
-      const params: any[] = [req.params.id];
-      const clauses: string[] = ['restaurant_id = ?'];
-      if (from)        { clauses.push('entry_date >= ?'); params.push(from); }
-      if (to)          { clauses.push('entry_date <= ?'); params.push(to); }
-      if (account)     { clauses.push('account_code = ?'); params.push(account); }
-      if (source_type) { clauses.push('source_type = ?'); params.push(source_type); }
-      const rows = await db.query(
-        `SELECT * FROM gl_entries WHERE ${clauses.join(' AND ')} AND is_reversed = 0
-         ORDER BY entry_date DESC, created_at DESC LIMIT 2000`,
-        params
-      );
-      res.json(rows);
-    } catch (err: any) { res.status(500).json({ error: err?.message }); }
-  });
-
-  app.get("/api/restaurant/:id/accounting/trial-balance", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { from, to } = req.query as Record<string, string>;
-      const params: any[] = [req.params.id];
-      const dateClauses: string[] = [];
-      if (from) { dateClauses.push('g.entry_date >= ?'); params.push(from); }
-      if (to)   { dateClauses.push('g.entry_date <= ?'); params.push(to); }
-      const dateWhere = dateClauses.length ? `AND ${dateClauses.join(' AND ')}` : '';
-      const rows = await db.query(
-        `SELECT g.account_code, g.account_name,
-                COALESCE(c.type, 'UNKNOWN') AS account_type,
-                COALESCE(c.display_order, 999) AS display_order,
-                SUM(g.dr_amount) AS dr_total,
-                SUM(g.cr_amount) AS cr_total
-         FROM gl_entries g
-         LEFT JOIN chart_of_accounts c ON c.code = g.account_code
-         WHERE g.restaurant_id = ? ${dateWhere} AND g.is_reversed = 0
-         GROUP BY g.account_code, g.account_name
-         HAVING dr_total > 0 OR cr_total > 0
-         ORDER BY display_order, g.account_code`,
-        params
-      );
-      res.json(rows);
-    } catch (err: any) { res.status(500).json({ error: err?.message }); }
-  });
-
-  // GST OUTSTANDING — net GST payable to the government, read straight from the
-  // posted General Ledger. Output GST (credit balance of the GST-Payable
-  // liability accounts) minus Input Tax Credit (debit balance of the ITC
-  // Receivable asset accounts). This endpoint ONLY reads (SELECT/SUM over
-  // gl_entries) — it never writes, posts, or changes any accounting figure, so
-  // it cannot affect existing books. Owner-only, like every accounting view.
-  app.get("/api/restaurant/:id/accounting/gst-outstanding", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { from, to } = req.query as Record<string, string>;
-      const OUTPUT_CODES = ['2200', '2210', '2220']; // GST Payable — CGST / SGST / IGST (liability)
-      const ITC_CODES    = ['1300', '1310', '1320']; // ITC Receivable — CGST / SGST / IGST (asset)
-      const allCodes = [...OUTPUT_CODES, ...ITC_CODES];
-      const ph = allCodes.map(() => '?').join(',');
-      const params: any[] = [req.params.id, ...allCodes];
-      let dateWhere = '';
-      if (from) { dateWhere += ' AND entry_date >= ?'; params.push(from); }
-      if (to)   { dateWhere += ' AND entry_date <= ?'; params.push(to); }
-      const rows: any[] = await db.query(
-        `SELECT account_code, account_name,
-                COALESCE(SUM(dr_amount), 0) AS dr, COALESCE(SUM(cr_amount), 0) AS cr
-           FROM gl_entries
-          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph})${dateWhere}
-          GROUP BY account_code, account_name
-          ORDER BY account_code`,
-        params
-      ).catch(() => []);
-      const round = (n: number) => Math.round(Number(n) * 100) / 100;
-      let output_gst = 0, input_tax_credit = 0;
-      const breakdown: any[] = [];
-      for (const r of rows) {
-        const dr = Number(r.dr || 0), cr = Number(r.cr || 0);
-        const isOutput = OUTPUT_CODES.includes(String(r.account_code));
-        // Liability accounts carry a credit balance; asset (ITC) accounts a debit balance.
-        const balance = isOutput ? (cr - dr) : (dr - cr);
-        if (isOutput) output_gst += balance; else input_tax_credit += balance;
-        breakdown.push({ account_code: r.account_code, account_name: r.account_name, kind: isOutput ? 'OUTPUT' : 'ITC', dr: round(dr), cr: round(cr), balance: round(balance) });
-      }
-      output_gst = round(output_gst);
-      input_tax_credit = round(input_tax_credit);
-      const net_outstanding = round(output_gst - input_tax_credit);
-      res.json({ from: from || null, to: to || null, output_gst, input_tax_credit, net_outstanding, breakdown });
-    } catch (err: any) { res.status(500).json({ error: err?.message }); }
-  });
-
-  app.post("/api/restaurant/:id/accounting/journal-entries", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { entry_date, narration, lines } = req.body;
-      if (!Array.isArray(lines) || lines.length < 2) return res.status(400).json({ error: 'At least 2 lines required' });
-      const glLines: GlLine[] = lines.map((l: any) => ({
-        account_code: String(l.account_code || ''),
-        account_name: String(l.account_name || l.account_code || ''),
-        dr_amount: Number(l.dr_amount || 0),
-        cr_amount: Number(l.cr_amount || 0),
-        narration: narration || l.narration,
-      }));
-      const seq = await getNextTenantSequence(db, 'journal');
-      const journalRef = `MJ-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
-      const date = String(entry_date || new Date().toISOString().slice(0, 10));
-      await _postGlEntries(db, req.params.id, journalRef, date, 'MANUAL_JOURNAL', null, glLines,
-        req.user?.id || (req.user as any)?.email || null);
-      res.status(201).json({ journal_ref: journalRef, lines: glLines.length });
-    } catch (err: any) { res.status(500).json({ error: err?.message }); }
-  });
-
-  app.get("/api/restaurant/:id/accounting/tds-payable", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { status } = req.query as Record<string, string>;
-      const params: any[] = [req.params.id];
-      let where = 'restaurant_id = ?';
-      if (status) { where += ' AND status = ?'; params.push(status); }
-      const rows = await db.query(
-        `SELECT * FROM tds_payable_ledger WHERE ${where} ORDER BY payment_date DESC`, params);
-      res.json(rows);
-    } catch (err: any) { res.status(500).json({ error: err?.message }); }
-  });
-
-  app.patch("/api/restaurant/:id/accounting/tds-payable/:tdsId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { challan_number, challan_date, bsr_code, status } = req.body;
-      await db.run(
-        `UPDATE tds_payable_ledger SET
-           challan_number = ?, challan_date = ?, bsr_code = ?,
-           status = COALESCE(?, status)
-         WHERE id = ? AND restaurant_id = ?`,
-        [challan_number || null, challan_date || null, bsr_code || null,
-         status || null, req.params.tdsId, req.params.id]
-      );
-      const row = await db.get("SELECT * FROM tds_payable_ledger WHERE id = ?", [req.params.tdsId]);
-      res.json(row);
-    } catch (err: any) { res.status(500).json({ error: err?.message }); }
-  });
 }
 
 // Helper: send pre-arrival email and record which stage was sent
