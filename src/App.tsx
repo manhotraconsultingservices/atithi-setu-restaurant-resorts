@@ -6,6 +6,7 @@ import { useToast } from './components/Toast';
 import { useConfirm } from './components/ConfirmDialog';
 import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
+import { HousekeepingModule } from './Housekeeping';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
@@ -8192,6 +8193,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ROSTER' | 'TIMESHEET' | 'STAFF_PAYROLL'    // shift roster + planned-vs-actual + operational payroll (Phase 3)
     | 'ROOMS' | 'ROOM_SETUP' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1 (ROOMS=availability board, ROOM_SETUP=owner-only setup)
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE' | 'HOTEL_INVENTORY'  // hospitality Phase 2 & 3
+    | 'HOUSEKEEPING'                             // cleaning checklist worklist + config + log
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
     | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
     | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
@@ -13238,7 +13240,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             SPA_CALENDAR: 'Appt. Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages', SPA_REPORTS: 'Spa Reports', SPA_BILLING: 'Invoices & Payments', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Spa Page Settings',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
@@ -13327,6 +13329,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ...(isOwnerOrAdmin ? [{ id: 'ROOM_SETUP', label: 'Room Setup' } as NavTab] : []),
               { id: 'FRONT_OFFICE_REPORTS', label: 'Hotel Reports' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
+              { id: 'HOUSEKEEPING',         label: 'Housekeeping' },
               { id: 'SERVICES',             label: 'Service Catalogue' },
               { id: 'FOLIOS',               label: 'Guest Bills' },
               { id: 'COMPLIANCE',           label: 'Guest Compliance' },
@@ -14142,6 +14145,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
         </div>
+      ) : activeTab === 'HOUSEKEEPING' && (isHotelEnabled || isEventsEnabled) ? (
+        <div className="p-1"><HousekeepingModule restaurantId={restaurantId} token={token!} /></div>
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
       ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS') && isEventsEnabled ? (
@@ -24972,6 +24977,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'HOTEL_BOOKINGS',    label: 'Hotel Bookings',          description: 'Create/edit bookings, check-in, check-out, cancellations, calendar.', hotelOnly: true },
               { id: 'SERVICES',          label: 'Hotel Services',          description: 'Configure room-service offerings (Extra towels, AC repair, etc.) and pricing.', hotelOnly: true },
               { id: 'SERVICE_REQUESTS',  label: 'Service Requests',        description: 'Live queue of guest requests — housekeeping / maintenance acknowledge here.', hotelOnly: true },
+              { id: 'HOUSEKEEPING',      label: 'Housekeeping',            description: 'Cleaning checklists, the cleaning worklist (tick tasks + release rooms/venues), and the cleaning log. Configure the checklist as owner/manager.', hotelOnly: true },
               { id: 'FOLIOS',            label: 'Guest Bills',             description: 'View / settle guest bills, add F&B charges, apply promos, credit notes.', hotelOnly: true },
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },

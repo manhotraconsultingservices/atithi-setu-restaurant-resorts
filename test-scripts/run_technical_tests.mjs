@@ -801,6 +801,62 @@ async function testEvents() {
   }
 }
 
+// ── Housekeeping (cleaning checklist workflow) tests ────────────────────────
+async function testHousekeeping() {
+  section('HOUSEKEEPING — Cleaning checklist / worklist / log');
+  if (!restaurantId) { skip('TC-HK-*', 'All housekeeping tests', 'no restaurantId'); return; }
+
+  // TC-HK-001: checklist template returns ROOM + EVENT buckets (auto-seeded).
+  const cl = await api('GET', `/api/restaurant/${restaurantId}/housekeeping/checklist`);
+  if (cl.status === 200 && cl.data && Array.isArray(cl.data.ROOM) && Array.isArray(cl.data.EVENT)) {
+    const seeded = cl.data.ROOM.length > 0 && cl.data.EVENT.length > 0;
+    (seeded ? pass : fail)('TC-HK-001', 'Checklist config returns ROOM + EVENT task buckets',
+      `ROOM=${cl.data.ROOM.length}, EVENT=${cl.data.EVENT.length} tasks`);
+  } else if (cl.status === 403) {
+    skip('TC-HK-001', 'Checklist config', 'user lacks HOUSEKEEPING access');
+  } else {
+    fail('TC-HK-001', 'Checklist config loads', `HTTP ${cl.status}`);
+  }
+
+  // TC-HK-002: worklist (open cleaning jobs) responds with task/mandatory counts.
+  const jb = await api('GET', `/api/restaurant/${restaurantId}/housekeeping/jobs?status=ALL`);
+  if (jb.status === 200 && Array.isArray(jb.data)) {
+    const shapeOk = jb.data.length === 0 ||
+      ('task_count' in jb.data[0] && 'pending_mandatory' in jb.data[0] && 'facility_type' in jb.data[0]);
+    (shapeOk ? pass : fail)('TC-HK-002', 'Cleaning worklist returns jobs with progress counts',
+      `${jb.data.length} jobs`);
+  } else if (jb.status === 403) {
+    skip('TC-HK-002', 'Cleaning worklist', 'user lacks HOUSEKEEPING access');
+  } else {
+    fail('TC-HK-002', 'Cleaning worklist loads', `HTTP ${jb.status}`);
+  }
+
+  // TC-HK-003: cleaning log returns log rows + per-facility rollup (times_cleaned / last_cleaned).
+  const lg = await api('GET', `/api/restaurant/${restaurantId}/housekeeping/log`);
+  if (lg.status === 200 && lg.data && Array.isArray(lg.data.log) && Array.isArray(lg.data.by_facility)) {
+    const shapeOk = lg.data.by_facility.length === 0 ||
+      ('times_cleaned' in lg.data.by_facility[0] && 'last_cleaned' in lg.data.by_facility[0]);
+    (shapeOk ? pass : fail)('TC-HK-003', 'Cleaning log returns history + per-facility rollup',
+      `${lg.data.log.length} log rows, ${lg.data.by_facility.length} facilities`);
+  } else if (lg.status === 403) {
+    skip('TC-HK-003', 'Cleaning log', 'user lacks HOUSEKEEPING access');
+  } else {
+    fail('TC-HK-003', 'Cleaning log loads', `HTTP ${lg.status}`);
+  }
+
+  // TC-HK-004: completing a job with pending mandatory tasks is rejected (enforcement).
+  const openJob = (jb.status === 200 && Array.isArray(jb.data))
+    ? jb.data.find(j => j.status === 'OPEN' && Number(j.pending_mandatory) > 0) : null;
+  if (openJob) {
+    const cp = await api('POST', `/api/restaurant/${restaurantId}/housekeeping/jobs/${openJob.id}/complete`, {});
+    (cp.status === 400 ? pass : fail)('TC-HK-004',
+      'Cannot close a cleaning job while mandatory tasks are pending',
+      `HTTP ${cp.status} (expected 400), pending=${openJob.pending_mandatory}`);
+  } else {
+    skip('TC-HK-004', 'Mandatory-task enforcement on complete', 'no open job with pending mandatory tasks');
+  }
+}
+
 // ── Channel Manager tests ──────────────────────────────────────────────────
 
 async function testChannelManager() {
@@ -1677,6 +1733,7 @@ async function main() {
   await testAccounting();
   await testSpa();
   await testEvents();
+  await testHousekeeping();
   await testChannelManager();
   await testReports();
   await testPublicBooking();

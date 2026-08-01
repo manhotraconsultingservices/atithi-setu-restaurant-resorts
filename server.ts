@@ -4829,7 +4829,7 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
     // the updated Staff Access UI.
     if (perms !== null) {
       const RBAC_NEWLY_ADDED = [
-        'HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT',
+        'HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'HOUSEKEEPING',
         // Events & Convention tabs — added after the matrix already shipped, so a
         // tenant who saved Staff Access before Events existed must default these to
         // Full(3) (not 0), else events staff get 403 until the owner re-saves.
@@ -21230,6 +21230,225 @@ ${data.tenant.name}`;
   const round2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
 
   // ══════════════════════════════════════════════════════════════════════════
+  // HOUSEKEEPING — configurable cleaning checklists + enforcement + log.
+  // On room checkout / event completion a cleaning JOB is created from the
+  // owner-configured template for that facility type (ROOM | EVENT). The
+  // facility can't be re-booked until the job's mandatory tasks are done
+  // (rooms stay CLEANING; a manager can override). Each done job is a cleaning
+  // log entry (facility + when + who).
+  // ══════════════════════════════════════════════════════════════════════════
+  const mkHkId = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  const HK_MANAGER_ROLES = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'];
+  const hkStaff = requireRole(['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'HOUSEKEEPING', 'MAINTENANCE', 'EVENTS_MANAGER']);
+
+  const ensureHousekeepingTables = async (db: any) => {
+    await db.exec(`CREATE TABLE IF NOT EXISTS housekeeping_tasks (
+      id TEXT PRIMARY KEY, facility_type TEXT NOT NULL, label TEXT NOT NULL,
+      is_mandatory INT DEFAULT 1, sort_order INT DEFAULT 0, is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`).catch(() => {});
+    await db.exec(`CREATE TABLE IF NOT EXISTS housekeeping_jobs (
+      id TEXT PRIMARY KEY, facility_type TEXT NOT NULL, facility_id TEXT, facility_label TEXT,
+      source_ref TEXT, guest_label TEXT, status TEXT DEFAULT 'OPEN',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, started_at TIMESTAMP,
+      completed_at TIMESTAMP, completed_by TEXT, override_reason TEXT, notes TEXT
+    )`).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_facility ON housekeeping_jobs(facility_id, status)`).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_status ON housekeeping_jobs(status, created_at)`).catch(() => {});
+    await db.exec(`CREATE TABLE IF NOT EXISTS housekeeping_job_tasks (
+      id TEXT PRIMARY KEY, job_id TEXT NOT NULL, label TEXT, is_mandatory INT DEFAULT 1,
+      is_done INT DEFAULT 0, done_at TIMESTAMP, done_by TEXT, sort_order INT DEFAULT 0
+    )`).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_job_tasks ON housekeeping_job_tasks(job_id)`).catch(() => {});
+    // Seed sensible defaults the first time so the checklist works out of the box.
+    const cnt: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_tasks").catch(() => ({ c: 0 }));
+    if (Number(cnt?.c || 0) === 0) {
+      const seed = [
+        ['ROOM', 'Change bed linen & pillow covers', 1], ['ROOM', 'Clean & sanitize bathroom / toilet', 1],
+        ['ROOM', 'Mop & clean the floor', 1], ['ROOM', 'Restock towels & amenities', 1],
+        ['ROOM', 'Empty dustbins', 1], ['ROOM', 'Reset TV & AC to default', 0],
+        ['ROOM', 'Final inspection', 1],
+        ['EVENT', 'Clear & remove all waste', 1], ['EVENT', 'Rearrange furniture / chairs / tables', 1],
+        ['EVENT', 'Clean & mop the floor', 1], ['EVENT', 'Sanitize washrooms', 1],
+        ['EVENT', 'Reset AV / stage / decor', 0], ['EVENT', 'Final inspection', 1],
+      ];
+      let i = 0;
+      for (const [ft, label, mand] of seed) {
+        await db.run("INSERT INTO housekeeping_tasks (id, facility_type, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
+          [mkHkId('HKTMPL'), ft, label, mand, i++]).catch(() => {});
+      }
+    }
+  };
+
+  // Create a cleaning job from the active template. Returns job id, or null when
+  // no checklist is configured for that facility type (→ no gating; backwards-compatible).
+  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null }) => {
+    try {
+      await ensureHousekeepingTables(db);
+      const tasks: any[] = await db.query("SELECT * FROM housekeeping_tasks WHERE facility_type = ? AND is_active = 1 ORDER BY sort_order, created_at", [o.facility_type]);
+      if (!tasks || tasks.length === 0) return null;
+      // Don't stack duplicate open jobs for the same booking/event.
+      if (o.source_ref) {
+        const dup: any = await db.get("SELECT id FROM housekeeping_jobs WHERE source_ref = ? AND facility_type = ? AND status = 'OPEN'", [o.source_ref, o.facility_type]);
+        if (dup) return dup.id;
+      }
+      const jid = mkHkId('HKJ');
+      await db.run("INSERT INTO housekeeping_jobs (id, facility_type, facility_id, facility_label, source_ref, guest_label, status) VALUES (?, ?, ?, ?, ?, ?, 'OPEN')",
+        [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref, o.guest_label || null]);
+      for (const t of tasks) {
+        await db.run("INSERT INTO housekeeping_job_tasks (id, job_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
+          [mkHkId('HKJT'), jid, t.label, t.is_mandatory, t.sort_order]);
+      }
+      return jid;
+    } catch (e) { console.warn('[housekeeping] createJob failed:', e); return null; }
+  };
+  const hasOpenHousekeepingJob = async (db: any, facilityId: string): Promise<boolean> => {
+    try { const r: any = await db.get("SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND status = 'OPEN' LIMIT 1", [facilityId]); return !!r; }
+    catch { return false; }
+  };
+
+  // ── Owner config — the checklist template (tasks per facility type) ──────────
+  app.get("/api/restaurant/:id/housekeeping/checklist", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const rows = await db.query("SELECT * FROM housekeeping_tasks ORDER BY facility_type, sort_order, created_at");
+      res.json({ ROOM: rows.filter((r: any) => r.facility_type === 'ROOM'), EVENT: rows.filter((r: any) => r.facility_type === 'EVENT') });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load checklist" }); }
+  });
+  app.post("/api/restaurant/:id/housekeeping/checklist/tasks", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Owner or manager only' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const b = req.body || {};
+      const ft = String(b.facility_type || '').toUpperCase() === 'EVENT' ? 'EVENT' : 'ROOM';
+      if (!b.label || !String(b.label).trim()) return res.status(400).json({ error: 'label is required' });
+      const cntRow: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_tasks WHERE facility_type = ?", [ft]);
+      const id = mkHkId('HKTMPL');
+      await db.run("INSERT INTO housekeeping_tasks (id, facility_type, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
+        [id, ft, String(b.label).trim(), b.is_mandatory === false ? 0 : 1, Number(cntRow?.c || 0)]);
+      res.status(201).json(await db.get("SELECT * FROM housekeeping_tasks WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to add task" }); }
+  });
+  app.patch("/api/restaurant/:id/housekeeping/checklist/tasks/:tid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Owner or manager only' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {}; const fields: string[] = []; const vals: any[] = [];
+      if (b.label !== undefined) { fields.push('label = ?'); vals.push(String(b.label).trim()); }
+      if (b.is_mandatory !== undefined) { fields.push('is_mandatory = ?'); vals.push(b.is_mandatory ? 1 : 0); }
+      if (b.is_active !== undefined) { fields.push('is_active = ?'); vals.push(b.is_active ? 1 : 0); }
+      if (b.sort_order !== undefined) { fields.push('sort_order = ?'); vals.push(Number(b.sort_order) || 0); }
+      if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
+      vals.push(req.params.tid);
+      await db.run(`UPDATE housekeeping_tasks SET ${fields.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM housekeeping_tasks WHERE id = ?", [req.params.tid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to update task" }); }
+  });
+  app.delete("/api/restaurant/:id/housekeeping/checklist/tasks/:tid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Owner or manager only' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM housekeeping_tasks WHERE id = ?", [req.params.tid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete task" }); }
+  });
+
+  // ── Housekeeping worklist — open/all cleaning jobs ───────────────────────────
+  app.get("/api/restaurant/:id/housekeeping/jobs", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const status = String(req.query.status || 'OPEN').toUpperCase();
+      const where = status === 'ALL' ? '' : "WHERE j.status = ?";
+      const params = status === 'ALL' ? [] : [status];
+      const jobs = await db.query(
+        `SELECT j.*,
+                (SELECT COUNT(*)::int FROM housekeeping_job_tasks t WHERE t.job_id = j.id) AS task_count,
+                (SELECT COUNT(*)::int FROM housekeeping_job_tasks t WHERE t.job_id = j.id AND t.is_done = 1) AS done_count,
+                (SELECT COUNT(*)::int FROM housekeeping_job_tasks t WHERE t.job_id = j.id AND t.is_mandatory = 1 AND t.is_done = 0) AS pending_mandatory
+           FROM housekeeping_jobs j ${where} ORDER BY j.status = 'OPEN' DESC, j.created_at DESC LIMIT 500`, params);
+      res.json(jobs);
+    } catch (err: any) { res.status(500).json({ error: "Failed to load cleaning jobs" }); }
+  });
+  app.get("/api/restaurant/:id/housekeeping/jobs/:jid", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
+      if (!job) return res.status(404).json({ error: "Job not found" });
+      const tasks = await db.query("SELECT * FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id", [req.params.jid]);
+      res.json({ ...job, tasks });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load job" }); }
+  });
+  app.patch("/api/restaurant/:id/housekeeping/jobs/:jid/tasks/:tid", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
+      if (!job) return res.status(404).json({ error: "Job not found" });
+      if (job.status !== 'OPEN') return res.status(409).json({ error: "This cleaning job is already closed" });
+      const done = req.body?.is_done ? 1 : 0;
+      await db.run("UPDATE housekeeping_job_tasks SET is_done = ?, done_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, done_by = ? WHERE id = ? AND job_id = ?",
+        [done, done, done ? (req.user?.email || req.user?.id || null) : null, req.params.tid, req.params.jid]);
+      if (!job.started_at) await db.run("UPDATE housekeeping_jobs SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL", [req.params.jid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to update task" }); }
+  });
+
+  // Release a facility after cleaning. On complete: all mandatory tasks must be
+  // done → job DONE + room flipped back to VACANT (available again).
+  const releaseFacility = async (db: any, job: any) => {
+    if (job.facility_type === 'ROOM' && job.facility_id) {
+      await db.run("UPDATE rooms SET status = 'VACANT' WHERE id = ? AND status = 'CLEANING'", [job.facility_id]).catch(() => {});
+    }
+  };
+  app.post("/api/restaurant/:id/housekeeping/jobs/:jid/complete", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
+      if (!job) return res.status(404).json({ error: "Job not found" });
+      if (job.status !== 'OPEN') return res.json({ success: true, already: true });
+      const pend: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_job_tasks WHERE job_id = ? AND is_mandatory = 1 AND is_done = 0", [req.params.jid]);
+      if (Number(pend?.c || 0) > 0) return res.status(400).json({ error: `${pend.c} mandatory task(s) still pending. Complete them before closing.`, pending_mandatory: pend.c });
+      await db.run("UPDATE housekeeping_jobs SET status = 'DONE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [req.user?.email || req.user?.id || null, req.params.jid]);
+      await releaseFacility(db, job);
+      res.json({ success: true, released: job.facility_type });
+    } catch (err: any) { res.status(500).json({ error: "Failed to complete cleaning" }); }
+  });
+  // Manager/owner override — release without completing every task (logged with reason).
+  app.post("/api/restaurant/:id/housekeeping/jobs/:jid/override", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Only a manager or owner can override a cleaning checklist.' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
+      if (!job) return res.status(404).json({ error: "Job not found" });
+      if (job.status !== 'OPEN') return res.json({ success: true, already: true });
+      await db.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE id = ?",
+        [req.user?.email || req.user?.id || null, String(req.body?.reason || '').trim() || 'Override', req.params.jid]);
+      await releaseFacility(db, job);
+      res.json({ success: true, released: job.facility_type });
+    } catch (err: any) { res.status(500).json({ error: "Failed to override" }); }
+  });
+
+  // ── Cleaning log — completed jobs (how many times + when each facility cleaned) ─
+  app.get("/api/restaurant/:id/housekeeping/log", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const facilityId = String(req.query.facility_id || '').trim();
+      const ft = String(req.query.facility_type || '').toUpperCase();
+      const clauses: string[] = ["status IN ('DONE','OVERRIDDEN')"]; const params: any[] = [];
+      if (facilityId) { clauses.push("facility_id = ?"); params.push(facilityId); }
+      if (ft === 'ROOM' || ft === 'EVENT') { clauses.push("facility_type = ?"); params.push(ft); }
+      const rows = await db.query(`SELECT * FROM housekeeping_jobs WHERE ${clauses.join(' AND ')} ORDER BY completed_at DESC LIMIT 500`, params);
+      const byFacility = await db.query(
+        `SELECT facility_type, facility_id, facility_label, COUNT(*)::int AS times_cleaned, MAX(completed_at) AS last_cleaned
+           FROM housekeeping_jobs WHERE status IN ('DONE','OVERRIDDEN') GROUP BY facility_type, facility_id, facility_label ORDER BY MAX(completed_at) DESC LIMIT 500`);
+      res.json({ log: rows, by_facility: byFacility });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load cleaning log" }); }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
   // Events & Convention Center module (gated by restaurants.events_enabled = 1)
   // Fully isolated: dedicated tables (eventsService.ts), dedicated routes, and
   // cross-module hotel access strictly through the Hotel HTTP API.
@@ -22506,7 +22725,12 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
+      const evBk: any = await db.get("SELECT b.venue_id, b.customer_name, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?", [req.params.bid]).catch(() => null);
       await db.run("UPDATE event_bookings SET status = 'COMPLETED' WHERE id = ?", [req.params.bid]);
+      // Housekeeping: raise a cleaning job for the venue from the EVENT checklist.
+      try {
+        await createHousekeepingJob(db, { facility_type: 'EVENT', facility_id: evBk?.venue_id || null, facility_label: evBk?.venue_name || 'Event venue', source_ref: req.params.bid, guest_label: evBk?.customer_name || null });
+      } catch { /* non-fatal */ }
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: 'Booking marked COMPLETED', after: { status: 'COMPLETED' } });
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to complete booking" }); }
@@ -22696,6 +22920,13 @@ ${data.tenant.name}`;
         if (conflict) return res.status(409).json({ error: "Venue is no longer available for this date/time" });
         const blocked = await venueBlockConflict(db, bk.venue_id, bk.event_date);
         if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
+        // Housekeeping gate: the venue must be cleaned after the previous event
+        // before this one is confirmed. A manager can override (body.override_cleaning).
+        const openHk = await hasOpenHousekeepingJob(db, bk.venue_id);
+        if (openHk && !req.body?.override_cleaning) {
+          const isMgr = HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase());
+          return res.status(409).json({ error: `This venue still has an open cleaning checklist from a previous event. Complete housekeeping first${isMgr ? ', or confirm again to override.' : '.'}`, housekeeping_blocked: true, can_override: isMgr });
+        }
       }
 
       // Create real hotel bookings for each QUOTED room via the Hotel API.
@@ -24744,6 +24975,18 @@ ${data.tenant.name}`;
       const allowed = ['VACANT', 'OCCUPIED', 'CLEANING', 'MAINTENANCE', 'BLOCKED'];
       if (!allowed.includes(status)) return res.status(400).json({ error: "Invalid room status" });
       const tenantDb = await getTenantDb(req.params.id);
+      // Housekeeping gate: a room can't be freed to VACANT while its cleaning
+      // checklist is still open. Non-managers must complete the checklist; a
+      // manager/owner may force it, which closes the job as an override (logged).
+      if (status === 'VACANT') {
+        const openJob: any = await tenantDb.get("SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' LIMIT 1", [req.params.roomId]).catch(() => null);
+        if (openJob) {
+          const isMgr = HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase());
+          if (!isMgr) return res.status(409).json({ error: 'Cleaning checklist not complete — finish the housekeeping tasks before marking this room ready.', housekeeping_job_id: openJob.id });
+          await tenantDb.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE id = ?",
+            [req.user?.email || req.user?.id || null, 'Room set VACANT by manager', openJob.id]).catch(() => {});
+        }
+      }
       await tenantDb.run("UPDATE rooms SET status = ? WHERE id = ?", [status, req.params.roomId]);
       const updated = await tenantDb.get("SELECT * FROM rooms WHERE id = ?", [req.params.roomId]);
       res.json(updated);
@@ -35018,6 +35261,12 @@ ${data.tenant.name}`;
       await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ?", [now, req.params.bookingId]);
       await tenantDb.run("UPDATE rooms SET status = 'CLEANING' WHERE id = ?", [b.room_id]);
       await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]);
+      // Housekeeping: raise a cleaning job from the ROOM checklist. The room stays
+      // CLEANING (not bookable) until the job's mandatory tasks are completed.
+      try {
+        const rm: any = await tenantDb.get("SELECT name, room_number FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null });
+      } catch { /* non-fatal — never block checkout */ }
 
       // ── Fire the unified loyalty hook so the folio counts toward the
       //    guest's lifetime spend the same way a restaurant order does.
@@ -43992,7 +44241,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-rbac-staff-access',
+    commit_marker: 'housekeeping-checklist-workflow',
     code_features: [
       'subscription-billing',
       'read-only-mode',

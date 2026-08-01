@@ -431,6 +431,41 @@ definition-of-done as updating `test-scripts/run_technical_tests.mjs`.
 
 ---
 
+## RBAC — MANDATORY for every new tab / module / endpoint
+
+**Every new piece of functionality ships behind RBAC — no exceptions.** A feature
+is not done until a business owner can grant or deny it per staff role, and the
+server enforces that decision. Owner / SUPER_ADMIN / CTO always bypass (they see
+everything); everyone else is gated. Adding a tab or endpoint without wiring RBAC
+is a defect, not a shortcut.
+
+**Definition of done — for any new tab, module, or mutating/reading endpoint:**
+1. **Server enforcement.** Guard every route with `authenticate` + the appropriate
+   role middleware (`hotelStaff` / `restaurantStaff` / a `requireRole([...])`) **and**
+   `requireTabAccess('TAB_ID')` (or `requireTabAction('TAB_ID', 'edit')` for writes).
+   Reads and writes both — never leave an endpoint ungated just because it only reads.
+2. **Frontend grant surface.** Add the tab to `PERMISSIBLE_TABS` in `src/App.tsx`
+   (the Staff Access matrix) with the correct scope flag (`hotelOnly` /
+   `restaurantOnly` / `eventsOnly`) so it only appears for tenants who have that
+   module, and add a human description. Gate the nav entry / route render on the
+   same permission.
+3. **No-lockout default.** Add the new `TAB_ID` to the **`RBAC_NEWLY_ADDED`** array
+   in `server.ts`. For a tenant that already saved a role-permission matrix, a tab
+   absent from that saved matrix resolves to level 0 → 403 for every non-owner role.
+   `RBAC_NEWLY_ADDED` defaults a freshly-shipped tab to Full (3) so existing tenants
+   aren't silently locked out of a feature they never had the chance to grant. Skip
+   this and the feature is invisible to all staff on every existing tenant.
+4. **New roles** (if the feature introduces one) go into the role union, the
+   `ALL_MANAGED_ROLES` list (Staff Access), and the server role checks — mirror the
+   hotel/spa/events role pattern.
+
+The Housekeeping module (tab id `HOUSEKEEPING`, added 2026-08) is the reference
+implementation: `requireTabAccess('HOUSEKEEPING')` on every route, a manager-role
+check (`HK_MANAGER_ROLES`) on config/override writes, a `PERMISSIBLE_TABS` row, and
+`HOUSEKEEPING` in `RBAC_NEWLY_ADDED`.
+
+---
+
 ## Events & Convention — public-page images & calendar
 
 **Public-page pictures (owner-uploaded, not URL-only).** Business owners add photos
