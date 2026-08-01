@@ -26,7 +26,7 @@ export function HousekeepingModule({ restaurantId, token, scope = 'ALL' }: { res
     return b;
   };
   const tabBtn = (k: typeof view, label: string, icon: any) => (
-    <button onClick={() => setView(k)} className={`${BTN} ${view === k ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] border border-[#e8dccf] text-[#6b5d52]'}`}>{icon}{label}</button>
+    <button onClick={() => setView(k)} className={`${BTN} flex-1 sm:flex-none justify-center whitespace-nowrap ${view === k ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] border border-[#e8dccf] text-[#6b5d52]'}`}>{icon}{label}</button>
   );
   const title = scope === 'EVENT' ? 'Event Housekeeping' : scope === 'ROOM' ? 'Room Housekeeping' : 'Housekeeping';
   const subtitle = scope === 'EVENT'
@@ -136,17 +136,18 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
             </div>
             <div className="flex flex-col gap-1.5 my-3">
               {(openJob.tasks || []).map((t: any) => (
-                <button key={t.id} onClick={() => toggle(t)} className={`flex items-center gap-2.5 text-left px-3 py-2 rounded-xl border transition-colors ${t.is_done ? 'bg-emerald-50 border-emerald-200' : 'bg-[#faf7f2] border-[#e8dccf] hover:border-[#cc5a16]'}`}>
-                  <span className={`w-5 h-5 rounded-md grid place-items-center shrink-0 ${t.is_done ? 'bg-emerald-500 text-white' : 'border border-[#cbb9a8]'}`}>{t.is_done && <Check size={13} />}</span>
+                <button key={t.id} onClick={() => toggle(t)} className={`flex items-center gap-2.5 text-left px-3 py-3 rounded-xl border transition-colors active:scale-[0.99] ${t.is_done ? 'bg-emerald-50 border-emerald-200' : 'bg-[#faf7f2] border-[#e8dccf] hover:border-[#cc5a16]'}`}>
+                  <span className={`w-6 h-6 rounded-md grid place-items-center shrink-0 ${t.is_done ? 'bg-emerald-500 text-white' : 'border-2 border-[#cbb9a8]'}`}>{t.is_done && <Check size={15} />}</span>
                   <span className={`text-sm flex-1 ${t.is_done ? 'line-through text-[#9c8e85]' : 'text-[#3d3128]'}`}>{t.label}</span>
-                  {!t.is_mandatory && <span className="text-[9px] font-bold text-[#b9a897] uppercase">optional</span>}
+                  {!t.is_mandatory && <span className="text-[9px] font-bold text-[#b9a897] uppercase shrink-0">optional</span>}
                 </button>
               ))}
             </div>
             {pendMand > 0 && <p className="flex items-center gap-1 text-[11px] text-amber-700 mb-2"><ShieldAlert size={12} />{pendMand} mandatory task(s) must be done to release this facility.</p>}
-            <div className="flex justify-end gap-2">
-              <button className={BTN_GHOST} onClick={override} disabled={busy}><ShieldAlert size={13} /> Override</button>
-              <button className={BTN_PRIMARY} onClick={complete} disabled={busy || pendMand > 0}><Check size={13} /> Mark cleaned &amp; release</button>
+            {/* Stack full-width on phones so the primary action is always an easy tap. */}
+            <div className="flex flex-col sm:flex-row sm:justify-end gap-2 sticky bottom-0 bg-white pt-1">
+              <button className={`${BTN_GHOST} w-full sm:w-auto justify-center py-2.5`} onClick={override} disabled={busy}><ShieldAlert size={13} /> Override</button>
+              <button className={`${BTN_PRIMARY} w-full sm:w-auto justify-center py-2.5`} onClick={complete} disabled={busy || pendMand > 0}><Check size={13} /> Mark cleaned &amp; release</button>
             </div>
           </div>
         </div>
@@ -176,12 +177,12 @@ function ChecklistConfig({ api, scope = 'ALL' }: { api: (p: string, i?: RequestI
       <p className="text-[11px] text-[#9c8e85] mb-3">Runs after every {ft === 'ROOM' ? 'room checkout' : 'completed event'}. Mandatory tasks must be ticked before the {ft === 'ROOM' ? 'room' : 'venue'} is released.</p>
       <div className="flex flex-col gap-1.5 mb-3">
         {(data[ft] || []).length === 0 ? <p className="text-xs text-[#9c8e85]">No tasks yet.</p> : (data[ft] || []).map((t: any) => (
-          <div key={t.id} className={`flex items-center gap-2 px-3 py-2 rounded-xl border ${t.is_active ? 'border-[#e8dccf]' : 'border-dashed border-[#e0d4c5] opacity-60'}`}>
-            <span className="text-sm flex-1 text-[#3d3128]">{t.label}</span>
+          <div key={t.id} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border ${t.is_active ? 'border-[#e8dccf]' : 'border-dashed border-[#e0d4c5] opacity-60'}`}>
+            <span className="text-sm flex-1 text-[#3d3128] break-words min-w-0">{t.label}</span>
             <button onClick={() => patch(t, { is_mandatory: !t.is_mandatory })}
-              className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${t.is_mandatory ? 'bg-rose-50 text-rose-600' : 'bg-[#f0e9df] text-[#9c8e85]'}`}
+              className={`text-[9px] font-bold px-2 py-1 rounded-full shrink-0 ${t.is_mandatory ? 'bg-rose-50 text-rose-600' : 'bg-[#f0e9df] text-[#9c8e85]'}`}
               title="Toggle mandatory / optional">{t.is_mandatory ? 'MANDATORY' : 'OPTIONAL'}</button>
-            <button onClick={() => del(t)} title="Remove"><X size={14} className="text-rose-400 hover:text-rose-600" /></button>
+            <button onClick={() => del(t)} title="Remove" className="p-1.5 shrink-0 text-rose-400 hover:text-rose-600"><X size={16} /></button>
           </div>
         ))}
       </div>

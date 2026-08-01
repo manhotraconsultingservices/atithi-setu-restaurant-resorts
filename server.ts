@@ -44265,7 +44265,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-confirm-hk-override',
+    commit_marker: 'housekeeping-mobile-responsive',
     code_features: [
       'subscription-billing',
       'read-only-mode',
