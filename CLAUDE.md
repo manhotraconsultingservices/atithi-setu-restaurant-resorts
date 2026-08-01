@@ -360,6 +360,12 @@ Recipe units (`g`, `ml`) auto-convert to ingredient stock units (`kg`, `l`) at d
 ### Auto-PO grouping in stock-low cron
 The 09:00 IST scan groups all below-`reorder_point` ingredients by `default_supplier_id` and creates a **single DRAFT PO per supplier** with all their items. Skips ingredients already on an open PO (status SENT or PARTIAL) to avoid double-ordering. The created PO id is attached to the `STOCK_LOW` notification so the owner sees "📋 DRAFT PO PO-NN ready" and can one-click review/send.
 
+### Route registration order — new API routes MUST go before the `/api/*` 404 catch-all
+`server.ts` registers a catch-all `app.use("/api/*", …404)` and a SPA `app.get("*")` fallback near the end of setup. Express matches in registration order, so **any `app.get/post/...("/api/…")` registered *after* those handlers is dead — it returns `{error:"API route not found"}` for every tenant.** This silently killed the entire `/accounting/*` suite + `integrations/sync-jobs` (they were appended after the catch-all) until Aug 2026. When adding endpoints, register them **above** that catch-all block; never append routes at the very end of the setup function. A `curl`/test that 404s a brand-new route you just wrote is almost always this, not a deploy lag — the regression suite's accounting 404s now `fail` (not `skip`) to catch it.
+
+### Postgres vs SQLite SQL — the tenant DB is Postgres
+Tenant queries run on Postgres, which is stricter than SQLite. Recurring gotchas already fixed: no SQLite `date(x,'+1 day')` (compute the boundary in JS); **HAVING/ORDER cannot reference SELECT aliases in an aggregate** the way SQLite allows — repeat the aggregate (`HAVING SUM(g.dr_amount) > 0`); every non-aggregated SELECT column in a `GROUP BY` query must appear in the `GROUP BY` (add `c.type, c.display_order`). Tenant tables are **schema-isolated** and carry **no `restaurant_id` column** (the schema is the tenant) — never filter tenant tables by `restaurant_id` (exceptions like `room_inventory_overrides` that do carry it are rare and explicit).
+
 ---
 
 ## Object Detail View — MANDATORY convention (Overview / Audit History / Where Used)

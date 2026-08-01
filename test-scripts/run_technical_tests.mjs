@@ -491,7 +491,9 @@ async function testAccounting() {
     const codes = coa.data.map(a => a.code);
     const required = ['1000','1100','2000','2100','2200','4000','5000'];
     const missing = required.filter(c => !codes.includes(c));
-    if (missing.length === 0) {
+    if (coa.data.length === 0) {
+      skip('TC-ACC-001b', 'Required account codes present', 'chart of accounts not seeded on this tenant (data state, not a code error)');
+    } else if (missing.length === 0) {
       pass('TC-ACC-001b', 'All required account codes present (1000 1100 2000 2100 2200 4000 5000)');
     } else {
       fail('TC-ACC-001b', 'Required account codes present', `missing: ${missing.join(', ')}`);
@@ -499,7 +501,7 @@ async function testAccounting() {
   } else if (coa.status === 403) {
     skip('TC-ACC-001', 'Chart of accounts', 'RBAC: need OWNER role');
   } else if (coa.status === 404) {
-    skip('TC-ACC-001', 'Chart of accounts', 'accounting module not yet live on this tenant (server restart pending)');
+    fail('TC-ACC-001', 'Chart of accounts', 'HTTP 404 — accounting route unreachable (regression: routes shadowed by the /api 404 catch-all)');
   } else {
     fail('TC-ACC-001', 'Chart of accounts loads', `HTTP ${coa.status}`);
   }
@@ -524,7 +526,7 @@ async function testAccounting() {
   } else if (gl.status === 403) {
     skip('TC-ACC-003', 'GL entries', 'RBAC: need OWNER role');
   } else if (gl.status === 404) {
-    skip('TC-ACC-003', 'GL entries', 'accounting module not yet live on this tenant (server restart pending)');
+    fail('TC-ACC-003', 'GL entries', 'HTTP 404 — accounting route unreachable (regression: routes shadowed by the /api 404 catch-all)');
   } else {
     fail('TC-ACC-003', 'GL entries loads', `HTTP ${gl.status}`);
   }
@@ -545,7 +547,7 @@ async function testAccounting() {
   } else if (tb.status === 403) {
     skip('TC-ACC-002b', 'Trial balance', 'RBAC: need OWNER role');
   } else if (tb.status === 404) {
-    skip('TC-ACC-002b', 'Trial balance', 'accounting module not yet live on this tenant (server restart pending)');
+    fail('TC-ACC-002b', 'Trial balance', 'HTTP 404 — accounting route unreachable (regression: routes shadowed by the /api 404 catch-all)');
   } else {
     fail('TC-ACC-002b', 'Trial balance endpoint responds', `HTTP ${tb.status}`);
   }
@@ -557,7 +559,7 @@ async function testAccounting() {
   } else if (tds.status === 403) {
     skip('TC-ACC-006', 'TDS payable', 'RBAC: need OWNER role');
   } else if (tds.status === 404) {
-    skip('TC-ACC-006', 'TDS payable', 'accounting module not yet live on this tenant (server restart pending)');
+    fail('TC-ACC-006', 'TDS payable', 'HTTP 404 — accounting route unreachable (regression: routes shadowed by the /api 404 catch-all)');
   } else {
     fail('TC-ACC-006', 'TDS payable list loads', `HTTP ${tds.status}`);
   }
@@ -576,9 +578,38 @@ async function testAccounting() {
   } else if (mjRes.status === 403) {
     skip('TC-ACC-004', 'Manual journal post', 'RBAC: need OWNER role');
   } else if (mjRes.status === 404) {
-    skip('TC-ACC-004', 'Manual journal post', 'accounting module not yet live on this tenant (server restart pending)');
+    fail('TC-ACC-004', 'Manual journal post', 'HTTP 404 — accounting route unreachable (regression: routes shadowed by the /api 404 catch-all)');
   } else {
     fail('TC-ACC-004', 'Manual journal posted', `HTTP ${mjRes.status} — ${JSON.stringify(mjRes.data)}`);
+  }
+
+  // TC-ACC-GST: GST Outstanding (Ledger & Books) — read-only, computed from the
+  // posted GL. Verify shape, the internal identity (output − ITC = net), and that
+  // it reconciles with the trial balance (an independent GL computation path).
+  const gsto = await api('GET', `/api/restaurant/${restaurantId}/accounting/gst-outstanding?from=${fyStart}&to=${today}`);
+  if (gsto.status === 200 && gsto.data && 'net_outstanding' in gsto.data) {
+    const r2 = n => Math.round(Number(n || 0) * 100) / 100;
+    const identityOk = r2(gsto.data.output_gst - gsto.data.input_tax_credit) === r2(gsto.data.net_outstanding);
+    (identityOk ? pass : fail)('TC-ACC-GST', 'GST Outstanding: output − ITC = net',
+      `output=${gsto.data.output_gst} itc=${gsto.data.input_tax_credit} net=${gsto.data.net_outstanding}`);
+    // Reconcile against the trial balance over the same window.
+    if (tb.status === 200 && Array.isArray(tb.data)) {
+      let outTb = 0, itcTb = 0;
+      for (const row of tb.data) {
+        const dr = Number(row.dr_total || 0), cr = Number(row.cr_total || 0), c = String(row.account_code);
+        if (['2200','2210','2220'].includes(c)) outTb += cr - dr;
+        if (['1300','1310','1320'].includes(c)) itcTb += dr - cr;
+      }
+      const reconOk = r2(gsto.data.output_gst) === r2(outTb) && r2(gsto.data.input_tax_credit) === r2(itcTb);
+      (reconOk ? pass : fail)('TC-ACC-GST-RECON', 'GST Outstanding reconciles with trial balance',
+        `endpoint out/itc=${r2(gsto.data.output_gst)}/${r2(gsto.data.input_tax_credit)} vs TB=${r2(outTb)}/${r2(itcTb)}`);
+    }
+  } else if (gsto.status === 403) {
+    skip('TC-ACC-GST', 'GST Outstanding', 'RBAC: need OWNER role');
+  } else if (gsto.status === 404) {
+    fail('TC-ACC-GST', 'GST Outstanding', 'HTTP 404 — accounting route unreachable (regression: routes shadowed by the /api 404 catch-all)');
+  } else {
+    fail('TC-ACC-GST', 'GST Outstanding responds', `HTTP ${gsto.status}`);
   }
 }
 
