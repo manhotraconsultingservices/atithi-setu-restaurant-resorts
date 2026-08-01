@@ -4828,7 +4828,15 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
     // keep seeing these tabs until the owner explicitly restricts them via
     // the updated Staff Access UI.
     if (perms !== null) {
-      const RBAC_NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT'];
+      const RBAC_NEWLY_ADDED = [
+        'HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT',
+        // Events & Convention tabs — added after the matrix already shipped, so a
+        // tenant who saved Staff Access before Events existed must default these to
+        // Full(3) (not 0), else events staff get 403 until the owner re-saves.
+        'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_VENUES',
+        'EVENTS_RENTALS', 'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS',
+        'EVENTS_REPORTS', 'EVENTS_SETTINGS',
+      ];
       for (const tab of RBAC_NEWLY_ADDED) {
         if (!(tab in perms)) perms[tab] = 3;
       }
@@ -43984,7 +43992,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-invoices-tab-payments-promo',
+    commit_marker: 'events-rbac-staff-access',
     code_features: [
       'subscription-billing',
       'read-only-mode',

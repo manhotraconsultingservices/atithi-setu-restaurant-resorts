@@ -24941,7 +24941,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // for non-technical owners (hover tooltip).
             // hotelOnly      = hidden for RESTAURANT tenants
             // restaurantOnly = hidden for HOTEL-only tenants
-            const PERMISSIBLE_TABS: { id: string; label: string; description: string; hotelOnly?: boolean; restaurantOnly?: boolean }[] = [
+            const PERMISSIBLE_TABS: { id: string; label: string; description: string; hotelOnly?: boolean; restaurantOnly?: boolean; eventsOnly?: boolean }[] = [
               { id: 'MONITOR',           label: 'Monitor / Dashboard',     description: 'Real-time KPIs, today\'s revenue, live order board, daily summary.' },
               { id: 'ORDERS',            label: 'Orders (POS)',            description: 'Place dine-in / takeaway orders, view current orders, kitchen ticket status.',        restaurantOnly: true },
               { id: 'INVOICES',          label: 'Invoices',                description: 'Manual invoice creation, GST invoice download, invoice list, refunds.' },
@@ -24982,11 +24982,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // Finance tabs (visible for both HOTEL and RESTAURANT tenants)
               { id: 'EXPENSE_JOURNAL',      label: 'Expense Journal',       description: 'Daily operating expenses, petty cash entries, vendor payments, expense reports and approval.' },
               { id: 'PROCUREMENT',          label: 'Procurement & AP',      description: 'Purchase orders, supplier invoices, goods-received notes, accounts payable aging.' },
+              // Events & Convention tabs (only shown when the Events module is enabled).
+              { id: 'EVENTS_DASHBOARD',  label: 'Events Dashboard',   description: 'Events ops cockpit: pipeline, win rate, revenue, receivables, venue utilization.', eventsOnly: true },
+              { id: 'EVENTS_CALENDAR',   label: 'Events Calendar',    description: 'Venue × date booking calendar.', eventsOnly: true },
+              { id: 'EVENTS_BOOKINGS',   label: 'Event Bookings',     description: 'Create/edit event bookings, lines, discount, payments, staff, confirm, checkout, invoice.', eventsOnly: true },
+              { id: 'EVENTS_VENUES',     label: 'Event Venues',       description: 'Convention halls / lawns master — categories, AC, occupancy, rates, photos.', eventsOnly: true },
+              { id: 'EVENTS_RENTALS',    label: 'Event Rentals',      description: 'Rentable inventory master — tables, chairs, sofas, cylinders, plates.', eventsOnly: true },
+              { id: 'EVENTS_SERVICES',   label: 'Event Services',     description: 'Add-on services master — serving staff, security, parking, decoration.', eventsOnly: true },
+              { id: 'EVENTS_CATERING',   label: 'Event Catering',     description: 'Catering / F&B package master (buffet / plated menus, per-plate pricing).', eventsOnly: true },
+              { id: 'EVENTS_QUOTATIONS', label: 'Event Quotations',   description: 'Generate, view and email event quotations (BEO).', eventsOnly: true },
+              { id: 'EVENTS_REPORTS',    label: 'Event Reports',      description: 'Events reporting hub — revenue, venue utilization, upcoming events, CSV export.', eventsOnly: true },
+              { id: 'EVENTS_SETTINGS',   label: 'Events Page Settings', description: 'Public events page config — hero, tagline, gallery photos.', eventsOnly: true },
             ];
-            // Filter: hotelOnly rows require hotel module; restaurantOnly rows require restaurant module.
+            // Filter: hotelOnly rows require hotel module; restaurantOnly rows
+            // require restaurant module; eventsOnly rows require the Events module.
             const visibleTabs = PERMISSIBLE_TABS.filter(t =>
               (!t.hotelOnly      || isHotelEnabled) &&
-              (!t.restaurantOnly || isRestaurantEnabled)
+              (!t.restaurantOnly || isRestaurantEnabled) &&
+              (!t.eventsOnly     || isEventsEnabled)
             );
 
             // Roles to manage. OWNER + SUPER_ADMIN/CTO are excluded —
