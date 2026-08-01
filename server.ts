@@ -4965,6 +4965,36 @@ async function _resolveRecipients(
   return (staff || []).map((s: any) => ({ email: s.email, phone: s.phone }));
 }
 
+// ── Notification delivery log ────────────────────────────────────────────────
+// Every send attempt (per channel, per recipient) is recorded so the owner can
+// see what went out and what failed. Lazily created per tenant.
+const _notifDelivReady = new Set<string>();
+async function ensureNotifDeliveries(db: any, rid: string) {
+  if (_notifDelivReady.has(rid)) return;
+  try {
+    await db.exec(`CREATE TABLE IF NOT EXISTS notification_deliveries (
+      id TEXT PRIMARY KEY, event_name TEXT, channel TEXT, recipient TEXT,
+      status TEXT DEFAULT 'SENT', error TEXT, preview TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_notif_deliv_created ON notification_deliveries(created_at DESC)`);
+  } catch { /* ignore */ }
+  _notifDelivReady.add(rid);
+}
+// Send on a single channel with the failure ISOLATED (one channel throwing must
+// never abort the others) and the outcome logged.
+async function logAndSend(db: any, eventName: string, channel: string, recipient: string, preview: string, fn: () => Promise<any>) {
+  const id = `ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  try {
+    await fn();
+    await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, preview) VALUES (?, ?, ?, ?, 'SENT', ?)",
+      [id, eventName, channel, recipient || '', String(preview || '').slice(0, 140)]).catch(() => {});
+  } catch (e: any) {
+    await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, preview) VALUES (?, ?, ?, ?, 'FAILED', ?, ?)",
+      [id, eventName, channel, recipient || '', String(e?.message || e).slice(0, 300), String(preview || '').slice(0, 140)]).catch(() => {});
+    console.error(`[notif] ${channel} → ${recipient} for ${eventName} failed:`, e?.message || e);
+  }
+}
+
 async function triggerNotification(restaurantId: string, eventName: string, data: any) {
   try {
     // Inject restaurant name so all notifications display the correct restaurant
@@ -4974,6 +5004,7 @@ async function triggerNotification(restaurantId: string, eventName: string, data
     }
 
     const db = await getTenantDb(restaurantId);
+    await ensureNotifDeliveries(db, restaurantId);
     const settings = await db.query("SELECT * FROM notification_settings WHERE event_name = ?", [eventName]);
     if (!settings || settings.length === 0) return;
 
@@ -5038,18 +5069,18 @@ async function triggerNotification(restaurantId: string, eventName: string, data
       for (const recipient of uniqueRecipients) {
         const isEmail = recipient.includes('@');
         if (setting.email_enabled && isEmail) {
-          await sendEmail(recipient, content.subject, content.text, content.html);
+          await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendEmail(recipient, content.subject, content.text, content.html));
         }
         if (setting.sms_enabled && !isEmail) {
-          await sendSMS(recipient, content.text);
+          await logAndSend(db, eventName, 'SMS', recipient, content.text, () => sendSMS(recipient, content.text));
         }
         if (setting.whatsapp_enabled && !isEmail) {
-          await sendWhatsApp(recipient, content.text);
+          await logAndSend(db, eventName, 'WHATSAPP', recipient, content.text, () => sendWhatsApp(recipient, content.text));
         }
       }
       // Telegram: channel-level (not per-recipient), uses stored chat_id override or env default
       if (setting.telegram_enabled) {
-        await sendTelegram(setting.telegram_chat_id || null, content.text);
+        await logAndSend(db, eventName, 'TELEGRAM', setting.telegram_chat_id || 'default', content.text, () => sendTelegram(setting.telegram_chat_id || null, content.text));
       }
     }
   } catch (err) {
@@ -7522,6 +7553,58 @@ async function startServer() {
     } catch (err) {
       console.error("Update notification settings error:", err);
       res.status(500).json({ error: "Failed to update notification settings" });
+    }
+  });
+
+  // Owner: Notification delivery log — what was actually sent, per channel, with
+  // status + error. Powers the "Delivery Log" panel so the owner can see the
+  // engine working (and diagnose a mis-configured channel).
+  app.get("/api/owner/notification-deliveries", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await ensureNotifDeliveries(db, req.user!.restaurantId);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
+      const status = String(req.query.status || '').toUpperCase();
+      const clauses: string[] = []; const params: any[] = [];
+      if (status === 'SENT' || status === 'FAILED') { clauses.push('status = ?'); params.push(status); }
+      if (req.query.channel) { clauses.push('channel = ?'); params.push(String(req.query.channel).toUpperCase()); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows = await db.query(`SELECT * FROM notification_deliveries ${where} ORDER BY created_at DESC LIMIT ${limit}`, params);
+      const counts: any = await db.get(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status='SENT')::int AS sent,
+                COUNT(*) FILTER (WHERE status='FAILED')::int AS failed
+           FROM notification_deliveries WHERE created_at > (CURRENT_TIMESTAMP - INTERVAL '30 days')`).catch(() => ({ total: 0, sent: 0, failed: 0 }));
+      res.json({ deliveries: rows, counts });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch notification deliveries" });
+    }
+  });
+
+  // Owner: fire a test message on a chosen channel to verify credentials/config.
+  app.post("/api/owner/notifications/test", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await ensureNotifDeliveries(db, req.user!.restaurantId);
+      const channel = String(req.body?.channel || '').toUpperCase();
+      const to = String(req.body?.recipient || '').trim();
+      const rRow: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [req.user!.restaurantId]).catch(() => null);
+      const msg = `✅ Test notification from ${rRow?.name || 'Atithi-Setu'} — your ${channel} channel is working.`;
+      const senders: Record<string, () => Promise<any>> = {
+        EMAIL:    () => sendEmail(to, 'Atithi-Setu — test notification', msg, `<p>${msg}</p>`),
+        SMS:      () => sendSMS(to, msg),
+        WHATSAPP: () => sendWhatsApp(to, msg),
+        TELEGRAM: () => sendTelegram(to || null, msg),
+      };
+      if (!senders[channel]) return res.status(400).json({ error: 'channel must be EMAIL, SMS, WHATSAPP or TELEGRAM' });
+      if (channel !== 'TELEGRAM' && !to) return res.status(400).json({ error: 'recipient is required for this channel' });
+      let ok = true, error: string | null = null;
+      try { await senders[channel](); } catch (e: any) { ok = false; error = String(e?.message || e); }
+      await logAndSend(db, 'TEST', channel, to || 'default', msg, async () => { if (!ok) throw new Error(error || 'send failed'); }).catch(() => {});
+      if (ok) res.json({ success: true });
+      else res.status(502).json({ error: error || 'Send failed — check channel credentials.' });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Test send failed' });
     }
   });
 
@@ -44265,7 +44348,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'fix-trial-balance-groupby',
+    commit_marker: 'notif-engine-delivery-log',
     code_features: [
       'subscription-billing',
       'read-only-mode',

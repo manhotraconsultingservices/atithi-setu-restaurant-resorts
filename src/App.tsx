@@ -62669,10 +62669,21 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
   const [settings, setSettings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deliveries, setDeliveries] = useState<any[]>([]);
+  const [deliveryCounts, setDeliveryCounts] = useState<{ total: number; sent: number; failed: number }>({ total: 0, sent: 0, failed: 0 });
+  const [showLog, setShowLog] = useState(false);
 
   useEffect(() => {
     fetchSettings();
+    fetchDeliveries();
   }, []);
+
+  const fetchDeliveries = async () => {
+    try {
+      const res = await fetch('/api/owner/notification-deliveries?limit=100', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (res.ok) { const d = await res.json(); setDeliveries(d.deliveries || []); setDeliveryCounts(d.counts || { total: 0, sent: 0, failed: 0 }); }
+    } catch (err) { console.error(err); }
+  };
 
   const fetchSettings = async () => {
     try {
@@ -62780,6 +62791,50 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
           {saving ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
           Save Changes
         </button>
+      </div>
+
+      {/* ── Delivery Log — proof the engine is working, per channel, with failures ── */}
+      <div className="bg-white border border-[#cc5a16]/10 rounded-2xl p-5">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-4">
+            <h3 className="font-bold text-[#1a1208] flex items-center gap-2"><MessageCircle size={16} className="text-[#cc5a16]" /> Delivery Log</h3>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 font-bold tabular-nums">{deliveryCounts.sent} sent</span>
+              <span className={`px-2.5 py-1 rounded-full font-bold tabular-nums ${deliveryCounts.failed > 0 ? 'bg-rose-50 text-rose-700' : 'bg-[#faf7f2] text-[#9c8e85]'}`}>{deliveryCounts.failed} failed</span>
+              <span className="text-[#9c8e85]">last 30 days</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={fetchDeliveries} className="px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/10 text-xs font-bold text-[#1a1208] hover:bg-[#cc5a16]/5 flex items-center gap-1.5"><RefreshCw size={13} /> Refresh</button>
+            <button onClick={() => setShowLog(s => !s)} className="px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/10 text-xs font-bold text-[#1a1208] hover:bg-[#cc5a16]/5">{showLog ? 'Hide' : 'Show'} recent</button>
+          </div>
+        </div>
+        {showLog && (
+          <div className="mt-4 max-h-80 overflow-y-auto rounded-xl border border-[#f0e8d8]">
+            {deliveries.length === 0 ? (
+              <p className="p-4 text-sm text-[#9c8e85] text-center">No notifications sent yet. Enable an event above, then trigger it (or use a per-event test).</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-[#f5f0e8] text-[#6b5d52] text-[11px] uppercase">
+                  <tr><th className="text-left px-3 py-2">When</th><th className="text-left px-3 py-2">Event</th><th className="text-left px-3 py-2">Channel</th><th className="text-left px-3 py-2">Recipient</th><th className="text-left px-3 py-2">Status</th></tr>
+                </thead>
+                <tbody>
+                  {deliveries.map((d: any) => (
+                    <tr key={d.id} className="border-t border-[#f0e8d8]">
+                      <td className="px-3 py-2 text-xs text-[#6b5d52] whitespace-nowrap">{d.created_at ? new Date(d.created_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' }) : '—'}</td>
+                      <td className="px-3 py-2 text-xs font-medium text-[#1a1208]">{d.event_name}</td>
+                      <td className="px-3 py-2"><span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#fbeee3] text-[#cc5a16]">{d.channel}</span></td>
+                      <td className="px-3 py-2 text-xs text-[#6b5d52] max-w-[180px] truncate" title={d.recipient}>{d.recipient || '—'}</td>
+                      <td className="px-3 py-2">
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${d.status === 'FAILED' ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`} title={d.error || ''}>{d.status}{d.status === 'FAILED' && d.error ? ' ⚠' : ''}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Per-event toggle table, grouped by category ── */}
