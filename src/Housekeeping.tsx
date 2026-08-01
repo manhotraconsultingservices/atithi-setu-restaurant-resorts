@@ -14,7 +14,10 @@ const BTN_GHOST = `${BTN} bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] ho
 const INPUT = 'w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white focus:outline-none focus:border-[#cc5a16]';
 const dt = (v: any) => v ? new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
 
-export function HousekeepingModule({ restaurantId, token }: { restaurantId: string; token: string }) {
+// scope='EVENT' → a focused view for the Events module (event venues only);
+// 'ROOM' → rooms only; 'ALL' (default) → the full hotel-side view (rooms + events).
+type HkScope = 'ALL' | 'ROOM' | 'EVENT';
+export function HousekeepingModule({ restaurantId, token, scope = 'ALL' }: { restaurantId: string; token: string; scope?: HkScope }) {
   const [view, setView] = useState<'WORKLIST' | 'CHECKLIST' | 'LOG'>('WORKLIST');
   const api = async (path: string, init: RequestInit = {}) => {
     const r = await fetch(`/api/restaurant/${restaurantId}${path}`, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) } });
@@ -25,14 +28,19 @@ export function HousekeepingModule({ restaurantId, token }: { restaurantId: stri
   const tabBtn = (k: typeof view, label: string, icon: any) => (
     <button onClick={() => setView(k)} className={`${BTN} ${view === k ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] border border-[#e8dccf] text-[#6b5d52]'}`}>{icon}{label}</button>
   );
+  const title = scope === 'EVENT' ? 'Event Housekeeping' : scope === 'ROOM' ? 'Room Housekeeping' : 'Housekeeping';
+  const subtitle = scope === 'EVENT'
+    ? 'Cleaning checklist, worklist & log for event venues.'
+    : scope === 'ROOM' ? 'Cleaning checklist, worklist & log for guest rooms.'
+    : 'Cleaning checklists, worklist & log — rooms and event venues.';
   return (
     <div>
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
         <div className="flex items-center gap-2.5">
           <div className="grid place-items-center w-9 h-9 rounded-xl bg-[#fbeee3] text-[#cc5a16]"><Sparkles size={18} /></div>
           <div>
-            <h2 className="text-xl font-bold text-[#14110c] leading-tight">Housekeeping</h2>
-            <p className="text-xs text-[#9c8e85]">Cleaning checklists, worklist &amp; log — rooms and event venues.</p>
+            <h2 className="text-xl font-bold text-[#14110c] leading-tight">{title}</h2>
+            <p className="text-xs text-[#9c8e85]">{subtitle}</p>
           </div>
         </div>
         <div className="flex items-center gap-1.5">
@@ -41,21 +49,27 @@ export function HousekeepingModule({ restaurantId, token }: { restaurantId: stri
           {tabBtn('LOG', 'Cleaning Log', <History size={13} />)}
         </div>
       </div>
-      {view === 'WORKLIST' && <Worklist api={api} />}
-      {view === 'CHECKLIST' && <ChecklistConfig api={api} />}
-      {view === 'LOG' && <CleaningLog api={api} />}
+      {view === 'WORKLIST' && <Worklist api={api} scope={scope} />}
+      {view === 'CHECKLIST' && <ChecklistConfig api={api} scope={scope} />}
+      {view === 'LOG' && <CleaningLog api={api} scope={scope} />}
     </div>
   );
 }
 
 // ── Worklist — open cleaning jobs, tick tasks, complete / override ────────────
-function Worklist({ api }: { api: (p: string, i?: RequestInit) => Promise<any> }) {
+function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) => Promise<any>; scope?: 'ALL' | 'ROOM' | 'EVENT' }) {
   const [jobs, setJobs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [openJob, setOpenJob] = useState<any>(null); // {..., tasks}
   const [busy, setBusy] = useState(false);
 
-  const load = async () => { setLoading(true); try { setJobs(await api('/housekeeping/jobs?status=OPEN')); } catch { setJobs([]); } finally { setLoading(false); } };
+  const load = async () => {
+    setLoading(true);
+    try {
+      const all = await api('/housekeeping/jobs?status=OPEN');
+      setJobs(scope === 'ALL' ? all : (all || []).filter((j: any) => j.facility_type === scope));
+    } catch { setJobs([]); } finally { setLoading(false); }
+  };
   useEffect(() => { load(); }, []);
   const openDetail = async (j: any) => { try { setOpenJob(await api(`/housekeeping/jobs/${j.id}`)); } catch (e: any) { alert(e.message); } };
   const toggle = async (t: any) => {
@@ -142,7 +156,7 @@ function Worklist({ api }: { api: (p: string, i?: RequestInit) => Promise<any> }
 }
 
 // ── Checklist config — owner-configured tasks per facility type ───────────────
-function ChecklistConfig({ api }: { api: (p: string, i?: RequestInit) => Promise<any> }) {
+function ChecklistConfig({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) => Promise<any>; scope?: 'ALL' | 'ROOM' | 'EVENT' }) {
   const [data, setData] = useState<{ ROOM: any[]; EVENT: any[] }>({ ROOM: [], EVENT: [] });
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState<Record<string, string>>({ ROOM: '', EVENT: '' });
@@ -178,15 +192,19 @@ function ChecklistConfig({ api }: { api: (p: string, i?: RequestInit) => Promise
     </div>
   );
   if (loading) return <p className="text-sm text-[#6b5d52] p-4">Loading…</p>;
+  if (scope === 'EVENT') return <div className="max-w-2xl">{col('EVENT', 'Event', <Building2 size={15} />)}</div>;
+  if (scope === 'ROOM') return <div className="max-w-2xl">{col('ROOM', 'Room', <DoorOpen size={15} />)}</div>;
   return <div className="grid md:grid-cols-2 gap-4">{col('ROOM', 'Room', <DoorOpen size={15} />)}{col('EVENT', 'Event', <Building2 size={15} />)}</div>;
 }
 
 // ── Cleaning log — history + per-facility counts ─────────────────────────────
-function CleaningLog({ api }: { api: (p: string, i?: RequestInit) => Promise<any> }) {
+function CleaningLog({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) => Promise<any>; scope?: 'ALL' | 'ROOM' | 'EVENT' }) {
   const [data, setData] = useState<{ log: any[]; by_facility: any[] }>({ log: [], by_facility: [] });
   const [loading, setLoading] = useState(true);
-  useEffect(() => { (async () => { setLoading(true); try { setData(await api('/housekeeping/log')); } catch { /* */ } finally { setLoading(false); } })(); }, []);
+  useEffect(() => { (async () => { setLoading(true); try { const q = scope !== 'ALL' ? `?facility_type=${scope}` : ''; setData(await api(`/housekeeping/log${q}`)); } catch { /* */ } finally { setLoading(false); } })(); }, [scope]);
   if (loading) return <p className="text-sm text-[#6b5d52] p-4">Loading…</p>;
+  // The log rows are already filtered server-side; the per-facility rollup is not, so scope it here.
+  const byFacility = scope === 'ALL' ? data.by_facility : data.by_facility.filter((f: any) => f.facility_type === scope);
   return (
     <div className="grid lg:grid-cols-2 gap-4">
       <div className={`${CARD} p-0 overflow-hidden`}>
@@ -195,7 +213,7 @@ function CleaningLog({ api }: { api: (p: string, i?: RequestInit) => Promise<any
           <table className="w-full text-sm">
             <thead><tr className="bg-[#faf7f2] text-[#6b5d52] text-[11px] uppercase"><th className="text-left px-4 py-2">Facility</th><th className="text-right px-4 py-2">Times</th><th className="text-left px-4 py-2">Last cleaned</th></tr></thead>
             <tbody>
-              {data.by_facility.length === 0 ? <tr><td colSpan={3} className="p-4 text-[#9c8e85] text-center">No cleaning recorded yet.</td></tr> : data.by_facility.map((f: any, i: number) => (
+              {byFacility.length === 0 ? <tr><td colSpan={3} className="p-4 text-[#9c8e85] text-center">No cleaning recorded yet.</td></tr> : byFacility.map((f: any, i: number) => (
                 <tr key={i} className="border-t border-[#f0ebe4]">
                   <td className="px-4 py-2"><span className="text-[9px] font-bold text-[#b9a897] mr-1">{f.facility_type}</span>{f.facility_label || f.facility_id}</td>
                   <td className="px-4 py-2 text-right font-bold tabular-nums">{f.times_cleaned}</td>

@@ -21239,6 +21239,16 @@ ${data.tenant.name}`;
   // ══════════════════════════════════════════════════════════════════════════
   const mkHkId = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
   const HK_MANAGER_ROLES = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'];
+  // Human-readable actor for cleaning-log entries — never a raw user UUID.
+  // Prefers the JWT display name, then email, then a Title-Cased role.
+  const hkActor = (req: AuthRequest): string => {
+    const u: any = req.user || {};
+    const name = (u.userName && String(u.userName).trim()) || (u.email && String(u.email).trim());
+    if (name) return name;
+    const role = String(u.role || '').replace(/_/g, ' ').trim();
+    return role ? role.replace(/\b\w/g, (c: string) => c.toUpperCase()) : 'Staff';
+  };
+  const HK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const hkStaff = requireRole(['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'HOUSEKEEPING', 'MAINTENANCE', 'EVENTS_MANAGER']);
 
   const ensureHousekeepingTables = async (db: any) => {
@@ -21389,7 +21399,7 @@ ${data.tenant.name}`;
       if (job.status !== 'OPEN') return res.status(409).json({ error: "This cleaning job is already closed" });
       const done = req.body?.is_done ? 1 : 0;
       await db.run("UPDATE housekeeping_job_tasks SET is_done = ?, done_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, done_by = ? WHERE id = ? AND job_id = ?",
-        [done, done, done ? (req.user?.email || req.user?.id || null) : null, req.params.tid, req.params.jid]);
+        [done, done, done ? hkActor(req) : null, req.params.tid, req.params.jid]);
       if (!job.started_at) await db.run("UPDATE housekeeping_jobs SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL", [req.params.jid]);
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to update task" }); }
@@ -21410,7 +21420,7 @@ ${data.tenant.name}`;
       if (job.status !== 'OPEN') return res.json({ success: true, already: true });
       const pend: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_job_tasks WHERE job_id = ? AND is_mandatory = 1 AND is_done = 0", [req.params.jid]);
       if (Number(pend?.c || 0) > 0) return res.status(400).json({ error: `${pend.c} mandatory task(s) still pending. Complete them before closing.`, pending_mandatory: pend.c });
-      await db.run("UPDATE housekeeping_jobs SET status = 'DONE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [req.user?.email || req.user?.id || null, req.params.jid]);
+      await db.run("UPDATE housekeeping_jobs SET status = 'DONE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [hkActor(req), req.params.jid]);
       await releaseFacility(db, job);
       res.json({ success: true, released: job.facility_type });
     } catch (err: any) { res.status(500).json({ error: "Failed to complete cleaning" }); }
@@ -21424,7 +21434,7 @@ ${data.tenant.name}`;
       if (!job) return res.status(404).json({ error: "Job not found" });
       if (job.status !== 'OPEN') return res.json({ success: true, already: true });
       await db.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE id = ?",
-        [req.user?.email || req.user?.id || null, String(req.body?.reason || '').trim() || 'Override', req.params.jid]);
+        [hkActor(req), String(req.body?.reason || '').trim() || 'Override', req.params.jid]);
       await releaseFacility(db, job);
       res.json({ success: true, released: job.facility_type });
     } catch (err: any) { res.status(500).json({ error: "Failed to override" }); }
@@ -21444,7 +21454,17 @@ ${data.tenant.name}`;
       const byFacility = await db.query(
         `SELECT facility_type, facility_id, facility_label, COUNT(*)::int AS times_cleaned, MAX(completed_at) AS last_cleaned
            FROM housekeeping_jobs WHERE status IN ('DONE','OVERRIDDEN') GROUP BY facility_type, facility_id, facility_label ORDER BY MAX(completed_at) DESC LIMIT 500`);
-      res.json({ log: rows, by_facility: byFacility });
+      // Present a human actor even for legacy rows that stored a raw user id:
+      // map the tenant owner's id → owner name, and any other bare UUID → Staff.
+      const rest: any = await centralDb.get("SELECT owner_user_id, owner_name FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+      const actorLabel = (v: any): string | null => {
+        const s = String(v ?? '').trim(); if (!s) return null;
+        if (rest?.owner_user_id && s === rest.owner_user_id) return rest.owner_name || 'Owner';
+        if (HK_UUID_RE.test(s)) return 'Staff';
+        return s;
+      };
+      const log = rows.map((r: any) => ({ ...r, completed_by: actorLabel(r.completed_by) }));
+      res.json({ log, by_facility: byFacility });
     } catch (err: any) { res.status(500).json({ error: "Failed to load cleaning log" }); }
   });
 
@@ -24987,7 +25007,7 @@ ${data.tenant.name}`;
           const isMgr = HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase());
           if (!isMgr) return res.status(409).json({ error: 'Cleaning checklist not complete — finish the housekeeping tasks before marking this room ready.', housekeeping_job_id: openJob.id });
           await tenantDb.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE id = ?",
-            [req.user?.email || req.user?.id || null, 'Room set VACANT by manager', openJob.id]).catch(() => {});
+            [hkActor(req), 'Room set VACANT by manager', openJob.id]).catch(() => {});
         }
       }
       await tenantDb.run("UPDATE rooms SET status = ? WHERE id = ?", [status, req.params.roomId]);
@@ -44243,7 +44263,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inv-grid-spa-appts-query-fix',
+    commit_marker: 'hk-event-nav-actor-name',
     code_features: [
       'subscription-billing',
       'read-only-mode',
