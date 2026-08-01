@@ -44265,7 +44265,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'fix-trial-balance-having-alias',
+    commit_marker: 'fix-trial-balance-groupby',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -44448,7 +44448,7 @@ ${data.tenant.name}`;
          FROM gl_entries g
          LEFT JOIN chart_of_accounts c ON c.code = g.account_code
          WHERE g.restaurant_id = ? ${dateWhere} AND g.is_reversed = 0
-         GROUP BY g.account_code, g.account_name
+         GROUP BY g.account_code, g.account_name, c.type, c.display_order
          HAVING SUM(g.dr_amount) > 0 OR SUM(g.cr_amount) > 0
          ORDER BY display_order, g.account_code`,
         params
