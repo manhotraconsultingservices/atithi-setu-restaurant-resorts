@@ -7816,11 +7816,12 @@ function SettlementUploadForm({
 }
 
 function AccountingView({ restaurantId, token }: { restaurantId: string; token: string }) {
-  type SubTab = 'TRIAL' | 'GL' | 'TDS' | 'JOURNAL';
+  type SubTab = 'TRIAL' | 'GL' | 'GST' | 'TDS' | 'JOURNAL';
   const [acctTab, setAcctTab] = useState<SubTab>('TRIAL');
   const [coa, setCoa] = useState<any[]>([]);
   const [glEntries, setGlEntries] = useState<any[]>([]);
   const [trialBalance, setTrialBalance] = useState<any[]>([]);
+  const [gstOut, setGstOut] = useState<any>(null);
   const [tdsRows, setTdsRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -7879,8 +7880,17 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
       .finally(() => setLoading(false));
   }, [acctApi, tdsStatus]);
 
+  // GST outstanding is read-only — computed from the posted GL (output GST − ITC).
+  const loadGst = useCallback(() => {
+    setLoading(true);
+    acctApi(`/accounting/gst-outstanding?from=${tbFrom}&to=${tbTo}`)
+      .then(d => { if (d && !d.error) setGstOut(d); })
+      .finally(() => setLoading(false));
+  }, [acctApi, tbFrom, tbTo]);
+
   useEffect(() => { if (acctTab === 'TRIAL') loadTrial(); }, [acctTab, loadTrial]);
   useEffect(() => { if (acctTab === 'GL') loadGl(); }, [acctTab, loadGl]);
+  useEffect(() => { if (acctTab === 'GST') loadGst(); }, [acctTab, loadGst]);
   useEffect(() => { if (acctTab === 'TDS') loadTds(); }, [acctTab, loadTds]);
 
   const fmtAmt = (n: number | null | undefined) =>
@@ -7926,10 +7936,10 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
       </div>
 
       <div className="flex gap-0 border-b border-[#e8ded0]">
-        {(['TRIAL', 'GL', 'TDS', 'JOURNAL'] as SubTab[]).map(t => (
+        {(['TRIAL', 'GL', 'GST', 'TDS', 'JOURNAL'] as SubTab[]).map(t => (
           <button key={t} onClick={() => setAcctTab(t)}
             className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${acctTab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
-            {t === 'TRIAL' ? 'Trial Balance' : t === 'GL' ? 'GL Ledger' : t === 'TDS' ? 'TDS Tracker' : 'Manual Entry'}
+            {t === 'TRIAL' ? 'Trial Balance' : t === 'GL' ? 'GL Ledger' : t === 'GST' ? 'GST Outstanding' : t === 'TDS' ? 'TDS Tracker' : 'Manual Entry'}
           </button>
         ))}
       </div>
@@ -7991,6 +8001,70 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
               </table>
             </div>
           )}
+        </div>
+      )}
+
+      {acctTab === 'GST' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">From</label>
+            <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <label className="text-xs text-[#6b5d52]">To</label>
+            <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadGst} className={AC_BTN}>Refresh</button>
+          </div>
+          {!gstOut && !loading ? (
+            <p className="text-sm text-[#6b5d52] italic">No GST postings for this period. Settle a folio (output GST) or record a supplier invoice (ITC) first.</p>
+          ) : gstOut ? (
+            <>
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Output GST collected</p>
+                  <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstOut.output_gst)}</p>
+                  <p className="text-[11px] text-[#9c8e85] mt-1">GST Payable — CGST + SGST (+ IGST)</p>
+                </div>
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Less: Input Tax Credit</p>
+                  <p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">− {fmtAmt(gstOut.input_tax_credit)}</p>
+                  <p className="text-[11px] text-[#9c8e85] mt-1">ITC Receivable on purchases</p>
+                </div>
+                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4">
+                  <p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Net GST Outstanding</p>
+                  <p className={`text-2xl font-bold mt-1 tabular-nums ${Number(gstOut.net_outstanding) > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{fmtAmt(gstOut.net_outstanding)}</p>
+                  <p className="text-[11px] text-[#9c8e85] mt-1">{Number(gstOut.net_outstanding) > 0.005 ? 'Payable to government' : Number(gstOut.net_outstanding) < -0.005 ? 'Net credit carried forward' : 'Nothing outstanding'}</p>
+                </div>
+              </div>
+              {Array.isArray(gstOut.breakdown) && gstOut.breakdown.length > 0 && (
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left">
+                      <th className="px-3 py-2 font-semibold text-[#1a1208]">Code</th>
+                      <th className="px-3 py-2 font-semibold text-[#1a1208]">Account</th>
+                      <th className="px-3 py-2 font-semibold text-[#1a1208]">Type</th>
+                      <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr Total</th>
+                      <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr Total</th>
+                      <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Balance</th>
+                    </tr></thead>
+                    <tbody>
+                      {gstOut.breakdown.map((r: any) => (
+                        <tr key={r.account_code} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]">
+                          <td className="px-3 py-2 font-mono text-xs">{r.account_code}</td>
+                          <td className="px-3 py-2">{r.account_name}</td>
+                          <td className="px-3 py-2"><span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${r.kind === 'OUTPUT' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-700'}`}>{r.kind === 'OUTPUT' ? 'OUTPUT GST' : 'ITC'}</span></td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.dr)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.cr)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmtAmt(r.balance)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="text-[11px] text-[#9c8e85] leading-relaxed">
+                Read-only view straight from the posted General Ledger: <strong>Output GST</strong> (credit balance of the GST-Payable accounts) minus <strong>Input Tax Credit</strong> (debit balance of the ITC-Receivable accounts) for the selected period. Recording a GST remittance as a Manual Journal (Dr GST Payable, Cr Bank) reduces the outstanding here automatically. This view never changes any posting.
+              </p>
+            </>
+          ) : null}
         </div>
       )}
 

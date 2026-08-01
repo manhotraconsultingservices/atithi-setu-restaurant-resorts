@@ -44265,7 +44265,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'housekeeping-mobile-responsive',
+    commit_marker: 'gst-outstanding-plus-8-locales',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -46361,6 +46361,52 @@ ${data.tenant.name}`;
         params
       );
       res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // GST OUTSTANDING — net GST payable to the government, read straight from the
+  // posted General Ledger. Output GST (credit balance of the GST-Payable
+  // liability accounts) minus Input Tax Credit (debit balance of the ITC
+  // Receivable asset accounts). This endpoint ONLY reads (SELECT/SUM over
+  // gl_entries) — it never writes, posts, or changes any accounting figure, so
+  // it cannot affect existing books. Owner-only, like every accounting view.
+  app.get("/api/restaurant/:id/accounting/gst-outstanding", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as Record<string, string>;
+      const OUTPUT_CODES = ['2200', '2210', '2220']; // GST Payable — CGST / SGST / IGST (liability)
+      const ITC_CODES    = ['1300', '1310', '1320']; // ITC Receivable — CGST / SGST / IGST (asset)
+      const allCodes = [...OUTPUT_CODES, ...ITC_CODES];
+      const ph = allCodes.map(() => '?').join(',');
+      const params: any[] = [req.params.id, ...allCodes];
+      let dateWhere = '';
+      if (from) { dateWhere += ' AND entry_date >= ?'; params.push(from); }
+      if (to)   { dateWhere += ' AND entry_date <= ?'; params.push(to); }
+      const rows: any[] = await db.query(
+        `SELECT account_code, account_name,
+                COALESCE(SUM(dr_amount), 0) AS dr, COALESCE(SUM(cr_amount), 0) AS cr
+           FROM gl_entries
+          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph})${dateWhere}
+          GROUP BY account_code, account_name
+          ORDER BY account_code`,
+        params
+      ).catch(() => []);
+      const round = (n: number) => Math.round(Number(n) * 100) / 100;
+      let output_gst = 0, input_tax_credit = 0;
+      const breakdown: any[] = [];
+      for (const r of rows) {
+        const dr = Number(r.dr || 0), cr = Number(r.cr || 0);
+        const isOutput = OUTPUT_CODES.includes(String(r.account_code));
+        // Liability accounts carry a credit balance; asset (ITC) accounts a debit balance.
+        const balance = isOutput ? (cr - dr) : (dr - cr);
+        if (isOutput) output_gst += balance; else input_tax_credit += balance;
+        breakdown.push({ account_code: r.account_code, account_name: r.account_name, kind: isOutput ? 'OUTPUT' : 'ITC', dr: round(dr), cr: round(cr), balance: round(balance) });
+      }
+      output_gst = round(output_gst);
+      input_tax_credit = round(input_tax_credit);
+      const net_outstanding = round(output_gst - input_tax_credit);
+      res.json({ from: from || null, to: to || null, output_gst, input_tax_credit, net_outstanding, breakdown });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
