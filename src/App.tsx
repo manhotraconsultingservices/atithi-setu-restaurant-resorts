@@ -32781,6 +32781,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   auditUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/audit`}
                   whereUsedUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/where-used`}
                   checklistUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/checklist`}
+                  onOpenObject={(type, oid) => { if (type === 'FOLIO') { setBookingDetailTarget(null); loadFolio(oid).catch(() => {}); } }}
                   overview={
                 <div className="space-y-4">
                   {/* Edit booking */}

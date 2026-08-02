@@ -29201,6 +29201,7 @@ ${data.tenant.name}`;
          changeReason, (req as any).user?.id || null]
       ).catch(() => {});
       const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'ROOM_REASSIGNED', summary: `Room reassigned: ${oldRoom?.name || oldRoom?.room_number || bk.room_id} → ${newRoom2?.name || newRoom2?.room_number || target}${changeReason ? ` · ${changeReason}` : ''}` });
       res.json({ ok: true, room_id: target, room_locked: row?.room_locked, booking: row });
     } catch (err: any) {
       console.error('reassign-room error:', err);
@@ -29274,6 +29275,7 @@ ${data.tenant.name}`;
          'Complimentary upgrade', (req as any).user?.id || null]
       ).catch(() => {});
       const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'UPGRADED', summary: `Complimentary upgrade: ${oldLabel} → ${newLabel}` });
       res.json({ ok: true, booking: row, old_room_id: bk.room_id, new_room_id: newRoomId, old_room_label: oldLabel, new_room_label: newLabel });
     } catch (err: any) {
       console.error('complimentary-upgrade error:', err);
@@ -29644,6 +29646,7 @@ ${data.tenant.name}`;
       const updatedFolio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folioId]);
       const payments: any[] = await tenantDb.query("SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0 ORDER BY recorded_at", [folioId]);
       const totalPaid = payments.filter((p: any) => p.payment_type !== 'REFUND').reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: bookingId, action: 'ADVANCE_RECORDED', summary: `Advance ₹${Number(amount || 0).toLocaleString('en-IN')} via ${method || 'CASH'}` });
       res.json({ ok: true, folio_id: folioId, total_advance_paid: totalPaid, folio: updatedFolio });
     } catch (err: any) {
       console.error('[record-advance] error:', err);
@@ -35455,6 +35458,7 @@ ${data.tenant.name}`;
       ));
       const updated: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [b.id]);
       const updatedFolio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: b.id, action: isEarly ? 'CHECKOUT_ADVANCED' : 'STAY_EXTENDED', summary: `Checkout ${co} → ${newCo} (${nightsChanged} night${nightsChanged === 1 ? '' : 's'} ${isEarly ? 'earlier' : 'later'})`, before: b, after: updated });
 
       return res.json({
         ok: true,
@@ -45282,7 +45286,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-module-split-booking-tree-menu',
+    commit_marker: 'booking-audit-exhaustive-folio-link',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
