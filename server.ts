@@ -29101,6 +29101,7 @@ ${data.tenant.name}`;
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
       // Phase H1 — log to channel sync queue (no-op for direct bookings).
       await logChannelSync(req.params.id, row, 'BOOKING_CREATED');
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: bid, action: 'CREATED', summary: `Booking created — ${guest_name || ''} · ${check_in_date}→${check_out_date}`.trim(), after: row });
       // ARI push: fire-and-forget update to all enabled OTA channels.
       triggerAriPush(req.params.id, { id: bid, room_id: resolvedRoomId, check_in_date, check_out_date, booking_source: booking_source || 'DIRECT' }).catch(() => {});
       res.status(201).json(row);
@@ -35333,6 +35334,7 @@ ${data.tenant.name}`;
       const editTouched = Object.keys(patch).some(k => k !== 'status');
       if (editTouched) {
         await logChannelSync(req.params.id, updated, 'BOOKING_UPDATED', { changed: Object.keys(patch) });
+        await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'UPDATED', summary: `Edited: ${Object.keys(patch).filter(k => k !== 'status').join(', ')}`, before: b, after: updated });
       }
       res.json(updated);
     } catch (err) {
@@ -35601,10 +35603,14 @@ ${data.tenant.name}`;
       // Checklist: raise any CHECK_IN checklists configured for this room / type
       // (arrival prep, welcome-amenity setup, etc). Fire-and-forget — never blocks
       // check-in; check-in checklists are normally non-blocking (room is OCCUPIED).
-      try {
-        const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN' });
-      } catch { /* non-fatal */ }
+      // Gated by the owner setting `checklist_validate_on_checkin` (default ON).
+      if (Number(check.restaurant?.checklist_validate_on_checkin ?? 1) === 1) {
+        try {
+          const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN' });
+        } catch { /* non-fatal */ }
+      }
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CHECKED_IN', summary: `Checked in — ${b.guest_name || ''} (room ${b.room_id})`.trim() });
 
       // ── REQ 1: lock every existing ID-proof document for this booking ──
       // The moment a guest checks in, the ID-proof documents that were
@@ -36122,6 +36128,7 @@ ${data.tenant.name}`;
 
       const now = new Date().toISOString();
       await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ?", [now, req.params.bookingId]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CHECKED_OUT', summary: `Checked out — ${b.guest_name || ''}`.trim() });
       await tenantDb.run("UPDATE rooms SET status = 'CLEANING' WHERE id = ?", [b.room_id]);
       await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]);
       // Housekeeping: raise a cleaning job from the ROOM checklist. The room stays
@@ -36565,6 +36572,7 @@ ${data.tenant.name}`;
       });
       // ARI push: cancellation frees this room — update all OTA channels.
       triggerAriPush(req.params.id, { id: b.id, room_id: b.room_id, check_in_date: b.check_in_date, check_out_date: b.check_out_date, booking_source: b.booking_source }).catch(() => {});
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CANCELLED', summary: `Cancelled — refund ${refund.refund_pct}% (₹${refund.refund_amount})${reason ? ` · ${reason}` : ''}` });
       res.json({
         success: true,
         refund_pct: refund.refund_pct,
@@ -36576,6 +36584,61 @@ ${data.tenant.name}`;
       console.error("cancel booking error:", err);
       res.status(500).json({ error: "Failed to cancel booking" });
     }
+  });
+
+  // ── Hotel booking — ObjectDetail nodes (Audit log / Checklist / Where-Used) ──
+  // Powers the booking-ID tree menu: audit trail (who did what, when), the
+  // check-in/housekeeping checklists raised for the booking, and cross-references
+  // to related objects (folio/invoice, room, F&B orders, ID docs, event booking).
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/audit", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'ROOM_BOOKING', req.params.bookingId));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit log" }); }
+  });
+
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/checklist", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db).catch(() => {});
+      const jobs: any[] = await db.query(
+        "SELECT id, template_name, trigger_event, status, blocks_release, created_at, completed_at FROM housekeeping_jobs WHERE source_ref = ? ORDER BY created_at DESC",
+        [req.params.bookingId]
+      ).catch(() => []);
+      for (const j of (jobs || [])) {
+        j.tasks = await db.query("SELECT id, label, is_mandatory, is_done, sort_order FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id", [j.id]).catch(() => []);
+      }
+      res.json({ jobs: jobs || [] });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load checklist" }); }
+  });
+
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/where-used", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bid = req.params.bookingId;
+      const bk: any = await db.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const groups: any[] = [];
+      if (bk.room_id) {
+        const rm: any = await db.get("SELECT id, name, room_number, status FROM rooms WHERE id = ?", [bk.room_id]).catch(() => null);
+        if (rm) groups.push({ group: 'Room', items: [{ type: 'Room', id: rm.id, label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), sublabel: rm.status || '', link: null }] });
+      }
+      const folios: any[] = await db.query("SELECT id, invoice_number, grand_total, status FROM folios WHERE booking_id = ? ORDER BY created_at DESC", [bid]).catch(() => []);
+      if (folios.length) groups.push({ group: 'Invoice / Folio', items: folios.map((f: any) => ({ type: 'Folio', id: f.id, label: f.invoice_number || f.id, sublabel: `${f.status} · ₹${Number(f.grand_total || 0).toLocaleString('en-IN')}`, link: { objectType: 'FOLIO', objectId: f.id } })) });
+      const orders: any[] = await db.query("SELECT id, total_amount, status, payment_status FROM orders WHERE booking_id = ? ORDER BY created_at DESC", [bid]).catch(() => []);
+      if (orders.length) groups.push({ group: 'F&B Orders', items: orders.map((o: any) => ({ type: 'Order', id: o.id, label: o.id, sublabel: `${o.status || ''} · ${o.payment_status || ''} · ₹${Number(o.total_amount || 0).toLocaleString('en-IN')}`, link: null })) });
+      const docs: any[] = await db.query("SELECT id, doc_type, file_name FROM guest_documents WHERE booking_id = ? ORDER BY created_at DESC", [bid]).catch(() => []);
+      if (docs.length) groups.push({ group: 'ID Documents', items: docs.map((d: any) => ({ type: 'Document', id: d.id, label: d.file_name || d.doc_type || d.id, sublabel: d.doc_type || '', link: null })) });
+      const evt: any[] = await db.query("SELECT booking_id FROM event_booking_rooms WHERE hotel_booking_id = ?", [bid]).catch(() => []);
+      if (evt.length) groups.push({ group: 'Event Booking', items: evt.map((e: any) => ({ type: 'Event Booking', id: e.booking_id, label: e.booking_id, sublabel: 'Room booked for an event', link: { objectType: 'EVENT_BOOKING', objectId: e.booking_id } })) });
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
   });
 
   // ─── CHANNEL MANAGER RE-SYNC LOG (Phase H1 scaffold) ─────────────────────
@@ -37080,6 +37143,7 @@ ${data.tenant.name}`;
                 hotel_gst_slab3_rate,
                 hotel_service_charge_percent,
                 hotel_require_id_at_checkin,
+                checklist_validate_on_checkin,
                 round_invoice_to_rupee
            FROM restaurants WHERE id = ?`,
         [req.params.id]
@@ -37099,6 +37163,8 @@ ${data.tenant.name}`;
         service_charge_percent: r?.hotel_service_charge_percent ?? 0,
         // Req 1b — pre-check-in ID gate (default ON)
         require_id_at_checkin:  Number(r?.hotel_require_id_at_checkin ?? 1) === 1,
+        // Raise CHECK_IN checklists during check-in (default ON)
+        checklist_validate_on_checkin: Number(r?.checklist_validate_on_checkin ?? 1) === 1,
         // M-6 — round-off opt-in (default OFF)
         round_invoice_to_rupee: Number(r?.round_invoice_to_rupee ?? 0) === 1,
       });
@@ -37153,6 +37219,10 @@ ${data.tenant.name}`;
       const roundToRupee = b.round_invoice_to_rupee == null
         ? null
         : (b.round_invoice_to_rupee ? 1 : 0);
+      // Raise CHECK_IN checklists at check-in. Same null-means-unchanged semantics.
+      const checklistValidateOnCheckin = b.checklist_validate_on_checkin == null
+        ? null
+        : (b.checklist_validate_on_checkin ? 1 : 0);
 
       await centralDb.run(
         `UPDATE restaurants
@@ -37168,11 +37238,13 @@ ${data.tenant.name}`;
                 hotel_gst_slab3_rate         = COALESCE(?, hotel_gst_slab3_rate),
                 hotel_service_charge_percent = COALESCE(?, hotel_service_charge_percent),
                 hotel_require_id_at_checkin  = COALESCE(?, hotel_require_id_at_checkin),
+                checklist_validate_on_checkin = COALESCE(?, checklist_validate_on_checkin),
                 round_invoice_to_rupee       = COALESCE(?, round_invoice_to_rupee)
           WHERE id = ?`,
         [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime,
          slab1Max, slab1Rate, slab2Max, slab2Rate, slab3Rate, svcPct,
          requireIdAtCheckin,
+         checklistValidateOnCheckin,
          roundToRupee,
          req.params.id]
       );
@@ -45210,8 +45282,12 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'accounting-phase3-capture-reversal',
+    commit_marker: 'checklist-module-split-booking-tree-menu',
     code_features: [
+      'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
+      'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
+      'checkin-checklist-validate-setting',  // owner toggle checklist_validate_on_checkin gates the CHECK_IN trigger
+      'booking-objectdetail-tree-menu',      // booking-ID opens Overview(+Edit)/Audit log/Checklist/Where-Used; ROOM_BOOKING audit writes on create/checkin/checkout/cancel/edit
       'gl-capture-fnb-spa-events-payroll',  // Phase 3.1: standalone F&B orders, spa checkout/quick-sale, event settlement + payroll now post double-entry GL
       'gl-reversal-engine',                 // Phase 3.2: dated contra journals on credit note, booking cancel, folio revise, supplier/staff/event deletes
       'gl-exceptions-no-silent-drop',       // Phase 3.0: unbalanced journals recorded to gl_exceptions (not lost); manual journal returns 400 instead of a false 201

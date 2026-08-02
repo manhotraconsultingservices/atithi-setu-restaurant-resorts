@@ -12,9 +12,9 @@
 // This component is intentionally module-agnostic — do NOT fork it per module.
 // ════════════════════════════════════════════════════════════════════════
 import React, { useState, useEffect } from 'react';
-import { FileText, History, Link2, ChevronRight, ArrowLeft } from 'lucide-react';
+import { FileText, History, Link2, ListChecks, ChevronRight, ArrowLeft } from 'lucide-react';
 
-type Node = 'OVERVIEW' | 'AUDIT' | 'WHERE_USED';
+type Node = 'OVERVIEW' | 'AUDIT' | 'CHECKLIST' | 'WHERE_USED';
 
 export interface ObjectDetailProps {
   title: string;
@@ -27,9 +27,11 @@ export interface ObjectDetailProps {
   /** Full API paths (relative to origin) returning the audit array / where-used groups. */
   auditUrl: string;
   whereUsedUrl: string;
+  /** Optional: full API path returning { jobs: [...] } — enables the Checklist node. */
+  checklistUrl?: string;
   /** Called when a Where-Used item with a link is clicked. */
   onOpenObject?: (objectType: string, objectId: string) => void;
-  /** Bump to force Audit/Where-Used to refetch (e.g. after an action on the object). */
+  /** Bump to force Audit/Where-Used/Checklist to refetch (e.g. after an action on the object). */
   refreshNonce?: number;
 }
 
@@ -132,9 +134,58 @@ function WhereUsedView({ url, token, onOpenObject, nonce }: { url: string; token
   );
 }
 
+// ── Checklist node ───────────────────────────────────────────────────────────
+function ChecklistView({ url, token, nonce }: { url: string; token: string; nonce?: number }) {
+  const [data, setData] = useState<any | null>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => { setData(null); setErr(''); apiGet(url, token).then(setData).catch(e => setErr(e.message)); }, [url, nonce]);
+
+  if (err) return <div className={CARD}><p className="text-sm text-rose-600">{err}</p></div>;
+  if (!data) return <div className={CARD}><p className="text-sm text-[#6b5d52]">Loading…</p></div>;
+  const jobs = data.jobs || [];
+  if (jobs.length === 0) return <div className={CARD}><p className="text-sm text-[#9d8b7e]">No checklists raised for this booking yet.</p></div>;
+
+  const pill = (s: string) => {
+    const st = String(s || '').toUpperCase();
+    const cls = st === 'COMPLETED' ? 'bg-emerald-50 text-emerald-700' : st === 'OPEN' ? 'bg-amber-50 text-amber-700' : 'bg-[#f0e9df] text-[#6b5d52]';
+    return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${cls}`}>{st || 'OPEN'}</span>;
+  };
+
+  return (
+    <div className="space-y-3">
+      {jobs.map((j: any) => {
+        const tasks = j.tasks || [];
+        const done = tasks.filter((t: any) => Number(t.is_done) === 1).length;
+        return (
+          <div key={j.id} className={CARD}>
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div className="min-w-0">
+                <span className="text-sm font-bold text-[#14110c]">{j.template_name || j.trigger_event || 'Checklist'}</span>
+                {Number(j.blocks_release) === 1 && <span className="ml-2 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600">blocks release</span>}
+                <span className="block text-[10px] text-[#9d8b7e]">{j.trigger_event}{j.created_at ? ` · ${timeAgo(j.created_at)}` : ''} · {done}/{tasks.length} done</span>
+              </div>
+              {pill(j.status)}
+            </div>
+            {tasks.length > 0 && (
+              <ul className="space-y-1">
+                {tasks.map((t: any) => (
+                  <li key={t.id} className="flex items-center gap-2 text-xs">
+                    <span className={Number(t.is_done) === 1 ? 'text-emerald-600' : 'text-[#c9bcae]'}>{Number(t.is_done) === 1 ? '☑' : '☐'}</span>
+                    <span className={Number(t.is_done) === 1 ? 'text-[#9d8b7e] line-through' : 'text-[#3d3128]'}>{t.label}{Number(t.is_mandatory) === 1 ? '' : ' (optional)'}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Shell ────────────────────────────────────────────────────────────────────
 export function ObjectDetail(props: ObjectDetailProps) {
-  const { title, subtitle, statusPill, onBack, backLabel, overview, token, auditUrl, whereUsedUrl, onOpenObject, refreshNonce } = props;
+  const { title, subtitle, statusPill, onBack, backLabel, overview, token, auditUrl, whereUsedUrl, checklistUrl, onOpenObject, refreshNonce } = props;
   const [node, setNode] = useState<Node>('OVERVIEW');
 
   const railItem = (key: Node, icon: React.ReactNode, label: string) => (
@@ -162,7 +213,8 @@ export function ObjectDetail(props: ObjectDetailProps) {
         {/* Tree rail */}
         <nav className="md:sticky md:top-4 self-start bg-white rounded-2xl border border-[#e8dccf] p-2 space-y-1">
           {railItem('OVERVIEW', <FileText size={15} />, 'Overview')}
-          {railItem('AUDIT', <History size={15} />, 'Audit History')}
+          {railItem('AUDIT', <History size={15} />, 'Audit log')}
+          {checklistUrl && railItem('CHECKLIST', <ListChecks size={15} />, 'Checklist')}
           {railItem('WHERE_USED', <Link2 size={15} />, 'Where Used')}
         </nav>
 
@@ -170,6 +222,7 @@ export function ObjectDetail(props: ObjectDetailProps) {
         <div className="min-w-0">
           {node === 'OVERVIEW' && overview}
           {node === 'AUDIT' && <AuditView url={auditUrl} token={token} nonce={refreshNonce} />}
+          {node === 'CHECKLIST' && checklistUrl && <ChecklistView url={checklistUrl} token={token} nonce={refreshNonce} />}
           {node === 'WHERE_USED' && <WhereUsedView url={whereUsedUrl} token={token} onOpenObject={onOpenObject} nonce={refreshNonce} />}
         </div>
       </div>

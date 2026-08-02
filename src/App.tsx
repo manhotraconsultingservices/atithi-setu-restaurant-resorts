@@ -8,6 +8,7 @@ import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { HousekeepingModule } from './Housekeeping';
 import { ChecklistTemplates } from './ChecklistTemplates';
+import { ObjectDetail } from './components/ObjectDetail';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
@@ -8798,7 +8799,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE' | 'HOTEL_INVENTORY'  // hospitality Phase 2 & 3
     | 'HOUSEKEEPING'                             // cleaning checklist worklist + config + log
     | 'EVENTS_HOUSEKEEPING'                      // event-scoped cleaning checklist under the Events nav
-    | 'CHECKLISTS'                               // owner config — configurable checklist templates
+    | 'CHECKLISTS'                               // owner config — hotel/room checklist templates (PMS nav)
+    | 'EVENTS_CHECKLISTS'                        // owner config — event checklist templates (Events & Convention nav)
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
     | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
     | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
@@ -9961,6 +9963,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     service_charge_percent: number;
     // Req 1b — pre-check-in ID gate
     require_id_at_checkin: boolean;
+    // Raise CHECK_IN checklists during check-in
+    checklist_validate_on_checkin: boolean;
   }>({
     min_stay_nights: 1, max_stay_nights: null,
     refund_full_days: null, refund_partial_pct: null, late_checkout_time: null,
@@ -9969,6 +9973,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     gst_slab3_rate: 18,
     service_charge_percent: 0,
     require_id_at_checkin: true,
+    checklist_validate_on_checkin: true,
   });
 
   // BCG Tariff Phase 2 — snapshot of the matrix tariff configuration.
@@ -12449,6 +12454,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         gst_slab2_rate:     Number(data.gst_slab2_rate ?? 12),
         gst_slab3_rate:     Number(data.gst_slab3_rate ?? 18),
         service_charge_percent: Number(data.service_charge_percent ?? 0),
+        require_id_at_checkin: data.require_id_at_checkin !== false,
+        checklist_validate_on_checkin: data.checklist_validate_on_checkin !== false,
       });
     } catch { /* hotel not enabled — ignore */ }
   };
@@ -12751,7 +12758,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Full(3) for any role that doesn't have them configured yet. This prevents
         // an owner from accidentally revoking access simply by opening the matrix
         // and saving before explicitly setting a level for these new tabs.
-        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS'];
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS'];
         for (const roleId of Object.keys(raw)) {
           for (const tab of NEWLY_ADDED) {
             if (!(tab in (raw[roleId] || {}))) raw[roleId] = { ...(raw[roleId] || {}), [tab]: 3 };
@@ -13845,7 +13852,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', EVENTS_HOUSEKEEPING: 'Cleaning Checklist', CHECKLISTS: 'Checklist Templates', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', EVENTS_HOUSEKEEPING: 'Cleaning Checklist', CHECKLISTS: 'Checklist Templates', EVENTS_CHECKLISTS: 'Checklist Templates', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             SPA_CALENDAR: 'Appt. Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages', SPA_REPORTS: 'Spa Reports', SPA_BILLING: 'Invoices & Payments', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Spa Page Settings',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
@@ -13983,6 +13990,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_CATERING',   label: 'Catering Menus' },
               { id: 'EVENTS_QUOTATIONS', label: 'Quotations' },
               { id: 'EVENTS_HOUSEKEEPING', label: 'Cleaning Checklist' },
+              ...(isOwnerOrAdmin ? [{ id: 'EVENTS_CHECKLISTS', label: 'Checklist Templates' } as NavTab] : []),
               { id: 'EVENTS_REPORTS',    label: 'Events Reports' },
               { id: 'EVENTS_SETTINGS',   label: 'Public Page Settings' },
             ],
@@ -14081,6 +14089,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
           // Checklist Templates is owner config (define/assign checklists). Owner-only.
           if (id === 'CHECKLISTS') return isOwnerOrAdmin;
+          // Event checklist config — owner-only, and only when Events is enabled.
+          if (id === 'EVENTS_CHECKLISTS') return isOwnerOrAdmin && isEventsEnabled;
           // Finance tabs (PROCUREMENT, EXPENSE_JOURNAL) were introduced after
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
@@ -14763,7 +14773,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       ) : activeTab === 'EVENTS_HOUSEKEEPING' && isEventsEnabled ? (
         <div className="p-1"><HousekeepingModule restaurantId={restaurantId} token={token!} scope="EVENT" /></div>
       ) : activeTab === 'CHECKLISTS' ? (
-        <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} /></div>
+        <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="ROOM" /></div>
+      ) : activeTab === 'EVENTS_CHECKLISTS' && isEventsEnabled ? (
+        <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="EVENT" /></div>
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
       ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS') && isEventsEnabled ? (
@@ -25617,6 +25629,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_QUOTATIONS', label: 'Event Quotations',   description: 'Generate, view and email event quotations (BEO).', eventsOnly: true },
               { id: 'EVENTS_REPORTS',    label: 'Event Reports',      description: 'Events reporting hub — revenue, venue utilization, upcoming events, CSV export.', eventsOnly: true },
               { id: 'EVENTS_SETTINGS',   label: 'Events Page Settings', description: 'Public events page config — hero, tagline, gallery photos.', eventsOnly: true },
+              { id: 'EVENTS_CHECKLISTS', label: 'Event Checklist Templates', description: 'Owner config: build event-hall checklist templates (setup / daily / post-event), set triggers, and assign to all or specific venues. Owner-only.', eventsOnly: true },
             ];
             // Filter: hotelOnly rows require hotel module; restaurantOnly rows
             // require restaurant module; eventsOnly rows require the Events module.
@@ -26945,6 +26958,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </p>
                   </div>
                 </div>
+
+                <label className="flex items-start gap-3 pt-4 cursor-pointer">
+                  <input type="checkbox" checked={hotelSettings.checklist_validate_on_checkin}
+                    onChange={e => setHotelSettings(s => ({ ...s, checklist_validate_on_checkin: e.target.checked }))}
+                    className="w-4 h-4 mt-0.5 accent-[#cc5a16]" />
+                  <span className="text-sm text-[#3d3128]">
+                    <span className="font-semibold">Validate checklist on check-in</span>
+                    <span className="block text-[11px] text-[#9c8e85]">When on, checking a guest in raises the CHECK-IN checklists you've configured (arrival prep, welcome amenities). Turn off to skip them entirely.</span>
+                  </span>
+                </label>
 
                 <div className="pt-4 flex items-center justify-end gap-3 flex-wrap">
                   <button
@@ -32747,21 +32770,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           const STATUS_CLS: Record<string,string> = { BOOKED:'bg-blue-100 text-blue-800', CHECKED_IN:'bg-emerald-100 text-emerald-800', CHECKING_OUT:'bg-amber-100 text-amber-800', CHECKED_OUT:'bg-slate-100 text-slate-700', CANCELLED:'bg-stone-100 text-stone-500', ASSIGNED:'bg-rose-100 text-rose-700' };
           return (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setBookingDetailTarget(null)}>
-              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg max-h-[92vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-                {/* Header */}
-                <div className="flex items-start justify-between px-6 pt-6 pb-4 border-b border-[#cc5a16]/10">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-mono text-xs text-[#9c8e85]">{bd.id}</span>
-                      <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', STATUS_CLS[bd.status] || 'bg-gray-100 text-gray-600')}>{STATUS_LABEL[bd.status] || bd.status}</span>
-                      {bd.group_name && <span className="text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-violet-100 text-violet-800">{bd.group_name}</span>}
-                    </div>
-                    <h3 className="text-lg font-bold font-serif text-[#1a1208]">{bd.guest_name}</h3>
-                    <p className="text-[12px] text-[#6b5d52]">{bd.guest_phone || '—'}{bd.guest_email ? ` · ${bd.guest_email}` : ''}</p>
+              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto p-5" onClick={e => e.stopPropagation()}>
+                <ObjectDetail
+                  title={bd.guest_name}
+                  subtitle={`${bd.id} · ${bd.guest_phone || '—'}${bd.guest_email ? ` · ${bd.guest_email}` : ''}`}
+                  statusPill={<span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', STATUS_CLS[bd.status] || 'bg-gray-100 text-gray-600')}>{STATUS_LABEL[bd.status] || bd.status}</span>}
+                  onBack={() => setBookingDetailTarget(null)}
+                  backLabel="Close"
+                  token={token!}
+                  auditUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/audit`}
+                  whereUsedUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/where-used`}
+                  checklistUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/checklist`}
+                  overview={
+                <div className="space-y-4">
+                  {/* Edit booking */}
+                  <div className="flex justify-end">
+                    <button type="button" onClick={() => { setBookingDetailTarget(null); setEditingBooking({ ...bd }); setShowBookingModal(true); }} className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-[12px] font-bold hover:bg-[#a84612]">✎ Edit booking</button>
                   </div>
-                  <button onClick={() => setBookingDetailTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18}/></button>
-                </div>
-                <div className="px-6 py-4 space-y-4">
                   {/* Stay summary */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="bg-[#faf7f2] rounded-2xl p-3">
@@ -32824,6 +32849,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     >Copy ID</button>
                   </div>
                 </div>
+                  }
+                />
               </div>
             </div>
           );

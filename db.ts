@@ -340,6 +340,10 @@ export async function initDb() {
     -- / day-use only properties (truck-stops, business meeting rooms)
     -- can set this to 0 to opt out.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_require_id_at_checkin INT DEFAULT 1;
+    -- When 1, hotel check-in raises the configured CHECK_IN checklists (arrival
+    -- prep, welcome-amenity setup). Owners who don't use check-in checklists set
+    -- this to 0 to skip the raise entirely.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS checklist_validate_on_checkin INT DEFAULT 1;
     -- Phase H2 — Hotel-specific GST + service charge.
     -- Indian hotels follow a tariff-slab GST regime (post-2022 GST Council):
     --   ≤ ₹1,000/night  → 0%   (exempt)

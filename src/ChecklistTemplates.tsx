@@ -5,7 +5,14 @@ import { useState, useEffect, useCallback } from 'react';
 // execute the resulting jobs in the Housekeeping worklist; here the owner defines
 // WHAT the checklists are, WHEN they trigger, and WHERE they apply.
 
-type Props = { restaurantId: string; token: string };
+type FacilityScope = 'ROOM' | 'EVENT' | 'ALL';
+// facilityScope lets the same editor be mounted per module: hotel/OMS shows ROOM +
+// GENERIC checklists, Events & Convention shows EVENT checklists. 'ALL' = owner/
+// SuperAdmin view (everything). Defaults to 'ALL' for backward compatibility.
+type Props = { restaurantId: string; token: string; facilityScope?: FacilityScope };
+
+const scopeTypes = (scope: FacilityScope): string[] =>
+  scope === 'ROOM' ? ['ROOM', 'GENERIC'] : scope === 'EVENT' ? ['EVENT'] : ['ROOM', 'EVENT', 'GENERIC'];
 
 const TRIGGERS: { v: string; label: string; hint: string }[] = [
   { v: 'CHECK_IN', label: 'On check-in', hint: 'Raised when a guest checks into the room' },
@@ -34,7 +41,7 @@ const BTN = 'px-3 py-1.5 bg-[#a0522d] text-white text-sm rounded hover:bg-[#8b45
 const GHOST = 'px-3 py-1.5 border border-[#d4c4a8] text-sm rounded hover:bg-[#f5f0e8]';
 const INPUT = 'text-sm border border-[#d4c4a8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#a0522d]';
 
-export function ChecklistTemplates({ restaurantId, token }: Props) {
+export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' }: Props) {
   const api = useCallback(makeApi(restaurantId, token), [restaurantId, token]);
   const [tab, setTab] = useState<'TEMPLATES' | 'CATEGORIES'>('TEMPLATES');
   const [cats, setCats] = useState<any[]>([]);
@@ -42,6 +49,18 @@ export function ChecklistTemplates({ restaurantId, token }: Props) {
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<any | null>(null); // full template (with steps/assignments) or a NEW blank
   const [err, setErr] = useState('');
+
+  const allowed = scopeTypes(facilityScope);
+  const shown = templates.filter(t => allowed.includes(String(t.facility_type)));
+  const defaultFType = facilityScope === 'EVENT' ? 'EVENT' : 'ROOM';
+  const defaultTrigger = facilityScope === 'EVENT' ? 'EVENT_COMPLETE' : 'CHECK_OUT';
+  const heading = facilityScope === 'EVENT' ? 'Event Checklist Templates'
+    : facilityScope === 'ROOM' ? 'Hotel Checklist Templates' : 'Checklist Templates';
+  const subheading = facilityScope === 'EVENT'
+    ? 'Checklists for event halls & venues — setup, daily upkeep, and post-event handover. Staff run them from the Events cleaning worklist.'
+    : facilityScope === 'ROOM'
+      ? 'Checklists for hotel rooms & general facilities — check-in, housekeeping, mid-stay, and inspections. Staff run them from Housekeeping.'
+      : 'Define reusable checklists, when they trigger, and where they apply. Staff run them from Housekeeping.';
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -59,8 +78,8 @@ export function ChecklistTemplates({ restaurantId, token }: Props) {
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Checklist Templates</h2>
-        <p className="text-sm text-[#6b5d52] mt-1">Define reusable checklists, when they trigger, and where they apply. Staff run them from Housekeeping.</p>
+        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{heading}</h2>
+        <p className="text-sm text-[#6b5d52] mt-1">{subheading}</p>
       </div>
 
       <div className="flex gap-0 border-b border-[#e8ded0]">
@@ -79,10 +98,10 @@ export function ChecklistTemplates({ restaurantId, token }: Props) {
       {tab === 'TEMPLATES' && !editing && (
         <div className="space-y-4">
           <div className="flex justify-between items-center">
-            <p className="text-sm text-[#6b5d52]">{templates.length} template{templates.length === 1 ? '' : 's'}</p>
-            <button onClick={() => setEditing({ __new: true, name: '', category_id: cats[0]?.id || '', facility_type: 'ROOM', trigger_event: 'CHECK_OUT', blocks_release: 0, recurrence_nights: 1, steps: [], assignments: [] })} className={BTN}>+ New template</button>
+            <p className="text-sm text-[#6b5d52]">{shown.length} template{shown.length === 1 ? '' : 's'}</p>
+            <button onClick={() => setEditing({ __new: true, name: '', category_id: cats[0]?.id || '', facility_type: defaultFType, trigger_event: defaultTrigger, blocks_release: 0, recurrence_nights: 1, steps: [], assignments: [] })} className={BTN}>+ New template</button>
           </div>
-          {loading ? <p className="text-sm text-[#6b5d52]">Loading…</p> : templates.length === 0 ? (
+          {loading ? <p className="text-sm text-[#6b5d52]">Loading…</p> : shown.length === 0 ? (
             <p className="text-sm text-[#6b5d52] italic">No templates yet. Create one, or the default check-out checklists will show here.</p>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
@@ -97,7 +116,7 @@ export function ChecklistTemplates({ restaurantId, token }: Props) {
                   <th className="px-3 py-2"></th>
                 </tr></thead>
                 <tbody>
-                  {templates.map(t => (
+                  {shown.map(t => (
                     <tr key={t.id} className={`border-t border-[#f0e8d8] hover:bg-[#fdf8f0] ${Number(t.is_active) === 0 ? 'opacity-50' : ''}`}>
                       <td className="px-3 py-2 font-medium">{t.name}{t.is_system ? <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#f0e8d8] text-[#6b5d52]">system</span> : null}</td>
                       <td className="px-3 py-2 text-[#6b5d52]">{catName(t.category_id)}</td>
@@ -119,7 +138,7 @@ export function ChecklistTemplates({ restaurantId, token }: Props) {
       )}
 
       {tab === 'TEMPLATES' && editing && (
-        <TemplateEditor api={api} cats={cats} restaurantId={restaurantId} token={token}
+        <TemplateEditor api={api} cats={cats} restaurantId={restaurantId} token={token} facilityScope={facilityScope}
           initial={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} onError={setErr} />
       )}
     </div>
@@ -160,12 +179,13 @@ function CategoriesPanel({ api, cats, reload }: { api: any; cats: any[]; reload:
 }
 
 // ── Template editor (fields + steps + assignments) ───────────────────────────
-function TemplateEditor({ api, cats, restaurantId, token, initial, onClose, onSaved, onError }:
-  { api: any; cats: any[]; restaurantId: string; token: string; initial: any; onClose: () => void; onSaved: () => void; onError: (s: string) => void }) {
+function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL', initial, onClose, onSaved, onError }:
+  { api: any; cats: any[]; restaurantId: string; token: string; facilityScope?: FacilityScope; initial: any; onClose: () => void; onSaved: () => void; onError: (s: string) => void }) {
   const isNew = !!initial.__new;
+  const ftypeOpts = FTYPES.filter(f => scopeTypes(facilityScope).includes(f.v));
   const [form, setForm] = useState<any>({
     name: initial.name || '', category_id: initial.category_id || (cats[0]?.id || ''),
-    facility_type: initial.facility_type || 'ROOM', trigger_event: initial.trigger_event || 'CHECK_OUT',
+    facility_type: initial.facility_type || (facilityScope === 'EVENT' ? 'EVENT' : 'ROOM'), trigger_event: initial.trigger_event || 'CHECK_OUT',
     blocks_release: Number(initial.blocks_release) === 1, recurrence_nights: Number(initial.recurrence_nights) || 1,
     notes: initial.notes || '',
   });
@@ -214,7 +234,7 @@ function TemplateEditor({ api, cats, restaurantId, token, initial, onClose, onSa
       <div className="grid sm:grid-cols-2 gap-3">
         <div><label className="text-xs text-[#6b5d52] block mb-1">Name</label><input value={form.name} onChange={e => set('name', e.target.value)} placeholder="e.g. PMS - Check-Out" className={INPUT + ' w-full'} /></div>
         <div><label className="text-xs text-[#6b5d52] block mb-1">Category</label><select value={form.category_id} onChange={e => set('category_id', e.target.value)} className={INPUT + ' w-full'}>{cats.filter(c => Number(c.is_active) === 1).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
-        <div><label className="text-xs text-[#6b5d52] block mb-1">Applies to</label><select value={form.facility_type} onChange={e => set('facility_type', e.target.value)} disabled={!!initial.is_system} className={INPUT + ' w-full disabled:bg-[#f5f0e8]'}>{FTYPES.map(f => <option key={f.v} value={f.v}>{f.label}</option>)}</select></div>
+        <div><label className="text-xs text-[#6b5d52] block mb-1">Facility type</label><select value={form.facility_type} onChange={e => set('facility_type', e.target.value)} disabled={!!initial.is_system} className={INPUT + ' w-full disabled:bg-[#f5f0e8]'}>{ftypeOpts.map(f => <option key={f.v} value={f.v}>{f.label}</option>)}</select></div>
         <div><label className="text-xs text-[#6b5d52] block mb-1">Trigger</label><select value={form.trigger_event} onChange={e => set('trigger_event', e.target.value)} disabled={!!initial.is_system} className={INPUT + ' w-full disabled:bg-[#f5f0e8]'}>{TRIGGERS.map(t => <option key={t.v} value={t.v}>{t.label}</option>)}</select><p className="text-[11px] text-[#9c8e85] mt-1">{TRIGGERS.find(t => t.v === form.trigger_event)?.hint}</p></div>
         {form.trigger_event === 'MID_STAY' && (
           <div><label className="text-xs text-[#6b5d52] block mb-1">Repeat every (nights)</label><input type="number" min={1} value={form.recurrence_nights} onChange={e => set('recurrence_nights', Math.max(1, Number(e.target.value) || 1))} className={INPUT + ' w-full'} /></div>
@@ -241,7 +261,7 @@ function TemplateEditor({ api, cats, restaurantId, token, initial, onClose, onSa
 
       {/* Assignments (only meaningful once the template exists) */}
       {!isNew && (
-        <AssignmentsPanel api={api} restaurantId={restaurantId} token={token} template={initial} assignments={assignments} setAssignments={setAssignments} onError={onError} />
+        <AssignmentsPanel api={api} restaurantId={restaurantId} token={token} facilityScope={facilityScope} template={initial} assignments={assignments} setAssignments={setAssignments} onError={onError} />
       )}
 
       <div className="flex items-center gap-3">
@@ -254,13 +274,22 @@ function TemplateEditor({ api, cats, restaurantId, token, initial, onClose, onSa
 }
 
 // ── Assignments (per-entity targeting) ───────────────────────────────────────
-function AssignmentsPanel({ api, restaurantId, token, template, assignments, setAssignments, onError }:
-  { api: any; restaurantId: string; token: string; template: any; assignments: any[]; setAssignments: (a: any[]) => void; onError: (s: string) => void }) {
-  const [scope, setScope] = useState(template.facility_type === 'EVENT' ? 'VENUE' : 'ROOM');
-  const [scopeId, setScopeId] = useState('');
+// "Applies to" is either ALL facilities of the template's type (no assignment
+// rows = the default), OR a specific set. Owners can multi-select several rooms /
+// halls at once, or revert to "all" with one click. Target types are scoped to
+// the template's facility_type (event templates target venues only, etc.).
+function AssignmentsPanel({ api, restaurantId, token, facilityScope = 'ALL', template, assignments, setAssignments, onError }:
+  { api: any; restaurantId: string; token: string; facilityScope?: FacilityScope; template: any; assignments: any[]; setAssignments: (a: any[]) => void; onError: (s: string) => void }) {
+  const ftype = String(template.facility_type || (facilityScope === 'EVENT' ? 'EVENT' : 'ROOM'));
+  const targetTypes = ftype === 'EVENT' ? ['VENUE'] : ftype === 'ROOM' ? ['ROOM', 'ROOM_TYPE'] : ['ROOM', 'ROOM_TYPE', 'VENUE'];
+  const TARGET_LABEL: Record<string, string> = { ROOM: 'Specific rooms', ROOM_TYPE: 'Room types', VENUE: 'Event halls' };
+  const facilityNoun = ftype === 'EVENT' ? 'event halls' : ftype === 'ROOM' ? 'rooms' : 'facilities';
+  const [scope, setScope] = useState(targetTypes[0]);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
   const [rooms, setRooms] = useState<any[]>([]);
   const [types, setTypes] = useState<any[]>([]);
   const [venues, setVenues] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
   const api2 = makeApi(restaurantId, token);
 
   useEffect(() => {
@@ -272,29 +301,51 @@ function AssignmentsPanel({ api, restaurantId, token, template, assignments, set
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const opts = scope === 'ROOM' ? rooms.map((r: any) => ({ id: r.id, label: r.name || (r.room_number ? `Room ${r.room_number}` : r.id) }))
-    : scope === 'ROOM_TYPE' ? types.map((t: any) => ({ id: t.id, label: t.name || t.id }))
-      : venues.map((v: any) => ({ id: v.id, label: v.name || v.id }));
-  const labelFor = (a: any) => {
-    const pool = a.scope === 'ROOM' ? rooms : a.scope === 'ROOM_TYPE' ? types : venues;
-    const hit = pool.find((x: any) => x.id === a.scope_id);
-    return hit ? (hit.name || (hit.room_number ? `Room ${hit.room_number}` : hit.id)) : a.scope_id;
-  };
+  const poolFor = (s: string) => s === 'ROOM' ? rooms : s === 'ROOM_TYPE' ? types : venues;
+  const optLabel = (s: string, x: any) => x.name || (s === 'ROOM' && x.room_number ? `Room ${x.room_number}` : x.id);
+  const opts = poolFor(scope).map((x: any) => ({ id: x.id, label: optLabel(scope, x) }));
+  const assignedIds = new Set(assignments.filter(a => a.scope === scope).map(a => a.scope_id));
+  const selectable = opts.filter((o: any) => !assignedIds.has(o.id));
+  const labelFor = (a: any) => { const hit = poolFor(a.scope).find((x: any) => x.id === a.scope_id); return hit ? optLabel(a.scope, hit) : a.scope_id; };
 
-  const add = async () => {
-    if (!scopeId) return;
+  const toggle = (id: string) => setChecked(c => { const n = new Set(c); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const allSel = selectable.length > 0 && selectable.every((o: any) => checked.has(o.id));
+  const toggleAll = () => setChecked(c => { const n = new Set(c); if (allSel) selectable.forEach((o: any) => n.delete(o.id)); else selectable.forEach((o: any) => n.add(o.id)); return n; });
+  const pickedCount = [...checked].filter(id => selectable.some((o: any) => o.id === id)).length;
+
+  const addSelected = async () => {
+    const ids = selectable.filter((o: any) => checked.has(o.id)).map((o: any) => o.id);
+    if (!ids.length) return;
+    setBusy(true);
     try {
-      const row = await api(`/checklists/assignments`, { method: 'POST', body: JSON.stringify({ template_id: template.id, scope, scope_id: scopeId }) });
-      setAssignments([...assignments.filter(a => a.id !== row.id), row]);
-      setScopeId('');
+      const added: any[] = [];
+      for (const scope_id of ids) added.push(await api(`/checklists/assignments`, { method: 'POST', body: JSON.stringify({ template_id: template.id, scope, scope_id }) }));
+      setAssignments([...assignments.filter(a => !added.some(r => r.id === a.id)), ...added]);
+      setChecked(new Set());
     } catch (e: any) { onError(e?.message); }
+    finally { setBusy(false); }
   };
   const remove = async (aid: string) => { try { await api(`/checklists/assignments/${aid}`, { method: 'DELETE' }); setAssignments(assignments.filter(a => a.id !== aid)); } catch (e: any) { onError(e?.message); } };
+  const clearAll = async () => {
+    if (!assignments.length) return;
+    if (!window.confirm(`Apply this checklist to ALL ${facilityNoun}? This removes the ${assignments.length} specific target${assignments.length === 1 ? '' : 's'} below.`)) return;
+    setBusy(true);
+    try { for (const a of assignments) await api(`/checklists/assignments/${a.id}`, { method: 'DELETE' }); setAssignments([]); }
+    catch (e: any) { onError(e?.message); }
+    finally { setBusy(false); }
+  };
+  const isAll = assignments.length === 0;
 
   return (
     <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
       <p className="text-sm font-semibold text-[#1a1208]">Applies to</p>
-      <p className="text-[11px] text-[#9c8e85] mb-3">{assignments.length === 0 ? 'Currently applies to ALL facilities of its type (default). Add a specific target below to restrict it.' : 'Restricted to the specific targets below. Remove all to revert to “all facilities”.'}</p>
+      <div className="flex items-center gap-2 mt-2 mb-3 flex-wrap">
+        <span className={`text-xs px-2 py-1 rounded-full ${isAll ? 'bg-emerald-50 text-emerald-700 font-semibold' : 'bg-[#f0e8d8] text-[#6b5d52]'}`}>
+          {isAll ? `✓ All ${facilityNoun} of this type` : `${assignments.length} specific target${assignments.length === 1 ? '' : 's'}`}
+        </span>
+        {!isAll && <button onClick={clearAll} disabled={busy} className="text-xs px-2 py-1 border border-[#d4c4a8] rounded hover:bg-[#f5f0e8]">Apply to all instead</button>}
+      </div>
+
       {assignments.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-3">
           {assignments.map(a => (
@@ -305,21 +356,29 @@ function AssignmentsPanel({ api, restaurantId, token, template, assignments, set
           ))}
         </div>
       )}
-      <div className="flex items-end gap-2 flex-wrap">
-        <div><label className="text-xs text-[#6b5d52] block mb-1">Target</label>
-          <select value={scope} onChange={e => { setScope(e.target.value); setScopeId(''); }} className={INPUT}>
-            <option value="ROOM">Specific room</option>
-            <option value="ROOM_TYPE">Room type</option>
-            <option value="VENUE">Event hall</option>
-          </select>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <label className="text-xs text-[#6b5d52]">Add specific</label>
+          {targetTypes.length > 1 ? (
+            <select value={scope} onChange={e => { setScope(e.target.value); setChecked(new Set()); }} className={INPUT}>
+              {targetTypes.map(tt => <option key={tt} value={tt}>{TARGET_LABEL[tt]}</option>)}
+            </select>
+          ) : <span className="text-xs font-medium text-[#1a1208]">{TARGET_LABEL[scope]}</span>}
+          {selectable.length > 0 && <button onClick={toggleAll} className="text-[11px] text-[#a0522d] underline">{allSel ? 'Clear' : 'Select all'}</button>}
         </div>
-        <div className="flex-1 min-w-[12rem]"><label className="text-xs text-[#6b5d52] block mb-1">&nbsp;</label>
-          <select value={scopeId} onChange={e => setScopeId(e.target.value)} className={INPUT + ' w-full'}>
-            <option value="">Select…</option>
-            {opts.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
-          </select>
-        </div>
-        <button onClick={add} disabled={!scopeId} className={GHOST}>Assign</button>
+        {selectable.length === 0 ? (
+          <p className="text-xs text-[#9c8e85] italic">{opts.length === 0 ? 'None available (module may be off, or none created yet).' : 'All already assigned.'}</p>
+        ) : (
+          <div className="max-h-44 overflow-y-auto rounded border border-[#e8ded0] divide-y divide-[#f0e8d8]">
+            {selectable.map((o: any) => (
+              <label key={o.id} className="flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-[#fdf8f0] cursor-pointer">
+                <input type="checkbox" checked={checked.has(o.id)} onChange={() => toggle(o.id)} /> {o.label}
+              </label>
+            ))}
+          </div>
+        )}
+        <button onClick={addSelected} disabled={busy || pickedCount === 0} className={GHOST}>Add selected{pickedCount ? ` (${pickedCount})` : ''}</button>
       </div>
     </div>
   );
