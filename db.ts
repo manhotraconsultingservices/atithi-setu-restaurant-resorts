@@ -2521,6 +2521,53 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     );
     CREATE INDEX IF NOT EXISTS idx_tds_res_status ON tds_payable_ledger (restaurant_id, status);
     CREATE INDEX IF NOT EXISTS idx_tds_quarter     ON tds_payable_ledger (restaurant_id, quarter);
+
+    -- ── Best-in-class Accounting — Phase 2 schema ──────────────────────────
+    -- Period close is SOFT: this table records closed periods for advisory
+    -- reporting only; it never blocks posting (see /accounting/periods/exceptions).
+    CREATE TABLE IF NOT EXISTS accounting_periods (
+      period_key TEXT PRIMARY KEY,
+      from_date  TEXT NOT NULL,
+      to_date    TEXT NOT NULL,
+      status     TEXT NOT NULL DEFAULT 'OPEN',
+      closed_by  TEXT,
+      closed_at  TEXT,
+      note       TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Physical cash count vs GL cash-in-hand (1000); optional variance journal.
+    CREATE TABLE IF NOT EXISTS cash_counts (
+      id                   TEXT PRIMARY KEY,
+      restaurant_id        TEXT NOT NULL,
+      count_date           TEXT NOT NULL,
+      session              TEXT NOT NULL,
+      counted_amount       REAL NOT NULL,
+      expected_amount      REAL NOT NULL,
+      variance             REAL NOT NULL,
+      counted_by           TEXT,
+      note                 TEXT,
+      variance_journal_ref TEXT,
+      created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_cashcount_res_date ON cash_counts (restaurant_id, count_date);
+
+    -- Manual bank reconciliation: a saved statement balance + the set of GL
+    -- bank lines marked cleared against it. No posting side-effects.
+    CREATE TABLE IF NOT EXISTS bank_reconciliations (
+      id                        TEXT PRIMARY KEY,
+      account_code              TEXT NOT NULL,
+      period                    TEXT NOT NULL,
+      statement_closing_balance REAL NOT NULL DEFAULT 0,
+      status                    TEXT NOT NULL DEFAULT 'DRAFT',
+      created_by                TEXT,
+      created_at                TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS bank_rec_cleared (
+      rec_id      TEXT NOT NULL,
+      gl_entry_id TEXT NOT NULL,
+      PRIMARY KEY (rec_id, gl_entry_id)
+    );
   `).catch(() => {});
 
   // Seed standard chart of accounts — Indian hotel/restaurant context.
@@ -2576,6 +2623,7 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['5900','Professional Fees','EXPENSE',730],
     ['5910','Legal & Compliance Fees','EXPENSE',740],
     ['6000','Miscellaneous Expenses','EXPENSE',750],
+    ['6010','Cash Over / Short','EXPENSE',755],
   ];
   for (const [code, name, type, display_order] of _coaSeed) {
     await db.run(

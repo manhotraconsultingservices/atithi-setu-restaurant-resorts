@@ -44348,7 +44348,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'accounting-coa-seed-fix-daily-cashbook',
+    commit_marker: 'accounting-phase2-statements-gst-controls',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -44694,6 +44694,477 @@ ${data.tenant.name}`;
       );
       const row = await db.get("SELECT * FROM tds_payable_ledger WHERE id = ?", [req.params.tdsId]);
       res.json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ACCOUNTING PHASE 2 — GL-derived statements, GST returns, aging, and controls.
+  // Every endpoint is owner-only and (except the cash-count variance journal,
+  // which posts through the balanced _postGlEntries) strictly READ-ONLY. Each
+  // figure reconciles to an independent GL path (trial balance / gst-outstanding).
+  // These MUST stay before the /api/* 404 catch-all below.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── Profit & Loss (GL-derived) ─────────────────────────────────────────────
+  app.get("/api/restaurant/:id/accounting/profit-loss", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as Record<string, string>;
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const params: any[] = [req.params.id];
+      let dateWhere = '';
+      if (from) { dateWhere += ' AND g.entry_date >= ?'; params.push(from); }
+      if (to)   { dateWhere += ' AND g.entry_date <= ?'; params.push(to); }
+      const rows: any[] = await db.query(
+        `SELECT g.account_code, g.account_name, COALESCE(c.type,'UNKNOWN') AS account_type,
+                COALESCE(SUM(g.dr_amount),0) AS dr, COALESCE(SUM(g.cr_amount),0) AS cr
+           FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0
+            AND (c.type IN ('REVENUE','EXPENSE') OR g.account_code LIKE '4%' OR g.account_code LIKE '5%' OR g.account_code LIKE '6%')
+            ${dateWhere}
+          GROUP BY g.account_code, g.account_name, c.type
+          ORDER BY g.account_code`,
+        params).catch(() => []);
+      const revenue: any[] = [], expenses: any[] = [];
+      let total_revenue = 0, total_expense = 0;
+      for (const r of rows) {
+        const dr = Number(r.dr || 0), cr = Number(r.cr || 0);
+        const type = String(r.account_type), code = String(r.account_code);
+        const isRev = type === 'REVENUE' || (type !== 'EXPENSE' && code.startsWith('4'));
+        if (isRev) {
+          const amt = round(cr - dr);
+          if (Math.abs(amt) >= 0.005) { revenue.push({ account_code: code, account_name: r.account_name, amount: amt }); total_revenue += amt; }
+        } else {
+          const amt = round(dr - cr);
+          if (Math.abs(amt) >= 0.005) { expenses.push({ account_code: code, account_name: r.account_name, amount: amt }); total_expense += amt; }
+        }
+      }
+      total_revenue = round(total_revenue); total_expense = round(total_expense);
+      res.json({ period: { from: from || null, to: to || null }, revenue, expenses, total_revenue, total_expense, net_profit: round(total_revenue - total_expense) });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── Balance Sheet (GL-derived, as-of) ──────────────────────────────────────
+  // Assets(dr−cr) = Liabilities(cr−dr) + Equity(cr−dr) + Retained Earnings, where
+  // Retained Earnings = LIFETIME Σ(Revenue cr−dr) − Σ(Expense dr−cr) up to asOf
+  // (no closing entries are ever posted, so P&L accounts carry lifetime balances).
+  app.get("/api/restaurant/:id/accounting/balance-sheet", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const asOf = String((req.query as any).asOf || new Date().toISOString().slice(0, 10));
+      const rows: any[] = await db.query(
+        `SELECT g.account_code, g.account_name, COALESCE(c.type,'UNKNOWN') AS account_type,
+                COALESCE(c.display_order,999) AS display_order,
+                COALESCE(SUM(g.dr_amount),0) AS dr, COALESCE(SUM(g.cr_amount),0) AS cr
+           FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.entry_date <= ?
+          GROUP BY g.account_code, g.account_name, c.type, c.display_order
+          ORDER BY display_order, g.account_code`,
+        [req.params.id, asOf]).catch(() => []);
+      const assets: any[] = [], liabilities: any[] = [], equity: any[] = [];
+      let total_assets = 0, total_liabilities = 0, equity_posted = 0, earnings = 0;
+      for (const r of rows) {
+        const dr = Number(r.dr || 0), cr = Number(r.cr || 0);
+        const type = String(r.account_type), code = String(r.account_code);
+        if (type === 'ASSET' || (type === 'UNKNOWN' && code.startsWith('1'))) {
+          const amt = round(dr - cr);
+          if (Math.abs(amt) >= 0.005) { assets.push({ account_code: code, account_name: r.account_name, amount: amt }); total_assets += amt; }
+        } else if (type === 'LIABILITY' || (type === 'UNKNOWN' && code.startsWith('2'))) {
+          const amt = round(cr - dr);
+          if (Math.abs(amt) >= 0.005) { liabilities.push({ account_code: code, account_name: r.account_name, amount: amt }); total_liabilities += amt; }
+        } else if (type === 'EQUITY' || (type === 'UNKNOWN' && code.startsWith('3'))) {
+          const amt = round(cr - dr);
+          if (Math.abs(amt) >= 0.005) { equity.push({ account_code: code, account_name: r.account_name, amount: amt }); equity_posted += amt; }
+        } else if (type === 'REVENUE' || code.startsWith('4')) {
+          earnings += (cr - dr);
+        } else if (type === 'EXPENSE' || code.startsWith('5') || code.startsWith('6')) {
+          earnings -= (dr - cr);
+        }
+      }
+      earnings = round(earnings);
+      equity.push({ account_code: '3100*', account_name: 'Retained Earnings (computed)', amount: earnings });
+      total_assets = round(total_assets); total_liabilities = round(total_liabilities);
+      const total_equity = round(equity_posted + earnings);
+      const diff = round(total_assets - (total_liabilities + total_equity));
+      res.json({ as_of: asOf, assets, liabilities, equity, retained_earnings: earnings, total_assets, total_liabilities, total_equity, diff, balanced: Math.abs(diff) < 0.02 });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── Cash Flow (GL-derived, direct method) ──────────────────────────────────
+  // Net change in cash+bank (1000,1010,1020) partitioned into Operating/Investing/
+  // Financing by each cash line's source_type (manual journals classified by an
+  // equity counter-account). Buckets are a partition of Σ(dr−cr), so they always
+  // reconcile to closing − opening.
+  app.get("/api/restaurant/:id/accounting/cash-flow-gl", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const f = String((req.query as any).from || (new Date().toISOString().slice(0, 7) + '-01'));
+      const t = String((req.query as any).to || new Date().toISOString().slice(0, 10));
+      const CASH = ['1000', '1010', '1020'];
+      const ph = CASH.map(() => '?').join(',');
+      const opRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code IN (${ph}) AND entry_date < ?`, [req.params.id, ...CASH, f]).catch(() => ({ bal: 0 }));
+      const clRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code IN (${ph}) AND entry_date <= ?`, [req.params.id, ...CASH, t]).catch(() => ({ bal: 0 }));
+      const opening = round(opRow?.bal || 0), closing = round(clRow?.bal || 0);
+      const rows: any[] = await db.query(
+        `SELECT g.journal_ref, g.account_code, g.account_name, g.source_type, g.dr_amount, g.cr_amount, COALESCE(c.type,'UNKNOWN') AS account_type
+           FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+          WHERE g.restaurant_id=? AND g.is_reversed=0 AND g.entry_date >= ? AND g.entry_date <= ?
+            AND g.journal_ref IN (
+              SELECT DISTINCT journal_ref FROM gl_entries
+               WHERE restaurant_id=? AND is_reversed=0 AND entry_date >= ? AND entry_date <= ? AND account_code IN (${ph}))
+          ORDER BY g.journal_ref`,
+        [req.params.id, f, t, req.params.id, f, t, ...CASH]).catch(() => []);
+      const byJournal: Record<string, any[]> = {};
+      for (const r of rows) { (byJournal[String(r.journal_ref)] ||= []).push(r); }
+      const buckets: Record<string, Record<string, number>> = { operating: {}, investing: {}, financing: {} };
+      for (const jref in byJournal) {
+        const lines = byJournal[jref];
+        const hasEquityCounter = lines.some((l: any) => String(l.account_type) === 'EQUITY' || String(l.account_code).startsWith('3'));
+        for (const l of lines) {
+          if (!CASH.includes(String(l.account_code))) continue;
+          const net = Number(l.dr_amount || 0) - Number(l.cr_amount || 0);
+          if (Math.abs(net) < 0.005) continue;
+          const st = String(l.source_type || 'OTHER');
+          const bucket = st === 'MANUAL_JOURNAL' ? (hasEquityCounter ? 'financing' : 'operating') : 'operating';
+          buckets[bucket][st] = round((buckets[bucket][st] || 0) + net);
+        }
+      }
+      const toLines = (obj: Record<string, number>) => Object.entries(obj).map(([source_type, amount]) => ({ source_type, amount: round(amount) }));
+      const sumLines = (obj: Record<string, number>) => round(Object.values(obj).reduce((s, v) => s + Number(v), 0));
+      const operating = { total: sumLines(buckets.operating), lines: toLines(buckets.operating) };
+      const investing = { total: sumLines(buckets.investing), lines: toLines(buckets.investing) };
+      const financing = { total: sumLines(buckets.financing), lines: toLines(buckets.financing) };
+      const net_change = round(operating.total + investing.total + financing.total);
+      const recon_diff = round(net_change - (closing - opening));
+      res.json({ period: { from: f, to: t }, opening_balance: opening, closing_balance: closing, net_change, operating, investing, financing, reconciled: Math.abs(recon_diff) < 0.02, recon_diff });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── GSTR-1 working sheet (outward supplies, B2B/B2C, rate-wise) ────────────
+  // Per-journal aggregate of the revenue base + GST-payable lines; B2B if the
+  // source folio carries a guest GSTIN. TOTAL output tax reconciles to
+  // gst-outstanding exactly; the B2B/B2C/rate split is a partition of that total.
+  app.get("/api/restaurant/:id/accounting/gst/gstr1", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const { from, to } = req.query as Record<string, string>;
+      const GST = ['2200', '2210', '2220'];
+      const gstPh = GST.map(() => '?').join(',');
+      const mainParams: any[] = [req.params.id];
+      let mainDate = '';
+      const subParams: any[] = [req.params.id];
+      let subDate = '';
+      if (from) { mainDate += ' AND g.entry_date >= ?'; mainParams.push(from); subDate += ' AND entry_date >= ?'; subParams.push(from); }
+      if (to)   { mainDate += ' AND g.entry_date <= ?'; mainParams.push(to);   subDate += ' AND entry_date <= ?'; subParams.push(to); }
+      const rows: any[] = await db.query(
+        `SELECT g.journal_ref, MAX(g.source_type) AS source_type, MAX(g.source_id) AS source_id,
+                SUM(CASE WHEN c.type='REVENUE' OR g.account_code LIKE '4%' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS taxable,
+                SUM(CASE WHEN g.account_code='2200' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS cgst,
+                SUM(CASE WHEN g.account_code='2210' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS sgst,
+                SUM(CASE WHEN g.account_code='2220' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS igst
+           FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0 ${mainDate}
+            AND g.journal_ref IN (
+              SELECT DISTINCT journal_ref FROM gl_entries
+               WHERE restaurant_id = ? AND is_reversed = 0 ${subDate} AND account_code IN (${gstPh}))
+          GROUP BY g.journal_ref`,
+        [...mainParams, ...subParams, ...GST]).catch(() => []);
+      // Resolve GSTIN for folio-settlement journals (hotel folios carry it).
+      const folioIds = rows.filter(r => String(r.source_type) === 'FOLIO_SETTLEMENT' && r.source_id).map(r => String(r.source_id));
+      const gstinMap: Record<string, string> = {};
+      if (folioIds.length) {
+        const fph = folioIds.map(() => '?').join(',');
+        const frows: any[] = await db.query(
+          `SELECT f.id AS folio_id, b.guest_gstin FROM folios f LEFT JOIN room_bookings b ON b.id = f.booking_id WHERE f.id IN (${fph})`,
+          folioIds).catch(() => []);
+        for (const fr of frows) { if (fr.guest_gstin) gstinMap[String(fr.folio_id)] = String(fr.guest_gstin); }
+      }
+      const SLABS = [0, 5, 12, 18, 28];
+      const snap = (rate: number) => SLABS.reduce((best, s) => Math.abs(s - rate) < Math.abs(best - rate) ? s : best, SLABS[0]);
+      const b2bMap: Record<number, any> = {}, b2cMap: Record<number, any> = {};
+      let tTaxable = 0, tCgst = 0, tSgst = 0, tIgst = 0;
+      for (const r of rows) {
+        const taxable = Number(r.taxable || 0), cgst = Number(r.cgst || 0), sgst = Number(r.sgst || 0), igst = Number(r.igst || 0);
+        const tax = cgst + sgst + igst;
+        if (Math.abs(tax) < 0.005 && Math.abs(taxable) < 0.005) continue;
+        const gstin = String(r.source_type) === 'FOLIO_SETTLEMENT' ? gstinMap[String(r.source_id)] : null;
+        const rate = taxable > 0 ? snap(round(tax / taxable * 100)) : 0;
+        const target = gstin ? b2bMap : b2cMap;
+        const cur = target[rate] || { rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, invoices: 0 };
+        cur.taxable += taxable; cur.cgst += cgst; cur.sgst += sgst; cur.igst += igst; cur.invoices += 1;
+        target[rate] = cur;
+        tTaxable += taxable; tCgst += cgst; tSgst += sgst; tIgst += igst;
+      }
+      const toArr = (m: Record<number, any>) => Object.values(m).map((x: any) => ({ rate: x.rate, taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), invoices: x.invoices })).sort((a, b) => a.rate - b.rate);
+      const totals = { taxable: round(tTaxable), cgst: round(tCgst), sgst: round(tSgst), igst: round(tIgst), output_gst: round(tCgst + tSgst + tIgst) };
+      res.json({ period: { from: from || null, to: to || null }, b2b: toArr(b2bMap), b2c: toArr(b2cMap), totals });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── GSTR-3B summary (output tax − ITC = net payable) ───────────────────────
+  app.get("/api/restaurant/:id/accounting/gst/gstr3b", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const { from, to } = req.query as Record<string, string>;
+      const GST = ['2200', '2210', '2220'], ITC = ['1300', '1310', '1320'];
+      const gstPh = GST.map(() => '?').join(',');
+      const mainParams: any[] = [req.params.id];
+      let mainDate = '';
+      const subParams: any[] = [req.params.id];
+      let subDate = '';
+      if (from) { mainDate += ' AND g.entry_date >= ?'; mainParams.push(from); subDate += ' AND entry_date >= ?'; subParams.push(from); }
+      if (to)   { mainDate += ' AND g.entry_date <= ?'; mainParams.push(to);   subDate += ' AND entry_date <= ?'; subParams.push(to); }
+      const outRow: any = await db.get(
+        `SELECT SUM(CASE WHEN c.type='REVENUE' OR g.account_code LIKE '4%' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS taxable,
+                SUM(CASE WHEN g.account_code='2200' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS cgst,
+                SUM(CASE WHEN g.account_code='2210' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS sgst,
+                SUM(CASE WHEN g.account_code='2220' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS igst
+           FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0 ${mainDate}
+            AND g.journal_ref IN (
+              SELECT DISTINCT journal_ref FROM gl_entries
+               WHERE restaurant_id = ? AND is_reversed = 0 ${subDate} AND account_code IN (${gstPh}))`,
+        [...mainParams, ...subParams, ...GST]).catch(() => ({}));
+      // ITC: debit balance of the ITC-receivable accounts over the window.
+      let itcWhere = 'restaurant_id = ? AND is_reversed = 0';
+      const itcParams: any[] = [req.params.id];
+      if (from) { itcWhere += ' AND entry_date >= ?'; itcParams.push(from); }
+      if (to)   { itcWhere += ' AND entry_date <= ?'; itcParams.push(to); }
+      const itcPh = ITC.map(() => '?').join(',');
+      itcWhere += ` AND account_code IN (${itcPh})`; itcParams.push(...ITC);
+      const itcRow: any = await db.get(
+        `SELECT SUM(CASE WHEN account_code='1300' THEN dr_amount - cr_amount ELSE 0 END) AS c,
+                SUM(CASE WHEN account_code='1310' THEN dr_amount - cr_amount ELSE 0 END) AS s,
+                SUM(CASE WHEN account_code='1320' THEN dr_amount - cr_amount ELSE 0 END) AS i
+           FROM gl_entries WHERE ${itcWhere}`,
+        itcParams).catch(() => ({}));
+      const cgst = Number(outRow?.cgst || 0), sgst = Number(outRow?.sgst || 0), igst = Number(outRow?.igst || 0), taxable = Number(outRow?.taxable || 0);
+      const itc_c = Number(itcRow?.c || 0), itc_s = Number(itcRow?.s || 0), itc_i = Number(itcRow?.i || 0);
+      const output_tax = round(cgst + sgst + igst);
+      const itc_total = round(itc_c + itc_s + itc_i);
+      res.json({
+        period: { from: from || null, to: to || null },
+        outward_taxable_supplies: { taxable_value: round(taxable), igst: round(igst), cgst: round(cgst), sgst: round(sgst) },
+        itc_available: { igst: round(itc_i), cgst: round(itc_c), sgst: round(itc_s), total: itc_total },
+        output_tax, net_tax_payable: round(output_tax - itc_total),
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── AR / AP Aging (GL-derived, FIFO) ───────────────────────────────────────
+  // Age the OPEN balance of the control accounts by consuming oldest increasing-
+  // side lots with the total decreasing-side (FIFO), then bucket the survivors by
+  // age. Bucket total reconciles to the control account's trial-balance net.
+  app.get("/api/restaurant/:id/accounting/aging", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const type = String((req.query as any).type || 'AR').toUpperCase() === 'AP' ? 'AP' : 'AR';
+      const asOf = String((req.query as any).asOf || new Date().toISOString().slice(0, 10));
+      const codes = type === 'AP' ? ['2000'] : ['1100', '1110'];
+      const ph = codes.map(() => '?').join(',');
+      const rows: any[] = await db.query(
+        `SELECT entry_date, dr_amount, cr_amount FROM gl_entries
+          WHERE restaurant_id=? AND is_reversed=0 AND account_code IN (${ph}) AND entry_date <= ?
+          ORDER BY entry_date ASC, created_at ASC`,
+        [req.params.id, ...codes, asOf]).catch(() => []);
+      const isAR = type === 'AR';
+      let totalDecrease = 0;
+      const lots: { date: string; amt: number }[] = [];
+      for (const r of rows) {
+        const inc = isAR ? Number(r.dr_amount || 0) : Number(r.cr_amount || 0);
+        const dec = isAR ? Number(r.cr_amount || 0) : Number(r.dr_amount || 0);
+        if (inc > 0) lots.push({ date: String(r.entry_date), amt: inc });
+        totalDecrease += dec;
+      }
+      let rem = totalDecrease;
+      for (const lot of lots) { if (rem <= 0) break; const applied = Math.min(lot.amt, rem); lot.amt -= applied; rem -= applied; }
+      const buckets: Record<string, number> = { d0_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 };
+      const asOfMs = Date.parse(asOf);
+      for (const lot of lots) {
+        if (lot.amt <= 0) continue;
+        const age = Math.floor((asOfMs - Date.parse(lot.date)) / 86400000);
+        if (age <= 30) buckets.d0_30 += lot.amt;
+        else if (age <= 60) buckets.d31_60 += lot.amt;
+        else if (age <= 90) buckets.d61_90 += lot.amt;
+        else buckets.d90_plus += lot.amt;
+      }
+      for (const k in buckets) buckets[k] = round(buckets[k]);
+      const unapplied = round(rem);
+      const total_open = round(buckets.d0_30 + buckets.d31_60 + buckets.d61_90 + buckets.d90_plus - unapplied);
+      res.json({ type, as_of: asOf, control_accounts: codes, buckets, unapplied, total_open });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── Period close (SOFT lock — advisory only) ───────────────────────────────
+  // Closing a period NEVER blocks or alters posting; _postGlEntries is untouched.
+  // The exceptions endpoint surfaces any entry dated inside a closed period.
+  app.get("/api/restaurant/:id/accounting/periods", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM accounting_periods ORDER BY from_date DESC", []).catch(() => []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/periods/exceptions", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT g.id, g.journal_ref, g.entry_date, g.account_code, g.account_name,
+                g.dr_amount, g.cr_amount, g.source_type, g.created_at,
+                p.period_key, p.closed_at,
+                CASE WHEN g.created_at > p.closed_at THEN 1 ELSE 0 END AS posted_after_close
+           FROM gl_entries g
+           JOIN accounting_periods p
+             ON p.status='CLOSED' AND g.entry_date >= p.from_date AND g.entry_date <= p.to_date
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0
+          ORDER BY g.created_at DESC LIMIT 500`,
+        [req.params.id]).catch(() => []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.post("/api/restaurant/:id/accounting/periods/close", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { period_key, from_date, to_date, note } = req.body || {};
+      if (!period_key || !from_date || !to_date) return res.status(400).json({ error: 'period_key, from_date and to_date are required' });
+      const by = (req.user as any)?.id || (req.user as any)?.email || null;
+      await db.run(
+        `INSERT INTO accounting_periods (period_key, from_date, to_date, status, closed_by, closed_at, note)
+         VALUES (?, ?, ?, 'CLOSED', ?, CURRENT_TIMESTAMP, ?)
+         ON CONFLICT (period_key) DO UPDATE SET
+           status='CLOSED', closed_by=EXCLUDED.closed_by, closed_at=CURRENT_TIMESTAMP,
+           from_date=EXCLUDED.from_date, to_date=EXCLUDED.to_date, note=EXCLUDED.note`,
+        [String(period_key), String(from_date), String(to_date), by, note || null]);
+      const row = await db.get("SELECT * FROM accounting_periods WHERE period_key = ?", [String(period_key)]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.post("/api/restaurant/:id/accounting/periods/reopen", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { period_key } = req.body || {};
+      if (!period_key) return res.status(400).json({ error: 'period_key is required' });
+      await db.run("UPDATE accounting_periods SET status='OPEN', closed_by=NULL, closed_at=NULL WHERE period_key = ?", [String(period_key)]);
+      const row = await db.get("SELECT * FROM accounting_periods WHERE period_key = ?", [String(period_key)]);
+      res.json(row || { period_key, status: 'OPEN' });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── Physical cash count + optional variance journal ────────────────────────
+  app.get("/api/restaurant/:id/accounting/cash-count", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const date = String((req.query as any).date || new Date().toISOString().slice(0, 10));
+      const expRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code='1000' AND entry_date <= ?`, [req.params.id, date]).catch(() => ({ bal: 0 }));
+      const counts = await db.query("SELECT * FROM cash_counts WHERE restaurant_id=? AND count_date=? ORDER BY created_at DESC", [req.params.id, date]).catch(() => []);
+      res.json({ date, expected_amount: round(expRow?.bal || 0), counts });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.post("/api/restaurant/:id/accounting/cash-count", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const { count_date, session, counted_amount, note, post_variance } = req.body || {};
+      const date = String(count_date || new Date().toISOString().slice(0, 10));
+      const sess = String(session || 'CLOSE').toUpperCase() === 'OPEN' ? 'OPEN' : 'CLOSE';
+      const counted = round(Number(counted_amount || 0));
+      const expRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code='1000' AND entry_date <= ?`, [req.params.id, date]).catch(() => ({ bal: 0 }));
+      const expected = round(expRow?.bal || 0);
+      const variance = round(counted - expected);
+      const ccId = `CC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const by = (req.user as any)?.id || (req.user as any)?.email || null;
+      let journalRef: string | null = null;
+      if (post_variance && Math.abs(variance) >= 0.01) {
+        const seq = await getNextTenantSequence(db, 'cashcount');
+        journalRef = `CC-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+        const v = variance;
+        const lines: GlLine[] = [
+          { account_code: '1000', account_name: 'Cash in Hand',     dr_amount: v > 0 ? v : 0,  cr_amount: v < 0 ? -v : 0, narration: `Cash count variance ${date}` },
+          { account_code: '6010', account_name: 'Cash Over / Short', dr_amount: v < 0 ? -v : 0, cr_amount: v > 0 ? v : 0,  narration: `Cash count variance ${date}` },
+        ];
+        await _postGlEntries(db, req.params.id, journalRef, date, 'CASH_COUNT', ccId, lines, by);
+      }
+      await db.run(
+        `INSERT INTO cash_counts (id, restaurant_id, count_date, session, counted_amount, expected_amount, variance, counted_by, note, variance_journal_ref)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [ccId, req.params.id, date, sess, counted, expected, variance, by, note || null, journalRef]);
+      const row = await db.get("SELECT * FROM cash_counts WHERE id = ?", [ccId]);
+      res.status(201).json({ ...row, expected_amount: expected, counted_amount: counted, variance, variance_journal_ref: journalRef });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── Bank reconciliation (manual clear) ─────────────────────────────────────
+  app.get("/api/restaurant/:id/accounting/bank-reconciliation", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const account = String((req.query as any).account || '1010');
+      const from = String((req.query as any).from || (new Date().toISOString().slice(0, 7) + '-01'));
+      const to = String((req.query as any).to || new Date().toISOString().slice(0, 10));
+      const bookRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date <= ?`, [req.params.id, account, to]).catch(() => ({ bal: 0 }));
+      const book_balance = round(bookRow?.bal || 0);
+      const lines: any[] = await db.query(
+        `SELECT id, journal_ref, entry_date, account_name, dr_amount, cr_amount, source_type, narration
+           FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date >= ? AND entry_date <= ?
+          ORDER BY entry_date DESC, created_at DESC LIMIT 1000`,
+        [req.params.id, account, from, to]).catch(() => []);
+      const period = `${from}..${to}`;
+      const rec: any = await db.get("SELECT * FROM bank_reconciliations WHERE account_code=? AND period=? ORDER BY created_at DESC LIMIT 1", [account, period]).catch(() => null);
+      let clearedIds: string[] = [];
+      if (rec) { const cl: any[] = await db.query("SELECT gl_entry_id FROM bank_rec_cleared WHERE rec_id=?", [rec.id]).catch(() => []); clearedIds = cl.map((r: any) => String(r.gl_entry_id)); }
+      const clearedSet = new Set(clearedIds);
+      const withFlags = lines.map((l: any) => ({ ...l, cleared: clearedSet.has(String(l.id)) }));
+      const statement_closing_balance = rec ? round(rec.statement_closing_balance) : null;
+      const difference = statement_closing_balance != null ? round(book_balance - statement_closing_balance) : null;
+      res.json({ account_code: account, period: { from, to }, book_balance, statement_closing_balance, difference, reconciled: difference != null && Math.abs(difference) < 0.02, lines: withFlags });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.post("/api/restaurant/:id/accounting/bank-reconciliation", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const { account, from, to, statement_closing_balance, cleared_entry_ids } = req.body || {};
+      const acct = String(account || '1010');
+      const period = `${String(from)}..${String(to)}`;
+      const recId = `BR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const scb = round(Number(statement_closing_balance || 0));
+      const by = (req.user as any)?.id || (req.user as any)?.email || null;
+      await db.run(
+        `INSERT INTO bank_reconciliations (id, account_code, period, statement_closing_balance, status, created_by) VALUES (?, ?, ?, ?, 'SAVED', ?)`,
+        [recId, acct, period, scb, by]);
+      const ids: string[] = Array.isArray(cleared_entry_ids) ? cleared_entry_ids.map((x: any) => String(x)) : [];
+      for (const gid of ids) {
+        await db.run("INSERT INTO bank_rec_cleared (rec_id, gl_entry_id) VALUES (?, ?) ON CONFLICT (rec_id, gl_entry_id) DO NOTHING", [recId, gid]);
+      }
+      const bookRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date <= ?`, [req.params.id, acct, String(to)]).catch(() => ({ bal: 0 }));
+      const book_balance = round(bookRow?.bal || 0);
+      const difference = round(book_balance - scb);
+      res.status(201).json({ id: recId, account_code: acct, period, book_balance, statement_closing_balance: scb, difference, reconciled: Math.abs(difference) < 0.02, cleared_count: ids.length });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 

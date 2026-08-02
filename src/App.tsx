@@ -7816,7 +7816,9 @@ function SettlementUploadForm({
 }
 
 function AccountingView({ restaurantId, token }: { restaurantId: string; token: string }) {
-  type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL';
+  type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
+    | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
+    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT';
   const [acctTab, setAcctTab] = useState<SubTab>('TRIAL');
   const [coa, setCoa] = useState<any[]>([]);
   const [glEntries, setGlEntries] = useState<any[]>([]);
@@ -7904,6 +7906,91 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   useEffect(() => { if (acctTab === 'CASHBOOK') loadCashBook(); }, [acctTab, loadCashBook]);
   useEffect(() => { if (acctTab === 'TDS') loadTds(); }, [acctTab, loadTds]);
 
+  // ── Phase 2: GL-derived statements, GST returns, aging, controls ──────────
+  const [pnl, setPnl] = useState<any>(null);
+  const [balanceSheet, setBalanceSheet] = useState<any>(null);
+  const [cashFlowGl, setCashFlowGl] = useState<any>(null);
+  const [gstr1, setGstr1] = useState<any>(null);
+  const [gstr3b, setGstr3b] = useState<any>(null);
+  const [agingAr, setAgingAr] = useState<any>(null);
+  const [agingAp, setAgingAp] = useState<any>(null);
+  const [bankRec, setBankRec] = useState<any>(null);
+  const [bankRecAccount, setBankRecAccount] = useState('1010');
+  const [bankRecCleared, setBankRecCleared] = useState<Record<string, boolean>>({});
+  const [bankRecStmtBal, setBankRecStmtBal] = useState('');
+  const [periods, setPeriods] = useState<any[]>([]);
+  const [periodsExc, setPeriodsExc] = useState<any[]>([]);
+  const [cashCount, setCashCount] = useState<any>(null);
+  const [ccCounted, setCcCounted] = useState('');
+  const [ccPostVar, setCcPostVar] = useState(true);
+  const [ccMsg, setCcMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [asOfDate, setAsOfDate] = useState(todayStr);
+  const [pcKey, setPcKey] = useState(todayStr.slice(0, 7));
+  const [pcFrom, setPcFrom] = useState(monthStart);
+  const [pcTo, setPcTo] = useState(todayStr);
+  const [pcNote, setPcNote] = useState('');
+
+  const loadPnl = useCallback(() => { setLoading(true); acctApi(`/accounting/profit-loss?from=${tbFrom}&to=${tbTo}`).then(d => { if (d && !d.error) setPnl(d); }).finally(() => setLoading(false)); }, [acctApi, tbFrom, tbTo]);
+  const loadBalanceSheet = useCallback(() => { setLoading(true); acctApi(`/accounting/balance-sheet?asOf=${asOfDate}`).then(d => { if (d && !d.error) setBalanceSheet(d); }).finally(() => setLoading(false)); }, [acctApi, asOfDate]);
+  const loadCashFlowGl = useCallback(() => { setLoading(true); acctApi(`/accounting/cash-flow-gl?from=${tbFrom}&to=${tbTo}`).then(d => { if (d && !d.error) setCashFlowGl(d); }).finally(() => setLoading(false)); }, [acctApi, tbFrom, tbTo]);
+  const loadGstr1 = useCallback(() => { setLoading(true); acctApi(`/accounting/gst/gstr1?from=${tbFrom}&to=${tbTo}`).then(d => { if (d && !d.error) setGstr1(d); }).finally(() => setLoading(false)); }, [acctApi, tbFrom, tbTo]);
+  const loadGstr3b = useCallback(() => { setLoading(true); acctApi(`/accounting/gst/gstr3b?from=${tbFrom}&to=${tbTo}`).then(d => { if (d && !d.error) setGstr3b(d); }).finally(() => setLoading(false)); }, [acctApi, tbFrom, tbTo]);
+  const loadAgingAr = useCallback(() => { setLoading(true); acctApi(`/accounting/aging?type=AR&asOf=${asOfDate}`).then(d => { if (d && !d.error) setAgingAr(d); }).finally(() => setLoading(false)); }, [acctApi, asOfDate]);
+  const loadAgingAp = useCallback(() => { setLoading(true); acctApi(`/accounting/aging?type=AP&asOf=${asOfDate}`).then(d => { if (d && !d.error) setAgingAp(d); }).finally(() => setLoading(false)); }, [acctApi, asOfDate]);
+  const loadBankRec = useCallback(() => {
+    setLoading(true);
+    acctApi(`/accounting/bank-reconciliation?account=${bankRecAccount}&from=${tbFrom}&to=${tbTo}`).then(d => {
+      if (d && !d.error) {
+        setBankRec(d);
+        const m: Record<string, boolean> = {};
+        (d.lines || []).forEach((l: any) => { m[l.id] = !!l.cleared; });
+        setBankRecCleared(m);
+        setBankRecStmtBal(d.statement_closing_balance != null ? String(d.statement_closing_balance) : '');
+      }
+    }).finally(() => setLoading(false));
+  }, [acctApi, bankRecAccount, tbFrom, tbTo]);
+  const loadPeriods = useCallback(() => { setLoading(true); Promise.all([acctApi('/accounting/periods'), acctApi('/accounting/periods/exceptions')]).then(([p, e]) => { if (Array.isArray(p)) setPeriods(p); if (Array.isArray(e)) setPeriodsExc(e); }).finally(() => setLoading(false)); }, [acctApi]);
+  const loadCashCount = useCallback(() => { setLoading(true); acctApi(`/accounting/cash-count?date=${asOfDate}`).then(d => { if (d && !d.error) setCashCount(d); }).finally(() => setLoading(false)); }, [acctApi, asOfDate]);
+
+  useEffect(() => { if (acctTab === 'PNL') loadPnl(); }, [acctTab, loadPnl]);
+  useEffect(() => { if (acctTab === 'BALANCESHEET') loadBalanceSheet(); }, [acctTab, loadBalanceSheet]);
+  useEffect(() => { if (acctTab === 'CASHFLOW') loadCashFlowGl(); }, [acctTab, loadCashFlowGl]);
+  useEffect(() => { if (acctTab === 'GSTR1') loadGstr1(); }, [acctTab, loadGstr1]);
+  useEffect(() => { if (acctTab === 'GSTR3B') loadGstr3b(); }, [acctTab, loadGstr3b]);
+  useEffect(() => { if (acctTab === 'AGING_AR') loadAgingAr(); }, [acctTab, loadAgingAr]);
+  useEffect(() => { if (acctTab === 'AGING_AP') loadAgingAp(); }, [acctTab, loadAgingAp]);
+  useEffect(() => { if (acctTab === 'BANKREC') loadBankRec(); }, [acctTab, loadBankRec]);
+  useEffect(() => { if (acctTab === 'PERIODS') loadPeriods(); }, [acctTab, loadPeriods]);
+  useEffect(() => { if (acctTab === 'CASHCOUNT') loadCashCount(); }, [acctTab, loadCashCount]);
+
+  const closePeriod = async () => {
+    if (!pcKey || !pcFrom || !pcTo) return;
+    await acctApi('/accounting/periods/close', { method: 'POST', body: JSON.stringify({ period_key: pcKey, from_date: pcFrom, to_date: pcTo, note: pcNote }) });
+    setPcNote(''); loadPeriods();
+  };
+  const reopenPeriod = async (key: string) => { await acctApi('/accounting/periods/reopen', { method: 'POST', body: JSON.stringify({ period_key: key }) }); loadPeriods(); };
+  const submitCashCount = async () => {
+    setCcMsg(null);
+    const res = await acctApi('/accounting/cash-count', { method: 'POST', body: JSON.stringify({ count_date: asOfDate, session: 'CLOSE', counted_amount: parseFloat(ccCounted) || 0, note: '', post_variance: ccPostVar }) });
+    if (res && !res.error) { setCcMsg({ type: 'ok', text: `Recorded. Variance ${fmtAmt(res.variance)}${res.variance_journal_ref ? ` · journal ${res.variance_journal_ref}` : ''}` }); setCcCounted(''); loadCashCount(); }
+    else setCcMsg({ type: 'err', text: res?.error || 'Failed to record count' });
+  };
+  const saveBankRec = async () => {
+    const cleared_entry_ids = Object.entries(bankRecCleared).filter(([, v]) => v).map(([k]) => k);
+    await acctApi('/accounting/bank-reconciliation', { method: 'POST', body: JSON.stringify({ account: bankRecAccount, from: tbFrom, to: tbTo, statement_closing_balance: parseFloat(bankRecStmtBal) || 0, cleared_entry_ids }) });
+    loadBankRec();
+  };
+
+  // Simple CSV export — client-side blob download.
+  const downloadCsv = (filename: string, header: string[], rows: (string | number)[][]) => {
+    const esc = (v: any) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const csv = [header.map(esc).join(','), ...rows.map(r => r.map(esc).join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const fmtAmt = (n: number | null | undefined) =>
     n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -7939,6 +8026,23 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   const AC_INPUT = 'text-sm border border-[#d4c4a8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#a0522d]';
   const AC_BTN = 'px-3 py-1.5 bg-[#a0522d] text-white text-sm rounded hover:bg-[#8b4513] disabled:opacity-40';
 
+  // Two-tier accounting nav: a group row + the active group's sub-tabs.
+  const TAB_LABEL: Record<SubTab, string> = {
+    TRIAL: 'Trial Balance', GL: 'GL Ledger', JOURNAL: 'Manual Entry',
+    PNL: 'Profit & Loss', BALANCESHEET: 'Balance Sheet', CASHFLOW: 'Cash Flow',
+    GST: 'GST Outstanding', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
+    CASHBOOK: 'Cash Book', AGING_AR: 'AR Aging', AGING_AP: 'AP Aging', BANKREC: 'Bank Reconciliation',
+    TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count',
+  };
+  const ACCT_GROUPS: { key: string; label: string; tabs: SubTab[] }[] = [
+    { key: 'LEDGER', label: 'Ledger', tabs: ['TRIAL', 'GL', 'JOURNAL'] },
+    { key: 'STATEMENTS', label: 'Statements', tabs: ['PNL', 'BALANCESHEET', 'CASHFLOW'] },
+    { key: 'GST', label: 'GST', tabs: ['GST', 'GSTR1', 'GSTR3B'] },
+    { key: 'WORKING', label: 'Working Capital', tabs: ['CASHBOOK', 'AGING_AR', 'AGING_AP', 'BANKREC'] },
+    { key: 'CONTROLS', label: 'Controls', tabs: ['TDS', 'PERIODS', 'CASHCOUNT'] },
+  ];
+  const activeGroup = ACCT_GROUPS.find(g => g.tabs.includes(acctTab)) || ACCT_GROUPS[0];
+
   return (
     <div className="space-y-5">
       <div>
@@ -7946,13 +8050,23 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
         <p className="text-sm text-[#6b5d52] mt-1">Double-entry GL · Trial balance · TDS tracker · Manual journals</p>
       </div>
 
-      <div className="flex gap-0 border-b border-[#e8ded0]">
-        {(['TRIAL', 'GL', 'GST', 'CASHBOOK', 'TDS', 'JOURNAL'] as SubTab[]).map(t => (
-          <button key={t} onClick={() => setAcctTab(t)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${acctTab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
-            {t === 'TRIAL' ? 'Trial Balance' : t === 'GL' ? 'GL Ledger' : t === 'GST' ? 'GST Outstanding' : t === 'CASHBOOK' ? 'Cash Book' : t === 'TDS' ? 'TDS Tracker' : 'Manual Entry'}
-          </button>
-        ))}
+      <div className="space-y-2">
+        <div className="flex gap-1.5 flex-wrap">
+          {ACCT_GROUPS.map(g => (
+            <button key={g.key} onClick={() => setAcctTab(g.tabs[0])}
+              className={`px-3 py-1.5 text-sm font-semibold rounded-full transition-colors ${activeGroup.key === g.key ? 'bg-[#a0522d] text-white' : 'bg-[#f0e8d8] text-[#6b5d52] hover:bg-[#e5d9c3]'}`}>
+              {g.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-0 border-b border-[#e8ded0] overflow-x-auto">
+          {activeGroup.tabs.map(t => (
+            <button key={t} onClick={() => setAcctTab(t)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${acctTab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
+              {TAB_LABEL[t]}
+            </button>
+          ))}
+        </div>
       </div>
 
       {loading && <p className="text-sm text-[#6b5d52] animate-pulse">Loading...</p>}
@@ -8153,6 +8267,332 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
               </p>
             </>
           ) : null}
+        </div>
+      )}
+
+      {acctTab === 'PNL' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">From</label>
+            <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <label className="text-xs text-[#6b5d52]">To</label>
+            <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadPnl} className={AC_BTN}>Refresh</button>
+            {pnl && <button onClick={() => downloadCsv(`pnl_${tbFrom}_${tbTo}.csv`, ['Section', 'Code', 'Account', 'Amount'], [...pnl.revenue.map((r: any) => ['Revenue', r.account_code, r.account_name, r.amount]), ...pnl.expenses.map((r: any) => ['Expense', r.account_code, r.account_name, r.amount])])} className="text-sm px-3 py-1.5 border border-[#d4c4a8] rounded hover:bg-[#f5f0e8]">Download CSV</button>}
+          </div>
+          {pnl ? (
+            <>
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Total Revenue</p><p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">{fmtAmt(pnl.total_revenue)}</p></div>
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Total Expenses</p><p className="text-2xl font-bold text-rose-700 mt-1 tabular-nums">{fmtAmt(pnl.total_expense)}</p></div>
+                <div className={`rounded-lg border-2 p-4 ${Number(pnl.net_profit) >= 0 ? 'border-emerald-600 bg-emerald-50' : 'border-rose-600 bg-rose-50'}`}><p className="text-xs uppercase tracking-wide font-semibold text-[#6b5d52]">Net {Number(pnl.net_profit) >= 0 ? 'Profit' : 'Loss'}</p><p className="text-2xl font-bold mt-1 tabular-nums text-[#1a1208]">{fmtAmt(pnl.net_profit)}</p></div>
+              </div>
+              <div className="grid md:grid-cols-2 gap-4">
+                {([['Revenue', pnl.revenue], ['Expenses', pnl.expenses]] as [string, any[]][]).map(([title, rows]) => (
+                  <div key={title} className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                    <table className="w-full text-sm border-collapse">
+                      <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Code</th><th className="px-3 py-2 font-semibold text-[#1a1208]">{title}</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Amount</th></tr></thead>
+                      <tbody>{rows.length ? rows.map((r: any) => (<tr key={r.account_code} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]"><td className="px-3 py-2 font-mono text-xs">{r.account_code}</td><td className="px-3 py-2">{r.account_name}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.amount)}</td></tr>)) : (<tr><td colSpan={3} className="px-3 py-3 text-center text-[#9c8e85] italic">No {title.toLowerCase()} in period</td></tr>)}</tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-[#9c8e85]">GL-derived — reconciles to the Trial Balance for the same period.</p>
+            </>
+          ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a period and refresh.</p>}
+        </div>
+      )}
+
+      {acctTab === 'BALANCESHEET' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">As of</label>
+            <input type="date" value={asOfDate} onChange={e => setAsOfDate(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadBalanceSheet} className={AC_BTN}>Refresh</button>
+            {balanceSheet && <span className={`text-xs font-bold px-2 py-1 rounded-full ${balanceSheet.balanced ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>{balanceSheet.balanced ? '✓ Balanced' : `Off by ${fmtAmt(balanceSheet.diff)}`}</span>}
+          </div>
+          {balanceSheet ? (
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                <table className="w-full text-sm border-collapse">
+                  <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={2}>Assets</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208] tabular-nums">{fmtAmt(balanceSheet.total_assets)}</th></tr></thead>
+                  <tbody>{balanceSheet.assets.map((r: any) => (<tr key={r.account_code} className="border-t border-[#f0e8d8]"><td className="px-3 py-2 font-mono text-xs w-16">{r.account_code}</td><td className="px-3 py-2">{r.account_name}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.amount)}</td></tr>))}</tbody>
+                </table>
+              </div>
+              <div className="space-y-4">
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={2}>Liabilities</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208] tabular-nums">{fmtAmt(balanceSheet.total_liabilities)}</th></tr></thead>
+                    <tbody>{balanceSheet.liabilities.length ? balanceSheet.liabilities.map((r: any) => (<tr key={r.account_code} className="border-t border-[#f0e8d8]"><td className="px-3 py-2 font-mono text-xs w-16">{r.account_code}</td><td className="px-3 py-2">{r.account_name}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.amount)}</td></tr>)) : (<tr><td colSpan={3} className="px-3 py-2 text-[#9c8e85] italic">None</td></tr>)}</tbody>
+                  </table>
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={2}>Equity</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208] tabular-nums">{fmtAmt(balanceSheet.total_equity)}</th></tr></thead>
+                    <tbody>{balanceSheet.equity.map((r: any) => (<tr key={r.account_code} className="border-t border-[#f0e8d8]"><td className="px-3 py-2 font-mono text-xs w-16">{r.account_code}</td><td className="px-3 py-2">{r.account_name}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.amount)}</td></tr>))}</tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a date and refresh.</p>}
+          <p className="text-[11px] text-[#9c8e85]">Assets = Liabilities + Equity (incl. computed Retained Earnings = lifetime revenue − expense). GL-derived.</p>
+        </div>
+      )}
+
+      {acctTab === 'CASHFLOW' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">From</label>
+            <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <label className="text-xs text-[#6b5d52]">To</label>
+            <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadCashFlowGl} className={AC_BTN}>Refresh</button>
+            {cashFlowGl && <span className={`text-xs font-bold px-2 py-1 rounded-full ${cashFlowGl.reconciled ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>{cashFlowGl.reconciled ? '✓ Reconciled' : `Off by ${fmtAmt(cashFlowGl.recon_diff)}`}</span>}
+          </div>
+          {cashFlowGl ? (
+            <>
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Opening Cash + Bank</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashFlowGl.opening_balance)}</p></div>
+                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Net Change</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashFlowGl.net_change)}</p></div>
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Closing Cash + Bank</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashFlowGl.closing_balance)}</p></div>
+              </div>
+              {([['Operating', cashFlowGl.operating], ['Investing', cashFlowGl.investing], ['Financing', cashFlowGl.financing]] as [string, any][]).map(([title, b]) => (
+                <div key={title} className="rounded-lg border border-[#e8ded0] bg-white p-3">
+                  <div className="flex justify-between items-center"><p className="text-sm font-semibold text-[#1a1208]">{title} activities</p><p className="tabular-nums font-bold">{fmtAmt(b.total)}</p></div>
+                  {b.lines.length > 0 && <div className="mt-2 space-y-1 text-sm">{b.lines.map((l: any) => (<div key={l.source_type} className="flex justify-between text-[#6b5d52]"><span>{String(l.source_type).replace(/_/g, ' ')}</span><span className="tabular-nums">{fmtAmt(l.amount)}</span></div>))}</div>}
+                </div>
+              ))}
+              <p className="text-[11px] text-[#9c8e85]">Direct method from the GL (cash accts 1000 + 1010 + 1020). Buckets reconcile to closing − opening.</p>
+            </>
+          ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a period and refresh.</p>}
+        </div>
+      )}
+
+      {acctTab === 'GSTR1' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">From</label>
+            <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <label className="text-xs text-[#6b5d52]">To</label>
+            <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadGstr1} className={AC_BTN}>Refresh</button>
+          </div>
+          {gstr1 ? (
+            <>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Taxable Value</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstr1.totals.taxable)}</p></div>
+                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Output GST</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstr1.totals.output_gst)}</p></div>
+              </div>
+              {([['B2B (registered)', gstr1.b2b], ['B2C (unregistered)', gstr1.b2c]] as [string, any[]][]).map(([title, rows]) => (
+                <div key={title} className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={6}>{title}</th></tr><tr className="bg-[#faf6ef] text-left text-xs"><th className="px-3 py-1.5">Rate %</th><th className="px-3 py-1.5 text-right">Taxable</th><th className="px-3 py-1.5 text-right">CGST</th><th className="px-3 py-1.5 text-right">SGST</th><th className="px-3 py-1.5 text-right">IGST</th><th className="px-3 py-1.5 text-right">Invoices</th></tr></thead>
+                    <tbody>{rows.length ? rows.map((r: any) => (<tr key={r.rate} className="border-t border-[#f0e8d8]"><td className="px-3 py-2">{r.rate}%</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.taxable)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.sgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.igst)}</td><td className="px-3 py-2 text-right tabular-nums">{r.invoices}</td></tr>)) : (<tr><td colSpan={6} className="px-3 py-2 text-[#9c8e85] italic">None</td></tr>)}</tbody>
+                  </table>
+                </div>
+              ))}
+              <p className="text-[11px] text-[#9c8e85]">Working sheet — total Output GST reconciles to GST Outstanding. Rate labels are snapped to the nearest slab; rupee totals are exact.</p>
+            </>
+          ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a period and refresh.</p>}
+        </div>
+      )}
+
+      {acctTab === 'GSTR3B' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">From</label>
+            <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <label className="text-xs text-[#6b5d52]">To</label>
+            <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadGstr3b} className={AC_BTN}>Refresh</button>
+          </div>
+          {gstr3b ? (
+            <>
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Output Tax</p><p className="text-2xl font-bold text-rose-700 mt-1 tabular-nums">{fmtAmt(gstr3b.output_tax)}</p></div>
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">ITC Available</p><p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">− {fmtAmt(gstr3b.itc_available.total)}</p></div>
+                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Net Tax Payable</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstr3b.net_tax_payable)}</p></div>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                <table className="w-full text-sm border-collapse">
+                  <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Section</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Taxable</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">IGST</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">CGST</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">SGST</th></tr></thead>
+                  <tbody>
+                    <tr className="border-t border-[#f0e8d8]"><td className="px-3 py-2">3.1(a) Outward taxable supplies</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.outward_taxable_supplies.taxable_value)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.outward_taxable_supplies.igst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.outward_taxable_supplies.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.outward_taxable_supplies.sgst)}</td></tr>
+                    <tr className="border-t border-[#f0e8d8]"><td className="px-3 py-2">4. ITC available</td><td className="px-3 py-2 text-right tabular-nums">—</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.itc_available.igst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.itc_available.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.itc_available.sgst)}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[11px] text-[#9c8e85]">Working sheet — output tax, ITC and net payable reconcile to GST Outstanding for the same period.</p>
+            </>
+          ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a period and refresh.</p>}
+        </div>
+      )}
+
+      {(acctTab === 'AGING_AR' || acctTab === 'AGING_AP') && (() => {
+        const isAr = acctTab === 'AGING_AR';
+        const a = isAr ? agingAr : agingAp;
+        const reload = isAr ? loadAgingAr : loadAgingAp;
+        const label = isAr ? 'Accounts Receivable' : 'Accounts Payable';
+        return (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="text-xs text-[#6b5d52]">As of</label>
+              <input type="date" value={asOfDate} onChange={e => setAsOfDate(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+              <button onClick={reload} className={AC_BTN}>Refresh</button>
+              {a && <span className="text-xs text-[#6b5d52]">Control a/c: {a.control_accounts.join(', ')}</span>}
+            </div>
+            {a ? (
+              <>
+                <div className="grid sm:grid-cols-5 gap-3">
+                  {([['0–30 days', a.buckets.d0_30], ['31–60 days', a.buckets.d31_60], ['61–90 days', a.buckets.d61_90], ['90+ days', a.buckets.d90_plus]] as [string, number][]).map(([t, v], i) => (
+                    <div key={t} className={`rounded-lg border p-4 ${i === 3 ? 'border-rose-300 bg-rose-50' : 'border-[#e8ded0] bg-white'}`}><p className="text-xs text-[#6b5d52] uppercase tracking-wide">{t}</p><p className="text-xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(v)}</p></div>
+                  ))}
+                  <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Total Open</p><p className="text-xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(a.total_open)}</p></div>
+                </div>
+                {Number(a.unapplied) > 0.005 && <p className="text-xs text-[#9c8e85]">Unapplied credits (overpayments/advances): {fmtAmt(a.unapplied)}</p>}
+                <p className="text-[11px] text-[#9c8e85]">{label} aged FIFO from the GL. Total Open reconciles to the control account's Trial-Balance net.</p>
+              </>
+            ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a date and refresh.</p>}
+          </div>
+        );
+      })()}
+
+      {acctTab === 'BANKREC' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <select value={bankRecAccount} onChange={e => setBankRecAccount(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
+              <option value="1010">1010 · Bank — Main</option>
+              <option value="1020">1020 · Bank — OTA Receivable</option>
+            </select>
+            <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <span className="text-xs text-[#6b5d52]">to</span>
+            <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadBankRec} className={AC_BTN}>Load</button>
+          </div>
+          {bankRec ? (
+            <>
+              <div className="grid sm:grid-cols-3 gap-3 items-end">
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Book Balance (GL)</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(bankRec.book_balance)}</p></div>
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Statement Closing Balance</p>
+                  <input type="number" value={bankRecStmtBal} onChange={e => setBankRecStmtBal(e.target.value)} placeholder="0.00" className="mt-1 w-full text-lg font-bold border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums" />
+                </div>
+                <div className={`rounded-lg border-2 p-4 ${bankRecStmtBal !== '' && Math.abs(bankRec.book_balance - (parseFloat(bankRecStmtBal) || 0)) < 0.02 ? 'border-emerald-600 bg-emerald-50' : 'border-[#a0522d] bg-[#fdf6ef]'}`}>
+                  <p className="text-xs uppercase tracking-wide font-semibold text-[#6b5d52]">Difference</p>
+                  <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(bankRec.book_balance - (parseFloat(bankRecStmtBal) || 0))}</p>
+                </div>
+              </div>
+              <div className="flex justify-end"><button onClick={saveBankRec} className={AC_BTN}>Save reconciliation</button></div>
+              <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                <table className="w-full text-sm border-collapse">
+                  <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Cleared</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Date</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Journal</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Narration</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr</th></tr></thead>
+                  <tbody>{bankRec.lines.length ? bankRec.lines.map((l: any) => (
+                    <tr key={l.id} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]">
+                      <td className="px-3 py-2"><input type="checkbox" checked={!!bankRecCleared[l.id]} onChange={e => setBankRecCleared(m => ({ ...m, [l.id]: e.target.checked }))} /></td>
+                      <td className="px-3 py-2 whitespace-nowrap text-[#6b5d52]">{l.entry_date}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-[#6b5d52] whitespace-nowrap">{l.journal_ref}</td>
+                      <td className="px-3 py-2 text-xs text-[#6b5d52] max-w-[14rem] truncate">{l.narration || '—'}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{Number(l.dr_amount) > 0 ? fmtAmt(l.dr_amount) : '—'}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{Number(l.cr_amount) > 0 ? fmtAmt(l.cr_amount) : '—'}</td>
+                    </tr>
+                  )) : (<tr><td colSpan={6} className="px-3 py-3 text-center text-[#9c8e85] italic">No bank movements in this window</td></tr>)}</tbody>
+                </table>
+              </div>
+              <p className="text-[11px] text-[#9c8e85]">Manual reconciliation — tick cleared lines and save the statement balance. This marks lines cleared only; it never posts to the GL.</p>
+            </>
+          ) : !loading && <p className="text-sm text-[#6b5d52] italic">Choose an account and load.</p>}
+        </div>
+      )}
+
+      {acctTab === 'PERIODS' && (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-[#e8ded0] bg-white p-4 space-y-3">
+            <p className="text-sm font-semibold text-[#1a1208]">Close a period (soft lock)</p>
+            <div className="flex items-end gap-2 flex-wrap">
+              <div><label className="text-xs text-[#6b5d52] block">Period key</label><input value={pcKey} onChange={e => setPcKey(e.target.value)} placeholder="2026-07" className={AC_INPUT + ' w-28'} /></div>
+              <div><label className="text-xs text-[#6b5d52] block">From</label><input type="date" value={pcFrom} onChange={e => setPcFrom(e.target.value)} className={AC_INPUT} /></div>
+              <div><label className="text-xs text-[#6b5d52] block">To</label><input type="date" value={pcTo} onChange={e => setPcTo(e.target.value)} className={AC_INPUT} /></div>
+              <div className="flex-1 min-w-[10rem]"><label className="text-xs text-[#6b5d52] block">Note</label><input value={pcNote} onChange={e => setPcNote(e.target.value)} placeholder="optional" className={AC_INPUT + ' w-full'} /></div>
+              <button onClick={closePeriod} className={AC_BTN}>Close period</button>
+            </div>
+            <p className="text-[11px] text-[#9c8e85]">Soft lock: closing a period is advisory. Posting is never blocked — any entry dated inside a closed period is flagged in Exceptions below.</p>
+          </div>
+          {periods.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Period</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Range</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Status</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Closed</th><th className="px-3 py-2"></th></tr></thead>
+                <tbody>{periods.map((p: any) => (
+                  <tr key={p.period_key} className="border-t border-[#f0e8d8]">
+                    <td className="px-3 py-2 font-medium">{p.period_key}</td>
+                    <td className="px-3 py-2 text-[#6b5d52]">{p.from_date} → {p.to_date}</td>
+                    <td className="px-3 py-2"><span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${p.status === 'CLOSED' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-700'}`}>{p.status}</span></td>
+                    <td className="px-3 py-2 text-xs text-[#9c8e85]">{p.closed_at ? String(p.closed_at).slice(0, 10) : '—'}</td>
+                    <td className="px-3 py-2 text-right">{p.status === 'CLOSED' && <button onClick={() => reopenPeriod(p.period_key)} className="text-xs px-2 py-1 border border-[#d4c4a8] rounded hover:bg-[#f5f0e8]">Reopen</button>}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+          <div>
+            <p className="text-sm font-semibold text-[#1a1208] mb-2">Post-close exceptions {periodsExc.length > 0 && <span className="text-rose-600">({periodsExc.length})</span>}</p>
+            {periodsExc.length ? (
+              <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                <table className="w-full text-sm border-collapse">
+                  <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Entry date</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Journal</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Account</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Period</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Flag</th></tr></thead>
+                  <tbody>{periodsExc.map((r: any) => (
+                    <tr key={r.id} className="border-t border-[#f0e8d8]">
+                      <td className="px-3 py-2 whitespace-nowrap text-[#6b5d52]">{r.entry_date}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-[#6b5d52]">{r.journal_ref}</td>
+                      <td className="px-3 py-2"><span className="font-mono text-xs">{r.account_code}</span> {r.account_name}</td>
+                      <td className="px-3 py-2">{r.period_key}</td>
+                      <td className="px-3 py-2">{Number(r.posted_after_close) === 1 ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-50 text-rose-600">POSTED AFTER CLOSE</span> : <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#f0e8d8] text-[#6b5d52]">in closed period</span>}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : <p className="text-sm text-[#6b5d52] italic">No entries dated inside a closed period.</p>}
+          </div>
+        </div>
+      )}
+
+      {acctTab === 'CASHCOUNT' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">Date</label>
+            <input type="date" value={asOfDate} onChange={e => setAsOfDate(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadCashCount} className={AC_BTN}>Load</button>
+          </div>
+          {cashCount && (
+            <div className="rounded-lg border border-[#e8ded0] bg-white p-4 space-y-3">
+              <div className="grid sm:grid-cols-3 gap-3 items-end">
+                <div><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Expected (GL Cash 1000)</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashCount.expected_amount)}</p></div>
+                <div><label className="text-xs text-[#6b5d52] block">Physically counted</label><input type="number" value={ccCounted} onChange={e => setCcCounted(e.target.value)} placeholder="0.00" className="mt-1 w-full text-lg font-bold border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums" /></div>
+                <div><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Variance</p><p className={`text-2xl font-bold mt-1 tabular-nums ${ccCounted !== '' && Math.abs((parseFloat(ccCounted) || 0) - Number(cashCount.expected_amount)) >= 0.01 ? 'text-rose-700' : 'text-emerald-700'}`}>{fmtAmt((parseFloat(ccCounted) || 0) - Number(cashCount.expected_amount))}</p></div>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-[#6b5d52]"><input type="checkbox" checked={ccPostVar} onChange={e => setCcPostVar(e.target.checked)} /> Post a balanced variance journal (Cash 1000 ↔ Cash Over/Short 6010)</label>
+              <div className="flex items-center gap-3">
+                <button onClick={submitCashCount} disabled={ccCounted === ''} className={AC_BTN}>Record count</button>
+                {ccMsg && <span className={`text-sm ${ccMsg.type === 'ok' ? 'text-emerald-700' : 'text-rose-700'}`}>{ccMsg.text}</span>}
+              </div>
+            </div>
+          )}
+          {cashCount && cashCount.counts && cashCount.counts.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Session</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Expected</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Counted</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Variance</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Journal</th></tr></thead>
+                <tbody>{cashCount.counts.map((c: any) => (
+                  <tr key={c.id} className="border-t border-[#f0e8d8]">
+                    <td className="px-3 py-2">{c.session}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(c.expected_amount)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(c.counted_amount)}</td>
+                    <td className={`px-3 py-2 text-right tabular-nums ${Math.abs(Number(c.variance)) >= 0.01 ? 'text-rose-700 font-semibold' : ''}`}>{fmtAmt(c.variance)}</td>
+                    <td className="px-3 py-2 font-mono text-xs text-[#6b5d52]">{c.variance_journal_ref || '—'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+          <p className="text-[11px] text-[#9c8e85]">Expected balance is the GL Cash-in-Hand closing through the chosen date. Posting the variance journal brings the books onto the physical count.</p>
         </div>
       )}
 

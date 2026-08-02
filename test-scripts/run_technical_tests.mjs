@@ -644,6 +644,118 @@ async function testAccounting() {
   } else {
     fail('TC-ACC-CASHBOOK', 'Cash Book responds', `HTTP ${cb.status}`);
   }
+
+  // ── Phase 2: GL-derived statements, GST returns, aging, controls ──────────
+  const r2f = n => Math.round(Number(n || 0) * 100) / 100;
+
+  // TC-ACC-PNL — net_profit identity + reconcile to trial balance (same FY window).
+  const pl = await api('GET', `/api/restaurant/${restaurantId}/accounting/profit-loss?from=${fyStart}&to=${today}`);
+  if (pl.status === 200 && pl.data && 'net_profit' in pl.data) {
+    const idOk = r2f(pl.data.net_profit) === r2f(pl.data.total_revenue - pl.data.total_expense);
+    (idOk ? pass : fail)('TC-ACC-PNL', 'P&L: net_profit = revenue − expense', `rev=${pl.data.total_revenue} exp=${pl.data.total_expense} net=${pl.data.net_profit}`);
+    if (tb.status === 200 && Array.isArray(tb.data)) {
+      let rev = 0, exp = 0;
+      for (const r of tb.data) {
+        const t = String(r.account_type), dr = Number(r.dr_total || 0), cr = Number(r.cr_total || 0);
+        if (t === 'REVENUE') rev += (cr - dr);
+        if (t === 'EXPENSE') exp += (dr - cr);
+      }
+      const recOk = r2f(pl.data.total_revenue) === r2f(rev) && r2f(pl.data.total_expense) === r2f(exp);
+      (recOk ? pass : fail)('TC-ACC-PNL-RECON', 'P&L reconciles with trial balance', `pnl rev/exp=${r2f(pl.data.total_revenue)}/${r2f(pl.data.total_expense)} vs TB=${r2f(rev)}/${r2f(exp)}`);
+    }
+  } else if (pl.status === 403) { skip('TC-ACC-PNL', 'P&L', 'RBAC: need OWNER role'); }
+  else if (pl.status === 404) { fail('TC-ACC-PNL', 'P&L', 'HTTP 404 — accounting route unreachable'); }
+  else { fail('TC-ACC-PNL', 'P&L responds', `HTTP ${pl.status}`); }
+
+  // TC-ACC-BS — Assets = Liabilities + Equity (balanced by construction).
+  const bs = await api('GET', `/api/restaurant/${restaurantId}/accounting/balance-sheet?asOf=${today}`);
+  if (bs.status === 200 && bs.data && 'balanced' in bs.data) {
+    const idOk = r2f(bs.data.total_assets) === r2f(bs.data.total_liabilities + bs.data.total_equity);
+    (idOk && bs.data.balanced ? pass : fail)('TC-ACC-BS', 'Balance Sheet balances (A = L + E)', `A=${bs.data.total_assets} L=${bs.data.total_liabilities} E=${bs.data.total_equity} diff=${bs.data.diff}`);
+  } else if (bs.status === 403) { skip('TC-ACC-BS', 'Balance Sheet', 'RBAC: need OWNER role'); }
+  else if (bs.status === 404) { fail('TC-ACC-BS', 'Balance Sheet', 'HTTP 404 — accounting route unreachable'); }
+  else { fail('TC-ACC-BS', 'Balance Sheet responds', `HTTP ${bs.status}`); }
+
+  // TC-ACC-CASHFLOW — buckets partition closing − opening.
+  const cf = await api('GET', `/api/restaurant/${restaurantId}/accounting/cash-flow-gl?from=${fyStart}&to=${today}`);
+  if (cf.status === 200 && cf.data && 'net_change' in cf.data) {
+    const idOk = r2f(cf.data.operating.total + cf.data.investing.total + cf.data.financing.total) === r2f(cf.data.closing_balance - cf.data.opening_balance);
+    (idOk && cf.data.reconciled ? pass : fail)('TC-ACC-CASHFLOW', 'Cash Flow buckets = closing − opening', `net=${cf.data.net_change} recon_diff=${cf.data.recon_diff}`);
+  } else if (cf.status === 403) { skip('TC-ACC-CASHFLOW', 'Cash Flow', 'RBAC: need OWNER role'); }
+  else if (cf.status === 404) { fail('TC-ACC-CASHFLOW', 'Cash Flow', 'HTTP 404 — accounting route unreachable'); }
+  else { fail('TC-ACC-CASHFLOW', 'Cash Flow responds', `HTTP ${cf.status}`); }
+
+  // TC-ACC-GSTR1 / GSTR3B — reconcile to gst-outstanding over the same window.
+  const gso2 = await api('GET', `/api/restaurant/${restaurantId}/accounting/gst-outstanding?from=${fyStart}&to=${today}`);
+  const g1 = await api('GET', `/api/restaurant/${restaurantId}/accounting/gst/gstr1?from=${fyStart}&to=${today}`);
+  if (g1.status === 200 && g1.data?.totals && gso2.status === 200 && gso2.data) {
+    const ok1 = r2f(g1.data.totals.output_gst) === r2f(gso2.data.output_gst);
+    (ok1 ? pass : fail)('TC-ACC-GSTR1', 'GSTR-1 output GST reconciles with GST Outstanding', `gstr1=${r2f(g1.data.totals.output_gst)} vs out=${r2f(gso2.data.output_gst)}`);
+  } else if (g1.status === 403) { skip('TC-ACC-GSTR1', 'GSTR-1', 'RBAC: need OWNER role'); }
+  else if (g1.status === 404) { fail('TC-ACC-GSTR1', 'GSTR-1', 'HTTP 404 — accounting route unreachable'); }
+  else { fail('TC-ACC-GSTR1', 'GSTR-1 responds', `HTTP ${g1.status}`); }
+  const g3 = await api('GET', `/api/restaurant/${restaurantId}/accounting/gst/gstr3b?from=${fyStart}&to=${today}`);
+  if (g3.status === 200 && g3.data && g3.data.itc_available && gso2.status === 200 && gso2.data) {
+    const okO = r2f(g3.data.output_tax) === r2f(gso2.data.output_gst);
+    const okI = r2f(g3.data.itc_available.total) === r2f(gso2.data.input_tax_credit);
+    const okN = r2f(g3.data.net_tax_payable) === r2f(gso2.data.net_outstanding);
+    (okO && okI && okN ? pass : fail)('TC-ACC-GSTR3B', 'GSTR-3B output/ITC/net reconcile with GST Outstanding', `3b out/itc/net=${r2f(g3.data.output_tax)}/${r2f(g3.data.itc_available.total)}/${r2f(g3.data.net_tax_payable)}`);
+  } else if (g3.status === 403) { skip('TC-ACC-GSTR3B', 'GSTR-3B', 'RBAC: need OWNER role'); }
+  else if (g3.status === 404) { fail('TC-ACC-GSTR3B', 'GSTR-3B', 'HTTP 404 — accounting route unreachable'); }
+  else { fail('TC-ACC-GSTR3B', 'GSTR-3B responds', `HTTP ${g3.status}`); }
+
+  // TC-ACC-AGING-AR/AP — bucket total reconciles to control-account net (all-time TB).
+  const tbAll2 = await api('GET', `/api/restaurant/${restaurantId}/accounting/trial-balance?from=2000-01-01&to=${today}`);
+  for (const t of ['AR', 'AP']) {
+    const ag = await api('GET', `/api/restaurant/${restaurantId}/accounting/aging?type=${t}&asOf=${today}`);
+    if (ag.status === 200 && ag.data && ag.data.buckets) {
+      const b = ag.data.buckets;
+      const sum = r2f(b.d0_30 + b.d31_60 + b.d61_90 + b.d90_plus - (ag.data.unapplied || 0));
+      const idOk = sum === r2f(ag.data.total_open);
+      let recOk = true, tbNet = 'n/a';
+      if (tbAll2.status === 200 && Array.isArray(tbAll2.data)) {
+        const codes = t === 'AP' ? ['2000'] : ['1100', '1110'];
+        let net = 0;
+        for (const r of tbAll2.data) {
+          if (!codes.includes(String(r.account_code))) continue;
+          const dr = Number(r.dr_total || 0), cr = Number(r.cr_total || 0);
+          net += t === 'AP' ? (cr - dr) : (dr - cr);
+        }
+        tbNet = r2f(net);
+        recOk = r2f(ag.data.total_open) === tbNet;
+      }
+      (idOk && recOk ? pass : fail)(`TC-ACC-AGING-${t}`, `${t} aging total reconciles to control-account net`, `total_open=${r2f(ag.data.total_open)} tbNet=${tbNet}`);
+    } else if (ag.status === 403) { skip(`TC-ACC-AGING-${t}`, `${t} aging`, 'RBAC: need OWNER role'); }
+    else if (ag.status === 404) { fail(`TC-ACC-AGING-${t}`, `${t} aging`, 'HTTP 404 — accounting route unreachable'); }
+    else { fail(`TC-ACC-AGING-${t}`, `${t} aging responds`, `HTTP ${ag.status}`); }
+  }
+
+  // TC-ACC-PERIODS — periods + exceptions endpoints respond.
+  const pr = await api('GET', `/api/restaurant/${restaurantId}/accounting/periods`);
+  const pex = await api('GET', `/api/restaurant/${restaurantId}/accounting/periods/exceptions`);
+  if (pr.status === 200 && Array.isArray(pr.data) && pex.status === 200 && Array.isArray(pex.data)) {
+    pass('TC-ACC-PERIODS', `Periods + exceptions endpoints respond (${pr.data.length} periods, ${pex.data.length} exceptions)`);
+  } else if (pr.status === 403) { skip('TC-ACC-PERIODS', 'Periods', 'RBAC: need OWNER role'); }
+  else if (pr.status === 404) { fail('TC-ACC-PERIODS', 'Periods', 'HTTP 404 — accounting route unreachable'); }
+  else { fail('TC-ACC-PERIODS', 'Periods respond', `HTTP ${pr.status} / ${pex.status}`); }
+
+  // TC-ACC-CASHCOUNT — GET expected, POST a zero-variance count (no GL mutation).
+  const ccg = await api('GET', `/api/restaurant/${restaurantId}/accounting/cash-count?date=${today}`);
+  if (ccg.status === 200 && ccg.data && 'expected_amount' in ccg.data) {
+    const post = await api('POST', `/api/restaurant/${restaurantId}/accounting/cash-count`, { count_date: today, session: 'CLOSE', counted_amount: ccg.data.expected_amount, post_variance: false });
+    const okShape = post.status === 201 && post.data && r2f(post.data.variance) === 0;
+    (okShape ? pass : fail)('TC-ACC-CASHCOUNT', 'Cash count records; variance = counted − expected', `expected=${ccg.data.expected_amount} variance=${post.data?.variance}`);
+  } else if (ccg.status === 403) { skip('TC-ACC-CASHCOUNT', 'Cash count', 'RBAC: need OWNER role'); }
+  else if (ccg.status === 404) { fail('TC-ACC-CASHCOUNT', 'Cash count', 'HTTP 404 — accounting route unreachable'); }
+  else { fail('TC-ACC-CASHCOUNT', 'Cash count responds', `HTTP ${ccg.status}`); }
+
+  // TC-ACC-BANKREC — reconciliation loads (book balance + bank lines).
+  const brk = await api('GET', `/api/restaurant/${restaurantId}/accounting/bank-reconciliation?account=1010&from=${fyStart}&to=${today}`);
+  if (brk.status === 200 && brk.data && 'book_balance' in brk.data && Array.isArray(brk.data.lines)) {
+    pass('TC-ACC-BANKREC', `Bank reconciliation loads (book=${r2f(brk.data.book_balance)}, ${brk.data.lines.length} lines)`);
+  } else if (brk.status === 403) { skip('TC-ACC-BANKREC', 'Bank reconciliation', 'RBAC: need OWNER role'); }
+  else if (brk.status === 404) { fail('TC-ACC-BANKREC', 'Bank reconciliation', 'HTTP 404 — accounting route unreachable'); }
+  else { fail('TC-ACC-BANKREC', 'Bank reconciliation responds', `HTTP ${brk.status}`); }
 }
 
 // ── Spa tests ──────────────────────────────────────────────────────────────
