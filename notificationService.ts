@@ -973,6 +973,47 @@ export function buildNotificationContent(
       };
     }
 
+    case 'CHECKLIST_ASSIGNED': {
+      const tpl = data.templateName || 'Checklist';
+      const who = data.assignedUser || (data.assignedRole ? String(data.assignedRole).replace(/_/g, ' ').toLowerCase() : 'the team');
+      const facility = data.facility || '';
+      return {
+        subject: `Checklist assigned: ${tpl}${facility ? ` — ${facility}` : ''}`,
+        text:
+          `A checklist is assigned to ${who} at ${r}.\n\n` +
+          `Checklist: ${tpl}\n${facility ? `For: ${facility}\n` : ''}${data.trigger ? `Trigger: ${data.trigger}\n` : ''}` +
+          `\nOpen "My Checklist" to complete it.\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">New checklist assigned</h2>` +
+          `<p>A checklist is assigned to <strong>${who}</strong> at <strong>${r}</strong>.</p>` +
+          `<table style="margin:12px 0"><tr><td><b>Checklist:</b></td><td>${tpl}</td></tr>` +
+          (facility ? `<tr><td><b>For:</b></td><td>${facility}</td></tr>` : '') +
+          `</table><p>Open <strong>My Checklist</strong> to complete it.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p></div>`,
+      };
+    }
+
+    case 'CHECKLIST_COMPLETED': {
+      const tpl = data.templateName || 'Checklist';
+      const facility = data.facility || '';
+      return {
+        subject: `Checklist completed: ${tpl}${facility ? ` — ${facility}` : ''}`,
+        text:
+          `A checklist was completed at ${r}.\n\n` +
+          `Checklist: ${tpl}\n${facility ? `For: ${facility}\n` : ''}${data.completedBy ? `By: ${data.completedBy}\n` : ''}` +
+          `\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#16a34a;margin-top:0">Checklist completed ✓</h2>` +
+          `<p>A checklist was completed at <strong>${r}</strong>.</p>` +
+          `<table style="margin:12px 0"><tr><td><b>Checklist:</b></td><td>${tpl}</td></tr>` +
+          (facility ? `<tr><td><b>For:</b></td><td>${facility}</td></tr>` : '') +
+          (data.completedBy ? `<tr><td><b>By:</b></td><td>${data.completedBy}</td></tr>` : '') +
+          `</table><p style="color:#6b7280;font-size:12px">— ${r}</p></div>`,
+      };
+    }
+
     case 'BOOKING_NO_SHOW': {
       const guest = data.guestName || 'Guest';
       const checkIn = data.checkIn ? new Date(String(data.checkIn)).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'expected date';

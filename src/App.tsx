@@ -8,6 +8,7 @@ import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { HousekeepingModule } from './Housekeeping';
 import { ChecklistTemplates } from './ChecklistTemplates';
+import { MyChecklists } from './MyChecklists';
 import { ObjectDetail } from './components/ObjectDetail';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { StaffPayrollGrid } from './StaffPayroll';
@@ -8801,6 +8802,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'EVENTS_HOUSEKEEPING'                      // event-scoped cleaning checklist under the Events nav
     | 'CHECKLISTS'                               // owner config — hotel/room checklist templates (PMS nav)
     | 'EVENTS_CHECKLISTS'                        // owner config — event checklist templates (Events & Convention nav)
+    | 'MY_CHECKLIST'                             // personal — checklist instances assigned to me / my role
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
     | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
     | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
@@ -12758,7 +12760,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Full(3) for any role that doesn't have them configured yet. This prevents
         // an owner from accidentally revoking access simply by opening the matrix
         // and saving before explicitly setting a level for these new tabs.
-        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS'];
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'MY_CHECKLIST'];
         for (const roleId of Object.keys(raw)) {
           for (const tab of NEWLY_ADDED) {
             if (!(tab in (raw[roleId] || {}))) raw[roleId] = { ...(raw[roleId] || {}), [tab]: 3 };
@@ -13852,7 +13854,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', EVENTS_HOUSEKEEPING: 'Cleaning Checklist', CHECKLISTS: 'Checklist Templates', EVENTS_CHECKLISTS: 'Checklist Templates', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', EVENTS_HOUSEKEEPING: 'Cleaning Checklist', CHECKLISTS: 'Checklist Templates', EVENTS_CHECKLISTS: 'Checklist Templates', MY_CHECKLIST: 'My Checklist', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             SPA_CALENDAR: 'Appt. Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages', SPA_REPORTS: 'Spa Reports', SPA_BILLING: 'Invoices & Payments', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Spa Page Settings',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
@@ -13914,6 +13916,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         ];
 
         const modules: NavModule[] = [
+          {
+            // Personal work queue — every staff member's assigned checklists
+            // (instances), regardless of module. Visible to all so front desk /
+            // housekeeping / maintenance always land on what's theirs to do.
+            id: 'MY_WORK', label: 'My Checklist', icon: <CheckCircle2 size={16} />,
+            visible: true,
+            tabs: [{ id: 'MY_CHECKLIST', label: 'My Checklist' }],
+          },
           {
             // Single-mode tenants have an unambiguous dashboardMode, so the
             // operational trio lives in its own Overview module. BOTH-mode
@@ -14091,6 +14101,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           if (id === 'CHECKLISTS') return isOwnerOrAdmin;
           // Event checklist config — owner-only, and only when Events is enabled.
           if (id === 'EVENTS_CHECKLISTS') return isOwnerOrAdmin && isEventsEnabled;
+          // My Checklist is the personal work queue — visible to every staff member.
+          if (id === 'MY_CHECKLIST') return true;
           // Finance tabs (PROCUREMENT, EXPENSE_JOURNAL) were introduced after
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
@@ -14772,6 +14784,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="p-1"><HousekeepingModule restaurantId={restaurantId} token={token!} /></div>
       ) : activeTab === 'EVENTS_HOUSEKEEPING' && isEventsEnabled ? (
         <div className="p-1"><HousekeepingModule restaurantId={restaurantId} token={token!} scope="EVENT" /></div>
+      ) : activeTab === 'MY_CHECKLIST' ? (
+        <div className="p-1"><MyChecklists restaurantId={restaurantId} token={token!} /></div>
       ) : activeTab === 'CHECKLISTS' ? (
         <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="ROOM" /></div>
       ) : activeTab === 'EVENTS_CHECKLISTS' && isEventsEnabled ? (

@@ -4312,6 +4312,18 @@ function _glAccountForEntryType(entryType: string): { code: string; name: string
   return { code: '4000', name: 'Room Revenue' };
 }
 
+// A checklist INSTANCE (job) is owned by a responsible team, derived from the
+// template's trigger so nothing needs hand-assignment: arrival prep → Front Desk;
+// cleaning / daily / mid-stay / event handover → Housekeeping; manual/inspection
+// → Maintenance. An explicit override (o.assigned_to_role) always wins.
+function _checklistAssigneeRole(trigger: string, override?: string | null): string {
+  if (override) return String(override).toUpperCase();
+  const t = String(trigger || '').toUpperCase();
+  if (t === 'CHECK_IN') return 'FRONT_DESK';
+  if (t === 'MANUAL') return 'MAINTENANCE';
+  return 'HOUSEKEEPING'; // CHECK_OUT, DAILY, MID_STAY, EVENT_COMPLETE
+}
+
 function _glAccountForExpenseCategory(category: string): { code: string; name: string } {
   const c = String(category || '').toUpperCase();
   if (/FOOD|F&B|BEVER|GROCERY|PROVISION|CONSUMABLE/.test(c)) return { code: '5000', name: 'Cost of F&B Consumed' };
@@ -21623,9 +21635,15 @@ ${data.tenant.name}`;
     // execution spine above. New snapshot columns on jobs; blocks_release DEFAULT 1
     // so every legacy OPEN job keeps gating room release exactly as before.
     for (const col of ['template_id TEXT', 'template_name TEXT', 'category_id TEXT',
-      'trigger_event TEXT', 'blocks_release INT DEFAULT 1', 'dedupe_key TEXT']) {
+      'trigger_event TEXT', 'blocks_release INT DEFAULT 1', 'dedupe_key TEXT',
+      // Assignment workflow (My Checklist): DRAFT → ASSIGNED → COMPLETE. status
+      // (OPEN/DONE) stays the release-gating truth; workflow_state is the richer
+      // lifecycle + who owns it (a specific user and/or a responsible role).
+      "workflow_state TEXT DEFAULT 'ASSIGNED'", 'assigned_to_user TEXT',
+      'assigned_to_role TEXT', 'assigned_at TIMESTAMP', 'assigned_by TEXT']) {
       await db.exec(`ALTER TABLE housekeeping_jobs ADD COLUMN IF NOT EXISTS ${col}`).catch(() => {});
     }
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_assignee ON housekeeping_jobs(assigned_to_role, assigned_to_user, workflow_state)`).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_block ON housekeeping_jobs(facility_id, status, blocks_release)`).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_dedupe ON housekeeping_jobs(dedupe_key, template_id)`).catch(() => {});
     await db.exec(`CREATE TABLE IF NOT EXISTS checklist_categories (
@@ -21732,9 +21750,13 @@ ${data.tenant.name}`;
     if (dupSql) { const dup: any = await db.get(dupSql, dupParams).catch(() => null); if (dup) return dup.id; }
     const steps: any[] = await db.query("SELECT label, is_mandatory, sort_order FROM checklist_template_steps WHERE template_id = ? AND is_active = 1 ORDER BY sort_order, id", [tpl.id]).catch(() => []);
     const jid = mkHkId('HKJ');
+    // Responsible team is derived from the trigger so owners never have to assign
+    // by hand: arrival prep → Front Desk, cleaning/daily/mid-stay/event → Housekeeping,
+    // manual/inspection → Maintenance. Reassignable later via the assign endpoint.
+    const asgRole = _checklistAssigneeRole(o.trigger, o.assigned_to_role);
     await db.run(
-      "INSERT INTO housekeeping_jobs (id, facility_type, facility_id, facility_label, source_ref, guest_label, status, template_id, template_name, category_id, trigger_event, blocks_release, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)",
-      [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref || null, o.guest_label || null, tpl.id, tpl.name, tpl.category_id || null, o.trigger, tpl.blocks_release ? 1 : 0, o.dedupe_key || null]);
+      "INSERT INTO housekeeping_jobs (id, facility_type, facility_id, facility_label, source_ref, guest_label, status, template_id, template_name, category_id, trigger_event, blocks_release, dedupe_key, workflow_state, assigned_to_role, assigned_to_user, assigned_at) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, 'ASSIGNED', ?, ?, CURRENT_TIMESTAMP)",
+      [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref || null, o.guest_label || null, tpl.id, tpl.name, tpl.category_id || null, o.trigger, tpl.blocks_release ? 1 : 0, o.dedupe_key || null, asgRole, o.assigned_to_user || null]);
     for (const s of steps) {
       await db.run("INSERT INTO housekeeping_job_tasks (id, job_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
         [mkHkId('HKJT'), jid, s.label, s.is_mandatory, s.sort_order]);
@@ -21744,7 +21766,7 @@ ${data.tenant.name}`;
 
   // Raise all applicable checklist jobs for a trigger (one per template). Never
   // throws — the caller (checkout/checkin/complete/cron) is never blocked.
-  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null }): Promise<string[]> => {
+  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null; assigned_to_role?: string | null; assigned_to_user?: string | null }): Promise<string[]> => {
     try {
       await ensureHousekeepingTables(db);
       let templates: any[];
@@ -21935,9 +21957,10 @@ ${data.tenant.name}`;
       if (job.status !== 'OPEN') return res.json({ success: true, already: true });
       const pend: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_job_tasks WHERE job_id = ? AND is_mandatory = 1 AND is_done = 0", [req.params.jid]);
       if (Number(pend?.c || 0) > 0) return res.status(400).json({ error: `${pend.c} mandatory task(s) still pending. Complete them before closing.`, pending_mandatory: pend.c });
-      await db.run("UPDATE housekeeping_jobs SET status = 'DONE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [hkActor(req), req.params.jid]);
+      await db.run("UPDATE housekeeping_jobs SET status = 'DONE', workflow_state = 'COMPLETE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [hkActor(req), req.params.jid]);
       await releaseFacility(db, job);
       await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: 'COMPLETED', summary: `Completed "${job.template_name || 'checklist'}" for ${job.facility_label || job.facility_type} by ${hkActor(req)}`, after: { status: 'DONE' } });
+      try { triggerNotification(req.params.id, 'CHECKLIST_COMPLETED', { jobId: req.params.jid, templateName: job.template_name || 'checklist', facility: job.facility_label || job.facility_type, completedBy: hkActor(req) }).catch(() => {}); } catch { /* non-fatal */ }
       res.json({ success: true, released: job.facility_type });
     } catch (err: any) { res.status(500).json({ error: "Failed to complete cleaning" }); }
   });
@@ -21950,7 +21973,7 @@ ${data.tenant.name}`;
       if (!job) return res.status(404).json({ error: "Job not found" });
       if (job.status !== 'OPEN') return res.json({ success: true, already: true });
       const ovReason = String(req.body?.reason || '').trim() || 'Override';
-      await db.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE id = ?",
+      await db.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', workflow_state = 'COMPLETE', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE id = ?",
         [hkActor(req), ovReason, req.params.jid]);
       await releaseFacility(db, job);
       await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: 'OVERRIDDEN', summary: `Overrode "${job.template_name || 'checklist'}" for ${job.facility_label || job.facility_type} — ${ovReason}`, after: { status: 'OVERRIDDEN', reason: ovReason } });
@@ -22238,8 +22261,13 @@ ${data.tenant.name}`;
         guest_label: b.guest_label || null,
         trigger: 'MANUAL',
         template_ids,
+        assigned_to_role: b.assigned_to_role ? String(b.assigned_to_role).toUpperCase() : null,
+        assigned_to_user: b.assigned_to_user || null,
       });
-      for (const jid of jobIds) await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: jid, action: 'CREATED', summary: `Manually started a checklist for ${b.facility_label || ft} by ${hkActor(req)}` });
+      for (const jid of jobIds) {
+        await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: jid, action: 'CREATED', summary: `Manually started a checklist for ${b.facility_label || ft} by ${hkActor(req)}` });
+        try { triggerNotification(req.params.id, 'CHECKLIST_ASSIGNED', { jobId: jid, templateName: null, facility: b.facility_label || ft, trigger: 'MANUAL', assignedRole: b.assigned_to_role ? String(b.assigned_to_role).toUpperCase() : 'MAINTENANCE', assignedUser: b.assigned_to_user || null }).catch(() => {}); } catch { /* non-fatal */ }
+      }
       res.status(201).json({ job_ids: jobIds, count: jobIds.length });
     } catch (err: any) { res.status(500).json({ error: "Failed to start checklist" }); }
   });
@@ -22259,6 +22287,109 @@ ${data.tenant.name}`;
       const raised = await runTenantScheduledChecklists(db, { isHotel, isEvents, ymd });
       res.json({ raised, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to run scheduled checklists' }); }
+  });
+
+  // ── My Checklist ────────────────────────────────────────────────────────────
+  // A checklist INSTANCE (job) is owned by a responsible role and, optionally, a
+  // specific user. "My Checklist" is the pull view: every staff member sees the
+  // checklists assigned to them or their role, and can tick tasks + complete them
+  // without needing the HOUSEKEEPING tab. Managers see the whole team's queue.
+  const _checklistOwns = (req: AuthRequest, job: any): boolean => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (HK_MANAGER_ROLES.includes(role)) return true;
+    const me = String(req.user?.email || req.user?.id || '').toLowerCase();
+    if (job.assigned_to_user && String(job.assigned_to_user).toLowerCase() === me) return true;
+    if (job.assigned_to_role && String(job.assigned_to_role).toUpperCase() === role) return true;
+    return false;
+  };
+
+  app.get("/api/restaurant/:id/checklists/my", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const role = String(req.user?.role || '').toUpperCase();
+      const me = String(req.user?.email || req.user?.id || '');
+      const isMgr = HK_MANAGER_ROLES.includes(role);
+      const state = String(req.query.state || 'ASSIGNED').toUpperCase(); // ASSIGNED | COMPLETE | ALL
+      const params: any[] = [];
+      let where = "status IN ('OPEN','DONE','OVERRIDDEN')";
+      if (!isMgr) {
+        where += " AND (LOWER(COALESCE(assigned_to_user,'')) = LOWER(?) OR UPPER(COALESCE(assigned_to_role,'')) = ?)";
+        params.push(me, role);
+      }
+      if (state === 'ASSIGNED') where += " AND workflow_state = 'ASSIGNED'";
+      else if (state === 'COMPLETE') where += " AND workflow_state = 'COMPLETE'";
+      const jobs: any[] = await db.query(
+        `SELECT id, facility_type, facility_id, facility_label, source_ref, guest_label, status, workflow_state,
+                template_name, category_id, trigger_event, blocks_release, assigned_to_role, assigned_to_user,
+                assigned_at, created_at, completed_at, completed_by
+           FROM housekeeping_jobs WHERE ${where}
+          ORDER BY (workflow_state = 'ASSIGNED') DESC, created_at DESC LIMIT 300`,
+        params
+      ).catch(() => []);
+      for (const j of (jobs || [])) {
+        const t: any[] = await db.query("SELECT id, label, is_mandatory, is_done, sort_order FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id", [j.id]).catch(() => []);
+        j.tasks = t;
+        j.task_count = t.length;
+        j.done_count = t.filter((x: any) => Number(x.is_done) === 1).length;
+        j.pending_mandatory = t.filter((x: any) => Number(x.is_mandatory) === 1 && Number(x.is_done) === 0).length;
+      }
+      res.json({ role, is_manager: isMgr, state, jobs: jobs || [] });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to load my checklists' }); }
+  });
+
+  app.patch("/api/restaurant/:id/checklists/my/jobs/:jid/tasks/:tid", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
+      if (!job) return res.status(404).json({ error: 'Checklist not found' });
+      if (!_checklistOwns(req, job)) return res.status(403).json({ error: 'This checklist is not assigned to you.' });
+      if (job.status !== 'OPEN') return res.status(409).json({ error: 'This checklist is already closed.' });
+      const done = req.body?.is_done ? 1 : 0;
+      const actor = req.user?.email || req.user?.id || null;
+      await db.run("UPDATE housekeeping_job_tasks SET is_done = ?, done_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, done_by = ? WHERE id = ? AND job_id = ?",
+        [done, done, done ? actor : null, req.params.tid, req.params.jid]);
+      if (!job.started_at) await db.run("UPDATE housekeeping_jobs SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL", [req.params.jid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to update task' }); }
+  });
+
+  app.post("/api/restaurant/:id/checklists/my/jobs/:jid/complete", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
+      if (!job) return res.status(404).json({ error: 'Checklist not found' });
+      if (!_checklistOwns(req, job)) return res.status(403).json({ error: 'This checklist is not assigned to you.' });
+      if (job.status !== 'OPEN') return res.json({ success: true, already: true });
+      const pend: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_job_tasks WHERE job_id = ? AND is_mandatory = 1 AND is_done = 0", [req.params.jid]);
+      if (Number(pend?.c || 0) > 0) return res.status(400).json({ error: `${pend.c} mandatory task(s) still pending.`, pending_mandatory: pend.c });
+      const actor = req.user?.email || req.user?.id || null;
+      await db.run("UPDATE housekeeping_jobs SET status = 'DONE', workflow_state = 'COMPLETE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [actor, req.params.jid]);
+      await releaseFacility(db, job);
+      await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: 'COMPLETED', summary: `Completed "${job.template_name || 'checklist'}" for ${job.facility_label || job.facility_type}`, after: { status: 'DONE' } });
+      try { triggerNotification(req.params.id, 'CHECKLIST_COMPLETED', { jobId: req.params.jid, templateName: job.template_name || 'checklist', facility: job.facility_label || job.facility_type, completedBy: actor }).catch(() => {}); } catch { /* non-fatal */ }
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to complete checklist' }); }
+  });
+
+  // Assign / reassign a checklist instance to a role and/or a specific user, or park
+  // it as a DRAFT (manager/owner only). Notifies the assignee when it goes ASSIGNED.
+  app.post("/api/restaurant/:id/checklists/jobs/:jid/assign", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Only a manager or owner can assign checklists.' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
+      if (!job) return res.status(404).json({ error: 'Checklist not found' });
+      const role = req.body?.assigned_to_role ? String(req.body.assigned_to_role).toUpperCase() : job.assigned_to_role;
+      const user = req.body?.assigned_to_user !== undefined ? (String(req.body.assigned_to_user || '') || null) : job.assigned_to_user;
+      const wantDraft = String(req.body?.workflow_state || '').toUpperCase() === 'DRAFT';
+      const newState = wantDraft ? 'DRAFT' : 'ASSIGNED';
+      await db.run("UPDATE housekeeping_jobs SET assigned_to_role = ?, assigned_to_user = ?, workflow_state = ?, assigned_at = CURRENT_TIMESTAMP, assigned_by = ? WHERE id = ?",
+        [role || null, user || null, newState, req.user?.email || req.user?.id || null, req.params.jid]);
+      await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: newState === 'DRAFT' ? 'DRAFTED' : 'ASSIGNED', summary: `${newState === 'DRAFT' ? 'Parked as draft' : `Assigned to ${user || role || 'team'}`} — "${job.template_name || 'checklist'}"` });
+      if (newState === 'ASSIGNED') { try { triggerNotification(req.params.id, 'CHECKLIST_ASSIGNED', { jobId: req.params.jid, templateName: job.template_name || 'checklist', facility: job.facility_label || job.facility_type, trigger: job.trigger_event, assignedRole: role, assignedUser: user }).catch(() => {}); } catch { /* non-fatal */ } }
+      res.json({ success: true, assigned_to_role: role, assigned_to_user: user, workflow_state: newState });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to assign checklist' }); }
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -45286,7 +45417,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'booking-audit-exhaustive-folio-link',
+    commit_marker: 'my-checklist-assignment-workflow',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
