@@ -28,6 +28,15 @@
 > 5. **Run the full QA suite** (`qa_folio_reconciliation`, `qa_revenue_dedup`,
 >    `qa_gst_exempt`, `qa_restaurant_bill`, `qa_fnb_e2e`, `qa_e2e_tariff_calculations`)
 >    on any folio/billing change, and add a new `qa_*.mjs` for each new flow.
+> 6. **Always run the technical test suite before shipping.** Every new feature,
+>    endpoint, or role is not "done" until `node test-scripts/run_technical_tests.mjs`
+>    (or `run-tests.bat` at the repo root, which prompts for owner creds) passes
+>    with **0 failures** against the target tenant. This is in addition to adding
+>    a test case for the new functionality itself (see the rule below): update the
+>    suite AND run it. The suite is self-cleaning — its test bookings/journals are
+>    cancelled or reversed — so it is safe to run repeatedly against a live tenant.
+>    If credentials aren't available to you, say so and give the user the exact
+>    command; never imply the suite passed when it wasn't run.
 
 ## Core Value Proposition
 A comprehensive, multi-tenant **restaurant + hospitality (hotel)** management ecosystem focusing on frictionless customer/guest ordering, real-time kitchen coordination, GST-ready billing, and deep owner analytics.

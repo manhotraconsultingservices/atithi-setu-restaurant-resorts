@@ -575,6 +575,16 @@ async function testAccounting() {
   });
   if (mjRes.status === 201 && mjRes.data.journal_ref) {
     pass('TC-ACC-004', `Manual journal posted (${mjRes.data.journal_ref})`);
+    // Self-clean: post the exact reversal so the suite leaves the real books
+    // untouched (net-zero) and later reconciliation reads aren't skewed by it.
+    await api('POST', `/api/restaurant/${restaurantId}/accounting/journal-entries`, {
+      entry_date: today,
+      narration: `Auto-reversal of ${mjRes.data.journal_ref} — automated test suite`,
+      lines: [
+        { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 0,   cr_amount: 100 },
+        { account_code: '4900', account_name: 'Other Income',  dr_amount: 100, cr_amount: 0 },
+      ]
+    });
   } else if (mjRes.status === 403) {
     skip('TC-ACC-004', 'Manual journal post', 'RBAC: need OWNER role');
   } else if (mjRes.status === 404) {
@@ -631,8 +641,10 @@ async function testAccounting() {
     // today — both must be the identical GL sum, computed by independent paths.
     const tbAll = await api('GET', `/api/restaurant/${restaurantId}/accounting/trial-balance?from=2000-01-01&to=${today}`);
     if (tbAll.status === 200 && Array.isArray(tbAll.data)) {
-      const row1000 = tbAll.data.find(r => String(r.account_code) === '1000');
-      const tbCash = row1000 ? Number(row1000.dr_total || 0) - Number(row1000.cr_total || 0) : 0;
+      // Sum ALL rows for code 1000 — trial-balance groups by (code, name), so the
+      // same account can appear as multiple rows if the account_name ever varied.
+      const tbCash = tbAll.data.filter(r => String(r.account_code) === '1000')
+        .reduce((s, r) => s + Number(r.dr_total || 0) - Number(r.cr_total || 0), 0);
       const reconOk = r2(cih.closing) === r2(tbCash);
       (reconOk ? pass : fail)('TC-ACC-CASHBOOK-RECON', 'Cash Book cash-in-hand reconciles with trial balance acct 1000',
         `cashbook closing=${r2(cih.closing)} vs TB 1000=${r2(tbCash)}`);
@@ -653,9 +665,12 @@ async function testAccounting() {
   if (pl.status === 200 && pl.data && 'net_profit' in pl.data) {
     const idOk = r2f(pl.data.net_profit) === r2f(pl.data.total_revenue - pl.data.total_expense);
     (idOk ? pass : fail)('TC-ACC-PNL', 'P&L: net_profit = revenue − expense', `rev=${pl.data.total_revenue} exp=${pl.data.total_expense} net=${pl.data.net_profit}`);
-    if (tb.status === 200 && Array.isArray(tb.data)) {
+    // Reconcile against a FRESH trial balance over the same window (not the one
+    // captured earlier in this run, which predates the suite's own postings).
+    const tbP = await api('GET', `/api/restaurant/${restaurantId}/accounting/trial-balance?from=${fyStart}&to=${today}`);
+    if (tbP.status === 200 && Array.isArray(tbP.data)) {
       let rev = 0, exp = 0;
-      for (const r of tb.data) {
+      for (const r of tbP.data) {
         const t = String(r.account_type), dr = Number(r.dr_total || 0), cr = Number(r.cr_total || 0);
         if (t === 'REVENUE') rev += (cr - dr);
         if (t === 'EXPENSE') exp += (dr - cr);
