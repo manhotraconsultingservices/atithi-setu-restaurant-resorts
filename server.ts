@@ -21644,6 +21644,9 @@ ${data.tenant.name}`;
       await db.exec(`ALTER TABLE housekeeping_jobs ADD COLUMN IF NOT EXISTS ${col}`).catch(() => {});
     }
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_assignee ON housekeeping_jobs(assigned_to_role, assigned_to_user, workflow_state)`).catch(() => {});
+    // Per-task free-text remark (e.g. "minibar restocked, 2 waters short") — lets
+    // staff record observations against each checklist step for quality tracking.
+    await db.exec(`ALTER TABLE housekeeping_job_tasks ADD COLUMN IF NOT EXISTS remark TEXT`).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_block ON housekeeping_jobs(facility_id, status, blocks_release)`).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_dedupe ON housekeeping_jobs(dedupe_key, template_id)`).catch(() => {});
     await db.exec(`CREATE TABLE IF NOT EXISTS checklist_categories (
@@ -22328,7 +22331,7 @@ ${data.tenant.name}`;
         params
       ).catch(() => []);
       for (const j of (jobs || [])) {
-        const t: any[] = await db.query("SELECT id, label, is_mandatory, is_done, sort_order FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id", [j.id]).catch(() => []);
+        const t: any[] = await db.query("SELECT id, label, is_mandatory, is_done, remark, done_by, done_at, sort_order FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id", [j.id]).catch(() => []);
         j.tasks = t;
         j.task_count = t.length;
         j.done_count = t.filter((x: any) => Number(x.is_done) === 1).length;
@@ -22345,10 +22348,16 @@ ${data.tenant.name}`;
       if (!job) return res.status(404).json({ error: 'Checklist not found' });
       if (!_checklistOwns(req, job)) return res.status(403).json({ error: 'This checklist is not assigned to you.' });
       if (job.status !== 'OPEN') return res.status(409).json({ error: 'This checklist is already closed.' });
-      const done = req.body?.is_done ? 1 : 0;
       const actor = req.user?.email || req.user?.id || null;
-      await db.run("UPDATE housekeeping_job_tasks SET is_done = ?, done_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, done_by = ? WHERE id = ? AND job_id = ?",
-        [done, done, done ? actor : null, req.params.tid, req.params.jid]);
+      // Body may carry is_done (tick/untick) and/or remark (free-text note). Both optional.
+      if (req.body?.is_done !== undefined) {
+        const done = req.body.is_done ? 1 : 0;
+        await db.run("UPDATE housekeeping_job_tasks SET is_done = ?, done_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, done_by = ? WHERE id = ? AND job_id = ?",
+          [done, done, done ? actor : null, req.params.tid, req.params.jid]);
+      }
+      if (req.body?.remark !== undefined) {
+        await db.run("UPDATE housekeeping_job_tasks SET remark = ? WHERE id = ? AND job_id = ?", [String(req.body.remark || '').slice(0, 1000) || null, req.params.tid, req.params.jid]);
+      }
       if (!job.started_at) await db.run("UPDATE housekeeping_jobs SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL", [req.params.jid]);
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: 'Failed to update task' }); }
@@ -22390,6 +22399,40 @@ ${data.tenant.name}`;
       if (newState === 'ASSIGNED') { try { triggerNotification(req.params.id, 'CHECKLIST_ASSIGNED', { jobId: req.params.jid, templateName: job.template_name || 'checklist', facility: job.facility_label || job.facility_type, trigger: job.trigger_event, assignedRole: role, assignedUser: user }).catch(() => {}); } catch { /* non-fatal */ } }
       res.json({ success: true, assigned_to_role: role, assigned_to_user: user, workflow_state: newState });
     } catch (err: any) { res.status(500).json({ error: 'Failed to assign checklist' }); }
+  });
+
+  // ── Checklist instance — ObjectDetail nodes (Audit log / Where-Used / Related) ──
+  // The checklist-instance tree menu: its own change history, and the objects it
+  // is attached to (room / booking / hall / event) so staff can jump to them.
+  app.get("/api/restaurant/:id/checklists/jobs/:jid/audit", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'CHECKLIST_JOB', req.params.jid));
+    } catch (err: any) { res.status(500).json({ error: 'Failed to load audit log' }); }
+  });
+
+  app.get("/api/restaurant/:id/checklists/jobs/:jid/where-used", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
+      if (!job) return res.status(404).json({ error: 'Checklist not found' });
+      const groups: any[] = [];
+      // The facility this checklist is attached to (room or event hall/venue).
+      if (job.facility_id) {
+        const isEvent = String(job.facility_type) === 'EVENT';
+        groups.push({ group: isEvent ? 'Event hall' : 'Room', items: [{ type: isEvent ? 'Venue' : 'Room', id: job.facility_id, label: job.facility_label || job.facility_id, sublabel: job.facility_type, link: isEvent ? null : { objectType: 'ROOM', objectId: job.facility_id } }] });
+      }
+      // The booking / event this checklist was raised for (source_ref).
+      if (job.source_ref) {
+        const bk: any = await db.get("SELECT id, guest_name, status FROM room_bookings WHERE id = ?", [job.source_ref]).catch(() => null);
+        if (bk) groups.push({ group: 'Booking', items: [{ type: 'Booking', id: bk.id, label: bk.guest_name || bk.id, sublabel: `${bk.status} · ${bk.id}`, link: { objectType: 'ROOM_BOOKING', objectId: bk.id } }] });
+        else {
+          const evb: any = await db.get("SELECT id, customer_name, status FROM event_bookings WHERE id = ?", [job.source_ref]).catch(() => null);
+          if (evb) groups.push({ group: 'Event booking', items: [{ type: 'Event Booking', id: evb.id, label: evb.customer_name || evb.id, sublabel: `${evb.status} · ${evb.id}`, link: { objectType: 'EVENT_BOOKING', objectId: evb.id } }] });
+        }
+      }
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to compute where-used' }); }
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -45498,7 +45541,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'blocking-checkin-room-tree-menu',
+    commit_marker: 'my-checklist-table-instance-tree-menu',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

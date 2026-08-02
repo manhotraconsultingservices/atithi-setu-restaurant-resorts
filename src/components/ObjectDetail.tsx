@@ -23,6 +23,8 @@ export interface ObjectDetailProps {
   onBack?: () => void;
   backLabel?: string;
   overview: React.ReactNode;
+  /** Label for the first (overview) rail node. Defaults to "Overview". */
+  overviewLabel?: string;
   token: string;
   /** Full API paths (relative to origin) returning the audit array / where-used groups. */
   auditUrl: string;
@@ -185,7 +187,7 @@ function ChecklistView({ url, token, nonce }: { url: string; token: string; nonc
 
 // ── Shell ────────────────────────────────────────────────────────────────────
 export function ObjectDetail(props: ObjectDetailProps) {
-  const { title, subtitle, statusPill, onBack, backLabel, overview, token, auditUrl, whereUsedUrl, checklistUrl, onOpenObject, refreshNonce } = props;
+  const { title, subtitle, statusPill, onBack, backLabel, overview, overviewLabel, token, auditUrl, whereUsedUrl, checklistUrl, onOpenObject, refreshNonce } = props;
   const [node, setNode] = useState<Node>('OVERVIEW');
 
   const railItem = (key: Node, icon: React.ReactNode, label: string) => (
@@ -212,7 +214,7 @@ export function ObjectDetail(props: ObjectDetailProps) {
       <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-4">
         {/* Tree rail */}
         <nav className="md:sticky md:top-4 self-start bg-white rounded-2xl border border-[#e8dccf] p-2 space-y-1">
-          {railItem('OVERVIEW', <FileText size={15} />, 'Overview')}
+          {railItem('OVERVIEW', <FileText size={15} />, overviewLabel || 'Overview')}
           {railItem('AUDIT', <History size={15} />, 'Audit log')}
           {checklistUrl && railItem('CHECKLIST', <ListChecks size={15} />, 'Checklist')}
           {railItem('WHERE_USED', <Link2 size={15} />, 'Where Used')}
