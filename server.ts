@@ -21510,6 +21510,48 @@ ${data.tenant.name}`;
     catch { return false; }
   };
 
+  // Raise the day's DAILY checklists (per room + venue) and the recurring
+  // MID_STAY checklists (per in-house stay) for one tenant. Idempotent via dedupe
+  // keys — safe to run repeatedly. Used by the 05:00 cron AND the owner-triggered
+  // "run now" endpoint. `ymd` lets callers evaluate the run as of a given date.
+  const runTenantScheduledChecklists = async (db: any, o: { isHotel: boolean; isEvents: boolean; ymd: string }): Promise<number> => {
+    let raised = 0;
+    await ensureHousekeepingTables(db);
+    const has: any = await db.get("SELECT (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='DAILY') AS daily, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='MID_STAY') AS midstay").catch(() => ({ daily: 0, midstay: 0 }));
+    if (Number(has?.daily || 0) === 0 && Number(has?.midstay || 0) === 0) return 0;
+    if (o.isHotel && Number(has?.daily || 0) > 0) {
+      const rooms: any[] = await db.query("SELECT id, name, room_number, type_id FROM rooms").catch(() => []);
+      for (const rm of rooms) {
+        const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${o.ymd}` });
+        raised += ids.length;
+      }
+    }
+    if (o.isEvents && Number(has?.daily || 0) > 0) {
+      const venues: any[] = await db.query("SELECT id, name FROM event_venues WHERE is_active = 1").catch(() => []);
+      for (const v of venues) {
+        const ids = await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${o.ymd}` });
+        raised += ids.length;
+      }
+    }
+    if (o.isHotel && Number(has?.midstay || 0) > 0) {
+      const stays: any[] = await db.query("SELECT rb.id, rb.room_id, rb.check_in_date, r.name, r.room_number, r.type_id FROM room_bookings rb JOIN rooms r ON r.id = rb.room_id WHERE rb.status = 'CHECKED_IN'").catch(() => []);
+      for (const st of stays) {
+        const ci = String(st.check_in_date || '').slice(0, 10);
+        if (!ci) continue;
+        const nights = Math.floor((Date.parse(o.ymd) - Date.parse(ci)) / 86400000);
+        if (nights <= 0) continue;
+        const tpls: any[] = await resolveTemplatesForTrigger(db, { facility_type: 'ROOM', facility_id: st.room_id, room_type_id: st.type_id || null, trigger: 'MID_STAY' });
+        for (const tpl of tpls) {
+          const N = Math.max(1, Number(tpl.recurrence_nights) || 1);
+          if (nights % N !== 0) continue;
+          const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${st.id}:${tpl.id}:N${nights}` });
+          raised += ids.length;
+        }
+      }
+    }
+    return raised;
+  };
+
   // ── Owner config — LEGACY checklist template editor. Now backed by the two
   // system templates' steps (TPL-SYS-ROOM-CHECKOUT / TPL-SYS-EVENT-COMPLETE) so
   // the old Housekeeping config UI keeps working against the new source of truth.
@@ -21936,6 +21978,23 @@ ${data.tenant.name}`;
       for (const jid of jobIds) await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: jid, action: 'CREATED', summary: `Manually started a checklist for ${b.facility_label || ft} by ${hkActor(req)}` });
       res.status(201).json({ job_ids: jobIds, count: jobIds.length });
     } catch (err: any) { res.status(500).json({ error: "Failed to start checklist" }); }
+  });
+
+  // Owner-triggered "run the scheduled checklists now" — the same logic the 05:00
+  // cron runs (DAILY per room/venue + MID_STAY per in-house stay) for THIS tenant.
+  // Idempotent (dedupe keys). Optional { as_of: 'YYYY-MM-DD' } evaluates the mid-stay
+  // night math as of that date — handy for testing an overstay checklist on demand.
+  app.post("/api/restaurant/:id/checklists/run-scheduled", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rest: any = await centralDb.get("SELECT property_type, events_enabled FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+      const isHotel = ['HOTEL', 'BOTH'].includes(String(rest?.property_type || ''));
+      const isEvents = Number(rest?.events_enabled) === 1;
+      const ymd = String(req.body?.as_of || new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10)).slice(0, 10);
+      const raised = await runTenantScheduledChecklists(db, { isHotel, isEvents, ymd });
+      res.json({ raised, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to run scheduled checklists' }); }
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -44745,7 +44804,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'configurable-checklist-templates',
+    commit_marker: 'checklist-run-scheduled-endpoint',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -46000,39 +46059,7 @@ ${data.tenant.name}`;
           const isEvents = Number(r.events_enabled) === 1;
           if (!isHotel && !isEvents) continue;
           const db = await getTenantDb(r.id);
-          await ensureHousekeepingTables(db);
-          const has: any = await db.get("SELECT (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='DAILY') AS daily, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='MID_STAY') AS midstay").catch(() => ({ daily: 0, midstay: 0 }));
-          if (Number(has?.daily || 0) === 0 && Number(has?.midstay || 0) === 0) continue;
-          if (isHotel && Number(has?.daily || 0) > 0) {
-            const rooms: any[] = await db.query("SELECT id, name, room_number, type_id FROM rooms").catch(() => []);
-            for (const rm of rooms) {
-              const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${ymd}` });
-              raised += ids.length;
-            }
-          }
-          if (isEvents && Number(has?.daily || 0) > 0) {
-            const venues: any[] = await db.query("SELECT id, name FROM event_venues WHERE is_active = 1").catch(() => []);
-            for (const v of venues) {
-              const ids = await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${ymd}` });
-              raised += ids.length;
-            }
-          }
-          if (isHotel && Number(has?.midstay || 0) > 0) {
-            const stays: any[] = await db.query("SELECT rb.id, rb.room_id, rb.check_in_date, r.name, r.room_number, r.type_id FROM room_bookings rb JOIN rooms r ON r.id = rb.room_id WHERE rb.status = 'CHECKED_IN'").catch(() => []);
-            for (const st of stays) {
-              const ci = String(st.check_in_date || '').slice(0, 10);
-              if (!ci) continue;
-              const nights = Math.floor((Date.parse(ymd) - Date.parse(ci)) / 86400000);
-              if (nights <= 0) continue;
-              const tpls: any[] = await resolveTemplatesForTrigger(db, { facility_type: 'ROOM', facility_id: st.room_id, room_type_id: st.type_id || null, trigger: 'MID_STAY' });
-              for (const tpl of tpls) {
-                const N = Math.max(1, Number(tpl.recurrence_nights) || 1);
-                if (nights % N !== 0) continue;
-                const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${st.id}:${tpl.id}:N${nights}` });
-                raised += ids.length;
-              }
-            }
-          }
+          raised += await runTenantScheduledChecklists(db, { isHotel, isEvents, ymd });
         } catch (tenantErr) { console.error(`[checklist-cron] tenant ${r.id} error:`, tenantErr); }
       }
       if (raised > 0) console.log(`[checklist-cron] raised ${raised} daily/mid-stay checklist job(s)`);

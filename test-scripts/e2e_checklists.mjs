@@ -1,0 +1,153 @@
+/**
+ * e2e_checklists.mjs — validate the CHECK-IN, CHECK-OUT, OVERSTAY (mid-stay) and
+ * EVENT-HALL DAILY checklist trigger flows end-to-end against a live tenant.
+ *
+ * It is SELF-CLEANING: it closes the jobs it raises, cancels/checks-out its test
+ * booking, deletes its templates, and restores the "ID at check-in" setting it may
+ * have toggled. It does create real (throwaway) scaffolding while it runs.
+ *
+ * Run (owner credentials required):
+ *   OWNER_EMAIL=you@x.com OWNER_PASSWORD=secret RESTAURANT_ID=RESTO-1003 \
+ *     node test-scripts/e2e_checklists.mjs
+ *   (BASE_URL defaults to https://erp.atithi-setu.com)
+ */
+
+const BASE = process.env.BASE_URL || 'https://erp.atithi-setu.com';
+const EMAIL = process.env.OWNER_EMAIL || process.env.LIVE_LOGIN_ID || '';
+const PASSWORD = process.env.OWNER_PASSWORD || process.env.LIVE_PASSWORD || '';
+const RID = process.env.RESTAURANT_ID || process.env.LIVE_RESTAURANT_ID || '';
+if (!EMAIL || !PASSWORD || !RID) {
+  console.error('\nMissing credentials. Set OWNER_EMAIL, OWNER_PASSWORD, RESTAURANT_ID.\n');
+  process.exit(1);
+}
+
+let token = '';
+const api = async (m, p, b) => {
+  const h = { 'Content-Type': 'application/json' };
+  if (token) h.Authorization = `Bearer ${token}`;
+  const r = await fetch(`${BASE}${p}`, { method: m, headers: h, body: b ? JSON.stringify(b) : undefined });
+  const ct = r.headers.get('content-type') || '';
+  return { status: r.status, data: ct.includes('json') ? await r.json().catch(() => ({})) : await r.text() };
+};
+let passN = 0, failN = 0, skipN = 0;
+const ok = (c, id, msg, note = '') => { c ? passN++ : failN++; console.log(`${c ? '✅ PASS' : '❌ FAIL'}  ${id} — ${msg}${note ? '  | ' + note : ''}`); };
+const skip = (id, msg, note = '') => { skipN++; console.log(`⚠️  SKIP  ${id} — ${msg}${note ? '  | ' + note : ''}`); };
+const day = (o) => new Date(Date.now() + o * 86400000).toISOString().slice(0, 10);
+
+const P = `/api/restaurant/${RID}`;
+const created = { templates: [], bookingId: null, restoreReqId: undefined };
+const asList = (d) => Array.isArray(d) ? d : (d?.rooms || d?.venues || []);
+const jobsAll = async () => { const r = await api('GET', `${P}/housekeeping/jobs?status=ALL`); return Array.isArray(r.data) ? r.data : []; };
+const jobsFor = async (facilityId, trigger) => (await jobsAll()).filter(j => j.facility_id === facilityId && (!trigger || j.trigger_event === trigger));
+const closeJob = async (jid) => {
+  const j = await api('GET', `${P}/housekeeping/jobs/${jid}`);
+  for (const t of (j.data?.tasks || [])) await api('PATCH', `${P}/housekeeping/jobs/${jid}/tasks/${t.id}`, { is_done: true });
+  await api('POST', `${P}/housekeeping/jobs/${jid}/complete`, {});
+};
+
+async function cleanup() {
+  try {
+    // Close every OPEN job spawned by our templates (any run, any facility).
+    const mine = new Set(created.templates);
+    for (const j of await jobsAll()) if (j.status === 'OPEN' && mine.has(j.template_id)) { try { await closeJob(j.id); } catch {} }
+  } catch {}
+  // Return the booking to a terminal state so it never strands a room.
+  if (created.bookingId) {
+    try {
+      const list = await api('GET', `${P}/hotel/bookings`);
+      const b = (Array.isArray(list.data) ? list.data : (list.data?.bookings || [])).find(x => x.id === created.bookingId);
+      const st = b?.status;
+      if (st === 'CHECKED_IN') await api('POST', `${P}/hotel/bookings/${created.bookingId}/checkout`, { payment_method: 'CASH' });
+      else if (st === 'BOOKED') await api('POST', `${P}/hotel/bookings/${created.bookingId}/cancel`, { reason: 'E2E cleanup' });
+    } catch {}
+  }
+  for (const tid of created.templates) { try { await api('DELETE', `${P}/checklists/templates/${tid}`); } catch {} }
+  if (created.restoreReqId !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: !!created.restoreReqId }); } catch {} }
+}
+
+(async () => {
+  let r = await api('POST', '/api/auth/owner/login', { identifier: EMAIL, password: PASSWORD });
+  if (r.status !== 200) r = await api('POST', '/api/auth/login', { loginId: EMAIL, password: PASSWORD, restaurantId: RID });
+  token = r.data?.jwt_token || r.data?.token || '';
+  if (!token) { console.error('❌ LOGIN FAILED —', r.status, JSON.stringify(r.data)); process.exit(1); }
+  console.log(`\n═══ Checklist trigger e2e — ${RID} @ ${BASE} ═══\n`);
+  const tag = Date.now();
+  const mkTpl = async (body) => { const res = await api('POST', `${P}/checklists/templates`, body); if (res.status === 201 && res.data?.id) created.templates.push(res.data.id); return res; };
+
+  try {
+    // ── Scaffolding: the four templates under test ──
+    const ciT = await mkTpl({ name: `E2E Check-In ${tag}`, facility_type: 'ROOM', trigger_event: 'CHECK_IN', blocks_release: false, steps: [{ label: 'Place welcome amenities', is_mandatory: true }] });
+    const coT = await mkTpl({ name: `E2E Check-Out ${tag}`, facility_type: 'ROOM', trigger_event: 'CHECK_OUT', blocks_release: true, steps: [{ label: 'Strip & remake bed', is_mandatory: true }, { label: 'Sanitise bathroom', is_mandatory: true }] });
+    const msT = await mkTpl({ name: `E2E Mid-Stay ${tag}`, facility_type: 'ROOM', trigger_event: 'MID_STAY', recurrence_nights: 1, blocks_release: false, steps: [{ label: 'Replace towels', is_mandatory: true }] });
+    const dlT = await mkTpl({ name: `E2E Hall Daily ${tag}`, facility_type: 'EVENT', trigger_event: 'DAILY', blocks_release: false, steps: [{ label: 'Wipe surfaces & set chairs', is_mandatory: true }] });
+    ok(ciT.status === 201 && coT.status === 201 && msT.status === 201 && dlT.status === 201, 'E2E-SETUP', 'Created check-in / check-out / mid-stay / daily templates', `HTTP ${ciT.status}/${coT.status}/${msT.status}/${dlT.status}`);
+    if (ciT.status === 403) { console.error('\nNeed OWNER role to create templates — aborting.\n'); return; }
+
+    // ── EVENT-HALL DAILY (independent of bookings) ──
+    const venues = asList((await api('GET', `${P}/events/venues`)).data);
+    if (venues.length) {
+      const run = await api('POST', `${P}/checklists/run-scheduled`, {});
+      const anyDaily = (await Promise.all(venues.map(v => jobsFor(v.id, 'DAILY')))).some(a => a.some(j => created.templates.includes(j.template_id)));
+      ok(run.status === 200 && anyDaily, 'E2E-DAILY-HALL', 'Daily run raised a DAILY checklist for an event hall', `raised=${run.data?.raised}`);
+    } else {
+      skip('E2E-DAILY-HALL', 'Event-hall daily', 'events not enabled or no venues on this tenant');
+    }
+
+    // ── CHECK-IN → OVERSTAY → CHECK-OUT (need hotel + a bookable room) ──
+    const rooms = asList((await api('GET', `${P}/hotel/rooms`)).data);
+    if (!rooms.length) {
+      ['E2E-CHECKIN', 'E2E-MIDSTAY', 'E2E-CHECKOUT', 'E2E-GATING'].forEach(id => skip(id, 'Room-flow triggers', 'hotel not enabled or no rooms'));
+      return;
+    }
+    let bookingId = null, roomId = null;
+    for (const room of rooms.slice(0, 6)) {
+      const bk = await api('POST', `${P}/hotel/bookings`, { room_id: room.id, guest_name: `E2E Guest ${tag}`, guest_phone: '9990000123', num_guests: 1, check_in_date: day(0), check_out_date: day(3), booking_source: 'DIRECT', room_rate: Number(room.base_price || 1500) });
+      if (bk.status === 201 && bk.data?.id) { bookingId = bk.data.id; roomId = room.id; break; }
+    }
+    if (!bookingId) { ['E2E-CHECKIN', 'E2E-MIDSTAY', 'E2E-CHECKOUT', 'E2E-GATING'].forEach(id => skip(id, 'Room-flow triggers', 'could not create a test booking (date conflicts)')); return; }
+    created.bookingId = bookingId;
+
+    // Check-in (turn ID-requirement off for the test if it blocks; restored in cleanup).
+    let cin = await api('POST', `${P}/hotel/bookings/${bookingId}/checkin`, {});
+    if (cin.status === 400 && (cin.data?.missing_field === 'guest_documents' || cin.data?.require_id_at_checkin)) {
+      const st0 = await api('GET', `${P}/hotel/settings`);
+      created.restoreReqId = st0.data?.require_id_at_checkin;
+      await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: false });
+      cin = await api('POST', `${P}/hotel/bookings/${bookingId}/checkin`, {});
+    }
+    if (!(cin.status === 200 || cin.data?.booking)) {
+      ok(false, 'E2E-CHECKIN', 'Check-in request', `HTTP ${cin.status} — ${JSON.stringify(cin.data).slice(0, 160)}`);
+      ['E2E-MIDSTAY', 'E2E-CHECKOUT', 'E2E-GATING'].forEach(id => skip(id, 'Room-flow triggers', 'check-in failed'));
+      return;
+    }
+    const ciJobs = (await jobsFor(roomId, 'CHECK_IN')).filter(j => created.templates.includes(j.template_id));
+    ok(ciJobs.length >= 1, 'E2E-CHECKIN', 'Check-in raised the check-in checklist for the room', `${ciJobs.length} check-in job(s)`);
+
+    // Overstay — evaluate the scheduled run "as of tomorrow" so nights = 1 (mid-stay every 1 night).
+    const runMs = await api('POST', `${P}/checklists/run-scheduled`, { as_of: day(1) });
+    const msJobs = (await jobsFor(roomId, 'MID_STAY')).filter(j => created.templates.includes(j.template_id));
+    ok(runMs.status === 200 && msJobs.length >= 1, 'E2E-MIDSTAY', 'Overstay run raised the mid-stay checklist for the in-house room', `raised=${runMs.data?.raised}, jobs=${msJobs.length}`);
+
+    // Check-out — room must go CLEANING and a BLOCKING check-out checklist must open.
+    const cout = await api('POST', `${P}/hotel/bookings/${bookingId}/checkout`, { payment_method: 'CASH' });
+    if (!(cout.status === 200 || cout.status === 201)) {
+      ok(false, 'E2E-CHECKOUT', 'Check-out request', `HTTP ${cout.status} — ${JSON.stringify(cout.data).slice(0, 160)}`);
+      skip('E2E-GATING', 'Release gating', 'check-out failed');
+      return;
+    }
+    const roomRow = asList((await api('GET', `${P}/hotel/rooms`)).data).find(x => x.id === roomId);
+    const coJobs = (await jobsFor(roomId, 'CHECK_OUT')).filter(j => created.templates.includes(j.template_id));
+    const blocking = coJobs.filter(j => j.status === 'OPEN' && Number(j.blocks_release) === 1);
+    ok(roomRow?.status === 'CLEANING' && blocking.length >= 1, 'E2E-CHECKOUT', 'Check-out set room to CLEANING and raised a blocking check-out checklist', `room=${roomRow?.status}, blocking=${blocking.length}`);
+
+    // Gating — completing the blocking checklist releases the room to VACANT.
+    for (const j of blocking) await closeJob(j.id);
+    const roomRow2 = asList((await api('GET', `${P}/hotel/rooms`)).data).find(x => x.id === roomId);
+    ok(roomRow2?.status === 'VACANT', 'E2E-GATING', 'Completing the blocking checklist released the room to VACANT', `room=${roomRow2?.status}`);
+  } finally {
+    console.log('\n… cleaning up test data …');
+    await cleanup();
+    console.log(`\n═══ ${passN} passed, ${failN} failed, ${skipN} skipped ═══\n`);
+  }
+  process.exit(failN ? 1 : 0);
+})().catch(async (e) => { console.error('ERROR', e); try { await cleanup(); } catch {} process.exit(2); });
