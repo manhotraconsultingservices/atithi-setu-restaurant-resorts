@@ -4836,6 +4836,7 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
         'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_VENUES',
         'EVENTS_RENTALS', 'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS',
         'EVENTS_REPORTS', 'EVENTS_SETTINGS',
+        'CHECKLISTS',
       ];
       for (const tab of RBAC_NEWLY_ADDED) {
         if (!(tab in perms)) perms[tab] = 3;
@@ -21353,6 +21354,41 @@ ${data.tenant.name}`;
       is_done INT DEFAULT 0, done_at TIMESTAMP, done_by TEXT, sort_order INT DEFAULT 0
     )`).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_job_tasks ON housekeeping_job_tasks(job_id)`).catch(() => {});
+
+    // ── Configurable Checklist Templates (Phase 2) — config layer on top of the
+    // execution spine above. New snapshot columns on jobs; blocks_release DEFAULT 1
+    // so every legacy OPEN job keeps gating room release exactly as before.
+    for (const col of ['template_id TEXT', 'template_name TEXT', 'category_id TEXT',
+      'trigger_event TEXT', 'blocks_release INT DEFAULT 1', 'dedupe_key TEXT']) {
+      await db.exec(`ALTER TABLE housekeeping_jobs ADD COLUMN IF NOT EXISTS ${col}`).catch(() => {});
+    }
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_block ON housekeeping_jobs(facility_id, status, blocks_release)`).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_dedupe ON housekeeping_jobs(dedupe_key, template_id)`).catch(() => {});
+    await db.exec(`CREATE TABLE IF NOT EXISTS checklist_categories (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT, is_system INT DEFAULT 0,
+      is_active INT DEFAULT 1, sort_order INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`).catch(() => {});
+    await db.exec(`CREATE TABLE IF NOT EXISTS checklist_templates (
+      id TEXT PRIMARY KEY, category_id TEXT, name TEXT NOT NULL,
+      facility_type TEXT NOT NULL, trigger_event TEXT NOT NULL,
+      recurrence_nights INT DEFAULT 0, blocks_release INT DEFAULT 0,
+      is_system INT DEFAULT 0, is_active INT DEFAULT 1, sort_order INT DEFAULT 0,
+      notes TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_chk_tpl ON checklist_templates(facility_type, trigger_event, is_active)`).catch(() => {});
+    await db.exec(`CREATE TABLE IF NOT EXISTS checklist_template_steps (
+      id TEXT PRIMARY KEY, template_id TEXT NOT NULL, label TEXT NOT NULL,
+      is_mandatory INT DEFAULT 1, sort_order INT DEFAULT 0, is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_chk_step ON checklist_template_steps(template_id, sort_order)`).catch(() => {});
+    await db.exec(`CREATE TABLE IF NOT EXISTS checklist_assignments (
+      id TEXT PRIMARY KEY, template_id TEXT NOT NULL, scope TEXT NOT NULL,
+      scope_id TEXT NOT NULL, is_active INT DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_chk_asg ON checklist_assignments(scope, scope_id, is_active)`).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_chk_asg_tpl ON checklist_assignments(template_id)`).catch(() => {});
+
     // Seed sensible defaults the first time so the checklist works out of the box.
     const cnt: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_tasks").catch(() => ({ c: 0 }));
     if (Number(cnt?.c || 0) === 0) {
@@ -21371,41 +21407,123 @@ ${data.tenant.name}`;
           [mkHkId('HKTMPL'), ft, label, mand, i++]).catch(() => {});
       }
     }
+
+    // One-time: seed the 4 default categories + migrate the legacy task lists into
+    // two named system templates (guarded on the ROOM template's existence so this
+    // whole block is a no-op after the first run — safe to call on every request).
+    const seeded: any = await db.get("SELECT 1 AS x FROM checklist_templates WHERE id = 'TPL-SYS-ROOM-CHECKOUT'").catch(() => null);
+    if (!seeded) {
+      const cats: [string, string, number][] = [['CAT-SYS-PMS', 'PMS', 0], ['CAT-SYS-EVENTHALL', 'Event Hall', 1], ['CAT-SYS-INSPECTION', 'Inspection', 2], ['CAT-SYS-EVENT', 'Event', 3]];
+      for (const [cid, name, ord] of cats) {
+        await db.run("INSERT INTO checklist_categories (id, name, slug, is_system, sort_order) SELECT ?, ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM checklist_categories WHERE id = ?)",
+          [cid, name, String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-'), ord, cid]).catch(() => {});
+      }
+      const sysTpls: [string, string, string, string, string][] = [
+        ['TPL-SYS-ROOM-CHECKOUT', 'PMS - Check-Out', 'CAT-SYS-PMS', 'ROOM', 'CHECK_OUT'],
+        ['TPL-SYS-EVENT-COMPLETE', 'Event Hall - Check-Out', 'CAT-SYS-EVENTHALL', 'EVENT', 'EVENT_COMPLETE'],
+      ];
+      for (const [tid, name, cid, ft, trg] of sysTpls) {
+        await db.run("INSERT INTO checklist_templates (id, category_id, name, facility_type, trigger_event, blocks_release, is_system) SELECT ?, ?, ?, ?, ?, 1, 1 WHERE NOT EXISTS (SELECT 1 FROM checklist_templates WHERE id = ?)",
+          [tid, cid, name, ft, trg, tid]).catch(() => {});
+        const stepCnt: any = await db.get("SELECT COUNT(*)::int AS c FROM checklist_template_steps WHERE template_id = ?", [tid]).catch(() => ({ c: 0 }));
+        if (Number(stepCnt?.c || 0) === 0) {
+          const src: any[] = await db.query("SELECT label, is_mandatory, sort_order FROM housekeeping_tasks WHERE facility_type = ? AND is_active = 1 ORDER BY sort_order, created_at", [ft]).catch(() => []);
+          for (const s of src) {
+            await db.run("INSERT INTO checklist_template_steps (id, template_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
+              [mkHkId('CHKS'), tid, s.label, s.is_mandatory, s.sort_order]).catch(() => {});
+          }
+        }
+      }
+    }
   };
 
-  // Create a cleaning job from the active template. Returns job id, or null when
-  // no checklist is configured for that facility type (→ no gating; backwards-compatible).
-  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null }) => {
+  // Resolve the checklist templates that apply to a facility for a trigger.
+  // Most-specific tier wins (per-entity assignment > type-level default); every
+  // template in the winning tier applies. Empty ⇒ no gating (backwards-compatible).
+  const resolveTemplatesForTrigger = async (db: any, o: { facility_type: string; facility_id?: string | null; room_type_id?: string | null; trigger: string }): Promise<any[]> => {
+    const base = "SELECT t.* FROM checklist_templates t";
+    const tiers: { sql: string; params: any[] }[] = [];
+    if (o.facility_type === 'ROOM') {
+      if (o.facility_id) tiers.push({ sql: `${base} JOIN checklist_assignments a ON a.template_id=t.id AND a.is_active=1 WHERE t.is_active=1 AND t.facility_type=? AND t.trigger_event=? AND a.scope='ROOM' AND a.scope_id=? ORDER BY t.sort_order, t.created_at`, params: [o.facility_type, o.trigger, o.facility_id] });
+      if (o.room_type_id) tiers.push({ sql: `${base} JOIN checklist_assignments a ON a.template_id=t.id AND a.is_active=1 WHERE t.is_active=1 AND t.facility_type=? AND t.trigger_event=? AND a.scope='ROOM_TYPE' AND a.scope_id=? ORDER BY t.sort_order, t.created_at`, params: [o.facility_type, o.trigger, o.room_type_id] });
+    } else if (o.facility_type === 'EVENT') {
+      if (o.facility_id) tiers.push({ sql: `${base} JOIN checklist_assignments a ON a.template_id=t.id AND a.is_active=1 WHERE t.is_active=1 AND t.facility_type=? AND t.trigger_event=? AND a.scope='VENUE' AND a.scope_id=? ORDER BY t.sort_order, t.created_at`, params: [o.facility_type, o.trigger, o.facility_id] });
+    }
+    // Type-level default: active templates for this (facility_type|GENERIC, trigger)
+    // that carry NO active assignment at all (a global default).
+    tiers.push({ sql: `${base} WHERE t.is_active=1 AND (t.facility_type=? OR t.facility_type='GENERIC') AND t.trigger_event=? AND NOT EXISTS (SELECT 1 FROM checklist_assignments a WHERE a.template_id=t.id AND a.is_active=1) ORDER BY t.sort_order, t.created_at`, params: [o.facility_type, o.trigger] });
+    for (const tier of tiers) {
+      const rows: any[] = await db.query(tier.sql, tier.params).catch(() => []);
+      if (rows && rows.length) return rows;
+    }
+    return [];
+  };
+
+  // Create ONE cleaning job from a template (snapshotting steps + blocks_release).
+  const createJobFromTemplate = async (db: any, tpl: any, o: any): Promise<string | null> => {
+    const recurring = tpl.trigger_event === 'DAILY' || tpl.trigger_event === 'MID_STAY';
+    let dupSql = '', dupParams: any[] = [];
+    if (recurring && o.dedupe_key) { dupSql = "SELECT id FROM housekeeping_jobs WHERE dedupe_key = ? AND template_id = ? LIMIT 1"; dupParams = [o.dedupe_key, tpl.id]; }
+    else if (o.source_ref) { dupSql = "SELECT id FROM housekeeping_jobs WHERE source_ref = ? AND template_id = ? AND status = 'OPEN' LIMIT 1"; dupParams = [o.source_ref, tpl.id]; }
+    if (dupSql) { const dup: any = await db.get(dupSql, dupParams).catch(() => null); if (dup) return dup.id; }
+    const steps: any[] = await db.query("SELECT label, is_mandatory, sort_order FROM checklist_template_steps WHERE template_id = ? AND is_active = 1 ORDER BY sort_order, id", [tpl.id]).catch(() => []);
+    const jid = mkHkId('HKJ');
+    await db.run(
+      "INSERT INTO housekeeping_jobs (id, facility_type, facility_id, facility_label, source_ref, guest_label, status, template_id, template_name, category_id, trigger_event, blocks_release, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)",
+      [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref || null, o.guest_label || null, tpl.id, tpl.name, tpl.category_id || null, o.trigger, tpl.blocks_release ? 1 : 0, o.dedupe_key || null]);
+    for (const s of steps) {
+      await db.run("INSERT INTO housekeeping_job_tasks (id, job_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
+        [mkHkId('HKJT'), jid, s.label, s.is_mandatory, s.sort_order]);
+    }
+    return jid;
+  };
+
+  // Raise all applicable checklist jobs for a trigger (one per template). Never
+  // throws — the caller (checkout/checkin/complete/cron) is never blocked.
+  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null }): Promise<string[]> => {
     try {
       await ensureHousekeepingTables(db);
-      const tasks: any[] = await db.query("SELECT * FROM housekeeping_tasks WHERE facility_type = ? AND is_active = 1 ORDER BY sort_order, created_at", [o.facility_type]);
-      if (!tasks || tasks.length === 0) return null;
-      // Don't stack duplicate open jobs for the same booking/event.
-      if (o.source_ref) {
-        const dup: any = await db.get("SELECT id FROM housekeeping_jobs WHERE source_ref = ? AND facility_type = ? AND status = 'OPEN'", [o.source_ref, o.facility_type]);
-        if (dup) return dup.id;
+      let templates: any[];
+      if (o.template_ids && o.template_ids.length) {
+        const ph = o.template_ids.map(() => '?').join(',');
+        templates = await db.query(`SELECT * FROM checklist_templates WHERE id IN (${ph}) AND is_active = 1`, o.template_ids).catch(() => []);
+      } else {
+        templates = await resolveTemplatesForTrigger(db, o);
       }
-      const jid = mkHkId('HKJ');
-      await db.run("INSERT INTO housekeeping_jobs (id, facility_type, facility_id, facility_label, source_ref, guest_label, status) VALUES (?, ?, ?, ?, ?, ?, 'OPEN')",
-        [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref, o.guest_label || null]);
-      for (const t of tasks) {
-        await db.run("INSERT INTO housekeeping_job_tasks (id, job_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
-          [mkHkId('HKJT'), jid, t.label, t.is_mandatory, t.sort_order]);
-      }
-      return jid;
-    } catch (e) { console.warn('[housekeeping] createJob failed:', e); return null; }
+      if (!templates || !templates.length) return [];
+      const ids: string[] = [];
+      for (const tpl of templates) { const jid = await createJobFromTemplate(db, tpl, o); if (jid) ids.push(jid); }
+      return ids;
+    } catch (e) { console.warn('[checklist] raiseChecklistJobs failed:', e); return []; }
   };
+
+  // Backwards-compatible shim — every existing caller keeps working and now
+  // transparently supports multiple templates per trigger. Returns first job id.
+  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null; room_type_id?: string | null }) => {
+    const trigger = o.facility_type === 'EVENT' ? 'EVENT_COMPLETE' : 'CHECK_OUT';
+    const ids = await raiseChecklistJobs(db, { ...o, trigger });
+    return ids[0] || null;
+  };
+  // Only RELEASE-BLOCKING open jobs gate a facility (inspections etc. don't).
   const hasOpenHousekeepingJob = async (db: any, facilityId: string): Promise<boolean> => {
-    try { const r: any = await db.get("SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND status = 'OPEN' LIMIT 1", [facilityId]); return !!r; }
+    try { const r: any = await db.get("SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND status = 'OPEN' AND blocks_release = 1 LIMIT 1", [facilityId]); return !!r; }
     catch { return false; }
   };
 
-  // ── Owner config — the checklist template (tasks per facility type) ──────────
+  // ── Owner config — LEGACY checklist template editor. Now backed by the two
+  // system templates' steps (TPL-SYS-ROOM-CHECKOUT / TPL-SYS-EVENT-COMPLETE) so
+  // the old Housekeeping config UI keeps working against the new source of truth.
+  // Richer multi-template management lives under /checklists/*.
+  const LEGACY_SYS_TPL = (ft: string) => (String(ft).toUpperCase() === 'EVENT' ? 'TPL-SYS-EVENT-COMPLETE' : 'TPL-SYS-ROOM-CHECKOUT');
   app.get("/api/restaurant/:id/housekeeping/checklist", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
-      const rows = await db.query("SELECT * FROM housekeeping_tasks ORDER BY facility_type, sort_order, created_at");
+      const rows = await db.query(
+        `SELECT s.*, t.facility_type FROM checklist_template_steps s
+           JOIN checklist_templates t ON t.id = s.template_id
+          WHERE t.id IN ('TPL-SYS-ROOM-CHECKOUT','TPL-SYS-EVENT-COMPLETE') AND s.is_active = 1
+          ORDER BY t.facility_type, s.sort_order, s.id`);
       res.json({ ROOM: rows.filter((r: any) => r.facility_type === 'ROOM'), EVENT: rows.filter((r: any) => r.facility_type === 'EVENT') });
     } catch (err: any) { res.status(500).json({ error: "Failed to load checklist" }); }
   });
@@ -21415,13 +21533,14 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
       const b = req.body || {};
-      const ft = String(b.facility_type || '').toUpperCase() === 'EVENT' ? 'EVENT' : 'ROOM';
+      const tid = LEGACY_SYS_TPL(b.facility_type);
       if (!b.label || !String(b.label).trim()) return res.status(400).json({ error: 'label is required' });
-      const cntRow: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_tasks WHERE facility_type = ?", [ft]);
-      const id = mkHkId('HKTMPL');
-      await db.run("INSERT INTO housekeeping_tasks (id, facility_type, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
-        [id, ft, String(b.label).trim(), b.is_mandatory === false ? 0 : 1, Number(cntRow?.c || 0)]);
-      res.status(201).json(await db.get("SELECT * FROM housekeeping_tasks WHERE id = ?", [id]));
+      const cntRow: any = await db.get("SELECT COUNT(*)::int AS c FROM checklist_template_steps WHERE template_id = ?", [tid]);
+      const id = mkHkId('CHKS');
+      await db.run("INSERT INTO checklist_template_steps (id, template_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
+        [id, tid, String(b.label).trim(), b.is_mandatory === false ? 0 : 1, Number(cntRow?.c || 0)]);
+      const row: any = await db.get("SELECT s.*, t.facility_type FROM checklist_template_steps s JOIN checklist_templates t ON t.id = s.template_id WHERE s.id = ?", [id]);
+      res.status(201).json(row);
     } catch (err: any) { res.status(500).json({ error: "Failed to add task" }); }
   });
   app.patch("/api/restaurant/:id/housekeeping/checklist/tasks/:tid", authenticate, async (req: AuthRequest, res: Response) => {
@@ -21435,15 +21554,15 @@ ${data.tenant.name}`;
       if (b.sort_order !== undefined) { fields.push('sort_order = ?'); vals.push(Number(b.sort_order) || 0); }
       if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
       vals.push(req.params.tid);
-      await db.run(`UPDATE housekeeping_tasks SET ${fields.join(', ')} WHERE id = ?`, vals);
-      res.json(await db.get("SELECT * FROM housekeeping_tasks WHERE id = ?", [req.params.tid]));
+      await db.run(`UPDATE checklist_template_steps SET ${fields.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM checklist_template_steps WHERE id = ?", [req.params.tid]));
     } catch (err: any) { res.status(500).json({ error: "Failed to update task" }); }
   });
   app.delete("/api/restaurant/:id/housekeeping/checklist/tasks/:tid", authenticate, async (req: AuthRequest, res: Response) => {
     if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Owner or manager only' });
     try {
       const db = await getTenantDb(req.params.id);
-      await db.run("DELETE FROM housekeeping_tasks WHERE id = ?", [req.params.tid]);
+      await db.run("DELETE FROM checklist_template_steps WHERE id = ?", [req.params.tid]);
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to delete task" }); }
   });
@@ -21484,6 +21603,7 @@ ${data.tenant.name}`;
       await db.run("UPDATE housekeeping_job_tasks SET is_done = ?, done_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, done_by = ? WHERE id = ? AND job_id = ?",
         [done, done, done ? hkActor(req) : null, req.params.tid, req.params.jid]);
       if (!job.started_at) await db.run("UPDATE housekeeping_jobs SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL", [req.params.jid]);
+      await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: done ? 'STEP_DONE' : 'STEP_UNDONE', summary: `${done ? 'Completed' : 'Reopened'} a step on "${job.template_name || 'checklist'}" (${job.facility_label || job.facility_type})` });
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to update task" }); }
   });
@@ -21492,6 +21612,12 @@ ${data.tenant.name}`;
   // done → job DONE + room flipped back to VACANT (available again).
   const releaseFacility = async (db: any, job: any) => {
     if (job.facility_type === 'ROOM' && job.facility_id) {
+      // Don't free the room while ANOTHER release-blocking checklist is still open
+      // (e.g. a checkout that raised both a Check-Out and an Inspection checklist).
+      const stillBlocking: any = await db.get(
+        "SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' AND blocks_release = 1 AND id <> ? LIMIT 1",
+        [job.facility_id, job.id]).catch(() => null);
+      if (stillBlocking) return;
       await db.run("UPDATE rooms SET status = 'VACANT' WHERE id = ? AND status = 'CLEANING'", [job.facility_id]).catch(() => {});
     }
   };
@@ -21505,6 +21631,7 @@ ${data.tenant.name}`;
       if (Number(pend?.c || 0) > 0) return res.status(400).json({ error: `${pend.c} mandatory task(s) still pending. Complete them before closing.`, pending_mandatory: pend.c });
       await db.run("UPDATE housekeeping_jobs SET status = 'DONE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [hkActor(req), req.params.jid]);
       await releaseFacility(db, job);
+      await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: 'COMPLETED', summary: `Completed "${job.template_name || 'checklist'}" for ${job.facility_label || job.facility_type} by ${hkActor(req)}`, after: { status: 'DONE' } });
       res.json({ success: true, released: job.facility_type });
     } catch (err: any) { res.status(500).json({ error: "Failed to complete cleaning" }); }
   });
@@ -21516,9 +21643,11 @@ ${data.tenant.name}`;
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
       if (!job) return res.status(404).json({ error: "Job not found" });
       if (job.status !== 'OPEN') return res.json({ success: true, already: true });
+      const ovReason = String(req.body?.reason || '').trim() || 'Override';
       await db.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE id = ?",
-        [hkActor(req), String(req.body?.reason || '').trim() || 'Override', req.params.jid]);
+        [hkActor(req), ovReason, req.params.jid]);
       await releaseFacility(db, job);
+      await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: 'OVERRIDDEN', summary: `Overrode "${job.template_name || 'checklist'}" for ${job.facility_label || job.facility_type} — ${ovReason}`, after: { status: 'OVERRIDDEN', reason: ovReason } });
       res.json({ success: true, released: job.facility_type });
     } catch (err: any) { res.status(500).json({ error: "Failed to override" }); }
   });
@@ -21549,6 +21678,264 @@ ${data.tenant.name}`;
       const log = rows.map((r: any) => ({ ...r, completed_by: actorLabel(r.completed_by) }));
       res.json({ log, by_facility: byFacility });
     } catch (err: any) { res.status(500).json({ error: "Failed to load cleaning log" }); }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CONFIGURABLE CHECKLIST TEMPLATES — owner config layer (categories → templates
+  // → steps → assignments) feeding the housekeeping execution spine above. Config
+  // is owner/admin-only; reads are hkStaff. Triggers resolve templates and raise
+  // one job per applicable template (see resolveTemplatesForTrigger / raiseChecklistJobs).
+  // ══════════════════════════════════════════════════════════════════════════
+  const CHK_TRIGGERS = ['CHECK_IN', 'CHECK_OUT', 'MID_STAY', 'DAILY', 'EVENT_COMPLETE', 'MANUAL'];
+  const CHK_FTYPES = ['ROOM', 'EVENT', 'GENERIC'];
+
+  // ── Categories ───────────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/checklists/categories", authenticate, hkStaff, requireTabAccess('CHECKLISTS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      res.json(await db.query("SELECT * FROM checklist_categories ORDER BY sort_order, name"));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load categories" }); }
+  });
+  app.post("/api/restaurant/:id/checklists/categories", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const name = String(req.body?.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'name is required' });
+      const id = mkHkId('CHKCAT');
+      const cnt: any = await db.get("SELECT COUNT(*)::int AS c FROM checklist_categories");
+      await db.run("INSERT INTO checklist_categories (id, name, slug, sort_order) VALUES (?, ?, ?, ?)",
+        [id, name, name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), Number(cnt?.c || 0)]);
+      res.status(201).json(await db.get("SELECT * FROM checklist_categories WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to add category" }); }
+  });
+  app.patch("/api/restaurant/:id/checklists/categories/:cid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {}; const fields: string[] = []; const vals: any[] = [];
+      if (b.name !== undefined) { fields.push('name = ?'); vals.push(String(b.name).trim()); }
+      if (b.is_active !== undefined) { fields.push('is_active = ?'); vals.push(b.is_active ? 1 : 0); }
+      if (b.sort_order !== undefined) { fields.push('sort_order = ?'); vals.push(Number(b.sort_order) || 0); }
+      if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
+      vals.push(req.params.cid);
+      await db.run(`UPDATE checklist_categories SET ${fields.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM checklist_categories WHERE id = ?", [req.params.cid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to update category" }); }
+  });
+  app.delete("/api/restaurant/:id/checklists/categories/:cid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const cat: any = await db.get("SELECT is_system FROM checklist_categories WHERE id = ?", [req.params.cid]);
+      if (cat && Number(cat.is_system) === 1) return res.status(400).json({ error: 'System categories cannot be deleted (you can deactivate a template instead).' });
+      await db.run("UPDATE checklist_categories SET is_active = 0 WHERE id = ?", [req.params.cid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete category" }); }
+  });
+
+  // ── Templates (+ steps) ──────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/checklists/templates", authenticate, hkStaff, requireTabAccess('CHECKLISTS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const { facility_type, trigger, category_id } = req.query as Record<string, string>;
+      const clauses: string[] = []; const params: any[] = [];
+      if (facility_type) { clauses.push('t.facility_type = ?'); params.push(facility_type); }
+      if (trigger) { clauses.push('t.trigger_event = ?'); params.push(trigger); }
+      if (category_id) { clauses.push('t.category_id = ?'); params.push(category_id); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows = await db.query(
+        `SELECT t.*, c.name AS category_name,
+                (SELECT COUNT(*)::int FROM checklist_template_steps s WHERE s.template_id = t.id AND s.is_active = 1) AS step_count,
+                (SELECT COUNT(*)::int FROM checklist_assignments a WHERE a.template_id = t.id AND a.is_active = 1) AS assignment_count
+           FROM checklist_templates t LEFT JOIN checklist_categories c ON c.id = t.category_id
+           ${where} ORDER BY t.sort_order, t.created_at`, params);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to load templates" }); }
+  });
+  app.get("/api/restaurant/:id/checklists/templates/:tid", authenticate, hkStaff, requireTabAccess('CHECKLISTS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const tpl = await db.get("SELECT * FROM checklist_templates WHERE id = ?", [req.params.tid]);
+      if (!tpl) return res.status(404).json({ error: 'Template not found' });
+      const steps = await db.query("SELECT * FROM checklist_template_steps WHERE template_id = ? AND is_active = 1 ORDER BY sort_order, id", [req.params.tid]);
+      const assignments = await db.query("SELECT * FROM checklist_assignments WHERE template_id = ? AND is_active = 1", [req.params.tid]);
+      res.json({ ...tpl, steps, assignments });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load template" }); }
+  });
+  app.post("/api/restaurant/:id/checklists/templates", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const b = req.body || {};
+      const name = String(b.name || '').trim();
+      const ft = String(b.facility_type || '').toUpperCase();
+      const trg = String(b.trigger_event || '').toUpperCase();
+      if (!name) return res.status(400).json({ error: 'name is required' });
+      if (!CHK_FTYPES.includes(ft)) return res.status(400).json({ error: 'facility_type must be ROOM, EVENT or GENERIC' });
+      if (!CHK_TRIGGERS.includes(trg)) return res.status(400).json({ error: `trigger_event must be one of ${CHK_TRIGGERS.join(', ')}` });
+      const recur = trg === 'MID_STAY' ? Math.max(1, Number(b.recurrence_nights) || 1) : (Number(b.recurrence_nights) || 0);
+      if (trg === 'MID_STAY' && recur < 1) return res.status(400).json({ error: 'MID_STAY requires recurrence_nights >= 1' });
+      const id = mkHkId('CHKTPL');
+      const cnt: any = await db.get("SELECT COUNT(*)::int AS c FROM checklist_templates");
+      await db.run("INSERT INTO checklist_templates (id, category_id, name, facility_type, trigger_event, recurrence_nights, blocks_release, sort_order, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [id, b.category_id || null, name, ft, trg, recur, b.blocks_release ? 1 : 0, Number(cnt?.c || 0), String(b.notes || '').trim() || null]);
+      const steps = Array.isArray(b.steps) ? b.steps : [];
+      let i = 0;
+      for (const s of steps) {
+        const label = String(s?.label || '').trim();
+        if (!label) continue;
+        await db.run("INSERT INTO checklist_template_steps (id, template_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
+          [mkHkId('CHKS'), id, label, s?.is_mandatory === false ? 0 : 1, Number(s?.sort_order ?? i)]);
+        i++;
+      }
+      await writeObjectAudit(db, req, { objectType: 'CHECKLIST_TEMPLATE', objectId: id, action: 'CREATED', summary: `Created checklist template "${name}" (${ft}/${trg})` });
+      res.status(201).json(await db.get("SELECT * FROM checklist_templates WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create template" }); }
+  });
+  app.patch("/api/restaurant/:id/checklists/templates/:tid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const tpl: any = await db.get("SELECT * FROM checklist_templates WHERE id = ?", [req.params.tid]);
+      if (!tpl) return res.status(404).json({ error: 'Template not found' });
+      const b = req.body || {}; const fields: string[] = []; const vals: any[] = [];
+      if (b.name !== undefined) { fields.push('name = ?'); vals.push(String(b.name).trim()); }
+      if (b.category_id !== undefined) { fields.push('category_id = ?'); vals.push(b.category_id || null); }
+      if (b.blocks_release !== undefined) { fields.push('blocks_release = ?'); vals.push(b.blocks_release ? 1 : 0); }
+      if (b.recurrence_nights !== undefined) { fields.push('recurrence_nights = ?'); vals.push(Math.max(0, Number(b.recurrence_nights) || 0)); }
+      if (b.is_active !== undefined) { fields.push('is_active = ?'); vals.push(b.is_active ? 1 : 0); }
+      if (b.sort_order !== undefined) { fields.push('sort_order = ?'); vals.push(Number(b.sort_order) || 0); }
+      if (b.notes !== undefined) { fields.push('notes = ?'); vals.push(String(b.notes || '').trim() || null); }
+      // Changing facility_type / trigger of a SYSTEM template is blocked (protects the
+      // default checkout / event-complete gating). Custom templates may change freely.
+      if (Number(tpl.is_system) !== 1) {
+        if (b.facility_type !== undefined && CHK_FTYPES.includes(String(b.facility_type).toUpperCase())) { fields.push('facility_type = ?'); vals.push(String(b.facility_type).toUpperCase()); }
+        if (b.trigger_event !== undefined && CHK_TRIGGERS.includes(String(b.trigger_event).toUpperCase())) { fields.push('trigger_event = ?'); vals.push(String(b.trigger_event).toUpperCase()); }
+      }
+      if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
+      vals.push(req.params.tid);
+      await db.run(`UPDATE checklist_templates SET ${fields.join(', ')} WHERE id = ?`, vals);
+      await writeObjectAudit(db, req, { objectType: 'CHECKLIST_TEMPLATE', objectId: req.params.tid, action: 'EDITED', summary: `Edited checklist template "${tpl.name}"`, before: tpl });
+      res.json(await db.get("SELECT * FROM checklist_templates WHERE id = ?", [req.params.tid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to update template" }); }
+  });
+  app.delete("/api/restaurant/:id/checklists/templates/:tid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const tpl: any = await db.get("SELECT is_system FROM checklist_templates WHERE id = ?", [req.params.tid]);
+      if (tpl && Number(tpl.is_system) === 1) return res.status(400).json({ error: 'System templates cannot be deleted. You can deactivate it instead.' });
+      await db.run("UPDATE checklist_templates SET is_active = 0 WHERE id = ?", [req.params.tid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete template" }); }
+  });
+  app.post("/api/restaurant/:id/checklists/templates/:tid/steps", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const label = String(req.body?.label || '').trim();
+      if (!label) return res.status(400).json({ error: 'label is required' });
+      const cnt: any = await db.get("SELECT COUNT(*)::int AS c FROM checklist_template_steps WHERE template_id = ?", [req.params.tid]);
+      const id = mkHkId('CHKS');
+      await db.run("INSERT INTO checklist_template_steps (id, template_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
+        [id, req.params.tid, label, req.body?.is_mandatory === false ? 0 : 1, Number(cnt?.c || 0)]);
+      res.status(201).json(await db.get("SELECT * FROM checklist_template_steps WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to add step" }); }
+  });
+  app.patch("/api/restaurant/:id/checklists/templates/:tid/steps/:sid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {}; const fields: string[] = []; const vals: any[] = [];
+      if (b.label !== undefined) { fields.push('label = ?'); vals.push(String(b.label).trim()); }
+      if (b.is_mandatory !== undefined) { fields.push('is_mandatory = ?'); vals.push(b.is_mandatory ? 1 : 0); }
+      if (b.is_active !== undefined) { fields.push('is_active = ?'); vals.push(b.is_active ? 1 : 0); }
+      if (b.sort_order !== undefined) { fields.push('sort_order = ?'); vals.push(Number(b.sort_order) || 0); }
+      if (!fields.length) return res.status(400).json({ error: 'Nothing to update' });
+      vals.push(req.params.sid);
+      await db.run(`UPDATE checklist_template_steps SET ${fields.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM checklist_template_steps WHERE id = ?", [req.params.sid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to update step" }); }
+  });
+  app.delete("/api/restaurant/:id/checklists/templates/:tid/steps/:sid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM checklist_template_steps WHERE id = ?", [req.params.sid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete step" }); }
+  });
+
+  // ── Assignments (per-entity overrides) ───────────────────────────────────
+  app.get("/api/restaurant/:id/checklists/assignments", authenticate, hkStaff, requireTabAccess('CHECKLISTS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const { template_id, scope, scope_id } = req.query as Record<string, string>;
+      const clauses: string[] = ['is_active = 1']; const params: any[] = [];
+      if (template_id) { clauses.push('template_id = ?'); params.push(template_id); }
+      if (scope) { clauses.push('scope = ?'); params.push(scope); }
+      if (scope_id) { clauses.push('scope_id = ?'); params.push(scope_id); }
+      res.json(await db.query(`SELECT * FROM checklist_assignments WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load assignments" }); }
+  });
+  app.post("/api/restaurant/:id/checklists/assignments", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const b = req.body || {};
+      const scope = String(b.scope || '').toUpperCase();
+      const scopeId = String(b.scope_id || '').trim();
+      if (!b.template_id) return res.status(400).json({ error: 'template_id is required' });
+      if (!['ROOM', 'ROOM_TYPE', 'VENUE'].includes(scope)) return res.status(400).json({ error: 'scope must be ROOM, ROOM_TYPE or VENUE' });
+      if (!scopeId) return res.status(400).json({ error: 'scope_id is required' });
+      const existsSql = scope === 'ROOM' ? "SELECT 1 FROM rooms WHERE id = ?" : scope === 'ROOM_TYPE' ? "SELECT 1 FROM room_types WHERE id = ?" : "SELECT 1 FROM event_venues WHERE id = ?";
+      const ent: any = await db.get(existsSql, [scopeId]).catch(() => null);
+      if (!ent) return res.status(400).json({ error: `No ${scope} found with id ${scopeId}` });
+      // De-dupe identical active assignment.
+      const dup: any = await db.get("SELECT id FROM checklist_assignments WHERE template_id = ? AND scope = ? AND scope_id = ? AND is_active = 1", [b.template_id, scope, scopeId]).catch(() => null);
+      if (dup) return res.status(200).json(await db.get("SELECT * FROM checklist_assignments WHERE id = ?", [dup.id]));
+      const id = mkHkId('CHKASG');
+      await db.run("INSERT INTO checklist_assignments (id, template_id, scope, scope_id) VALUES (?, ?, ?, ?)", [id, b.template_id, scope, scopeId]);
+      res.status(201).json(await db.get("SELECT * FROM checklist_assignments WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create assignment" }); }
+  });
+  app.delete("/api/restaurant/:id/checklists/assignments/:aid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM checklist_assignments WHERE id = ?", [req.params.aid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete assignment" }); }
+  });
+
+  // ── Manual / on-demand start (e.g. Electrical Inspection on a specific room) ──
+  app.post("/api/restaurant/:id/checklists/jobs", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const b = req.body || {};
+      const template_ids: string[] = Array.isArray(b.template_ids) ? b.template_ids : (b.template_id ? [b.template_id] : []);
+      if (!template_ids.length) return res.status(400).json({ error: 'template_id(s) required' });
+      const ft = String(b.facility_type || 'ROOM').toUpperCase();
+      const jobIds = await raiseChecklistJobs(db, {
+        facility_type: ft === 'EVENT' ? 'EVENT' : 'ROOM',
+        facility_id: b.facility_id || null,
+        facility_label: b.facility_label || null,
+        source_ref: b.source_ref || null,
+        guest_label: b.guest_label || null,
+        trigger: 'MANUAL',
+        template_ids,
+      });
+      for (const jid of jobIds) await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: jid, action: 'CREATED', summary: `Manually started a checklist for ${b.facility_label || ft} by ${hkActor(req)}` });
+      res.status(201).json({ job_ids: jobIds, count: jobIds.length });
+    } catch (err: any) { res.status(500).json({ error: "Failed to start checklist" }); }
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -25085,12 +25472,14 @@ ${data.tenant.name}`;
       // checklist is still open. Non-managers must complete the checklist; a
       // manager/owner may force it, which closes the job as an override (logged).
       if (status === 'VACANT') {
-        const openJob: any = await tenantDb.get("SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' LIMIT 1", [req.params.roomId]).catch(() => null);
-        if (openJob) {
+        // Only RELEASE-BLOCKING open checklists gate the room (an inspection with
+        // blocks_release=0 stays on the worklist but doesn't hold the room).
+        const blockers: any[] = await tenantDb.query("SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' AND blocks_release = 1", [req.params.roomId]).catch(() => []);
+        if (blockers.length) {
           const isMgr = HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase());
-          if (!isMgr) return res.status(409).json({ error: 'Cleaning checklist not complete — finish the housekeeping tasks before marking this room ready.', housekeeping_job_id: openJob.id });
-          await tenantDb.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE id = ?",
-            [hkActor(req), 'Room set VACANT by manager', openJob.id]).catch(() => {});
+          if (!isMgr) return res.status(409).json({ error: 'Cleaning checklist not complete — finish the housekeeping tasks before marking this room ready.', housekeeping_job_id: blockers[0].id, housekeeping_job_ids: blockers.map((b: any) => b.id) });
+          await tenantDb.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' AND blocks_release = 1",
+            [hkActor(req), 'Room set VACANT by manager', req.params.roomId]).catch(() => {});
         }
       }
       await tenantDb.run("UPDATE rooms SET status = ? WHERE id = ?", [status, req.params.roomId]);
@@ -34850,6 +35239,14 @@ ${data.tenant.name}`;
       }
       await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [b.room_id]);
 
+      // Checklist: raise any CHECK_IN checklists configured for this room / type
+      // (arrival prep, welcome-amenity setup, etc). Fire-and-forget — never blocks
+      // check-in; check-in checklists are normally non-blocking (room is OCCUPIED).
+      try {
+        const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN' });
+      } catch { /* non-fatal */ }
+
       // ── REQ 1: lock every existing ID-proof document for this booking ──
       // The moment a guest checks in, the ID-proof documents that were
       // submitted become the official record of the stay (statutory for
@@ -35371,8 +35768,8 @@ ${data.tenant.name}`;
       // Housekeeping: raise a cleaning job from the ROOM checklist. The room stays
       // CLEANING (not bookable) until the job's mandatory tasks are completed.
       try {
-        const rm: any = await tenantDb.get("SELECT name, room_number FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null });
+        const rm: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null });
       } catch { /* non-fatal — never block checkout */ }
 
       // ── Fire the unified loyalty hook so the folio counts toward the
@@ -44348,7 +44745,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'accounting-phase2-statements-gst-controls',
+    commit_marker: 'configurable-checklist-templates',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -45587,6 +45984,61 @@ ${data.tenant.name}`;
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[inv-forecast] Forecast recompute cron started — daily at 03:00 IST');
+
+  // ─── Checklists: daily + mid-stay auto-raise (05:00 IST) ────────────────
+  // For hotel/events tenants with active DAILY / MID_STAY templates, raise the
+  // day's Daily checklists per room/venue and the recurring mid-stay checklists
+  // for in-house guests. Dedupe keys make every run idempotent (safe to re-run).
+  cron.schedule('0 5 * * *', async () => {
+    try {
+      const ymd = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const restaurants = await centralDb.query("SELECT id, property_type, events_enabled FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'");
+      let raised = 0;
+      for (const r of restaurants) {
+        try {
+          const isHotel = ['HOTEL', 'BOTH'].includes(String(r.property_type || ''));
+          const isEvents = Number(r.events_enabled) === 1;
+          if (!isHotel && !isEvents) continue;
+          const db = await getTenantDb(r.id);
+          await ensureHousekeepingTables(db);
+          const has: any = await db.get("SELECT (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='DAILY') AS daily, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='MID_STAY') AS midstay").catch(() => ({ daily: 0, midstay: 0 }));
+          if (Number(has?.daily || 0) === 0 && Number(has?.midstay || 0) === 0) continue;
+          if (isHotel && Number(has?.daily || 0) > 0) {
+            const rooms: any[] = await db.query("SELECT id, name, room_number, type_id FROM rooms").catch(() => []);
+            for (const rm of rooms) {
+              const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${ymd}` });
+              raised += ids.length;
+            }
+          }
+          if (isEvents && Number(has?.daily || 0) > 0) {
+            const venues: any[] = await db.query("SELECT id, name FROM event_venues WHERE is_active = 1").catch(() => []);
+            for (const v of venues) {
+              const ids = await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${ymd}` });
+              raised += ids.length;
+            }
+          }
+          if (isHotel && Number(has?.midstay || 0) > 0) {
+            const stays: any[] = await db.query("SELECT rb.id, rb.room_id, rb.check_in_date, r.name, r.room_number, r.type_id FROM room_bookings rb JOIN rooms r ON r.id = rb.room_id WHERE rb.status = 'CHECKED_IN'").catch(() => []);
+            for (const st of stays) {
+              const ci = String(st.check_in_date || '').slice(0, 10);
+              if (!ci) continue;
+              const nights = Math.floor((Date.parse(ymd) - Date.parse(ci)) / 86400000);
+              if (nights <= 0) continue;
+              const tpls: any[] = await resolveTemplatesForTrigger(db, { facility_type: 'ROOM', facility_id: st.room_id, room_type_id: st.type_id || null, trigger: 'MID_STAY' });
+              for (const tpl of tpls) {
+                const N = Math.max(1, Number(tpl.recurrence_nights) || 1);
+                if (nights % N !== 0) continue;
+                const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${st.id}:${tpl.id}:N${nights}` });
+                raised += ids.length;
+              }
+            }
+          }
+        } catch (tenantErr) { console.error(`[checklist-cron] tenant ${r.id} error:`, tenantErr); }
+      }
+      if (raised > 0) console.log(`[checklist-cron] raised ${raised} daily/mid-stay checklist job(s)`);
+    } catch (err) { console.error('[checklist-cron] cron error:', err); }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[checklist-cron] Daily + mid-stay checklist cron started — 05:00 IST');
 
   // ─── Inventory: morning stock-low scan (09:00 IST) ──────────────────────
   // Fires STOCK_LOW notification for ingredients that crossed below their

@@ -62,6 +62,33 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
   const [loading, setLoading] = useState(true);
   const [openJob, setOpenJob] = useState<any>(null); // {..., tasks}
   const [busy, setBusy] = useState(false);
+  // Manual / on-demand start (inspections, ad-hoc runs).
+  const [showStart, setShowStart] = useState(false);
+  const [startTpls, setStartTpls] = useState<any[]>([]);
+  const [startRooms, setStartRooms] = useState<any[]>([]);
+  const [startVenues, setStartVenues] = useState<any[]>([]);
+  const [startTplId, setStartTplId] = useState('');
+  const [startFacId, setStartFacId] = useState('');
+
+  const openStart = async () => {
+    setShowStart(true); setStartTplId(''); setStartFacId('');
+    try { const t = await api('/checklists/templates'); setStartTpls((Array.isArray(t) ? t : []).filter((x: any) => Number(x.is_active) === 1)); } catch { setStartTpls([]); }
+    try { const r = await api('/hotel/rooms'); setStartRooms(Array.isArray(r) ? r : (r?.rooms || [])); } catch { setStartRooms([]); }
+    try { const v = await api('/events/venues'); setStartVenues(Array.isArray(v) ? v : (v?.venues || [])); } catch { setStartVenues([]); }
+  };
+  const startTpl = startTpls.find(t => t.id === startTplId);
+  const startIsEvent = startTpl?.facility_type === 'EVENT';
+  const startFacilities = startIsEvent ? startVenues : startRooms;
+  const submitStart = async () => {
+    if (!startTplId || !startFacId) return;
+    const fac = startFacilities.find((f: any) => f.id === startFacId);
+    const label = fac ? (fac.name || (fac.room_number ? `Room ${fac.room_number}` : fac.id)) : startFacId;
+    setBusy(true);
+    try {
+      await api('/checklists/jobs', { method: 'POST', body: JSON.stringify({ template_id: startTplId, facility_type: startIsEvent ? 'EVENT' : 'ROOM', facility_id: startFacId, facility_label: label }) });
+      setShowStart(false); await load();
+    } catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -96,6 +123,7 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
     <div>
       <div className="flex items-center gap-2 mb-3">
         <button className={BTN_GHOST} onClick={load}><RefreshCw size={13} /> Refresh</button>
+        <button className={BTN_GHOST} onClick={openStart}>+ Start checklist</button>
         <span className="text-[11px] text-[#9c8e85]">{jobs.length} facilities awaiting cleaning</span>
       </div>
       {loading ? <p className="text-sm text-[#6b5d52] p-4">Loading…</p> : jobs.length === 0 ? (
@@ -115,6 +143,7 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
                     : <span className="text-[10px] font-bold text-emerald-600">ready to close</span>}
                 </div>
                 <div className="font-bold text-[#14110c]">{j.facility_label || j.facility_id}</div>
+                {j.template_name && <div className="text-[11px] font-semibold text-[#cc5a16]">{j.template_name}{Number(j.blocks_release) === 0 ? <span className="ml-1 text-[9px] font-bold uppercase text-[#9c8e85]">· non-blocking</span> : null}</div>}
                 <div className="text-[11px] text-[#9c8e85]">{j.guest_label ? `after ${j.guest_label} · ` : ''}{dt(j.created_at)}</div>
                 <div className="mt-2 h-1.5 rounded-full bg-[#f0e9df] overflow-hidden"><div className="h-full bg-[#cc5a16]" style={{ width: `${pct}%` }} /></div>
                 <div className="text-[10px] text-[#9c8e85] mt-1">{j.done_count}/{j.task_count} tasks</div>
@@ -130,7 +159,7 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
             <div className="flex items-start justify-between gap-2 mb-1">
               <div>
                 <h3 className="text-lg font-bold text-[#14110c]">{openJob.facility_label}</h3>
-                <p className="text-[11px] text-[#9c8e85]">{openJob.facility_type} cleaning{openJob.guest_label ? ` · after ${openJob.guest_label}` : ''}</p>
+                <p className="text-[11px] text-[#9c8e85]">{openJob.template_name || `${openJob.facility_type} cleaning`}{openJob.guest_label ? ` · after ${openJob.guest_label}` : ''}</p>
               </div>
               <button onClick={() => setOpenJob(null)}><X size={18} className="text-[#9c8e85]" /></button>
             </div>
@@ -148,6 +177,35 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
             <div className="flex flex-col sm:flex-row sm:justify-end gap-2 sticky bottom-0 bg-white pt-1">
               <button className={`${BTN_GHOST} w-full sm:w-auto justify-center py-2.5`} onClick={override} disabled={busy}><ShieldAlert size={13} /> Override</button>
               <button className={`${BTN_PRIMARY} w-full sm:w-auto justify-center py-2.5`} onClick={complete} disabled={busy || pendMand > 0}><Check size={13} /> Mark cleaned &amp; release</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showStart && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowStart(false)}>
+          <div className="w-full max-w-md bg-white rounded-2xl border border-[#e8dccf] p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-2 mb-3">
+              <h3 className="text-lg font-bold text-[#14110c]">Start a checklist</h3>
+              <button onClick={() => setShowStart(false)}><X size={18} className="text-[#9c8e85]" /></button>
+            </div>
+            <label className="text-[11px] font-semibold text-[#6b5d52] block mb-1">Checklist template</label>
+            <select value={startTplId} onChange={e => { setStartTplId(e.target.value); setStartFacId(''); }} className="w-full text-sm border border-[#d4c4a8] rounded px-2 py-2 bg-white mb-3">
+              <option value="">Select a template…</option>
+              {startTpls.map(t => <option key={t.id} value={t.id}>{t.name} ({t.facility_type})</option>)}
+            </select>
+            {startTpl && (
+              <>
+                <label className="text-[11px] font-semibold text-[#6b5d52] block mb-1">{startIsEvent ? 'Event hall' : 'Room'}</label>
+                <select value={startFacId} onChange={e => setStartFacId(e.target.value)} className="w-full text-sm border border-[#d4c4a8] rounded px-2 py-2 bg-white mb-3">
+                  <option value="">Select…</option>
+                  {startFacilities.map((f: any) => <option key={f.id} value={f.id}>{f.name || (f.room_number ? `Room ${f.room_number}` : f.id)}</option>)}
+                </select>
+              </>
+            )}
+            <div className="flex justify-end gap-2">
+              <button className={BTN_GHOST} onClick={() => setShowStart(false)}>Cancel</button>
+              <button className={BTN_PRIMARY} onClick={submitStart} disabled={busy || !startTplId || !startFacId}>Start</button>
             </div>
           </div>
         </div>

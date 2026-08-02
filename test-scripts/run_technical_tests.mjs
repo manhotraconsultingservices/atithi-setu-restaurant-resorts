@@ -1052,6 +1052,98 @@ async function testHousekeeping() {
   }
 }
 
+// ── Configurable Checklist Templates ─────────────────────────────────────────
+async function testChecklists() {
+  section('CHECKLISTS — configurable templates / assignments / manual start');
+  if (!restaurantId) { skip('TC-CHK-*', 'All checklist tests', 'no restaurantId'); return; }
+  const R = restaurantId;
+  const cleanupJob = async (jid) => {
+    const j = await api('GET', `/api/restaurant/${R}/housekeeping/jobs/${jid}`);
+    for (const t of (j.data?.tasks || [])) await api('PATCH', `/api/restaurant/${R}/housekeeping/jobs/${jid}/tasks/${t.id}`, { is_done: true });
+    await api('POST', `/api/restaurant/${R}/housekeeping/jobs/${jid}/complete`, {});
+  };
+
+  // TC-CHK-CAT — category create + list + deactivate (self-cleaning).
+  const catRes = await api('POST', `/api/restaurant/${R}/checklists/categories`, { name: `UAT Cat ${Date.now()}` });
+  if (catRes.status === 201 && catRes.data?.id) {
+    const list = await api('GET', `/api/restaurant/${R}/checklists/categories`);
+    const found = Array.isArray(list.data) && list.data.some(c => c.id === catRes.data.id);
+    (found ? pass : fail)('TC-CHK-CAT', 'Category create + list', `id=${catRes.data.id}`);
+    await api('DELETE', `/api/restaurant/${R}/checklists/categories/${catRes.data.id}`);
+  } else if (catRes.status === 403) { skip('TC-CHK-CAT', 'Category CRUD', 'need OWNER role'); }
+  else if (catRes.status === 404) { fail('TC-CHK-CAT', 'Category CRUD', 'HTTP 404 — route unreachable (regression: shadowed by /api 404)'); }
+  else { fail('TC-CHK-CAT', 'Category create', `HTTP ${catRes.status}`); }
+
+  // TC-CHK-TMPL — template + steps create; detail returns copied steps.
+  let tplId = null;
+  const tplRes = await api('POST', `/api/restaurant/${R}/checklists/templates`, {
+    name: `UAT Inspection ${Date.now()}`, facility_type: 'ROOM', trigger_event: 'MANUAL', blocks_release: false,
+    steps: [{ label: 'Check smoke detector', is_mandatory: true }, { label: 'Test switches', is_mandatory: true }],
+  });
+  if (tplRes.status === 201 && tplRes.data?.id) {
+    tplId = tplRes.data.id;
+    const det = await api('GET', `/api/restaurant/${R}/checklists/templates/${tplId}`);
+    const okSteps = det.status === 200 && Array.isArray(det.data?.steps) && det.data.steps.length === 2;
+    (okSteps ? pass : fail)('TC-CHK-TMPL', 'Template + steps create; detail returns steps', `${det.data?.steps?.length} steps`);
+  } else if (tplRes.status === 403) { skip('TC-CHK-TMPL', 'Template CRUD', 'need OWNER role'); }
+  else { fail('TC-CHK-TMPL', 'Template create', `HTTP ${tplRes.status} — ${JSON.stringify(tplRes.data)}`); }
+
+  // Need a real room for assignment + manual-start + gating tests.
+  let roomId = null;
+  const rms = await api('GET', `/api/restaurant/${R}/hotel/rooms`);
+  if (rms.status === 200) { const arr = Array.isArray(rms.data) ? rms.data : (rms.data?.rooms || []); roomId = arr[0]?.id || null; }
+
+  if (tplId && roomId) {
+    // TC-CHK-ASSIGN — per-entity assignment created + reflected in the count.
+    const asg = await api('POST', `/api/restaurant/${R}/checklists/assignments`, { template_id: tplId, scope: 'ROOM', scope_id: roomId });
+    if (asg.status === 201 && asg.data?.id) {
+      const tl = await api('GET', `/api/restaurant/${R}/checklists/templates`);
+      const row = Array.isArray(tl.data) ? tl.data.find(t => t.id === tplId) : null;
+      (row && Number(row.assignment_count) >= 1 ? pass : fail)('TC-CHK-ASSIGN', 'Per-entity assignment created + counted', `assignment_count=${row?.assignment_count}`);
+      await api('DELETE', `/api/restaurant/${R}/checklists/assignments/${asg.data.id}`);
+    } else { fail('TC-CHK-ASSIGN', 'Assignment create', `HTTP ${asg.status} — ${JSON.stringify(asg.data)}`); }
+
+    // TC-CHK-MANUAL — manual start raises a job with copied steps + blocks_release snapshot.
+    const started = await api('POST', `/api/restaurant/${R}/checklists/jobs`, { template_id: tplId, facility_type: 'ROOM', facility_id: roomId, facility_label: 'UAT Room' });
+    if (started.status === 201 && Array.isArray(started.data?.job_ids) && started.data.job_ids.length === 1) {
+      const jid = started.data.job_ids[0];
+      const job = await api('GET', `/api/restaurant/${R}/housekeeping/jobs/${jid}`);
+      const okJob = job.status === 200 && job.data?.template_id === tplId && Array.isArray(job.data?.tasks) && job.data.tasks.length === 2 && Number(job.data.blocks_release) === 0;
+      (okJob ? pass : fail)('TC-CHK-MANUAL', 'Manual start raises a job with copied steps + non-blocking snapshot', `tasks=${job.data?.tasks?.length}, blocks_release=${job.data?.blocks_release}`);
+      await cleanupJob(jid);
+    } else { fail('TC-CHK-MANUAL', 'Manual start', `HTTP ${started.status} — ${JSON.stringify(started.data)}`); }
+
+    // TC-CHK-MULTI — one trigger raises one job per template (checkout can spawn 2).
+    const tpl2 = await api('POST', `/api/restaurant/${R}/checklists/templates`, { name: `UAT Insp2 ${Date.now()}`, facility_type: 'ROOM', trigger_event: 'MANUAL', steps: [{ label: 'Spot check', is_mandatory: false }] });
+    if (tpl2.status === 201 && tpl2.data?.id) {
+      const both = await api('POST', `/api/restaurant/${R}/checklists/jobs`, { template_ids: [tplId, tpl2.data.id], facility_type: 'ROOM', facility_id: roomId, facility_label: 'UAT Room' });
+      (both.status === 201 && both.data?.count === 2 ? pass : fail)('TC-CHK-MULTI', 'One trigger raises one job per template', `count=${both.data?.count}`);
+      for (const jid of (both.data?.job_ids || [])) await cleanupJob(jid);
+      await api('DELETE', `/api/restaurant/${R}/checklists/templates/${tpl2.data.id}`);
+    }
+
+    // TC-CHK-GATING — a blocks_release=1 template snapshots blocks_release=1 onto its job
+    // (this is the flag the room-release gate keys on).
+    const gTpl = await api('POST', `/api/restaurant/${R}/checklists/templates`, { name: `UAT Blocking ${Date.now()}`, facility_type: 'ROOM', trigger_event: 'MANUAL', blocks_release: true, steps: [{ label: 'Final check', is_mandatory: true }] });
+    if (gTpl.status === 201 && gTpl.data?.id) {
+      const gStart = await api('POST', `/api/restaurant/${R}/checklists/jobs`, { template_id: gTpl.data.id, facility_type: 'ROOM', facility_id: roomId, facility_label: 'UAT Room' });
+      const gjid = gStart.data?.job_ids?.[0];
+      if (gjid) {
+        const gjob = await api('GET', `/api/restaurant/${R}/housekeeping/jobs/${gjid}`);
+        (Number(gjob.data?.blocks_release) === 1 ? pass : fail)('TC-CHK-GATING', 'blocks_release=1 template snapshots a release-blocking job', `blocks_release=${gjob.data?.blocks_release}`);
+        await cleanupJob(gjid);
+      }
+      await api('DELETE', `/api/restaurant/${R}/checklists/templates/${gTpl.data.id}`);
+    }
+  } else {
+    skip('TC-CHK-ASSIGN', 'Assignment + manual start + gating', tplId ? 'no hotel room on this tenant' : 'template not created');
+    skip('TC-CHK-MANUAL', 'Manual start', tplId ? 'no hotel room on this tenant' : 'template not created');
+    skip('TC-CHK-GATING', 'blocks_release snapshot', tplId ? 'no hotel room on this tenant' : 'template not created');
+  }
+
+  if (tplId) await api('DELETE', `/api/restaurant/${R}/checklists/templates/${tplId}`);
+}
+
 // ── Channel Manager tests ──────────────────────────────────────────────────
 
 async function testChannelManager() {
@@ -1937,6 +2029,7 @@ async function main() {
   await testSpa();
   await testEvents();
   await testHousekeeping();
+  await testChecklists();
   await testChannelManager();
   await testReports();
   await testPublicBooking();

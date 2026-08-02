@@ -7,6 +7,7 @@ import { useConfirm } from './components/ConfirmDialog';
 import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { HousekeepingModule } from './Housekeeping';
+import { ChecklistTemplates } from './ChecklistTemplates';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
@@ -8797,6 +8798,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE' | 'HOTEL_INVENTORY'  // hospitality Phase 2 & 3
     | 'HOUSEKEEPING'                             // cleaning checklist worklist + config + log
     | 'EVENTS_HOUSEKEEPING'                      // event-scoped cleaning checklist under the Events nav
+    | 'CHECKLISTS'                               // owner config — configurable checklist templates
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
     | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
     | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
@@ -12749,7 +12751,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Full(3) for any role that doesn't have them configured yet. This prevents
         // an owner from accidentally revoking access simply by opening the matrix
         // and saving before explicitly setting a level for these new tabs.
-        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT'];
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS'];
         for (const roleId of Object.keys(raw)) {
           for (const tab of NEWLY_ADDED) {
             if (!(tab in (raw[roleId] || {}))) raw[roleId] = { ...(raw[roleId] || {}), [tab]: 3 };
@@ -13843,7 +13845,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', EVENTS_HOUSEKEEPING: 'Cleaning Checklist', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', EVENTS_HOUSEKEEPING: 'Cleaning Checklist', CHECKLISTS: 'Checklist Templates', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             SPA_CALENDAR: 'Appt. Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages', SPA_REPORTS: 'Spa Reports', SPA_BILLING: 'Invoices & Payments', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Spa Page Settings',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
@@ -13933,6 +13935,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FRONT_OFFICE_REPORTS', label: 'Hotel Reports' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
               { id: 'HOUSEKEEPING',         label: 'Housekeeping' },
+              ...(isOwnerOrAdmin ? [{ id: 'CHECKLISTS', label: 'Checklist Templates' } as NavTab] : []),
               { id: 'SERVICES',             label: 'Service Catalogue' },
               { id: 'FOLIOS',               label: 'Guest Bills' },
               { id: 'COMPLIANCE',           label: 'Guest Compliance' },
@@ -14076,6 +14079,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // Room Setup is owner-only (room CRUD + types + tariff). Mirror the
           // STAFF_ACCESS gate: owners always see it; everyone else never does.
           if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
+          // Checklist Templates is owner config (define/assign checklists). Owner-only.
+          if (id === 'CHECKLISTS') return isOwnerOrAdmin;
           // Finance tabs (PROCUREMENT, EXPENSE_JOURNAL) were introduced after
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
@@ -14757,6 +14762,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="p-1"><HousekeepingModule restaurantId={restaurantId} token={token!} /></div>
       ) : activeTab === 'EVENTS_HOUSEKEEPING' && isEventsEnabled ? (
         <div className="p-1"><HousekeepingModule restaurantId={restaurantId} token={token!} scope="EVENT" /></div>
+      ) : activeTab === 'CHECKLISTS' ? (
+        <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} /></div>
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
       ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS') && isEventsEnabled ? (
@@ -25588,6 +25595,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'SERVICES',          label: 'Hotel Services',          description: 'Configure room-service offerings (Extra towels, AC repair, etc.) and pricing.', hotelOnly: true },
               { id: 'SERVICE_REQUESTS',  label: 'Service Requests',        description: 'Live queue of guest requests — housekeeping / maintenance acknowledge here.', hotelOnly: true },
               { id: 'HOUSEKEEPING',      label: 'Housekeeping',            description: 'Cleaning checklists, the cleaning worklist (tick tasks + release rooms/venues), and the cleaning log. Configure the checklist as owner/manager.', hotelOnly: true },
+              { id: 'CHECKLISTS',        label: 'Checklist Templates',     description: 'Owner config: build reusable checklist templates by category, set their trigger (check-in / check-out / daily / mid-stay / inspection), and assign them to all or specific rooms / halls. Owner-only.', hotelOnly: true },
               { id: 'FOLIOS',            label: 'Guest Bills',             description: 'View / settle guest bills, add F&B charges, apply promos, credit notes.', hotelOnly: true },
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
