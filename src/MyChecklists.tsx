@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { ObjectDetail } from './components/ObjectDetail';
+import { DataTable, type ColDef } from './components/DataTable';
 
 // ── "My Checklist" — the personal work queue of checklist INSTANCES assigned to
 // the current user or their role. A checklist instance = a job with real tasks,
@@ -72,6 +73,45 @@ export function MyChecklists({ restaurantId, token }: Props) {
 
   const pendingCount = jobs.filter(j => j.workflow_state === 'ASSIGNED').length;
 
+  const columns = useMemo<ColDef<any>[]>(() => [
+    {
+      key: 'name', label: 'Checklist', sortable: true, searchable: true, hideable: false,
+      getValue: (j) => j.template_name || TRIGGER_LABEL[j.trigger_event] || 'Checklist',
+      render: (j) => (
+        <div className="flex items-center gap-2">
+          <button onClick={() => setDetail(j)} className="font-semibold text-blue-600 hover:text-blue-800 hover:underline text-left">
+            {j.template_name || TRIGGER_LABEL[j.trigger_event] || 'Checklist'}
+          </button>
+          {Number(j.blocks_release) === 1 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600 whitespace-nowrap">blocks release</span>}
+        </div>
+      ),
+      exportValue: (j) => j.template_name || TRIGGER_LABEL[j.trigger_event] || 'Checklist',
+    },
+    {
+      key: 'facility', label: 'For', sortable: true, filterable: true, filterType: 'text',
+      getValue: (j) => `${j.facility_label || j.facility_id || j.facility_type || ''}${j.guest_label ? ` · ${j.guest_label}` : ''}`,
+    },
+    {
+      key: 'trigger', label: 'Trigger', sortable: true, filterable: true, filterType: 'select',
+      getValue: (j) => TRIGGER_LABEL[j.trigger_event] || j.trigger_event || '',
+    },
+    ...(isManager ? [{
+      key: 'assignee', label: 'Assigned to', sortable: true, filterable: true, filterType: 'select',
+      getValue: (j: any) => j.assigned_to_user || ROLE_LABEL[j.assigned_to_role] || j.assigned_to_role || '',
+    } as ColDef<any>] : []),
+    {
+      key: 'progress', label: 'Progress', sortable: true, align: 'center', searchable: false,
+      getValue: (j) => { const c = taskCounts(j); return c.total ? c.done / c.total : 0; },
+      render: (j) => { const { total, done, pendMand } = taskCounts(j); return <span className="tabular-nums whitespace-nowrap">{done}/{total}{pendMand > 0 ? <span className="text-[11px] text-rose-600"> · {pendMand} req</span> : ''}</span>; },
+      exportValue: (j) => { const { total, done } = taskCounts(j); return `${done}/${total}`; },
+    },
+    {
+      key: 'status', label: 'Status', sortable: true, align: 'center', filterable: true, filterType: 'select',
+      getValue: (j) => String(j.workflow_state || 'ASSIGNED').toUpperCase(),
+      render: (j) => statePill(j.workflow_state),
+    },
+  ], [isManager]);
+
   return (
     <div className="space-y-5">
       <div>
@@ -92,53 +132,25 @@ export function MyChecklists({ restaurantId, token }: Props) {
 
       {err && <div className="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded px-3 py-2">{err}</div>}
 
-      {loading ? (
-        <p className="text-sm text-[#6b5d52]">Loading…</p>
-      ) : jobs.length === 0 ? (
-        <div className="text-center py-16">
-          <p className="text-4xl mb-2">{tab === 'ASSIGNED' ? '✅' : '🗂️'}</p>
-          <p className="text-sm text-[#6b5d52]">{tab === 'ASSIGNED' ? 'Nothing on your checklist right now. Great work!' : 'No completed checklists yet.'}</p>
-        </div>
-      ) : (
-        <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
-          <table className="w-full text-sm border-collapse">
-            <thead><tr className="bg-[#f5f0e8] text-left">
-              <th className="px-3 py-2 font-semibold text-[#1a1208]">Checklist</th>
-              <th className="px-3 py-2 font-semibold text-[#1a1208]">For</th>
-              <th className="px-3 py-2 font-semibold text-[#1a1208]">Trigger</th>
-              {isManager && <th className="px-3 py-2 font-semibold text-[#1a1208]">Assigned to</th>}
-              <th className="px-3 py-2 font-semibold text-[#1a1208] text-center">Progress</th>
-              <th className="px-3 py-2 font-semibold text-[#1a1208] text-center">Status</th>
-            </tr></thead>
-            <tbody>
-              {jobs.map(job => {
-                const { total, done, pendMand } = taskCounts(job);
-                return (
-                  <tr key={job.id} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]">
-                    <td className="px-3 py-2">
-                      <button onClick={() => setDetail(job)} className="font-semibold text-blue-600 hover:text-blue-800 hover:underline text-left">
-                        {job.template_name || TRIGGER_LABEL[job.trigger_event] || 'Checklist'}
-                      </button>
-                      {Number(job.blocks_release) === 1 && <span className="ml-2 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600">blocks release</span>}
-                    </td>
-                    <td className="px-3 py-2 text-[#6b5d52]">{job.facility_label || job.facility_id || job.facility_type}{job.guest_label ? ` · ${job.guest_label}` : ''}</td>
-                    <td className="px-3 py-2 text-[#6b5d52]">{TRIGGER_LABEL[job.trigger_event] || job.trigger_event}</td>
-                    {isManager && <td className="px-3 py-2 text-[#6b5d52]">{job.assigned_to_user || ROLE_LABEL[job.assigned_to_role] || job.assigned_to_role || '—'}</td>}
-                    <td className="px-3 py-2 text-center tabular-nums whitespace-nowrap">{done}/{total}{pendMand > 0 ? <span className="text-[11px] text-rose-600"> · {pendMand} req</span> : ''}</td>
-                    <td className="px-3 py-2 text-center">{statePill(job.workflow_state)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <DataTable
+        data={jobs}
+        columns={columns}
+        rowKey={(j) => j.id}
+        loading={loading}
+        compact
+        columnChooser
+        columnFilters
+        tableId={`my-checklist-${isManager ? 'mgr' : 'self'}`}
+        searchPlaceholder="Search checklists…"
+        exportFilename={`my-checklist-${tab.toLowerCase()}`}
+        emptyMessage={tab === 'ASSIGNED' ? 'Nothing on your checklist right now. Great work!' : 'No completed checklists yet.'}
+      />
     </div>
   );
 }
 
 // ── Checklist instance detail — tree menu (Summary / Audit log / Where-Used) ──
-function ChecklistDetail({ restaurantId, token, job: initial, onBack }: { restaurantId: string; token: string; job: any; onBack: () => void }) {
+export function ChecklistDetail({ restaurantId, token, job: initial, onBack }: { restaurantId: string; token: string; job: any; onBack: () => void }) {
   const api = useCallback(makeApi(restaurantId, token), [restaurantId, token]);
   const [tasks, setTasks] = useState<any[]>((initial.tasks || []).map((t: any) => ({ ...t })));
   const [state, setState] = useState<string>(initial.workflow_state || 'ASSIGNED');

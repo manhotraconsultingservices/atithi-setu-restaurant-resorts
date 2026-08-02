@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronUp, ChevronDown, ChevronsUpDown, Download, Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronUp, ChevronDown, ChevronsUpDown, Download, Search, X, ChevronLeft, ChevronRight, SlidersHorizontal, Check } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 export interface ColDef<T = any> {
@@ -14,7 +14,12 @@ export interface ColDef<T = any> {
   headerClassName?: string;
   align?: 'left' | 'right' | 'center';
   searchable?: boolean;
-  hidden?: boolean;
+  hidden?: boolean;              // hard-hidden (responsive etc.) — never shown, not in the chooser
+  hideable?: boolean;           // default true; when false the column can't be toggled off in the gear chooser
+  defaultHidden?: boolean;      // start hidden in the chooser (user can re-enable)
+  filterable?: boolean;         // show a per-column filter control (needs columnFilters on the table)
+  filterType?: 'text' | 'select';
+  filterOptions?: { value: string; label: string }[]; // for select; derived from data when omitted
 }
 
 interface DataTableProps<T = any> {
@@ -37,6 +42,9 @@ interface DataTableProps<T = any> {
   hideSearch?: boolean;
   hideExport?: boolean;
   hidePagination?: boolean;
+  columnChooser?: boolean;      // show a gear that adds/removes columns
+  columnFilters?: boolean;      // show a per-column filter row
+  tableId?: string;             // localStorage key so the column choice sticks per user
 }
 
 function getVal<T>(row: T, col: ColDef<T>): any {
@@ -93,26 +101,92 @@ export function DataTable<T = any>({
   hideSearch = false,
   hideExport = false,
   hidePagination = false,
+  columnChooser = false,
+  columnFilters = false,
+  tableId,
 }: DataTableProps<T>) {
   const [query, setQuery] = useState('');
   const [sortCol, setSortCol] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(defaultPageSize);
+  const [colFilters, setColFilters] = useState<Record<string, string>>({});
+  const [chooserOpen, setChooserOpen] = useState(false);
 
-  const visible = useMemo(() => columns.filter(c => !c.hidden), [columns]);
+  const storageKey = tableId ? `dt:cols:${tableId}` : null;
+  const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => {
+    if (storageKey && typeof window !== 'undefined') {
+      try {
+        const raw = window.localStorage.getItem(storageKey);
+        if (raw) return new Set<string>(JSON.parse(raw));
+      } catch { /* ignore */ }
+    }
+    return new Set(columns.filter(c => c.defaultHidden).map(c => c.key));
+  });
+
+  const toggleCol = (key: string) => {
+    setHiddenKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      if (storageKey && typeof window !== 'undefined') {
+        try { window.localStorage.setItem(storageKey, JSON.stringify([...next])); } catch { /* ignore */ }
+      }
+      return next;
+    });
+  };
+
+  const visible = useMemo(
+    () => columns.filter(c => !c.hidden && !hiddenKeys.has(c.key)),
+    [columns, hiddenKeys],
+  );
+
+  // distinct values for select-type column filters (only when we actually filter)
+  const selectOptions = useMemo(() => {
+    if (!columnFilters) return {} as Record<string, { value: string; label: string }[]>;
+    const out: Record<string, { value: string; label: string }[]> = {};
+    columns.forEach(col => {
+      if (!col.filterable || col.filterType !== 'select') return;
+      if (col.filterOptions) { out[col.key] = col.filterOptions; return; }
+      const seen = new Set<string>();
+      const opts: { value: string; label: string }[] = [];
+      data.forEach(row => {
+        const raw = getVal(row, col);
+        const s = raw == null ? '' : String(raw);
+        if (s && !seen.has(s)) { seen.add(s); opts.push({ value: s, label: s }); }
+      });
+      opts.sort((a, b) => a.label.localeCompare(b.label, 'en', { numeric: true, sensitivity: 'base' }));
+      out[col.key] = opts;
+    });
+    return out;
+  }, [columns, data, columnFilters]);
+
+  const activeFilters = useMemo<[string, string][]>(
+    () => (Object.entries(colFilters) as [string, string][]).filter(([, v]) => Boolean(v && String(v).trim())),
+    [colFilters],
+  );
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return data;
-    const q = query.toLowerCase();
-    return data.filter(row =>
-      visible.some(col => {
-        if (col.searchable === false) return false;
-        const v = String(getVal(row, col) ?? '').toLowerCase();
-        return v.includes(q);
-      })
-    );
-  }, [data, query, visible]);
+    const q = query.trim().toLowerCase();
+    if (!q && activeFilters.length === 0) return data;
+    return data.filter(row => {
+      if (q) {
+        const hit = visible.some(col => {
+          if (col.searchable === false) return false;
+          return String(getVal(row, col) ?? '').toLowerCase().includes(q);
+        });
+        if (!hit) return false;
+      }
+      for (const [key, val] of activeFilters) {
+        const col = columns.find(c => c.key === key);
+        if (!col) continue;
+        const cell = String(getVal(row, col) ?? '').toLowerCase();
+        const v = val.trim().toLowerCase();
+        if (col.filterType === 'select') { if (cell !== v) return false; }
+        else if (!cell.includes(v)) return false;
+      }
+      return true;
+    });
+  }, [data, query, visible, activeFilters, columns]);
 
   const sorted = useMemo(() => {
     if (!sortCol) return filtered;
@@ -137,9 +211,15 @@ export function DataTable<T = any>({
     setPage(1);
   };
 
+  const setFilter = (key: string, val: string) => {
+    setColFilters(f => ({ ...f, [key]: val }));
+    setPage(1);
+  };
+
   const cellPad = compact ? 'px-3 py-2' : 'px-4 py-3';
   const headPad = compact ? 'px-3 py-2' : 'px-4 py-3';
-  const showToolbar = !hideSearch || !hideExport || toolbarLeft || toolbarRight;
+  const showToolbar = !hideSearch || !hideExport || columnChooser || toolbarLeft || toolbarRight;
+  const chooserCols = columns.filter(c => !c.hidden);
 
   return (
     <div className={cn('overflow-hidden rounded-2xl border border-[#cc5a16]/10 bg-white', containerClassName)}>
@@ -164,12 +244,54 @@ export function DataTable<T = any>({
             </div>
           )}
           <span className="text-xs text-[#9c8e85] hidden sm:inline tabular-nums">
-            {query ? `${filtered.length} of ${data.length}` : `${data.length} record${data.length !== 1 ? 's' : ''}`}
+            {query || activeFilters.length ? `${filtered.length} of ${data.length}` : `${data.length} record${data.length !== 1 ? 's' : ''}`}
           </span>
           {toolbarRight}
+          {columnChooser && (
+            <div className="relative">
+              <button
+                onClick={() => setChooserOpen(o => !o)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#6b5d52] bg-white border border-[#e8dccf] rounded-xl hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors"
+                title="Choose columns"
+              >
+                <SlidersHorizontal size={13} />
+                Columns
+              </button>
+              {chooserOpen && (
+                <>
+                  <div className="fixed inset-0 z-20" onClick={() => setChooserOpen(false)} />
+                  <div className="absolute right-0 mt-1 z-30 w-56 bg-white border border-[#e8dccf] rounded-xl shadow-lg p-1.5">
+                    <p className="px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Show columns</p>
+                    <div className="max-h-72 overflow-y-auto">
+                      {chooserCols.map(c => {
+                        const shown = !hiddenKeys.has(c.key);
+                        const locked = c.hideable === false;
+                        return (
+                          <button
+                            key={c.key}
+                            onClick={() => { if (!locked) toggleCol(c.key); }}
+                            disabled={locked}
+                            className={cn(
+                              'w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-lg text-left transition-colors',
+                              locked ? 'text-[#c4b8ab] cursor-default' : 'text-[#3d3128] hover:bg-[#faf7f2]',
+                            )}
+                          >
+                            <span className={cn('w-4 h-4 rounded border flex items-center justify-center shrink-0', shown ? 'bg-[#cc5a16] border-[#cc5a16] text-white' : 'border-[#d4c4a8] bg-white')}>
+                              {shown && <Check size={11} strokeWidth={3} />}
+                            </span>
+                            {c.label}{locked && <span className="ml-auto text-[9px] uppercase tracking-wide text-[#c4b8ab]">fixed</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           {!hideExport && (
             <button
-              onClick={() => exportToCsv(sorted, columns, exportFilename)}
+              onClick={() => exportToCsv(sorted, visible, exportFilename)}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#6b5d52] bg-white border border-[#e8dccf] rounded-xl hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors"
               title="Export to CSV"
             >
@@ -210,6 +332,38 @@ export function DataTable<T = any>({
                 </th>
               ))}
             </tr>
+            {columnFilters && (
+              <tr className="bg-white border-b border-[#f0ebe4]">
+                {visible.map(col => (
+                  <th key={col.key} className={cn(compact ? 'px-3 pb-2 pt-0' : 'px-4 pb-2.5 pt-0', 'align-top')}>
+                    {col.filterable ? (
+                      col.filterType === 'select' ? (
+                        <select
+                          value={colFilters[col.key] || ''}
+                          onChange={e => setFilter(col.key, e.target.value)}
+                          className="w-full text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20 font-normal normal-case tracking-normal"
+                        >
+                          <option value="">All</option>
+                          {(selectOptions[col.key] || []).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      ) : (
+                        <div className="relative">
+                          <input
+                            value={colFilters[col.key] || ''}
+                            onChange={e => setFilter(col.key, e.target.value)}
+                            placeholder="Filter…"
+                            className="w-full text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 pr-5 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20 font-normal normal-case tracking-normal"
+                          />
+                          {colFilters[col.key] && (
+                            <button onClick={() => setFilter(col.key, '')} className="absolute right-1 top-1/2 -translate-y-1/2 text-[#9c8e85] hover:text-[#cc5a16]"><X size={11} /></button>
+                          )}
+                        </div>
+                      )
+                    ) : null}
+                  </th>
+                ))}
+              </tr>
+            )}
           </thead>
           <tbody className="divide-y divide-[#f0ebe4]">
             {loading ? (

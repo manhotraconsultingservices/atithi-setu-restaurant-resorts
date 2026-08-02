@@ -22435,6 +22435,39 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: 'Failed to compute where-used' }); }
   });
 
+  // ── Checklist Board (manager/owner) — every checklist instance across the
+  // property with filters, so managers can see what's pending, who owns it, and
+  // how old it is. Rows carry the same shape as /checklists/my (tasks included),
+  // so the same instance tree menu (tick / remark / complete) works from here.
+  app.get("/api/restaurant/:id/checklists/board", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Only a manager or owner can view the checklist board.' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const q = req.query as Record<string, string>;
+      const params: any[] = [];
+      const clauses: string[] = [];
+      const status = String(q.status || 'OPEN').toUpperCase(); // OPEN | ALL
+      if (status === 'OPEN') clauses.push("status = 'OPEN'");
+      if (q.trigger) { clauses.push('trigger_event = ?'); params.push(String(q.trigger).toUpperCase()); }
+      if (q.facility_type) { clauses.push('facility_type = ?'); params.push(String(q.facility_type).toUpperCase()); }
+      if (q.assigned_to_role) { clauses.push("UPPER(COALESCE(assigned_to_role,'')) = ?"); params.push(String(q.assigned_to_role).toUpperCase()); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const jobs: any[] = await db.query(
+        `SELECT id, facility_type, facility_id, facility_label, source_ref, guest_label, status, workflow_state,
+                template_name, category_id, trigger_event, blocks_release, assigned_to_role, assigned_to_user,
+                assigned_at, created_at, completed_at, completed_by
+           FROM housekeeping_jobs ${where}
+          ORDER BY (status = 'OPEN') DESC, created_at ASC LIMIT 500`, params
+      ).catch(() => []);
+      for (const j of (jobs || [])) {
+        const t: any[] = await db.query('SELECT id, label, is_mandatory, is_done, remark, done_by, done_at, sort_order FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id', [j.id]).catch(() => []);
+        j.tasks = t; j.task_count = t.length; j.done_count = t.filter((x: any) => Number(x.is_done) === 1).length; j.pending_mandatory = t.filter((x: any) => Number(x.is_mandatory) === 1 && Number(x.is_done) === 0).length;
+      }
+      res.json({ jobs: jobs || [] });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to load checklist board' }); }
+  });
+
   // ══════════════════════════════════════════════════════════════════════════
   // Events & Convention Center module (gated by restaurants.events_enabled = 1)
   // Fully isolated: dedicated tables (eventsService.ts), dedicated routes, and
@@ -45541,7 +45574,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'my-checklist-table-instance-tree-menu',
+    commit_marker: 'checklist-board-nav-smart-datatable',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
