@@ -771,6 +771,40 @@ async function testAccounting() {
   } else if (brk.status === 403) { skip('TC-ACC-BANKREC', 'Bank reconciliation', 'RBAC: need OWNER role'); }
   else if (brk.status === 404) { fail('TC-ACC-BANKREC', 'Bank reconciliation', 'HTTP 404 — accounting route unreachable'); }
   else { fail('TC-ACC-BANKREC', 'Bank reconciliation responds', `HTTP ${brk.status}`); }
+
+  // ── Phase 3 — transaction capture + reversal + no-silent-drop ──────────────
+  // TC-ACC-GLEXC: the GL exceptions ledger must contain NO unbalanced journals
+  // produced by the Phase-3 capture/reversal machinery. Any row keyed to a
+  // capture/reversal source_type means one of those journals failed to balance
+  // (which would silently understate the books). This is the live guard that the
+  // F&B / spa / event / payroll / reversal journals are all internally balanced.
+  const glx = await api('GET', `/api/restaurant/${restaurantId}/accounting/gl-exceptions`);
+  if (glx.status === 200 && glx.data && Array.isArray(glx.data.exceptions)) {
+    const CAP = new Set(['FNB_ORDER','SPA_SETTLEMENT','SPA_SALE','EVENT_SETTLEMENT','EVENT_ADVANCE',
+      'PAYROLL_RUN','STAFF_PAYROLL','STAFF_ADVANCE','BOOKING_CANCEL','CREDIT_NOTE','FOLIO_REVISED','REVERSAL']);
+    const capExc = glx.data.exceptions.filter(e => CAP.has(String(e.source_type)) && !Number(e.resolved));
+    (capExc.length === 0 ? pass : fail)('TC-ACC-GLEXC',
+      'No unbalanced Phase-3 capture/reversal journals in gl_exceptions',
+      capExc.length ? `${capExc.length} unbalanced: ${capExc.slice(0, 3).map(e => e.journal_ref + ' [' + e.reason + ']').join('; ')}`
+                    : `clean (open=${glx.data.open}, total=${glx.data.count})`);
+  } else if (glx.status === 403) { skip('TC-ACC-GLEXC', 'GL exceptions', 'RBAC: need OWNER role'); }
+  else if (glx.status === 404) { fail('TC-ACC-GLEXC', 'GL exceptions endpoint', 'HTTP 404 — endpoint unreachable (Phase-3 deploy not live?)'); }
+  else { fail('TC-ACC-GLEXC', 'GL exceptions endpoint', `HTTP ${glx.status}`); }
+
+  // TC-ACC-MJ-UNBALANCED: H1 — an unbalanced manual journal must be REFUSED with
+  // 400 (recorded to gl_exceptions), never silently accepted with a false 201.
+  const badMj = await api('POST', `/api/restaurant/${restaurantId}/accounting/journal`, {
+    entry_date: today, narration: 'TECHTEST unbalanced journal (expect 400)',
+    lines: [
+      { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 100, cr_amount: 0 },
+      { account_code: '4900', account_name: 'Other Income', dr_amount: 0, cr_amount: 90 },
+    ],
+  });
+  if (badMj.status === 400) {
+    pass('TC-ACC-MJ-UNBALANCED', 'Unbalanced manual journal refused with 400 (no silent 201)');
+  } else if (badMj.status === 403) { skip('TC-ACC-MJ-UNBALANCED', 'Unbalanced manual journal', 'RBAC: need OWNER role'); }
+  else if (badMj.status === 201) { fail('TC-ACC-MJ-UNBALANCED', 'Unbalanced manual journal refused', 'HTTP 201 — REGRESSION: unbalanced journal accepted (H1 not deployed)'); }
+  else { fail('TC-ACC-MJ-UNBALANCED', 'Unbalanced manual journal refused', `HTTP ${badMj.status}`); }
 }
 
 // ── Spa tests ──────────────────────────────────────────────────────────────

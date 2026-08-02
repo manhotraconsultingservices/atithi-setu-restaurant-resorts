@@ -2662,6 +2662,12 @@ async function writeGstRegisterFromFolio(
   );
   if (Number(existing?.cnt || 0) > 0) return;
 
+  // M3 — a gst_exempt folio is a taxable-value-only supply: record the taxable
+  // amount but ZERO GST, so the GSTR-1 output register reconciles with the GL /
+  // GSTR-3B instead of carrying phantom output tax on an exempt sale.
+  const folioRow: any = await tenantDb.get("SELECT gst_exempt FROM folios WHERE id = ?", [folioId]);
+  const isExempt = Number(folioRow?.gst_exempt || 0) === 1;
+
   const entries: any[] = await tenantDb.query(
     `SELECT * FROM folio_entries
       WHERE folio_id = ? AND amount > 0 AND reversal_of_entry_id IS NULL`,
@@ -2688,8 +2694,8 @@ async function writeGstRegisterFromFolio(
 
   for (const entry of entries) {
     const taxable = Number(entry.amount || 0);
-    const gstAmt  = Number(entry.gst_amount || 0);
-    const gstRate = Number(entry.gst_rate || 0);
+    const gstAmt  = isExempt ? 0 : Number(entry.gst_amount || 0);
+    const gstRate = isExempt ? 0 : Number(entry.gst_rate || 0);
     const half    = gstRate / 2;
     const cgst    = Math.round(gstAmt / 2 * 100) / 100;
     const sgst    = Math.round((gstAmt - cgst) * 100) / 100;
@@ -4354,6 +4360,11 @@ function _glCurrentQuarter(): string {
   return `Q4-${y - 1}`;
 }
 
+// Result of a GL post. `ok=false, dropped=true` means the journal did NOT balance
+// and was recorded in gl_exceptions instead of being written — callers that care
+// (e.g. the manual-journal endpoint) inspect this and refuse to report success.
+interface GlPostResult { ok: boolean; posted: number; dropped: boolean; reason?: string; }
+
 async function _postGlEntries(
   db: any,
   restaurantId: string,
@@ -4363,15 +4374,19 @@ async function _postGlEntries(
   sourceId: string | null,
   lines: GlLine[],
   postedBy: string | null,
-): Promise<void> {
-  const totalDr = lines.reduce((s, l) => s + (l.dr_amount || 0), 0);
-  const totalCr = lines.reduce((s, l) => s + (l.cr_amount || 0), 0);
+): Promise<GlPostResult> {
+  const meaningful = (lines || []).filter(l => (l.dr_amount || 0) !== 0 || (l.cr_amount || 0) !== 0);
+  if (meaningful.length === 0) return { ok: true, posted: 0, dropped: false };
+  const totalDr = meaningful.reduce((s, l) => s + (l.dr_amount || 0), 0);
+  const totalCr = meaningful.reduce((s, l) => s + (l.cr_amount || 0), 0);
   if (Math.abs(totalDr - totalCr) > 0.02) {
-    console.warn(`[GL] Unbalanced journal ${journalRef}: Dr=${totalDr.toFixed(2)} Cr=${totalCr.toFixed(2)} — skipping`);
-    return;
+    const reason = `unbalanced Dr=${totalDr.toFixed(2)} Cr=${totalCr.toFixed(2)} diff=${(totalDr - totalCr).toFixed(2)}`;
+    console.warn(`[GL] Refused journal ${journalRef}: ${reason} — recorded to gl_exceptions`);
+    await _recordGlException(db, restaurantId, journalRef, entryDate, sourceType, sourceId, totalDr, totalCr, meaningful, reason, postedBy);
+    return { ok: false, posted: 0, dropped: true, reason };
   }
-  for (const line of lines) {
-    if ((line.dr_amount || 0) === 0 && (line.cr_amount || 0) === 0) continue;
+  let posted = 0;
+  for (const line of meaningful) {
     const id = `GL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
     await db.run(
       `INSERT INTO gl_entries
@@ -4384,6 +4399,233 @@ async function _postGlEntries(
        line.narration || null, sourceType, sourceId || null,
        line.cost_centre || null, postedBy || null]
     );
+    posted++;
+  }
+  return { ok: true, posted, dropped: false };
+}
+
+// Persist a refused (unbalanced) journal so it is visible and recoverable rather
+// than silently dropped. Best-effort: a failure here must never mask the caller.
+async function _recordGlException(
+  db: any, restaurantId: string, journalRef: string, entryDate: string,
+  sourceType: string, sourceId: string | null, totalDr: number, totalCr: number,
+  lines: GlLine[], reason: string, postedBy: string | null,
+): Promise<void> {
+  try {
+    await db.run(
+      `INSERT INTO gl_exceptions
+         (id, restaurant_id, journal_ref, entry_date, source_type, source_id,
+          total_dr, total_cr, difference, reason, lines_json, posted_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [`GLX-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+       restaurantId, journalRef, entryDate || null, sourceType || null, sourceId || null,
+       +totalDr.toFixed(2), +totalCr.toFixed(2), +(totalDr - totalCr).toFixed(2),
+       reason, JSON.stringify(lines || []).slice(0, 8000), postedBy || null]
+    );
+  } catch (e) {
+    console.error('[GL] failed to record gl_exception:', e);
+  }
+}
+
+// Reverse a posted journal by writing DATED compensating entries (Dr↔Cr swapped)
+// under a new reversal ref, linked back via source_id. We do NOT retroactively
+// mutate the original rows — the daily Cash Book and every closed period must keep
+// their numbers, and the credit-note / cancel event is itself a dated transaction.
+// Idempotent: a deterministic reversalRef that already exists is a no-op.
+async function _reverseJournal(
+  db: any,
+  restaurantId: string,
+  originalRef: string,
+  opts: { reversalRef?: string; date?: string; sourceType?: string; sourceId?: string; reason?: string; postedBy?: string | null } = {},
+): Promise<{ ok: boolean; reversed: number; reason?: string; reversalRef: string }> {
+  const reversalRef = opts.reversalRef || `REV-${originalRef}`;
+  try {
+    const dup: any = await db.get(
+      "SELECT id FROM gl_entries WHERE restaurant_id = ? AND journal_ref = ? LIMIT 1",
+      [restaurantId, reversalRef]
+    );
+    if (dup) return { ok: true, reversed: 0, reason: 'already_reversed', reversalRef };
+    const originals: any[] = await db.query(
+      "SELECT account_code, account_name, dr_amount, cr_amount, cost_centre FROM gl_entries WHERE restaurant_id = ? AND journal_ref = ? AND is_reversed = 0",
+      [restaurantId, originalRef]
+    );
+    if (!originals || originals.length === 0) return { ok: false, reversed: 0, reason: 'no_original_journal', reversalRef };
+    const date = opts.date || new Date().toISOString().slice(0, 10);
+    const rev = opts.reason ? ` — ${opts.reason}` : '';
+    const lines: GlLine[] = originals.map((o: any) => ({
+      account_code: o.account_code,
+      account_name: o.account_name,
+      dr_amount: Number(o.cr_amount || 0),
+      cr_amount: Number(o.dr_amount || 0),
+      narration: `Reversal of ${originalRef}${rev}`,
+      cost_centre: o.cost_centre || undefined,
+    }));
+    const result = await _postGlEntries(
+      db, restaurantId, reversalRef, date,
+      opts.sourceType || 'REVERSAL', opts.sourceId || originalRef, lines, opts.postedBy || null
+    );
+    return { ok: result.ok, reversed: result.ok ? lines.length : 0, reason: result.ok ? undefined : result.reason, reversalRef };
+  } catch (e: any) {
+    console.error(`[GL] _reverseJournal(${originalRef}) failed:`, e);
+    return { ok: false, reversed: 0, reason: e?.message || 'error', reversalRef };
+  }
+}
+
+// ─── Phase 3.1 — transaction capture helpers ─────────────────────────────────
+// These post balanced double-entry journals for the operating-revenue engines
+// (restaurant F&B, spa, events, payroll) that previously never reached the GL.
+// Every one is idempotent (guards on its journal_ref) and non-throwing, so it is
+// safe to call fire-and-forget from an operational endpoint.
+
+// Post GL for a STANDALONE (non-folio) restaurant order that has been paid. Room
+// F&B charged to a hotel folio is captured by folio settlement and skipped here.
+// Idempotent on ORDER-<id> — safe from both the payment endpoint and session close.
+async function _postOrderGl(db: any, restaurantId: string, order: any, postedBy: string | null): Promise<void> {
+  try {
+    if (!order || !order.id) return;
+    if (String(order.payment_status || '').toUpperCase() !== 'PAID') return;
+    // Folio-bound orders settle through FOLIO-<id>; never double-post them here.
+    const pm = String(order.payment_method || '').toUpperCase();
+    const folioBound = String(order.folio_post_status || '').toUpperCase() === 'POSTED'
+      || (order.folio_id && order.posted_to_folio_at)
+      || pm === 'CHARGE_TO_ROOM';
+    if (folioBound) return;
+    const journalRef = `ORDER-${order.id}`;
+    const already = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
+    if (already) return;
+
+    const total = +Number(order.total_amount || 0).toFixed(2);
+    if (total <= 0) return;
+    const gst = +Number(order.gst_amount || 0).toFixed(2);
+    const scp = Number(order.service_charge_percent || 0);
+    const taxable = +(total - gst).toFixed(2);
+    const netRev = +(taxable / (1 + scp / 100)).toFixed(2);
+    const svcAmt = +(taxable - netRev).toFixed(2);
+    const isEco = Number(order.is_eco_paid || 0) === 1;
+    const entryDate = (order.created_at || new Date().toISOString()).toString().slice(0, 10);
+
+    const lines: GlLine[] = [];
+    if (isEco) {
+      // Sec 9(5): the e-commerce operator remits GST, so we do NOT credit our GST
+      // output liability. The platform owes us the taxable value (net of the GST it
+      // collects); commission is settled separately at aggregator reconciliation.
+      lines.push({ account_code: '1010', account_name: 'Bank — Main Account', dr_amount: taxable, cr_amount: 0, narration: `ECO ${order.eco_platform || ''} order ${order.id}`.trim() });
+    } else {
+      const cashAcct = _glAccountForPaymentMethod(order.payment_method);
+      lines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: total, cr_amount: 0, narration: `${order.payment_method || 'CASH'} order ${order.id}` });
+    }
+    lines.push({ account_code: '4010', account_name: 'F&B Revenue', dr_amount: 0, cr_amount: netRev, narration: `F&B order ${order.id}` });
+    if (svcAmt > 0) lines.push({ account_code: '4020', account_name: 'Service Charge Revenue', dr_amount: 0, cr_amount: svcAmt, narration: `Service charge ${order.id}` });
+    if (!isEco && gst > 0) {
+      const cgst = +(gst / 2).toFixed(2);
+      const sgst = +(gst - cgst).toFixed(2);
+      if (cgst > 0) lines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST order ${order.id}` });
+      if (sgst > 0) lines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST order ${order.id}` });
+    }
+    await _postGlEntries(db, restaurantId, journalRef, entryDate, 'FNB_ORDER', order.id, lines, postedBy);
+  } catch (e) {
+    console.error(`[GL] _postOrderGl(${order?.id}) failed:`, e);
+  }
+}
+
+// Post GL for a settled folio (spa appointment, spa quick-sale, or event). Mirrors
+// the hotel folio-settlement posting exactly — each sub-block is internally
+// balanced, so the journal balances at any payment coverage; AR carries the
+// residual. Caller supplies the revenue account. Idempotent on FOLIO-<folioId>.
+async function _postFolioGl(
+  db: any, restaurantId: string, folioId: string,
+  opts: { revenueCode: string; revenueName: string; sourceType: string; arCode?: string; arName?: string; postedBy?: string | null },
+): Promise<void> {
+  try {
+    const journalRef = `FOLIO-${folioId}`;
+    const already = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
+    if (already) return;
+    const folio: any = await db.get("SELECT * FROM folios WHERE id = ?", [folioId]);
+    if (!folio) return;
+    const subtotal = +Number(folio.subtotal || 0).toFixed(2);
+    const gstAmt = +Number(folio.gst_amount || 0).toFixed(2);
+    const discount = +Number(folio.discount || 0).toFixed(2);
+    const grandTotal = +Number(folio.grand_total || 0).toFixed(2);
+    if (subtotal + gstAmt <= 0 && grandTotal <= 0) return;
+    const arCode = opts.arCode || '1100';
+    const arName = opts.arName || 'Accounts Receivable — Guests';
+    const cgst = +(gstAmt / 2).toFixed(2);
+    const sgst = +(gstAmt - cgst).toFixed(2);
+    const entryDate = (folio.settled_at || folio.created_at || new Date().toISOString()).toString().slice(0, 10);
+    const payments: any[] = await db.query("SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0", [folioId]).catch(() => []);
+    const advances = (payments || []).filter((p: any) => p.payment_type === 'ADVANCE');
+    const advTotal = advances.reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+    const nonAdv = (payments || []).filter((p: any) => p.payment_type !== 'ADVANCE');
+    const lines: GlLine[] = [];
+    if (subtotal + gstAmt > 0) {
+      lines.push({ account_code: arCode, account_name: arName, dr_amount: +(subtotal + gstAmt - discount).toFixed(2), cr_amount: 0, narration: `Bill ${folioId}` });
+      lines.push({ account_code: opts.revenueCode, account_name: opts.revenueName, dr_amount: 0, cr_amount: subtotal, narration: `Revenue ${folioId}` });
+      if (discount > 0) lines.push({ account_code: '4900', account_name: 'Other Income', dr_amount: discount, cr_amount: 0, narration: `Discount ${folioId}` });
+      if (cgst > 0) lines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST ${folioId}` });
+      if (sgst > 0) lines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST ${folioId}` });
+    }
+    if (advTotal > 0) {
+      const applied = +Math.min(advTotal, grandTotal > 0 ? grandTotal : advTotal).toFixed(2);
+      lines.push({ account_code: '2100', account_name: 'Advances from Guests', dr_amount: applied, cr_amount: 0, narration: `Advance applied ${folioId}` });
+      lines.push({ account_code: arCode, account_name: arName, dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folioId}` });
+    }
+    for (const p of nonAdv) {
+      const amt = +Number(p.amount || 0).toFixed(2);
+      if (amt <= 0) continue;
+      const cashAcct = _glAccountForPaymentMethod(p.payment_method);
+      lines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method || 'CASH'} ${folioId}` });
+      lines.push({ account_code: arCode, account_name: arName, dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folioId}` });
+    }
+    await _postGlEntries(db, restaurantId, journalRef, entryDate, opts.sourceType, folioId, lines, opts.postedBy || null);
+  } catch (e) {
+    console.error(`[GL] _postFolioGl(${folioId}) failed:`, e);
+  }
+}
+
+// Formal HR payroll-run disbursement journal. Aggregates statutory components from
+// payslips → books salary expense, employer contributions, net pay and every
+// statutory payable. Idempotent on PAYRUN-<runId>. Salary TDS → 2330 (Sec 192).
+async function _postPayrollRunGl(db: any, restaurantId: string, runId: string, postedBy: string | null): Promise<void> {
+  try {
+    const journalRef = `PAYRUN-${runId}`;
+    const already = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
+    if (already) return;
+    const run: any = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [runId]);
+    if (!run) return;
+    const agg: any = await db.get(
+      `SELECT COALESCE(SUM(gross_earnings),0)   AS g,
+              COALESCE(SUM(pf_employee),0)      AS pfe,
+              COALESCE(SUM(pf_employer_eps),0) + COALESCE(SUM(pf_employer_epf),0) AS pfer,
+              COALESCE(SUM(esi_employee),0)     AS esie,
+              COALESCE(SUM(esi_employer),0)     AS esier,
+              COALESCE(SUM(professional_tax),0) AS pt,
+              COALESCE(SUM(tds),0)              AS tds,
+              COALESCE(SUM(net_pay),0)          AS net
+         FROM payslips WHERE payroll_run_id = ?`, [runId]);
+    if (!agg) return;
+    const G = +Number(agg.g || 0).toFixed(2), PFe = +Number(agg.pfe || 0).toFixed(2), PFer = +Number(agg.pfer || 0).toFixed(2);
+    const ESIe = +Number(agg.esie || 0).toFixed(2), ESIer = +Number(agg.esier || 0).toFixed(2);
+    const PT = +Number(agg.pt || 0).toFixed(2), TDS = +Number(agg.tds || 0).toFixed(2), NET = +Number(agg.net || 0).toFixed(2);
+    if (G <= 0 && NET <= 0) return;
+    // Reimbursement (expense claims paid with the run) is already expensed at claim
+    // approval (Cr 2400); clear that liability here so the journal balances to net_pay.
+    const REIMB = +((Number(run.total_net || 0) + Number(run.total_deductions || 0)) - Number(run.total_gross || 0)).toFixed(2);
+    const entryDate = (run.paid_at || run.updated_at || new Date().toISOString()).toString().slice(0, 10);
+    const lines: GlLine[] = [];
+    lines.push({ account_code: '5100', account_name: 'Salaries & Wages', dr_amount: G, cr_amount: 0, narration: `Payroll ${runId}` });
+    if (PFer > 0) lines.push({ account_code: '5110', account_name: 'EPF — Employer Contribution', dr_amount: PFer, cr_amount: 0, narration: `Employer EPF ${runId}` });
+    if (ESIer > 0) lines.push({ account_code: '5120', account_name: 'ESI — Employer Contribution', dr_amount: ESIer, cr_amount: 0, narration: `Employer ESI ${runId}` });
+    if (REIMB > 0) lines.push({ account_code: '2400', account_name: 'Salaries & Wages Payable', dr_amount: REIMB, cr_amount: 0, narration: `Reimbursement cleared ${runId}` });
+    if (NET > 0) lines.push({ account_code: '1010', account_name: 'Bank — Main Account', dr_amount: 0, cr_amount: NET, narration: `Net pay ${runId}` });
+    const epfPayable = +(PFe + PFer).toFixed(2);
+    if (epfPayable > 0) lines.push({ account_code: '2500', account_name: 'EPF Payable', dr_amount: 0, cr_amount: epfPayable, narration: `EPF payable ${runId}` });
+    const esiPayable = +(ESIe + ESIer).toFixed(2);
+    if (esiPayable > 0) lines.push({ account_code: '2510', account_name: 'ESI Payable', dr_amount: 0, cr_amount: esiPayable, narration: `ESI payable ${runId}` });
+    if (PT > 0) lines.push({ account_code: '2520', account_name: 'Professional Tax Payable', dr_amount: 0, cr_amount: PT, narration: `PT payable ${runId}` });
+    if (TDS > 0) lines.push({ account_code: '2330', account_name: 'TDS Payable — Sec 192 (Salary)', dr_amount: 0, cr_amount: TDS, narration: `Salary TDS ${runId}` });
+    await _postGlEntries(db, restaurantId, journalRef, entryDate, 'PAYROLL_RUN', runId, lines, postedBy);
+  } catch (e) {
+    console.error(`[GL] _postPayrollRunGl(${runId}) failed:`, e);
   }
 }
 
@@ -13845,6 +14087,9 @@ async function startServer() {
           WHERE reimburse_with_payroll_run_id = ? AND status = 'HR_APPROVED'`,
         [stamp, req.params.runId]
       );
+      // Phase 3.1 — post the payroll disbursement journal (salary + employer
+      // contributions expensed; net pay + statutory dues booked as liabilities).
+      await _postPayrollRunGl(db, req.params.id, req.params.runId, req.user?.email || req.user?.id || null);
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
       res.json({ run });
     } catch (err: any) {
@@ -20007,13 +20252,22 @@ ${data.tenant.name}`;
       try {
         const expAcct = _glAccountForSupplierInvoice(module || '', notes || '');
         const invDate = (invoice_date || new Date().toISOString().slice(0, 10)) as string;
-        const cgst = +(Number(gst) / 2).toFixed(2);
-        const sgst = Number(gst) - cgst;
+        // H2 — inter-state purchases claim ITC as IGST (1320), not CGST/SGST.
+        // Interstate when the caller flags it, or when a place_of_supply/supplier
+        // state differs from the tenant state (frontend-supplied). Default = intra.
+        const isInterstate = req.body?.is_interstate === true
+          || String(req.body?.tax_type || '').toUpperCase() === 'IGST';
         const glLines: GlLine[] = [
           { account_code: expAcct.code, account_name: expAcct.name, dr_amount: Number(sub), cr_amount: 0, narration: `Invoice ${invoice_number || id}` },
         ];
-        if (cgst > 0) glLines.push({ account_code: '1300', account_name: 'ITC Receivable — CGST', dr_amount: cgst, cr_amount: 0, narration: `ITC CGST ${id}` });
-        if (sgst > 0) glLines.push({ account_code: '1310', account_name: 'ITC Receivable — SGST', dr_amount: sgst, cr_amount: 0, narration: `ITC SGST ${id}` });
+        if (isInterstate) {
+          if (Number(gst) > 0) glLines.push({ account_code: '1320', account_name: 'ITC Receivable — IGST', dr_amount: Number(gst), cr_amount: 0, narration: `ITC IGST ${id}` });
+        } else {
+          const cgst = +(Number(gst) / 2).toFixed(2);
+          const sgst = +(Number(gst) - cgst).toFixed(2);
+          if (cgst > 0) glLines.push({ account_code: '1300', account_name: 'ITC Receivable — CGST', dr_amount: cgst, cr_amount: 0, narration: `ITC CGST ${id}` });
+          if (sgst > 0) glLines.push({ account_code: '1310', account_name: 'ITC Receivable — SGST', dr_amount: sgst, cr_amount: 0, narration: `ITC SGST ${id}` });
+        }
         glLines.push({ account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: 0, cr_amount: Number(total), narration: `AP invoice ${id}` });
         await _postGlEntries(db, req.params.id, `SI-${id}`, invDate as string, 'SUPPLIER_INVOICE', id, glLines, (req as any).user?.email || (req as any).user?.id);
       } catch (glErr) { console.error('[GL] supplier invoice error:', glErr); }
@@ -20075,6 +20329,11 @@ ${data.tenant.name}`;
       const payCount: any = await db.get("SELECT COUNT(*) AS cnt FROM supplier_payments WHERE invoice_id = ?", [inv.id]);
       if (payCount.cnt > 0) return res.status(409).json({ error: 'Cannot delete invoice with recorded payments' });
       await db.run("DELETE FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
+      // Phase 3.2 — reverse the invoice's GL journal (expense + ITC + AP backed out).
+      await _reverseJournal(db, req.params.id, `SI-${req.params.invoiceId}`, {
+        sourceType: 'SUPPLIER_INVOICE_REVERSAL', sourceId: req.params.invoiceId,
+        reason: 'Invoice deleted', postedBy: req.user?.email || req.user?.id || null,
+      });
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to delete invoice" });
@@ -20179,6 +20438,11 @@ ${data.tenant.name}`;
       const pay: any = await db.get("SELECT * FROM supplier_payments WHERE id = ?", [req.params.paymentId]);
       if (!pay) return res.status(404).json({ error: 'Payment not found' });
       await db.run("DELETE FROM supplier_payments WHERE id = ?", [req.params.paymentId]);
+      // Phase 3.2 — reverse the payment's GL journal (Dr AP / Cr Cash backed out).
+      await _reverseJournal(db, req.params.id, `SP-${req.params.paymentId}`, {
+        sourceType: 'SUPPLIER_PAYMENT_REVERSAL', sourceId: req.params.paymentId,
+        reason: 'Supplier payment deleted', postedBy: req.user?.email || req.user?.id || null,
+      });
       if (pay.invoice_id) {
         const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [pay.invoice_id]);
         if (inv) {
@@ -23132,6 +23396,18 @@ ${data.tenant.name}`;
           );
         }
       } catch (e) { console.warn('[events] accounts bridge (post) failed:', e); }
+      // Phase 3.1 — post the receipt to the GL as an advance from the customer
+      // (Dr Cash/Bank / Cr 2100 Advances). Revenue is recognized at checkout.
+      try {
+        const evGuard = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [`EVENT-PAY-${pid}`]);
+        if (!evGuard) {
+          const cashAcct = _glAccountForPaymentMethod(b.method);
+          await _postGlEntries(db, req.params.id, `EVENT-PAY-${pid}`, (b.paid_at || new Date().toISOString().slice(0, 10)), 'EVENT_ADVANCE', pid, [
+            { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Event advance ${bk.customer_name || ''}`.trim() },
+            { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Event advance ${req.params.bid}` },
+          ], req.user?.email || null);
+        }
+      } catch (glErr) { console.error('[GL] event-payment capture failed:', glErr); }
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'PAYMENT_RECORDED', summary: `Payment ${amount} via ${b.method || 'CASH'} (total paid ${paid})` });
       res.status(201).json({ success: true, payment_id: pid, paid, balance: round2(Number(bk.total_amount || 0) - paid) });
     } catch (err: any) { res.status(500).json({ error: "Failed to record payment" }); }
@@ -23147,6 +23423,11 @@ ${data.tenant.name}`;
       await db.run("DELETE FROM event_payments WHERE id = ?", [req.params.pid]);
       // Events ↔ Accounts: pull the mirrored receipt back out of the cash ledger.
       await db.run("DELETE FROM petty_cash WHERE reference_id = ?", [`EVENT-PAY-${req.params.pid}`]).catch(() => {});
+      // Phase 3.2 — reverse the advance journal (dated contra entry) for this receipt.
+      await _reverseJournal(db, req.params.id, `EVENT-PAY-${req.params.pid}`, {
+        sourceType: 'EVENT_ADVANCE_REVERSAL', sourceId: req.params.pid,
+        reason: 'Event payment deleted', postedBy: req.user?.email || req.user?.id || null,
+      });
       if (pay.schedule_id) {
         const sched: any = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [pay.schedule_id]);
         if (sched) {
@@ -23809,6 +24090,13 @@ ${data.tenant.name}`;
       const folio = await db.get("SELECT * FROM folios WHERE id = ?", [fid]);
       await writeObjectAudit(db, req, { objectType: 'FOLIO', objectId: fid, action: 'CREATED', summary: `Event invoice ${invoiceNumber} raised (${grand})`, after: folio });
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICED', summary: `Invoice ${invoiceNumber} generated (folio ${fid})` });
+      // Phase 3.1 — recognize event revenue + GST to the GL. The mirrored ADVANCE
+      // folio_payment applies prior advances (already booked Dr Cash / Cr 2100 at
+      // payment time) as Dr 2100 / Cr AR; AR carries any unpaid balance.
+      await _postFolioGl(db, req.params.id, fid, {
+        revenueCode: '4050', revenueName: 'Banquet & Events Revenue',
+        sourceType: 'EVENT_SETTLEMENT', postedBy: req.user?.email || req.user?.id || null,
+      });
       res.status(201).json(folio);
     } catch (err: any) {
       console.error("/events checkout error:", err);
@@ -24759,6 +25047,11 @@ ${data.tenant.name}`;
       if (out && out.is_fully_paid) {
         await db.run("UPDATE folios SET status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
           [b.payment_method || 'CASH', req.params.fid]);
+        // Phase 3.1 — capture spa appointment revenue to the GL on full settlement.
+        await _postFolioGl(db, req.params.id, req.params.fid, {
+          revenueCode: '4040', revenueName: 'Spa Revenue',
+          sourceType: 'SPA_SETTLEMENT', postedBy: req.user?.email || req.user?.id || null,
+        });
       }
       res.status(201).json({ success: true, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid });
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to record payment" }); }
@@ -24903,7 +25196,7 @@ ${data.tenant.name}`;
   // package purchase, membership subscription, and retail sale.
   const spaQuickSaleFolio = async (
     db: DbInterface, entryType: string, description: string, amount: number, gstPct: number,
-    paymentMethod: string, recordedBy: string | null, sourceId?: string | null
+    paymentMethod: string, recordedBy: string | null, sourceId: string | null, restaurantId: string
   ): Promise<{ folioId: string; invoiceNumber: string; grandTotal: number }> => {
     const folioId = mkSpaId('SPAFOL');
     const tenantRow: any = await centralDb.get("SELECT currency_code FROM restaurants WHERE id = (SELECT current_database())").catch(() => null);
@@ -24924,6 +25217,13 @@ ${data.tenant.name}`;
     await recordFolioPayment(db, { folioId, amount: out?.outstanding || amt + gstAmt, method: paymentMethod || 'CASH', type: 'FINAL', recordedBy });
     await db.run("UPDATE folios SET invoice_number = ?, status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
       [invNum, paymentMethod || 'CASH', folioId]);
+    // Phase 3.1 — capture spa quick-sale (package / membership / retail) to the GL.
+    // Retail products → Ancillary Revenue (4030); packages & memberships → Spa (4040).
+    const revCode = entryType === 'SPA_PRODUCT' ? '4030' : '4040';
+    const revName = entryType === 'SPA_PRODUCT' ? 'Ancillary Revenue' : 'Spa Revenue';
+    await _postFolioGl(db, restaurantId, folioId, {
+      revenueCode: revCode, revenueName: revName, sourceType: 'SPA_SALE', postedBy: recordedBy,
+    });
     return { folioId, invoiceNumber: invNum, grandTotal: round2(amt + gstAmt) };
   };
 
@@ -24959,7 +25259,7 @@ ${data.tenant.name}`;
       const b = req.body || {};
       const pkg: any = await db.get("SELECT * FROM spa_packages WHERE id = ?", [b.package_id]);
       if (!pkg) return res.status(404).json({ error: "Package not found" });
-      const sale = await spaQuickSaleFolio(db, 'PACKAGE_PURCHASE', `Package: ${pkg.name}`, Number(pkg.price || 0), Number(pkg.gst_percent ?? 18), b.payment_method || 'CASH', req.user?.email || req.user?.id || null, pkg.id);
+      const sale = await spaQuickSaleFolio(db, 'PACKAGE_PURCHASE', `Package: ${pkg.name}`, Number(pkg.price || 0), Number(pkg.gst_percent ?? 18), b.payment_method || 'CASH', req.user?.email || req.user?.id || null, pkg.id, req.params.id);
       const cpId = mkSpaId('SPACP');
       const expiresAt = new Date(Date.now() + Number(pkg.validity_days || 365) * 86400000).toISOString();
       await db.run(
@@ -25008,7 +25308,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const plan: any = await db.get("SELECT * FROM spa_membership_plans WHERE id = ?", [req.body?.plan_id]);
       if (!plan) return res.status(404).json({ error: "Membership plan not found" });
-      const sale = await spaQuickSaleFolio(db, 'MEMBERSHIP_FEE', `Membership: ${plan.name}`, Number(plan.monthly_fee || 0), Number(plan.gst_percent ?? 18), req.body?.payment_method || 'CASH', req.user?.email || req.user?.id || null, plan.id);
+      const sale = await spaQuickSaleFolio(db, 'MEMBERSHIP_FEE', `Membership: ${plan.name}`, Number(plan.monthly_fee || 0), Number(plan.gst_percent ?? 18), req.body?.payment_method || 'CASH', req.user?.email || req.user?.id || null, plan.id, req.params.id);
       const id = mkSpaId('SPACM');
       const start = new Date(); const end = new Date(Date.now() + 30 * 86400000);
       await db.run(
@@ -25049,7 +25349,7 @@ ${data.tenant.name}`;
         `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
          VALUES (?, ?, ?, ?, 'SPA_RETAIL_SALE', 'spa_retail', NULL, ?, ?, ?, 'Spa retail sale')`,
         [mkSpaId('MOV'), b.ingredient_id, -qty, item.unit || 'unit', bal, item.default_unit_price || null, req.user?.id || null]).catch(() => {});
-      const sale = await spaQuickSaleFolio(db, 'SPA_PRODUCT', `${item.name} × ${qty}`, lineAmount, gstPct, b.payment_method || 'CASH', req.user?.email || req.user?.id || null, item.id);
+      const sale = await spaQuickSaleFolio(db, 'SPA_PRODUCT', `${item.name} × ${qty}`, lineAmount, gstPct, b.payment_method || 'CASH', req.user?.email || req.user?.id || null, item.id, req.params.id);
       res.status(201).json({ success: true, invoice_number: sale.invoiceNumber, grand_total: sale.grandTotal, stock_remaining: bal });
     } catch (err: any) { console.error("spa retail sale error:", err); res.status(500).json({ error: "Failed to record retail sale" }); }
   });
@@ -36221,6 +36521,40 @@ ${data.tenant.name}`;
       } catch (e) {
         console.warn('[cancel] folio reversal failed (non-fatal):', e);
       }
+      // Phase 3.2 — clear the advance liability for the cancelled booking. The
+      // advance (booked Dr Cash / Cr 2100 at receipt) is unwound: refunded portion
+      // → Cr Cash, forfeited portion → Cr Other Income. Idempotent per booking.
+      try {
+        const cf: any = await tenantDb.get(
+          "SELECT id FROM folios WHERE booking_id = ? ORDER BY created_at LIMIT 1",
+          [req.params.bookingId]
+        );
+        let advTotal = 0; let advMethod = 'CASH';
+        if (cf?.id) {
+          const advs: any[] = await tenantDb.query(
+            "SELECT amount, payment_method FROM folio_payments WHERE folio_id = ? AND payment_type = 'ADVANCE' AND is_voided = 0",
+            [cf.id]
+          ).catch(() => []);
+          advTotal = (advs || []).reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+          if (advs && advs[0]?.payment_method) advMethod = advs[0].payment_method;
+        }
+        advTotal = +advTotal.toFixed(2);
+        if (advTotal > 0) {
+          const journalRef = `CANCEL-${req.params.bookingId}`;
+          const dup = await tenantDb.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
+          if (!dup) {
+            const refundApplied = +Math.min(Number(refund.refund_amount || 0), advTotal).toFixed(2);
+            const forfeit = +(advTotal - refundApplied).toFixed(2);
+            const cashAcct = _glAccountForPaymentMethod(advMethod);
+            const lines: GlLine[] = [
+              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: advTotal, cr_amount: 0, narration: `Cancel booking ${req.params.bookingId}` },
+            ];
+            if (refundApplied > 0) lines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: refundApplied, narration: `Refund on cancel ${req.params.bookingId}` });
+            if (forfeit > 0) lines.push({ account_code: '4900', account_name: 'Other Income', dr_amount: 0, cr_amount: forfeit, narration: `Forfeited advance ${req.params.bookingId}` });
+            await _postGlEntries(tenantDb, req.params.id, journalRef, new Date().toISOString().slice(0, 10), 'BOOKING_CANCEL', req.params.bookingId, lines, req.user?.id || req.user?.email || null);
+          }
+        }
+      } catch (glErr) { console.error('[GL] booking-cancel capture failed:', glErr); }
       // Phase H1 — log cancel for channel re-sync. Even DIRECT bookings
       // get an audit row (status='skipped_direct') so the front desk has
       // a unified history.
@@ -38524,6 +38858,13 @@ ${data.tenant.name}`;
         );
       }
       const cn = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [cnId]);
+      // Phase 3.2 — reverse the parent folio's GL settlement as a DATED contra
+      // journal keyed to the credit note (FOLIO-<cnId>), so revenue, output GST
+      // and AR/cash are backed out in the period the credit note is issued.
+      await _reverseJournal(tenantDb, req.params.id, `FOLIO-${parent.id}`, {
+        reversalRef: `FOLIO-${cnId}`, sourceType: 'CREDIT_NOTE', sourceId: cnId,
+        reason: reason || 'Credit note', postedBy: req.user?.email || req.user?.id || null,
+      });
       res.status(201).json(cn);
     } catch (err: any) {
       console.error("Credit note error:", err);
@@ -38605,6 +38946,13 @@ ${data.tenant.name}`;
 
       // Mark the original folio as superseded
       await tenantDb.run("UPDATE folios SET status = 'superseded' WHERE id = ?", [original.id]);
+      // Phase 3.2 — reverse the superseded folio's GL settlement so its revenue is
+      // backed out; the revision settles under FOLIO-<newId> when re-settled, so
+      // there is no double-count (fixes the folio-revise double-revenue gap).
+      await _reverseJournal(tenantDb, req.params.id, `FOLIO-${original.id}`, {
+        sourceType: 'FOLIO_REVISED', sourceId: newId,
+        reason: `Superseded by revision ${newId}`, postedBy: revisedBy,
+      });
 
       res.status(201).json({ id: newId, revision_number: newRevNum, parent_folio_id: original.id });
     } catch (err: any) {
@@ -39931,6 +40279,19 @@ ${data.tenant.name}`;
         // of swallowing (the previous silent .catch hid every "stuck table"
         // bug for months).
         await freeTableForSession(db, { session_id: session.id, reason: 'session-close' });
+
+        // Phase 3.1 — capture each standalone F&B order settled by this session
+        // to the GL (idempotent on ORDER-<id>; session close does not call the
+        // per-order payment endpoint, so this is the only GL hook for dine-in).
+        try {
+          const sessOrders: any[] = await db.query(
+            "SELECT * FROM orders WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'",
+            [session.id]
+          );
+          for (const o of (sessOrders || [])) {
+            await _postOrderGl(db, req.params.id, o, req.user?.email || req.user?.id || null);
+          }
+        } catch (glErr) { console.error('[GL] session-close capture failed:', glErr); }
       }
       res.json({ success: true });
     } catch (err) {
@@ -43089,6 +43450,13 @@ ${data.tenant.name}`;
         `INSERT INTO staff_advances (id, staff_id, amount, advance_date, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?)`,
         [id, staff_id, amt, advance_date || new Date().toISOString().slice(0, 10), note || null, req.user?.email || null]
       );
+      // Phase 3.1 — book the advance payout (Dr Advances to Staff / Cr Cash).
+      try {
+        await _postGlEntries(db, targetId, `SADV-${id}`, (advance_date || new Date().toISOString().slice(0, 10)), 'STAFF_ADVANCE', id, [
+          { account_code: '1210', account_name: 'Advances to Staff', dr_amount: amt, cr_amount: 0, narration: `Staff advance ${staff_id}` },
+          { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 0, cr_amount: amt, narration: `Staff advance paid` },
+        ], req.user?.email || null);
+      } catch (glErr) { console.error('[GL] staff-advance capture failed:', glErr); }
       res.status(201).json({ success: true, id });
     } catch (err) { console.error("staff advance error:", err); res.status(500).json({ error: "Failed to record advance" }); }
   });
@@ -43101,6 +43469,11 @@ ${data.tenant.name}`;
       const db = await getTenantDb(targetId);
       await ensurePayrollTables(db);
       await db.run("DELETE FROM staff_advances WHERE id = ?", [req.params.id]);
+      // Phase 3.2 — reverse the advance payout journal.
+      await _reverseJournal(db, targetId, `SADV-${req.params.id}`, {
+        sourceType: 'STAFF_ADVANCE_REVERSAL', sourceId: req.params.id,
+        reason: 'Advance deleted', postedBy: req.user?.email || req.user?.id || null,
+      });
       res.json({ success: true });
     } catch (err) { res.status(500).json({ error: "Failed to delete advance" }); }
   });
@@ -43213,6 +43586,29 @@ ${data.tenant.name}`;
           }
         }
       }
+      // Phase 3.1 — post the aggregate operational-payroll disbursement journal
+      // (Dr Salaries & Wages / Cr Bank net / Cr Advances to Staff recovered).
+      // Idempotent per period (first finalize wins; re-finalize won't re-post).
+      try {
+        let tG = 0, tNet = 0, tDed = 0;
+        for (const r of rows) {
+          const g = round2(Number(r.gross || 0));
+          const d = round2(Math.max(0, Math.min(Number(r.advance_deducted || 0), g)));
+          tG = round2(tG + g); tDed = round2(tDed + d); tNet = round2(tNet + (g - d));
+        }
+        if (tG > 0) {
+          const journalRef = `PAYRUN-OPS-${period}`;
+          const dup = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
+          if (!dup) {
+            const lines: GlLine[] = [
+              { account_code: '5100', account_name: 'Salaries & Wages', dr_amount: tG, cr_amount: 0, narration: `Operational payroll ${period}` },
+            ];
+            if (tNet > 0) lines.push({ account_code: '1010', account_name: 'Bank — Main Account', dr_amount: 0, cr_amount: tNet, narration: `Net wages ${period}` });
+            if (tDed > 0) lines.push({ account_code: '1210', account_name: 'Advances to Staff', dr_amount: 0, cr_amount: tDed, narration: `Advance recovered ${period}` });
+            await _postGlEntries(db, targetId, journalRef, `${period}-01`, 'STAFF_PAYROLL', period, lines, req.user?.email || req.user?.id || null);
+          }
+        }
+      } catch (glErr) { console.error('[GL] operational-payroll capture failed:', glErr); }
       res.json({ success: true, period, count: rows.length });
     } catch (err: any) { console.error("payroll finalize error:", err); res.status(500).json({ error: "Failed to finalize payroll" }); }
   });
@@ -43523,6 +43919,16 @@ ${data.tenant.name}`;
         } catch (freeErr) {
           console.error(`[order-payment] FAILED to free table after paying order ${order.id}:`, freeErr);
         }
+      }
+
+      // Phase 3.1 — capture standalone F&B revenue to the GL. Re-read the row so
+      // payment_status reflects the UPDATE above; _postOrderGl skips folio-bound
+      // orders and is idempotent on ORDER-<id>.
+      if (isPaid && order) {
+        try {
+          const paidOrder = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.id]);
+          await _postOrderGl(db, tenantId, paidOrder, req.user?.email || req.user?.id || null);
+        } catch (glErr) { console.error('[GL] order-payment capture failed:', glErr); }
       }
 
       res.json({ success: true });
@@ -44804,8 +45210,12 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-run-scheduled-endpoint',
+    commit_marker: 'accounting-phase3-capture-reversal',
     code_features: [
+      'gl-capture-fnb-spa-events-payroll',  // Phase 3.1: standalone F&B orders, spa checkout/quick-sale, event settlement + payroll now post double-entry GL
+      'gl-reversal-engine',                 // Phase 3.2: dated contra journals on credit note, booking cancel, folio revise, supplier/staff/event deletes
+      'gl-exceptions-no-silent-drop',       // Phase 3.0: unbalanced journals recorded to gl_exceptions (not lost); manual journal returns 400 instead of a false 201
+      'gst-itc-igst-routing',               // Phase 3.3: interstate supplier ITC → 1320 IGST; gst_exempt folio writes zero GST to output register
       'subscription-billing',
       'read-only-mode',
       'tenant-inactive-block',
@@ -45115,10 +45525,32 @@ ${data.tenant.name}`;
       const seq = await getNextTenantSequence(db, 'journal');
       const journalRef = `MJ-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
       const date = String(entry_date || new Date().toISOString().slice(0, 10));
-      await _postGlEntries(db, req.params.id, journalRef, date, 'MANUAL_JOURNAL', null, glLines,
+      const result = await _postGlEntries(db, req.params.id, journalRef, date, 'MANUAL_JOURNAL', null, glLines,
         req.user?.id || (req.user as any)?.email || null);
-      res.status(201).json({ journal_ref: journalRef, lines: glLines.length });
+      // H1 — never report success on a journal that did not balance. It was
+      // recorded to gl_exceptions (not posted); the cashier must correct it.
+      if (!result.ok && result.dropped) {
+        return res.status(400).json({ error: `Journal does not balance (${result.reason}). Nothing was posted — recorded to GL exceptions for review.` });
+      }
+      res.status(201).json({ journal_ref: journalRef, lines: result.posted });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // GL exceptions — journals that _postGlEntries REFUSED because they did not
+  // balance. Owner-visible so nothing money-related is ever silently lost.
+  app.get("/api/restaurant/:id/accounting/gl-exceptions", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT id, journal_ref, entry_date, source_type, source_id, total_dr, total_cr,
+                difference, reason, posted_by, resolved, created_at
+           FROM gl_exceptions WHERE restaurant_id = ?
+          ORDER BY created_at DESC LIMIT 500`, [req.params.id]
+      ).catch(() => []);
+      const openCount = (rows || []).filter((r: any) => !Number(r.resolved)).length;
+      res.json({ count: (rows || []).length, open: openCount, exceptions: rows || [] });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to load GL exceptions' }); }
   });
 
   app.get("/api/restaurant/:id/accounting/tds-payable", authenticate, async (req: AuthRequest, res: Response) => {

@@ -2499,6 +2499,27 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     CREATE INDEX IF NOT EXISTS idx_gl_account   ON gl_entries (restaurant_id, account_code);
     CREATE INDEX IF NOT EXISTS idx_gl_source    ON gl_entries (source_type, source_id);
 
+    -- GL exceptions — every journal that _postGlEntries REFUSED to post (unbalanced
+    -- beyond the 0.02 tolerance) is recorded here instead of vanishing into a log
+    -- line. Owner-visible so money can never silently disappear from the ledger.
+    CREATE TABLE IF NOT EXISTS gl_exceptions (
+      id             TEXT PRIMARY KEY,
+      restaurant_id  TEXT NOT NULL,
+      journal_ref    TEXT NOT NULL,
+      entry_date     TEXT,
+      source_type    TEXT,
+      source_id      TEXT,
+      total_dr       REAL NOT NULL DEFAULT 0,
+      total_cr       REAL NOT NULL DEFAULT 0,
+      difference     REAL NOT NULL DEFAULT 0,
+      reason         TEXT,
+      lines_json     TEXT,
+      posted_by      TEXT,
+      resolved       INTEGER NOT NULL DEFAULT 0,
+      created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_glexc_res ON gl_exceptions (restaurant_id, resolved);
+
     CREATE TABLE IF NOT EXISTS tds_payable_ledger (
       id                TEXT PRIMARY KEY,
       restaurant_id     TEXT NOT NULL,
@@ -2579,6 +2600,7 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['1100','Accounts Receivable — Guests','ASSET',30],
     ['1110','Accounts Receivable — OTA Channels','ASSET',40],
     ['1200','Advance to Suppliers','ASSET',50],
+    ['1210','Advances to Staff','ASSET',55],
     ['1300','ITC Receivable — CGST','ASSET',60],
     ['1310','ITC Receivable — SGST','ASSET',70],
     ['1320','ITC Receivable — IGST','ASSET',80],
@@ -2593,6 +2615,7 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['2300','TDS Payable — Sec 194C','LIABILITY',250],
     ['2310','TDS Payable — Sec 194J','LIABILITY',260],
     ['2320','TDS Payable — Sec 194H','LIABILITY',270],
+    ['2330','TDS Payable — Sec 192 (Salary)','LIABILITY',275],
     ['2400','Salaries & Wages Payable','LIABILITY',280],
     ['2500','EPF Payable','LIABILITY',290],
     ['2510','ESI Payable','LIABILITY',300],
