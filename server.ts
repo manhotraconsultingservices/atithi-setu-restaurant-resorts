@@ -25972,7 +25972,9 @@ ${data.tenant.name}`;
             [hkActor(req), 'Room set VACANT by manager', req.params.roomId]).catch(() => {});
         }
       }
+      const prevRoom: any = await tenantDb.get("SELECT status FROM rooms WHERE id = ?", [req.params.roomId]).catch(() => null);
       await tenantDb.run("UPDATE rooms SET status = ? WHERE id = ?", [status, req.params.roomId]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: req.params.roomId, action: 'STATUS_CHANGED', summary: `Room status ${prevRoom?.status || '?'} → ${status}` });
       const updated = await tenantDb.get("SELECT * FROM rooms WHERE id = ?", [req.params.roomId]);
       res.json(updated);
     } catch (err) {
@@ -35711,6 +35713,34 @@ ${data.tenant.name}`;
         });
       }
 
+      // ── CHECK-IN CHECKLIST GATE ──────────────────────────────────────────
+      // When the owner setting is on, the CHECK_IN checklist must be completed by
+      // the front desk BEFORE the guest is checked in. We raise it (idempotent) and,
+      // if any mandatory task is still pending, return the checklist so the wizard
+      // can show it — check-in is refused (409) until every mandatory task is done.
+      const _checklistOn = Number(check.restaurant?.checklist_validate_on_checkin ?? 1) === 1;
+      let _checkinJobIds: string[] = [];
+      if (_checklistOn) {
+        try {
+          const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN' });
+          const rows: any[] = await tenantDb.query("SELECT id FROM housekeeping_jobs WHERE source_ref = ? AND trigger_event = 'CHECK_IN' AND status = 'OPEN'", [req.params.bookingId]).catch(() => []);
+          _checkinJobIds = (rows || []).map((r: any) => r.id);
+          if (_checkinJobIds.length) {
+            const ph = _checkinJobIds.map(() => '?').join(',');
+            const pend: any = await tenantDb.get(`SELECT COUNT(*)::int AS c FROM housekeeping_job_tasks WHERE job_id IN (${ph}) AND is_mandatory = 1 AND is_done = 0`, _checkinJobIds).catch(() => ({ c: 0 }));
+            if (Number(pend?.c || 0) > 0) {
+              const jobsFull: any[] = [];
+              for (const jid of _checkinJobIds) {
+                const j: any = await tenantDb.get("SELECT id, template_name, trigger_event, status, blocks_release FROM housekeeping_jobs WHERE id = ?", [jid]);
+                if (j) { j.tasks = await tenantDb.query("SELECT id, label, is_mandatory, is_done, sort_order FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id", [jid]); jobsFull.push(j); }
+              }
+              return res.status(409).json({ error: `Complete the check-in checklist first — ${pend.c} required task(s) pending.`, checklist_incomplete: true, pending_mandatory: pend.c, jobs: jobsFull });
+            }
+          }
+        } catch (e) { console.warn('[checkin] checklist gate error (non-fatal):', e); }
+      }
+
       // BA-FIX-3 (H1, 11 Jun 2026) — atomic check-in transition.
       // Previously two simultaneous "Check In" clicks from front-
       // desk staff could both pass the status guard (line above) →
@@ -35734,16 +35764,15 @@ ${data.tenant.name}`;
         return res.json({ booking: current, folio_id: null, perk: { applies: false, type: null, message: '' }, idempotent: true });
       }
       await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [b.room_id]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: b.room_id, action: 'OCCUPIED', summary: `Occupied — guest ${b.guest_name || ''} checked in`.trim() });
 
-      // Checklist: raise any CHECK_IN checklists configured for this room / type
-      // (arrival prep, welcome-amenity setup, etc). Fire-and-forget — never blocks
-      // check-in; check-in checklists are normally non-blocking (room is OCCUPIED).
-      // Gated by the owner setting `checklist_validate_on_checkin` (default ON).
-      if (Number(check.restaurant?.checklist_validate_on_checkin ?? 1) === 1) {
-        try {
-          const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN' });
-        } catch { /* non-fatal */ }
+      // The CHECK_IN checklist passed the gate above (all mandatory tasks done) —
+      // mark those instance(s) complete so they clear out of My Checklist.
+      if (_checklistOn && _checkinJobIds.length) {
+        const by = req.user?.email || req.user?.id || 'front desk';
+        for (const jid of _checkinJobIds) {
+          await tenantDb.run("UPDATE housekeeping_jobs SET status = 'DONE', workflow_state = 'COMPLETE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ? AND status = 'OPEN'", [by, jid]).catch(() => {});
+        }
       }
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CHECKED_IN', summary: `Checked in — ${b.guest_name || ''} (room ${b.room_id})`.trim() });
 
@@ -36265,6 +36294,7 @@ ${data.tenant.name}`;
       await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ?", [now, req.params.bookingId]);
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CHECKED_OUT', summary: `Checked out — ${b.guest_name || ''}`.trim() });
       await tenantDb.run("UPDATE rooms SET status = 'CLEANING' WHERE id = ?", [b.room_id]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: b.room_id, action: 'CLEANING', summary: `Cleaning — guest ${b.guest_name || ''} checked out`.trim() });
       await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]);
       // Housekeeping: raise a cleaning job from the ROOM checklist. The room stays
       // CLEANING (not bookable) until the job's mandatory tasks are completed.
@@ -36772,6 +36802,57 @@ ${data.tenant.name}`;
       if (docs.length) groups.push({ group: 'ID Documents', items: docs.map((d: any) => ({ type: 'Document', id: d.id, label: d.file_name || d.doc_type || d.id, sublabel: d.doc_type || '', link: null })) });
       const evt: any[] = await db.query("SELECT booking_id FROM event_booking_rooms WHERE hotel_booking_id = ?", [bid]).catch(() => []);
       if (evt.length) groups.push({ group: 'Event Booking', items: evt.map((e: any) => ({ type: 'Event Booking', id: e.booking_id, label: e.booking_id, sublabel: 'Room booked for an event', link: { objectType: 'EVENT_BOOKING', objectId: e.booking_id } })) });
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
+  });
+
+  // ── Room — ObjectDetail nodes (Audit log / Checklist / Where-Used) ───────────
+  // Powers the room-ID tree menu on the availability board: the room's status
+  // timeline, the checklists attached to it (esp. checkout/cleaning), and cross-
+  // references to its bookings, holds, folios and service requests.
+  app.get("/api/restaurant/:id/hotel/rooms/:roomId/audit", authenticate, hotelStaff, requireTabAccess('ROOMS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'ROOM', req.params.roomId));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit log" }); }
+  });
+
+  app.get("/api/restaurant/:id/hotel/rooms/:roomId/checklist", authenticate, hotelStaff, requireTabAccess('ROOMS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db).catch(() => {});
+      const jobs: any[] = await db.query(
+        "SELECT id, template_name, trigger_event, status, blocks_release, guest_label, created_at, completed_at FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' ORDER BY created_at DESC LIMIT 50",
+        [req.params.roomId]
+      ).catch(() => []);
+      for (const j of (jobs || [])) {
+        j.tasks = await db.query("SELECT id, label, is_mandatory, is_done, sort_order FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id", [j.id]).catch(() => []);
+      }
+      res.json({ jobs: jobs || [] });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load checklist" }); }
+  });
+
+  app.get("/api/restaurant/:id/hotel/rooms/:roomId/where-used", authenticate, hotelStaff, requireTabAccess('ROOMS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rid = req.params.roomId;
+      const groups: any[] = [];
+      const cur: any[] = await db.query("SELECT id, guest_name, status, check_in_date, check_out_date FROM room_bookings WHERE room_id = ? AND status IN ('BOOKED','CHECKED_IN') ORDER BY check_in_date LIMIT 30", [rid]).catch(() => []);
+      if (cur.length) groups.push({ group: 'Current & upcoming bookings', items: cur.map((b: any) => ({ type: 'Booking', id: b.id, label: `${b.guest_name || b.id}`, sublabel: `${b.status} · ${String(b.check_in_date).slice(0, 10)}→${String(b.check_out_date).slice(0, 10)}`, link: { objectType: 'ROOM_BOOKING', objectId: b.id } })) });
+      const past: any[] = await db.query("SELECT id, guest_name, check_in_date, check_out_date FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_OUT' ORDER BY check_out_date DESC LIMIT 10", [rid]).catch(() => []);
+      if (past.length) groups.push({ group: 'Recent stays', items: past.map((b: any) => ({ type: 'Booking', id: b.id, label: `${b.guest_name || b.id}`, sublabel: `${String(b.check_in_date).slice(0, 10)}→${String(b.check_out_date).slice(0, 10)}`, link: { objectType: 'ROOM_BOOKING', objectId: b.id } })) });
+      const holds: any[] = await db.query("SELECT id, from_date, to_date, reason FROM room_holds WHERE room_id = ? ORDER BY from_date DESC LIMIT 20", [rid]).catch(() => []);
+      if (holds.length) groups.push({ group: 'Holds / blocks', items: holds.map((h: any) => ({ type: 'Hold', id: h.id, label: h.reason || 'Blocked', sublabel: `${String(h.from_date).slice(0, 10)}→${String(h.to_date).slice(0, 10)}`, link: null })) });
+      const folios: any[] = await db.query("SELECT id, invoice_number, grand_total, status FROM folios WHERE room_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 10", [rid]).catch(() => []);
+      if (folios.length) groups.push({ group: 'Open folios', items: folios.map((f: any) => ({ type: 'Folio', id: f.id, label: f.invoice_number || f.id, sublabel: `${f.status} · ₹${Number(f.grand_total || 0).toLocaleString('en-IN')}`, link: { objectType: 'FOLIO', objectId: f.id } })) });
+      const sr: any[] = await db.query("SELECT id, service_name, status FROM service_requests WHERE room_id = ? AND status NOT IN ('COMPLETED','CANCELLED') ORDER BY created_at DESC LIMIT 20", [rid]).catch(() => []);
+      if (sr.length) groups.push({ group: 'Open service requests', items: sr.map((s: any) => ({ type: 'Service', id: s.id, label: s.service_name || s.id, sublabel: s.status || '', link: null })) });
       res.json({ groups });
     } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
   });
@@ -45417,7 +45498,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'my-checklist-assignment-workflow',
+    commit_marker: 'blocking-checkin-room-tree-menu',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

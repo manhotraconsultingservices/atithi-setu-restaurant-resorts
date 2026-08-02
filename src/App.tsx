@@ -9378,6 +9378,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [openActionMenu, setOpenActionMenu] = useState<string|null>(null);
   const [actionMenuPos, setActionMenuPos] = useState<{top:number;left:number}|null>(null);
   const [bookingDetailTarget, setBookingDetailTarget] = useState<any>(null);
+  const [roomDetailTarget, setRoomDetailTarget] = useState<any>(null);
   // Reservations table — client-side sort + live filter (13 Jun 2026 fix).
   // The "All bookings" table had no sort and clipped its right-hand columns,
   // so checked-in guests were hard to locate. displayedBookings sorts +
@@ -12435,7 +12436,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       },
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+    if (!res.ok) { const err: any = new Error(body.error || `Request failed (${res.status})`); err.status = res.status; err.data = body; throw err; }
     return body;
   };
 
@@ -20590,7 +20591,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         const locked = room.status === 'OCCUPIED' || room.status === 'BLOCKED';
                         return (
                           <tr key={room.id} className={cn('border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]/40', idx % 2 === 1 && 'bg-[#faf7f2]/20')}>
-                            <td className="px-4 py-2.5 font-bold text-[#1a1208]">{room.name}</td>
+                            <td className="px-4 py-2.5 font-bold"><button type="button" title="View room details" onClick={() => setRoomDetailTarget(room)} className="text-[#1a1208] hover:text-[#cc5a16] hover:underline underline-offset-2">{room.name}</button></td>
                             <td className="px-4 py-2.5 font-mono text-xs text-[#3d3128]">{room.room_number || '—'}</td>
                             <td className="px-4 py-2.5 text-xs text-[#3d3128]">{room.floor ?? '—'}</td>
                             <td className="px-4 py-2.5 text-xs text-[#3d3128]">{typeName}</td>
@@ -20647,7 +20648,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <div key={room.id} className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
                       <div className="flex items-start justify-between mb-3">
                         <div className="min-w-0 flex-1">
-                          <h3 className="font-serif font-bold text-[#1a1208] truncate">{room.name}</h3>
+                          <h3 className="font-serif font-bold text-[#1a1208] truncate"><button type="button" title="View room details" onClick={() => setRoomDetailTarget(room)} className="text-left hover:text-[#cc5a16] hover:underline underline-offset-2">{room.name}</button></h3>
                           <p className="text-xs text-[#9c8e85] mt-0.5">{room.type || 'STANDARD'} · {room.capacity || 2} guests · ₹{Number(room.base_rate || 0).toLocaleString('en-IN')}</p>
                         </div>
                         <span className={cn("px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide border", statusColor.bg, statusColor.border, statusColor.text)}>
@@ -32772,6 +32773,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       )}
 
       {/* ═══ Booking Detail Modal ══════════════════════════════════════ */}
+        {roomDetailTarget && (() => {
+          const rd = roomDetailTarget;
+          const RS_CLS: Record<string, string> = { VACANT: 'bg-emerald-100 text-emerald-800', OCCUPIED: 'bg-blue-100 text-blue-800', CLEANING: 'bg-amber-100 text-amber-800', MAINTENANCE: 'bg-stone-100 text-stone-600', BLOCKED: 'bg-rose-100 text-rose-700' };
+          return (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setRoomDetailTarget(null)}>
+              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto p-5" onClick={e => e.stopPropagation()}>
+                <ObjectDetail
+                  title={rd.name || (rd.room_number ? `Room ${rd.room_number}` : rd.id)}
+                  subtitle={`${rd.type || rd.type_id || 'Room'}${rd.floor != null ? ` · Floor ${rd.floor}` : ''} · capacity ${rd.capacity ?? '—'}`}
+                  statusPill={<span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', RS_CLS[String(rd.status || '').toUpperCase()] || 'bg-gray-100 text-gray-600')}>{rd.status || '—'}</span>}
+                  onBack={() => setRoomDetailTarget(null)}
+                  backLabel="Close"
+                  token={token!}
+                  auditUrl={`/api/restaurant/${restaurantId}/hotel/rooms/${rd.id}/audit`}
+                  whereUsedUrl={`/api/restaurant/${restaurantId}/hotel/rooms/${rd.id}/where-used`}
+                  checklistUrl={`/api/restaurant/${restaurantId}/hotel/rooms/${rd.id}/checklist`}
+                  onOpenObject={(type, oid) => { if (type === 'FOLIO') { setRoomDetailTarget(null); loadFolio(oid).catch(() => {}); } }}
+                  overview={
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Room</p><p className="text-sm font-bold text-[#1a1208]">{rd.name || rd.id}</p>{rd.room_number && <p className="text-[11px] text-[#6b5d52]">No. {rd.room_number}</p>}</div>
+                        <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Type / Floor</p><p className="text-sm font-bold text-[#1a1208]">{rd.type || rd.type_id || '—'}</p>{rd.floor != null && <p className="text-[11px] text-[#6b5d52]">Floor {rd.floor}</p>}</div>
+                        <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Base rate</p><p className="text-sm font-bold text-[#1a1208]">₹{Number(rd.base_rate || 0).toLocaleString('en-IN')}</p></div>
+                        <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Capacity</p><p className="text-sm font-bold text-[#1a1208]">{rd.capacity ?? '—'} guests</p></div>
+                      </div>
+                      {rd.notes && <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3"><p className="text-[10px] font-bold uppercase tracking-widest text-amber-800 mb-1">Notes</p><p className="text-[12px] text-amber-900">{rd.notes}</p></div>}
+                    </div>
+                  }
+                />
+              </div>
+            </div>
+          );
+        })()}
+
         {bookingDetailTarget && (() => {
           const bd = bookingDetailTarget;
           const nights = (() => {
@@ -39857,8 +39892,26 @@ const CheckInWizardModal: React.FC<{
     }
   };
 
+  // Check-in checklist gate — the server returns 409 { checklist_incomplete, jobs }
+  // until every mandatory arrival task is ticked. We render those tasks inline and
+  // block "Confirm Check-In" until they're done.
+  const [checklistJobs, setChecklistJobs] = useState<any[]>([]);
+  const [tickBusy, setTickBusy] = useState('');
+  const chkPendMand = checklistJobs.reduce((n, j) => n + (j.tasks || []).filter((t: any) => Number(t.is_mandatory) === 1 && Number(t.is_done) === 0).length, 0);
+  const tickTask = async (jobId: string, taskId: string, next: boolean) => {
+    setTickBusy(taskId);
+    setChecklistJobs(js => js.map(j => j.id !== jobId ? j : { ...j, tasks: j.tasks.map((t: any) => t.id === taskId ? { ...t, is_done: next ? 1 : 0 } : t) }));
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/checklists/my/jobs/${jobId}/tasks/${taskId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ is_done: next }),
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d?.error || 'Failed'); }
+    } catch (e: any) { setError(e?.message || 'Failed to update task'); setChecklistJobs(js => js.map(j => j.id !== jobId ? j : { ...j, tasks: j.tasks.map((t: any) => t.id === taskId ? { ...t, is_done: next ? 0 : 1 } : t) })); }
+    finally { setTickBusy(''); }
+  };
+
   const docsOk = !requireDocs || docCount > 0;
-  const canCheckIn = docsOk;
+  const canCheckIn = docsOk && chkPendMand === 0;
 
   const confirm = async () => {
     if (!canCheckIn || submitting) return;
@@ -39871,11 +39924,16 @@ const CheckInWizardModal: React.FC<{
         : undefined;
       await onCheckIn(adv);
     } catch (err: any) {
-      const msg = err?.message || '';
-      if (msg.includes('Form-C must be generated') || msg.includes('FORM_C_REQUIRED')) {
-        setFormCError(true);
+      if (err?.status === 409 && err?.data?.checklist_incomplete) {
+        setChecklistJobs(Array.isArray(err.data.jobs) ? err.data.jobs : []);
+        setError('');
       } else {
-        setError(msg || 'Check-in failed');
+        const msg = err?.message || '';
+        if (msg.includes('Form-C must be generated') || msg.includes('FORM_C_REQUIRED')) {
+          setFormCError(true);
+        } else {
+          setError(msg || 'Check-in failed');
+        }
       }
     } finally { setSubmitting(false); }
   };
@@ -40423,6 +40481,27 @@ const CheckInWizardModal: React.FC<{
               </div>
             )}
 
+            {checklistJobs.length > 0 && (
+              <div className="rounded-2xl border border-amber-300 bg-amber-50 p-3 mb-1">
+                <p className="text-[12px] font-bold text-amber-900 mb-1.5">Check-in checklist{chkPendMand > 0 ? ` — ${chkPendMand} required task${chkPendMand === 1 ? '' : 's'} left` : ' ✓ done'}</p>
+                {checklistJobs.map(job => (
+                  <div key={job.id} className="mb-2 last:mb-0">
+                    {job.template_name && <p className="text-[11px] font-semibold text-amber-900 mb-0.5">{job.template_name}</p>}
+                    <ul className="space-y-0.5">
+                      {(job.tasks || []).map((t: any) => (
+                        <li key={t.id}>
+                          <label className="flex items-start gap-2 text-[12px] cursor-pointer">
+                            <input type="checkbox" className="mt-0.5 accent-emerald-600" checked={Number(t.is_done) === 1} disabled={tickBusy === t.id}
+                              onChange={e => tickTask(job.id, t.id, e.target.checked)} />
+                            <span className={Number(t.is_done) === 1 ? 'text-amber-700 line-through' : 'text-amber-900'}>{t.label}{Number(t.is_mandatory) === 1 ? '' : ' (optional)'}</span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="flex gap-2 pt-3 mt-1 border-t border-[#cc5a16]/10">
               <button
                 onClick={() => setStep(1)}
@@ -43032,7 +43111,7 @@ function Ota360Report({ restaurantId, token }: { restaurantId: string; token: st
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) },
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+    if (!res.ok) { const err: any = new Error(body.error || `Request failed (${res.status})`); err.status = res.status; err.data = body; throw err; }
     return body;
   };
   const fetchOta360 = async (days = ota360Days) => {
