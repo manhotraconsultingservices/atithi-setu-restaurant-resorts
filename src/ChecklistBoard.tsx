@@ -152,6 +152,7 @@ export function ChecklistBoard({ restaurantId, token }: Props) {
         searchPlaceholder="Search checklists…"
         exportFilename="checklist-board"
         emptyMessage="No checklists match these filters."
+        onRowClick={(job) => setDetail(job)}
         toolbarLeft={
           <div className="flex items-center gap-1.5">
             <select value={status} onChange={e => setStatus(e.target.value as any)} className="text-sm border border-[#e8dccf] rounded-xl px-2 py-1.5 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20">

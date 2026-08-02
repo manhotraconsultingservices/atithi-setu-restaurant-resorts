@@ -10,7 +10,7 @@ import { HousekeepingModule } from './Housekeeping';
 import { ChecklistTemplates } from './ChecklistTemplates';
 import { MyChecklists } from './MyChecklists';
 import { ChecklistBoard } from './ChecklistBoard';
-import { ObjectDetail } from './components/ObjectDetail';
+import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
@@ -32799,6 +32799,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   auditUrl={`/api/restaurant/${restaurantId}/hotel/rooms/${rd.id}/audit`}
                   whereUsedUrl={`/api/restaurant/${restaurantId}/hotel/rooms/${rd.id}/where-used`}
                   checklistUrl={`/api/restaurant/${restaurantId}/hotel/rooms/${rd.id}/checklist`}
+                  resolveLink={buildObjectResolver(restaurantId, token!)}
                   onOpenObject={(type, oid) => { if (type === 'FOLIO') { setRoomDetailTarget(null); loadFolio(oid).catch(() => {}); } }}
                   overview={
                     <div className="space-y-3">
@@ -32840,6 +32841,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   auditUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/audit`}
                   whereUsedUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/where-used`}
                   checklistUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/checklist`}
+                  resolveLink={buildObjectResolver(restaurantId, token!)}
                   onOpenObject={(type, oid) => { if (type === 'FOLIO') { setBookingDetailTarget(null); loadFolio(oid).catch(() => {}); } }}
                   overview={
                 <div className="space-y-4">

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { ObjectDetail } from './components/ObjectDetail';
+import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { DataTable, type ColDef } from './components/DataTable';
 
 // ── "My Checklist" — the personal work queue of checklist INSTANCES assigned to
@@ -144,6 +144,7 @@ export function MyChecklists({ restaurantId, token }: Props) {
         searchPlaceholder="Search checklists…"
         exportFilename={`my-checklist-${tab.toLowerCase()}`}
         emptyMessage={tab === 'ASSIGNED' ? 'Nothing on your checklist right now. Great work!' : 'No completed checklists yet.'}
+        onRowClick={(j) => setDetail(j)}
       />
     </div>
   );
@@ -235,6 +236,7 @@ export function ChecklistDetail({ restaurantId, token, job: initial, onBack }: {
       overview={summary}
       auditUrl={`/api/restaurant/${restaurantId}/checklists/jobs/${initial.id}/audit`}
       whereUsedUrl={`/api/restaurant/${restaurantId}/checklists/jobs/${initial.id}/where-used`}
+      resolveLink={buildObjectResolver(restaurantId, token)}
     />
   );
 }

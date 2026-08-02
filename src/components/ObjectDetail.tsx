@@ -2,19 +2,31 @@
 // ObjectDetail — the reusable "object detail with tree menu" shell.
 //
 // Implements the mandatory CLAUDE.md convention: every business-document object
-// (Sales Invoice / Folio, Quotation, Booking) opens into a left tree rail with
-// three nodes — Overview, Audit History, Where Used. Each module drops its
-// object's existing detail content in as `overview`; the shell fetches + renders
-// Audit and Where-Used from the endpoints the module provides. Deep-links in
-// Where-Used call `onOpenObject(objectType, objectId)` so navigation stays
-// inside one shell across modules.
+// (Sales Invoice / Folio, Quotation, Booking, Room, Checklist) opens into a left
+// tree rail — Overview, Audit log, Checklist (optional), Where Used. Each module
+// drops its object's detail content in as `overview`; the shell fetches + renders
+// the other nodes from the endpoints the module provides.
+//
+// Two behaviours are load-bearing here:
+//   1. Every list node (Audit / Checklist / Where-Used) is a SMART TABLE
+//      (sortable, per-column filters, gear column chooser, search, CSV) via the
+//      shared DataTable — no bespoke lists.
+//   2. Where-Used hyperlinks DRILL IN-PLACE. Clicking one resolves the linked
+//      object (via `resolveLink`) and pushes it onto an internal stack rendered
+//      in the SAME frame with a Back button — never a new pop-up. Falls back to
+//      the legacy `onOpenObject` callback when no resolver is supplied.
 //
 // This component is intentionally module-agnostic — do NOT fork it per module.
 // ════════════════════════════════════════════════════════════════════════
 import React, { useState, useEffect } from 'react';
 import { FileText, History, Link2, ListChecks, ChevronRight, ArrowLeft } from 'lucide-react';
+import { DataTable, type ColDef } from './DataTable';
 
 type Node = 'OVERVIEW' | 'AUDIT' | 'CHECKLIST' | 'WHERE_USED';
+
+/** Hint carried from a Where-Used row into the resolver so a drilled object can
+ *  show a sensible title/subtitle even before (or without) a fetch. */
+export interface LinkHint { label?: string; subtitle?: string }
 
 export interface ObjectDetailProps {
   title: string;
@@ -31,8 +43,10 @@ export interface ObjectDetailProps {
   whereUsedUrl: string;
   /** Optional: full API path returning { jobs: [...] } — enables the Checklist node. */
   checklistUrl?: string;
-  /** Called when a Where-Used item with a link is clicked. */
+  /** Legacy: called when a Where-Used item with a link is clicked and no `resolveLink` is set. */
   onOpenObject?: (objectType: string, objectId: string) => void;
+  /** Preferred: resolve a Where-Used link into a child detail rendered in the same frame. */
+  resolveLink?: (objectType: string, objectId: string, hint?: LinkHint) => ObjectDetailProps | Promise<ObjectDetailProps | null> | null;
   /** Bump to force Audit/Where-Used/Checklist to refetch (e.g. after an action on the object). */
   refreshNonce?: number;
 }
@@ -51,144 +65,208 @@ function timeAgo(iso: string): string {
   return String(iso || '').replace('T', ' ').slice(0, 16);
 }
 
-// ── Audit History node ───────────────────────────────────────────────────────
+// ── Audit log node (smart table) ─────────────────────────────────────────────
 function AuditView({ url, token, nonce }: { url: string; token: string; nonce?: number }) {
   const [rows, setRows] = useState<any[] | null>(null);
   const [err, setErr] = useState('');
-  const [open, setOpen] = useState<string | null>(null);
-  useEffect(() => { setRows(null); setErr(''); apiGet(url, token).then(setRows).catch(e => setErr(e.message)); }, [url, nonce]);
+  const [openId, setOpenId] = useState<string | null>(null);
+  useEffect(() => {
+    setRows(null); setErr(''); setOpenId(null);
+    apiGet(url, token).then((r) => setRows(Array.isArray(r) ? r : (r?.rows || []))).catch(e => setErr(e.message));
+  }, [url, nonce]);
 
   if (err) return <div className={CARD}><p className="text-sm text-rose-600">{err}</p></div>;
-  if (!rows) return <div className={CARD}><p className="text-sm text-[#6b5d52]">Loading…</p></div>;
-  if (rows.length === 0) return <div className={CARD}><p className="text-sm text-[#9d8b7e]">No audit history yet.</p></div>;
+
+  const columns: ColDef<any>[] = [
+    { key: 'when', label: 'When', sortable: true, getValue: r => r.created_at || '', render: r => <span className="text-[11px] text-[#6b5d52] whitespace-nowrap">{timeAgo(r.created_at)}</span> },
+    { key: 'action', label: 'Action', sortable: true, filterable: true, filterType: 'select', getValue: r => r.action || '', render: r => <span className="text-xs font-bold text-[#14110c]">{r.action}</span> },
+    { key: 'summary', label: 'Details', sortable: true, searchable: true, getValue: r => r.summary || '', render: r => <span className="text-xs text-[#3d3128]">{r.summary || '—'}</span> },
+    { key: 'actor', label: 'By', sortable: true, filterable: true, filterType: 'text', getValue: r => r.actor_email || 'system', render: r => <span className="text-[11px] text-[#6b5d52]">{r.actor_email || 'system'}{r.actor_role ? ` · ${r.actor_role}` : ''}</span> },
+    { key: 'changes', label: 'Changes', searchable: false, noExport: true, render: r => (r.before_json || r.after_json) ? <button className="text-[11px] text-[#cc5a16] font-semibold" onClick={() => setOpenId(openId === r.id ? null : r.id)}>{openId === r.id ? 'Hide' : 'View'}</button> : <span className="text-[#c9bcae]">—</span> },
+  ];
 
   return (
-    <div className={CARD}>
-      <div className="relative pl-5">
-        <div className="absolute left-1.5 top-1 bottom-1 w-px bg-[#e8dccf]" />
-        {rows.map((r: any) => {
-          const hasDiff = r.before_json || r.after_json;
-          return (
-            <div key={r.id} className="relative pb-4 last:pb-0">
-              <div className="absolute -left-[13px] top-1 w-2.5 h-2.5 rounded-full bg-[#cc5a16] border-2 border-white" />
-              <div className="flex items-baseline justify-between gap-3">
-                <span className="text-xs font-bold text-[#14110c]">{r.action}</span>
-                <span className="text-[10px] text-[#9d8b7e] whitespace-nowrap">{timeAgo(r.created_at)}</span>
-              </div>
-              {r.summary && <div className="text-xs text-[#3d3128] mt-0.5">{r.summary}</div>}
-              <div className="text-[10px] text-[#9d8b7e] mt-0.5">{r.actor_email || 'system'}{r.actor_role ? ` · ${r.actor_role}` : ''}</div>
-              {hasDiff && (
-                <button className="text-[10px] text-[#cc5a16] font-semibold mt-1" onClick={() => setOpen(open === r.id ? null : r.id)}>
-                  {open === r.id ? 'Hide changes' : 'View changes'}
-                </button>
-              )}
-              {open === r.id && hasDiff && (
-                <pre className="mt-1 p-2 rounded-lg bg-[#faf7f2] border border-[#e8dccf] text-[10px] overflow-x-auto whitespace-pre-wrap">
-                  {r.before_json ? `before: ${r.before_json}\n` : ''}{r.after_json ? `after:  ${r.after_json}` : ''}
-                </pre>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
+    <DataTable
+      data={rows || []} columns={columns} rowKey={(r, i) => r.id || i} loading={rows === null}
+      compact columnChooser columnFilters tableId="od-audit"
+      searchPlaceholder="Search audit…" exportFilename="audit-log" emptyMessage="No audit history yet."
+      isExpanded={(r) => openId === r.id}
+      renderExpanded={(r) => (r.before_json || r.after_json) ? (
+        <pre className="p-2 rounded-lg bg-[#faf7f2] border border-[#e8dccf] text-[10px] overflow-x-auto whitespace-pre-wrap">{r.before_json ? `before: ${r.before_json}\n` : ''}{r.after_json ? `after:  ${r.after_json}` : ''}</pre>
+      ) : null}
+    />
   );
 }
 
-// ── Where Used node ──────────────────────────────────────────────────────────
-function WhereUsedView({ url, token, onOpenObject, nonce }: { url: string; token: string; onOpenObject?: (t: string, i: string) => void; nonce?: number }) {
-  const [data, setData] = useState<any | null>(null);
-  const [err, setErr] = useState('');
-  useEffect(() => { setData(null); setErr(''); apiGet(url, token).then(setData).catch(e => setErr(e.message)); }, [url, nonce]);
-
-  if (err) return <div className={CARD}><p className="text-sm text-rose-600">{err}</p></div>;
-  if (!data) return <div className={CARD}><p className="text-sm text-[#6b5d52]">Loading…</p></div>;
-  const groups = data.groups || [];
-  if (groups.length === 0) return <div className={CARD}><p className="text-sm text-[#9d8b7e]">Not referenced anywhere yet.</p></div>;
-
-  return (
-    <div className="space-y-3">
-      {groups.map((g: any, gi: number) => (
-        <div key={gi} className={CARD}>
-          <h3 className="text-xs font-bold text-[#6b5d52] uppercase tracking-wide mb-2">{g.group}</h3>
-          <div className="space-y-1">
-            {(g.items || []).map((it: any, ii: number) => {
-              const clickable = it.link && onOpenObject;
-              return (
-                <button
-                  key={ii}
-                  disabled={!clickable}
-                  onClick={() => clickable && onOpenObject!(it.link.objectType, it.link.objectId)}
-                  className={`w-full text-left flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl border ${clickable ? 'border-[#e8dccf] hover:bg-[#faf7f2] cursor-pointer' : 'border-transparent cursor-default'}`}
-                >
-                  <span className="min-w-0">
-                    <span className="text-xs font-semibold text-[#14110c]">{it.label}</span>
-                    {it.sublabel && <span className="block text-[10px] text-[#9d8b7e] truncate">{it.sublabel}</span>}
-                  </span>
-                  {clickable && <ChevronRight size={14} className="text-[#cc5a16] shrink-0" />}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Checklist node ───────────────────────────────────────────────────────────
+// ── Checklist node (smart table — one row per task, across all jobs) ──────────
 function ChecklistView({ url, token, nonce }: { url: string; token: string; nonce?: number }) {
   const [data, setData] = useState<any | null>(null);
   const [err, setErr] = useState('');
   useEffect(() => { setData(null); setErr(''); apiGet(url, token).then(setData).catch(e => setErr(e.message)); }, [url, nonce]);
 
   if (err) return <div className={CARD}><p className="text-sm text-rose-600">{err}</p></div>;
-  if (!data) return <div className={CARD}><p className="text-sm text-[#6b5d52]">Loading…</p></div>;
-  const jobs = data.jobs || [];
-  if (jobs.length === 0) return <div className={CARD}><p className="text-sm text-[#9d8b7e]">No checklists raised for this booking yet.</p></div>;
 
-  const pill = (s: string) => {
-    const st = String(s || '').toUpperCase();
-    const cls = st === 'COMPLETED' ? 'bg-emerald-50 text-emerald-700' : st === 'OPEN' ? 'bg-amber-50 text-amber-700' : 'bg-[#f0e9df] text-[#6b5d52]';
-    return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${cls}`}>{st || 'OPEN'}</span>;
-  };
+  const jobs = data?.jobs || [];
+  const rows = jobs.flatMap((j: any) => {
+    const tasks = j.tasks || [];
+    const jobName = j.template_name || j.trigger_event || 'Checklist';
+    const blocks = Number(j.blocks_release) === 1;
+    if (!tasks.length) return [{ _k: `${j.id}:none`, checklist: jobName, blocks, task: '(no tasks)', required: '', status: String(j.status || 'OPEN').toUpperCase() === 'DONE' ? 'Done' : 'Pending', remark: '' }];
+    return tasks.map((t: any) => ({
+      _k: `${j.id}:${t.id}`, checklist: jobName, blocks,
+      task: t.label, required: Number(t.is_mandatory) === 1 ? 'Required' : 'Optional',
+      status: Number(t.is_done) === 1 ? 'Done' : 'Pending', remark: t.remark || '',
+    }));
+  });
+
+  const badge = (txt: string, cls: string) => <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${cls}`}>{txt}</span>;
+  const columns: ColDef<any>[] = [
+    { key: 'checklist', label: 'Checklist', sortable: true, filterable: true, filterType: 'select', getValue: r => r.checklist, render: r => <span className="inline-flex items-center gap-1.5"><span className="font-semibold text-[#14110c]">{r.checklist}</span>{r.blocks && badge('blocks', 'bg-rose-50 text-rose-600')}</span> },
+    { key: 'task', label: 'Task', sortable: true, searchable: true, getValue: r => r.task },
+    { key: 'required', label: 'Required', sortable: true, align: 'center', filterable: true, filterType: 'select', getValue: r => r.required, render: r => r.required ? badge(r.required, r.required === 'Required' ? 'bg-rose-50 text-rose-600' : 'bg-[#f0e9df] text-[#6b5d52]') : <span className="text-[#c9bcae]">—</span> },
+    { key: 'status', label: 'Status', sortable: true, align: 'center', filterable: true, filterType: 'select', getValue: r => r.status, render: r => badge(r.status, r.status === 'Done' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700') },
+    { key: 'remark', label: 'Remark', searchable: true, getValue: r => r.remark, render: r => r.remark ? <span className="text-xs text-[#3d3128] italic">“{r.remark}”</span> : <span className="text-[#c9bcae]">—</span> },
+  ];
 
   return (
-    <div className="space-y-3">
-      {jobs.map((j: any) => {
-        const tasks = j.tasks || [];
-        const done = tasks.filter((t: any) => Number(t.is_done) === 1).length;
-        return (
-          <div key={j.id} className={CARD}>
-            <div className="flex items-center justify-between gap-3 mb-2">
-              <div className="min-w-0">
-                <span className="text-sm font-bold text-[#14110c]">{j.template_name || j.trigger_event || 'Checklist'}</span>
-                {Number(j.blocks_release) === 1 && <span className="ml-2 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600">blocks release</span>}
-                <span className="block text-[10px] text-[#9d8b7e]">{j.trigger_event}{j.created_at ? ` · ${timeAgo(j.created_at)}` : ''} · {done}/{tasks.length} done</span>
-              </div>
-              {pill(j.status)}
-            </div>
-            {tasks.length > 0 && (
-              <ul className="space-y-1">
-                {tasks.map((t: any) => (
-                  <li key={t.id} className="flex items-center gap-2 text-xs">
-                    <span className={Number(t.is_done) === 1 ? 'text-emerald-600' : 'text-[#c9bcae]'}>{Number(t.is_done) === 1 ? '☑' : '☐'}</span>
-                    <span className={Number(t.is_done) === 1 ? 'text-[#9d8b7e] line-through' : 'text-[#3d3128]'}>{t.label}{Number(t.is_mandatory) === 1 ? '' : ' (optional)'}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        );
-      })}
-    </div>
+    <DataTable
+      data={rows} columns={columns} rowKey={(r) => r._k} loading={data === null}
+      compact columnChooser columnFilters tableId="od-checklist"
+      searchPlaceholder="Search tasks…" exportFilename="checklist" emptyMessage="No checklists raised yet."
+    />
   );
 }
 
+// ── Where Used node (smart table — flat across all groups; links drill in) ────
+function WhereUsedView({ url, token, onOpen, nonce }: { url: string; token: string; onOpen: (t: string, i: string, hint?: LinkHint) => void; nonce?: number }) {
+  const [data, setData] = useState<any | null>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => { setData(null); setErr(''); apiGet(url, token).then(setData).catch(e => setErr(e.message)); }, [url, nonce]);
+
+  if (err) return <div className={CARD}><p className="text-sm text-rose-600">{err}</p></div>;
+
+  const groups = data?.groups || [];
+  const rows = groups.flatMap((g: any, gi: number) => (g.items || []).map((it: any, ii: number) => ({
+    _k: `${gi}:${ii}`, group: g.group, type: it.type || '', label: it.label, sublabel: it.sublabel || '', link: it.link || null,
+  })));
+
+  const columns: ColDef<any>[] = [
+    { key: 'group', label: 'Group', sortable: true, filterable: true, filterType: 'select', getValue: r => r.group },
+    {
+      key: 'label', label: 'Reference', sortable: true, searchable: true, getValue: r => r.label,
+      render: r => r.link
+        ? <button onClick={() => onOpen(r.link.objectType, r.link.objectId, { label: r.label, subtitle: r.sublabel })} className="font-semibold text-blue-600 hover:text-blue-800 hover:underline text-left inline-flex items-center gap-1">{r.label}<ChevronRight size={12} className="shrink-0" /></button>
+        : <span className="font-semibold text-[#14110c]">{r.label}</span>,
+    },
+    { key: 'sublabel', label: 'Detail', sortable: true, searchable: true, getValue: r => r.sublabel, render: r => r.sublabel ? <span className="text-[11px] text-[#6b5d52]">{r.sublabel}</span> : <span className="text-[#c9bcae]">—</span> },
+    { key: 'type', label: 'Type', sortable: true, filterable: true, filterType: 'select', getValue: r => r.type },
+  ];
+
+  return (
+    <DataTable
+      data={rows} columns={columns} rowKey={(r) => r._k} loading={data === null}
+      compact columnChooser columnFilters tableId="od-whereused"
+      searchPlaceholder="Search related…" exportFilename="where-used" emptyMessage="Not referenced anywhere yet."
+    />
+  );
+}
+
+// ── Shared link resolver factory ─────────────────────────────────────────────
+// Builds a `resolveLink` for the hotel/events object graph so Where-Used links
+// drill in the same frame. Reused by App.tsx (room/booking) and the checklist
+// detail. Returns null for types it doesn't own → the shell falls back to
+// `onOpenObject` (e.g. FOLIO → open the folio page).
+export function buildObjectResolver(restaurantId: string, token: string) {
+  const base = `/api/restaurant/${restaurantId}`;
+  const auth = { headers: { Authorization: `Bearer ${token}` } };
+  const facts = (typeLabel: string, objectId: string, extra: [string, any][] = []): React.ReactNode => (
+    <div className={CARD}>
+      <div className="grid grid-cols-2 gap-3 text-[12px]">
+        {([['Type', typeLabel], ['Reference', objectId], ...extra] as [string, any][]).map(([k, v], i) => (
+          <div key={i}><span className="text-[#9c8e85]">{k}</span><div className="font-semibold text-[#14110c] break-words">{v == null || v === '' ? '—' : String(v)}</div></div>
+        ))}
+      </div>
+    </div>
+  );
+  const mk = (o: { title: string; subtitle?: string; auditUrl: string; whereUsedUrl: string; checklistUrl?: string; overview: React.ReactNode }): ObjectDetailProps => ({ token, backLabel: 'Back', ...o });
+
+  return async (objectType: string, objectId: string, hint?: LinkHint): Promise<ObjectDetailProps | null> => {
+    switch (objectType) {
+      case 'ROOM_BOOKING': {
+        let b: any = {};
+        try { const r = await fetch(`${base}/hotel/bookings/${objectId}`, auth); if (r.ok) { const j = await r.json(); b = j?.booking || j || {}; } } catch { /* best-effort */ }
+        return mk({
+          title: b.guest_name || hint?.label || objectId,
+          subtitle: [objectId, b.guest_phone].filter(Boolean).join(' · ') || hint?.subtitle,
+          auditUrl: `${base}/hotel/bookings/${objectId}/audit`,
+          whereUsedUrl: `${base}/hotel/bookings/${objectId}/where-used`,
+          checklistUrl: `${base}/hotel/bookings/${objectId}/checklist`,
+          overview: facts('Room booking', objectId, [
+            ['Guest', b.guest_name], ['Status', b.status], ['Room', b.room_name || b.room_id],
+            ['Check-in', String(b.check_in_date || '').slice(0, 10)], ['Check-out', String(b.check_out_date || '').slice(0, 10)],
+            ['Total', b.total_amount != null ? `₹${Number(b.total_amount).toLocaleString('en-IN')}` : null],
+          ]),
+        });
+      }
+      case 'ROOM':
+        return mk({
+          title: hint?.label || `Room ${objectId}`, subtitle: hint?.subtitle || 'Room',
+          auditUrl: `${base}/hotel/rooms/${objectId}/audit`,
+          whereUsedUrl: `${base}/hotel/rooms/${objectId}/where-used`,
+          checklistUrl: `${base}/hotel/rooms/${objectId}/checklist`,
+          overview: facts('Room', objectId, [['Room', hint?.label]]),
+        });
+      case 'EVENT_BOOKING':
+        return mk({
+          title: hint?.label || objectId, subtitle: hint?.subtitle || 'Event booking',
+          auditUrl: `${base}/events/bookings/${objectId}/audit`,
+          whereUsedUrl: `${base}/events/bookings/${objectId}/where-used`,
+          overview: facts('Event booking', objectId),
+        });
+      case 'EVENT_QUOTATION':
+        return mk({
+          title: hint?.label || objectId, subtitle: hint?.subtitle || 'Quotation',
+          auditUrl: `${base}/events/quotations/${objectId}/audit`,
+          whereUsedUrl: `${base}/events/quotations/${objectId}/where-used`,
+          overview: facts('Quotation', objectId),
+        });
+      default:
+        return null; // FOLIO & unknowns → shell falls back to onOpenObject
+    }
+  };
+}
+
 // ── Shell ────────────────────────────────────────────────────────────────────
-export function ObjectDetail(props: ObjectDetailProps) {
-  const { title, subtitle, statusPill, onBack, backLabel, overview, overviewLabel, token, auditUrl, whereUsedUrl, checklistUrl, onOpenObject, refreshNonce } = props;
+export function ObjectDetail(rootProps: ObjectDetailProps) {
+  // Internal drill-down stack: root at the bottom, each Where-Used drill pushes.
+  const [stack, setStack] = useState<ObjectDetailProps[]>([]);
   const [node, setNode] = useState<Node>('OVERVIEW');
+  const [resolving, setResolving] = useState(false);
+  const cur = stack.length ? stack[stack.length - 1] : rootProps;
+
+  // Reset to Overview whenever we move between root and this specific frame.
+  // (Audit/Where-Used/Checklist refetch on their own url change.)
+  useEffect(() => { setNode('OVERVIEW'); }, [stack.length, rootProps.auditUrl]);
+
+  const openLink = async (objectType: string, objectId: string, hint?: LinkHint) => {
+    if (rootProps.resolveLink) {
+      setResolving(true);
+      try {
+        const child = await rootProps.resolveLink(objectType, objectId, hint);
+        if (child) { setStack(s => [...s, child]); if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+      } catch { /* fall through to legacy */ }
+      finally { setResolving(false); }
+    }
+    (cur.onOpenObject || rootProps.onOpenObject)?.(objectType, objectId);
+  };
+
+  const goBack = () => {
+    if (stack.length) setStack(s => s.slice(0, -1));
+    else rootProps.onBack?.();
+  };
+  const prevTitle = stack.length ? (stack.length > 1 ? stack[stack.length - 2].title : rootProps.title) : null;
+  const backLabel = stack.length ? `Back to ${prevTitle}` : (rootProps.backLabel || 'Back');
+  const canBack = stack.length > 0 || !!rootProps.onBack;
 
   const railItem = (key: Node, icon: React.ReactNode, label: string) => (
     <button
@@ -201,31 +279,32 @@ export function ObjectDetail(props: ObjectDetailProps) {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
-        {onBack ? <button className="px-3 py-2 rounded-xl text-xs font-bold bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] hover:bg-[#f0e9df] flex items-center gap-1.5" onClick={onBack}><ArrowLeft size={14} />{backLabel || 'Back'}</button> : <span />}
-        {statusPill}
+      <div className="flex items-center justify-between mb-4 gap-3">
+        {canBack ? <button className="px-3 py-2 rounded-xl text-xs font-bold bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] hover:bg-[#f0e9df] flex items-center gap-1.5 min-w-0" onClick={goBack}><ArrowLeft size={14} className="shrink-0" /><span className="truncate max-w-[220px]">{backLabel}</span></button> : <span />}
+        {cur.statusPill}
       </div>
 
       <div className="mb-4">
-        <h2 className="text-xl font-bold font-serif text-[#14110c]">{title}</h2>
-        {subtitle && <p className="text-xs text-[#6b5d52]">{subtitle}</p>}
+        <h2 className="text-xl font-bold font-serif text-[#14110c]">{cur.title}</h2>
+        {cur.subtitle && <p className="text-xs text-[#6b5d52]">{cur.subtitle}</p>}
+        {resolving && <p className="text-[11px] text-[#cc5a16] mt-1">Opening…</p>}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-4">
         {/* Tree rail */}
         <nav className="md:sticky md:top-4 self-start bg-white rounded-2xl border border-[#e8dccf] p-2 space-y-1">
-          {railItem('OVERVIEW', <FileText size={15} />, overviewLabel || 'Overview')}
+          {railItem('OVERVIEW', <FileText size={15} />, cur.overviewLabel || 'Overview')}
           {railItem('AUDIT', <History size={15} />, 'Audit log')}
-          {checklistUrl && railItem('CHECKLIST', <ListChecks size={15} />, 'Checklist')}
+          {cur.checklistUrl && railItem('CHECKLIST', <ListChecks size={15} />, 'Checklist')}
           {railItem('WHERE_USED', <Link2 size={15} />, 'Where Used')}
         </nav>
 
         {/* Node content */}
         <div className="min-w-0">
-          {node === 'OVERVIEW' && overview}
-          {node === 'AUDIT' && <AuditView url={auditUrl} token={token} nonce={refreshNonce} />}
-          {node === 'CHECKLIST' && checklistUrl && <ChecklistView url={checklistUrl} token={token} nonce={refreshNonce} />}
-          {node === 'WHERE_USED' && <WhereUsedView url={whereUsedUrl} token={token} onOpenObject={onOpenObject} nonce={refreshNonce} />}
+          {node === 'OVERVIEW' && cur.overview}
+          {node === 'AUDIT' && <AuditView url={cur.auditUrl} token={cur.token} nonce={cur.refreshNonce} />}
+          {node === 'CHECKLIST' && cur.checklistUrl && <ChecklistView url={cur.checklistUrl} token={cur.token} nonce={cur.refreshNonce} />}
+          {node === 'WHERE_USED' && <WhereUsedView url={cur.whereUsedUrl} token={cur.token} onOpen={openLink} nonce={cur.refreshNonce} />}
         </div>
       </div>
     </div>
