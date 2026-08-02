@@ -2579,7 +2579,11 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   ];
   for (const [code, name, type, display_order] of _coaSeed) {
     await db.run(
-      `INSERT OR IGNORE INTO chart_of_accounts (code, name, type, display_order) VALUES (?, ?, ?, ?)`,
+      // Postgres upsert — the previous `INSERT OR IGNORE` was SQLite-only and
+      // errored on Postgres (swallowed by .catch), so the chart of accounts
+      // never seeded on any tenant → empty Ledger & Books / UNKNOWN account types.
+      `INSERT INTO chart_of_accounts (code, name, type, display_order) VALUES (?, ?, ?, ?)
+       ON CONFLICT (code) DO NOTHING`,
       [code, name, type, display_order]
     ).catch(() => {});
   }

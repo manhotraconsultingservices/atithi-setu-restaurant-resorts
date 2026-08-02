@@ -611,6 +611,39 @@ async function testAccounting() {
   } else {
     fail('TC-ACC-GST', 'GST Outstanding responds', `HTTP ${gsto.status}`);
   }
+
+  // TC-ACC-CASHBOOK: Daily Cash Book — read-only, GL-derived. Verify shape, the
+  // closing = opening + in − out identity for both cash-in-hand and bank, that the
+  // total cash position = cash.closing + bank.closing, and reconcile cash-in-hand's
+  // closing against the trial balance (independent GL path) balance of account 1000.
+  const cb = await api('GET', `/api/restaurant/${restaurantId}/accounting/cash-book?date=${today}`);
+  if (cb.status === 200 && cb.data && cb.data.cash_in_hand && cb.data.bank) {
+    const r2 = n => Math.round(Number(n || 0) * 100) / 100;
+    const cih = cb.data.cash_in_hand, bk = cb.data.bank;
+    const idOk = (b) => r2(b.closing) === r2(Number(b.opening) + Number(b.in) - Number(b.out));
+    (idOk(cih) && idOk(bk) ? pass : fail)('TC-ACC-CASHBOOK', 'Cash Book: closing = opening + in − out',
+      `cash ${cih.opening}+${cih.in}-${cih.out}=${cih.closing}; bank ${bk.opening}+${bk.in}-${bk.out}=${bk.closing}`);
+    const posOk = r2(cb.data.total_cash_position) === r2(Number(cih.closing) + Number(bk.closing));
+    (posOk ? pass : fail)('TC-ACC-CASHBOOK-POS', 'Cash Book: total position = cash.closing + bank.closing',
+      `pos=${cb.data.total_cash_position} vs ${r2(Number(cih.closing) + Number(bk.closing))}`);
+    // Reconcile cash-in-hand closing (Σ(dr−cr) on 1000 for all entries ≤ today)
+    // against the trial balance of account 1000 over an all-time window through
+    // today — both must be the identical GL sum, computed by independent paths.
+    const tbAll = await api('GET', `/api/restaurant/${restaurantId}/accounting/trial-balance?from=2000-01-01&to=${today}`);
+    if (tbAll.status === 200 && Array.isArray(tbAll.data)) {
+      const row1000 = tbAll.data.find(r => String(r.account_code) === '1000');
+      const tbCash = row1000 ? Number(row1000.dr_total || 0) - Number(row1000.cr_total || 0) : 0;
+      const reconOk = r2(cih.closing) === r2(tbCash);
+      (reconOk ? pass : fail)('TC-ACC-CASHBOOK-RECON', 'Cash Book cash-in-hand reconciles with trial balance acct 1000',
+        `cashbook closing=${r2(cih.closing)} vs TB 1000=${r2(tbCash)}`);
+    }
+  } else if (cb.status === 403) {
+    skip('TC-ACC-CASHBOOK', 'Cash Book', 'RBAC: need OWNER role');
+  } else if (cb.status === 404) {
+    fail('TC-ACC-CASHBOOK', 'Cash Book', 'HTTP 404 — accounting route unreachable (regression: routes shadowed by the /api 404 catch-all)');
+  } else {
+    fail('TC-ACC-CASHBOOK', 'Cash Book responds', `HTTP ${cb.status}`);
+  }
 }
 
 // ── Spa tests ──────────────────────────────────────────────────────────────

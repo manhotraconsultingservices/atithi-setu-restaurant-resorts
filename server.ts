@@ -44348,7 +44348,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-catalog-all-fired-events',
+    commit_marker: 'accounting-coa-seed-fix-daily-cashbook',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -44586,6 +44586,63 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
+  // DAILY CASH BOOK — opening/closing cash position for a day, straight from the
+  // posted GL. Cash in Hand = acct 1000; Bank/Account = 1010 + 1020. Both are
+  // debit-normal assets, so balance = Σ(dr − cr). Opening = balance before the
+  // day; in/out = the day's debits/credits; closing = opening + in − out.
+  // Expenses = the day's EXPENSE-account activity. Strictly read-only.
+  app.get("/api/restaurant/:id/accounting/cash-book", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const date = String(req.query.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const CASH = ['1000'];            // Cash in Hand
+      const BANK = ['1010', '1020'];    // Bank — Main + OTA Receivable
+
+      // opening (dr−cr for entries strictly before `date`) and the day's in/out.
+      const bucket = async (codes: string[]) => {
+        const ph = codes.map(() => '?').join(',');
+        const op: any = await db.get(
+          `SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries
+            WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph}) AND entry_date < ?`,
+          [req.params.id, ...codes, date]).catch(() => ({ bal: 0 }));
+        const day: any = await db.get(
+          `SELECT COALESCE(SUM(dr_amount),0) AS din, COALESCE(SUM(cr_amount),0) AS dout FROM gl_entries
+            WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph}) AND entry_date = ?`,
+          [req.params.id, ...codes, date]).catch(() => ({ din: 0, dout: 0 }));
+        const opening = round(Number(op?.bal || 0));
+        const inn = round(Number(day?.din || 0));
+        const out = round(Number(day?.dout || 0));
+        return { opening, in: inn, out, closing: round(opening + inn - out) };
+      };
+      const cash_in_hand = await bucket(CASH);
+      const bank = await bucket(BANK);
+
+      // the day's expenses, grouped by account (dr−cr on EXPENSE accounts).
+      const expRows: any[] = await db.query(
+        `SELECT g.account_code, g.account_name, COALESCE(SUM(g.dr_amount - g.cr_amount),0) AS amount
+           FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.entry_date = ?
+            AND (c.type = 'EXPENSE' OR g.account_code LIKE '5%' OR g.account_code LIKE '6%')
+          GROUP BY g.account_code, g.account_name
+         HAVING COALESCE(SUM(g.dr_amount - g.cr_amount),0) <> 0
+          ORDER BY g.account_code`,
+        [req.params.id, date]).catch(() => []);
+      const expenses = expRows.map(r => ({ account_code: r.account_code, account_name: r.account_name, amount: round(Number(r.amount || 0)) }));
+      const total_expense = round(expenses.reduce((s, e) => s + e.amount, 0));
+
+      res.json({
+        date,
+        cash_in_hand,
+        bank,
+        total_cash_position: round(cash_in_hand.closing + bank.closing),
+        expenses,
+        total_expense,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
   app.post("/api/restaurant/:id/accounting/journal-entries", authenticate, async (req: AuthRequest, res: Response) => {
     if (!_acctOwnerOnly(req, res)) return;
     try {
@@ -44749,14 +44806,33 @@ ${data.tenant.name}`;
                 if (sorted.length > 0) topItem = sorted[0][0];
               } catch { /* fallback to N/A */ }
 
+              // Day-close cash book (GL-derived): opening/closing cash-in-hand
+              // + bank, and the day's expenses. Best-effort — never blocks the report.
+              let cashBook: any = null;
+              try {
+                const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+                const bal = async (codes: string[]) => {
+                  const ph = codes.map(() => '?').join(',');
+                  const op: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph}) AND entry_date < ?`, [restaurant.id, ...codes, today]).catch(() => ({ bal: 0 }));
+                  const day: any = await db.get(`SELECT COALESCE(SUM(dr_amount),0) AS din, COALESCE(SUM(cr_amount),0) AS dout FROM gl_entries WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph}) AND entry_date = ?`, [restaurant.id, ...codes, today]).catch(() => ({ din: 0, dout: 0 }));
+                  const opening = r2(op?.bal || 0);
+                  return { opening, closing: r2(opening + Number(day?.din || 0) - Number(day?.dout || 0)) };
+                };
+                const cih = await bal(['1000']);
+                const bk = await bal(['1010', '1020']);
+                const expRow: any = await db.get(`SELECT COALESCE(SUM(g.dr_amount - g.cr_amount),0) AS amt FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.entry_date = ? AND (c.type = 'EXPENSE' OR g.account_code LIKE '5%' OR g.account_code LIKE '6%')`, [restaurant.id, today]).catch(() => ({ amt: 0 }));
+                cashBook = { cashOpen: cih.opening, cashClose: cih.closing, bankOpen: bk.opening, bankClose: bk.closing, expense: r2(expRow?.amt || 0), position: r2(cih.closing + bk.closing) };
+              } catch { /* cash-book is optional */ }
+
               data = {
                 date: new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
                 orderCount: parseInt(summary?.order_count ?? '0', 10),
                 revenue: parseFloat(summary?.revenue ?? '0').toFixed(2),
                 topItem,
+                cashBook,
               };
 
-              console.log(`[Scheduler] DAILY_REPORT data: orders=${data.orderCount}, revenue=₹${data.revenue}, top="${data.topItem}"`);
+              console.log(`[Scheduler] DAILY_REPORT data: orders=${data.orderCount}, revenue=₹${data.revenue}, top="${data.topItem}", cashPos=₹${cashBook?.position ?? 'n/a'}`);
             }
 
             await triggerNotification(restaurant.id, setting.event_name, data);

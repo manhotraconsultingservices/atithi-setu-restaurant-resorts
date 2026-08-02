@@ -7816,12 +7816,13 @@ function SettlementUploadForm({
 }
 
 function AccountingView({ restaurantId, token }: { restaurantId: string; token: string }) {
-  type SubTab = 'TRIAL' | 'GL' | 'GST' | 'TDS' | 'JOURNAL';
+  type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL';
   const [acctTab, setAcctTab] = useState<SubTab>('TRIAL');
   const [coa, setCoa] = useState<any[]>([]);
   const [glEntries, setGlEntries] = useState<any[]>([]);
   const [trialBalance, setTrialBalance] = useState<any[]>([]);
   const [gstOut, setGstOut] = useState<any>(null);
+  const [cashBook, setCashBook] = useState<any>(null);
   const [tdsRows, setTdsRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -7888,9 +7889,19 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
       .finally(() => setLoading(false));
   }, [acctApi, tbFrom, tbTo]);
 
+  // Daily cash book — read-only, GL-derived (opening/closing cash + bank + expenses).
+  const [cbDate, setCbDate] = useState(todayStr);
+  const loadCashBook = useCallback(() => {
+    setLoading(true);
+    acctApi(`/accounting/cash-book?date=${cbDate}`)
+      .then(d => { if (d && !d.error) setCashBook(d); })
+      .finally(() => setLoading(false));
+  }, [acctApi, cbDate]);
+
   useEffect(() => { if (acctTab === 'TRIAL') loadTrial(); }, [acctTab, loadTrial]);
   useEffect(() => { if (acctTab === 'GL') loadGl(); }, [acctTab, loadGl]);
   useEffect(() => { if (acctTab === 'GST') loadGst(); }, [acctTab, loadGst]);
+  useEffect(() => { if (acctTab === 'CASHBOOK') loadCashBook(); }, [acctTab, loadCashBook]);
   useEffect(() => { if (acctTab === 'TDS') loadTds(); }, [acctTab, loadTds]);
 
   const fmtAmt = (n: number | null | undefined) =>
@@ -7936,10 +7947,10 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
       </div>
 
       <div className="flex gap-0 border-b border-[#e8ded0]">
-        {(['TRIAL', 'GL', 'GST', 'TDS', 'JOURNAL'] as SubTab[]).map(t => (
+        {(['TRIAL', 'GL', 'GST', 'CASHBOOK', 'TDS', 'JOURNAL'] as SubTab[]).map(t => (
           <button key={t} onClick={() => setAcctTab(t)}
             className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${acctTab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
-            {t === 'TRIAL' ? 'Trial Balance' : t === 'GL' ? 'GL Ledger' : t === 'GST' ? 'GST Outstanding' : t === 'TDS' ? 'TDS Tracker' : 'Manual Entry'}
+            {t === 'TRIAL' ? 'Trial Balance' : t === 'GL' ? 'GL Ledger' : t === 'GST' ? 'GST Outstanding' : t === 'CASHBOOK' ? 'Cash Book' : t === 'TDS' ? 'TDS Tracker' : 'Manual Entry'}
           </button>
         ))}
       </div>
@@ -8062,6 +8073,83 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
               )}
               <p className="text-[11px] text-[#9c8e85] leading-relaxed">
                 Read-only view straight from the posted General Ledger: <strong>Output GST</strong> (credit balance of the GST-Payable accounts) minus <strong>Input Tax Credit</strong> (debit balance of the ITC-Receivable accounts) for the selected period. Recording a GST remittance as a Manual Journal (Dr GST Payable, Cr Bank) reduces the outstanding here automatically. This view never changes any posting.
+              </p>
+            </>
+          ) : null}
+        </div>
+      )}
+
+      {acctTab === 'CASHBOOK' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">Date</label>
+            <input type="date" value={cbDate} onChange={e => setCbDate(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadCashBook} className={AC_BTN}>Refresh</button>
+          </div>
+          {!cashBook && !loading ? (
+            <p className="text-sm text-[#6b5d52] italic">No cash-book data. Pick a date and refresh.</p>
+          ) : cashBook ? (
+            <>
+              <div className="grid sm:grid-cols-2 gap-3">
+                {/* Cash in Hand */}
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide font-semibold">💵 Cash in Hand</p>
+                  <div className="mt-3 space-y-1.5 text-sm">
+                    <div className="flex justify-between"><span className="text-[#6b5d52]">Opening balance</span><span className="tabular-nums">{fmtAmt(cashBook.cash_in_hand?.opening)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#6b5d52]">Received today</span><span className="tabular-nums text-emerald-700">+ {fmtAmt(cashBook.cash_in_hand?.in)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#6b5d52]">Paid out today</span><span className="tabular-nums text-rose-700">− {fmtAmt(cashBook.cash_in_hand?.out)}</span></div>
+                    <div className="flex justify-between border-t border-[#f0e8d8] pt-1.5 mt-1.5 font-bold text-[#1a1208]"><span>Closing balance</span><span className="tabular-nums">{fmtAmt(cashBook.cash_in_hand?.closing)}</span></div>
+                  </div>
+                </div>
+                {/* Cash in Account (Bank) */}
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide font-semibold">🏦 Cash in Account (Bank)</p>
+                  <div className="mt-3 space-y-1.5 text-sm">
+                    <div className="flex justify-between"><span className="text-[#6b5d52]">Opening balance</span><span className="tabular-nums">{fmtAmt(cashBook.bank?.opening)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#6b5d52]">Received today</span><span className="tabular-nums text-emerald-700">+ {fmtAmt(cashBook.bank?.in)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#6b5d52]">Paid out today</span><span className="tabular-nums text-rose-700">− {fmtAmt(cashBook.bank?.out)}</span></div>
+                    <div className="flex justify-between border-t border-[#f0e8d8] pt-1.5 mt-1.5 font-bold text-[#1a1208]"><span>Closing balance</span><span className="tabular-nums">{fmtAmt(cashBook.bank?.closing)}</span></div>
+                  </div>
+                </div>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4">
+                  <p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Total cash position (Hand + Bank)</p>
+                  <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashBook.total_cash_position)}</p>
+                  <p className="text-[11px] text-[#9c8e85] mt-1">Closing cash + bank at end of {cashBook.date}</p>
+                </div>
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide font-semibold">Total expenses today</p>
+                  <p className="text-2xl font-bold text-rose-700 mt-1 tabular-nums">{fmtAmt(cashBook.total_expense)}</p>
+                  <p className="text-[11px] text-[#9c8e85] mt-1">All expense-account postings on {cashBook.date}</p>
+                </div>
+              </div>
+              {Array.isArray(cashBook.expenses) && cashBook.expenses.length > 0 && (
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left">
+                      <th className="px-3 py-2 font-semibold text-[#1a1208]">Code</th>
+                      <th className="px-3 py-2 font-semibold text-[#1a1208]">Expense account</th>
+                      <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Amount</th>
+                    </tr></thead>
+                    <tbody>
+                      {cashBook.expenses.map((r: any) => (
+                        <tr key={r.account_code} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]">
+                          <td className="px-3 py-2 font-mono text-xs">{r.account_code}</td>
+                          <td className="px-3 py-2">{r.account_name}</td>
+                          <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmtAmt(r.amount)}</td>
+                        </tr>
+                      ))}
+                      <tr className="border-t-2 border-[#d4c4a8] bg-[#faf6ef] font-bold">
+                        <td className="px-3 py-2" colSpan={2}>Total</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(cashBook.total_expense)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="text-[11px] text-[#9c8e85] leading-relaxed">
+                Read-only day-close view derived straight from the posted General Ledger. <strong>Cash in Hand</strong> is account 1000; <strong>Bank</strong> is accounts 1010 + 1020. Opening = balance carried in before the day; Received / Paid out = the day's debits / credits; Closing = opening + received − paid out. Expenses are every posting to an expense account on this date. This view never changes any posting, and the same summary is emailed / sent on Telegram in the end-of-day <strong>Daily Report</strong> when that notification is enabled.
               </p>
             </>
           ) : null}

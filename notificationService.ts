@@ -370,22 +370,45 @@ export function buildNotificationContent(
 
     /* ── Daily Report ─────────────────────────────────────────────────── */
 
-    case 'DAILY_REPORT':
+    case 'DAILY_REPORT': {
+      const cb = data.cashBook;
+      const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      // Day-close cash book appended to the end of the report (opening/closing
+      // cash-in-hand + bank + expenses), when GL data is available.
+      const cashText = cb
+        ? `\n\n💰 *Day-Close Cash Book*\n` +
+          `Cash in Hand: ${inr(cb.cashOpen)} → ${inr(cb.cashClose)}\n` +
+          `Cash in Account (Bank): ${inr(cb.bankOpen)} → ${inr(cb.bankClose)}\n` +
+          `Expenses today: ${inr(cb.expense)}\n` +
+          `Closing cash position: ${inr(cb.position)}`
+        : '';
+      const cashHtml = cb
+        ? `<h3 style="color:#5A5A40;margin-top:18px">💰 Day-Close Cash Book</h3>` +
+          `<table border="0" cellpadding="6">` +
+          `<tr><td>Cash in Hand</td><td>${inr(cb.cashOpen)} → <strong>${inr(cb.cashClose)}</strong></td></tr>` +
+          `<tr><td>Cash in Account (Bank)</td><td>${inr(cb.bankOpen)} → <strong>${inr(cb.bankClose)}</strong></td></tr>` +
+          `<tr><td>Expenses today</td><td><strong>${inr(cb.expense)}</strong></td></tr>` +
+          `<tr><td>Closing cash position</td><td><strong>${inr(cb.position)}</strong></td></tr>` +
+          `</table>`
+        : '';
       return {
         subject: `📊 Daily Sales Report — ${data.date || 'Today'} — ${r}`,
         text:
           `📊 *Daily Sales Summary — ${data.date || 'Today'}*\n` +
           `Total Orders: ${data.orderCount ?? 0}\n` +
           `Revenue: ₹${data.revenue ?? '0'}\n` +
-          `Top Item: ${data.topItem || 'N/A'}`,
+          `Top Item: ${data.topItem || 'N/A'}` +
+          cashText,
         html:
           `<h2 style="color:#5A5A40">📊 Daily Sales Report — ${data.date || 'Today'}</h2>` +
           `<table border="0" cellpadding="6">` +
           `<tr><td>Total Orders</td><td><strong>${data.orderCount ?? 0}</strong></td></tr>` +
           `<tr><td>Revenue</td><td><strong>₹${data.revenue ?? '0'}</strong></td></tr>` +
           `<tr><td>Top Item</td><td>${data.topItem || 'N/A'}</td></tr>` +
-          `</table>`,
+          `</table>` +
+          cashHtml,
       };
+    }
 
     /* ── Staff Attendance ─────────────────────────────────────────────── */
 
