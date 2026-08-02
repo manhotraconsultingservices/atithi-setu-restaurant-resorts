@@ -45,22 +45,28 @@ const closeJob = async (jid) => {
   await api('POST', `${P}/housekeeping/jobs/${jid}/complete`, {});
 };
 
+// Terminate any leftover throwaway "E2E Guest" bookings (this run's + any stranded
+// by a prior failed run) so a test never leaves a room occupied. Checked-in bookings
+// are comped out (waive:true) since the test folio has an unpaid balance.
+async function sweepE2EBookings() {
+  try {
+    const list = await api('GET', `${P}/hotel/bookings`);
+    const rows = (Array.isArray(list.data) ? list.data : (list.data?.bookings || []));
+    for (const b of rows) {
+      if (!String(b.guest_name || '').startsWith('E2E Guest')) continue;
+      if (b.status === 'CHECKED_IN') { try { await api('POST', `${P}/hotel/bookings/${b.id}/checkout`, { payment_method: 'CASH', waive: true }); } catch {} }
+      else if (b.status === 'BOOKED') { try { await api('POST', `${P}/hotel/bookings/${b.id}/cancel`, { reason: 'E2E cleanup' }); } catch {} }
+    }
+  } catch {}
+}
+
 async function cleanup() {
+  await sweepE2EBookings();
   try {
     // Close every OPEN job spawned by our templates (any run, any facility).
     const mine = new Set(created.templates);
     for (const j of await jobsAll()) if (j.status === 'OPEN' && mine.has(j.template_id)) { try { await closeJob(j.id); } catch {} }
   } catch {}
-  // Return the booking to a terminal state so it never strands a room.
-  if (created.bookingId) {
-    try {
-      const list = await api('GET', `${P}/hotel/bookings`);
-      const b = (Array.isArray(list.data) ? list.data : (list.data?.bookings || [])).find(x => x.id === created.bookingId);
-      const st = b?.status;
-      if (st === 'CHECKED_IN') await api('POST', `${P}/hotel/bookings/${created.bookingId}/checkout`, { payment_method: 'CASH' });
-      else if (st === 'BOOKED') await api('POST', `${P}/hotel/bookings/${created.bookingId}/cancel`, { reason: 'E2E cleanup' });
-    } catch {}
-  }
   for (const tid of created.templates) { try { await api('DELETE', `${P}/checklists/templates/${tid}`); } catch {} }
   if (created.restoreReqId !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: !!created.restoreReqId }); } catch {} }
 }
@@ -71,6 +77,7 @@ async function cleanup() {
   token = r.data?.jwt_token || r.data?.token || '';
   if (!token) { console.error('❌ LOGIN FAILED —', r.status, JSON.stringify(r.data)); process.exit(1); }
   console.log(`\n═══ Checklist trigger e2e — ${RID} @ ${BASE} ═══\n`);
+  await sweepE2EBookings(); // clear any stray test bookings left by a prior failed run
   const tag = Date.now();
   const mkTpl = async (body) => { const res = await api('POST', `${P}/checklists/templates`, body); if (res.status === 201 && res.data?.id) created.templates.push(res.data.id); return res; };
 
@@ -129,7 +136,9 @@ async function cleanup() {
     ok(runMs.status === 200 && msJobs.length >= 1, 'E2E-MIDSTAY', 'Overstay run raised the mid-stay checklist for the in-house room', `raised=${runMs.data?.raised}, jobs=${msJobs.length}`);
 
     // Check-out — room must go CLEANING and a BLOCKING check-out checklist must open.
-    const cout = await api('POST', `${P}/hotel/bookings/${bookingId}/checkout`, { payment_method: 'CASH' });
+    // waive:true comps the throwaway test folio so the checkout isn't blocked by the
+    // outstanding-balance guard (no real revenue is posted for a comped folio).
+    const cout = await api('POST', `${P}/hotel/bookings/${bookingId}/checkout`, { payment_method: 'CASH', waive: true });
     if (!(cout.status === 200 || cout.status === 201)) {
       ok(false, 'E2E-CHECKOUT', 'Check-out request', `HTTP ${cout.status} — ${JSON.stringify(cout.data).slice(0, 160)}`);
       skip('E2E-GATING', 'Release gating', 'check-out failed');
