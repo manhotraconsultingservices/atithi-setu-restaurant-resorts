@@ -67,10 +67,6 @@ export function MyChecklists({ restaurantId, token }: Props) {
   }, [api, tab]);
   useEffect(() => { load(); }, [load]);
 
-  if (detail) {
-    return <ChecklistDetail restaurantId={restaurantId} token={token} job={detail} onBack={() => { setDetail(null); load(); }} />;
-  }
-
   const pendingCount = jobs.filter(j => j.workflow_state === 'ASSIGNED').length;
 
   const columns = useMemo<ColDef<any>[]>(() => [
@@ -111,6 +107,13 @@ export function MyChecklists({ restaurantId, token }: Props) {
       render: (j) => statePill(j.workflow_state),
     },
   ], [isManager]);
+
+  // Every hook is above this line. The detail-view early return MUST come after
+  // all hooks so the hook count stays identical between the list and detail
+  // renders — otherwise React throws "Rendered fewer hooks than expected".
+  if (detail) {
+    return <ChecklistDetail restaurantId={restaurantId} token={token} job={detail} onBack={() => { setDetail(null); load(); }} />;
+  }
 
   return (
     <div className="space-y-5">
