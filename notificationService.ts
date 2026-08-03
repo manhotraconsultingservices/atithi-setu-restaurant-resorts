@@ -1582,7 +1582,7 @@ export async function sendWhatsApp(to: string, message: string): Promise<void> {
 // own error description (e.g. "Bad Request: chat not found", "Forbidden: bot
 // can't initiate conversation with a user") so callers can surface the real
 // reason to the operator instead of a generic failure.
-export async function sendTelegramDetailed(chatId: string | null | undefined, message: string): Promise<{ ok: boolean; error?: string }> {
+export async function sendTelegramDetailed(chatId: string | null | undefined, message: string, _depth = 0): Promise<{ ok: boolean; error?: string; usedChatId?: string }> {
   if (!TELEGRAM_BOT_TOKEN) {
     console.warn('[Notification] Telegram bot token not configured — skipping.');
     return { ok: false, error: 'bot token not configured on server' };
@@ -1612,10 +1612,19 @@ export async function sendTelegramDetailed(chatId: string | null | undefined, me
     if (!response.ok) {
       const errBody: any = await response.json().catch(() => ({}));
       console.error('[Notification] Telegram API error:', JSON.stringify(errBody));
+      // A basic group that was upgraded to a supergroup gets a NEW chat id, which
+      // Telegram hands back as parameters.migrate_to_chat_id. Follow it once so the
+      // message still goes through and callers can learn the corrected id.
+      const migrateTo = errBody?.parameters?.migrate_to_chat_id;
+      if (migrateTo != null && _depth < 1) {
+        clearTimeout(timer);
+        const retry = await sendTelegramDetailed(String(migrateTo), message, _depth + 1);
+        return retry.ok ? { ok: true, usedChatId: String(migrateTo) } : retry;
+      }
       return { ok: false, error: errBody?.description || `HTTP ${response.status}` };
     }
     console.log(`[Notification] Telegram message sent → chat ${targetChatId}`);
-    return { ok: true };
+    return { ok: true, usedChatId: String(targetChatId) };
   } catch (err: any) {
     console.error('[Notification] Telegram send failed:', err);
     return { ok: false, error: err?.name === 'AbortError' ? 'timed out reaching api.telegram.org' : (err?.message || String(err)) };

@@ -45362,12 +45362,30 @@ ${data.tenant.name}`;
         [`Test in progress… (to ${targets.map(t => t || 'default').join(', ')})`]
       ).catch(() => {});
       void (async () => {
-        let sent = 0; const failParts: string[] = [];
+        let sent = 0; const failParts: string[] = []; const migrations: { from: string; to: string }[] = [];
         for (const t of targets) {
-          let r: { ok: boolean; error?: string };
+          let r: { ok: boolean; error?: string; usedChatId?: string };
           try { r = await sendTelegramDetailed(t, msg); }
           catch (e: any) { r = { ok: false, error: e?.message || String(e) }; }
-          if (r.ok) sent++; else failParts.push(`${t || 'default'}: ${r.error || 'rejected'}`);
+          if (r.ok) {
+            sent++;
+            // Telegram delivered to a DIFFERENT id than requested → the group was
+            // upgraded to a supergroup. Record the old→new mapping so we can fix it.
+            if (t && r.usedChatId && String(r.usedChatId) !== String(t)) migrations.push({ from: String(t), to: String(r.usedChatId) });
+          } else failParts.push(`${t || 'default'}: ${r.error || 'rejected'}`);
+        }
+        // Auto-correct the saved chat id(s) when a group migrated to a supergroup,
+        // so future alerts (and the next test) use the working id automatically.
+        let migrateNote = '';
+        if (migrations.length) {
+          try {
+            const cur: any = await centralDb.get("SELECT telegram_admin_chat_id FROM platform_notification_config WHERE id = 'DEFAULT'");
+            let val = String(cur?.telegram_admin_chat_id || '');
+            let changed = false;
+            for (const m of migrations) { if (val.includes(m.from)) { val = val.split(m.from).join(m.to); changed = true; } }
+            if (changed) await centralDb.run("UPDATE platform_notification_config SET telegram_admin_chat_id = ? WHERE id = 'DEFAULT'", [val]);
+          } catch (e: any) { console.error('[notif-test migrate persist]', e?.message || e); }
+          migrateNote = ` Note: ${migrations.map(m => `group ${m.from} was upgraded to a supergroup — new id ${m.to}`).join('; ')}. The saved id has been updated automatically.`;
         }
         // A positive numeric id is a personal user (not a group); bots can't DM a
         // user who hasn't messaged the bot first. Groups are negative. Add a hint.
@@ -45376,7 +45394,7 @@ ${data.tenant.name}`;
           ? ' Tip: a positive id (like 6613370540) is a personal user, not a group — the bot can only DM them after they open the bot and send /start once. For a GROUP, use its negative id (e.g. -1001234567890) and add the bot to that group.'
           : '';
         const detail = sent > 0
-          ? `Delivered to ${sent} chat${sent === 1 ? '' : 's'}${failParts.length ? `; failed → ${failParts.join('; ')}` : ''} (by ${byWhom})`
+          ? `Delivered to ${sent} chat${sent === 1 ? '' : 's'}${failParts.length ? `; failed → ${failParts.join('; ')}` : ''}.${migrateNote} (by ${byWhom})`
           : `Telegram accepted no message → ${failParts.join('; ')}.${posHint} (by ${byWhom})`;
         await centralDb.run(
           "UPDATE platform_notification_config SET last_test_at = CURRENT_TIMESTAMP, last_test_ok = ?, last_test_detail = ? WHERE id = 'DEFAULT'",
@@ -46074,7 +46092,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'telegram-show-bot-username',
+    commit_marker: 'telegram-supergroup-auto-migrate',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
