@@ -49515,9 +49515,11 @@ function SuperAdminDashboard({ token }: { token: string }) {
     setAlertLoading(true); setAlertMsg(null);
     try {
       const res = await fetch('/api/admin/notification-config', { headers: { 'Authorization': `Bearer ${token}` } });
-      if (res.ok) setAlertCfg(await res.json());
-      else setAlertMsg({ type: 'err', text: 'Failed to load config' });
-    } catch { setAlertMsg({ type: 'err', text: 'Network error' }); }
+      const raw = await res.text();
+      let data: any = null; try { data = raw ? JSON.parse(raw) : {}; } catch { data = null; }
+      if (res.ok && data) setAlertCfg(data);
+      else setAlertMsg({ type: 'err', text: (data && data.error) ? data.error : `Load failed — HTTP ${res.status}${raw ? ': ' + raw.slice(0, 200) : ''}` });
+    } catch (e: any) { setAlertMsg({ type: 'err', text: 'Request failed: ' + (e?.message || String(e)) }); }
     finally { setAlertLoading(false); }
   };
   const saveAdminAlerts = async () => {
@@ -49537,10 +49539,11 @@ function SuperAdminDashboard({ token }: { token: string }) {
         subscription_due_lead_days: Number(alertCfg.subscription_due_lead_days) || 0,
       };
       const res = await fetch('/api/admin/notification-config', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify(body) });
-      const data = await res.json();
-      if (res.ok) { setAlertMsg({ type: 'ok', text: 'Saved ✓' }); if (data.config) setAlertCfg((prev: any) => ({ ...prev, ...data.config })); }
-      else setAlertMsg({ type: 'err', text: data.error || 'Save failed' });
-    } catch { setAlertMsg({ type: 'err', text: 'Network error' }); }
+      const raw = await res.text();
+      let data: any = null; try { data = raw ? JSON.parse(raw) : {}; } catch { data = null; }
+      if (res.ok) { setAlertMsg({ type: 'ok', text: 'Saved ✓' }); if (data && data.config) setAlertCfg((prev: any) => ({ ...prev, ...data.config })); }
+      else setAlertMsg({ type: 'err', text: (data && data.error) ? data.error : `Save failed — HTTP ${res.status}${raw ? ': ' + raw.slice(0, 200) : ''}` });
+    } catch (e: any) { setAlertMsg({ type: 'err', text: 'Request failed: ' + (e?.message || String(e)) }); }
     finally { setAlertBusy(false); }
   };
   const testAdminAlerts = async () => {
@@ -49552,10 +49555,11 @@ function SuperAdminDashboard({ token }: { token: string }) {
     setAlertBusy(true); setAlertMsg(null);
     try {
       const res = await fetch('/api/admin/notification-config/test', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ telegram_admin_chat_id: (alertCfg?.telegram_admin_chat_id || '').trim() || null }) });
-      const data = await res.json();
-      if (res.ok) setAlertMsg({ type: 'ok', text: `Test message sent to ${data.sent_to || 'the admin chat'} ✓` });
-      else setAlertMsg({ type: 'err', text: data.error || 'Test failed' });
-    } catch { setAlertMsg({ type: 'err', text: 'Network error' }); }
+      const raw = await res.text();
+      let data: any = null; try { data = raw ? JSON.parse(raw) : {}; } catch { data = null; }
+      if (res.ok) setAlertMsg({ type: 'ok', text: `Test message sent to ${(data && data.sent_to) || 'the admin chat'} ✓` });
+      else setAlertMsg({ type: 'err', text: (data && data.error) ? data.error : `Test failed — HTTP ${res.status}${raw ? ': ' + raw.slice(0, 200) : ''}` });
+    } catch (e: any) { setAlertMsg({ type: 'err', text: 'Request failed: ' + (e?.message || String(e)) }); }
     finally { setAlertBusy(false); }
   };
 
