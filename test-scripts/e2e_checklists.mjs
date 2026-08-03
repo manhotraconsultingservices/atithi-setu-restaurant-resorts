@@ -69,6 +69,7 @@ async function cleanup() {
   } catch {}
   for (const tid of created.templates) { try { await api('DELETE', `${P}/checklists/templates/${tid}`); } catch {} }
   if (created.restoreReqId !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: !!created.restoreReqId }); } catch {} }
+  if (created.restoreCheckoutValidate !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { checklist_validate_on_checkout: !!created.restoreCheckoutValidate }); } catch {} }
 }
 
 (async () => {
@@ -153,6 +154,36 @@ async function cleanup() {
     for (const j of blocking) await closeJob(j.id);
     const roomRow2 = asList((await api('GET', `${P}/hotel/rooms`)).data).find(x => x.id === roomId);
     ok(roomRow2?.status === 'VACANT', 'E2E-GATING', 'Completing the blocking checklist released the room to VACANT', `room=${roomRow2?.status}`);
+
+    // ── OWNER OPT-OUT: checklist_validate_on_checkout = 0 ──
+    // The check-out checklist is still RAISED (housekeeping visibility) but forced
+    // NON-blocking, so the room is never held. Round-trips the new owner setting.
+    const st1 = await api('GET', `${P}/hotel/settings`);
+    if (st1.status === 200 && st1.data && 'checklist_validate_on_checkout' in st1.data) {
+      created.restoreCheckoutValidate = st1.data.checklist_validate_on_checkout;
+      await api('PATCH', `${P}/hotel/settings`, { checklist_validate_on_checkout: false });
+      const st2 = await api('GET', `${P}/hotel/settings`);
+      ok(st2.data?.checklist_validate_on_checkout === false, 'E2E-CO-SETTING', 'checklist_validate_on_checkout round-trips to false', `got=${st2.data?.checklist_validate_on_checkout}`);
+
+      let bId2 = null, rId2 = null;
+      for (const room of rooms.slice(0, 8)) {
+        if (room.id === roomId) continue;
+        const bk = await api('POST', `${P}/hotel/bookings`, { room_id: room.id, guest_name: `E2E Guest ${tag}b`, guest_phone: '9990000124', num_guests: 1, check_in_date: day(0), check_out_date: day(2), booking_source: 'DIRECT', room_rate: Number(room.base_price || 1500) });
+        if (bk.status === 201 && bk.data?.id) { bId2 = bk.data.id; rId2 = room.id; break; }
+      }
+      if (bId2) {
+        await api('POST', `${P}/hotel/bookings/${bId2}/checkin`, {});
+        const co2 = await api('POST', `${P}/hotel/bookings/${bId2}/checkout`, { payment_method: 'CASH', waive: true });
+        if (co2.status === 200 || co2.status === 201) {
+          const coJobs2 = (await jobsFor(rId2, 'CHECK_OUT')).filter(j => created.templates.includes(j.template_id));
+          const anyBlocking = coJobs2.some(j => j.status === 'OPEN' && Number(j.blocks_release) === 1);
+          ok(coJobs2.length >= 1 && !anyBlocking, 'E2E-CO-NONBLOCK', 'With validate-on-checkout OFF, the check-out checklist is raised NON-blocking (room not held)', `jobs=${coJobs2.length}, anyBlocking=${anyBlocking}`);
+        } else { skip('E2E-CO-NONBLOCK', 'Non-blocking check-out', `check-out failed HTTP ${co2.status}`); }
+      } else { skip('E2E-CO-NONBLOCK', 'Non-blocking check-out', 'no second bookable room'); }
+    } else {
+      skip('E2E-CO-SETTING', 'checkout setting', 'checklist_validate_on_checkout not present — server not updated?');
+      skip('E2E-CO-NONBLOCK', 'Non-blocking check-out', 'setting not present');
+    }
   } finally {
     console.log('\n… cleaning up test data …');
     await cleanup();

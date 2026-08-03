@@ -21757,9 +21757,15 @@ ${data.tenant.name}`;
     // by hand: arrival prep → Front Desk, cleaning/daily/mid-stay/event → Housekeeping,
     // manual/inspection → Maintenance. Reassignable later via the assign endpoint.
     const asgRole = _checklistAssigneeRole(o.trigger, o.assigned_to_role);
+    // Per-job release gating snapshot. Normally taken from the template, but the
+    // caller can force it (e.g. an owner with checklist_validate_on_checkout=0
+    // raises the check-out checklist non-blocking so it never holds the room).
+    const blocksRelease = o.blocks_release_override != null
+      ? (o.blocks_release_override ? 1 : 0)
+      : (tpl.blocks_release ? 1 : 0);
     await db.run(
       "INSERT INTO housekeeping_jobs (id, facility_type, facility_id, facility_label, source_ref, guest_label, status, template_id, template_name, category_id, trigger_event, blocks_release, dedupe_key, workflow_state, assigned_to_role, assigned_to_user, assigned_at) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, 'ASSIGNED', ?, ?, CURRENT_TIMESTAMP)",
-      [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref || null, o.guest_label || null, tpl.id, tpl.name, tpl.category_id || null, o.trigger, tpl.blocks_release ? 1 : 0, o.dedupe_key || null, asgRole, o.assigned_to_user || null]);
+      [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref || null, o.guest_label || null, tpl.id, tpl.name, tpl.category_id || null, o.trigger, blocksRelease, o.dedupe_key || null, asgRole, o.assigned_to_user || null]);
     for (const s of steps) {
       await db.run("INSERT INTO housekeeping_job_tasks (id, job_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
         [mkHkId('HKJT'), jid, s.label, s.is_mandatory, s.sort_order]);
@@ -21769,7 +21775,7 @@ ${data.tenant.name}`;
 
   // Raise all applicable checklist jobs for a trigger (one per template). Never
   // throws — the caller (checkout/checkin/complete/cron) is never blocked.
-  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null; assigned_to_role?: string | null; assigned_to_user?: string | null }): Promise<string[]> => {
+  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null; assigned_to_role?: string | null; assigned_to_user?: string | null; blocks_release_override?: number | null }): Promise<string[]> => {
     try {
       await ensureHousekeepingTables(db);
       let templates: any[];
@@ -21788,7 +21794,7 @@ ${data.tenant.name}`;
 
   // Backwards-compatible shim — every existing caller keeps working and now
   // transparently supports multiple templates per trigger. Returns first job id.
-  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null; room_type_id?: string | null }) => {
+  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null; room_type_id?: string | null; blocks_release_override?: number | null }) => {
     const trigger = o.facility_type === 'EVENT' ? 'EVENT_COMPLETE' : 'CHECK_OUT';
     const ids = await raiseChecklistJobs(db, { ...o, trigger });
     return ids[0] || null;
@@ -36372,11 +36378,16 @@ ${data.tenant.name}`;
       await tenantDb.run("UPDATE rooms SET status = 'CLEANING' WHERE id = ?", [b.room_id]);
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: b.room_id, action: 'CLEANING', summary: `Cleaning — guest ${b.guest_name || ''} checked out`.trim() });
       await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]);
-      // Housekeeping: raise a cleaning job from the ROOM checklist. The room stays
-      // CLEANING (not bookable) until the job's mandatory tasks are completed.
+      // Housekeeping: raise a cleaning job from the ROOM checklist. When the owner
+      // keeps checklist_validate_on_checkout=1 (default) the room stays CLEANING
+      // (not bookable) until the job's mandatory tasks are done. When they've
+      // turned it OFF, the same checklist is still raised for the worklist but is
+      // forced non-blocking so it never holds the room.
       try {
+        const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+        const enforceCheckout = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
         const rm: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null });
+        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, blocks_release_override: enforceCheckout ? null : 0 });
       } catch { /* non-fatal — never block checkout */ }
 
       // ── Fire the unified loyalty hook so the folio counts toward the
@@ -37436,6 +37447,7 @@ ${data.tenant.name}`;
                 hotel_service_charge_percent,
                 hotel_require_id_at_checkin,
                 checklist_validate_on_checkin,
+                checklist_validate_on_checkout,
                 round_invoice_to_rupee
            FROM restaurants WHERE id = ?`,
         [req.params.id]
@@ -37457,6 +37469,8 @@ ${data.tenant.name}`;
         require_id_at_checkin:  Number(r?.hotel_require_id_at_checkin ?? 1) === 1,
         // Raise CHECK_IN checklists during check-in (default ON)
         checklist_validate_on_checkin: Number(r?.checklist_validate_on_checkin ?? 1) === 1,
+        // Hold the room until the check-out checklist is complete (default ON)
+        checklist_validate_on_checkout: Number(r?.checklist_validate_on_checkout ?? 1) === 1,
         // M-6 — round-off opt-in (default OFF)
         round_invoice_to_rupee: Number(r?.round_invoice_to_rupee ?? 0) === 1,
       });
@@ -37515,6 +37529,10 @@ ${data.tenant.name}`;
       const checklistValidateOnCheckin = b.checklist_validate_on_checkin == null
         ? null
         : (b.checklist_validate_on_checkin ? 1 : 0);
+      // Hold the room until the check-out checklist is complete. Same semantics.
+      const checklistValidateOnCheckout = b.checklist_validate_on_checkout == null
+        ? null
+        : (b.checklist_validate_on_checkout ? 1 : 0);
 
       await centralDb.run(
         `UPDATE restaurants
@@ -37531,12 +37549,14 @@ ${data.tenant.name}`;
                 hotel_service_charge_percent = COALESCE(?, hotel_service_charge_percent),
                 hotel_require_id_at_checkin  = COALESCE(?, hotel_require_id_at_checkin),
                 checklist_validate_on_checkin = COALESCE(?, checklist_validate_on_checkin),
+                checklist_validate_on_checkout = COALESCE(?, checklist_validate_on_checkout),
                 round_invoice_to_rupee       = COALESCE(?, round_invoice_to_rupee)
           WHERE id = ?`,
         [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime,
          slab1Max, slab1Rate, slab2Max, slab2Rate, slab3Rate, svcPct,
          requireIdAtCheckin,
          checklistValidateOnCheckin,
+         checklistValidateOnCheckout,
          roundToRupee,
          req.params.id]
       );
@@ -45574,7 +45594,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'fix-mychecklist-hooks-order-whitescreen',
+    commit_marker: 'checkout-checklist-hold-owner-setting',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

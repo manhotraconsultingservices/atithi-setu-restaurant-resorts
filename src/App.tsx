@@ -9970,6 +9970,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     require_id_at_checkin: boolean;
     // Raise CHECK_IN checklists during check-in
     checklist_validate_on_checkin: boolean;
+    // Hold the room until the CHECK_OUT checklist is complete
+    checklist_validate_on_checkout: boolean;
   }>({
     min_stay_nights: 1, max_stay_nights: null,
     refund_full_days: null, refund_partial_pct: null, late_checkout_time: null,
@@ -9979,6 +9981,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     service_charge_percent: 0,
     require_id_at_checkin: true,
     checklist_validate_on_checkin: true,
+    checklist_validate_on_checkout: true,
   });
 
   // BCG Tariff Phase 2 — snapshot of the matrix tariff configuration.
@@ -12461,6 +12464,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         service_charge_percent: Number(data.service_charge_percent ?? 0),
         require_id_at_checkin: data.require_id_at_checkin !== false,
         checklist_validate_on_checkin: data.checklist_validate_on_checkin !== false,
+        checklist_validate_on_checkout: data.checklist_validate_on_checkout !== false,
       });
     } catch { /* hotel not enabled — ignore */ }
   };
@@ -26991,6 +26995,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <span className="text-sm text-[#3d3128]">
                     <span className="font-semibold">Validate checklist on check-in</span>
                     <span className="block text-[11px] text-[#9c8e85]">When on, checking a guest in raises the CHECK-IN checklists you've configured (arrival prep, welcome amenities). Turn off to skip them entirely.</span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-3 pt-3 cursor-pointer">
+                  <input type="checkbox" checked={hotelSettings.checklist_validate_on_checkout}
+                    onChange={e => setHotelSettings(s => ({ ...s, checklist_validate_on_checkout: e.target.checked }))}
+                    className="w-4 h-4 mt-0.5 accent-[#cc5a16]" />
+                  <span className="text-sm text-[#3d3128]">
+                    <span className="font-semibold">Validate checklist on check-out</span>
+                    <span className="block text-[11px] text-[#9c8e85]">When on, the room is held (kept CLEANING / not re-bookable) after check-out until the CHECK-OUT checklist is completed. Turn off to release rooms freely — the checklist is still raised for housekeeping, it just won't block the room.</span>
                   </span>
                 </label>
 

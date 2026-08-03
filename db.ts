@@ -344,6 +344,11 @@ export async function initDb() {
     -- prep, welcome-amenity setup). Owners who don't use check-in checklists set
     -- this to 0 to skip the raise entirely.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS checklist_validate_on_checkin INT DEFAULT 1;
+    -- When 1 (default), the check-out checklist HOLDS the room (stays CLEANING /
+    -- not re-bookable) until its mandatory tasks are done. Owners who don't want
+    -- that hold set this to 0 — the check-out checklist is still raised for the
+    -- housekeeping worklist, but it no longer blocks room release.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS checklist_validate_on_checkout INT DEFAULT 1;
     -- Phase H2 — Hotel-specific GST + service charge.
     -- Indian hotels follow a tariff-slab GST regime (post-2022 GST Council):
     --   ≤ ₹1,000/night  → 0%   (exempt)
