@@ -22116,7 +22116,11 @@ ${data.tenant.name}`;
   // is owner/admin-only; reads are hkStaff. Triggers resolve templates and raise
   // one job per applicable template (see resolveTemplatesForTrigger / raiseChecklistJobs).
   // ══════════════════════════════════════════════════════════════════════════
-  const CHK_TRIGGERS = ['CHECK_IN', 'CHECK_OUT', 'MID_STAY', 'DAILY', 'EVENT_COMPLETE', 'MANUAL', 'CLEANING'];
+  const CHK_TRIGGERS = ['CHECK_IN', 'CHECK_OUT', 'MID_STAY', 'DAILY', 'EVENT_COMPLETE', 'MANUAL', 'CLEANING',
+    // Booking lifecycle events + room-status changes. All NON-BLOCKING (they never
+    // gate a business operation) — raised for quality/visibility only.
+    'BOOKING_NEW', 'BOOKING_ASSIGNED',
+    'ROOM_VACANT', 'ROOM_OCCUPIED', 'ROOM_CLEANING', 'ROOM_MAINTENANCE', 'ROOM_BLOCKED'];
   const CHK_FTYPES = ['ROOM', 'EVENT', 'GENERIC'];
 
   // ── Categories ───────────────────────────────────────────────────────────
@@ -26147,9 +26151,14 @@ ${data.tenant.name}`;
             [hkActor(req), 'Room set VACANT by manager', req.params.roomId]).catch(() => {});
         }
       }
-      const prevRoom: any = await tenantDb.get("SELECT status FROM rooms WHERE id = ?", [req.params.roomId]).catch(() => null);
+      const prevRoom: any = await tenantDb.get("SELECT status, name, room_number, type_id FROM rooms WHERE id = ?", [req.params.roomId]).catch(() => null);
       await tenantDb.run("UPDATE rooms SET status = ? WHERE id = ?", [status, req.params.roomId]);
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: req.params.roomId, action: 'STATUS_CHANGED', summary: `Room status ${prevRoom?.status || '?'} → ${status}` });
+      // Raise any ROOM_<status> checklist the owner configured for this transition —
+      // NON-BLOCKING, so it never holds the room. Only on a real change.
+      if (String(prevRoom?.status || '') !== status) {
+        raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: req.params.roomId, facility_label: prevRoom?.name || (prevRoom?.room_number ? `Room ${prevRoom.room_number}` : req.params.roomId), room_type_id: prevRoom?.type_id || null, trigger: `ROOM_${status}`, blocks_release_override: 0 }).catch(() => {});
+      }
       const updated = await tenantDb.get("SELECT * FROM rooms WHERE id = ?", [req.params.roomId]);
       res.json(updated);
     } catch (err) {
@@ -29416,10 +29425,14 @@ ${data.tenant.name}`;
       // the check-in handler dedupes on (source_ref, template_id) so it never
       // double-raises. Never blocks booking creation.
       try {
+        const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [resolvedRoomId]).catch(() => null);
+        const rmCiLabel = rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : resolvedRoomId);
+        // On a new booking — raise the BOOKING_NEW checklist (non-blocking).
+        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: resolvedRoomId, facility_label: rmCiLabel, source_ref: bid, guest_label: guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'BOOKING_NEW', blocks_release_override: 0 });
+        // Attach the CHECK_IN checklist too when the owner enforces it at check-in.
         const ciCfg: any = await centralDb.get("SELECT checklist_validate_on_checkin FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
         if (Number(ciCfg?.checklist_validate_on_checkin ?? 1) === 1 && ['BOOKED', 'ASSIGNED'].includes(String(row?.status || 'BOOKED').toUpperCase())) {
-          const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [resolvedRoomId]).catch(() => null);
-          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: resolvedRoomId, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : resolvedRoomId), source_ref: bid, guest_label: guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN', due_date: _checklistDueDate('CHECK_IN', { checkInDate: check_in_date }) });
+          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: resolvedRoomId, facility_label: rmCiLabel, source_ref: bid, guest_label: guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN', due_date: _checklistDueDate('CHECK_IN', { checkInDate: check_in_date }) });
         }
       } catch { /* non-fatal — never block booking creation */ }
       // ARI push: fire-and-forget update to all enabled OTA channels.
@@ -29522,6 +29535,8 @@ ${data.tenant.name}`;
       ).catch(() => {});
       const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'ROOM_REASSIGNED', summary: `Room reassigned: ${oldRoom?.name || oldRoom?.room_number || bk.room_id} → ${newRoom2?.name || newRoom2?.room_number || target}${changeReason ? ` · ${changeReason}` : ''}` });
+      // Room assigned to the booking — raise any BOOKING_ASSIGNED checklist (non-blocking).
+      raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: target, facility_label: newRoom2?.name || (newRoom2?.room_number ? `Room ${newRoom2.room_number}` : target), room_type_id: newRoom2?.type_id || null, source_ref: req.params.bookingId, guest_label: row?.guest_name || null, trigger: 'BOOKING_ASSIGNED', blocks_release_override: 0 }).catch(() => {});
       res.json({ ok: true, room_id: target, room_locked: row?.room_locked, booking: row });
     } catch (err: any) {
       console.error('reassign-room error:', err);
@@ -35983,6 +35998,8 @@ ${data.tenant.name}`;
         const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
         const enforceCo = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
         await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'CHECK_OUT', blocks_release_override: enforceCo ? null : 0, due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
+        // Room is now OCCUPIED — raise any ROOM_OCCUPIED status checklist (non-blocking).
+        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'ROOM_OCCUPIED', blocks_release_override: 0 });
         const ciYmd = String(b.check_in_date || '').slice(0, 10), coYmd = String(b.check_out_date || '').slice(0, 10);
         const stayNights = (/^\d{4}-\d{2}-\d{2}$/.test(ciYmd) && /^\d{4}-\d{2}-\d{2}$/.test(coYmd))
           ? Math.round((new Date(coYmd + 'T00:00:00').getTime() - new Date(ciYmd + 'T00:00:00').getTime()) / 86400000) : 0;
@@ -36526,6 +36543,8 @@ ${data.tenant.name}`;
         const enforceCheckout = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
         const rm: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
         await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, blocks_release_override: enforceCheckout ? null : 0, due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
+        // Room is now CLEANING — raise any ROOM_CLEANING status checklist (non-blocking).
+        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, trigger: 'ROOM_CLEANING', blocks_release_override: 0 });
       } catch { /* non-fatal — never block checkout */ }
 
       // ── Fire the unified loyalty hook so the folio counts toward the
@@ -45732,7 +45751,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'room-cleaning-per-booking-cadence',
+    commit_marker: 'checklist-triggers-booking-events-room-status',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

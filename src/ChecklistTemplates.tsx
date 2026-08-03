@@ -14,14 +14,23 @@ type Props = { restaurantId: string; token: string; facilityScope?: FacilityScop
 const scopeTypes = (scope: FacilityScope): string[] =>
   scope === 'ROOM' ? ['ROOM', 'GENERIC'] : scope === 'EVENT' ? ['EVENT'] : ['ROOM', 'EVENT', 'GENERIC'];
 
-const TRIGGERS: { v: string; label: string; hint: string }[] = [
-  { v: 'CHECK_IN', label: 'On check-in', hint: 'Raised when a guest checks into the room' },
-  { v: 'CHECK_OUT', label: 'On check-out', hint: 'Raised when the room is checked out' },
-  { v: 'MID_STAY', label: 'Mid-stay / overstay (recurring)', hint: 'Every N nights of an in-house stay (owner cadence)' },
-  { v: 'CLEANING', label: 'Room cleaning (recurring)', hint: 'During a stay at the per-booking cadence the front desk sets at check-in' },
-  { v: 'DAILY', label: 'Daily (each morning)', hint: 'Auto-raised every morning per facility' },
-  { v: 'EVENT_COMPLETE', label: 'On event completion', hint: 'Raised when an event is marked complete' },
-  { v: 'MANUAL', label: 'Manual / on-demand', hint: 'Started by staff when needed (inspections, audits)' },
+const TRIGGERS: { v: string; label: string; hint: string; ft: string[] }[] = [
+  // Booking lifecycle (hotel rooms)
+  { v: 'BOOKING_NEW', label: 'On new booking', hint: 'Raised the moment a booking is created — non-blocking', ft: ['ROOM'] },
+  { v: 'BOOKING_ASSIGNED', label: 'On room assigned', hint: 'Raised when a room is assigned / reassigned to a booking — non-blocking', ft: ['ROOM'] },
+  { v: 'CHECK_IN', label: 'On check-in', hint: 'Raised when a guest checks into the room', ft: ['ROOM'] },
+  { v: 'CHECK_OUT', label: 'On check-out', hint: 'Raised when the room is checked out', ft: ['ROOM'] },
+  { v: 'MID_STAY', label: 'Mid-stay / overstay (recurring)', hint: 'Every N nights of an in-house stay (owner cadence)', ft: ['ROOM'] },
+  { v: 'CLEANING', label: 'Room cleaning (recurring)', hint: 'During a stay at the per-booking cadence the front desk sets at check-in', ft: ['ROOM'] },
+  { v: 'DAILY', label: 'Daily (each morning)', hint: 'Auto-raised every morning per facility', ft: ['ROOM', 'EVENT', 'GENERIC'] },
+  { v: 'EVENT_COMPLETE', label: 'On event completion', hint: 'Raised when an event is marked complete', ft: ['EVENT'] },
+  { v: 'MANUAL', label: 'Manual / on-demand', hint: 'Started by staff when needed (inspections, audits)', ft: ['ROOM', 'EVENT', 'GENERIC'] },
+  // Room status changes — all NON-BLOCKING (never gate a business operation)
+  { v: 'ROOM_VACANT', label: 'When room → Vacant', hint: 'Raised when the room becomes vacant / ready — non-blocking', ft: ['ROOM'] },
+  { v: 'ROOM_OCCUPIED', label: 'When room → Occupied', hint: 'Raised when the room becomes occupied — non-blocking', ft: ['ROOM'] },
+  { v: 'ROOM_CLEANING', label: 'When room → Cleaning', hint: 'Raised when the room goes to cleaning — non-blocking', ft: ['ROOM'] },
+  { v: 'ROOM_MAINTENANCE', label: 'When room → Maintenance', hint: 'Raised when the room goes to maintenance — non-blocking', ft: ['ROOM'] },
+  { v: 'ROOM_BLOCKED', label: 'When room → Blocked', hint: 'Raised when the room is blocked — non-blocking', ft: ['ROOM'] },
 ];
 const FTYPES = [{ v: 'ROOM', label: 'Hotel room' }, { v: 'EVENT', label: 'Event hall' }, { v: 'GENERIC', label: 'Generic' }];
 const trgLabel = (v: string) => TRIGGERS.find(t => t.v === v)?.label || v;
@@ -236,7 +245,7 @@ function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL',
         <div><label className="text-xs text-[#6b5d52] block mb-1">Name</label><input value={form.name} onChange={e => set('name', e.target.value)} placeholder="e.g. PMS - Check-Out" className={INPUT + ' w-full'} /></div>
         <div><label className="text-xs text-[#6b5d52] block mb-1">Category</label><select value={form.category_id} onChange={e => set('category_id', e.target.value)} className={INPUT + ' w-full'}>{cats.filter(c => Number(c.is_active) === 1).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
         <div><label className="text-xs text-[#6b5d52] block mb-1">Facility type</label><select value={form.facility_type} onChange={e => set('facility_type', e.target.value)} disabled={!!initial.is_system} className={INPUT + ' w-full disabled:bg-[#f5f0e8]'}>{ftypeOpts.map(f => <option key={f.v} value={f.v}>{f.label}</option>)}</select></div>
-        <div><label className="text-xs text-[#6b5d52] block mb-1">Trigger</label><select value={form.trigger_event} onChange={e => set('trigger_event', e.target.value)} disabled={!!initial.is_system} className={INPUT + ' w-full disabled:bg-[#f5f0e8]'}>{TRIGGERS.map(t => <option key={t.v} value={t.v}>{t.label}</option>)}</select><p className="text-[11px] text-[#9c8e85] mt-1">{TRIGGERS.find(t => t.v === form.trigger_event)?.hint}</p></div>
+        <div><label className="text-xs text-[#6b5d52] block mb-1">Trigger</label><select value={form.trigger_event} onChange={e => set('trigger_event', e.target.value)} disabled={!!initial.is_system} className={INPUT + ' w-full disabled:bg-[#f5f0e8]'}>{TRIGGERS.filter(t => t.ft.includes(form.facility_type)).map(t => <option key={t.v} value={t.v}>{t.label}</option>)}</select><p className="text-[11px] text-[#9c8e85] mt-1">{TRIGGERS.find(t => t.v === form.trigger_event)?.hint}</p></div>
         {form.trigger_event === 'MID_STAY' && (
           <div><label className="text-xs text-[#6b5d52] block mb-1">Repeat every (nights)</label><input type="number" min={1} value={form.recurrence_nights} onChange={e => set('recurrence_nights', Math.max(1, Number(e.target.value) || 1))} className={INPUT + ' w-full'} /></div>
         )}
