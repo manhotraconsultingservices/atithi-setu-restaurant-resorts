@@ -32859,8 +32859,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   onOpenObject={(type, oid) => { if (type === 'FOLIO') { setBookingDetailTarget(null); loadFolio(oid).catch(() => {}); } }}
                   overview={
                 <div className="space-y-4">
-                  {/* Edit booking */}
-                  <div className="flex justify-end">
+                  {/* Actions — check in (when the stay hasn't started) + edit */}
+                  <div className="flex justify-end gap-2 flex-wrap">
+                    {['BOOKED', 'ASSIGNED'].includes(String(bd.status || '').toUpperCase()) && (
+                      <button type="button" onClick={() => { const t = bd; setBookingDetailTarget(null); confirmAndCheckIn(t); }} className="px-4 py-2 rounded-2xl bg-emerald-600 text-white text-[12px] font-bold hover:bg-emerald-700">→ Check in</button>
+                    )}
                     <button type="button" onClick={() => { setBookingDetailTarget(null); setEditingBooking({ ...bd }); setShowBookingModal(true); }} className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-[12px] font-bold hover:bg-[#a84612]">✎ Edit booking</button>
                   </div>
                   {/* Stay summary */}

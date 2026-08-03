@@ -115,6 +115,11 @@ async function cleanup() {
     if (!bookingId) { ['E2E-CHECKIN', 'E2E-MIDSTAY', 'E2E-CHECKOUT', 'E2E-GATING'].forEach(id => skip(id, 'Room-flow triggers', 'could not create a test booking (date conflicts)')); return; }
     created.bookingId = bookingId;
 
+    // The CHECK_IN checklist should attach the moment the booking is confirmed —
+    // before check-in — when checklist_validate_on_checkin is on (the default).
+    const preCi = (await jobsFor(roomId, 'CHECK_IN')).filter(j => created.templates.includes(j.template_id));
+    ok(preCi.length >= 1, 'E2E-CHECKIN-EARLY', 'Check-in checklist attached at booking-confirm time (before check-in)', `${preCi.length} pre-check-in job(s)`);
+
     // Check-in (turn ID-requirement off for the test if it blocks; restored in cleanup).
     let cin = await api('POST', `${P}/hotel/bookings/${bookingId}/checkin`, {});
     if (cin.status === 400 && (cin.data?.missing_field === 'guest_documents' || cin.data?.require_id_at_checkin)) {

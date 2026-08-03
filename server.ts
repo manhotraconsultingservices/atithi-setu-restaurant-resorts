@@ -29317,6 +29317,18 @@ ${data.tenant.name}`;
       // Phase H1 — log to channel sync queue (no-op for direct bookings).
       await logChannelSync(req.params.id, row, 'BOOKING_CREATED');
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: bid, action: 'CREATED', summary: `Booking created — ${guest_name || ''} · ${check_in_date}→${check_out_date}`.trim(), after: row });
+      // Attach the CHECK-IN checklist the moment the booking is confirmed/assigned,
+      // so the front desk can prep it ahead of arrival — but ONLY when the owner
+      // enforces checklists at check-in (checklist_validate_on_checkin=1). Idempotent:
+      // the check-in handler dedupes on (source_ref, template_id) so it never
+      // double-raises. Never blocks booking creation.
+      try {
+        const ciCfg: any = await centralDb.get("SELECT checklist_validate_on_checkin FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+        if (Number(ciCfg?.checklist_validate_on_checkin ?? 1) === 1 && ['BOOKED', 'ASSIGNED'].includes(String(row?.status || 'BOOKED').toUpperCase())) {
+          const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [resolvedRoomId]).catch(() => null);
+          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: resolvedRoomId, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : resolvedRoomId), source_ref: bid, guest_label: guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN' });
+        }
+      } catch { /* non-fatal — never block booking creation */ }
       // ARI push: fire-and-forget update to all enabled OTA channels.
       triggerAriPush(req.params.id, { id: bid, room_id: resolvedRoomId, check_in_date, check_out_date, booking_source: booking_source || 'DIRECT' }).catch(() => {});
       res.status(201).json(row);
@@ -45594,7 +45606,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checkout-checklist-hold-owner-setting',
+    commit_marker: 'checkin-checklist-at-booking-plus-overview-checkin',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
