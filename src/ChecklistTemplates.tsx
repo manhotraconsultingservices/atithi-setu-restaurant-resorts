@@ -14,6 +14,18 @@ type Props = { restaurantId: string; token: string; facilityScope?: FacilityScop
 const scopeTypes = (scope: FacilityScope): string[] =>
   scope === 'ROOM' ? ['ROOM', 'GENERIC'] : scope === 'EVENT' ? ['EVENT'] : ['ROOM', 'EVENT', 'GENERIC'];
 
+// The facility_type a scope maps categories to ('ALL' = the owner / all-modules view).
+const scopeFacilityType = (scope: FacilityScope): string =>
+  scope === 'EVENT' ? 'EVENT' : scope === 'ROOM' ? 'ROOM' : 'ALL';
+// A category shows in a scope when it's cross-module ('ALL' / unset) or matches it —
+// so PMS templates only offer PMS categories and Events only offers Event categories.
+const catInScope = (c: any, scope: FacilityScope): boolean => {
+  const s = scopeFacilityType(scope);
+  if (s === 'ALL') return true;
+  const cf = String(c?.facility_type || 'ALL').toUpperCase();
+  return cf === 'ALL' || cf === s;
+};
+
 const TRIGGERS: { v: string; label: string; hint: string; ft: string[] }[] = [
   // Booking lifecycle (hotel rooms)
   { v: 'BOOKING_NEW', label: 'On new booking', hint: 'Raised the moment a booking is created — non-blocking', ft: ['ROOM'] },
@@ -90,6 +102,8 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' 
   useEffect(() => { load(); }, [load]);
 
   const catName = (id: string) => cats.find(c => c.id === id)?.name || '—';
+  // Active categories relevant to this module (PMS vs Event) — used as defaults.
+  const inScopeActiveCats = cats.filter(c => Number(c.is_active) === 1 && catInScope(c, facilityScope));
 
   return (
     <div className="space-y-5">
@@ -109,13 +123,13 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' 
 
       {err && <div className="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded px-3 py-2">{err}</div>}
 
-      {tab === 'CATEGORIES' && <CategoriesPanel api={api} cats={cats} reload={load} />}
+      {tab === 'CATEGORIES' && <CategoriesPanel api={api} cats={cats} reload={load} facilityScope={facilityScope} />}
 
       {tab === 'TEMPLATES' && !editing && (
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <p className="text-sm text-[#6b5d52]">{shown.length} template{shown.length === 1 ? '' : 's'}</p>
-            <button onClick={() => setEditing({ __new: true, name: '', category_id: cats[0]?.id || '', facility_type: defaultFType, trigger_event: defaultTrigger, blocks_release: 0, recurrence_nights: 1, steps: [], assignments: [] })} className={BTN}>+ New template</button>
+            <button onClick={() => setEditing({ __new: true, name: '', category_id: inScopeActiveCats[0]?.id || '', facility_type: defaultFType, trigger_event: defaultTrigger, blocks_release: 0, recurrence_nights: 1, steps: [], assignments: [] })} className={BTN}>+ New template</button>
           </div>
           {loading ? <p className="text-sm text-[#6b5d52]">Loading…</p> : shown.length === 0 ? (
             <p className="text-sm text-[#6b5d52] italic">No templates yet. Create one, or the default check-out checklists will show here.</p>
@@ -171,13 +185,15 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' 
 }
 
 // ── Categories ─────────────────────────────────────────────────────────────
-function CategoriesPanel({ api, cats, reload }: { api: any; cats: any[]; reload: () => void }) {
+function CategoriesPanel({ api, cats, reload, facilityScope = 'ALL' }: { api: any; cats: any[]; reload: () => void; facilityScope?: FacilityScope }) {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  const shownCats = cats.filter(c => catInScope(c, facilityScope)); // only this module's categories
   const add = async () => {
     if (!name.trim()) return;
     setBusy(true);
-    try { await api('/checklists/categories', { method: 'POST', body: JSON.stringify({ name: name.trim() }) }); setName(''); reload(); } finally { setBusy(false); }
+    // New categories are scoped to the module they're created in (PMS vs Event).
+    try { await api('/checklists/categories', { method: 'POST', body: JSON.stringify({ name: name.trim(), facility_type: scopeFacilityType(facilityScope) }) }); setName(''); reload(); } finally { setBusy(false); }
   };
   return (
     <div className="space-y-4 max-w-2xl">
@@ -189,7 +205,7 @@ function CategoriesPanel({ api, cats, reload }: { api: any; cats: any[]; reload:
         <table className="w-full text-sm border-collapse">
           <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Category</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Status</th><th className="px-3 py-2"></th></tr></thead>
           <tbody>
-            {cats.map(c => (
+            {shownCats.map(c => (
               <tr key={c.id} className="border-t border-[#f0e8d8]">
                 <td className="px-3 py-2 font-medium">{c.name}{c.is_system ? <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#f0e8d8] text-[#6b5d52]">system</span> : null}</td>
                 <td className="px-3 py-2">{Number(c.is_active) === 1 ? <span className="text-emerald-700 text-xs">Active</span> : <span className="text-[#9c8e85] text-xs">Inactive</span>}</td>
@@ -209,7 +225,7 @@ function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL',
   const isNew = !!initial.__new;
   const ftypeOpts = FTYPES.filter(f => scopeTypes(facilityScope).includes(f.v));
   const [form, setForm] = useState<any>({
-    name: initial.name || '', category_id: initial.category_id || (cats[0]?.id || ''),
+    name: initial.name || '', category_id: initial.category_id || (cats.filter(c => catInScope(c, facilityScope))[0]?.id || ''),
     facility_type: initial.facility_type || (facilityScope === 'EVENT' ? 'EVENT' : 'ROOM'), trigger_event: initial.trigger_event || 'CHECK_OUT',
     blocks_release: Number(initial.blocks_release) === 1, recurrence_nights: Number(initial.recurrence_nights) || 1,
     notes: initial.notes || '',
@@ -258,7 +274,7 @@ function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL',
 
       <div className="grid sm:grid-cols-2 gap-3">
         <div><label className="text-xs text-[#6b5d52] block mb-1">Name</label><input value={form.name} onChange={e => set('name', e.target.value)} placeholder="e.g. PMS - Check-Out" className={INPUT + ' w-full'} /></div>
-        <div><label className="text-xs text-[#6b5d52] block mb-1">Category</label><select value={form.category_id} onChange={e => set('category_id', e.target.value)} className={INPUT + ' w-full'}>{cats.filter(c => Number(c.is_active) === 1).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+        <div><label className="text-xs text-[#6b5d52] block mb-1">Category</label><select value={form.category_id} onChange={e => set('category_id', e.target.value)} className={INPUT + ' w-full'}>{cats.filter(c => Number(c.is_active) === 1 && catInScope(c, facilityScope)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
         <div><label className="text-xs text-[#6b5d52] block mb-1">Facility type</label><select value={form.facility_type} onChange={e => set('facility_type', e.target.value)} disabled={!!initial.is_system} className={INPUT + ' w-full disabled:bg-[#f5f0e8]'}>{ftypeOpts.map(f => <option key={f.v} value={f.v}>{f.label}</option>)}</select></div>
         <div><label className="text-xs text-[#6b5d52] block mb-1">Trigger</label><select value={form.trigger_event} onChange={e => set('trigger_event', e.target.value)} disabled={!!initial.is_system} className={INPUT + ' w-full disabled:bg-[#f5f0e8]'}>{TRIGGERS.filter(t => t.ft.includes(form.facility_type)).map(t => <option key={t.v} value={t.v}>{t.label}</option>)}</select><p className="text-[11px] text-[#9c8e85] mt-1">{TRIGGERS.find(t => t.v === form.trigger_event)?.hint}</p></div>
         {form.trigger_event === 'MID_STAY' && (

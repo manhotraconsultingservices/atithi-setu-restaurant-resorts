@@ -21666,6 +21666,9 @@ ${data.tenant.name}`;
       id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT, is_system INT DEFAULT 0,
       is_active INT DEFAULT 1, sort_order INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`).catch(() => {});
+    // Categories are module-scoped so PMS templates only offer PMS categories and
+    // Events only offers Event categories ('ALL' = shows in every module).
+    await db.exec(`ALTER TABLE checklist_categories ADD COLUMN IF NOT EXISTS facility_type TEXT DEFAULT 'ALL'`).catch(() => {});
     await db.exec(`CREATE TABLE IF NOT EXISTS checklist_templates (
       id TEXT PRIMARY KEY, category_id TEXT, name TEXT NOT NULL,
       facility_type TEXT NOT NULL, trigger_event TEXT NOT NULL,
@@ -21750,6 +21753,11 @@ ${data.tenant.name}`;
         }
       }
     }
+    // Scope the system categories to their module (idempotent, every init, so both
+    // new and existing tenants converge): PMS → ROOM, Event Hall / Event → EVENT.
+    // Inspection stays 'ALL' — inspections apply to rooms and halls alike.
+    await db.run("UPDATE checklist_categories SET facility_type = 'ROOM' WHERE id = 'CAT-SYS-PMS'").catch(() => {});
+    await db.run("UPDATE checklist_categories SET facility_type = 'EVENT' WHERE id IN ('CAT-SYS-EVENTHALL', 'CAT-SYS-EVENT')").catch(() => {});
   };
 
   // Resolve the checklist templates that apply to a facility for a trigger.
@@ -22145,10 +22153,13 @@ ${data.tenant.name}`;
       await ensureHousekeepingTables(db);
       const name = String(req.body?.name || '').trim();
       if (!name) return res.status(400).json({ error: 'name is required' });
+      // Scope a custom category to the module it's created in (ROOM / EVENT), or ALL.
+      const ftRaw = String(req.body?.facility_type || 'ALL').toUpperCase();
+      const facilityType = ['ROOM', 'EVENT', 'ALL'].includes(ftRaw) ? ftRaw : 'ALL';
       const id = mkHkId('CHKCAT');
       const cnt: any = await db.get("SELECT COUNT(*)::int AS c FROM checklist_categories");
-      await db.run("INSERT INTO checklist_categories (id, name, slug, sort_order) VALUES (?, ?, ?, ?)",
-        [id, name, name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), Number(cnt?.c || 0)]);
+      await db.run("INSERT INTO checklist_categories (id, name, slug, facility_type, sort_order) VALUES (?, ?, ?, ?, ?)",
+        [id, name, name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), facilityType, Number(cnt?.c || 0)]);
       res.status(201).json(await db.get("SELECT * FROM checklist_categories WHERE id = ?", [id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to add category" }); }
   });
@@ -45813,7 +45824,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'superadmin-role-grid-reconcile',
+    commit_marker: 'checklist-category-module-scope',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
