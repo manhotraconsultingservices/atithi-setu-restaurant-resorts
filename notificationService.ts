@@ -1588,6 +1588,10 @@ export async function sendTelegram(chatId: string | null | undefined, message: s
     console.warn('[Notification] No Telegram chat ID specified — skipping.');
     return false;
   }
+  // Bound the request so a blocked/slow egress to api.telegram.org can't hang the
+  // caller (e.g. the SuperAdmin "Send test" request) — abort after 8s.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     const response = await fetch(url, {
@@ -1598,6 +1602,7 @@ export async function sendTelegram(chatId: string | null | undefined, message: s
         text:       message,
         parse_mode: 'Markdown',
       }),
+      signal: controller.signal,
     });
     if (!response.ok) {
       const errBody = await response.json().catch(() => ({}));
@@ -1609,6 +1614,8 @@ export async function sendTelegram(chatId: string | null | undefined, message: s
   } catch (err) {
     console.error('[Notification] Telegram send failed:', err);
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

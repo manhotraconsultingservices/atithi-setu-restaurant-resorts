@@ -5275,6 +5275,23 @@ async function getPlatformNotifyConfig(): Promise<any> {
   return cfg;
 }
 function invalidatePlatformNotifyCache() { _platformNotifyCache = null; }
+// Defensively create the config table + seed the DEFAULT row at request time, so
+// the endpoints work even if the central-init migration hasn't applied it yet.
+async function ensurePlatformNotificationConfig(): Promise<void> {
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS platform_notification_config (
+      id TEXT PRIMARY KEY,
+      telegram_admin_chat_id TEXT,
+      event_new_tenant INT DEFAULT 1,
+      event_subscription_due INT DEFAULT 1,
+      event_tenant_access INT DEFAULT 1,
+      subscription_due_lead_days INT DEFAULT 3,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_by TEXT
+    );
+    INSERT INTO platform_notification_config (id) VALUES ('DEFAULT') ON CONFLICT (id) DO NOTHING;
+  `).catch((e: any) => console.error('[ensurePlatformNotificationConfig]', e?.message || e));
+}
 // eventKey → the config column that gates it.
 const _PLATFORM_EVENT_COL: Record<string, string> = {
   NEW_TENANT: 'event_new_tenant',
@@ -45244,22 +45261,20 @@ ${data.tenant.name}`;
   // platform events fire. GET also reports whether the env token/chat are present.
   app.get("/api/admin/notification-config", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
     try {
-      let cfg: any = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'").catch(() => null);
-      if (!cfg) {
-        await centralDb.run("INSERT INTO platform_notification_config (id) VALUES ('DEFAULT') ON CONFLICT (id) DO NOTHING").catch(() => {});
-        cfg = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'").catch(() => ({}));
-      }
+      await ensurePlatformNotificationConfig();
+      const cfg: any = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'").catch(() => ({}));
       res.json({
         ...(cfg || {}),
         bot_token_configured: !!process.env.TELEGRAM_BOT_TOKEN,
         env_admin_chat_id: process.env.TELEGRAM_ADMIN_CHAT_ID || null,
         env_default_chat_id: process.env.TELEGRAM_DEFAULT_CHAT_ID || null,
       });
-    } catch (err) { res.status(500).json({ error: "Failed to load notification config" }); }
+    } catch (err: any) { res.status(500).json({ error: "Failed to load notification config: " + (err?.message || err) }); }
   });
 
   app.put("/api/admin/notification-config", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
+      await ensurePlatformNotificationConfig();
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
       if ('telegram_admin_chat_id' in b) { fields.push("telegram_admin_chat_id = ?"); vals.push(b.telegram_admin_chat_id ? String(b.telegram_admin_chat_id).trim() : null); }
@@ -45274,7 +45289,7 @@ ${data.tenant.name}`;
       invalidatePlatformNotifyCache();
       const cfg = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'");
       res.json({ success: true, config: cfg });
-    } catch (err) { res.status(500).json({ error: "Failed to save notification config" }); }
+    } catch (err: any) { res.status(500).json({ error: "Failed to save notification config: " + (err?.message || err) }); }
   });
 
   // Send a test Telegram message to the configured admin chat, and report the
@@ -45284,6 +45299,7 @@ ${data.tenant.name}`;
       if (!process.env.TELEGRAM_BOT_TOKEN) {
         return res.status(400).json({ error: "TELEGRAM_BOT_TOKEN is not set on the server. Add it to the server .env and restart the app." });
       }
+      await ensurePlatformNotificationConfig();
       invalidatePlatformNotifyCache();
       const cfg = await getPlatformNotifyConfig();
       const chatId = (req.body?.telegram_admin_chat_id ? String(req.body.telegram_admin_chat_id).trim() : '')
@@ -45980,7 +45996,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'superadmin-telegram-alerts-config',
+    commit_marker: 'telegram-config-fix-ensure-table-timeout',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
