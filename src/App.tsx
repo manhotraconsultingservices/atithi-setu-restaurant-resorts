@@ -13077,9 +13077,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const checkInBooking = async (
     bookingId: string,
     force = false,
-    advance?: { amount: number; method: string; reference?: string }
+    advance?: { amount: number; method: string; reference?: string },
+    cleaningFreqNights?: number | null
   ) => {
     const body: any = { force };
+    // Room-cleaning cadence the front desk set from the guest's preference
+    // (1 = daily, 2 = every 2 nights, 0 = none). Server stores it on the booking;
+    // the daily cron raises the CLEANING checklist for the stay accordingly.
+    if (cleaningFreqNights !== undefined && cleaningFreqNights !== null) {
+      body.cleaning_frequency_nights = cleaningFreqNights;
+    }
     // Advance payment (10 Jun 2026 critical fix): when staff collected
     // a partial / deposit / full payment from the guest at check-in,
     // record it as a folio_payments row with type='ADVANCE'. Reduces
@@ -32967,11 +32974,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // Optimistically merge saved fields back into the bookings list
               setHotelBookings((rows: any[]) => rows.map(r => r.id === patched.id ? { ...r, ...patched } : r));
             }}
-            onCheckIn={async (advance?: { amount: number; method: string; reference?: string }) => {
+            onCheckIn={async (advance?: { amount: number; method: string; reference?: string }, cleaningFreqNights?: number | null) => {
               // force=true for early check-in so the server bypasses the future-date guard.
               // Errors propagate to the wizard's confirm() handler which shows inline UI for
               // FORM_C_REQUIRED and a generic error message for other failures.
-              await checkInBooking(b.id, isEarly, advance);
+              await checkInBooking(b.id, isEarly, advance, cleaningFreqNights);
               setCheckInChecklistTarget(null);
             }}
           />
@@ -39728,9 +39735,11 @@ const CheckInWizardModal: React.FC<{
   onPreview?: (doc: any) => void;
   onCancel: () => void;
   onSaved?: (patched: any) => void;
-  onCheckIn: (advance?: { amount: number; method: string; reference?: string }) => void | Promise<void>;
+  onCheckIn: (advance?: { amount: number; method: string; reference?: string }, cleaningFreqNights?: number | null) => void | Promise<void>;
 }> = ({ booking, requireDocs, restaurantId, token, mealPlans = [], tariffModel, isEarly = false, onPreview, onCancel, onSaved, onCheckIn }) => {
   const [step, setStep] = useState<1 | 2>(1);
+  // Room-cleaning cadence the front desk sets from the guest's preference.
+  const [cleaningFreq, setCleaningFreq] = useState<number>(Number(booking.cleaning_frequency_nights ?? 1));
   const [draft, setDraft] = useState<any>({
     guest_name:        booking.guest_name || '',
     guest_phone:       booking.guest_phone || '',
@@ -39951,7 +39960,7 @@ const CheckInWizardModal: React.FC<{
       const adv = amt > 0 && advance.method
         ? { amount: amt, method: advance.method.toUpperCase(), reference: advance.reference || undefined }
         : undefined;
-      await onCheckIn(adv);
+      await onCheckIn(adv, cleaningFreq);
     } catch (err: any) {
       if (err?.status === 409 && err?.data?.checklist_incomplete) {
         setChecklistJobs(Array.isArray(err.data.jobs) ? err.data.jobs : []);
@@ -40491,6 +40500,21 @@ const CheckInWizardModal: React.FC<{
                   ✓ ₹{Number(advance.amount).toLocaleString('en-IN')} will be recorded as ADVANCE. Outstanding at checkout reduces by this amount.
                 </p>
               )}
+            </div>
+
+            {/* Room-cleaning cadence — ask the guest their preference. The daily cron
+                raises the cleaning checklist for the stay at this frequency. */}
+            <div className="rounded-2xl bg-[#faf7f2] border border-[#e8dccf] px-4 py-3 mt-3">
+              <p className="text-[12px] font-bold text-[#3d3128] mb-1">Room cleaning</p>
+              <p className="text-[11px] text-[#9c8e85] mb-2">How often should housekeeping service the room during the stay? Ask the guest.</p>
+              <div className="flex gap-2 flex-wrap">
+                {[{ v: 1, label: 'Every day' }, { v: 2, label: 'Every 2 nights' }, { v: 0, label: 'No cleaning' }].map(opt => (
+                  <button key={opt.v} type="button" onClick={() => setCleaningFreq(opt.v)}
+                    className={`px-3 py-1.5 rounded-xl text-[12px] font-semibold border transition-colors ${cleaningFreq === opt.v ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#3d3128] border-[#e8dccf] hover:border-[#cc5a16]/50'}`}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {formCError && (

@@ -66,6 +66,10 @@ async function cleanup() {
     // Close every OPEN job spawned by our templates (any run, any facility).
     const mine = new Set(created.templates);
     for (const j of await jobsAll()) if (j.status === 'OPEN' && mine.has(j.template_id)) { try { await closeJob(j.id); } catch {} }
+    // Close any remaining OPEN jobs tied to this run's test bookings (e.g. the
+    // system Room-Cleaning template's jobs, which aren't in created.templates).
+    const testBk = new Set([created.bookingId, created.bookingId2].filter(Boolean));
+    if (testBk.size) for (const j of await jobsAll()) if (j.status === 'OPEN' && testBk.has(j.source_ref)) { try { await closeJob(j.id); } catch {} }
   } catch {}
   for (const tid of created.templates) { try { await api('DELETE', `${P}/checklists/templates/${tid}`); } catch {} }
   if (created.restoreReqId !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: !!created.restoreReqId }); } catch {} }
@@ -88,7 +92,9 @@ async function cleanup() {
     const coT = await mkTpl({ name: `E2E Check-Out ${tag}`, facility_type: 'ROOM', trigger_event: 'CHECK_OUT', blocks_release: true, steps: [{ label: 'Strip & remake bed', is_mandatory: true }, { label: 'Sanitise bathroom', is_mandatory: true }] });
     const msT = await mkTpl({ name: `E2E Mid-Stay ${tag}`, facility_type: 'ROOM', trigger_event: 'MID_STAY', recurrence_nights: 1, blocks_release: false, steps: [{ label: 'Replace towels', is_mandatory: true }] });
     const dlT = await mkTpl({ name: `E2E Hall Daily ${tag}`, facility_type: 'EVENT', trigger_event: 'DAILY', blocks_release: false, steps: [{ label: 'Wipe surfaces & set chairs', is_mandatory: true }] });
+    const clT = await mkTpl({ name: `E2E Cleaning ${tag}`, facility_type: 'ROOM', trigger_event: 'CLEANING', blocks_release: false, steps: [{ label: 'Change linen & towels', is_mandatory: true }] });
     ok(ciT.status === 201 && coT.status === 201 && msT.status === 201 && dlT.status === 201, 'E2E-SETUP', 'Created check-in / check-out / mid-stay / daily templates', `HTTP ${ciT.status}/${coT.status}/${msT.status}/${dlT.status}`);
+    ok(clT.status === 201, 'E2E-SETUP-CLEANING', 'CLEANING trigger accepted by the template editor', `HTTP ${clT.status}`);
     if (ciT.status === 403) { console.error('\nNeed OWNER role to create templates — aborting.\n'); return; }
 
     // ── EVENT-HALL DAILY (independent of bookings) ──
@@ -141,6 +147,8 @@ async function cleanup() {
     const msJobs = (await jobsFor(roomId, 'MID_STAY')).filter(j => created.templates.includes(j.template_id));
     ok(runMs.status === 200 && msJobs.length >= 1, 'E2E-MIDSTAY', 'Overstay run raised the mid-stay checklist for the in-house room', `raised=${runMs.data?.raised}, jobs=${msJobs.length}`);
     ok(typeof runMs.data?.overdue_notified === 'number', 'E2E-OVERDUE-SWEEP', 'run-scheduled reports an overdue-notified count (due-date reminder sweep is wired)', `overdue_notified=${runMs.data?.overdue_notified}`);
+    const clJobs = (await jobsFor(roomId, 'CLEANING')).filter(j => created.templates.includes(j.template_id));
+    ok(clJobs.length >= 1, 'E2E-CLEANING', 'Daily run raised the room-cleaning checklist at the per-booking cadence (default daily)', `cleaning jobs=${clJobs.length}`);
 
     // Check-out — room must go CLEANING and a BLOCKING check-out checklist must open.
     // waive:true comps the throwaway test folio so the checkout isn't blocked by the
@@ -178,6 +186,7 @@ async function cleanup() {
         if (bk.status === 201 && bk.data?.id) { bId2 = bk.data.id; rId2 = room.id; break; }
       }
       if (bId2) {
+        created.bookingId2 = bId2;
         await api('POST', `${P}/hotel/bookings/${bId2}/checkin`, {});
         const co2 = await api('POST', `${P}/hotel/bookings/${bId2}/checkout`, { payment_method: 'CASH', waive: true });
         if (co2.status === 200 || co2.status === 201) {

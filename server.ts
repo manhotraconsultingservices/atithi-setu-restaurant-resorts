@@ -442,6 +442,10 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- Day-use time window: HH:MM 24h strings, null for overnight bookings
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS day_use_start_time TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS day_use_end_time   TEXT;
+    -- Per-booking room-cleaning cadence (nights): 1 = daily, 2 = every 2 nights,
+    -- 0 = none. Front desk sets it at check-in per the guest's preference; the
+    -- daily cron raises the CLEANING checklist for in-house stays accordingly.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cleaning_frequency_nights INT DEFAULT 1;
     -- Room Change log: one row per physical room move during an active stay.
     -- Recorded by front desk when a guest is moved (upgrade, maintenance, preference).
     -- from_room_name / to_room_name are snapshots so the report stays readable
@@ -21723,6 +21727,23 @@ ${data.tenant.name}`;
         }
       }
     }
+
+    // Room-cleaning system template (CLEANING trigger). Seeded separately from the
+    // block above so EXISTING tenants (which already have the checkout template)
+    // pick it up too. Non-blocking — it never holds the room; the daily cron raises
+    // it during a stay at the guest's per-booking cadence (cleaning_frequency_nights).
+    const cleanSeeded: any = await db.get("SELECT 1 AS x FROM checklist_templates WHERE id = 'TPL-SYS-ROOM-CLEANING'").catch(() => null);
+    if (!cleanSeeded) {
+      await db.run("INSERT INTO checklist_categories (id, name, slug, is_system, sort_order) SELECT 'CAT-SYS-PMS', 'PMS', 'pms', 1, 0 WHERE NOT EXISTS (SELECT 1 FROM checklist_categories WHERE id = 'CAT-SYS-PMS')").catch(() => {});
+      await db.run("INSERT INTO checklist_templates (id, category_id, name, facility_type, trigger_event, blocks_release, is_system) SELECT 'TPL-SYS-ROOM-CLEANING', 'CAT-SYS-PMS', 'Room Cleaning', 'ROOM', 'CLEANING', 0, 1 WHERE NOT EXISTS (SELECT 1 FROM checklist_templates WHERE id = 'TPL-SYS-ROOM-CLEANING')").catch(() => {});
+      const cleanSteps = ['Change bed linen & towels', 'Clean & sanitise bathroom', 'Empty bins & replace liners', 'Vacuum / mop floor & dust surfaces', 'Restock amenities (water, tea/coffee)'];
+      const stepCnt: any = await db.get("SELECT COUNT(*)::int AS c FROM checklist_template_steps WHERE template_id = 'TPL-SYS-ROOM-CLEANING'").catch(() => ({ c: 0 }));
+      if (Number(stepCnt?.c || 0) === 0) {
+        for (let i = 0; i < cleanSteps.length; i++) {
+          await db.run("INSERT INTO checklist_template_steps (id, template_id, label, is_mandatory, sort_order) VALUES (?, 'TPL-SYS-ROOM-CLEANING', ?, 1, ?)", [mkHkId('CHKS'), cleanSteps[i], i]).catch(() => {});
+        }
+      }
+    }
   };
 
   // Resolve the checklist templates that apply to a facility for a trigger.
@@ -21830,8 +21851,8 @@ ${data.tenant.name}`;
   const runTenantScheduledChecklists = async (db: any, o: { isHotel: boolean; isEvents: boolean; ymd: string }): Promise<number> => {
     let raised = 0;
     await ensureHousekeepingTables(db);
-    const has: any = await db.get("SELECT (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='DAILY') AS daily, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='MID_STAY') AS midstay").catch(() => ({ daily: 0, midstay: 0 }));
-    if (Number(has?.daily || 0) === 0 && Number(has?.midstay || 0) === 0) return 0;
+    const has: any = await db.get("SELECT (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='DAILY') AS daily, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='MID_STAY') AS midstay, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='CLEANING') AS cleaning").catch(() => ({ daily: 0, midstay: 0, cleaning: 0 }));
+    if (Number(has?.daily || 0) === 0 && Number(has?.midstay || 0) === 0 && Number(has?.cleaning || 0) === 0) return 0;
     if (o.isHotel && Number(has?.daily || 0) > 0) {
       const rooms: any[] = await db.query("SELECT id, name, room_number, type_id FROM rooms").catch(() => []);
       for (const rm of rooms) {
@@ -21858,6 +21879,29 @@ ${data.tenant.name}`;
           const N = Math.max(1, Number(tpl.recurrence_nights) || 1);
           if (nights % N !== 0) continue;
           const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${st.id}:${tpl.id}:N${nights}`, due_date: o.ymd });
+          raised += ids.length;
+        }
+      }
+    }
+    // Room cleaning — recurring per in-house stay at the PER-BOOKING cadence the
+    // front desk set from the guest's preference (cleaning_frequency_nights): first
+    // clean after `freq` nights, then every `freq`. Skips the departure day (the
+    // check-out checklist covers it) and freq<1 (guest opted out). Distinct from the
+    // owner-cadence MID_STAY overstay checklist.
+    if (o.isHotel && Number(has?.cleaning || 0) > 0) {
+      const stays: any[] = await db.query("SELECT rb.id, rb.room_id, rb.check_in_date, rb.check_out_date, COALESCE(rb.cleaning_frequency_nights, 1) AS freq, r.name, r.room_number, r.type_id FROM room_bookings rb JOIN rooms r ON r.id = rb.room_id WHERE rb.status = 'CHECKED_IN'").catch(() => []);
+      for (const st of stays) {
+        const freq = Math.floor(Number(st.freq));
+        if (!(freq >= 1)) continue; // 0 / null → guest opted out of in-stay cleaning
+        const ci = String(st.check_in_date || '').slice(0, 10);
+        const co = String(st.check_out_date || '').slice(0, 10);
+        if (!ci) continue;
+        if (co && co <= o.ymd) continue; // departing today / overdue → checkout cleaning covers it
+        const nights = Math.floor((Date.parse(o.ymd) - Date.parse(ci)) / 86400000);
+        if (nights < freq || nights % freq !== 0) continue;
+        const tpls: any[] = await resolveTemplatesForTrigger(db, { facility_type: 'ROOM', facility_id: st.room_id, room_type_id: st.type_id || null, trigger: 'CLEANING' });
+        for (const tpl of tpls) {
+          const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'CLEANING', template_ids: [tpl.id], dedupe_key: `CLEAN:${st.id}:${tpl.id}:N${nights}`, due_date: o.ymd });
           raised += ids.length;
         }
       }
@@ -22072,7 +22116,7 @@ ${data.tenant.name}`;
   // is owner/admin-only; reads are hkStaff. Triggers resolve templates and raise
   // one job per applicable template (see resolveTemplatesForTrigger / raiseChecklistJobs).
   // ══════════════════════════════════════════════════════════════════════════
-  const CHK_TRIGGERS = ['CHECK_IN', 'CHECK_OUT', 'MID_STAY', 'DAILY', 'EVENT_COMPLETE', 'MANUAL'];
+  const CHK_TRIGGERS = ['CHECK_IN', 'CHECK_OUT', 'MID_STAY', 'DAILY', 'EVENT_COMPLETE', 'MANUAL', 'CLEANING'];
   const CHK_FTYPES = ['ROOM', 'EVENT', 'GENERIC'];
 
   // ── Categories ───────────────────────────────────────────────────────────
@@ -35927,6 +35971,13 @@ ${data.tenant.name}`;
       // checkout handler + the daily cron dedupe on (source_ref, template) and the
       // mid-stay dedupe key, so nothing double-raises. Never blocks check-in.
       try {
+        // Persist the guest's room-cleaning cadence if the front desk set it in the
+        // check-in wizard (1 = daily, 2 = every 2 nights, 0 = none). The daily cron
+        // raises the CLEANING checklist for this stay accordingly.
+        const cf = req.body?.cleaning_frequency_nights;
+        if (cf !== undefined && cf !== null && cf !== '') {
+          await tenantDb.run("UPDATE room_bookings SET cleaning_frequency_nights = ? WHERE id = ?", [Math.max(0, Math.floor(Number(cf) || 0)), req.params.bookingId]).catch(() => {});
+        }
         const rmStay: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
         const rmLabel = rmStay?.name || (rmStay?.room_number ? `Room ${rmStay.room_number}` : b.room_id);
         const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
@@ -45681,7 +45732,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-due-dates-and-overdue-reminders',
+    commit_marker: 'room-cleaning-per-booking-cadence',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

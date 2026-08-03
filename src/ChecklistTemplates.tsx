@@ -17,7 +17,8 @@ const scopeTypes = (scope: FacilityScope): string[] =>
 const TRIGGERS: { v: string; label: string; hint: string }[] = [
   { v: 'CHECK_IN', label: 'On check-in', hint: 'Raised when a guest checks into the room' },
   { v: 'CHECK_OUT', label: 'On check-out', hint: 'Raised when the room is checked out' },
-  { v: 'MID_STAY', label: 'Mid-stay (recurring)', hint: 'Every N nights of an in-house stay' },
+  { v: 'MID_STAY', label: 'Mid-stay / overstay (recurring)', hint: 'Every N nights of an in-house stay (owner cadence)' },
+  { v: 'CLEANING', label: 'Room cleaning (recurring)', hint: 'During a stay at the per-booking cadence the front desk sets at check-in' },
   { v: 'DAILY', label: 'Daily (each morning)', hint: 'Auto-raised every morning per facility' },
   { v: 'EVENT_COMPLETE', label: 'On event completion', hint: 'Raised when an event is marked complete' },
   { v: 'MANUAL', label: 'Manual / on-demand', hint: 'Started by staff when needed (inspections, audits)' },
