@@ -1014,6 +1014,30 @@ export function buildNotificationContent(
       };
     }
 
+    case 'CHECKLIST_OVERDUE': {
+      const tpl = data.template || data.templateName || 'Checklist';
+      const facility = data.facility || '';
+      const who = data.assignedUser || (data.assignedRole ? String(data.assignedRole).replace(/_/g, ' ').toLowerCase() : 'the team');
+      const due = data.dueDate || '';
+      return {
+        subject: `Overdue checklist: ${tpl}${facility ? ` — ${facility}` : ''}`,
+        text:
+          `A checklist is past its due date and still incomplete at ${r}.\n\n` +
+          `Checklist: ${tpl}\n${facility ? `For: ${facility}\n` : ''}${due ? `Due: ${due}\n` : ''}Assigned to: ${who}\n` +
+          `\nPlease complete it as soon as possible.\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#dc2626;margin-top:0">Checklist overdue ⏰</h2>` +
+          `<p>A checklist at <strong>${r}</strong> is past its due date and still incomplete.</p>` +
+          `<table style="margin:12px 0"><tr><td><b>Checklist:</b></td><td>${tpl}</td></tr>` +
+          (facility ? `<tr><td><b>For:</b></td><td>${facility}</td></tr>` : '') +
+          (due ? `<tr><td><b>Due:</b></td><td>${due}</td></tr>` : '') +
+          `<tr><td><b>Assigned to:</b></td><td>${who}</td></tr></table>` +
+          `<p>Please complete it as soon as possible.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p></div>`,
+      };
+    }
+
     case 'BOOKING_NO_SHOW': {
       const guest = data.guestName || 'Guest';
       const checkIn = data.checkIn ? new Date(String(data.checkIn)).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'expected date';

@@ -46,6 +46,14 @@ const statePill = (s: string) => {
   const cls = st === 'COMPLETE' ? 'bg-emerald-50 text-emerald-700' : st === 'DRAFT' ? 'bg-stone-100 text-stone-600' : 'bg-amber-50 text-amber-700';
   return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${cls}`}>{st || 'ASSIGNED'}</span>;
 };
+// Due date cell — highlights overdue (past due & not complete) in red with a clock.
+const dueCell = (due: any, complete: boolean) => {
+  const d = String(due || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return <span className="text-[#c9bcae]">—</span>;
+  const today = new Date().toISOString().slice(0, 10);
+  const overdue = !complete && d < today;
+  return <span className={`text-[11px] whitespace-nowrap ${overdue ? 'text-rose-600 font-bold' : 'text-[#6b5d52]'}`}>{d}{overdue ? ' ⏰' : ''}</span>;
+};
 
 export function MyChecklists({ restaurantId, token }: Props) {
   const api = useCallback(makeApi(restaurantId, token), [restaurantId, token]);
@@ -100,6 +108,12 @@ export function MyChecklists({ restaurantId, token }: Props) {
       getValue: (j) => { const c = taskCounts(j); return c.total ? c.done / c.total : 0; },
       render: (j) => { const { total, done, pendMand } = taskCounts(j); return <span className="tabular-nums whitespace-nowrap">{done}/{total}{pendMand > 0 ? <span className="text-[11px] text-rose-600"> · {pendMand} req</span> : ''}</span>; },
       exportValue: (j) => { const { total, done } = taskCounts(j); return `${done}/${total}`; },
+    },
+    {
+      key: 'due', label: 'Due', sortable: true, align: 'center', searchable: false,
+      getValue: (j) => j.due_date || '',
+      render: (j) => dueCell(j.due_date, j.workflow_state === 'COMPLETE'),
+      exportValue: (j) => j.due_date || '',
     },
     {
       key: 'status', label: 'Status', sortable: true, align: 'center', filterable: true, filterType: 'select',

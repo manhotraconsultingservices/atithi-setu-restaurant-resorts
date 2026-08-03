@@ -140,6 +140,7 @@ async function cleanup() {
     const runMs = await api('POST', `${P}/checklists/run-scheduled`, { as_of: day(1) });
     const msJobs = (await jobsFor(roomId, 'MID_STAY')).filter(j => created.templates.includes(j.template_id));
     ok(runMs.status === 200 && msJobs.length >= 1, 'E2E-MIDSTAY', 'Overstay run raised the mid-stay checklist for the in-house room', `raised=${runMs.data?.raised}, jobs=${msJobs.length}`);
+    ok(typeof runMs.data?.overdue_notified === 'number', 'E2E-OVERDUE-SWEEP', 'run-scheduled reports an overdue-notified count (due-date reminder sweep is wired)', `overdue_notified=${runMs.data?.overdue_notified}`);
 
     // Check-out — room must go CLEANING and a BLOCKING check-out checklist must open.
     // waive:true comps the throwaway test folio so the checkout isn't blocked by the

@@ -21640,7 +21640,10 @@ ${data.tenant.name}`;
       // (OPEN/DONE) stays the release-gating truth; workflow_state is the richer
       // lifecycle + who owns it (a specific user and/or a responsible role).
       "workflow_state TEXT DEFAULT 'ASSIGNED'", 'assigned_to_user TEXT',
-      'assigned_to_role TEXT', 'assigned_at TIMESTAMP', 'assigned_by TEXT']) {
+      'assigned_to_role TEXT', 'assigned_at TIMESTAMP', 'assigned_by TEXT',
+      // Due date (YYYY-MM-DD) + last overdue-reminder date so the daily cron
+      // notifies the assignee at most once a day when a job passes its due date.
+      'due_date TEXT', 'overdue_notified_on TEXT']) {
       await db.exec(`ALTER TABLE housekeeping_jobs ADD COLUMN IF NOT EXISTS ${col}`).catch(() => {});
     }
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_hk_jobs_assignee ON housekeeping_jobs(assigned_to_role, assigned_to_user, workflow_state)`).catch(() => {});
@@ -21744,6 +21747,21 @@ ${data.tenant.name}`;
     return [];
   };
 
+  // Due date (YYYY-MM-DD) for a raised checklist, derived from its trigger + the
+  // stay dates: CHECK_IN → arrival day, CHECK_OUT → departure day, MID_STAY →
+  // arrival + recurrence, DAILY/other → the day it's raised. null when inputs
+  // aren't valid dates. Drives the overdue-reminder sweep in the daily cron.
+  const _chkYmd = (d: any): string | null => { const s = String(d || '').slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null; };
+  const _chkYmdPlus = (ymd: string, n: number): string => { const dt = new Date(ymd + 'T00:00:00'); dt.setDate(dt.getDate() + n); return dt.toISOString().slice(0, 10); };
+  const _checklistDueDate = (trigger: string, o: { checkInDate?: any; checkOutDate?: any; recurrenceNights?: number; asOf?: any }): string | null => {
+    switch (trigger) {
+      case 'CHECK_IN': return _chkYmd(o.checkInDate);
+      case 'CHECK_OUT': return _chkYmd(o.checkOutDate);
+      case 'MID_STAY': { const ci = _chkYmd(o.checkInDate); return ci ? _chkYmdPlus(ci, Math.max(1, o.recurrenceNights || 1)) : _chkYmd(o.asOf); }
+      default: return _chkYmd(o.asOf) || _chkYmd(o.checkInDate);
+    }
+  };
+
   // Create ONE cleaning job from a template (snapshotting steps + blocks_release).
   const createJobFromTemplate = async (db: any, tpl: any, o: any): Promise<string | null> => {
     const recurring = tpl.trigger_event === 'DAILY' || tpl.trigger_event === 'MID_STAY';
@@ -21764,8 +21782,8 @@ ${data.tenant.name}`;
       ? (o.blocks_release_override ? 1 : 0)
       : (tpl.blocks_release ? 1 : 0);
     await db.run(
-      "INSERT INTO housekeeping_jobs (id, facility_type, facility_id, facility_label, source_ref, guest_label, status, template_id, template_name, category_id, trigger_event, blocks_release, dedupe_key, workflow_state, assigned_to_role, assigned_to_user, assigned_at) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, 'ASSIGNED', ?, ?, CURRENT_TIMESTAMP)",
-      [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref || null, o.guest_label || null, tpl.id, tpl.name, tpl.category_id || null, o.trigger, blocksRelease, o.dedupe_key || null, asgRole, o.assigned_to_user || null]);
+      "INSERT INTO housekeeping_jobs (id, facility_type, facility_id, facility_label, source_ref, guest_label, status, template_id, template_name, category_id, trigger_event, blocks_release, dedupe_key, workflow_state, assigned_to_role, assigned_to_user, assigned_at, due_date) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, 'ASSIGNED', ?, ?, CURRENT_TIMESTAMP, ?)",
+      [jid, o.facility_type, o.facility_id, o.facility_label, o.source_ref || null, o.guest_label || null, tpl.id, tpl.name, tpl.category_id || null, o.trigger, blocksRelease, o.dedupe_key || null, asgRole, o.assigned_to_user || null, o.due_date || null]);
     for (const s of steps) {
       await db.run("INSERT INTO housekeeping_job_tasks (id, job_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
         [mkHkId('HKJT'), jid, s.label, s.is_mandatory, s.sort_order]);
@@ -21775,7 +21793,7 @@ ${data.tenant.name}`;
 
   // Raise all applicable checklist jobs for a trigger (one per template). Never
   // throws — the caller (checkout/checkin/complete/cron) is never blocked.
-  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null; assigned_to_role?: string | null; assigned_to_user?: string | null; blocks_release_override?: number | null }): Promise<string[]> => {
+  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null; assigned_to_role?: string | null; assigned_to_user?: string | null; blocks_release_override?: number | null; due_date?: string | null }): Promise<string[]> => {
     try {
       await ensureHousekeepingTables(db);
       let templates: any[];
@@ -21794,7 +21812,7 @@ ${data.tenant.name}`;
 
   // Backwards-compatible shim — every existing caller keeps working and now
   // transparently supports multiple templates per trigger. Returns first job id.
-  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null; room_type_id?: string | null; blocks_release_override?: number | null }) => {
+  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null; room_type_id?: string | null; blocks_release_override?: number | null; due_date?: string | null }) => {
     const trigger = o.facility_type === 'EVENT' ? 'EVENT_COMPLETE' : 'CHECK_OUT';
     const ids = await raiseChecklistJobs(db, { ...o, trigger });
     return ids[0] || null;
@@ -21817,14 +21835,14 @@ ${data.tenant.name}`;
     if (o.isHotel && Number(has?.daily || 0) > 0) {
       const rooms: any[] = await db.query("SELECT id, name, room_number, type_id FROM rooms").catch(() => []);
       for (const rm of rooms) {
-        const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${o.ymd}` });
+        const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${o.ymd}`, due_date: o.ymd });
         raised += ids.length;
       }
     }
     if (o.isEvents && Number(has?.daily || 0) > 0) {
       const venues: any[] = await db.query("SELECT id, name FROM event_venues WHERE is_active = 1").catch(() => []);
       for (const v of venues) {
-        const ids = await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${o.ymd}` });
+        const ids = await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${o.ymd}`, due_date: o.ymd });
         raised += ids.length;
       }
     }
@@ -21839,12 +21857,42 @@ ${data.tenant.name}`;
         for (const tpl of tpls) {
           const N = Math.max(1, Number(tpl.recurrence_nights) || 1);
           if (nights % N !== 0) continue;
-          const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${st.id}:${tpl.id}:N${nights}` });
+          const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${st.id}:${tpl.id}:N${nights}`, due_date: o.ymd });
           raised += ids.length;
         }
       }
     }
     return raised;
+  };
+
+  // Notify the assigned person / team about checklists that passed their due
+  // date and still aren't complete. Runs from the daily cron + the owner "run
+  // now" endpoint. At most one reminder per job per day (overdue_notified_on
+  // guard). Best-effort — never throws.
+  const notifyOverdueChecklists = async (db: any, restaurantId: string, ymd: string): Promise<number> => {
+    let notified = 0;
+    try {
+      const overdue: any[] = await db.query(
+        "SELECT id, template_name, trigger_event, facility_id, facility_label, facility_type, source_ref, assigned_to_role, assigned_to_user, due_date FROM housekeeping_jobs WHERE status = 'OPEN' AND due_date IS NOT NULL AND due_date < ? AND (overdue_notified_on IS NULL OR overdue_notified_on < ?)",
+        [ymd, ymd]
+      ).catch(() => []);
+      for (const j of (overdue || [])) {
+        try {
+          await triggerNotification(restaurantId, 'CHECKLIST_OVERDUE', {
+            jobId: j.id,
+            template: j.template_name || j.trigger_event || 'Checklist',
+            facility: j.facility_label || j.facility_id || j.facility_type,
+            assignedRole: j.assigned_to_role || null,
+            assignedUser: j.assigned_to_user || null,
+            dueDate: j.due_date,
+            bookingId: j.source_ref || null,
+          });
+        } catch { /* notification is best-effort */ }
+        await db.run("UPDATE housekeeping_jobs SET overdue_notified_on = ? WHERE id = ?", [ymd, j.id]).catch(() => {});
+        notified++;
+      }
+    } catch (e) { console.warn('[checklist] overdue sweep failed:', e); }
+    return notified;
   };
 
   // ── Owner config — LEGACY checklist template editor. Now backed by the two
@@ -22294,7 +22342,8 @@ ${data.tenant.name}`;
       const isEvents = Number(rest?.events_enabled) === 1;
       const ymd = String(req.body?.as_of || new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10)).slice(0, 10);
       const raised = await runTenantScheduledChecklists(db, { isHotel, isEvents, ymd });
-      res.json({ raised, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
+      const overdue_notified = await notifyOverdueChecklists(db, req.params.id, ymd);
+      res.json({ raised, overdue_notified, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to run scheduled checklists' }); }
   });
 
@@ -22331,7 +22380,7 @@ ${data.tenant.name}`;
       const jobs: any[] = await db.query(
         `SELECT id, facility_type, facility_id, facility_label, source_ref, guest_label, status, workflow_state,
                 template_name, category_id, trigger_event, blocks_release, assigned_to_role, assigned_to_user,
-                assigned_at, created_at, completed_at, completed_by
+                assigned_at, created_at, completed_at, completed_by, due_date
            FROM housekeeping_jobs WHERE ${where}
           ORDER BY (workflow_state = 'ASSIGNED') DESC, created_at DESC LIMIT 300`,
         params
@@ -22462,7 +22511,7 @@ ${data.tenant.name}`;
       const jobs: any[] = await db.query(
         `SELECT id, facility_type, facility_id, facility_label, source_ref, guest_label, status, workflow_state,
                 template_name, category_id, trigger_event, blocks_release, assigned_to_role, assigned_to_user,
-                assigned_at, created_at, completed_at, completed_by
+                assigned_at, created_at, completed_at, completed_by, due_date
            FROM housekeeping_jobs ${where}
           ORDER BY (status = 'OPEN') DESC, created_at ASC LIMIT 500`, params
       ).catch(() => []);
@@ -29326,7 +29375,7 @@ ${data.tenant.name}`;
         const ciCfg: any = await centralDb.get("SELECT checklist_validate_on_checkin FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
         if (Number(ciCfg?.checklist_validate_on_checkin ?? 1) === 1 && ['BOOKED', 'ASSIGNED'].includes(String(row?.status || 'BOOKED').toUpperCase())) {
           const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [resolvedRoomId]).catch(() => null);
-          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: resolvedRoomId, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : resolvedRoomId), source_ref: bid, guest_label: guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN' });
+          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: resolvedRoomId, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : resolvedRoomId), source_ref: bid, guest_label: guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN', due_date: _checklistDueDate('CHECK_IN', { checkInDate: check_in_date }) });
         }
       } catch { /* non-fatal — never block booking creation */ }
       // ARI push: fire-and-forget update to all enabled OTA channels.
@@ -35817,7 +35866,7 @@ ${data.tenant.name}`;
       if (_checklistOn) {
         try {
           const rmCi: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN' });
+          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN', due_date: _checklistDueDate('CHECK_IN', { checkInDate: b.check_in_date }) });
           const rows: any[] = await tenantDb.query("SELECT id FROM housekeeping_jobs WHERE source_ref = ? AND trigger_event = 'CHECK_IN' AND status = 'OPEN'", [req.params.bookingId]).catch(() => []);
           _checkinJobIds = (rows || []).map((r: any) => r.id);
           if (_checkinJobIds.length) {
@@ -35882,7 +35931,7 @@ ${data.tenant.name}`;
         const rmLabel = rmStay?.name || (rmStay?.room_number ? `Room ${rmStay.room_number}` : b.room_id);
         const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
         const enforceCo = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
-        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'CHECK_OUT', blocks_release_override: enforceCo ? null : 0 });
+        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'CHECK_OUT', blocks_release_override: enforceCo ? null : 0, due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
         const ciYmd = String(b.check_in_date || '').slice(0, 10), coYmd = String(b.check_out_date || '').slice(0, 10);
         const stayNights = (/^\d{4}-\d{2}-\d{2}$/.test(ciYmd) && /^\d{4}-\d{2}-\d{2}$/.test(coYmd))
           ? Math.round((new Date(coYmd + 'T00:00:00').getTime() - new Date(ciYmd + 'T00:00:00').getTime()) / 86400000) : 0;
@@ -35891,7 +35940,7 @@ ${data.tenant.name}`;
           for (const tpl of (msTpls || [])) {
             const rec = Math.max(1, Number(tpl.recurrence_nights || 1));
             if (rec >= stayNights) continue; // recurrence longer than the stay → never fires
-            await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${req.params.bookingId}:${tpl.id}:N${rec}` });
+            await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${req.params.bookingId}:${tpl.id}:N${rec}`, due_date: _checklistDueDate('MID_STAY', { checkInDate: b.check_in_date, recurrenceNights: rec }) });
           }
         }
       } catch (e) { console.warn('[checkin] stay-checklist setup (non-fatal):', e); }
@@ -36425,7 +36474,7 @@ ${data.tenant.name}`;
         const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
         const enforceCheckout = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
         const rm: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, blocks_release_override: enforceCheckout ? null : 0 });
+        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, blocks_release_override: enforceCheckout ? null : 0, due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
       } catch { /* non-fatal — never block checkout */ }
 
       // ── Fire the unified loyalty hook so the folio counts toward the
@@ -45632,7 +45681,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checkin-raises-checkout-and-overstay-checklists',
+    commit_marker: 'checklist-due-dates-and-overdue-reminders',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
@@ -46918,6 +46967,7 @@ ${data.tenant.name}`;
           if (!isHotel && !isEvents) continue;
           const db = await getTenantDb(r.id);
           raised += await runTenantScheduledChecklists(db, { isHotel, isEvents, ymd });
+          await notifyOverdueChecklists(db, r.id, ymd);
         } catch (tenantErr) { console.error(`[checklist-cron] tenant ${r.id} error:`, tenantErr); }
       }
       if (raised > 0) console.log(`[checklist-cron] raised ${raised} daily/mid-stay checklist job(s)`);
