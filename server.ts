@@ -5260,6 +5260,48 @@ async function logAndSend(db: any, eventName: string, channel: string, recipient
   }
 }
 
+// Fires once when a brand-new tenant is created (from any registration path):
+//   1. Stamps the billing start date = creation day (only if still unset).
+//   2. Pings the Atithi-Setu admin group on Telegram with the new-tenant details.
+// Both steps are best-effort — this NEVER throws, so it can't break registration.
+// The admin group is TELEGRAM_ADMIN_CHAT_ID (falls back to TELEGRAM_DEFAULT_CHAT_ID
+// inside sendTelegram when that env var isn't set).
+async function notifyNewTenant(meta: {
+  restaurantId: string; name: string; city?: string | null; state?: string | null;
+  ownerName?: string | null; ownerEmail?: string | null; ownerPhone?: string | null;
+  propertyType?: string | null; source: string;
+}): Promise<void> {
+  try {
+    await centralDb.run(
+      "UPDATE restaurants SET billing_start_date = COALESCE(billing_start_date, CURRENT_DATE) WHERE id = ?",
+      [meta.restaurantId]
+    );
+  } catch (e: any) { console.error('[new-tenant] billing_start_date set failed:', e?.message || e); }
+
+  try {
+    // Escape Telegram legacy-Markdown metacharacters in dynamic values (an email
+    // like a_b@x.com would otherwise break parse_mode='Markdown' and drop the msg).
+    const esc = (s: any) => String(s ?? '').replace(/([_*`\[\]])/g, '\\$1');
+    const today = new Date().toISOString().slice(0, 10);
+    const loc = [meta.city, meta.state].filter(Boolean).map(esc).join(', ') || '—';
+    const lines = [
+      '🆕 *New tenant registered — Atithi-Setu*',
+      '',
+      `🏢 ${esc(meta.name)}`,
+      `🆔 ${esc(meta.restaurantId)}`,
+      `📍 ${loc}`,
+      meta.propertyType ? `🏷 Type: ${esc(meta.propertyType)}` : null,
+      `🧑 Owner: ${esc(meta.ownerName || '—')}${meta.ownerEmail ? ` · ${esc(meta.ownerEmail)}` : ''}`,
+      meta.ownerPhone ? `📞 ${esc(meta.ownerPhone)}` : null,
+      `🗓 Billing start: ${today}`,
+      `🔗 Source: ${esc(meta.source)}`,
+      '',
+      '_Review & activate from the Internal admin console._',
+    ].filter(Boolean) as string[];
+    await sendTelegram(process.env.TELEGRAM_ADMIN_CHAT_ID || null, lines.join('\n'));
+  } catch (e: any) { console.error('[new-tenant] admin Telegram notify failed:', e?.message || e); }
+}
+
 async function triggerNotification(restaurantId: string, eventName: string, data: any) {
   try {
     // Inject restaurant name so all notifications display the correct restaurant
@@ -8446,6 +8488,13 @@ async function startServer() {
          ON CONFLICT (id) DO NOTHING`,
         [restaurantId, restaurant_name.trim(), email.toLowerCase(), 'N/A', location_city.trim(), newSlug, propertyType]
       );
+
+      // New tenant: stamp the billing start date + ping the admin group on Telegram.
+      notifyNewTenant({
+        restaurantId, name: restaurant_name.trim(), city: location_city.trim(),
+        ownerName: owner_name?.trim() || null, ownerEmail: email.toLowerCase(), ownerPhone: phone?.trim() || null,
+        propertyType, source: 'Public registration',
+      }).catch(() => {});
 
       // Phase 7: Auto-provision Cloudflare DNS + Tunnel Public Hostname
       // Completely best-effort — if CF env vars aren't set or the API fails,
@@ -43281,6 +43330,13 @@ ${data.tenant.name}`;
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `, [userId, loginId, name, email, phone, hashedPassword, restaurantId, 'OWNER']);
 
+      // New tenant: stamp the billing start date + ping the admin group on Telegram.
+      notifyNewTenant({
+        restaurantId, name: restaurantName, city, state,
+        ownerName: name || null, ownerEmail: email || null, ownerPhone: phone || null,
+        source: 'Sales-rep onboarding',
+      }).catch(() => {});
+
       // Seed sensible default tab-permission levels for each staff role.
       // Without seeds, perms===null → fail-open (any tab accessible).
       // These defaults give each role access to their core workflow only;
@@ -44944,7 +45000,7 @@ ${data.tenant.name}`;
       const rows: any[] = await centralDb.query(`
         SELECT id, name, slug, is_active,
                subscription_plan, subscription_due_date, grace_period_days,
-               subscription_expires_at,
+               subscription_expires_at, billing_start_date,
                access_revoked, access_revoked_at, access_revoked_by, access_revoked_reason,
                last_payment_date, last_payment_amount, last_payment_reference,
                billing_notes
@@ -44987,7 +45043,7 @@ ${data.tenant.name}`;
       const allowed = [
         'subscription_plan', 'subscription_due_date', 'grace_period_days',
         'last_payment_date', 'last_payment_amount', 'last_payment_reference',
-        'billing_notes',
+        'billing_notes', 'billing_start_date',
       ];
       const updates: Record<string, any> = {};
       for (const k of allowed) {
@@ -45824,7 +45880,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-category-module-scope',
+    commit_marker: 'new-tenant-billing-start-and-telegram',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

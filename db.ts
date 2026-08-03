@@ -168,6 +168,11 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS last_payment_reference TEXT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS billing_notes TEXT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_plan TEXT;
+    -- billing_start_date: the day billing begins for a tenant. Auto-set to the
+    -- creation date when a new tenant registers (see notifyNewTenant in server.ts);
+    -- backfilled here from registered_at for any pre-existing tenant.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS billing_start_date DATE;
+    UPDATE restaurants SET billing_start_date = registered_at::date WHERE billing_start_date IS NULL AND registered_at IS NOT NULL;
     -- Phase 2 (Multi-currency + configurable tax). Defaults preserve the
     -- exact India / GST / ₹ behaviour for every pre-existing tenant.
     --   country         ISO-3166 alpha-2, selects the default tax preset.
