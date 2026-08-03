@@ -1,6 +1,14 @@
 /**
- * e2e_checklists.mjs — validate the CHECK-IN, CHECK-OUT, OVERSTAY (mid-stay) and
- * EVENT-HALL DAILY checklist trigger flows end-to-end against a live tenant.
+ * e2e_checklists.mjs — walk a hotel-room booking AND an event-hall booking through
+ * their whole lifecycle and assert exactly which checklist fires at each step:
+ *
+ *   ROOM:  create → BOOKING_NEW + CHECK_IN(attached early)
+ *          check-in → CHECK_IN(gate) + ROOM_OCCUPIED + CHECK_OUT(planned) + MID_STAY(sched)
+ *          daily cron → DAILY + MID_STAY + CLEANING
+ *          check-out → CHECK_OUT(blocking, holds room) + ROOM_CLEANING ; complete → room VACANT
+ *   HALL:  daily cron → DAILY ; status board → VENUE_<status>
+ *          complete event ("checkout") → EVENT_COMPLETE(blocking) → gates the next
+ *          event's confirm on that venue → completing the clean releases it
  *
  * It is SELF-CLEANING: it closes the jobs it raises, cancels/checks-out its test
  * booking, deletes its templates, and restores the "ID at check-in" setting it may
@@ -35,7 +43,7 @@ const skip = (id, msg, note = '') => { skipN++; console.log(`⚠️  SKIP  ${id}
 const day = (o) => new Date(Date.now() + o * 86400000).toISOString().slice(0, 10);
 
 const P = `/api/restaurant/${RID}`;
-const created = { templates: [], bookingId: null, restoreReqId: undefined };
+const created = { templates: [], bookingId: null, evBookings: [], restoreReqId: undefined };
 const asList = (d) => Array.isArray(d) ? d : (d?.rooms || d?.venues || []);
 const jobsAll = async () => { const r = await api('GET', `${P}/housekeeping/jobs?status=ALL`); return Array.isArray(r.data) ? r.data : []; };
 const jobsFor = async (facilityId, trigger) => (await jobsAll()).filter(j => j.facility_id === facilityId && (!trigger || j.trigger_event === trigger));
@@ -67,10 +75,13 @@ async function cleanup() {
     const mine = new Set(created.templates);
     for (const j of await jobsAll()) if (j.status === 'OPEN' && mine.has(j.template_id)) { try { await closeJob(j.id); } catch {} }
     // Close any remaining OPEN jobs tied to this run's test bookings (e.g. the
-    // system Room-Cleaning template's jobs, which aren't in created.templates).
-    const testBk = new Set([created.bookingId, created.bookingId2].filter(Boolean));
+    // system Room-Cleaning / Event-Complete templates' jobs, which aren't in
+    // created.templates) so no test leaves a room or venue held.
+    const testBk = new Set([created.bookingId, created.bookingId2, ...created.evBookings].filter(Boolean));
     if (testBk.size) for (const j of await jobsAll()) if (j.status === 'OPEN' && testBk.has(j.source_ref)) { try { await closeJob(j.id); } catch {} }
   } catch {}
+  // Cancel any confirmable throwaway event bookings (COMPLETED ones can't be cancelled — harmless).
+  for (const eb of created.evBookings) { try { await api('POST', `${P}/events/bookings/${eb}/cancel`, { reason: 'E2E cleanup' }); } catch {} }
   for (const tid of created.templates) { try { await api('DELETE', `${P}/checklists/templates/${tid}`); } catch {} }
   if (created.restoreReqId !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: !!created.restoreReqId }); } catch {} }
   if (created.restoreCheckoutValidate !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { checklist_validate_on_checkout: !!created.restoreCheckoutValidate }); } catch {} }
@@ -94,8 +105,17 @@ async function cleanup() {
     const dlT = await mkTpl({ name: `E2E Hall Daily ${tag}`, facility_type: 'EVENT', trigger_event: 'DAILY', blocks_release: false, steps: [{ label: 'Wipe surfaces & set chairs', is_mandatory: true }] });
     const clT = await mkTpl({ name: `E2E Cleaning ${tag}`, facility_type: 'ROOM', trigger_event: 'CLEANING', blocks_release: false, steps: [{ label: 'Change linen & towels', is_mandatory: true }] });
     const vcT = await mkTpl({ name: `E2E Hall Clean ${tag}`, facility_type: 'EVENT', trigger_event: 'VENUE_CLEANING', blocks_release: false, steps: [{ label: 'Wipe hall & reset chairs', is_mandatory: true }] });
+    // Booking-lifecycle + room-status templates (all NON-blocking) so we can assert the
+    // BOOKING_NEW / ROOM_OCCUPIED / ROOM_CLEANING triggers fire at the right moments.
+    const bnT = await mkTpl({ name: `E2E Booking-New ${tag}`, facility_type: 'ROOM', trigger_event: 'BOOKING_NEW', blocks_release: false, steps: [{ label: 'Pre-assign welcome kit', is_mandatory: false }] });
+    const roT = await mkTpl({ name: `E2E Room-Occupied ${tag}`, facility_type: 'ROOM', trigger_event: 'ROOM_OCCUPIED', blocks_release: false, steps: [{ label: 'Log occupancy', is_mandatory: false }] });
+    const rcT = await mkTpl({ name: `E2E Room-Cleaning ${tag}`, facility_type: 'ROOM', trigger_event: 'ROOM_CLEANING', blocks_release: false, steps: [{ label: 'Turn-down clean', is_mandatory: false }] });
+    // EVENT_COMPLETE template (BLOCKING) — the event-hall "checkout": completing an event
+    // raises it, and it holds the venue (gates the next event's confirm) until cleaned.
+    const ecT = await mkTpl({ name: `E2E Hall Complete ${tag}`, facility_type: 'EVENT', trigger_event: 'EVENT_COMPLETE', blocks_release: true, steps: [{ label: 'Deep-clean hall after event', is_mandatory: true }] });
     ok(ciT.status === 201 && coT.status === 201 && msT.status === 201 && dlT.status === 201, 'E2E-SETUP', 'Created check-in / check-out / mid-stay / daily templates', `HTTP ${ciT.status}/${coT.status}/${msT.status}/${dlT.status}`);
     ok(clT.status === 201, 'E2E-SETUP-CLEANING', 'CLEANING trigger accepted by the template editor', `HTTP ${clT.status}`);
+    ok(bnT.status === 201 && roT.status === 201 && rcT.status === 201 && ecT.status === 201, 'E2E-SETUP-LIFECYCLE', 'Created booking-new / room-occupied / room-cleaning / event-complete templates', `HTTP ${bnT.status}/${roT.status}/${rcT.status}/${ecT.status}`);
     if (ciT.status === 403) { console.error('\nNeed OWNER role to create templates — aborting.\n'); return; }
 
     // ── EVENT-HALL DAILY (independent of bookings) ──
@@ -110,9 +130,40 @@ async function cleanup() {
       const vJobs = (await jobsFor(vId, 'VENUE_CLEANING')).filter(j => created.templates.includes(j.template_id));
       ok((vs.status === 200) && vJobs.length >= 1, 'E2E-VENUE-STATUS', 'Setting a hall to CLEANING raised the VENUE_CLEANING checklist (non-blocking)', `http=${vs.status}, jobs=${vJobs.length}`);
       await api('PATCH', `${P}/events/venues/${vId}/status`, { status: 'VACANT' }).catch(() => {}); // reset
+
+      // ── EVENT-HALL LIFECYCLE: booking → complete ("checkout") → gate → release ──
+      // Faithfully walks a hall booking to completion and proves the EVENT_COMPLETE
+      // checklist (a) fires on complete, (b) is blocking, (c) gates the NEXT event's
+      // confirm on that venue, and (d) releases the venue once cleaned.
+      const evA = await api('POST', `${P}/events/bookings`, { venue_id: vId, customer_name: `E2E Event ${tag}`, customer_phone: '9990000200', event_date: day(0), guest_count: 20 });
+      if (evA.status === 201 && evA.data?.id) {
+        created.evBookings.push(evA.data.id);
+        const comp = await api('POST', `${P}/events/bookings/${evA.data.id}/complete`, {});
+        const ecJobs = (await jobsFor(vId, 'EVENT_COMPLETE')).filter(j => created.templates.includes(j.template_id));
+        const ecBlocking = ecJobs.filter(j => j.status === 'OPEN' && Number(j.blocks_release) === 1);
+        ok(comp.status === 200 && ecBlocking.length >= 1, 'E2E-EVT-COMPLETE', 'Completing an event raised a BLOCKING EVENT_COMPLETE checklist for the hall', `http=${comp.status}, blocking=${ecBlocking.length}`);
+
+        // A NEW booking on the same venue cannot be confirmed while the cleaning checklist is open.
+        const evB = await api('POST', `${P}/events/bookings`, { venue_id: vId, customer_name: `E2E Event ${tag}b`, customer_phone: '9990000201', event_date: day(30), guest_count: 20 });
+        if (evB.status === 201 && evB.data?.id) {
+          created.evBookings.push(evB.data.id);
+          const conf1 = await api('POST', `${P}/events/bookings/${evB.data.id}/confirm`, {});
+          ok(conf1.status === 409 && conf1.data?.housekeeping_blocked === true, 'E2E-EVT-GATE', 'Confirming a new event is blocked while the hall cleaning checklist is open', `http=${conf1.status}, blocked=${conf1.data?.housekeeping_blocked}`);
+
+          // Complete the cleaning checklist(s) → venue frees → confirm now succeeds.
+          for (const j of (await jobsFor(vId, 'EVENT_COMPLETE'))) if (j.status === 'OPEN' && Number(j.blocks_release) === 1) { try { await closeJob(j.id); } catch {} }
+          const conf2 = await api('POST', `${P}/events/bookings/${evB.data.id}/confirm`, {});
+          ok(conf2.status !== 409 || conf2.data?.housekeeping_blocked !== true, 'E2E-EVT-RELEASE', 'After the cleaning checklist is done, the venue frees and the next event confirms', `http=${conf2.status}`);
+        } else {
+          ['E2E-EVT-GATE', 'E2E-EVT-RELEASE'].forEach(id => skip(id, 'Hall gate', `could not create 2nd event booking HTTP ${evB.status}`));
+        }
+      } else {
+        ['E2E-EVT-COMPLETE', 'E2E-EVT-GATE', 'E2E-EVT-RELEASE'].forEach(id => skip(id, 'Hall lifecycle', `could not create event booking HTTP ${evA.status}`));
+      }
     } else {
       skip('E2E-DAILY-HALL', 'Event-hall daily', 'events not enabled or no venues on this tenant');
       skip('E2E-VENUE-STATUS', 'Hall status board', 'events not enabled or no venues on this tenant');
+      ['E2E-EVT-COMPLETE', 'E2E-EVT-GATE', 'E2E-EVT-RELEASE'].forEach(id => skip(id, 'Hall lifecycle', 'events not enabled or no venues on this tenant'));
     }
 
     // ── CHECK-IN → OVERSTAY → CHECK-OUT (need hotel + a bookable room) ──
@@ -134,6 +185,10 @@ async function cleanup() {
     const preCi = (await jobsFor(roomId, 'CHECK_IN')).filter(j => created.templates.includes(j.template_id));
     ok(preCi.length >= 1, 'E2E-CHECKIN-EARLY', 'Check-in checklist attached at booking-confirm time (before check-in)', `${preCi.length} pre-check-in job(s)`);
 
+    // Creating the booking should also raise the BOOKING_NEW checklist (non-blocking).
+    const bnJobs = (await jobsFor(roomId, 'BOOKING_NEW')).filter(j => created.templates.includes(j.template_id));
+    ok(bnJobs.length >= 1, 'E2E-BOOKING-NEW', 'Booking creation raised the BOOKING_NEW checklist (non-blocking)', `${bnJobs.length} booking-new job(s)`);
+
     // Check-in (turn ID-requirement off for the test if it blocks; restored in cleanup).
     let cin = await api('POST', `${P}/hotel/bookings/${bookingId}/checkin`, {});
     if (cin.status === 400 && (cin.data?.missing_field === 'guest_documents' || cin.data?.require_id_at_checkin)) {
@@ -149,6 +204,9 @@ async function cleanup() {
     }
     const ciJobs = (await jobsFor(roomId, 'CHECK_IN')).filter(j => created.templates.includes(j.template_id));
     ok(ciJobs.length >= 1, 'E2E-CHECKIN', 'Check-in raised the check-in checklist for the room', `${ciJobs.length} check-in job(s)`);
+    // Check-in flips the room to OCCUPIED → the ROOM_OCCUPIED status checklist (non-blocking).
+    const roJobs = (await jobsFor(roomId, 'ROOM_OCCUPIED')).filter(j => created.templates.includes(j.template_id));
+    ok(roJobs.length >= 1, 'E2E-ROOM-OCCUPIED', 'Check-in raised the ROOM_OCCUPIED status checklist (non-blocking)', `${roJobs.length} occupied job(s)`);
 
     // Overstay — evaluate the scheduled run "as of tomorrow" so nights = 1 (mid-stay every 1 night).
     const runMs = await api('POST', `${P}/checklists/run-scheduled`, { as_of: day(1) });
@@ -171,6 +229,9 @@ async function cleanup() {
     const coJobs = (await jobsFor(roomId, 'CHECK_OUT')).filter(j => created.templates.includes(j.template_id));
     const blocking = coJobs.filter(j => j.status === 'OPEN' && Number(j.blocks_release) === 1);
     ok(roomRow?.status === 'CLEANING' && blocking.length >= 1, 'E2E-CHECKOUT', 'Check-out set room to CLEANING and raised a blocking check-out checklist', `room=${roomRow?.status}, blocking=${blocking.length}`);
+    // Check-out flips the room to CLEANING → the ROOM_CLEANING status checklist (non-blocking).
+    const rcJobs = (await jobsFor(roomId, 'ROOM_CLEANING')).filter(j => created.templates.includes(j.template_id));
+    ok(rcJobs.length >= 1, 'E2E-ROOM-CLEANING', 'Check-out raised the ROOM_CLEANING status checklist (non-blocking)', `${rcJobs.length} cleaning job(s)`);
 
     // Gating — completing the blocking checklist releases the room to VACANT.
     for (const j of blocking) await closeJob(j.id);
