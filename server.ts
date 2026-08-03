@@ -35870,6 +35870,32 @@ ${data.tenant.name}`;
       }
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CHECKED_IN', summary: `Checked in — ${b.guest_name || ''} (room ${b.room_id})`.trim() });
 
+      // ── Set up the rest of the stay's checklists the moment the guest is in ──
+      // so the team can see what's coming: the CHECK-OUT checklist (planned; it
+      // holds the room at checkout only when checklist_validate_on_checkout is on)
+      // and, for multi-night stays, the OVERSTAY (mid-stay) checklist at the
+      // owner-configured cadence (template.recurrence_nights). Idempotent: the
+      // checkout handler + the daily cron dedupe on (source_ref, template) and the
+      // mid-stay dedupe key, so nothing double-raises. Never blocks check-in.
+      try {
+        const rmStay: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+        const rmLabel = rmStay?.name || (rmStay?.room_number ? `Room ${rmStay.room_number}` : b.room_id);
+        const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+        const enforceCo = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
+        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'CHECK_OUT', blocks_release_override: enforceCo ? null : 0 });
+        const ciYmd = String(b.check_in_date || '').slice(0, 10), coYmd = String(b.check_out_date || '').slice(0, 10);
+        const stayNights = (/^\d{4}-\d{2}-\d{2}$/.test(ciYmd) && /^\d{4}-\d{2}-\d{2}$/.test(coYmd))
+          ? Math.round((new Date(coYmd + 'T00:00:00').getTime() - new Date(ciYmd + 'T00:00:00').getTime()) / 86400000) : 0;
+        if (stayNights > 1) {
+          const msTpls = await resolveTemplatesForTrigger(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, room_type_id: rmStay?.type_id || null, trigger: 'MID_STAY' });
+          for (const tpl of (msTpls || [])) {
+            const rec = Math.max(1, Number(tpl.recurrence_nights || 1));
+            if (rec >= stayNights) continue; // recurrence longer than the stay → never fires
+            await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${req.params.bookingId}:${tpl.id}:N${rec}` });
+          }
+        }
+      } catch (e) { console.warn('[checkin] stay-checklist setup (non-fatal):', e); }
+
       // ── REQ 1: lock every existing ID-proof document for this booking ──
       // The moment a guest checks in, the ID-proof documents that were
       // submitted become the official record of the stay (statutory for
@@ -45606,7 +45632,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checkin-checklist-at-booking-plus-overview-checkin',
+    commit_marker: 'checkin-raises-checkout-and-overstay-checklists',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
