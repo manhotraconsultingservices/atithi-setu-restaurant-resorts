@@ -52019,7 +52019,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
         <div className="space-y-6">
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8 max-w-2xl">
             <h3 className="text-xl font-bold flex items-center gap-2"><Bell size={20} className="text-sky-600" /> Admin Alerts — Telegram</h3>
-            <p className="text-sm text-[#6b5d52] mt-1">Send platform alerts to your Atithi-Setu admin group on Telegram. The bot token is a server setting; here you set the group chat ID and which events fire.</p>
+            <p className="text-sm text-[#6b5d52] mt-1">Send platform alerts to Atithi-Setu admins on Telegram — to individual people (DMs) and/or a shared admin group. The bot token is a server setting; here you add the recipient IDs and choose which events fire.</p>
 
             {alertMsg && (
               <div className={cn("mt-4 px-4 py-2 rounded-xl text-sm", alertMsg.type === 'ok' ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200")}>{alertMsg.text}</div>
@@ -52042,30 +52042,30 @@ function SuperAdminDashboard({ token }: { token: string }) {
                         🤖 Alerts are sent by <b>@{alertCfg.bot_username}</b> —{' '}
                         <a href={`https://t.me/${alertCfg.bot_username}`} target="_blank" rel="noreferrer" className="underline font-semibold">open it in Telegram</a>.
                         <div className="text-[11px] mt-1 text-sky-700">
-                          For a <b>personal DM</b> (positive id): open <b>@{alertCfg.bot_username}</b> from that same account and tap <b>Start</b> once — otherwise Telegram returns “chat not found”.
-                          For a <b>group</b>: add <b>@{alertCfg.bot_username}</b> to the group and use the group’s <b>negative</b> id.
+                          <b>Add a person:</b> they open <b>@{alertCfg.bot_username}</b> and tap <b>Start</b> once (lets the bot DM them), then get their numeric ID from <b>@userinfobot</b>.
+                          <b> Add a group:</b> add <b>@{alertCfg.bot_username}</b> to the group and paste the group's id (it self-corrects if the group becomes a supergroup). One ID per line.
                         </div>
                       </>
                     ) : (
-                      <>🤖 Make sure you press <b>Start</b> on the <b>same bot</b> whose token is configured here (find it in Telegram via <b>@BotFather → /mybots</b>). Pressing Start on a different bot causes “chat not found”.</>
+                      <>🤖 Recipients must be reachable by the <b>same bot</b> whose token is configured here (find it via <b>@BotFather → /mybots</b>): a person taps <b>Start</b> on it; a group has it added as a member.</>
                     )}
                   </div>
                 )}
 
                 <div>
-                  <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Admin group chat ID(s)</label>
+                  <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Admin Telegram IDs (people and/or a group)</label>
                   <textarea value={alertCfg.telegram_admin_chat_id || ''} onChange={e => setAlertCfg((p: any) => ({ ...p, telegram_admin_chat_id: e.target.value }))}
-                    rows={2}
-                    placeholder={"-1001234567890, 987654321\n(one or more — comma or new-line separated)"}
+                    rows={3}
+                    placeholder={"6613370540\n-1004286121003\n(one ID per line — a person or a group)"}
                     className="w-full bg-[#faf7f2] rounded-lg px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none focus:border-sky-400 resize-y" />
-                  <p className="text-[11px] text-[#9c8e85] mt-1">One or more chat IDs — a number per line or comma-separated (group IDs are negative). <b>Not</b> the bot token. Add the bot to each group, then read the id via @RawDataBot or the bot's getUpdates.{alertCfg.env_admin_chat_id ? ` Env fallback: ${alertCfg.env_admin_chat_id}` : ''}</p>
+                  <p className="text-[11px] text-[#9c8e85] mt-1">One ID per line (or comma-separated). <b>Person:</b> their numeric ID from <b>@userinfobot</b> (they tap <b>Start</b> on the bot first). <b>Group:</b> the group's id (add the bot to the group). <b>Not</b> the bot token.{alertCfg.env_admin_chat_id ? ` Env fallback: ${alertCfg.env_admin_chat_id}` : ''}</p>
                   {(alertCfg.telegram_admin_chat_id || '').split(/[\s,;]+/).map((s: string) => s.trim()).filter(Boolean).some((c: string) => /^\d+:[A-Za-z0-9_-]{20,}$/.test(c)) && (
-                    <p className="text-[11px] text-rose-600 mt-1 font-semibold">⚠ That looks like a bot token, not a chat ID. Enter the group's numeric ID (e.g. -1001234567890).</p>
+                    <p className="text-[11px] text-rose-600 mt-1 font-semibold">⚠ That looks like a bot token, not an ID. Enter a numeric chat ID (e.g. 6613370540 for a person, from @userinfobot).</p>
                   )}
                 </div>
 
                 <div className="space-y-2">
-                  <p className="text-xs font-semibold text-[#6b5d52]">Events that alert the admin group</p>
+                  <p className="text-xs font-semibold text-[#6b5d52]">Events that alert admins</p>
                   {[
                     { k: 'event_new_tenant', label: '🆕 New tenant registered' },
                     { k: 'event_subscription_due', label: '📅 Subscription due / overdue / expired' },

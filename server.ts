@@ -45306,12 +45306,12 @@ ${data.tenant.name}`;
     try {
       await ensurePlatformNotificationConfig();
       const b = req.body || {};
-      // Guard: a Telegram chat id is a NUMBER (negative for groups). Reject any
-      // entry that looks like the bot TOKEN (<digits>:<hash>). Multiple ids allowed.
+      // Guard: a Telegram user id is a NUMBER. Reject any entry that looks like the
+      // bot TOKEN (<digits>:<hash>). Multiple ids allowed (one admin per id).
       const _cids = parsePlatformChatIds(b?.telegram_admin_chat_id);
       const _bad = _cids.find(c => /^\d+:[A-Za-z0-9_-]{20,}$/.test(c));
       if (_bad) {
-        return res.status(400).json({ error: `"${_bad}" looks like the bot TOKEN, not a chat ID. Enter one or more chat IDs (numbers like -1001234567890), comma- or newline-separated. The token belongs in the server env TELEGRAM_BOT_TOKEN.` });
+        return res.status(400).json({ error: `"${_bad}" looks like the bot TOKEN, not a user ID. Enter each admin's numeric user ID (e.g. 6613370540, from @userinfobot), comma- or newline-separated. The token belongs in the server env TELEGRAM_BOT_TOKEN.` });
       }
       const fields: string[] = []; const vals: any[] = [];
       if ('telegram_admin_chat_id' in b) { fields.push("telegram_admin_chat_id = ?"); vals.push(_cids.length ? _cids.join(', ') : null); }
@@ -45344,9 +45344,9 @@ ${data.tenant.name}`;
       const cfgIds = parsePlatformChatIds(cfg?.telegram_admin_chat_id);
       const ids = bodyIds.length ? bodyIds : (cfgIds.length ? cfgIds : (process.env.TELEGRAM_ADMIN_CHAT_ID ? [process.env.TELEGRAM_ADMIN_CHAT_ID] : []));
       const bad = ids.find(c => /^\d+:[A-Za-z0-9_-]{20,}$/.test(c));
-      if (bad) return res.status(400).json({ error: `"${bad}" looks like the bot TOKEN, not a chat ID. Enter chat IDs (numbers like -1001234567890).` });
+      if (bad) return res.status(400).json({ error: `"${bad}" looks like the bot TOKEN, not a user ID. Enter each admin's numeric user ID (e.g. 6613370540, from @userinfobot).` });
       if (!ids.length && !process.env.TELEGRAM_DEFAULT_CHAT_ID) {
-        return res.status(400).json({ error: "No admin chat id set. Enter one or more group chat ids first (group ids are negative, e.g. -1001234567890)." });
+        return res.status(400).json({ error: "No admin ID set. Add one or more admins' personal Telegram user IDs first (e.g. 6613370540, from @userinfobot)." });
       }
       const msg = `✅ *Atithi-Setu admin alerts connected*\n\nThis is a test from the Notifications config.\n👤 by ${_tgEsc(req.user?.email || 'admin')}`;
       const targets = ids.length ? ids : [null];
@@ -45387,11 +45387,12 @@ ${data.tenant.name}`;
           } catch (e: any) { console.error('[notif-test migrate persist]', e?.message || e); }
           migrateNote = ` Note: ${migrations.map(m => `group ${m.from} was upgraded to a supergroup — new id ${m.to}`).join('; ')}. The saved id has been updated automatically.`;
         }
-        // A positive numeric id is a personal user (not a group); bots can't DM a
-        // user who hasn't messaged the bot first. Groups are negative. Add a hint.
-        const hasPositiveId = targets.some(t => t && /^\d+$/.test(String(t)));
-        const posHint = (sent === 0 && hasPositiveId)
-          ? ' Tip: a positive id (like 6613370540) is a personal user, not a group — the bot can only DM them after they open the bot and send /start once. For a GROUP, use its negative id (e.g. -1001234567890) and add the bot to that group.'
+        // Recipients can be individuals (DM) or a group. A person must tap Start on
+        // the bot first; a group must have the bot added. "chat not found" / "can't
+        // initiate conversation" means one of those hasn't happened.
+        const botAt = _botUsernameCache ? `@${_botUsernameCache}` : 'the configured bot';
+        const posHint = sent === 0
+          ? ` Tip: for a person, they must open ${botAt} and tap Start once (get their id from @userinfobot); for a group, add ${botAt} to the group.`
           : '';
         const detail = sent > 0
           ? `Delivered to ${sent} chat${sent === 1 ? '' : 's'}${failParts.length ? `; failed → ${failParts.join('; ')}` : ''}.${migrateNote} (by ${byWhom})`
@@ -46092,7 +46093,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'telegram-supergroup-auto-migrate',
+    commit_marker: 'telegram-recipients-people-or-group',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
