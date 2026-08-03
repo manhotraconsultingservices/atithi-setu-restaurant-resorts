@@ -129,6 +129,7 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' 
                   <th className="px-3 py-2 font-semibold text-[#1a1208]">Trigger</th>
                   <th className="px-3 py-2 font-semibold text-[#1a1208] text-center">Steps</th>
                   <th className="px-3 py-2 font-semibold text-[#1a1208] text-center">Blocks release</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208] text-center">Status</th>
                   <th className="px-3 py-2"></th>
                 </tr></thead>
                 <tbody>
@@ -140,9 +141,17 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' 
                       <td className="px-3 py-2 text-[#6b5d52]">{trgLabel(t.trigger_event)}{t.trigger_event === 'MID_STAY' ? ` (every ${t.recurrence_nights}n)` : ''}</td>
                       <td className="px-3 py-2 text-center tabular-nums">{t.step_count}</td>
                       <td className="px-3 py-2 text-center">{Number(t.blocks_release) === 1 ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-50 text-rose-600">YES</span> : <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#f0e8d8] text-[#6b5d52]">no</span>}</td>
+                      <td className="px-3 py-2 text-center">{Number(t.is_active) === 0
+                        ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-stone-100 text-stone-500">Inactive</span>
+                        : <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Active</span>}</td>
                       <td className="px-3 py-2 text-right whitespace-nowrap">
                         <button onClick={async () => { try { setEditing(await api(`/checklists/templates/${t.id}`)); } catch (e: any) { setErr(e?.message); } }} className="text-xs px-2 py-1 border border-[#d4c4a8] rounded hover:bg-[#f5f0e8]">Edit</button>
-                        {!t.is_system && <button onClick={async () => { if (!window.confirm(`Delete template "${t.name}"?`)) return; try { await api(`/checklists/templates/${t.id}`, { method: 'DELETE' }); load(); } catch (e: any) { setErr(e?.message); } }} className="ml-1 text-xs px-2 py-1 border border-rose-200 text-rose-600 rounded hover:bg-rose-50">Delete</button>}
+                        {/* Activate / Deactivate — only ACTIVE templates are ever triggered. Works for
+                            system templates too (deactivate to stop the default checklist firing). */}
+                        <button onClick={async () => { try { await api(`/checklists/templates/${t.id}`, { method: 'PATCH', body: JSON.stringify({ is_active: Number(t.is_active) === 0 ? 1 : 0 }) }); load(); } catch (e: any) { setErr(e?.message); } }}
+                          className={`ml-1 text-xs px-2 py-1 border rounded ${Number(t.is_active) === 0 ? 'border-emerald-300 text-emerald-700 hover:bg-emerald-50' : 'border-[#d4c4a8] text-[#6b5d52] hover:bg-[#f5f0e8]'}`}>
+                          {Number(t.is_active) === 0 ? 'Activate' : 'Deactivate'}
+                        </button>
                       </td>
                     </tr>
                   ))}
