@@ -12,7 +12,7 @@ import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, 
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
-import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, buildNotificationContent } from "./notificationService.ts";
+import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, sendTelegramDetailed, buildNotificationContent } from "./notificationService.ts";
 import { getChannelAdapter, ChannelCredentials, AdapterAvailabilityPayload, AdapterResult } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
@@ -45341,14 +45341,22 @@ ${data.tenant.name}`;
         [`Test in progress… (to ${targets.map(t => t || 'default').join(', ')})`]
       ).catch(() => {});
       void (async () => {
-        let sent = 0; const failed: string[] = [];
+        let sent = 0; const failParts: string[] = [];
         for (const t of targets) {
-          try { if (await sendTelegram(t, msg)) sent++; else failed.push(t || 'default'); }
-          catch { failed.push(t || 'default'); }
+          let r: { ok: boolean; error?: string };
+          try { r = await sendTelegramDetailed(t, msg); }
+          catch (e: any) { r = { ok: false, error: e?.message || String(e) }; }
+          if (r.ok) sent++; else failParts.push(`${t || 'default'}: ${r.error || 'rejected'}`);
         }
+        // A positive numeric id is a personal user (not a group); bots can't DM a
+        // user who hasn't messaged the bot first. Groups are negative. Add a hint.
+        const hasPositiveId = targets.some(t => t && /^\d+$/.test(String(t)));
+        const posHint = (sent === 0 && hasPositiveId)
+          ? ' Tip: a positive id (like 6613370540) is a personal user, not a group — the bot can only DM them after they open the bot and send /start once. For a GROUP, use its negative id (e.g. -1001234567890) and add the bot to that group.'
+          : '';
         const detail = sent > 0
-          ? `Delivered to ${sent} chat${sent === 1 ? '' : 's'}${failed.length ? `; failed for ${failed.join(', ')}` : ''} (by ${byWhom})`
-          : `Telegram accepted no message. It rejected every chat (${targets.map(t => t || 'default').join(', ')}) — check the bot is a member/admin of each group and the ids are correct (group ids are negative, e.g. -1001234567890). (by ${byWhom})`;
+          ? `Delivered to ${sent} chat${sent === 1 ? '' : 's'}${failParts.length ? `; failed → ${failParts.join('; ')}` : ''} (by ${byWhom})`
+          : `Telegram accepted no message → ${failParts.join('; ')}.${posHint} (by ${byWhom})`;
         await centralDb.run(
           "UPDATE platform_notification_config SET last_test_at = CURRENT_TIMESTAMP, last_test_ok = ?, last_test_detail = ? WHERE id = 'DEFAULT'",
           [sent > 0 ? 1 : 0, detail]
@@ -46045,7 +46053,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'telegram-test-async-background',
+    commit_marker: 'telegram-test-detailed-error',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

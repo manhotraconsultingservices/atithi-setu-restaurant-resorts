@@ -1578,15 +1578,19 @@ export async function sendWhatsApp(to: string, message: string): Promise<void> {
 // Docs: https://core.telegram.org/bots/api#sendmessage
 // chatId can be a numeric user/group ID or a public channel username (@mychannel)
 // ─────────────────────────────────────────────────────────────────────────────
-export async function sendTelegram(chatId: string | null | undefined, message: string): Promise<boolean> {
+// Send a Telegram message and return the DETAILED outcome, including Telegram's
+// own error description (e.g. "Bad Request: chat not found", "Forbidden: bot
+// can't initiate conversation with a user") so callers can surface the real
+// reason to the operator instead of a generic failure.
+export async function sendTelegramDetailed(chatId: string | null | undefined, message: string): Promise<{ ok: boolean; error?: string }> {
   if (!TELEGRAM_BOT_TOKEN) {
     console.warn('[Notification] Telegram bot token not configured — skipping.');
-    return false;
+    return { ok: false, error: 'bot token not configured on server' };
   }
   const targetChatId = chatId || TELEGRAM_DEFAULT_CHAT_ID;
   if (!targetChatId) {
     console.warn('[Notification] No Telegram chat ID specified — skipping.');
-    return false;
+    return { ok: false, error: 'no chat id specified' };
   }
   // Bound the request so a blocked/slow egress to api.telegram.org can't hang the
   // caller (e.g. the SuperAdmin "Send test" request) — abort after 5s so the
@@ -1606,18 +1610,22 @@ export async function sendTelegram(chatId: string | null | undefined, message: s
       signal: controller.signal,
     });
     if (!response.ok) {
-      const errBody = await response.json().catch(() => ({}));
+      const errBody: any = await response.json().catch(() => ({}));
       console.error('[Notification] Telegram API error:', JSON.stringify(errBody));
-      return false;
+      return { ok: false, error: errBody?.description || `HTTP ${response.status}` };
     }
     console.log(`[Notification] Telegram message sent → chat ${targetChatId}`);
-    return true;
-  } catch (err) {
+    return { ok: true };
+  } catch (err: any) {
     console.error('[Notification] Telegram send failed:', err);
-    return false;
+    return { ok: false, error: err?.name === 'AbortError' ? 'timed out reaching api.telegram.org' : (err?.message || String(err)) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function sendTelegram(chatId: string | null | undefined, message: string): Promise<boolean> {
+  return (await sendTelegramDetailed(chatId, message)).ok;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
