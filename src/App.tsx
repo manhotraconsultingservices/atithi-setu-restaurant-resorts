@@ -49768,24 +49768,67 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // Access grid reads the same way the owner sees their tabs.
   // INVENTORY + DELIVERY were added 2026-05 — see ALWAYS_VISIBLE_TABS /
   // isTabVisible() for how legacy permission sets are grandfathered.
+  // Base tabs shown for every restaurant (restaurant-only + both-module tabs).
+  // Kept in sync with the owner-side PERMISSIBLE_TABS catalogue so this grid can
+  // grant/deny the same set. Finance/HR tabs are both-module → they live here.
   const RESTAURANT_TABS = [
-    'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'REPORTS', 'RESTAURANT_REPORTS', 'QR', 'BOOKINGS',
+    'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'ALL_REPORTS', 'RESTAURANT_REPORTS', 'QR', 'BOOKINGS',
     'LOYALTY', 'STAFF', 'ROSTER', 'TIMESHEET', 'ORDERS', 'INVOICES', 'ATTENDANCE', 'HR_PAYROLL',
+    'STAFF_PAYROLL', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'RECEIVABLES',
     'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'SETTINGS'
   ];
   // Hotel-only tabs (shown only when the selected restaurant has property_type IN ('HOTEL','BOTH'))
   const HOTEL_TABS = [
-    'ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS',
+    'ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS', 'HOUSEKEEPING', 'CHECKLISTS', 'HOTEL_INVENTORY',
     'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE',
   ];
-  // Compose the active tab list based on the currently-selected restaurant's property_type
+  // Events & Convention tabs (shown only when the selected restaurant has events_enabled)
+  const EVENTS_TABS = [
+    'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_VENUES', 'EVENTS_RENTALS',
+    'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS',
+  ];
+  // Spa & Wellness tabs (shown only when the selected restaurant has spa_enabled)
+  const SPA_TABS = [
+    'SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS',
+    'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_BILLING', 'SPA_SETTINGS', 'SPA_INVENTORY',
+  ];
+  // Compose the active tab list based on the currently-selected restaurant's modules.
   const selectedRestaurantRow = restaurants.find(r => r.id === permSelectedRestaurant);
   const selectedIsHotel = !!selectedRestaurantRow && (
     selectedRestaurantRow.property_type === 'HOTEL' ||
     selectedRestaurantRow.property_type === 'BOTH'
   );
-  const ALL_TABS = selectedIsHotel ? [...RESTAURANT_TABS, ...HOTEL_TABS] : RESTAURANT_TABS;
+  const selectedEventsEnabled = Number((selectedRestaurantRow as any)?.events_enabled) === 1;
+  const selectedSpaEnabled = Number((selectedRestaurantRow as any)?.spa_enabled) === 1;
+  const ALL_TABS = [
+    ...RESTAURANT_TABS,
+    ...(selectedIsHotel ? HOTEL_TABS : []),
+    ...(selectedEventsEnabled ? EVENTS_TABS : []),
+    ...(selectedSpaEnabled ? SPA_TABS : []),
+  ];
   const PERM_ROLES = ['OWNER', 'MANAGER'];
+  // One grid row per tab (a toggle button per role). Shared by every module section.
+  const renderPermTabRows = (tabs: string[]) => tabs.map((tab, i) => (
+    <tr key={tab} className={i % 2 === 0 ? 'bg-white' : 'bg-[#faf7f2]/40'}>
+      <td className="px-5 py-3 font-semibold text-[#3d3128] text-xs uppercase tracking-wider">{tab.replace(/_/g, ' ')}</td>
+      {PERM_ROLES.map(role => {
+        const allowed = (permData[role] || ALL_TABS).includes(tab);
+        return (
+          <td key={role} className="px-5 py-3 text-center">
+            <button
+              onClick={() => togglePermTab(role, tab)}
+              className={cn(
+                "w-8 h-8 rounded-xl flex items-center justify-center mx-auto transition-all",
+                allowed ? "bg-green-100 text-green-600 hover:bg-green-200" : "bg-red-50 text-red-400 hover:bg-red-100"
+              )}
+            >
+              {allowed ? <Check size={14} /> : <X size={14} />}
+            </button>
+          </td>
+        );
+      })}
+    </tr>
+  ));
 
   const fetchPermissions = async (restaurantId: string) => {
     if (!restaurantId) return;
@@ -49806,6 +49849,14 @@ function SuperAdminDashboard({ token }: { token: string }) {
         // was previously visible.
         const NEWLY_ADDED_PRE_V2: string[] = ['INVENTORY', 'DELIVERY']; // visible in pre-V2 lists, hidden from grid otherwise
         const NEWLY_ADDED_POST_V2: string[] = ['LOYALTY', 'ROSTER', 'TIMESHEET'];
+        // Tabs added to THIS grid after V3 — finance, housekeeping, checklists,
+        // hotel-inventory, plus the whole Events + Spa modules. No saved config
+        // could have known about them, so grandfather them into every config
+        // (module-gated: ALL_TABS only carries the enabled modules' tabs).
+        const NEWLY_ADDED_POST_V3: string[] = [
+          'ALL_REPORTS', 'STAFF_PAYROLL', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'RECEIVABLES',
+          'HOTEL_INVENTORY', 'HOUSEKEEPING', 'CHECKLISTS', ...EVENTS_TABS, ...SPA_TABS,
+        ];
         const normalized: Record<string, string[]> = {};
         for (const role of PERM_ROLES) {
           // Strip markers — permData must only ever contain real tab IDs
@@ -50980,27 +51031,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
                           🍽 Restaurant Tabs
                         </td>
                       </tr>
-                      {RESTAURANT_TABS.map((tab, i) => (
-                        <tr key={tab} className={i % 2 === 0 ? 'bg-white' : 'bg-[#faf7f2]/40'}>
-                          <td className="px-5 py-3 font-semibold text-[#3d3128] text-xs uppercase tracking-wider">{tab}</td>
-                          {PERM_ROLES.map(role => {
-                            const allowed = (permData[role] || ALL_TABS).includes(tab);
-                            return (
-                              <td key={role} className="px-5 py-3 text-center">
-                                <button
-                                  onClick={() => togglePermTab(role, tab)}
-                                  className={cn(
-                                    "w-8 h-8 rounded-xl flex items-center justify-center mx-auto transition-all",
-                                    allowed ? "bg-green-100 text-green-600 hover:bg-green-200" : "bg-red-50 text-red-400 hover:bg-red-100"
-                                  )}
-                                >
-                                  {allowed ? <Check size={14} /> : <X size={14} />}
-                                </button>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
+                      {renderPermTabRows(RESTAURANT_TABS)}
                       {/* Section header — Hotel tabs (only if enabled) */}
                       {selectedIsHotel && (
                         <>
@@ -51009,27 +51040,29 @@ function SuperAdminDashboard({ token }: { token: string }) {
                               🏨 Hotel Tabs
                             </td>
                           </tr>
-                          {HOTEL_TABS.map((tab, i) => (
-                            <tr key={tab} className={i % 2 === 0 ? 'bg-white' : 'bg-[#faf7f2]/40'}>
-                              <td className="px-5 py-3 font-semibold text-[#3d3128] text-xs uppercase tracking-wider">{tab.replace(/_/g, ' ')}</td>
-                              {PERM_ROLES.map(role => {
-                                const allowed = (permData[role] || ALL_TABS).includes(tab);
-                                return (
-                                  <td key={role} className="px-5 py-3 text-center">
-                                    <button
-                                      onClick={() => togglePermTab(role, tab)}
-                                      className={cn(
-                                        "w-8 h-8 rounded-xl flex items-center justify-center mx-auto transition-all",
-                                        allowed ? "bg-green-100 text-green-600 hover:bg-green-200" : "bg-red-50 text-red-400 hover:bg-red-100"
-                                      )}
-                                    >
-                                      {allowed ? <Check size={14} /> : <X size={14} />}
-                                    </button>
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          ))}
+                          {renderPermTabRows(HOTEL_TABS)}
+                        </>
+                      )}
+                      {/* Section header — Events tabs (only if the Events module is enabled) */}
+                      {selectedEventsEnabled && (
+                        <>
+                          <tr className="bg-[#7c3aed]/5">
+                            <td colSpan={1 + PERM_ROLES.length} className="px-5 py-2 text-[10px] font-bold uppercase tracking-widest text-[#7c3aed] border-l-4 border-[#7c3aed]">
+                              🎪 Events &amp; Convention Tabs
+                            </td>
+                          </tr>
+                          {renderPermTabRows(EVENTS_TABS)}
+                        </>
+                      )}
+                      {/* Section header — Spa tabs (only if the Spa module is enabled) */}
+                      {selectedSpaEnabled && (
+                        <>
+                          <tr className="bg-[#0f766e]/5">
+                            <td colSpan={1 + PERM_ROLES.length} className="px-5 py-2 text-[10px] font-bold uppercase tracking-widest text-[#0f766e] border-l-4 border-[#0f766e]">
+                              💆 Spa &amp; Wellness Tabs
+                            </td>
+                          </tr>
+                          {renderPermTabRows(SPA_TABS)}
                         </>
                       )}
                     </tbody>
