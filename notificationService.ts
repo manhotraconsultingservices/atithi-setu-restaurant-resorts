@@ -1589,9 +1589,10 @@ export async function sendTelegram(chatId: string | null | undefined, message: s
     return false;
   }
   // Bound the request so a blocked/slow egress to api.telegram.org can't hang the
-  // caller (e.g. the SuperAdmin "Send test" request) — abort after 8s.
+  // caller (e.g. the SuperAdmin "Send test" request) — abort after 5s so the
+  // handler returns well before Cloudflare's origin-timeout 502.
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  const timer = setTimeout(() => controller.abort(), 5000);
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     const response = await fetch(url, {

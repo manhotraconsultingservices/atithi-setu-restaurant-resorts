@@ -45326,10 +45326,27 @@ ${data.tenant.name}`;
       }
       const msg = `✅ *Atithi-Setu admin alerts connected*\n\nThis is a test from the Notifications config.\n👤 by ${_tgEsc(req.user?.email || 'admin')}`;
       const targets = ids.length ? ids : [null];
-      let sent = 0; const failed: string[] = [];
-      for (const t of targets) { const okOne = await sendTelegram(t, msg); if (okOne) sent++; else failed.push(t || 'default'); }
+      // Hard-bound the whole send phase. If the origin cannot reach
+      // api.telegram.org the outbound fetch can hang long enough for Cloudflare
+      // to return its own 502 HTML page before we ever respond — race the sends
+      // against a timer so we ALWAYS return clean JSON fast, and can tell an
+      // egress hang ("timed out") apart from a real Telegram rejection.
+      const TIMED_OUT = Symbol('timeout');
+      const doSends = (async () => {
+        let sent = 0; const failed: string[] = [];
+        for (const t of targets) { const okOne = await sendTelegram(t, msg); if (okOne) sent++; else failed.push(t || 'default'); }
+        return { sent, failed };
+      })();
+      const outcome: any = await Promise.race([
+        doSends,
+        new Promise(resolve => setTimeout(() => resolve(TIMED_OUT), 7000)),
+      ]);
+      if (outcome === TIMED_OUT) {
+        return res.status(504).json({ error: "Timed out reaching Telegram (api.telegram.org). The bot token is set, but the server could not connect to Telegram — this is almost always the VPS having no outbound internet access to api.telegram.org (host firewall / egress rule). No Telegram alert can send until that outbound route is opened." });
+      }
+      const { sent, failed } = outcome;
       if (sent > 0) return res.json({ success: true, sent_to: `${sent} chat${sent === 1 ? '' : 's'}`, failed });
-      return res.status(502).json({ error: "Telegram rejected the message for every chat. Check the bot token, that the bot is a member/admin of each group, and that the chat ids are correct." });
+      return res.status(502).json({ error: "Reached Telegram, but it rejected the message for every chat. Check that the bot is a member/admin of each group and that the chat ids are correct (group ids are negative, e.g. -1001234567890)." });
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to send test message" }); }
   });
 
@@ -46016,7 +46033,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'telegram-config-surface-real-error',
+    commit_marker: 'telegram-test-bounded-egress-msg',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
