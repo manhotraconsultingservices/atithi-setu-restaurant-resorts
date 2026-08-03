@@ -173,6 +173,21 @@ export async function initDb() {
     -- backfilled here from registered_at for any pre-existing tenant.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS billing_start_date DATE;
     UPDATE restaurants SET billing_start_date = registered_at::date WHERE billing_start_date IS NULL AND registered_at IS NOT NULL;
+
+    -- Platform-level notification config (single 'DEFAULT' row). The SuperAdmin
+    -- sets the admin Telegram chat id + which platform events alert, from the
+    -- /internal portal. The bot TOKEN stays in env (TELEGRAM_BOT_TOKEN).
+    CREATE TABLE IF NOT EXISTS platform_notification_config (
+      id TEXT PRIMARY KEY,
+      telegram_admin_chat_id TEXT,
+      event_new_tenant INT DEFAULT 1,
+      event_subscription_due INT DEFAULT 1,
+      event_tenant_access INT DEFAULT 1,
+      subscription_due_lead_days INT DEFAULT 3,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_by TEXT
+    );
+    INSERT INTO platform_notification_config (id) VALUES ('DEFAULT') ON CONFLICT (id) DO NOTHING;
     -- Phase 2 (Multi-currency + configurable tax). Defaults preserve the
     -- exact India / GST / ₹ behaviour for every pre-existing tenant.
     --   country         ISO-3166 alpha-2, selects the default tax preset.

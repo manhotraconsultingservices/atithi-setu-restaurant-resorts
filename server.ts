@@ -5260,6 +5260,43 @@ async function logAndSend(db: any, eventName: string, channel: string, recipient
   }
 }
 
+// ── Platform-level admin notifications (SuperAdmin-configurable) ─────────────
+// Config is one 'DEFAULT' row in central.platform_notification_config: the admin
+// Telegram chat id + per-event on/off toggles. The bot TOKEN stays in env
+// (TELEGRAM_BOT_TOKEN). Cached briefly so hot paths don't hit the DB each time.
+let _platformNotifyCache: { cfg: any; at: number } | null = null;
+async function getPlatformNotifyConfig(): Promise<any> {
+  const now = Date.now();
+  if (_platformNotifyCache && (now - _platformNotifyCache.at) < 30000) return _platformNotifyCache.cfg;
+  let cfg: any = null;
+  try { cfg = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'"); } catch { /* table not migrated yet */ }
+  cfg = cfg || {};
+  _platformNotifyCache = { cfg, at: now };
+  return cfg;
+}
+function invalidatePlatformNotifyCache() { _platformNotifyCache = null; }
+// eventKey → the config column that gates it.
+const _PLATFORM_EVENT_COL: Record<string, string> = {
+  NEW_TENANT: 'event_new_tenant',
+  SUBSCRIPTION_DUE: 'event_subscription_due',
+  TENANT_ACCESS: 'event_tenant_access',
+};
+// Escape Telegram legacy-Markdown metacharacters in dynamic values (an email like
+// a_b@x.com would otherwise break parse_mode='Markdown' and drop the message).
+function _tgEsc(s: any): string { return String(s ?? '').replace(/([_*`\[\]])/g, '\\$1'); }
+// Send a Telegram message to the platform admin group IF that event is enabled.
+// Chat id: config → TELEGRAM_ADMIN_CHAT_ID → (sendTelegram falls back to default).
+// Best-effort; never throws.
+async function notifyPlatformAdmin(eventKey: string, message: string): Promise<void> {
+  try {
+    const cfg = await getPlatformNotifyConfig();
+    const col = _PLATFORM_EVENT_COL[eventKey];
+    if (col && Number(cfg?.[col] ?? 1) === 0) return; // event switched off by the admin
+    const chatId = cfg?.telegram_admin_chat_id || process.env.TELEGRAM_ADMIN_CHAT_ID || null;
+    await sendTelegram(chatId, message);
+  } catch (e: any) { console.error(`[platform-notify:${eventKey}] failed:`, e?.message || e); }
+}
+
 // Fires once when a brand-new tenant is created (from any registration path):
 //   1. Stamps the billing start date = creation day (only if still unset).
 //   2. Pings the Atithi-Setu admin group on Telegram with the new-tenant details.
@@ -5278,28 +5315,23 @@ async function notifyNewTenant(meta: {
     );
   } catch (e: any) { console.error('[new-tenant] billing_start_date set failed:', e?.message || e); }
 
-  try {
-    // Escape Telegram legacy-Markdown metacharacters in dynamic values (an email
-    // like a_b@x.com would otherwise break parse_mode='Markdown' and drop the msg).
-    const esc = (s: any) => String(s ?? '').replace(/([_*`\[\]])/g, '\\$1');
-    const today = new Date().toISOString().slice(0, 10);
-    const loc = [meta.city, meta.state].filter(Boolean).map(esc).join(', ') || '—';
-    const lines = [
-      '🆕 *New tenant registered — Atithi-Setu*',
-      '',
-      `🏢 ${esc(meta.name)}`,
-      `🆔 ${esc(meta.restaurantId)}`,
-      `📍 ${loc}`,
-      meta.propertyType ? `🏷 Type: ${esc(meta.propertyType)}` : null,
-      `🧑 Owner: ${esc(meta.ownerName || '—')}${meta.ownerEmail ? ` · ${esc(meta.ownerEmail)}` : ''}`,
-      meta.ownerPhone ? `📞 ${esc(meta.ownerPhone)}` : null,
-      `🗓 Billing start: ${today}`,
-      `🔗 Source: ${esc(meta.source)}`,
-      '',
-      '_Review & activate from the Internal admin console._',
-    ].filter(Boolean) as string[];
-    await sendTelegram(process.env.TELEGRAM_ADMIN_CHAT_ID || null, lines.join('\n'));
-  } catch (e: any) { console.error('[new-tenant] admin Telegram notify failed:', e?.message || e); }
+  const today = new Date().toISOString().slice(0, 10);
+  const loc = [meta.city, meta.state].filter(Boolean).map(_tgEsc).join(', ') || '—';
+  const lines = [
+    '🆕 *New tenant registered — Atithi-Setu*',
+    '',
+    `🏢 ${_tgEsc(meta.name)}`,
+    `🆔 ${_tgEsc(meta.restaurantId)}`,
+    `📍 ${loc}`,
+    meta.propertyType ? `🏷 Type: ${_tgEsc(meta.propertyType)}` : null,
+    `🧑 Owner: ${_tgEsc(meta.ownerName || '—')}${meta.ownerEmail ? ` · ${_tgEsc(meta.ownerEmail)}` : ''}`,
+    meta.ownerPhone ? `📞 ${_tgEsc(meta.ownerPhone)}` : null,
+    `🗓 Billing start: ${today}`,
+    `🔗 Source: ${_tgEsc(meta.source)}`,
+    '',
+    '_Review & activate from the Internal admin console._',
+  ].filter(Boolean) as string[];
+  await notifyPlatformAdmin('NEW_TENANT', lines.join('\n'));
 }
 
 async function triggerNotification(restaurantId: string, eventName: string, data: any) {
@@ -45166,6 +45198,10 @@ ${data.tenant.name}`;
       notifyBilling(tenantId, 'ACCESS_REVOKED', { reason }).catch(err =>
         console.error("Revoke notification failed:", err)
       );
+      // Also ping the platform admin group (if that event is enabled).
+      centralDb.get("SELECT name FROM restaurants WHERE id = ?", [tenantId]).then((tr: any) =>
+        notifyPlatformAdmin('TENANT_ACCESS', `🔒 *Tenant access REVOKED*\n\n🏢 ${_tgEsc(tr?.name || tenantId)}\n🆔 ${_tgEsc(tenantId)}\n📝 ${_tgEsc(reason)}\n👤 by ${_tgEsc(adminId)}`)
+      ).catch(() => {});
       res.json({ success: true, access_revoked: true, notification: 'queued' });
     } catch (err) {
       console.error("Revoke access error:", err);
@@ -45190,11 +45226,75 @@ ${data.tenant.name}`;
       notifyBilling(tenantId, 'ACCESS_RESTORED', { restored_at: new Date().toISOString() }).catch(err =>
         console.error("Restore notification failed:", err)
       );
+      // Also ping the platform admin group (if that event is enabled).
+      const restoredBy = req.user?.id || req.user?.email || 'admin';
+      centralDb.get("SELECT name FROM restaurants WHERE id = ?", [tenantId]).then((tr: any) =>
+        notifyPlatformAdmin('TENANT_ACCESS', `✅ *Tenant access RESTORED*\n\n🏢 ${_tgEsc(tr?.name || tenantId)}\n🆔 ${_tgEsc(tenantId)}\n👤 by ${_tgEsc(restoredBy)}`)
+      ).catch(() => {});
       res.json({ success: true, access_revoked: false, notification: 'queued' });
     } catch (err) {
       console.error("Restore access error:", err);
       res.status(500).json({ error: "Failed to restore access" });
     }
+  });
+
+  // ── Platform notification config (SuperAdmin) ──────────────────────────────
+  // Configure the admin-group Telegram alerts from the /internal portal. The bot
+  // TOKEN stays in env (TELEGRAM_BOT_TOKEN); here we set the admin chat id + which
+  // platform events fire. GET also reports whether the env token/chat are present.
+  app.get("/api/admin/notification-config", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      let cfg: any = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'").catch(() => null);
+      if (!cfg) {
+        await centralDb.run("INSERT INTO platform_notification_config (id) VALUES ('DEFAULT') ON CONFLICT (id) DO NOTHING").catch(() => {});
+        cfg = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'").catch(() => ({}));
+      }
+      res.json({
+        ...(cfg || {}),
+        bot_token_configured: !!process.env.TELEGRAM_BOT_TOKEN,
+        env_admin_chat_id: process.env.TELEGRAM_ADMIN_CHAT_ID || null,
+        env_default_chat_id: process.env.TELEGRAM_DEFAULT_CHAT_ID || null,
+      });
+    } catch (err) { res.status(500).json({ error: "Failed to load notification config" }); }
+  });
+
+  app.put("/api/admin/notification-config", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      if ('telegram_admin_chat_id' in b) { fields.push("telegram_admin_chat_id = ?"); vals.push(b.telegram_admin_chat_id ? String(b.telegram_admin_chat_id).trim() : null); }
+      for (const col of ['event_new_tenant', 'event_subscription_due', 'event_tenant_access']) {
+        if (col in b) { fields.push(`${col} = ?`); vals.push(b[col] ? 1 : 0); }
+      }
+      if ('subscription_due_lead_days' in b) { fields.push("subscription_due_lead_days = ?"); vals.push(Math.max(0, Math.min(60, Math.floor(Number(b.subscription_due_lead_days) || 0)))); }
+      if (!fields.length) return res.status(400).json({ error: "No valid fields to update" });
+      fields.push("updated_at = CURRENT_TIMESTAMP"); fields.push("updated_by = ?"); vals.push(req.user?.email || req.user?.id || 'admin');
+      await centralDb.run("INSERT INTO platform_notification_config (id) VALUES ('DEFAULT') ON CONFLICT (id) DO NOTHING").catch(() => {});
+      await centralDb.run(`UPDATE platform_notification_config SET ${fields.join(', ')} WHERE id = 'DEFAULT'`, vals);
+      invalidatePlatformNotifyCache();
+      const cfg = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'");
+      res.json({ success: true, config: cfg });
+    } catch (err) { res.status(500).json({ error: "Failed to save notification config" }); }
+  });
+
+  // Send a test Telegram message to the configured admin chat, and report the
+  // real result (sendTelegram now returns success/failure).
+  app.post("/api/admin/notification-config/test", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!process.env.TELEGRAM_BOT_TOKEN) {
+        return res.status(400).json({ error: "TELEGRAM_BOT_TOKEN is not set on the server. Add it to the server .env and restart the app." });
+      }
+      invalidatePlatformNotifyCache();
+      const cfg = await getPlatformNotifyConfig();
+      const chatId = (req.body?.telegram_admin_chat_id ? String(req.body.telegram_admin_chat_id).trim() : '')
+        || cfg?.telegram_admin_chat_id || process.env.TELEGRAM_ADMIN_CHAT_ID || null;
+      if (!chatId && !process.env.TELEGRAM_DEFAULT_CHAT_ID) {
+        return res.status(400).json({ error: "No admin chat id set. Enter the group chat id first (group ids are negative, e.g. -1001234567890)." });
+      }
+      const ok = await sendTelegram(chatId, `✅ *Atithi-Setu admin alerts connected*\n\nThis is a test from the Notifications config.\n👤 by ${_tgEsc(req.user?.email || 'admin')}`);
+      if (ok) return res.json({ success: true, sent_to: chatId || 'TELEGRAM_DEFAULT_CHAT_ID' });
+      return res.status(502).json({ error: "Telegram rejected the message. Check the bot token, that the bot is a member/admin of the group, and that the chat id is correct." });
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to send test message" }); }
   });
 
   // ────────────────────────────────────────────────────────────────────
@@ -45880,7 +45980,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'new-tenant-billing-start-and-telegram',
+    commit_marker: 'superadmin-telegram-alerts-config',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
@@ -46879,6 +46979,39 @@ ${data.tenant.name}`;
     }
   });
   console.log('[Scheduler] Notification scheduler started — checking every minute');
+
+  // ─── Subscription-due digest (daily 09:00 IST) → platform admin Telegram ──
+  // If the SUBSCRIPTION_DUE event is enabled, once a day send the admin group a
+  // digest of tenants that are overdue / due today / due within the configured
+  // lead window. Best-effort; skips when disabled or nothing is due.
+  cron.schedule('30 3 * * *', async () => {
+    try {
+      const cfg = await getPlatformNotifyConfig();
+      if (Number(cfg?.event_subscription_due ?? 1) === 0) return;
+      const lead = Math.max(0, Math.min(60, Number(cfg?.subscription_due_lead_days ?? 3)));
+      const rows: any[] = await centralDb.query(
+        `SELECT id, name, subscription_due_date, (subscription_due_date - CURRENT_DATE) AS days_until_due
+           FROM restaurants
+          WHERE id <> 'SYSTEM' AND COALESCE(access_revoked, 0) = 0
+            AND subscription_due_date IS NOT NULL
+            AND (subscription_due_date - CURRENT_DATE) <= ?
+          ORDER BY subscription_due_date ASC`,
+        [lead]
+      ).catch(() => []);
+      if (!rows.length) return;
+      const overdue = rows.filter(r => Number(r.days_until_due) < 0);
+      const dueToday = rows.filter(r => Number(r.days_until_due) === 0);
+      const dueSoon = rows.filter(r => Number(r.days_until_due) > 0);
+      const fmt = (r: any) => `• ${_tgEsc(r.name || r.id)} — ${String(r.subscription_due_date).slice(0, 10)}`;
+      const parts: string[] = ['📅 *Subscription status — Atithi-Setu*', ''];
+      if (overdue.length) parts.push(`⛔ *Overdue (${overdue.length})*`, ...overdue.map(fmt), '');
+      if (dueToday.length) parts.push(`⚠️ *Due today (${dueToday.length})*`, ...dueToday.map(fmt), '');
+      if (dueSoon.length) parts.push(`⏳ *Due within ${lead} day(s) (${dueSoon.length})*`, ...dueSoon.map(fmt), '');
+      await notifyPlatformAdmin('SUBSCRIPTION_DUE', parts.join('\n').trim());
+    } catch (err) {
+      console.error('[subscription-digest] cron error:', err);
+    }
+  });
 
   // ─── Hotel SLA watchdog cron (every 2 min) ──────────────────────────────
   cron.schedule('*/2 * * * *', async () => {

@@ -1578,15 +1578,15 @@ export async function sendWhatsApp(to: string, message: string): Promise<void> {
 // Docs: https://core.telegram.org/bots/api#sendmessage
 // chatId can be a numeric user/group ID or a public channel username (@mychannel)
 // ─────────────────────────────────────────────────────────────────────────────
-export async function sendTelegram(chatId: string | null | undefined, message: string): Promise<void> {
+export async function sendTelegram(chatId: string | null | undefined, message: string): Promise<boolean> {
   if (!TELEGRAM_BOT_TOKEN) {
     console.warn('[Notification] Telegram bot token not configured — skipping.');
-    return;
+    return false;
   }
   const targetChatId = chatId || TELEGRAM_DEFAULT_CHAT_ID;
   if (!targetChatId) {
     console.warn('[Notification] No Telegram chat ID specified — skipping.');
-    return;
+    return false;
   }
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -1602,11 +1602,13 @@ export async function sendTelegram(chatId: string | null | undefined, message: s
     if (!response.ok) {
       const errBody = await response.json().catch(() => ({}));
       console.error('[Notification] Telegram API error:', JSON.stringify(errBody));
-    } else {
-      console.log(`[Notification] Telegram message sent → chat ${targetChatId}`);
+      return false;
     }
+    console.log(`[Notification] Telegram message sent → chat ${targetChatId}`);
+    return true;
   } catch (err) {
     console.error('[Notification] Telegram send failed:', err);
+    return false;
   }
 }
 

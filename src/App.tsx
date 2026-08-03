@@ -49303,13 +49303,19 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
-  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE'>('RESTAURANTS');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS'>('RESTAURANTS');
 
   // Subscription billing state (admin Billing tab)
   const [billingRows, setBillingRows] = useState<any[]>([]);
   const [billingLoading, setBillingLoading] = useState(false);
   const [billingEdit, setBillingEdit] = useState<Record<string, any>>({});
   const [billingMsg, setBillingMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  // Admin Alerts (Telegram) config state
+  const [alertCfg, setAlertCfg] = useState<any | null>(null);
+  const [alertLoading, setAlertLoading] = useState(false);
+  const [alertBusy, setAlertBusy] = useState(false);
+  const [alertMsg, setAlertMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   // SQL Console state
   const [sqlTarget, setSqlTarget] = useState<'tenant' | 'central'>('tenant');
@@ -49503,6 +49509,46 @@ function SuperAdminDashboard({ token }: { token: string }) {
       setBillingMsg({ type: 'err', text: 'Network error' });
     }
   };
+
+  // ── Admin Alerts (Telegram) config ──
+  const fetchAdminAlerts = async () => {
+    setAlertLoading(true); setAlertMsg(null);
+    try {
+      const res = await fetch('/api/admin/notification-config', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (res.ok) setAlertCfg(await res.json());
+      else setAlertMsg({ type: 'err', text: 'Failed to load config' });
+    } catch { setAlertMsg({ type: 'err', text: 'Network error' }); }
+    finally { setAlertLoading(false); }
+  };
+  const saveAdminAlerts = async () => {
+    if (!alertCfg) return;
+    setAlertBusy(true); setAlertMsg(null);
+    try {
+      const body = {
+        telegram_admin_chat_id: (alertCfg.telegram_admin_chat_id || '').trim() || null,
+        event_new_tenant: Number(alertCfg.event_new_tenant) ? 1 : 0,
+        event_subscription_due: Number(alertCfg.event_subscription_due) ? 1 : 0,
+        event_tenant_access: Number(alertCfg.event_tenant_access) ? 1 : 0,
+        subscription_due_lead_days: Number(alertCfg.subscription_due_lead_days) || 0,
+      };
+      const res = await fetch('/api/admin/notification-config', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify(body) });
+      const data = await res.json();
+      if (res.ok) { setAlertMsg({ type: 'ok', text: 'Saved ✓' }); if (data.config) setAlertCfg((prev: any) => ({ ...prev, ...data.config })); }
+      else setAlertMsg({ type: 'err', text: data.error || 'Save failed' });
+    } catch { setAlertMsg({ type: 'err', text: 'Network error' }); }
+    finally { setAlertBusy(false); }
+  };
+  const testAdminAlerts = async () => {
+    setAlertBusy(true); setAlertMsg(null);
+    try {
+      const res = await fetch('/api/admin/notification-config/test', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ telegram_admin_chat_id: (alertCfg?.telegram_admin_chat_id || '').trim() || null }) });
+      const data = await res.json();
+      if (res.ok) setAlertMsg({ type: 'ok', text: `Test message sent to ${data.sent_to || 'the admin chat'} ✓` });
+      else setAlertMsg({ type: 'err', text: data.error || 'Test failed' });
+    } catch { setAlertMsg({ type: 'err', text: 'Network error' }); }
+    finally { setAlertBusy(false); }
+  };
+
   const revokeTenantAccess = async (tenantId: string, tenantName: string) => {
     const r = await promptPayment({ title: `Revoke access for ${tenantName}?`, fields: [{ name: 'reason', label: 'Reason (shown to tenant)', type: 'text', required: true, defaultValue: 'Subscription payment overdue' }], confirmLabel: 'Revoke Access' });
     if (!r) return;
@@ -50211,6 +50257,15 @@ function SuperAdminDashboard({ token }: { token: string }) {
             )}
           >
             <Terminal size={16} /> SQL Console
+          </button>
+          <button
+            onClick={() => { setViewMode('ADMIN_ALERTS'); fetchAdminAlerts(); }}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'ADMIN_ALERTS' ? "bg-sky-600 text-white shadow-md" : "text-[#1a1208] hover:bg-[#cc5a16]/5"
+            )}
+          >
+            <Bell size={16} /> Admin Alerts
           </button>
         </div>
       </div>
@@ -51911,6 +51966,63 @@ function SuperAdminDashboard({ token }: { token: string }) {
           {sqlResult && sqlResult.columns.length === 0 && !sqlError && (
             <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-8 text-center text-sm text-[#9c8e85] italic">Query returned 0 rows.</div>
           )}
+        </div>
+      ) : viewMode === 'ADMIN_ALERTS' ? (
+        <div className="space-y-6">
+          <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8 max-w-2xl">
+            <h3 className="text-xl font-bold flex items-center gap-2"><Bell size={20} className="text-sky-600" /> Admin Alerts — Telegram</h3>
+            <p className="text-sm text-[#6b5d52] mt-1">Send platform alerts to your Atithi-Setu admin group on Telegram. The bot token is a server setting; here you set the group chat ID and which events fire.</p>
+
+            {alertMsg && (
+              <div className={cn("mt-4 px-4 py-2 rounded-xl text-sm", alertMsg.type === 'ok' ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200")}>{alertMsg.text}</div>
+            )}
+
+            {alertLoading || !alertCfg ? (
+              <p className="text-sm text-[#9c8e85] mt-6">Loading…</p>
+            ) : (
+              <div className="mt-6 space-y-5">
+                <div className={cn("px-4 py-3 rounded-xl text-sm border", alertCfg.bot_token_configured ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-800 border-amber-200")}>
+                  {alertCfg.bot_token_configured
+                    ? '✅ Bot token is configured on the server (TELEGRAM_BOT_TOKEN).'
+                    : '⚠️ Bot token is NOT set. Add TELEGRAM_BOT_TOKEN to the server .env and restart before messages can send.'}
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Admin group chat ID</label>
+                  <input value={alertCfg.telegram_admin_chat_id || ''} onChange={e => setAlertCfg((p: any) => ({ ...p, telegram_admin_chat_id: e.target.value }))}
+                    placeholder="-1001234567890 (group IDs are negative)"
+                    className="w-full bg-[#faf7f2] rounded-lg px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none focus:border-sky-400" />
+                  <p className="text-[11px] text-[#9c8e85] mt-1">Add your bot to the group, then read the id via @RawDataBot or the bot's getUpdates.{alertCfg.env_admin_chat_id ? ` Env fallback: ${alertCfg.env_admin_chat_id}` : ''}</p>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-[#6b5d52]">Events that alert the admin group</p>
+                  {[
+                    { k: 'event_new_tenant', label: '🆕 New tenant registered' },
+                    { k: 'event_subscription_due', label: '📅 Subscription due / overdue / expired' },
+                    { k: 'event_tenant_access', label: '🔒 Tenant suspended / reactivated' },
+                  ].map(ev => (
+                    <label key={ev.k} className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input type="checkbox" checked={!!Number(alertCfg[ev.k])} onChange={e => setAlertCfg((p: any) => ({ ...p, [ev.k]: e.target.checked ? 1 : 0 }))} className="w-4 h-4 accent-sky-600" />
+                      {ev.label}
+                    </label>
+                  ))}
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Subscription reminder lead (days before due)</label>
+                  <input type="number" min={0} max={60} value={Number(alertCfg.subscription_due_lead_days) || 0} onChange={e => setAlertCfg((p: any) => ({ ...p, subscription_due_lead_days: e.target.value }))}
+                    className="w-28 bg-[#faf7f2] rounded-lg px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none focus:border-sky-400" />
+                  <p className="text-[11px] text-[#9c8e85] mt-1">A daily digest (09:00 IST) lists tenants overdue, due today, or due within this many days.</p>
+                </div>
+
+                <div className="flex items-center gap-2 pt-2">
+                  <button onClick={saveAdminAlerts} disabled={alertBusy} data-allow-readonly className="px-4 py-2 rounded-2xl text-sm font-bold bg-sky-600 text-white hover:bg-sky-700 transition-colors disabled:opacity-50">Save</button>
+                  <button onClick={testAdminAlerts} disabled={alertBusy} data-allow-readonly className="px-4 py-2 rounded-2xl text-sm font-bold bg-[#faf7f2] hover:bg-sky-50 transition-colors disabled:opacity-50">Send test message</button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       ) : null}
     </div>
