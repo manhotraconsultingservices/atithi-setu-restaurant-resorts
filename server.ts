@@ -5304,13 +5304,19 @@ function _tgEsc(s: any): string { return String(s ?? '').replace(/([_*`\[\]])/g,
 // Send a Telegram message to the platform admin group IF that event is enabled.
 // Chat id: config → TELEGRAM_ADMIN_CHAT_ID → (sendTelegram falls back to default).
 // Best-effort; never throws.
+// A stored chat-id value can hold MULTIPLE ids (comma / newline / semicolon /
+// space separated) so alerts fan out to several groups or people.
+function parsePlatformChatIds(raw: any): string[] {
+  return String(raw || '').split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+}
 async function notifyPlatformAdmin(eventKey: string, message: string): Promise<void> {
   try {
     const cfg = await getPlatformNotifyConfig();
     const col = _PLATFORM_EVENT_COL[eventKey];
     if (col && Number(cfg?.[col] ?? 1) === 0) return; // event switched off by the admin
-    const chatId = cfg?.telegram_admin_chat_id || process.env.TELEGRAM_ADMIN_CHAT_ID || null;
-    await sendTelegram(chatId, message);
+    const ids = parsePlatformChatIds(cfg?.telegram_admin_chat_id);
+    const targets = ids.length ? ids : [process.env.TELEGRAM_ADMIN_CHAT_ID || null];
+    for (const t of targets) { await sendTelegram(t, message); } // each is best-effort inside sendTelegram
   } catch (e: any) { console.error(`[platform-notify:${eventKey}] failed:`, e?.message || e); }
 }
 
@@ -45276,8 +45282,15 @@ ${data.tenant.name}`;
     try {
       await ensurePlatformNotificationConfig();
       const b = req.body || {};
+      // Guard: a Telegram chat id is a NUMBER (negative for groups). Reject any
+      // entry that looks like the bot TOKEN (<digits>:<hash>). Multiple ids allowed.
+      const _cids = parsePlatformChatIds(b?.telegram_admin_chat_id);
+      const _bad = _cids.find(c => /^\d+:[A-Za-z0-9_-]{20,}$/.test(c));
+      if (_bad) {
+        return res.status(400).json({ error: `"${_bad}" looks like the bot TOKEN, not a chat ID. Enter one or more chat IDs (numbers like -1001234567890), comma- or newline-separated. The token belongs in the server env TELEGRAM_BOT_TOKEN.` });
+      }
       const fields: string[] = []; const vals: any[] = [];
-      if ('telegram_admin_chat_id' in b) { fields.push("telegram_admin_chat_id = ?"); vals.push(b.telegram_admin_chat_id ? String(b.telegram_admin_chat_id).trim() : null); }
+      if ('telegram_admin_chat_id' in b) { fields.push("telegram_admin_chat_id = ?"); vals.push(_cids.length ? _cids.join(', ') : null); }
       for (const col of ['event_new_tenant', 'event_subscription_due', 'event_tenant_access']) {
         if (col in b) { fields.push(`${col} = ?`); vals.push(b[col] ? 1 : 0); }
       }
@@ -45302,14 +45315,21 @@ ${data.tenant.name}`;
       await ensurePlatformNotificationConfig();
       invalidatePlatformNotifyCache();
       const cfg = await getPlatformNotifyConfig();
-      const chatId = (req.body?.telegram_admin_chat_id ? String(req.body.telegram_admin_chat_id).trim() : '')
-        || cfg?.telegram_admin_chat_id || process.env.TELEGRAM_ADMIN_CHAT_ID || null;
-      if (!chatId && !process.env.TELEGRAM_DEFAULT_CHAT_ID) {
-        return res.status(400).json({ error: "No admin chat id set. Enter the group chat id first (group ids are negative, e.g. -1001234567890)." });
+      // Prefer ids typed in the request (unsaved), else the saved config, else env.
+      const bodyIds = parsePlatformChatIds(req.body?.telegram_admin_chat_id);
+      const cfgIds = parsePlatformChatIds(cfg?.telegram_admin_chat_id);
+      const ids = bodyIds.length ? bodyIds : (cfgIds.length ? cfgIds : (process.env.TELEGRAM_ADMIN_CHAT_ID ? [process.env.TELEGRAM_ADMIN_CHAT_ID] : []));
+      const bad = ids.find(c => /^\d+:[A-Za-z0-9_-]{20,}$/.test(c));
+      if (bad) return res.status(400).json({ error: `"${bad}" looks like the bot TOKEN, not a chat ID. Enter chat IDs (numbers like -1001234567890).` });
+      if (!ids.length && !process.env.TELEGRAM_DEFAULT_CHAT_ID) {
+        return res.status(400).json({ error: "No admin chat id set. Enter one or more group chat ids first (group ids are negative, e.g. -1001234567890)." });
       }
-      const ok = await sendTelegram(chatId, `✅ *Atithi-Setu admin alerts connected*\n\nThis is a test from the Notifications config.\n👤 by ${_tgEsc(req.user?.email || 'admin')}`);
-      if (ok) return res.json({ success: true, sent_to: chatId || 'TELEGRAM_DEFAULT_CHAT_ID' });
-      return res.status(502).json({ error: "Telegram rejected the message. Check the bot token, that the bot is a member/admin of the group, and that the chat id is correct." });
+      const msg = `✅ *Atithi-Setu admin alerts connected*\n\nThis is a test from the Notifications config.\n👤 by ${_tgEsc(req.user?.email || 'admin')}`;
+      const targets = ids.length ? ids : [null];
+      let sent = 0; const failed: string[] = [];
+      for (const t of targets) { const okOne = await sendTelegram(t, msg); if (okOne) sent++; else failed.push(t || 'default'); }
+      if (sent > 0) return res.json({ success: true, sent_to: `${sent} chat${sent === 1 ? '' : 's'}`, failed });
+      return res.status(502).json({ error: "Telegram rejected the message for every chat. Check the bot token, that the bot is a member/admin of each group, and that the chat ids are correct." });
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to send test message" }); }
   });
 
@@ -45996,7 +46016,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'telegram-config-fix-ensure-table-timeout',
+    commit_marker: 'telegram-config-multi-chatid-and-token-guard',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

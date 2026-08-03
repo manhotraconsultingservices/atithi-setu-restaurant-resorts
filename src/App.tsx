@@ -49522,6 +49522,11 @@ function SuperAdminDashboard({ token }: { token: string }) {
   };
   const saveAdminAlerts = async () => {
     if (!alertCfg) return;
+    const _ids = (alertCfg.telegram_admin_chat_id || '').split(/[\s,;]+/).map((s: string) => s.trim()).filter(Boolean);
+    if (_ids.some((c: string) => /^\d+:[A-Za-z0-9_-]{20,}$/.test(c))) {
+      setAlertMsg({ type: 'err', text: 'One value is a BOT TOKEN, not a chat ID. Enter chat IDs (numbers like -1001234567890), comma- or newline-separated. The bot token stays in the server env.' });
+      return;
+    }
     setAlertBusy(true); setAlertMsg(null);
     try {
       const body = {
@@ -49539,6 +49544,11 @@ function SuperAdminDashboard({ token }: { token: string }) {
     finally { setAlertBusy(false); }
   };
   const testAdminAlerts = async () => {
+    const _ids = (alertCfg?.telegram_admin_chat_id || '').split(/[\s,;]+/).map((s: string) => s.trim()).filter(Boolean);
+    if (_ids.some((c: string) => /^\d+:[A-Za-z0-9_-]{20,}$/.test(c))) {
+      setAlertMsg({ type: 'err', text: "One value is a BOT TOKEN, not a chat ID. Enter the group's numeric ID (e.g. -1001234567890) and Save first." });
+      return;
+    }
     setAlertBusy(true); setAlertMsg(null);
     try {
       const res = await fetch('/api/admin/notification-config/test', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ telegram_admin_chat_id: (alertCfg?.telegram_admin_chat_id || '').trim() || null }) });
@@ -51988,11 +51998,15 @@ function SuperAdminDashboard({ token }: { token: string }) {
                 </div>
 
                 <div>
-                  <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Admin group chat ID</label>
-                  <input value={alertCfg.telegram_admin_chat_id || ''} onChange={e => setAlertCfg((p: any) => ({ ...p, telegram_admin_chat_id: e.target.value }))}
-                    placeholder="-1001234567890 (group IDs are negative)"
-                    className="w-full bg-[#faf7f2] rounded-lg px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none focus:border-sky-400" />
-                  <p className="text-[11px] text-[#9c8e85] mt-1">Add your bot to the group, then read the id via @RawDataBot or the bot's getUpdates.{alertCfg.env_admin_chat_id ? ` Env fallback: ${alertCfg.env_admin_chat_id}` : ''}</p>
+                  <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Admin group chat ID(s)</label>
+                  <textarea value={alertCfg.telegram_admin_chat_id || ''} onChange={e => setAlertCfg((p: any) => ({ ...p, telegram_admin_chat_id: e.target.value }))}
+                    rows={2}
+                    placeholder={"-1001234567890, 987654321\n(one or more — comma or new-line separated)"}
+                    className="w-full bg-[#faf7f2] rounded-lg px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none focus:border-sky-400 resize-y" />
+                  <p className="text-[11px] text-[#9c8e85] mt-1">One or more chat IDs — a number per line or comma-separated (group IDs are negative). <b>Not</b> the bot token. Add the bot to each group, then read the id via @RawDataBot or the bot's getUpdates.{alertCfg.env_admin_chat_id ? ` Env fallback: ${alertCfg.env_admin_chat_id}` : ''}</p>
+                  {(alertCfg.telegram_admin_chat_id || '').split(/[\s,;]+/).map((s: string) => s.trim()).filter(Boolean).some((c: string) => /^\d+:[A-Za-z0-9_-]{20,}$/.test(c)) && (
+                    <p className="text-[11px] text-rose-600 mt-1 font-semibold">⚠ That looks like a bot token, not a chat ID. Enter the group's numeric ID (e.g. -1001234567890).</p>
+                  )}
                 </div>
 
                 <div className="space-y-2">
