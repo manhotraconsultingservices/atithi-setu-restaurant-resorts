@@ -5295,6 +5295,25 @@ async function ensurePlatformNotificationConfig(): Promise<void> {
     ALTER TABLE platform_notification_config ADD COLUMN IF NOT EXISTS last_test_detail TEXT;
   `).catch((e: any) => console.error('[ensurePlatformNotificationConfig]', e?.message || e));
 }
+// The configured bot's @username, so the SuperAdmin page can tell the operator
+// exactly WHICH bot to open + /start (a "chat not found" almost always means the
+// user pressed Start on a different bot). Fetched in the BACKGROUND and cached —
+// never awaited in a request path, so it can't hold a Cloudflare-proxied response
+// open (see the sync-outbound-502 lesson). `undefined` = not yet fetched.
+let _botUsernameCache: string | null | undefined = undefined;
+let _botUsernameFetching = false;
+function warmBotUsername(): void {
+  if (_botUsernameFetching || _botUsernameCache !== undefined) return;
+  if (!process.env.TELEGRAM_BOT_TOKEN) { _botUsernameCache = null; return; }
+  _botUsernameFetching = true;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getMe`, { signal: controller.signal })
+    .then(r => r.json())
+    .then((j: any) => { if (j?.ok && j?.result?.username) _botUsernameCache = j.result.username; })
+    .catch(() => { /* leave undefined so the next GET retries */ })
+    .finally(() => { clearTimeout(timer); _botUsernameFetching = false; });
+}
 // eventKey → the config column that gates it.
 const _PLATFORM_EVENT_COL: Record<string, string> = {
   NEW_TENANT: 'event_new_tenant',
@@ -45271,10 +45290,12 @@ ${data.tenant.name}`;
   app.get("/api/admin/notification-config", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
     try {
       await ensurePlatformNotificationConfig();
+      warmBotUsername(); // background, cached — never awaited
       const cfg: any = await centralDb.get("SELECT * FROM platform_notification_config WHERE id = 'DEFAULT'").catch(() => ({}));
       res.json({
         ...(cfg || {}),
         bot_token_configured: !!process.env.TELEGRAM_BOT_TOKEN,
+        bot_username: _botUsernameCache || null,
         env_admin_chat_id: process.env.TELEGRAM_ADMIN_CHAT_ID || null,
         env_default_chat_id: process.env.TELEGRAM_DEFAULT_CHAT_ID || null,
       });
@@ -46053,7 +46074,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'telegram-test-detailed-error',
+    commit_marker: 'telegram-show-bot-username',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

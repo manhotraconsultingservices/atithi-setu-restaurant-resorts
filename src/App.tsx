@@ -49517,7 +49517,20 @@ function SuperAdminDashboard({ token }: { token: string }) {
       const res = await fetch('/api/admin/notification-config', { headers: { 'Authorization': `Bearer ${token}` } });
       const raw = await res.text();
       let data: any = null; try { data = raw ? JSON.parse(raw) : {}; } catch { data = null; }
-      if (res.ok && data) setAlertCfg(data);
+      if (res.ok && data) {
+        setAlertCfg(data);
+        // The bot @username is fetched server-side in the background and cached;
+        // if it wasn't ready on this first load, grab it once more shortly.
+        if (data.bot_token_configured && !data.bot_username) {
+          setTimeout(async () => {
+            try {
+              const r2 = await fetch('/api/admin/notification-config', { headers: { 'Authorization': `Bearer ${token}` } });
+              const d2 = await r2.json().catch(() => null);
+              if (d2 && d2.bot_username) setAlertCfg((prev: any) => ({ ...prev, bot_username: d2.bot_username }));
+            } catch { /* ignore */ }
+          }, 1800);
+        }
+      }
       else setAlertMsg({ type: 'err', text: (data && data.error) ? data.error : `Load failed — HTTP ${res.status}${raw ? ': ' + raw.slice(0, 200) : ''}` });
     } catch (e: any) { setAlertMsg({ type: 'err', text: 'Request failed: ' + (e?.message || String(e)) }); }
     finally { setAlertLoading(false); }
@@ -52021,6 +52034,23 @@ function SuperAdminDashboard({ token }: { token: string }) {
                     ? '✅ Bot token is configured on the server (TELEGRAM_BOT_TOKEN).'
                     : '⚠️ Bot token is NOT set. Add TELEGRAM_BOT_TOKEN to the server .env and restart before messages can send.'}
                 </div>
+
+                {alertCfg.bot_token_configured && (
+                  <div className="px-4 py-3 rounded-xl text-sm border bg-sky-50 text-sky-800 border-sky-200">
+                    {alertCfg.bot_username ? (
+                      <>
+                        🤖 Alerts are sent by <b>@{alertCfg.bot_username}</b> —{' '}
+                        <a href={`https://t.me/${alertCfg.bot_username}`} target="_blank" rel="noreferrer" className="underline font-semibold">open it in Telegram</a>.
+                        <div className="text-[11px] mt-1 text-sky-700">
+                          For a <b>personal DM</b> (positive id): open <b>@{alertCfg.bot_username}</b> from that same account and tap <b>Start</b> once — otherwise Telegram returns “chat not found”.
+                          For a <b>group</b>: add <b>@{alertCfg.bot_username}</b> to the group and use the group’s <b>negative</b> id.
+                        </div>
+                      </>
+                    ) : (
+                      <>🤖 Make sure you press <b>Start</b> on the <b>same bot</b> whose token is configured here (find it in Telegram via <b>@BotFather → /mybots</b>). Pressing Start on a different bot causes “chat not found”.</>
+                    )}
+                  </div>
+                )}
 
                 <div>
                   <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Admin group chat ID(s)</label>
