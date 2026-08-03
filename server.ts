@@ -5093,8 +5093,14 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
         // Full(3) (not 0), else events staff get 403 until the owner re-saves.
         'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_VENUES',
         'EVENTS_RENTALS', 'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS',
-        'EVENTS_REPORTS', 'EVENTS_SETTINGS',
-        'CHECKLISTS',
+        'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS',
+        'CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
+        // Spa & Wellness — operational tabs; module-gated, so harmless on non-spa
+        // tenants and prevents locking spa staff out on tenants that pre-configured
+        // Staff Access before Spa shipped. (SPA_BILLING / SPA_SETTINGS stay out —
+        // the owner grants those explicitly.)
+        'SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES',
+        'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_INVENTORY',
       ];
       for (const tab of RBAC_NEWLY_ADDED) {
         if (!(tab in perms)) perms[tab] = 3;
@@ -9207,7 +9213,7 @@ async function startServer() {
   });
 
   // Menu: Update Item
-  app.patch("/api/menu/:id", authenticate, menuImageUpload.single('image'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/menu/:id", authenticate, restaurantStaff, menuImageUpload.single('image'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const updates: Record<string, any> = { ...req.body };
@@ -9248,7 +9254,7 @@ async function startServer() {
   });
 
   // Menu: Delete Item
-  app.delete("/api/menu/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/menu/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("DELETE FROM menu WHERE id = ?", [req.params.id]);
@@ -16194,7 +16200,7 @@ ${data.tenant.name}`;
   });
 
   // Ingredients: update
-  app.patch("/api/inventory/ingredients/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/inventory/ingredients/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const allowed = [
@@ -16224,7 +16230,7 @@ ${data.tenant.name}`;
 
   // Ingredients: soft-delete (sets is_active=0). Hard delete blocked because
   // recipes / movements / GRN line items reference this row.
-  app.delete("/api/inventory/ingredients/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/inventory/ingredients/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE ingredients SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.id]);
@@ -16236,7 +16242,7 @@ ${data.tenant.name}`;
 
   // Ingredients: bulk stock adjustment (manual override)
   // Used for ad-hoc corrections. Logs MANUAL movement with a "before/after" note.
-  app.post("/api/inventory/ingredients/:id/adjust-stock", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/inventory/ingredients/:id/adjust-stock", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { new_qty, reason } = req.body;
       if (new_qty == null || isNaN(Number(new_qty))) {
@@ -16488,7 +16494,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/inventory/suppliers/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/inventory/suppliers/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const allowed = [
@@ -16514,7 +16520,7 @@ ${data.tenant.name}`;
   });
 
   // Soft-delete (PO/GRN history references this row)
-  app.delete("/api/inventory/suppliers/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/inventory/suppliers/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE suppliers SET is_active = 0 WHERE id = ?", [req.params.id]);
@@ -16690,7 +16696,7 @@ ${data.tenant.name}`;
   });
 
   // Update PO header (only DRAFT POs editable for header fields)
-  app.patch("/api/inventory/purchase-orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/inventory/purchase-orders/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -16718,7 +16724,7 @@ ${data.tenant.name}`;
   });
 
   // Replace line items on a DRAFT PO. Recomputes totals.
-  app.put("/api/inventory/purchase-orders/:id/items", authenticate, async (req: AuthRequest, res: Response) => {
+  app.put("/api/inventory/purchase-orders/:id/items", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { items } = req.body;
       if (!Array.isArray(items)) return res.status(400).json({ error: "items array is required" });
@@ -16763,7 +16769,7 @@ ${data.tenant.name}`;
   });
 
   // Mark a PO as SENT (DRAFT → SENT). Optionally fires an email to the supplier later.
-  app.post("/api/inventory/purchase-orders/:id/send", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/inventory/purchase-orders/:id/send", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -16866,7 +16872,7 @@ ${data.tenant.name}`;
 
   // Email PO to supplier with PDF attachment
   // Body: { to?: string, cc?: string, message?: string }   // overrides supplier.email if 'to' is provided
-  app.post("/api/inventory/purchase-orders/:id/email", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/inventory/purchase-orders/:id/email", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId!);
       const data = await hydratePOForPdf(db, req.params.id, req.user!.restaurantId!);
@@ -16905,7 +16911,7 @@ ${data.tenant.name}`;
   });
 
   // Cancel a PO (any non-terminal status → CANCELLED)
-  app.post("/api/inventory/purchase-orders/:id/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/inventory/purchase-orders/:id/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -17226,7 +17232,7 @@ ${data.tenant.name}`;
   });
 
   // Upload bill image for an existing GRN
-  app.post("/api/inventory/grn/:id/upload-bill", authenticate, upload.single('bill'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/inventory/grn/:id/upload-bill", authenticate, restaurantStaff, upload.single('bill'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded (field name: 'bill')" });
       const db = await getTenantDb(req.user!.restaurantId);
@@ -18957,7 +18963,7 @@ ${data.tenant.name}`;
 
   // Update one or more line items during the count.
   // Body: { items: [{ id, actual_qty }, ...] }
-  app.patch("/api/inventory/counts/:id/items", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/inventory/counts/:id/items", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { items } = req.body;
       if (!Array.isArray(items)) return res.status(400).json({ error: "items array required" });
@@ -18991,7 +18997,7 @@ ${data.tenant.name}`;
   // Complete the count. Reconciles every line where actual_qty was filled —
   // for each non-zero variance, posts a COUNT_ADJUSTMENT movement and brings
   // ingredients.current_stock_qty in line with reality.
-  app.post("/api/inventory/counts/:id/complete", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/inventory/counts/:id/complete", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId!);
       const count: any = await db.get("SELECT * FROM physical_counts WHERE id = ?", [req.params.id]);
@@ -19872,7 +19878,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.delete("/api/inventory/seasonality/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/inventory/seasonality/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE seasonality_factors SET is_active = 0 WHERE id = ?", [req.params.id]);
@@ -20083,7 +20089,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel-inventory/:itemId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel-inventory/:itemId", authenticate, restaurantStaff, requireTabAccess('HOTEL_INVENTORY'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const allowed = ['name', 'category', 'unit', 'current_stock_qty', 'par_level', 'reorder_point', 'default_unit_price', 'sku', 'notes'];
@@ -20103,7 +20109,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel-inventory/:itemId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel-inventory/:itemId", authenticate, restaurantStaff, requireTabAccess('HOTEL_INVENTORY'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("UPDATE hotel_inventory_items SET is_active = 0 WHERE id = ?", [req.params.itemId]);
@@ -20947,7 +20953,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.delete("/api/storage-locations/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/storage-locations/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       if (req.params.id === 'LOC-MAIN') return res.status(400).json({ error: "Cannot delete the default Main location" });
       const db = await getTenantDb(req.user!.restaurantId);
@@ -28895,6 +28901,11 @@ ${data.tenant.name}`;
 
   app.post("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      // RBAC: mirror the petty-cash edit/delete siblings — owner/manager only.
+      const role = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role)) {
+        return res.status(403).json({ error: 'Only an owner or manager can record a petty-cash entry.' });
+      }
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
       const direction = String(req.body?.direction || '').toUpperCase() === 'OUT' ? 'OUT' : 'IN';
@@ -40091,7 +40102,10 @@ ${data.tenant.name}`;
   });
 
   // Update Restaurant Settings
-  app.patch("/api/restaurant/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  // RBAC: restaurantAdmin (OWNER/MANAGER/admin) + SETTINGS tab — GST / UPI / FSSAI /
+  // invoice-numbering are financial-config, so this mirrors the restaurantAdmin gate
+  // its helper is documented for. Tenant isolation is enforced globally in authenticate().
+  app.patch("/api/restaurant/:id", authenticate, restaurantAdmin, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
     try {
       const {
         name, gst_number, gst_percentage, is_gst_enabled, template_id, table_count,
@@ -41199,9 +41213,14 @@ ${data.tenant.name}`;
   });
 
   // Invoice status: update on individual ORDER
-  app.patch("/api/orders/:id/invoice-status", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/orders/:id/invoice-status", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
-      const { invoice_status, restaurantId } = req.body;
+      const { invoice_status, restaurantId: bodyRid } = req.body;
+      // Tenant-safety: this path carries no :id, so the global tenant-isolation
+      // guard can't apply. Staff act on their OWN tenant (from the JWT); only
+      // platform admins may target another tenant via the body restaurantId.
+      const _role = String(req.user?.role || '').toUpperCase();
+      const restaurantId = ((_role === 'SUPER_ADMIN' || _role === 'CTO') && bodyRid) ? bodyRid : req.user!.restaurantId;
       if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
       const db = await getTenantDb(restaurantId);
       await db.run("UPDATE orders SET invoice_status = ? WHERE id = ?", [invoice_status, req.params.id]);
@@ -42918,7 +42937,7 @@ ${data.tenant.name}`;
   );
 
   // Orders: Update Status
-  app.patch("/api/orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/orders/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       // Ensure chef/eta columns exist (in case migration hasn't run yet for this tenant)
@@ -43847,6 +43866,10 @@ ${data.tenant.name}`;
   // Staff: Update Staff
   app.patch("/api/owner/staff/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      // RBAC: mirror the staff create/GET siblings — only tenant admins manage staff.
+      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+        return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      }
       const db = await getTenantDb(req.user!.restaurantId);
       const updates = req.body;
       const keys = Object.keys(updates);
@@ -43862,6 +43885,10 @@ ${data.tenant.name}`;
   // Staff: Delete Staff
   app.delete("/api/owner/staff/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      // RBAC: mirror the staff create/GET siblings — only tenant admins manage staff.
+      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+        return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      }
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("DELETE FROM attendance_staff WHERE id = ?", [req.params.id]);
       res.json({ success: true });
@@ -43898,6 +43925,10 @@ ${data.tenant.name}`;
   // Attendance: Update Record Status
   app.patch("/api/attendance/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      // RBAC: attendance edits are a manager function — mirror the staff-mgmt gate.
+      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+        return res.status(403).json({ error: "Forbidden — editing attendance requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      }
       const { status } = req.body;
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE attendance SET status = ? WHERE id = ?", [status, req.params.id]);
@@ -43910,6 +43941,10 @@ ${data.tenant.name}`;
   // Staff: Update Settings (default hours + payroll wage type/rate)
   app.patch("/api/owner/staff/:id/settings", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      // RBAC: mirror the staff create/GET siblings — only tenant admins manage staff.
+      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+        return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      }
       const b = req.body || {};
       const db = await getTenantDb(req.user!.restaurantId);
       await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8");
@@ -44404,10 +44439,14 @@ ${data.tenant.name}`;
   });
 
   // Orders: Mark Payment
-  app.patch("/api/orders/:id/payment", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/orders/:id/payment", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { status, restaurantId: rId } = req.body;
-      const tenantId = rId || req.user!.restaurantId;
+      // Tenant-safety: this path carries no :id, so the global tenant-isolation
+      // guard can't apply. Staff act on their OWN tenant (from the JWT); only
+      // platform admins may target another tenant via the body restaurantId.
+      const _role = String(req.user?.role || '').toUpperCase();
+      const tenantId = ((_role === 'SUPER_ADMIN' || _role === 'CTO') && rId) ? rId : req.user!.restaurantId;
       const db = await getTenantDb(tenantId);
       const order = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.id]);
 
@@ -44613,7 +44652,7 @@ ${data.tenant.name}`;
   });
 
   // Owner: Update Booking Status
-  app.post("/api/owner/bookings/:id/status", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/owner/bookings/:id/status", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { status } = req.body;
       const db = await getTenantDb(req.user!.restaurantId);
@@ -44641,7 +44680,7 @@ ${data.tenant.name}`;
   });
 
   // Owner: Cancel (soft-delete) a booking
-  app.delete("/api/owner/bookings/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/owner/bookings/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const booking = await db.get("SELECT * FROM bookings WHERE id = ?", [req.params.id]);
@@ -44665,7 +44704,7 @@ ${data.tenant.name}`;
   });
 
   // Owner: Create booking on behalf of customer (auto-confirmed)
-  app.post("/api/owner/bookings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/owner/bookings", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { customer_name, customer_phone, customer_email, booking_date, booking_time, guests, notes } = req.body;
       if (!customer_name || !customer_phone || !booking_date || !booking_time || !guests) {
@@ -44695,7 +44734,7 @@ ${data.tenant.name}`;
   });
 
   // Owner: Upsert reservation day config for a specific date
-  app.put("/api/owner/reservation-config/:date", authenticate, async (req: AuthRequest, res: Response) => {
+  app.put("/api/owner/reservation-config/:date", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { max_tables, time_slots, is_open, notes } = req.body;
       const db = await getTenantDb(req.user!.restaurantId);
@@ -44714,7 +44753,7 @@ ${data.tenant.name}`;
   });
 
   // Owner: Delete reservation day config for a specific date
-  app.delete("/api/owner/reservation-config/:date", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/owner/reservation-config/:date", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("DELETE FROM reservation_day_config WHERE TO_CHAR(config_date, 'YYYY-MM-DD') = ?", [req.params.date]);
@@ -44725,7 +44764,7 @@ ${data.tenant.name}`;
   });
 
   // Owner: Bulk-apply availability config to a date range (with optional day-of-week filter)
-  app.post("/api/owner/reservation-config/bulk", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/owner/reservation-config/bulk", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { from_date, to_date, day_of_week, max_tables, time_slots, is_open, notes } = req.body;
       if (!from_date || !to_date) return res.status(400).json({ error: "from_date and to_date are required" });
@@ -45774,7 +45813,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-template-active-toggle',
+    commit_marker: 'rbac-endpoint-gates-and-tab-catalogue',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

@@ -1983,6 +1983,40 @@ async function testRBACHardening() {
   } else {
     fail('TC-RBAC-F4-001', 'POST /spa/appointments — should reject unauthed request (fail-closed)', `got ${spaCreate.status} — may still be fail-open`);
   }
+
+  // ── ENDPOINT ROLE GATES — a low-privilege staffer (WAITER) must be 403'd on the
+  //    owner/manager-only writes we locked down (settings, staff edit, attendance,
+  //    petty-cash). Creates a throwaway WAITER, logs in as them, checks the gates,
+  //    then deletes the account. Skips cleanly if staff setup isn't possible.
+  {
+    const tag = Date.now();
+    const loginId = `rbacwaiter_${tag}`;
+    const pwd = `Rb!${tag}xZ`;
+    let waiterId = null, waiterTok = '';
+    const mk = await api('POST', '/api/owner/staff', { name: `RBAC Waiter ${tag}`, role: 'WAITER', loginId, password: pwd, employee_type: 'LOGIN' });
+    if (mk.status === 200 || mk.status === 201) {
+      waiterId = mk.data?.id || mk.data?.staff?.id || null;
+      const lg = await api('POST', '/api/auth/login', { loginId, password: pwd, restaurantId });
+      waiterTok = lg.data?.jwt_token || lg.data?.token || '';
+    }
+    const gateIds = ['TC-RBAC-GATE-001', 'TC-RBAC-GATE-002', 'TC-RBAC-GATE-003', 'TC-RBAC-GATE-004'];
+    if (!waiterTok) {
+      gateIds.forEach(id => skip(id, 'Endpoint role-gate (WAITER → 403)', `could not create/login a throwaway WAITER (create=${mk.status})`));
+    } else {
+      const gate = async (id, name, method, path, body) => {
+        const r = await api(method, path, body, waiterTok);
+        if (r.status === 403) pass(id, name, '403 as expected');
+        else fail(id, name, `expected 403 for WAITER but got ${r.status} — write endpoint is not owner/manager-gated`);
+      };
+      // settings = restaurantAdmin gate; staff/attendance = STAFF_MGMT_ROLES; petty-cash = owner/manager.
+      // WAITER is in restaurantStaff, so these must be the tighter gates to reject it.
+      await gate('TC-RBAC-GATE-001', 'PATCH /api/restaurant/:id (settings) blocks WAITER', 'PATCH', `/api/restaurant/${restaurantId}`, {});
+      await gate('TC-RBAC-GATE-002', 'PATCH /api/owner/staff/:id blocks WAITER',           'PATCH', `/api/owner/staff/FAKE_${tag}`, { name: 'x' });
+      await gate('TC-RBAC-GATE-003', 'PATCH /api/attendance/:id blocks WAITER',            'PATCH', `/api/attendance/FAKE_${tag}`, { status: 'PRESENT' });
+      await gate('TC-RBAC-GATE-004', 'POST /api/restaurant/:id/petty-cash blocks WAITER',  'POST',  `/api/restaurant/${restaurantId}/petty-cash`, { amount: 1, direction: 'OUT', category: 'RBAC test' });
+    }
+    if (waiterId) { try { await api('DELETE', `/api/owner/staff/${waiterId}`); } catch {} }
+  }
 }
 
 // ── Summary report ─────────────────────────────────────────────────────────

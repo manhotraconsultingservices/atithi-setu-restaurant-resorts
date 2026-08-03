@@ -12769,7 +12769,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Full(3) for any role that doesn't have them configured yet. This prevents
         // an owner from accidentally revoking access simply by opening the matrix
         // and saving before explicitly setting a level for these new tabs.
-        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD'];
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
+          // Spa operational tabs — grantable in Staff Access from now on; prefill Full
+          // so spa staff on tenants that pre-configured the matrix aren't locked out.
+          'SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_INVENTORY'];
         for (const roleId of Object.keys(raw)) {
           for (const tab of NEWLY_ADDED) {
             if (!(tab in (raw[roleId] || {}))) raw[roleId] = { ...(raw[roleId] || {}), [tab]: 3 };
@@ -14126,14 +14129,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           if (id === 'MY_CHECKLIST') return true;
           // Checklist Board is the manager/owner cockpit over every checklist instance.
           if (id === 'CHECKLIST_BOARD') return isOwnerOrAdmin || currentRole === 'MANAGER';
-          // Status Board — rooms + halls status grid; visible wherever hotel/events run.
-          if (id === 'STATUS_BOARD') return isHotelEnabled || isEventsEnabled;
+          // Status Board — rooms + halls status grid. Module-gated AND permissionable:
+          // owner always sees it; staff go through the Staff Access matrix.
+          if (id === 'STATUS_BOARD') return (isHotelEnabled || isEventsEnabled) && (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs));
           // Finance tabs (PROCUREMENT, EXPENSE_JOURNAL) were introduced after
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
           // visibility still flows through isTabVisible (V3 fix handles it).
           if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING' || id === 'ACCOUNTING') && isOwnerOrAdmin) return true;
-          if (id === 'SPA_BILLING' && isSpaEnabled) return true;
+          // Spa Billing — module-gated AND permissionable (was hard-forced visible).
+          if (id === 'SPA_BILLING') return isSpaEnabled && (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs));
           // The Events-module cleaning tab reuses the shared HOUSEKEEPING
           // permission (the backend housekeeping endpoints are RBAC-keyed on
           // 'HOUSEKEEPING'), so it shows for whoever can access Housekeeping.
@@ -25618,7 +25623,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // for non-technical owners (hover tooltip).
             // hotelOnly      = hidden for RESTAURANT tenants
             // restaurantOnly = hidden for HOTEL-only tenants
-            const PERMISSIBLE_TABS: { id: string; label: string; description: string; hotelOnly?: boolean; restaurantOnly?: boolean; eventsOnly?: boolean }[] = [
+            const PERMISSIBLE_TABS: { id: string; label: string; description: string; hotelOnly?: boolean; restaurantOnly?: boolean; eventsOnly?: boolean; spaOnly?: boolean }[] = [
               { id: 'MONITOR',           label: 'Monitor / Dashboard',     description: 'Real-time KPIs, today\'s revenue, live order board, daily summary.' },
               { id: 'ORDERS',            label: 'Orders (POS)',            description: 'Place dine-in / takeaway orders, view current orders, kitchen ticket status.',        restaurantOnly: true },
               { id: 'INVOICES',          label: 'Invoices',                description: 'Manual invoice creation, GST invoice download, invoice list, refunds.' },
@@ -25638,7 +25643,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'TIMESHEET',         label: 'Timesheet',               description: 'Planned vs actual hours, payroll prep, overtime variance.' },
               { id: 'ATTENDANCE',        label: 'Attendance',              description: 'Clock-in / clock-out records, daily attendance report.' },
               { id: 'HR_PAYROLL',        label: 'HR & Payroll',            description: 'Employee profile + salary structure + payslip + statutory (PF/ESI/TDS) + expenses + offer letters.' },
-              { id: 'REPORTS',            label: 'Reports & Analytics',    description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis.' },
+              { id: 'STAFF_PAYROLL',     label: 'Operational Payroll',     description: 'Attendance-driven wages + advances for hourly / full-time operational staff (separate from formal HR payroll).' },
+              { id: 'ALL_REPORTS',       label: 'Reports & Analytics',    description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis — the unified reports hub.' },
               { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports',     description: 'F&B revenue, top dishes, peak-hour heatmap, delivery settlement, customer cohort — separate reporting hub.', restaurantOnly: true },
               { id: 'FEEDBACK',           label: 'Feedback / Reviews',     description: 'Customer feedback responses, NPS, public review page.' },
               { id: 'NOTIFICATIONS',     label: 'Notifications',           description: 'WhatsApp / SMS / email template config, delivery logs.' },
@@ -25661,6 +25667,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // Finance tabs (visible for both HOTEL and RESTAURANT tenants)
               { id: 'EXPENSE_JOURNAL',      label: 'Expense Journal',       description: 'Daily operating expenses, petty cash entries, vendor payments, expense reports and approval.' },
               { id: 'PROCUREMENT',          label: 'Procurement & AP',      description: 'Purchase orders, supplier invoices, goods-received notes, accounts payable aging.' },
+              { id: 'RECEIVABLES',          label: 'Receivables (AR)',      description: 'Customer / OTA receivables — agents, invoices, payments, aging, collection.' },
               // Events & Convention tabs (only shown when the Events module is enabled).
               { id: 'EVENTS_DASHBOARD',  label: 'Events Dashboard',   description: 'Events ops cockpit: pipeline, win rate, revenue, receivables, venue utilization.', eventsOnly: true },
               { id: 'EVENTS_CALENDAR',   label: 'Events Calendar',    description: 'Venue × date booking calendar.', eventsOnly: true },
@@ -25673,20 +25680,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_REPORTS',    label: 'Event Reports',      description: 'Events reporting hub — revenue, venue utilization, upcoming events, CSV export.', eventsOnly: true },
               { id: 'EVENTS_SETTINGS',   label: 'Events Page Settings', description: 'Public events page config — hero, tagline, gallery photos.', eventsOnly: true },
               { id: 'EVENTS_CHECKLISTS', label: 'Event Checklist Templates', description: 'Owner config: build event-hall checklist templates (setup / daily / post-event), set triggers, and assign to all or specific venues. Owner-only.', eventsOnly: true },
+              // Spa & Wellness tabs (only shown when the Spa module is enabled).
+              { id: 'SPA_CALENDAR',     label: 'Spa Calendar',       description: 'Therapist × time appointment calendar — book, reschedule, view the day.', spaOnly: true },
+              { id: 'SPA_APPOINTMENTS', label: 'Spa Appointments',   description: 'Appointment list, status, checkout to folio / invoice.', spaOnly: true },
+              { id: 'SPA_CATALOG',      label: 'Spa Catalog',        description: 'Treatments / services master — duration, price, resources, therapists.', spaOnly: true },
+              { id: 'SPA_RESOURCES',    label: 'Spa Resources',      description: 'Rooms / tables / equipment used for appointment scheduling.', spaOnly: true },
+              { id: 'SPA_CLIENTS',      label: 'Spa Clients',        description: 'Spa CRM — client profiles, intake forms, visit history.', spaOnly: true },
+              { id: 'SPA_PACKAGES',     label: 'Spa Packages',       description: 'Packages, memberships and retail products for spa sale.', spaOnly: true },
+              { id: 'SPA_REPORTS',      label: 'Spa Reports',        description: 'Spa revenue, therapist utilization, top treatments — reporting hub.', spaOnly: true },
+              { id: 'SPA_BILLING',      label: 'Spa Billing',        description: 'Spa invoices and payments.', spaOnly: true },
+              { id: 'SPA_SETTINGS',     label: 'Spa Settings',       description: 'Spa module configuration — hours, public page, policies.', spaOnly: true },
+              { id: 'SPA_INVENTORY',    label: 'Spa Inventory',      description: 'Spa consumables and retail stock — levels, movements.', spaOnly: true },
             ];
             // Filter: hotelOnly rows require hotel module; restaurantOnly rows
             // require restaurant module; eventsOnly rows require the Events module.
             const visibleTabs = PERMISSIBLE_TABS.filter(t =>
               (!t.hotelOnly      || isHotelEnabled) &&
               (!t.restaurantOnly || isRestaurantEnabled) &&
-              (!t.eventsOnly     || isEventsEnabled)
+              (!t.eventsOnly     || isEventsEnabled) &&
+              (!t.spaOnly        || isSpaEnabled)
             );
 
             // Roles to manage. OWNER + SUPER_ADMIN/CTO are excluded —
             // they always see everything (server enforces this too).
             // Module-aware: hotel-only roles are hidden for restaurant-only
             // tenants; restaurant-only roles are hidden for hotel-only tenants.
-            const ALL_MANAGED_ROLES: { id: string; label: string; hint: string; hotelOnly?: boolean; restaurantOnly?: boolean }[] = [
+            const ALL_MANAGED_ROLES: { id: string; label: string; hint: string; hotelOnly?: boolean; restaurantOnly?: boolean; spaOnly?: boolean }[] = [
               { id: 'MANAGER',      label: 'Manager',      hint: 'Senior staff — typically full operational access' },
               { id: 'FRONT_DESK',   label: 'PMS',          hint: 'Receptionist — bookings, guest bills, guest services',  hotelOnly: true },
               { id: 'CONCIERGE',    label: 'Concierge',    hint: 'Guest service coordinator',                         hotelOnly: true },
@@ -25695,6 +25714,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'CHEF',         label: 'Chef / KDS',   hint: 'Kitchen display, recipes',                          restaurantOnly: true },
               { id: 'HOUSEKEEPING', label: 'Housekeep.',   hint: 'Service requests + room status',                    hotelOnly: true },
               { id: 'MAINTENANCE',  label: 'Maintenance',  hint: 'Service requests, room status',                     hotelOnly: true },
+              { id: 'THERAPIST',    label: 'Therapist',    hint: 'Spa therapist — appointments, clients',             spaOnly: true },
               // Owner-defined custom roles — scope-filtered at render time
               ...customRoles.map(cr => ({
                 id: cr.id,
@@ -25706,7 +25726,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ];
             const MANAGED_ROLES = ALL_MANAGED_ROLES.filter(r =>
               (!r.hotelOnly      || isHotelEnabled) &&
-              (!r.restaurantOnly || isRestaurantEnabled)
+              (!r.restaurantOnly || isRestaurantEnabled) &&
+              (!r.spaOnly        || isSpaEnabled)
             );
 
             // RBAC-6: level labels + colors

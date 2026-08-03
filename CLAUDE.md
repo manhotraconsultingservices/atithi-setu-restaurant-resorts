@@ -446,13 +446,21 @@ definition-of-done as updating `test-scripts/run_technical_tests.mjs`.
 
 ---
 
-## RBAC — MANDATORY for every new tab / module / endpoint
+## RBAC — MANDATORY for every new tab / page / module / object / endpoint
 
 **Every new piece of functionality ships behind RBAC — no exceptions.** A feature
 is not done until a business owner can grant or deny it per staff role, and the
 server enforces that decision. Owner / SUPER_ADMIN / CTO always bypass (they see
 everything); everyone else is gated. Adding a tab or endpoint without wiring RBAC
 is a defect, not a shortcut.
+
+**This covers every navigable surface and every business object, not just "tabs":**
+any new **page / view / nav entry**, any new **object detail view** (see the Object
+Detail convention above), and any new **module** gets its own `TAB_ID` and goes
+through all four steps below. If a user can reach it from the nav or by drilling into
+a record, it must be permissionable — a page that renders regardless of the saved
+role matrix, or an endpoint whose only middleware is `authenticate`, is an RBAC gap
+to fix, not an acceptable state.
 
 **Definition of done — for any new tab, module, or mutating/reading endpoint:**
 1. **Server enforcement.** Guard every route with `authenticate` + the appropriate
@@ -478,6 +486,52 @@ The Housekeeping module (tab id `HOUSEKEEPING`, added 2026-08) is the reference
 implementation: `requireTabAccess('HOUSEKEEPING')` on every route, a manager-role
 check (`HK_MANAGER_ROLES`) on config/override writes, a `PERMISSIBLE_TABS` row, and
 `HOUSEKEEPING` in `RBAC_NEWLY_ADDED`.
+
+---
+
+## Smart tables — MANDATORY for every list/grid of records
+
+**Any new table that lists records is a "smart table" — no plain `<table>` of rows.**
+Every tabular listing anywhere in the app (any module, any tab, any object-detail
+node) must be **sortable**, **filterable**, and let the user **show/hide/add columns**
+via the gear. This is a definition-of-done item, exactly like RBAC and i18n: shipping
+a bare HTML table is a defect to retrofit, not an acceptable state.
+
+**Use the shared component — never hand-roll a table.** Render through
+`src/components/DataTable.tsx` (`import { DataTable, type ColDef, exportToCsv }`). It
+already provides sort, global search, CSV export, and pagination; the three
+capabilities this rule requires are **opt-in props you must set**:
+
+1. `columnChooser` — the gear that adds/removes columns.
+2. `columnFilters` — the per-column filter row.
+3. `tableId="<stable-unique-id>"` — persists each user's column choice in
+   `localStorage` (`dt:cols:<tableId>`). Give every table a distinct id.
+
+Then, per `ColDef`: mark real columns `sortable: true`; mark the columns worth
+filtering `filterable: true` (with `filterType: 'select'` + `filterOptions` for
+enums, `'text'` otherwise); use `hideable` / `defaultHidden` to control what the gear
+shows and what starts hidden; use `searchable` for the columns the global search box
+should match. Keep an `exportFilename` so CSV export stays meaningful.
+
+```tsx
+<DataTable
+  data={rows}
+  rowKey={(r) => r.id}
+  columnChooser columnFilters tableId="hotel-inventory-items"
+  exportFilename="inventory-items"
+  columns={[
+    { key: 'name',   label: t('inventory.name'),   sortable: true, searchable: true },
+    { key: 'status', label: t('common.status'),    sortable: true, filterable: true,
+      filterType: 'select', filterOptions: STATUS_OPTS },
+    { key: 'qty',    label: t('inventory.qty'),     sortable: true, align: 'right' },
+    { key: 'notes',  label: t('common.notes'),      hideable: true, defaultHidden: true },
+  ]}
+/>
+```
+
+Column **labels are user-facing strings** → localize them with `t()` (see the i18n
+rule). The reference implementations are the Hotel Inventory, Attendance, Expense
+Journal, My Checklist, and Checklist Board tables — copy their setup.
 
 ---
 
