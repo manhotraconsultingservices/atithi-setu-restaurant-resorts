@@ -5290,6 +5290,9 @@ async function ensurePlatformNotificationConfig(): Promise<void> {
       updated_by TEXT
     );
     INSERT INTO platform_notification_config (id) VALUES ('DEFAULT') ON CONFLICT (id) DO NOTHING;
+    ALTER TABLE platform_notification_config ADD COLUMN IF NOT EXISTS last_test_at TIMESTAMP;
+    ALTER TABLE platform_notification_config ADD COLUMN IF NOT EXISTS last_test_ok INT;
+    ALTER TABLE platform_notification_config ADD COLUMN IF NOT EXISTS last_test_detail TEXT;
   `).catch((e: any) => console.error('[ensurePlatformNotificationConfig]', e?.message || e));
 }
 // eventKey → the config column that gates it.
@@ -45326,28 +45329,37 @@ ${data.tenant.name}`;
       }
       const msg = `✅ *Atithi-Setu admin alerts connected*\n\nThis is a test from the Notifications config.\n👤 by ${_tgEsc(req.user?.email || 'admin')}`;
       const targets = ids.length ? ids : [null];
-      // Hard-bound the whole send phase. If the origin cannot reach
-      // api.telegram.org the outbound fetch can hang long enough for Cloudflare
-      // to return its own 502 HTML page before we ever respond — race the sends
-      // against a timer so we ALWAYS return clean JSON fast, and can tell an
-      // egress hang ("timed out") apart from a real Telegram rejection.
-      const TIMED_OUT = Symbol('timeout');
-      const doSends = (async () => {
+      const byWhom = req.user?.email || req.user?.id || 'admin';
+      // Respond IMMEDIATELY, then perform the Telegram send in the BACKGROUND.
+      // The working per-tenant Telegram alerts also fire from background jobs —
+      // doing the send synchronously inside this Cloudflare-proxied request is what
+      // let a slow send hold the HTTP connection open until Cloudflare gave up and
+      // returned its own 502 HTML page. The real outcome is persisted to last_test_*
+      // and the UI reads it back via GET (which always returns instantly).
+      await centralDb.run(
+        "UPDATE platform_notification_config SET last_test_at = CURRENT_TIMESTAMP, last_test_ok = NULL, last_test_detail = ? WHERE id = 'DEFAULT'",
+        [`Test in progress… (to ${targets.map(t => t || 'default').join(', ')})`]
+      ).catch(() => {});
+      void (async () => {
         let sent = 0; const failed: string[] = [];
-        for (const t of targets) { const okOne = await sendTelegram(t, msg); if (okOne) sent++; else failed.push(t || 'default'); }
-        return { sent, failed };
-      })();
-      const outcome: any = await Promise.race([
-        doSends,
-        new Promise(resolve => setTimeout(() => resolve(TIMED_OUT), 7000)),
-      ]);
-      if (outcome === TIMED_OUT) {
-        return res.status(504).json({ error: "Timed out reaching Telegram (api.telegram.org). The bot token is set, but the server could not connect to Telegram — this is almost always the VPS having no outbound internet access to api.telegram.org (host firewall / egress rule). No Telegram alert can send until that outbound route is opened." });
-      }
-      const { sent, failed } = outcome;
-      if (sent > 0) return res.json({ success: true, sent_to: `${sent} chat${sent === 1 ? '' : 's'}`, failed });
-      return res.status(502).json({ error: "Reached Telegram, but it rejected the message for every chat. Check that the bot is a member/admin of each group and that the chat ids are correct (group ids are negative, e.g. -1001234567890)." });
-    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to send test message" }); }
+        for (const t of targets) {
+          try { if (await sendTelegram(t, msg)) sent++; else failed.push(t || 'default'); }
+          catch { failed.push(t || 'default'); }
+        }
+        const detail = sent > 0
+          ? `Delivered to ${sent} chat${sent === 1 ? '' : 's'}${failed.length ? `; failed for ${failed.join(', ')}` : ''} (by ${byWhom})`
+          : `Telegram accepted no message. It rejected every chat (${targets.map(t => t || 'default').join(', ')}) — check the bot is a member/admin of each group and the ids are correct (group ids are negative, e.g. -1001234567890). (by ${byWhom})`;
+        await centralDb.run(
+          "UPDATE platform_notification_config SET last_test_at = CURRENT_TIMESTAMP, last_test_ok = ?, last_test_detail = ? WHERE id = 'DEFAULT'",
+          [sent > 0 ? 1 : 0, detail]
+        ).catch((e: any) => console.error('[notif-test persist]', e?.message || e));
+      })().catch((e: any) => console.error('[notif-test bg]', e?.message || e));
+      return res.status(202).json({
+        queued: true,
+        targets: targets.map(t => t || 'default'),
+        message: `Test queued to ${targets.length} chat${targets.length === 1 ? '' : 's'}. The result appears below in a few seconds.`,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to queue test message" }); }
   });
 
   // ────────────────────────────────────────────────────────────────────
@@ -46033,7 +46045,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'telegram-test-bounded-egress-msg',
+    commit_marker: 'telegram-test-async-background',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

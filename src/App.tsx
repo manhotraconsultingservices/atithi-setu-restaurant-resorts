@@ -49552,13 +49552,34 @@ function SuperAdminDashboard({ token }: { token: string }) {
       setAlertMsg({ type: 'err', text: "One value is a BOT TOKEN, not a chat ID. Enter the group's numeric ID (e.g. -1001234567890) and Save first." });
       return;
     }
-    setAlertBusy(true); setAlertMsg(null);
+    setAlertBusy(true); setAlertMsg({ type: 'ok', text: 'Sending test…' });
     try {
       const res = await fetch('/api/admin/notification-config/test', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ telegram_admin_chat_id: (alertCfg?.telegram_admin_chat_id || '').trim() || null }) });
       const raw = await res.text();
       let data: any = null; try { data = raw ? JSON.parse(raw) : {}; } catch { data = null; }
-      if (res.ok) setAlertMsg({ type: 'ok', text: `Test message sent to ${(data && data.sent_to) || 'the admin chat'} ✓` });
-      else setAlertMsg({ type: 'err', text: (data && data.error) ? data.error : `Test failed — HTTP ${res.status}${raw ? ': ' + raw.slice(0, 200) : ''}` });
+      if (!res.ok) { setAlertMsg({ type: 'err', text: (data && data.error) ? data.error : `Test failed — HTTP ${res.status}${raw ? ': ' + raw.slice(0, 200) : ''}` }); return; }
+      // The server queues the send in the background and persists the outcome to
+      // last_test_* — poll GET until it reports success/failure (never blocks on Telegram).
+      setAlertMsg({ type: 'ok', text: (data && data.message) || 'Test queued. Checking result…' });
+      const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+      let settled = false;
+      for (const wait of [2500, 2500, 3000, 4000, 5000]) {
+        await sleep(wait);
+        try {
+          const gr = await fetch('/api/admin/notification-config', { headers: { 'Authorization': `Bearer ${token}` } });
+          const gd = await gr.json().catch(() => null);
+          if (gd) {
+            setAlertCfg((prev: any) => ({ ...prev, ...gd }));
+            const lok = gd.last_test_ok;
+            if (lok !== null && lok !== undefined) {
+              const okBool = Number(lok) === 1;
+              setAlertMsg({ type: okBool ? 'ok' : 'err', text: (okBool ? '✓ ' : '') + (gd.last_test_detail || (okBool ? 'Test delivered.' : 'Test failed.')) });
+              settled = true; break;
+            }
+          }
+        } catch { /* transient — keep polling */ }
+      }
+      if (!settled) setAlertMsg({ type: 'err', text: 'Still running on the server. Re-open this page shortly to see the last test result.' });
     } catch (e: any) { setAlertMsg({ type: 'err', text: 'Request failed: ' + (e?.message || String(e)) }); }
     finally { setAlertBusy(false); }
   };
@@ -52038,6 +52059,12 @@ function SuperAdminDashboard({ token }: { token: string }) {
                   <button onClick={saveAdminAlerts} disabled={alertBusy} data-allow-readonly className="px-4 py-2 rounded-2xl text-sm font-bold bg-sky-600 text-white hover:bg-sky-700 transition-colors disabled:opacity-50">Save</button>
                   <button onClick={testAdminAlerts} disabled={alertBusy} data-allow-readonly className="px-4 py-2 rounded-2xl text-sm font-bold bg-[#faf7f2] hover:bg-sky-50 transition-colors disabled:opacity-50">Send test message</button>
                 </div>
+
+                {alertCfg.last_test_detail && (
+                  <div className={`text-[11px] rounded-lg px-3 py-2 border ${Number(alertCfg.last_test_ok) === 1 ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : (alertCfg.last_test_ok === null || alertCfg.last_test_ok === undefined) ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+                    <b>Last test:</b> {alertCfg.last_test_detail}{alertCfg.last_test_at ? ` — ${new Date(alertCfg.last_test_at).toLocaleString()}` : ''}
+                  </div>
+                )}
               </div>
             )}
           </div>
