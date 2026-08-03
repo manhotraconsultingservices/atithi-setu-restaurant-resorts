@@ -22120,7 +22120,8 @@ ${data.tenant.name}`;
     // Booking lifecycle events + room-status changes. All NON-BLOCKING (they never
     // gate a business operation) — raised for quality/visibility only.
     'BOOKING_NEW', 'BOOKING_ASSIGNED',
-    'ROOM_VACANT', 'ROOM_OCCUPIED', 'ROOM_CLEANING', 'ROOM_MAINTENANCE', 'ROOM_BLOCKED'];
+    'ROOM_VACANT', 'ROOM_OCCUPIED', 'ROOM_CLEANING', 'ROOM_MAINTENANCE', 'ROOM_BLOCKED',
+    'VENUE_VACANT', 'VENUE_OCCUPIED', 'VENUE_CLEANING', 'VENUE_MAINTENANCE', 'VENUE_BLOCKED'];
   const CHK_FTYPES = ['ROOM', 'EVENT', 'GENERIC'];
 
   // ── Categories ───────────────────────────────────────────────────────────
@@ -22754,6 +22755,28 @@ ${data.tenant.name}`;
       await db.run("UPDATE event_venues SET is_active = 0 WHERE id = ?", [req.params.vid]);
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to delete venue" }); }
+  });
+
+  // Manual hall status board (mirrors room status). Setting it raises any
+  // VENUE_<status> checklist the owner configured — NON-BLOCKING, never gates ops.
+  app.patch("/api/restaurant/:id/events/venues/:vid/status", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const status = String(req.body?.status || '').toUpperCase();
+      const allowed = ['VACANT', 'OCCUPIED', 'CLEANING', 'MAINTENANCE', 'BLOCKED'];
+      if (!allowed.includes(status)) return res.status(400).json({ error: 'Invalid venue status' });
+      const db = await getTenantDb(req.params.id);
+      const prev: any = await db.get("SELECT status, name FROM event_venues WHERE id = ?", [req.params.vid]).catch(() => null);
+      if (!prev) return res.status(404).json({ error: 'Venue not found' });
+      await db.run("UPDATE event_venues SET status = ? WHERE id = ?", [status, req.params.vid]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_VENUE', objectId: req.params.vid, action: 'STATUS_CHANGED', summary: `Hall status ${prev?.status || '?'} → ${status}` });
+      if (String(prev?.status || '') !== status) {
+        raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: req.params.vid, facility_label: prev?.name || req.params.vid, trigger: `VENUE_${status}`, blocks_release_override: 0 }).catch(() => {});
+      }
+      const row = await db.get("SELECT * FROM event_venues WHERE id = ?", [req.params.vid]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: 'Failed to update venue status' }); }
   });
 
   // Venue blocks (maintenance / hold)
@@ -45751,7 +45774,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-triggers-booking-events-room-status',
+    commit_marker: 'event-hall-status-board-venue-triggers',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

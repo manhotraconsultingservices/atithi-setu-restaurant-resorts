@@ -93,6 +93,7 @@ async function cleanup() {
     const msT = await mkTpl({ name: `E2E Mid-Stay ${tag}`, facility_type: 'ROOM', trigger_event: 'MID_STAY', recurrence_nights: 1, blocks_release: false, steps: [{ label: 'Replace towels', is_mandatory: true }] });
     const dlT = await mkTpl({ name: `E2E Hall Daily ${tag}`, facility_type: 'EVENT', trigger_event: 'DAILY', blocks_release: false, steps: [{ label: 'Wipe surfaces & set chairs', is_mandatory: true }] });
     const clT = await mkTpl({ name: `E2E Cleaning ${tag}`, facility_type: 'ROOM', trigger_event: 'CLEANING', blocks_release: false, steps: [{ label: 'Change linen & towels', is_mandatory: true }] });
+    const vcT = await mkTpl({ name: `E2E Hall Clean ${tag}`, facility_type: 'EVENT', trigger_event: 'VENUE_CLEANING', blocks_release: false, steps: [{ label: 'Wipe hall & reset chairs', is_mandatory: true }] });
     ok(ciT.status === 201 && coT.status === 201 && msT.status === 201 && dlT.status === 201, 'E2E-SETUP', 'Created check-in / check-out / mid-stay / daily templates', `HTTP ${ciT.status}/${coT.status}/${msT.status}/${dlT.status}`);
     ok(clT.status === 201, 'E2E-SETUP-CLEANING', 'CLEANING trigger accepted by the template editor', `HTTP ${clT.status}`);
     if (ciT.status === 403) { console.error('\nNeed OWNER role to create templates — aborting.\n'); return; }
@@ -103,8 +104,15 @@ async function cleanup() {
       const run = await api('POST', `${P}/checklists/run-scheduled`, {});
       const anyDaily = (await Promise.all(venues.map(v => jobsFor(v.id, 'DAILY')))).some(a => a.some(j => created.templates.includes(j.template_id)));
       ok(run.status === 200 && anyDaily, 'E2E-DAILY-HALL', 'Daily run raised a DAILY checklist for an event hall', `raised=${run.data?.raised}`);
+      // Hall status board → VENUE_<status> checklist (non-blocking).
+      const vId = venues[0].id;
+      const vs = await api('PATCH', `${P}/events/venues/${vId}/status`, { status: 'CLEANING' });
+      const vJobs = (await jobsFor(vId, 'VENUE_CLEANING')).filter(j => created.templates.includes(j.template_id));
+      ok((vs.status === 200) && vJobs.length >= 1, 'E2E-VENUE-STATUS', 'Setting a hall to CLEANING raised the VENUE_CLEANING checklist (non-blocking)', `http=${vs.status}, jobs=${vJobs.length}`);
+      await api('PATCH', `${P}/events/venues/${vId}/status`, { status: 'VACANT' }).catch(() => {}); // reset
     } else {
       skip('E2E-DAILY-HALL', 'Event-hall daily', 'events not enabled or no venues on this tenant');
+      skip('E2E-VENUE-STATUS', 'Hall status board', 'events not enabled or no venues on this tenant');
     }
 
     // ── CHECK-IN → OVERSTAY → CHECK-OUT (need hotel + a bookable room) ──

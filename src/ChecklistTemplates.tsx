@@ -31,6 +31,12 @@ const TRIGGERS: { v: string; label: string; hint: string; ft: string[] }[] = [
   { v: 'ROOM_CLEANING', label: 'When room → Cleaning', hint: 'Raised when the room goes to cleaning — non-blocking', ft: ['ROOM'] },
   { v: 'ROOM_MAINTENANCE', label: 'When room → Maintenance', hint: 'Raised when the room goes to maintenance — non-blocking', ft: ['ROOM'] },
   { v: 'ROOM_BLOCKED', label: 'When room → Blocked', hint: 'Raised when the room is blocked — non-blocking', ft: ['ROOM'] },
+  // Event-hall status changes — all NON-BLOCKING
+  { v: 'VENUE_VACANT', label: 'When hall → Vacant', hint: 'Raised when the hall becomes vacant / ready — non-blocking', ft: ['EVENT'] },
+  { v: 'VENUE_OCCUPIED', label: 'When hall → Occupied', hint: 'Raised when the hall becomes occupied / in use — non-blocking', ft: ['EVENT'] },
+  { v: 'VENUE_CLEANING', label: 'When hall → Cleaning', hint: 'Raised when the hall goes to cleaning — non-blocking', ft: ['EVENT'] },
+  { v: 'VENUE_MAINTENANCE', label: 'When hall → Maintenance', hint: 'Raised when the hall goes to maintenance — non-blocking', ft: ['EVENT'] },
+  { v: 'VENUE_BLOCKED', label: 'When hall → Blocked', hint: 'Raised when the hall is blocked — non-blocking', ft: ['EVENT'] },
 ];
 const FTYPES = [{ v: 'ROOM', label: 'Hotel room' }, { v: 'EVENT', label: 'Event hall' }, { v: 'GENERIC', label: 'Generic' }];
 const trgLabel = (v: string) => TRIGGERS.find(t => t.v === v)?.label || v;

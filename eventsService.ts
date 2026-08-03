@@ -232,6 +232,9 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_event_venues_active ON event_venues(is_active, display_order);
   `);
+  // Manual hall status board (VACANT | OCCUPIED | CLEANING | MAINTENANCE | BLOCKED)
+  // — mirrors room status. Setting it raises the matching VENUE_<status> checklist.
+  await tenantDb.exec("ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'VACANT'").catch(() => {});
 
   // ── Rentable inventory master (tables, chairs, sofas, cylinders, plates) ────
   await tenantDb.exec(`

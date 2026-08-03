@@ -222,6 +222,13 @@ function EventVenues({ restaurantId, token }: Props) {
     } catch (e: any) { alert(e.message); }
   };
   const remove = async (id: string) => { if (!window.confirm('Deactivate this venue?')) return; try { await api(`/events/venues/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  // Manual hall status board — setting it raises the matching VENUE_<status> checklist (non-blocking).
+  const setStatus = async (id: string, status: string) => {
+    setRows(rs => rs.map(r => r.id === id ? { ...r, status } : r));
+    try { await api(`/events/venues/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }); }
+    catch (e: any) { alert(e.message); await load(); }
+  };
+  const VENUE_STATUSES = ['VACANT', 'OCCUPIED', 'CLEANING', 'MAINTENANCE', 'BLOCKED'];
 
   return (
     <div>
@@ -267,6 +274,12 @@ function EventVenues({ restaurantId, token }: Props) {
           { key: 'ac_type', label: t('events.venues.acType'), render: (r: any) => r.ac_type === 'AC' ? t('events.venues.ac') : t('events.venues.nonAc') },
           { key: 'max_occupancy', label: t('events.venues.occupancy'), render: (r: any) => `${r.min_occupancy || 0}–${r.max_occupancy || 0}` },
           { key: 'daily_rate', label: t('events.venues.dailyRate'), render: (r: any) => money(r.daily_rate) },
+          { key: 'status', label: 'Status', render: (r: any) => (
+            <select value={String(r.status || 'VACANT').toUpperCase()} onChange={e => setStatus(r.id, e.target.value)}
+              className="text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20">
+              {VENUE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          ) },
           { key: '_a', label: t('common.actions'), render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>
