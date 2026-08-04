@@ -22216,6 +22216,18 @@ ${data.tenant.name}`;
       const pend: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_job_tasks WHERE job_id = ? AND is_mandatory = 1 AND is_done = 0", [req.params.jid]);
       if (Number(pend?.c || 0) > 0) return res.status(400).json({ error: `${pend.c} mandatory task(s) still pending. Complete them before closing.`, pending_mandatory: pend.c });
       await db.run("UPDATE housekeeping_jobs SET status = 'DONE', workflow_state = 'COMPLETE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [hkActor(req), req.params.jid]);
+      // R7/R8 ENHANCEMENT — two-stage cleaning: when the CHECK_OUT (inspection) checklist
+      // completes and the owner enabled it, chain the Room Cleaning (CLEANING) checklist as
+      // BLOCKING before releasing, so the room stays CLEANING until cleaning is also done.
+      // If no CLEANING template is configured, nothing is raised and the room frees normally.
+      if (job.trigger_event === 'CHECK_OUT' && job.facility_type === 'ROOM' && job.facility_id) {
+        try {
+          const tsCfg: any = await centralDb.get("SELECT checklist_two_stage_cleaning FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+          if (Number(tsCfg?.checklist_two_stage_cleaning ?? 0) === 1) {
+            await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: job.facility_id, facility_label: job.facility_label, source_ref: job.source_ref, guest_label: job.guest_label, trigger: 'CLEANING', blocks_release_override: 1 });
+          }
+        } catch (e) { console.warn('[checklist] two-stage cleaning chain failed:', e); }
+      }
       await releaseFacility(db, job);
       await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: 'COMPLETED', summary: `Completed "${job.template_name || 'checklist'}" for ${job.facility_label || job.facility_type} by ${hkActor(req)}`, after: { status: 'DONE' } });
       try { triggerNotification(req.params.id, 'CHECKLIST_COMPLETED', { jobId: req.params.jid, templateName: job.template_name || 'checklist', facility: job.facility_label || job.facility_type, completedBy: hkActor(req) }).catch(() => {}); } catch { /* non-fatal */ }
@@ -36193,19 +36205,15 @@ ${data.tenant.name}`;
         } catch (e) { console.warn('[checkin] checklist gate error (non-fatal):', e); }
       }
 
-      // R5 FIX (QA "Hotel Checklist Issues"): don't occupy a room that still has an
-      // unfinished release-blocking housekeeping job (e.g. an uncompleted cleaning /
-      // checkout checklist) — it would leave the room OCCUPIED in PMS while Housekeeping
-      // still shows it as Cleaning. A manager can override with override_housekeeping.
+      // R5 (QA "Hotel Checklist Issues") — SOFT WARNING (per owner request): if the room
+      // still has an unfinished release-blocking housekeeping job (e.g. an uncompleted
+      // cleaning checklist), let the check-in proceed but surface a warning so the front
+      // desk knows housekeeping isn't finished. Returned as `housekeeping_warning`.
+      let hkWarn: string | null = null;
       try {
-        const blk: any = await tenantDb.get("SELECT id, template_name FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' AND blocks_release = 1 LIMIT 1", [b.room_id]).catch(() => null);
-        if (blk) {
-          const isMgr = HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase());
-          if (!(isMgr && req.body?.override_housekeeping)) {
-            return res.status(409).json({ error: `Room still has an unfinished cleaning/release checklist ("${blk.template_name || 'housekeeping'}"). Complete housekeeping before check-in${isMgr ? ', or check in again to override.' : '.'}`, housekeeping_blocked: true, can_override: isMgr, housekeeping_job_id: blk.id });
-          }
-        }
-      } catch { /* non-fatal — never hard-block check-in on a lookup error */ }
+        const blk: any = await tenantDb.get("SELECT template_name FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' AND blocks_release = 1 LIMIT 1", [b.room_id]).catch(() => null);
+        if (blk) hkWarn = `Heads up: this room still has an unfinished cleaning/release checklist ("${blk.template_name || 'housekeeping'}"). The guest has been checked in — please make sure housekeeping is completed.`;
+      } catch { /* non-fatal */ }
 
       // BA-FIX-3 (H1, 11 Jun 2026) — atomic check-in transition.
       // Previously two simultaneous "Check In" clicks from front-
@@ -36390,6 +36398,7 @@ ${data.tenant.name}`;
         booking: await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]),
         folio_id: folio?.id || null,
         perk,
+        housekeeping_warning: hkWarn,
       });
     } catch (err: any) {
       console.error("checkin error:", err);
@@ -36809,12 +36818,19 @@ ${data.tenant.name}`;
       // turned it OFF, the same checklist is still raised for the worklist but is
       // forced non-blocking so it never holds the room.
       try {
-        const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+        const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout, checklist_two_stage_cleaning FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+        const twoStage = Number(coCfg?.checklist_two_stage_cleaning ?? 0) === 1;
         const enforceCheckout = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
         const rm: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, blocks_release_override: enforceCheckout ? null : 0, due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
-        // Room is now CLEANING — raise any ROOM_CLEANING status checklist (non-blocking).
-        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id), source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, trigger: 'ROOM_CLEANING', blocks_release_override: 0 });
+        const rmLbl = rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id);
+        // Stage 1 — the CHECK_OUT (inspection) checklist. In two-stage mode it MUST gate
+        // (blocking) so the Room Cleaning stage is chained only after inspection is done.
+        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLbl, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, blocks_release_override: twoStage ? 1 : (enforceCheckout ? null : 0), due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
+        // Single-stage: raise the ROOM_CLEANING status checklist now (non-blocking).
+        // Two-stage: the Room Cleaning (CLEANING) checklist is chained on CHECK_OUT completion instead.
+        if (!twoStage) {
+          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLbl, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, trigger: 'ROOM_CLEANING', blocks_release_override: 0 });
+        }
       } catch { /* non-fatal — never block checkout */ }
 
       // ── Fire the unified loyalty hook so the folio counts toward the
@@ -37875,6 +37891,7 @@ ${data.tenant.name}`;
                 hotel_require_id_at_checkin,
                 checklist_validate_on_checkin,
                 checklist_validate_on_checkout,
+                checklist_two_stage_cleaning,
                 round_invoice_to_rupee
            FROM restaurants WHERE id = ?`,
         [req.params.id]
@@ -37898,6 +37915,8 @@ ${data.tenant.name}`;
         checklist_validate_on_checkin: Number(r?.checklist_validate_on_checkin ?? 1) === 1,
         // Hold the room until the check-out checklist is complete (default ON)
         checklist_validate_on_checkout: Number(r?.checklist_validate_on_checkout ?? 1) === 1,
+        // Two-stage cleaning: Check-Out inspection → then Room Cleaning → then Vacant (default OFF)
+        checklist_two_stage_cleaning: Number(r?.checklist_two_stage_cleaning ?? 0) === 1,
         // M-6 — round-off opt-in (default OFF)
         round_invoice_to_rupee: Number(r?.round_invoice_to_rupee ?? 0) === 1,
       });
@@ -37960,6 +37979,10 @@ ${data.tenant.name}`;
       const checklistValidateOnCheckout = b.checklist_validate_on_checkout == null
         ? null
         : (b.checklist_validate_on_checkout ? 1 : 0);
+      // Two-stage cleaning (Check-Out inspection → Room Cleaning → Vacant). Same semantics.
+      const checklistTwoStageCleaning = b.checklist_two_stage_cleaning == null
+        ? null
+        : (b.checklist_two_stage_cleaning ? 1 : 0);
 
       await centralDb.run(
         `UPDATE restaurants
@@ -37977,6 +38000,7 @@ ${data.tenant.name}`;
                 hotel_require_id_at_checkin  = COALESCE(?, hotel_require_id_at_checkin),
                 checklist_validate_on_checkin = COALESCE(?, checklist_validate_on_checkin),
                 checklist_validate_on_checkout = COALESCE(?, checklist_validate_on_checkout),
+                checklist_two_stage_cleaning = COALESCE(?, checklist_two_stage_cleaning),
                 round_invoice_to_rupee       = COALESCE(?, round_invoice_to_rupee)
           WHERE id = ?`,
         [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime,
@@ -37984,6 +38008,7 @@ ${data.tenant.name}`;
          requireIdAtCheckin,
          checklistValidateOnCheckin,
          checklistValidateOnCheckout,
+         checklistTwoStageCleaning,
          roundToRupee,
          req.params.id]
       );
@@ -46192,7 +46217,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-qa-r2-r3-r5-r6-fixes',
+    commit_marker: 'checklist-r5-softwarn-r7r8-twostage',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

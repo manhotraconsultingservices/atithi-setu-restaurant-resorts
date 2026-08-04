@@ -9974,6 +9974,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     checklist_validate_on_checkin: boolean;
     // Hold the room until the CHECK_OUT checklist is complete
     checklist_validate_on_checkout: boolean;
+    // Two-stage cleaning: Check-Out inspection → Room Cleaning → Vacant
+    checklist_two_stage_cleaning: boolean;
   }>({
     min_stay_nights: 1, max_stay_nights: null,
     refund_full_days: null, refund_partial_pct: null, late_checkout_time: null,
@@ -9984,6 +9986,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     require_id_at_checkin: true,
     checklist_validate_on_checkin: true,
     checklist_validate_on_checkout: true,
+    checklist_two_stage_cleaning: false,
   });
 
   // BCG Tariff Phase 2 — snapshot of the matrix tariff configuration.
@@ -12467,6 +12470,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         require_id_at_checkin: data.require_id_at_checkin !== false,
         checklist_validate_on_checkin: data.checklist_validate_on_checkin !== false,
         checklist_validate_on_checkout: data.checklist_validate_on_checkout !== false,
+        checklist_two_stage_cleaning: data.checklist_two_stage_cleaning === true,
       });
     } catch { /* hotel not enabled — ignore */ }
   };
@@ -13107,6 +13111,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // it sequentially after /rooms doubled the post-check-in wait the user saw.
     await Promise.all([fetchHotelBookings(), fetchHotelRooms()]);
     markAvailabilityDirty();
+    // R5 soft warning — the room still had an unfinished cleaning/release checklist;
+    // check-in proceeded, but flag it so housekeeping gets finished.
+    if (result?.housekeeping_warning) toast.info(`⚠️ ${result.housekeeping_warning}`);
     // Phase H1 — celebrate birthday / anniversary perks. Server returns
     // perk.applies=true when today matches the guest's stored date and
     // it hasn't already fired in IST today. We surface a toast-like
@@ -27040,6 +27047,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <span className="text-sm text-[#3d3128]">
                     <span className="font-semibold">Validate checklist on check-out</span>
                     <span className="block text-[11px] text-[#9c8e85]">When on, the room is held (kept CLEANING / not re-bookable) after check-out until the CHECK-OUT checklist is completed. Turn off to release rooms freely — the checklist is still raised for housekeeping, it just won't block the room.</span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-3 pt-3 cursor-pointer">
+                  <input type="checkbox" checked={hotelSettings.checklist_two_stage_cleaning}
+                    onChange={e => setHotelSettings(s => ({ ...s, checklist_two_stage_cleaning: e.target.checked }))}
+                    className="w-4 h-4 mt-0.5 accent-[#cc5a16]" />
+                  <span className="text-sm text-[#3d3128]">
+                    <span className="font-semibold">Two-stage cleaning (Check-out → Cleaning → Vacant)</span>
+                    <span className="block text-[11px] text-[#9c8e85]">When on, checkout raises the CHECK-OUT (inspection) checklist first; once it's completed, the room's Cleaning checklist (a template with the <b>Cleaning</b> trigger) is raised automatically, and the room only becomes Vacant after that is done too. Requires "Validate checklist on check-out" behaviour. Configure a Cleaning-trigger template with Block Release for the second stage.</span>
                   </span>
                 </label>
 

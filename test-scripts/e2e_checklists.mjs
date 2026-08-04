@@ -83,7 +83,7 @@ async function cleanup() {
     // Close any remaining OPEN jobs tied to this run's test bookings (e.g. the
     // system Room-Cleaning / Event-Complete templates' jobs, which aren't in
     // created.templates) so no test leaves a room or venue held.
-    const testBk = new Set([created.bookingId, created.bookingId2, created.bookingId3, ...created.evBookings].filter(Boolean));
+    const testBk = new Set([created.bookingId, created.bookingId2, created.bookingId3, created.bookingId4, ...created.evBookings].filter(Boolean));
     if (testBk.size) for (const j of await jobsAll()) if (j.status === 'OPEN' && testBk.has(j.source_ref)) { try { await closeJob(j.id); } catch {} }
   } catch {}
   // Cancel any confirmable throwaway event bookings (COMPLETED ones can't be cancelled — harmless).
@@ -92,6 +92,7 @@ async function cleanup() {
   if (created.restoreReqId !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: !!created.restoreReqId }); } catch {} }
   if (created.restoreCheckoutValidate !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { checklist_validate_on_checkout: !!created.restoreCheckoutValidate }); } catch {} }
   if (created.restoreCheckinValidate !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { checklist_validate_on_checkin: !!created.restoreCheckinValidate }); } catch {} }
+  if (created.restoreTwoStage !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { checklist_two_stage_cleaning: !!created.restoreTwoStage }); } catch {} }
 }
 
 (async () => {
@@ -334,6 +335,43 @@ async function cleanup() {
       }
     } else {
       ['E2E-CHECKIN-GATE', 'E2E-CHECKIN-GATE-PASS'].forEach(id => skip(id, 'Check-in gate', 'checklist_validate_on_checkin setting not present — server not updated?'));
+    }
+
+    // ── TWO-STAGE CLEANING (R7/R8 enhancement): checkout raises CHECK_OUT (inspection,
+    // blocking); completing it auto-chains the Room Cleaning (CLEANING) checklist (blocking)
+    // and the room stays CLEANING until that's done too. Uses the coT + clT templates above. ──
+    const stTs = await api('GET', `${P}/hotel/settings`);
+    if (stTs.status === 200 && stTs.data && 'checklist_two_stage_cleaning' in stTs.data) {
+      created.restoreTwoStage = stTs.data.checklist_two_stage_cleaning;
+      await api('PATCH', `${P}/hotel/settings`, { checklist_two_stage_cleaning: true, checklist_validate_on_checkout: true });
+      if (created.restoreCheckoutValidate === undefined) created.restoreCheckoutValidate = stTs.data.checklist_validate_on_checkout;
+      let bId4 = null, rId4 = null;
+      for (const room of rooms.slice(0, 12)) {
+        if (room.id === roomId) continue;
+        const bk = await api('POST', `${P}/hotel/bookings`, { room_id: room.id, guest_name: `E2E Guest ${tag}d`, guest_phone: '9990000126', num_guests: 1, check_in_date: day(0), check_out_date: day(1), booking_source: 'DIRECT', room_rate: Number(room.base_price || 1500) });
+        if (bk.status === 201 && bk.data?.id) { bId4 = bk.data.id; rId4 = room.id; break; }
+      }
+      if (bId4) {
+        created.bookingId4 = bId4;
+        await api('POST', `${P}/hotel/bookings/${bId4}/checkin`, {});
+        const co = await api('POST', `${P}/hotel/bookings/${bId4}/checkout`, { payment_method: 'CASH', waive: true });
+        if (co.status === 200 || co.status === 201) {
+          const coJ = (await jobsFor(rId4, 'CHECK_OUT')).filter(j => created.templates.includes(j.template_id) && j.status === 'OPEN' && Number(j.blocks_release) === 1);
+          const clBefore = (await jobsFor(rId4, 'CLEANING')).filter(j => created.templates.includes(j.template_id) && j.status === 'OPEN');
+          ok(coJ.length >= 1 && clBefore.length === 0, 'E2E-TWOSTAGE-1', 'Two-stage: checkout raises the CHECK_OUT inspection (blocking); cleaning NOT raised yet', `checkout=${coJ.length}, cleaning=${clBefore.length}`);
+          // Complete every open CHECK_OUT job → cleaning should chain (blocking); room stays CLEANING.
+          for (const j of (await jobsFor(rId4, 'CHECK_OUT'))) if (j.status === 'OPEN') { try { await closeJob(j.id); } catch {} }
+          const clAfter = (await jobsFor(rId4, 'CLEANING')).filter(j => created.templates.includes(j.template_id) && j.status === 'OPEN' && Number(j.blocks_release) === 1);
+          const rmMid = asList((await api('GET', `${P}/hotel/rooms`)).data).find(x => x.id === rId4);
+          ok(clAfter.length >= 1 && rmMid?.status === 'CLEANING', 'E2E-TWOSTAGE-2', 'Completing the inspection auto-chains a BLOCKING cleaning checklist; room still CLEANING', `cleaning=${clAfter.length}, room=${rmMid?.status}`);
+        } else {
+          ['E2E-TWOSTAGE-1', 'E2E-TWOSTAGE-2'].forEach(id => skip(id, 'Two-stage cleaning', `checkout failed HTTP ${co.status}`));
+        }
+      } else {
+        ['E2E-TWOSTAGE-1', 'E2E-TWOSTAGE-2'].forEach(id => skip(id, 'Two-stage cleaning', 'no spare bookable room'));
+      }
+    } else {
+      ['E2E-TWOSTAGE-1', 'E2E-TWOSTAGE-2'].forEach(id => skip(id, 'Two-stage cleaning', 'checklist_two_stage_cleaning setting not present — server not updated?'));
     }
   } finally {
     console.log('\n… cleaning up test data …');

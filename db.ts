@@ -369,6 +369,7 @@ export async function initDb() {
     -- that hold set this to 0 — the check-out checklist is still raised for the
     -- housekeeping worklist, but it no longer blocks room release.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS checklist_validate_on_checkout INT DEFAULT 1;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS checklist_two_stage_cleaning INT DEFAULT 0;
     -- Phase H2 — Hotel-specific GST + service charge.
     -- Indian hotels follow a tariff-slab GST regime (post-2022 GST Council):
     --   ≤ ₹1,000/night  → 0%   (exempt)
