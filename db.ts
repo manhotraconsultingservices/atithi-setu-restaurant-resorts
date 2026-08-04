@@ -1162,6 +1162,13 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_mode TEXT DEFAULT 'postpaid'").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'").catch(() => {});
+  // Hotel room-service linkage (RS-1) — ensured for EVERY tenant so the hotel bookings
+  // list's fnb_total subquery (joins orders on booking_id/room_id) never trips on a
+  // tenant that has not yet used room-service F&B.
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_post_status TEXT").catch(() => {});
   // Cloud-kitchen / online-delivery: structured customer delivery address
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line1 TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line2 TEXT").catch(() => {});

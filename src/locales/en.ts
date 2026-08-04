@@ -105,6 +105,7 @@ export const en: Record<string, string> = {
   'events.bookings.title': 'Event Bookings',
   'events.bookings.sub': 'Inquiries, quotations, confirmed events',
   'events.bookings.new': 'New Booking',
+  'events.bookings.bookingId': 'Booking ID',
   'events.bookings.customer': 'Customer',
   'events.bookings.eventType': 'Event type',
   'events.bookings.venue': 'Venue',

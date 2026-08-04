@@ -22589,12 +22589,19 @@ ${data.tenant.name}`;
       const role = String(req.user?.role || '').toUpperCase();
       const me = String(req.user?.email || req.user?.id || '');
       const isMgr = HK_MANAGER_ROLES.includes(role);
+      const isEventsStaff = EVENTS_OPERATIONAL_ROLES.includes(role);
       const state = String(req.query.state || 'ASSIGNED').toUpperCase(); // ASSIGNED | COMPLETE | ALL
       const params: any[] = [];
       let where = "status IN ('OPEN','DONE','OVERRIDDEN')";
       if (!isMgr) {
-        where += " AND (LOWER(COALESCE(assigned_to_user,'')) = LOWER(?) OR UPPER(COALESCE(assigned_to_role,'')) = ?)";
+        // Personal worklist = jobs assigned to my user or my role. PLUS: events staff also
+        // see EVENT-facility checklists (venue cleaning after an event completes) — those are
+        // auto-assigned to HOUSEKEEPING, so the events team could never see them before (bug:
+        // "event checklist not showing in My Checklist").
+        const clauses = ["LOWER(COALESCE(assigned_to_user,'')) = LOWER(?)", "UPPER(COALESCE(assigned_to_role,'')) = ?"];
         params.push(me, role);
+        if (isEventsStaff) clauses.push("facility_type = 'EVENT'");
+        where += ` AND (${clauses.join(' OR ')})`;
       }
       if (state === 'ASSIGNED') where += " AND workflow_state = 'ASSIGNED'";
       else if (state === 'COMPLETE') where += " AND workflow_state = 'COMPLETE'";
@@ -23909,13 +23916,29 @@ ${data.tenant.name}`;
         `INSERT INTO event_payments (id, booking_id, schedule_id, amount, method, reference, paid_at, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [pid, req.params.bid, b.schedule_id || null, amount, b.method || 'CASH', b.reference || null, b.paid_at || new Date().toISOString().slice(0, 10), b.note || null, req.user?.email || null]
       );
-      // Allocate to a schedule row if given (accumulate; flip to PAID when covered).
+      // Allocate to the schedule. If a specific instalment was chosen, apply to it;
+      // otherwise AUTO-ALLOCATE across the DUE instalments (oldest first) so a general
+      // "Record Payment" (schedule_id not sent) still marks the schedule Paid. This was
+      // the reported bug: payments recorded without an instalment left every row DUE.
       if (b.schedule_id) {
         const sched: any = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [b.schedule_id]);
         if (sched) {
           const paidAmt = round2(Number(sched.paid_amount || 0) + amount);
           const status = paidAmt >= Number(sched.amount || 0) - 0.01 ? 'PAID' : 'DUE';
           await db.run("UPDATE event_payment_schedule SET paid_amount = ?, status = ?, paid_at = CASE WHEN ? = 'PAID' THEN CURRENT_TIMESTAMP ELSE paid_at END WHERE id = ?", [paidAmt, status, status, b.schedule_id]);
+        }
+      } else {
+        let remaining = amount;
+        const dueRows: any[] = await db.query("SELECT * FROM event_payment_schedule WHERE booking_id = ? AND status NOT IN ('PAID','WAIVED') ORDER BY due_date ASC, sort_order ASC", [req.params.bid]).catch(() => []);
+        for (const row of (dueRows || [])) {
+          if (remaining <= 0.01) break;
+          const owed = round2(Number(row.amount || 0) - Number(row.paid_amount || 0));
+          if (owed <= 0) continue;
+          const applied = Math.min(remaining, owed);
+          const newPaid = round2(Number(row.paid_amount || 0) + applied);
+          const newStatus = newPaid >= Number(row.amount || 0) - 0.01 ? 'PAID' : 'DUE';
+          await db.run("UPDATE event_payment_schedule SET paid_amount = ?, status = ?, paid_at = CASE WHEN ? = 'PAID' THEN CURRENT_TIMESTAMP ELSE paid_at END WHERE id = ?", [newPaid, newStatus, newStatus, row.id]);
+          remaining = round2(remaining - applied);
         }
       }
       const paid = await recomputeEventPaid(db, req.params.bid);
@@ -24100,6 +24123,7 @@ ${data.tenant.name}`;
       await db.run("UPDATE event_bookings SET status = 'COMPLETED' WHERE id = ?", [req.params.bid]);
       // Housekeeping: raise a cleaning job for the venue from the EVENT checklist.
       try {
+        await ensureHousekeepingTables(db); // events-first tenants may not have seeded the checklist system yet
         await createHousekeepingJob(db, { facility_type: 'EVENT', facility_id: evBk?.venue_id || null, facility_label: evBk?.venue_name || 'Event venue', source_ref: req.params.bid, guest_label: evBk?.customer_name || null });
       } catch { /* non-fatal */ }
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: 'Booking marked COMPLETED', after: { status: 'COMPLETED' } });
@@ -28353,6 +28377,11 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await ensureGuestDocumentsCreated(tenantDb);
+      // Guard: the per-row fnb_total subquery below joins `orders o` on o.booking_id /
+      // o.room_id. On a hotel tenant that has never used room-service F&B, the orders
+      // table predates those columns → "column o.booking_id does not exist" fires right
+      // after a booking is created. Ensure they exist before the query runs.
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT; ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT;").catch(() => {});
       const status = (req.query.status as string) || null;
       // REQ 5: search + date-range filters for booking-history lookup
       // 10 Jun 2026 — full rewrite. The previous version had a 22-
@@ -46217,7 +46246,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-r5-softwarn-r7r8-twostage',
+    commit_marker: 'events-payment-mychecklist-smarttable-ordersfix',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

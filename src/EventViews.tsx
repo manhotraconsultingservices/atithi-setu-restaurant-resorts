@@ -636,14 +636,25 @@ function EventBookings({ restaurantId, token }: Props) {
         data={rows}
         rowKey={(r: any) => r.id}
         emptyMessage={t('events.bookings.empty')}
+        columnChooser
+        columnFilters
+        tableId="events-bookings"
+        exportFilename="event-bookings"
         columns={[
-          { key: 'customer_name', label: t('events.bookings.customer') },
-          { key: 'venue_name', label: t('events.bookings.venue'), render: (r: any) => r.venue_name || '—' },
-          { key: 'event_date', label: t('events.bookings.eventDate'), render: (r: any) => { const s = String(r.event_date || '').slice(0, 10); const e = String(r.end_date || '').slice(0, 10); return e && e > s ? `${s} → ${e}` : s; } },
-          { key: 'guest_count', label: t('events.bookings.guests') },
-          { key: 'total_amount', label: t('common.total'), render: (r: any) => money(r.total_amount) },
-          { key: 'status', label: t('common.status'), render: (r: any) => <Pill status={r.status} /> },
-          { key: '_a', label: t('common.actions'), render: (r: any) => <button className={BTN_GHOST} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{t('common.edit')}</button> },
+          {
+            key: 'id', label: t('events.bookings.bookingId'), sortable: true, searchable: true, hideable: false,
+            // Booking ID is a hyperlink → opens the ObjectDetail tree menu (Overview / Audit / Where-Used),
+            // mirroring the PMS booking-ID drill-down.
+            render: (r: any) => <button onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])} className="font-semibold text-blue-600 hover:text-blue-800 hover:underline text-left">{r.id}</button>,
+            exportValue: (r: any) => r.id,
+          },
+          { key: 'customer_name', label: t('events.bookings.customer'), sortable: true, searchable: true, filterable: true, filterType: 'text' },
+          { key: 'venue_name', label: t('events.bookings.venue'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.venue_name || '—', render: (r: any) => r.venue_name || '—' },
+          { key: 'event_date', label: t('events.bookings.eventDate'), sortable: true, getValue: (r: any) => String(r.event_date || '').slice(0, 10), render: (r: any) => { const s = String(r.event_date || '').slice(0, 10); const e = String(r.end_date || '').slice(0, 10); return e && e > s ? `${s} → ${e}` : s; } },
+          { key: 'guest_count', label: t('events.bookings.guests'), sortable: true, align: 'right' },
+          { key: 'total_amount', label: t('common.total'), sortable: true, align: 'right', getValue: (r: any) => Number(r.total_amount || 0), render: (r: any) => money(r.total_amount), exportValue: (r: any) => String(r.total_amount ?? '') },
+          { key: 'status', label: t('common.status'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.status, render: (r: any) => <Pill status={r.status} /> },
+          { key: '_a', label: t('common.actions'), noExport: true, render: (r: any) => <button className={BTN_GHOST} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{t('common.edit')}</button> },
         ]}
       />
     </div>
