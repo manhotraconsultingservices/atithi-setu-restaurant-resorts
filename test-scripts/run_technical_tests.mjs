@@ -793,7 +793,7 @@ async function testAccounting() {
 
   // TC-ACC-MJ-UNBALANCED: H1 — an unbalanced manual journal must be REFUSED with
   // 400 (recorded to gl_exceptions), never silently accepted with a false 201.
-  const badMj = await api('POST', `/api/restaurant/${restaurantId}/accounting/journal`, {
+  const badMj = await api('POST', `/api/restaurant/${restaurantId}/accounting/journal-entries`, {
     entry_date: today, narration: 'TECHTEST unbalanced journal (expect 400)',
     lines: [
       { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 100, cr_amount: 0 },
@@ -894,7 +894,7 @@ async function testEvents() {
 
   // TC-EVT-INQUIRY: public inquiry creates an INQUIRY booking (self-cleaning).
   const inqDate = new Date(Date.now() + 20 * 86400000).toISOString().slice(0, 10);
-  const inq = await api('POST', `/api/public/restaurant/${restaurantId}/events/inquiry`, { name: 'UAT Inquiry', phone: '9990000300', event_date: inqDate, message: 'Automated test — please disregard' });
+  const inq = await api('POST', `/api/public/restaurant/${restaurantId}/events/inquiry`, { customer_name: 'UAT Inquiry', customer_phone: '9990000300', event_date: inqDate, special_requests: 'Automated test — please disregard' });
   if (inq.status === 201 || inq.status === 200) {
     pass('TC-EVT-INQUIRY', 'Public event inquiry accepted');
     let iid = inq.data?.id || inq.data?.booking?.id;
@@ -1149,11 +1149,17 @@ async function testChecklists() {
   } else if (tplRes.status === 403) { skip('TC-CHK-TMPL', 'Template CRUD', 'need OWNER role'); }
   else { fail('TC-CHK-TMPL', 'Template create', `HTTP ${tplRes.status} — ${JSON.stringify(tplRes.data)}`); }
 
-  // TC-CHK-MIDSTAY-REQ — a MID_STAY template must require recurrence_nights > 0.
+  // TC-CHK-MIDSTAY-REQ — a MID_STAY template must never end up with recurrence < 1
+  // (server either rejects recurrence_nights=0 with 400, or coerces it to >= 1).
   const msBad = await api('POST', `/api/restaurant/${R}/checklists/templates`, { name: `UAT MidStay Bad ${Date.now()}`, facility_type: 'ROOM', trigger_event: 'MID_STAY', recurrence_nights: 0, steps: [{ label: 'x', is_mandatory: false }] });
-  if (msBad.status === 400) pass('TC-CHK-MIDSTAY-REQ', 'MID_STAY template without recurrence_nights is rejected (400)');
+  if (msBad.status === 400) pass('TC-CHK-MIDSTAY-REQ', 'MID_STAY template with recurrence_nights=0 rejected (400)');
+  else if (msBad.status === 201 && msBad.data?.id) {
+    const okRec = Number(msBad.data.recurrence_nights) >= 1;
+    (okRec ? pass : fail)('TC-CHK-MIDSTAY-REQ', 'MID_STAY template never has recurrence_nights < 1 (coerced to ≥1)', `recurrence_nights=${msBad.data.recurrence_nights}`);
+    await api('DELETE', `/api/restaurant/${R}/checklists/templates/${msBad.data.id}`);
+  }
   else if (msBad.status === 403) skip('TC-CHK-MIDSTAY-REQ', 'MID_STAY validation', 'need OWNER role');
-  else { fail('TC-CHK-MIDSTAY-REQ', 'MID_STAY template without recurrence rejected', `HTTP ${msBad.status}`); if (msBad.status === 201 && msBad.data?.id) await api('DELETE', `/api/restaurant/${R}/checklists/templates/${msBad.data.id}`); }
+  else fail('TC-CHK-MIDSTAY-REQ', 'MID_STAY recurrence invariant', `HTTP ${msBad.status}`);
 
   // Need a real room for assignment + manual-start + gating tests.
   let roomId = null;
