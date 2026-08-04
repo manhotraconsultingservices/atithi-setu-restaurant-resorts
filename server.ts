@@ -23705,6 +23705,9 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const existing: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       if (!existing) return res.status(404).json({ error: "Booking not found" });
+      // F-E03: idempotent — a booking already cancelled must NOT re-run the unwind
+      // (that would double-reverse the GL and re-cancel hotel rooms).
+      if (existing.status === 'CANCELLED') return res.json({ success: true, already_cancelled: true });
       await db.run(
         "UPDATE event_bookings SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancellation_reason = ?, cancel_reason_note = ? WHERE id = ?",
         [req.user?.email || null, req.body?.reason || null, req.body?.note || null, req.params.bid]
@@ -23712,8 +23715,41 @@ ${data.tenant.name}`;
         // cancel_reason_note may not exist on an un-migrated tenant — fall back.
         await db.run("UPDATE event_bookings SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancellation_reason = ? WHERE id = ?", [req.user?.email || null, req.body?.reason || null, req.params.bid]);
       });
-      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'CANCELLED', summary: `Booking cancelled${req.body?.reason ? ` — ${req.body.reason}` : ''}`, before: { status: existing.status }, after: { status: 'CANCELLED' } });
-      res.json({ success: true });
+
+      // ── F-E04: unwind the cross-module + financial footprint of a cancelled event ──
+      // Each step is best-effort (never blocks the cancel) and reported back in `unwind`.
+      const unwind: any = { hotel_rooms_cancelled: 0, hotel_rooms_failed: 0, revenue_reversed: false, folio_voided: false };
+      // (a) Cancel the real hotel bookings created on confirm so a cancelled event
+      //     never leaves live rooms held. (Forwards the caller JWT — same role reach
+      //     as the confirm path that created them.)
+      try {
+        const bookedRooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND hotel_booking_id IS NOT NULL AND status != 'CANCELLED'", [req.params.bid]);
+        for (const rm of bookedRooms) {
+          const r = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings/${rm.hotel_booking_id}/cancel`, req.headers.authorization, { reason: `Event ${req.params.bid} cancelled` });
+          if (r.ok) { unwind.hotel_rooms_cancelled++; await db.run("UPDATE event_booking_rooms SET status = 'CANCELLED' WHERE id = ?", [rm.id]); }
+          else { unwind.hotel_rooms_failed++; console.warn(`[event-cancel] hotel booking ${rm.hotel_booking_id} cancel failed: ${r.status}`); }
+        }
+      } catch (e) { console.warn(`[event-cancel] hotel-room unwind failed for ${req.params.bid}:`, e); }
+      // (b) If the event was already invoiced, reverse the recognized revenue GL and
+      //     void the folio. The advance liability (2100) is intentionally LEFT on the
+      //     books — collected cash stays a liability pending a separate refund decision.
+      if (existing.folio_id) {
+        try {
+          const fol: any = await db.get("SELECT id, status FROM folios WHERE id = ?", [existing.folio_id]).catch(() => null);
+          if (fol && fol.status !== 'voided') {
+            await _reverseJournal(db, req.params.id, `FOLIO-${existing.folio_id}`, {
+              sourceType: 'EVENT_CANCEL_REVERSAL', sourceId: existing.folio_id,
+              reason: 'Event booking cancelled', postedBy: req.user?.email || req.user?.id || null,
+            });
+            unwind.revenue_reversed = true;
+            await db.run("UPDATE folios SET status = 'voided' WHERE id = ?", [existing.folio_id]);
+            unwind.folio_voided = true;
+          }
+        } catch (e) { console.warn(`[event-cancel] revenue/folio unwind failed for ${req.params.bid}:`, e); }
+      }
+
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'CANCELLED', summary: `Booking cancelled${req.body?.reason ? ` — ${req.body.reason}` : ''}${unwind.hotel_rooms_cancelled ? ` · ${unwind.hotel_rooms_cancelled} hotel room(s) released` : ''}${unwind.revenue_reversed ? ' · revenue reversed + folio voided' : ''}`, before: { status: existing.status }, after: { status: 'CANCELLED' } });
+      res.json({ success: true, unwind });
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel booking" }); }
   });
 
@@ -29389,7 +29425,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/bookings", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -34595,6 +34631,21 @@ ${data.tenant.name}`;
       // This runs PER CHILD inside the loop via the allocations map. We
       // pre-compute it once so the math is auditable in a single block.
       const eligibleChildren = children.filter((b: any) => b.status === 'CHECKED_IN');
+
+      // F-P05: sweep every child's unpaid in-room F&B onto its open folio BEFORE we
+      // allocate discount or settle — mirrors single checkout (:36647) so a group can
+      // never check out with unbilled room F&B (revenue leak), and so the discount is
+      // computed on the COMPLETE folio. Idempotent + non-fatal.
+      for (const b of eligibleChildren) {
+        try {
+          const of: any = await tenantDb.get("SELECT id FROM folios WHERE booking_id = ? AND status = 'open'", [b.id]);
+          if (of?.id) {
+            await postPendingRoomOrdersToFolio(req.params.id, { bookingId: b.id, roomId: b.room_id, postedBy: req.user?.id || 'GROUP_CHECKOUT_AUTOPOST' });
+            await recomputeFolioTotals(tenantDb, of.id);
+          }
+        } catch (e) { console.warn(`[group-checkout] F&B sweep failed for ${b.id}:`, e); }
+      }
+
       const childAllocations: Record<string, number> = {};
       if (groupDiscount > 0 && eligibleChildren.length > 0) {
         const subtotals: Array<{ id: string; subtotal: number }> = [];
@@ -34647,6 +34698,17 @@ ${data.tenant.name}`;
             "UPDATE room_sessions SET status='checked_out', closed_at = ? WHERE room_id = ? AND status='active'",
             [now, b.room_id]
           );
+          // F-P05: raise the CHECK_OUT cleaning checklist per child (mirrors single
+          // checkout :36716) so a group-checked-out room gets a release-blocking
+          // cleaning job instead of silently sitting in CLEANING with no worklist item.
+          try {
+            const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+            const enforceCheckout = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
+            const rm: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+            const rmLabel = rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id);
+            await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: b.id, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, blocks_release_override: enforceCheckout ? null : 0, due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
+            await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: b.id, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, trigger: 'ROOM_CLEANING', blocks_release_override: 0 });
+          } catch { /* non-fatal — never block group checkout */ }
           totalGrand += Number(settled?.grand_total || 0);
           // Sprint 2 BCG — write GST register for each settled child folio.
           if (settled?.id) {
@@ -35667,7 +35729,7 @@ ${data.tenant.name}`;
   });
   // ── END MASTER-BILLING ───────────────────────────────────────────────────────
 
-  app.patch("/api/restaurant/:id/hotel/bookings/:bookingId", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/bookings/:bookingId", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -35982,7 +36044,7 @@ ${data.tenant.name}`;
   });
 
   // Check-in: mark booking CHECKED_IN, set room OCCUPIED, open a folio with initial nightly charges
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkin", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkin", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36440,6 +36502,11 @@ ${data.tenant.name}`;
   app.post(
     "/api/restaurant/:id/hotel/bookings/:bookingId/documents",
     authenticate,
+    // F-P02: gate uploads to hotel-operational roles with HOTEL_BOOKINGS access,
+    // mirroring the GET/DELETE siblings. Runs BEFORE multer so an unauthorized
+    // caller is rejected without ever parsing (and storing) the uploaded file.
+    // F-P01: CREATE-level (view-only roles can't attach documents).
+    hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'CREATE'),
     // EARLY-CHECKIN-FIX (S-7 regression): use idDocUpload (image + PDF)
     // instead of menuImageUpload (image-only). Without this, PDF ID
     // proofs were rejected by multer with HTTP 415, blocking check-in.
@@ -36518,7 +36585,7 @@ ${data.tenant.name}`;
     }
   );
 
-  app.delete("/api/restaurant/:id/hotel/bookings/:bookingId/documents/:docId", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/bookings/:bookingId/documents/:docId", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36554,7 +36621,7 @@ ${data.tenant.name}`;
   });
 
   // Check-out: close folio if not already, set room CLEANING, mark booking CHECKED_OUT
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkout", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkout", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37012,7 +37079,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/cancel", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/cancel", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -46093,7 +46160,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'telegram-recipients-people-or-group',
+    commit_marker: 'validation-remediation-high-findings',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

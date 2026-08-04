@@ -77,7 +77,7 @@ async function cleanup() {
     // Close any remaining OPEN jobs tied to this run's test bookings (e.g. the
     // system Room-Cleaning / Event-Complete templates' jobs, which aren't in
     // created.templates) so no test leaves a room or venue held.
-    const testBk = new Set([created.bookingId, created.bookingId2, ...created.evBookings].filter(Boolean));
+    const testBk = new Set([created.bookingId, created.bookingId2, created.bookingId3, ...created.evBookings].filter(Boolean));
     if (testBk.size) for (const j of await jobsAll()) if (j.status === 'OPEN' && testBk.has(j.source_ref)) { try { await closeJob(j.id); } catch {} }
   } catch {}
   // Cancel any confirmable throwaway event bookings (COMPLETED ones can't be cancelled — harmless).
@@ -85,6 +85,7 @@ async function cleanup() {
   for (const tid of created.templates) { try { await api('DELETE', `${P}/checklists/templates/${tid}`); } catch {} }
   if (created.restoreReqId !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: !!created.restoreReqId }); } catch {} }
   if (created.restoreCheckoutValidate !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { checklist_validate_on_checkout: !!created.restoreCheckoutValidate }); } catch {} }
+  if (created.restoreCheckinValidate !== undefined) { try { await api('PATCH', `${P}/hotel/settings`, { checklist_validate_on_checkin: !!created.restoreCheckinValidate }); } catch {} }
 }
 
 (async () => {
@@ -130,6 +131,19 @@ async function cleanup() {
       const vJobs = (await jobsFor(vId, 'VENUE_CLEANING')).filter(j => created.templates.includes(j.template_id));
       ok((vs.status === 200) && vJobs.length >= 1, 'E2E-VENUE-STATUS', 'Setting a hall to CLEANING raised the VENUE_CLEANING checklist (non-blocking)', `http=${vs.status}, jobs=${vJobs.length}`);
       await api('PATCH', `${P}/events/venues/${vId}/status`, { status: 'VACANT' }).catch(() => {}); // reset
+
+      // ── INACTIVE TEMPLATE MUST NOT FIRE (the core "only active templates trigger" invariant) ──
+      // Create a DAILY hall template, deactivate it (is_active=0), run the scheduler, and assert
+      // it raised NO job — while the active hall-daily template above still fired.
+      const dlInact = await mkTpl({ name: `E2E Hall Daily INACTIVE ${tag}`, facility_type: 'EVENT', trigger_event: 'DAILY', blocks_release: false, steps: [{ label: 'should never run', is_mandatory: false }] });
+      if (dlInact.status === 201 && dlInact.data?.id) {
+        const deact = await api('PATCH', `${P}/checklists/templates/${dlInact.data.id}`, { is_active: false });
+        await api('POST', `${P}/checklists/run-scheduled`, {});
+        const inactJobs = (await jobsFor(vId, 'DAILY')).filter(j => j.template_id === dlInact.data.id);
+        ok(deact.status === 200 && inactJobs.length === 0, 'E2E-INACTIVE', 'A deactivated (is_active=0) template does NOT raise a job when its trigger fires', `inactive jobs=${inactJobs.length}`);
+      } else {
+        skip('E2E-INACTIVE', 'Inactive template', `could not create template HTTP ${dlInact.status}`);
+      }
 
       // ── EVENT-HALL LIFECYCLE: booking → complete ("checkout") → gate → release ──
       // Faithfully walks a hall booking to completion and proves the EVENT_COMPLETE
@@ -267,6 +281,49 @@ async function cleanup() {
     } else {
       skip('E2E-CO-SETTING', 'checkout setting', 'checklist_validate_on_checkout not present — server not updated?');
       skip('E2E-CO-NONBLOCK', 'Non-blocking check-out', 'setting not present');
+    }
+
+    // ── CHECK-IN BLOCKING GATE (feature #254): validate-on-checkin ON ⇒ 409 until mandatory done ──
+    // With checklist_validate_on_checkin ON and an active CHECK_IN template carrying a mandatory
+    // step, check-in must be REFUSED (409 checklist_incomplete) until that task is done, then
+    // succeed and auto-complete the job. This is the enforcement the rest of the suite never asserts.
+    const stCi = await api('GET', `${P}/hotel/settings`);
+    if (stCi.status === 200 && stCi.data && 'checklist_validate_on_checkin' in stCi.data) {
+      created.restoreCheckinValidate = stCi.data.checklist_validate_on_checkin;
+      await api('PATCH', `${P}/hotel/settings`, { checklist_validate_on_checkin: true });
+      if (created.restoreReqId === undefined) { // don't let the ID-gate be what blocks us
+        const s = await api('GET', `${P}/hotel/settings`); created.restoreReqId = s.data?.require_id_at_checkin;
+        await api('PATCH', `${P}/hotel/settings`, { require_id_at_checkin: false });
+      }
+      let bId3 = null, rId3 = null;
+      for (const room of rooms.slice(0, 10)) {
+        if (room.id === roomId) continue;
+        const bk = await api('POST', `${P}/hotel/bookings`, { room_id: room.id, guest_name: `E2E Guest ${tag}c`, guest_phone: '9990000125', num_guests: 1, check_in_date: day(0), check_out_date: day(1), booking_source: 'DIRECT', room_rate: Number(room.base_price || 1500) });
+        if (bk.status === 201 && bk.data?.id) { bId3 = bk.data.id; rId3 = room.id; break; }
+      }
+      if (bId3) {
+        created.bookingId3 = bId3;
+        const blocked = await api('POST', `${P}/hotel/bookings/${bId3}/checkin`, {});
+        ok(blocked.status === 409 && blocked.data?.checklist_incomplete === true && Number(blocked.data?.pending_mandatory) >= 1,
+          'E2E-CHECKIN-GATE', 'Check-in is REFUSED (409 checklist_incomplete) while a mandatory check-in task is pending',
+          `http=${blocked.status}, pending=${blocked.data?.pending_mandatory}`);
+        // Complete every open CHECK_IN job's mandatory tasks for this room.
+        for (const j of (await jobsFor(rId3, 'CHECK_IN'))) {
+          if (j.status !== 'OPEN') continue;
+          const jd = await api('GET', `${P}/housekeeping/jobs/${j.id}`);
+          for (const t of (jd.data?.tasks || [])) await api('PATCH', `${P}/housekeeping/jobs/${j.id}/tasks/${t.id}`, { is_done: true });
+        }
+        const pass = await api('POST', `${P}/hotel/bookings/${bId3}/checkin`, {});
+        const openCi = (await jobsFor(rId3, 'CHECK_IN')).filter(j => j.status === 'OPEN');
+        ok((pass.status === 200 || pass.data?.booking) && openCi.length === 0,
+          'E2E-CHECKIN-GATE-PASS', 'Once the mandatory task is done, check-in succeeds and the check-in checklist auto-completes',
+          `http=${pass.status}, openCheckIn=${openCi.length}`);
+        await api('POST', `${P}/hotel/bookings/${bId3}/checkout`, { payment_method: 'CASH', waive: true }).catch(() => {}); // free room
+      } else {
+        ['E2E-CHECKIN-GATE', 'E2E-CHECKIN-GATE-PASS'].forEach(id => skip(id, 'Check-in gate', 'no spare bookable room'));
+      }
+    } else {
+      ['E2E-CHECKIN-GATE', 'E2E-CHECKIN-GATE-PASS'].forEach(id => skip(id, 'Check-in gate', 'checklist_validate_on_checkin setting not present — server not updated?'));
     }
   } finally {
     console.log('\n… cleaning up test data …');

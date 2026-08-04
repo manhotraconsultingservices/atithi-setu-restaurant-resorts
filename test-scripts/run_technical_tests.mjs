@@ -892,6 +892,33 @@ async function testEvents() {
   const bk = await api('GET', `/api/restaurant/${restaurantId}/events/bookings`);
   (bk.status === 200 ? pass : fail)('TC-EVT-004', 'Events bookings endpoint responds', `HTTP ${bk.status}`);
 
+  // TC-EVT-INQUIRY: public inquiry creates an INQUIRY booking (self-cleaning).
+  const inqDate = new Date(Date.now() + 20 * 86400000).toISOString().slice(0, 10);
+  const inq = await api('POST', `/api/public/restaurant/${restaurantId}/events/inquiry`, { name: 'UAT Inquiry', phone: '9990000300', event_date: inqDate, message: 'Automated test — please disregard' });
+  if (inq.status === 201 || inq.status === 200) {
+    pass('TC-EVT-INQUIRY', 'Public event inquiry accepted');
+    let iid = inq.data?.id || inq.data?.booking?.id;
+    if (!iid) { const l = await api('GET', `/api/restaurant/${restaurantId}/events/bookings`); const row = (Array.isArray(l.data) ? l.data : []).find(b => b.customer_phone === '9990000300' && b.status === 'INQUIRY'); iid = row?.id; }
+    if (iid) await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${iid}/cancel`, { reason: 'UAT cleanup' });
+  } else if (inq.status === 404 || inq.status === 403) {
+    skip('TC-EVT-INQUIRY', 'Public event inquiry', `HTTP ${inq.status} — public page may be unpublished`);
+  } else {
+    fail('TC-EVT-INQUIRY', 'Public event inquiry accepted', `HTTP ${inq.status} — ${JSON.stringify(inq.data).slice(0, 120)}`);
+  }
+
+  // TC-EVT-CANCEL: create a throwaway booking, cancel → CANCELLED, re-cancel is idempotent (F-E03/F-E04).
+  const cbDate = new Date(Date.now() + 25 * 86400000).toISOString().slice(0, 10);
+  const cb = await api('POST', `/api/restaurant/${restaurantId}/events/bookings`, { customer_name: 'UAT Cancel', customer_phone: '9990000301', event_date: cbDate, guest_count: 10 });
+  if (cb.status === 201 && cb.data?.id) {
+    const c1 = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${cb.data.id}/cancel`, { reason: 'UAT' });
+    const g  = await api('GET',  `/api/restaurant/${restaurantId}/events/bookings/${cb.data.id}`);
+    const c2 = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${cb.data.id}/cancel`, { reason: 'UAT again' });
+    const okCancel = c1.status === 200 && g.data?.status === 'CANCELLED' && c2.status === 200 && c2.data?.already_cancelled === true;
+    (okCancel ? pass : fail)('TC-EVT-CANCEL', 'Event cancel → CANCELLED + idempotent re-cancel', `c1=${c1.status}, status=${g.data?.status}, reCancel=${c2.data?.already_cancelled}`);
+  } else {
+    skip('TC-EVT-CANCEL', 'Event cancel', `could not create booking HTTP ${cb.status}`);
+  }
+
   const today = new Date().toISOString().slice(0, 10);
   const av = await api('GET', `/api/restaurant/${restaurantId}/events/availability?from=${today}`);
   (av.status === 200 && Array.isArray(av.data?.dates) ? pass : fail)('TC-EVT-005', 'Events availability grid responds', `HTTP ${av.status}`);
@@ -1122,6 +1149,12 @@ async function testChecklists() {
   } else if (tplRes.status === 403) { skip('TC-CHK-TMPL', 'Template CRUD', 'need OWNER role'); }
   else { fail('TC-CHK-TMPL', 'Template create', `HTTP ${tplRes.status} — ${JSON.stringify(tplRes.data)}`); }
 
+  // TC-CHK-MIDSTAY-REQ — a MID_STAY template must require recurrence_nights > 0.
+  const msBad = await api('POST', `/api/restaurant/${R}/checklists/templates`, { name: `UAT MidStay Bad ${Date.now()}`, facility_type: 'ROOM', trigger_event: 'MID_STAY', recurrence_nights: 0, steps: [{ label: 'x', is_mandatory: false }] });
+  if (msBad.status === 400) pass('TC-CHK-MIDSTAY-REQ', 'MID_STAY template without recurrence_nights is rejected (400)');
+  else if (msBad.status === 403) skip('TC-CHK-MIDSTAY-REQ', 'MID_STAY validation', 'need OWNER role');
+  else { fail('TC-CHK-MIDSTAY-REQ', 'MID_STAY template without recurrence rejected', `HTTP ${msBad.status}`); if (msBad.status === 201 && msBad.data?.id) await api('DELETE', `/api/restaurant/${R}/checklists/templates/${msBad.data.id}`); }
+
   // Need a real room for assignment + manual-start + gating tests.
   let roomId = null;
   const rms = await api('GET', `/api/restaurant/${R}/hotel/rooms`);
@@ -1269,6 +1302,17 @@ async function testHotelBookingLifecycle() {
   const room = rmList.data[0];
   const checkIn  = new Date(Date.now() +  5 * 86400000).toISOString().slice(0, 10);
   const checkOut = new Date(Date.now() +  6 * 86400000).toISOString().slice(0, 10);
+
+  // TC-BIZ-BOOK-PASTDATE: a check-in date in the past must be rejected (400).
+  const pastIn  = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+  const pastOut = new Date(Date.now() - 1 * 86400000).toISOString().slice(0, 10);
+  const pastRes = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings`, {
+    room_id: room.id, guest_name: 'Past Date Guest', guest_phone: '9999900009', num_guests: 1,
+    check_in_date: pastIn, check_out_date: pastOut, booking_source: 'DIRECT', room_rate: Number(room.base_price || room.price || 1500),
+  });
+  if (pastRes.status === 400) pass('TC-BIZ-BOOK-PASTDATE', 'Booking with a past check-in date is rejected (400)');
+  else if (pastRes.status === 403 || pastRes.status === 404) skip('TC-BIZ-BOOK-PASTDATE', 'Past-date booking', `hotel not enabled (${pastRes.status})`);
+  else { fail('TC-BIZ-BOOK-PASTDATE', 'Past-date booking rejected', `HTTP ${pastRes.status} — ${JSON.stringify(pastRes.data).slice(0, 120)}`); if (pastRes.status === 201 && pastRes.data?.id) await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings/${pastRes.data.id}/cancel`, { reason: 'test cleanup' }); }
 
   // TC-BIZ-BOOK-001: Create a new booking
   const bkRes = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings`, {
