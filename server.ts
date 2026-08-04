@@ -21929,6 +21929,13 @@ ${data.tenant.name}`;
     let dupSql = '', dupParams: any[] = [];
     if (recurring && o.dedupe_key) { dupSql = "SELECT id FROM housekeeping_jobs WHERE dedupe_key = ? AND template_id = ? LIMIT 1"; dupParams = [o.dedupe_key, tpl.id]; }
     else if (o.source_ref) { dupSql = "SELECT id FROM housekeeping_jobs WHERE source_ref = ? AND template_id = ? AND status = 'OPEN' LIMIT 1"; dupParams = [o.source_ref, tpl.id]; }
+    else {
+      // R3 FIX (QA "Hotel Checklist Issues"): manual starts and room/venue-status
+      // triggers carry neither dedupe_key nor source_ref. Never create a SECOND open
+      // job from the same template for the same facility (e.g. two Room-Cleaning
+      // checklists for the same room in one cleaning cycle).
+      dupSql = "SELECT id FROM housekeeping_jobs WHERE facility_type = ? AND facility_id = ? AND template_id = ? AND status = 'OPEN' LIMIT 1"; dupParams = [o.facility_type, o.facility_id, tpl.id];
+    }
     if (dupSql) { const dup: any = await db.get(dupSql, dupParams).catch(() => null); if (dup) return dup.id; }
     const steps: any[] = await db.query("SELECT label, is_mandatory, sort_order FROM checklist_template_steps WHERE template_id = ? AND is_active = 1 ORDER BY sort_order, id", [tpl.id]).catch(() => []);
     const jid = mkHkId('HKJ');
@@ -22196,6 +22203,16 @@ ${data.tenant.name}`;
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
       if (!job) return res.status(404).json({ error: "Job not found" });
       if (job.status !== 'OPEN') return res.json({ success: true, already: true });
+      // R2 FIX (QA "Hotel Checklist Issues"): a release-blocking ROOM checklist must not
+      // be completed / "Mark Clean & Release" while the room is still OCCUPIED — the guest
+      // must check out first. (releaseFacility already refuses to vacate a non-CLEANING
+      // room; this blocks the action up-front with a clear message.)
+      if (Number(job.blocks_release) === 1 && job.facility_type === 'ROOM' && job.facility_id) {
+        const rmR: any = await db.get("SELECT status FROM rooms WHERE id = ?", [job.facility_id]).catch(() => null);
+        if (rmR && String(rmR.status).toUpperCase() === 'OCCUPIED') {
+          return res.status(409).json({ error: 'This room is still Occupied — the guest must check out before a release/cleaning checklist can be completed.', room_status: rmR.status });
+        }
+      }
       const pend: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_job_tasks WHERE job_id = ? AND is_mandatory = 1 AND is_done = 0", [req.params.jid]);
       if (Number(pend?.c || 0) > 0) return res.status(400).json({ error: `${pend.c} mandatory task(s) still pending. Complete them before closing.`, pending_mandatory: pend.c });
       await db.run("UPDATE housekeeping_jobs SET status = 'DONE', workflow_state = 'COMPLETE', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?", [hkActor(req), req.params.jid]);
@@ -36176,6 +36193,20 @@ ${data.tenant.name}`;
         } catch (e) { console.warn('[checkin] checklist gate error (non-fatal):', e); }
       }
 
+      // R5 FIX (QA "Hotel Checklist Issues"): don't occupy a room that still has an
+      // unfinished release-blocking housekeeping job (e.g. an uncompleted cleaning /
+      // checkout checklist) — it would leave the room OCCUPIED in PMS while Housekeeping
+      // still shows it as Cleaning. A manager can override with override_housekeeping.
+      try {
+        const blk: any = await tenantDb.get("SELECT id, template_name FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' AND blocks_release = 1 LIMIT 1", [b.room_id]).catch(() => null);
+        if (blk) {
+          const isMgr = HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase());
+          if (!(isMgr && req.body?.override_housekeeping)) {
+            return res.status(409).json({ error: `Room still has an unfinished cleaning/release checklist ("${blk.template_name || 'housekeeping'}"). Complete housekeeping before check-in${isMgr ? ', or check in again to override.' : '.'}`, housekeeping_blocked: true, can_override: isMgr, housekeeping_job_id: blk.id });
+          }
+        }
+      } catch { /* non-fatal — never hard-block check-in on a lookup error */ }
+
       // BA-FIX-3 (H1, 11 Jun 2026) — atomic check-in transition.
       // Previously two simultaneous "Check In" clicks from front-
       // desk staff could both pass the status guard (line above) →
@@ -36228,9 +36259,10 @@ ${data.tenant.name}`;
         }
         const rmStay: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
         const rmLabel = rmStay?.name || (rmStay?.room_number ? `Room ${rmStay.room_number}` : b.room_id);
-        const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
-        const enforceCo = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
-        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'CHECK_OUT', blocks_release_override: enforceCo ? null : 0, due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
+        // R6 FIX (QA "Hotel Checklist Issues"): do NOT pre-raise the CHECK_OUT
+        // checklist at check-in. It was appearing in Housekeeping the moment a guest
+        // checked in, and (if completed mid-stay) produced a duplicate at the real
+        // check-out. The CHECK_OUT checklist is now raised ONLY at actual check-out.
         // Room is now OCCUPIED — raise any ROOM_OCCUPIED status checklist (non-blocking).
         await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'ROOM_OCCUPIED', blocks_release_override: 0 });
         const ciYmd = String(b.check_in_date || '').slice(0, 10), coYmd = String(b.check_out_date || '').slice(0, 10);
@@ -46160,7 +46192,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'validation-remediation-high-findings',
+    commit_marker: 'checklist-qa-r2-r3-r5-r6-fixes',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

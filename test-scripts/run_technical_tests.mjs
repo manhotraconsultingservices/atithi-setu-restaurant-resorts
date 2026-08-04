@@ -1183,6 +1183,11 @@ async function testChecklists() {
       const job = await api('GET', `/api/restaurant/${R}/housekeeping/jobs/${jid}`);
       const okJob = job.status === 200 && job.data?.template_id === tplId && Array.isArray(job.data?.tasks) && job.data.tasks.length === 2 && Number(job.data.blocks_release) === 0;
       (okJob ? pass : fail)('TC-CHK-MANUAL', 'Manual start raises a job with copied steps + non-blocking snapshot', `tasks=${job.data?.tasks?.length}, blocks_release=${job.data?.blocks_release}`);
+      // TC-CHK-DEDUPE (QA "Hotel Checklist Issues" R3) — re-starting the SAME template for the
+      // same room while a job is still open must NOT create a duplicate; it returns the same job.
+      const again = await api('POST', `/api/restaurant/${R}/checklists/jobs`, { template_id: tplId, facility_type: 'ROOM', facility_id: roomId, facility_label: 'UAT Room' });
+      const sameJob = again.status === 201 && Array.isArray(again.data?.job_ids) && again.data.job_ids.length === 1 && again.data.job_ids[0] === jid;
+      (sameJob ? pass : fail)('TC-CHK-DEDUPE', 'Re-starting the same checklist for the same room does not create a duplicate open job', `job_ids=${JSON.stringify(again.data?.job_ids)} vs ${jid}`);
       await cleanupJob(jid);
     } else { fail('TC-CHK-MANUAL', 'Manual start', `HTTP ${started.status} — ${JSON.stringify(started.data)}`); }
 
