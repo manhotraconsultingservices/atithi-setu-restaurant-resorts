@@ -10819,6 +10819,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [invEditSearchActive, setInvEditSearchActive] = useState<number | null>(null);
   // Settings save UX — "Saving…" button + "✓ Saved" banner for 3s
   const [settingsSaveStatus, setSettingsSaveStatus] = useState<'idle'|'saving'|'saved'|'error'>('idle');
+  // Which capability section of the Settings page is showing (sub-nav). Only
+  // sections for modules the tenant actually has are offered.
+  const [settingsSection, setSettingsSection] = useState<'BUSINESS' | 'HOTEL' | 'SPA' | 'EVENTS'>('BUSINESS');
   // ── Invoice Delete Modal State (admin-gated feature) ──────────────────────
   const [deleteInvoiceTarget, setDeleteInvoiceTarget] = useState<any|null>(null);
   const [deleteIdConfirm, setDeleteIdConfirm]         = useState('');
@@ -13415,6 +13418,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           invoice_numbering_mode: String((restaurant as any).invoice_numbering_mode || 'RANDOM').toUpperCase(),
           invoice_number_prefix: String((restaurant as any).invoice_number_prefix || 'INV-').trim() || 'INV-',
           invoice_yearly_reset: (restaurant as any).invoice_yearly_reset ? 1 : 0,
+          invoice_template: (restaurant as any).invoice_template || 'CLASSIC',
         })
       });
       if (!res.ok) {
@@ -26460,7 +26464,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
         </div>
       ) : activeTab === 'SETTINGS' ? (
-        <div className="max-w-xl space-y-6">
+        <div className="max-w-3xl space-y-6">
           {/* ── Property Type — READ-ONLY for Owners ─────────────────────
               Activation of the Hotel module is a billing-tier decision so
               the toggle has been moved to the SuperAdmin console
@@ -26542,6 +26546,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             )}
           </div>
+
+          {/* Capability section sub-nav — only shows tabs for modules this
+              tenant actually has. Shared "Business & Billing" is always first. */}
+          {(() => {
+            const secs = ([
+              { id: 'BUSINESS', label: 'Business & Billing', on: true },
+              { id: 'HOTEL', label: 'Hotel', on: isHotelEnabled },
+              { id: 'SPA', label: 'Spa & Wellness', on: isSpaEnabled },
+              { id: 'EVENTS', label: 'Events & Convention', on: isEventsEnabled },
+            ] as { id: any; label: string; on: boolean }[]).filter(s => s.on);
+            return (
+              <div className="flex flex-wrap gap-2">
+                {secs.map(s => (
+                  <button key={s.id} onClick={() => setSettingsSection(s.id)}
+                    className={cn('px-4 py-2 rounded-full text-sm font-bold transition-all whitespace-nowrap',
+                      settingsSection === s.id ? 'bg-[#cc5a16] text-white shadow-md' : 'bg-white text-[#1a1208] border border-[#cc5a16]/15 hover:bg-[#cc5a16]/5')}>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+
+          {/* ═══ HOTEL section ═══ */}
+          {settingsSection === 'HOTEL' && (<>
 
           {/* ── 🌐 Public Booking Page — moved to dedicated top-level
               tab (9 Jun 2026). Settings keeps a small redirect card
@@ -27337,6 +27366,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
           )}
+          </>)}
+
+          {/* ═══ BUSINESS & BILLING section — shared across every module
+              (brand, GST/tax, invoicing, payments; plus F&B menu/checkout
+              for restaurant tenants) ═══ */}
+          {settingsSection === 'BUSINESS' && (<>
 
           {/* ── Brand Logo (used on invoice PDF) ───────────────────── */}
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
@@ -28007,6 +28042,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </button>
           </form>
         </div>
+          </>)}
+
+          {/* ═══ SPA section — the full spa config lives on its own tab ═══ */}
+          {settingsSection === 'SPA' && (
+            <div onClick={() => setActiveTab('SPA_SETTINGS')} className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm cursor-pointer hover:bg-[#cc5a16]/5 transition-all">
+              <h3 className="text-2xl font-bold font-serif mb-1">Spa &amp; Wellness</h3>
+              <p className="text-xs text-[#6b5d52] mb-4">Public spa page, hero image, tagline, and featured offers.</p>
+              <span className="inline-flex items-center gap-2 text-sm font-bold text-[#cc5a16]">Open Spa settings →</span>
+            </div>
+          )}
+
+          {/* ═══ EVENTS section — the full events config lives on its own tab ═══ */}
+          {settingsSection === 'EVENTS' && (
+            <div onClick={() => setActiveTab('EVENTS_SETTINGS')} className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm cursor-pointer hover:bg-[#cc5a16]/5 transition-all">
+              <h3 className="text-2xl font-bold font-serif mb-1">Events &amp; Convention</h3>
+              <p className="text-xs text-[#6b5d52] mb-4">Invoice GST, venue booking rules (half-day windows, turnaround buffer, weekend rates), and your public events page.</p>
+              <span className="inline-flex items-center gap-2 text-sm font-bold text-[#cc5a16]">Open Events settings →</span>
+            </div>
+          )}
         </div>
       ) : activeTab === 'SUBSCRIPTION' ? (
         <div className="bg-white p-10 rounded-[32px] border border-[#cc5a16]/10 shadow-sm max-w-2xl mx-auto">

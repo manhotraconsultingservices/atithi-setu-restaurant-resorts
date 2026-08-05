@@ -718,6 +718,11 @@ function EventBookings({ restaurantId, token }: Props) {
               <span className={`text-sm font-bold ${avail.available ? 'text-emerald-700' : 'text-red-700'}`}>{avail.available ? '✓ Hall available' : '✗ Not available'}</span>
               <span className="text-xs text-[#6b5d52]">{avail.reason}</span>
               <label className="flex items-center gap-1.5 text-xs ml-auto">Venue rate ₹<input type="number" className={`${INPUT} w-28 py-1`} value={form.venue_rate ?? ''} onChange={e => setForm({ ...form, venue_rate: e.target.value })} /></label>
+              {form.venue_rate_basis === 'DAILY' && form.end_date && form.end_date > form.event_date && (
+                <span className="w-full text-right text-[10px] text-[#9d8b7e] tabular-nums">
+                  {Math.max(1, Math.round((Date.parse(form.end_date + 'T00:00:00Z') - Date.parse(form.event_date + 'T00:00:00Z')) / 86400000) + 1)} days × daily rate = {money(Number(avail.rate) || 0)}
+                </span>
+              )}
             </div>
           )}
           <div className="flex gap-2 mt-3">
@@ -1128,6 +1133,13 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const evGrand = Number(bill.grand ?? bk.total_amount ?? 0);
   const evPct = evSubtotal > 0 ? Math.round((evDiscount / evSubtotal) * 100) : 0;
   const hasEmail = !!(bk.customer_email && String(bk.customer_email).trim());
+  // Multi-day venue breakdown — when a DAILY booking spans more than one day, show
+  // the day count (and the per-day rate when it divides evenly) so the venue total
+  // reads as rate × days rather than an opaque lump sum.
+  const evDays = (() => { const s = dOnly(bk.event_date); const e = bk.end_date ? dOnly(bk.end_date) : s; if (!e || e <= s) return 1; return Math.max(1, Math.round((Date.parse(e + 'T00:00:00Z') - Date.parse(s + 'T00:00:00Z')) / 86400000) + 1); })();
+  const evVenueRate = Number(bk.venue_rate || 0);
+  const evPerDay = evDays > 0 ? evVenueRate / evDays : evVenueRate;
+  const evUniform = Math.abs(evPerDay * evDays - evVenueRate) < 0.5;
 
   return (
     <ObjectDetail
@@ -1174,6 +1186,16 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
           {/* Bill summary ledger — makes subtotal, discount and grand total legible. */}
           <div className="rounded-xl bg-[#faf7f2] border border-[#e8dccf] p-3">
+            {/* Venue rent line — for a multi-day DAILY booking, spell out rate × days. */}
+            {evVenueRate > 0 && (
+              <div className="flex items-center justify-between text-xs text-[#6b5d52] mb-0.5">
+                <span>{t('events.bookings.venue')}{bk.venue_rate_basis === 'DAILY' && evDays > 1 ? ` · ${evDays} days` : bk.venue_rate_basis === 'HALF_DAY' ? ` · ${bk.half_day_slot || 'AM'}` : bk.venue_rate_basis === 'HOURLY' ? ' · hourly' : ''}</span>
+                <span className="tabular-nums">{money(evVenueRate)}</span>
+              </div>
+            )}
+            {evVenueRate > 0 && bk.venue_rate_basis === 'DAILY' && evDays > 1 && (
+              <div className="text-[10px] text-[#9d8b7e] text-right mb-1.5 tabular-nums">{evUniform ? `${money(evPerDay)} × ${evDays} days` : `across ${evDays} days`}</div>
+            )}
             <div className="flex items-center justify-between text-xs text-[#6b5d52] mb-1.5">
               <span>{t('events.bookings.subtotal')}</span>
               <span className="tabular-nums">{money(evSubtotal)}</span>
