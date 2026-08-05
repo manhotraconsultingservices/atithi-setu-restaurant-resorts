@@ -250,9 +250,43 @@ function EventVenues({ restaurantId, token }: Props) {
             <div><label className={LABEL}>{t('events.venues.minOccupancy')}</label><input type="number" className={INPUT} value={form.min_occupancy} onChange={e => setForm({ ...form, min_occupancy: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.venues.maxOccupancy')}</label><input type="number" className={INPUT} value={form.max_occupancy} onChange={e => setForm({ ...form, max_occupancy: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.venues.floorArea')}</label><input className={INPUT} value={form.floor_area} onChange={e => setForm({ ...form, floor_area: e.target.value })} placeholder="5000 sq ft" /></div>
-            <div><label className={LABEL}>{t('events.venues.hourlyRate')}</label><input type="number" className={INPUT} value={form.hourly_rate} onChange={e => setForm({ ...form, hourly_rate: e.target.value })} /></div>
-            <div><label className={LABEL}>{t('events.venues.halfDayRate')}</label><input type="number" className={INPUT} value={form.half_day_rate} onChange={e => setForm({ ...form, half_day_rate: e.target.value })} /></div>
-            <div><label className={LABEL}>{t('events.venues.dailyRate')}</label><input type="number" className={INPUT} value={form.daily_rate} onChange={e => setForm({ ...form, daily_rate: e.target.value })} /></div>
+            {/* Price matrix — rate basis × weekday/weekend. Blank weekend = same as weekday. */}
+            <div className="col-span-2 md:col-span-3">
+              <label className={LABEL}>Price matrix (₹) — leave Weekend blank to reuse the weekday rate</label>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border border-[#e8dccf] rounded-lg">
+                  <thead><tr className="bg-[#faf6f1] text-[11px] uppercase tracking-wide text-[#6b5d52]">
+                    <th className="text-left px-2 py-1.5">Basis</th><th className="px-2 py-1.5 text-left">Weekday</th><th className="px-2 py-1.5 text-left">Weekend / Peak</th>
+                  </tr></thead>
+                  <tbody>
+                    {[
+                      { label: 'Hourly', wk: 'hourly_rate', we: 'weekend_hourly_rate' },
+                      { label: 'Half-day · AM', wk: 'half_day_am_rate', we: 'weekend_half_day_am_rate' },
+                      { label: 'Half-day · PM', wk: 'half_day_pm_rate', we: 'weekend_half_day_pm_rate' },
+                      { label: 'Daily', wk: 'daily_rate', we: 'weekend_daily_rate' },
+                    ].map(row => (
+                      <tr key={row.wk} className="border-t border-[#efe6db]">
+                        <td className="px-2 py-1 font-semibold text-[#3d2e22] whitespace-nowrap">{row.label}</td>
+                        <td className="px-1 py-1"><input type="number" className={`${INPUT} py-1`} value={form[row.wk] ?? ''} onChange={e => setForm({ ...form, [row.wk]: e.target.value })} /></td>
+                        <td className="px-1 py-1"><input type="number" className={`${INPUT} py-1`} placeholder="same as weekday" value={form[row.we] ?? ''} onChange={e => setForm({ ...form, [row.we]: e.target.value })} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[11px] text-[#9d8b7e] mt-1">Half-day AM/PM fall back to the legacy half-day rate if blank. Hotel rooms attached to an event are priced by the Hotel settings, not this matrix.</p>
+            </div>
+            <div><label className={LABEL}>Hourly — min hours</label><input type="number" className={INPUT} value={form.hourly_min_hours ?? ''} onChange={e => setForm({ ...form, hourly_min_hours: e.target.value })} placeholder="e.g. 4" /></div>
+            <div><label className={LABEL}>Turnaround / prep (min)</label><input type="number" className={INPUT} value={form.turnaround_min ?? ''} onChange={e => setForm({ ...form, turnaround_min: e.target.value })} placeholder="house default" /></div>
+            <div className="col-span-2 md:col-span-3">
+              <label className={LABEL}>Half-day windows (blank = house default) — the gap between AM end & PM start is the guaranteed prep time</label>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div><span className="text-[11px] text-[#9d8b7e]">AM start</span><input type="time" className={INPUT} value={form.hd_am_start ?? ''} onChange={e => setForm({ ...form, hd_am_start: e.target.value })} /></div>
+                <div><span className="text-[11px] text-[#9d8b7e]">AM end</span><input type="time" className={INPUT} value={form.hd_am_end ?? ''} onChange={e => setForm({ ...form, hd_am_end: e.target.value })} /></div>
+                <div><span className="text-[11px] text-[#9d8b7e]">PM start</span><input type="time" className={INPUT} value={form.hd_pm_start ?? ''} onChange={e => setForm({ ...form, hd_pm_start: e.target.value })} /></div>
+                <div><span className="text-[11px] text-[#9d8b7e]">PM end</span><input type="time" className={INPUT} value={form.hd_pm_end ?? ''} onChange={e => setForm({ ...form, hd_pm_end: e.target.value })} /></div>
+              </div>
+            </div>
             <div className="col-span-2 md:col-span-3"><label className={LABEL}>{t('events.venues.amenities')}</label><input className={INPUT} value={form.amenities} onChange={e => setForm({ ...form, amenities: e.target.value })} placeholder="Stage, projector, parking, green room" /></div>
             <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('events.venues.image')}</label>
               <SingleImagePicker restaurantId={restaurantId} token={token} value={form.image_url || ''} onChange={(url) => setForm({ ...form, image_url: url })} aspect="h-24 w-40" /></div>
@@ -568,12 +602,30 @@ function EventBookings({ restaurantId, token }: Props) {
   const [venues, setVenues] = useState<any[]>([]);
   const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
   const [showNew, setShowNew] = useState(false);
-  const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', guest_count: '' };
+  const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', half_day_slot: 'AM', venue_rate: '', guest_count: '' };
   const [form, setForm] = useState<any>(blank);
+  const [avail, setAvail] = useState<{ available: boolean; reason: string; rate: number } | null>(null);
 
   const load = async () => { try { setRows(await api('/events/bookings')); } catch { /* */ } };
   const loadVenues = async () => { try { setVenues(await api('/events/venues')); } catch { /* */ } };
   useEffect(() => { load(); loadVenues(); }, []);
+
+  // Live venue availability + matrix rate for the new-booking form. Re-runs when
+  // the hall / date / basis / slot / time change; auto-fills the venue rate (still
+  // editable as a per-booking override).
+  useEffect(() => {
+    if (!showNew || !form.venue_id || !form.event_date) { setAvail(null); return; }
+    const qs = new URLSearchParams({ basis: form.venue_rate_basis, date: form.event_date });
+    if (form.end_date) qs.set('end_date', form.end_date);
+    if (form.venue_rate_basis === 'HALF_DAY') qs.set('slot', form.half_day_slot || 'AM');
+    else { qs.set('start', form.start_time || '10:00'); qs.set('end', form.end_time || '22:00'); }
+    let cancelled = false;
+    api(`/events/venues/${form.venue_id}/availability-check?${qs.toString()}`)
+      .then((r: any) => { if (cancelled) return; setAvail(r); setForm((f: any) => ({ ...f, venue_rate: r.rate })); })
+      .catch(() => { if (!cancelled) setAvail(null); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showNew, form.venue_id, form.event_date, form.end_date, form.venue_rate_basis, form.half_day_slot, form.start_time, form.end_time]);
 
   const create = async () => {
     if (!form.customer_name || !form.event_date) { alert('Customer name and event date are required'); return; }
@@ -617,14 +669,31 @@ function EventBookings({ restaurantId, token }: Props) {
             <div><label className={LABEL}>{t('events.bookings.endDate')}</label>
               <input type="date" className={INPUT} min={form.event_date} value={form.end_date} onChange={e => setForm({ ...form, end_date: e.target.value })} />
               <p className="text-[10px] text-[#9d8b7e] mt-0.5">{t('events.bookings.endDateHint')}</p></div>
-            <div><label className={LABEL}>{t('events.bookings.startTime')}</label><input type="time" className={INPUT} value={form.start_time} onChange={e => setForm({ ...form, start_time: e.target.value })} /></div>
-            <div><label className={LABEL}>{t('events.bookings.endTime')}</label><input type="time" className={INPUT} value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.bookings.rateBasis')}</label>
               <select className={INPUT} value={form.venue_rate_basis} onChange={e => setForm({ ...form, venue_rate_basis: e.target.value })}>
-                {['DAILY', 'HALF_DAY', 'HOURLY'].map(c => <option key={c} value={c}>{c}</option>)}
+                <option value="DAILY">Daily / Multi-day</option>
+                <option value="HALF_DAY">Half-day</option>
+                <option value="HOURLY">Hourly</option>
               </select></div>
+            {form.venue_rate_basis === 'HALF_DAY' ? (
+              <div><label className={LABEL}>Slot</label>
+                <select className={INPUT} value={form.half_day_slot || 'AM'} onChange={e => setForm({ ...form, half_day_slot: e.target.value })}>
+                  <option value="AM">Morning (AM)</option><option value="PM">Evening (PM)</option>
+                </select>
+                <p className="text-[10px] text-[#9d8b7e] mt-0.5">Time comes from the hall's AM/PM window.</p></div>
+            ) : (<>
+              <div><label className={LABEL}>{t('events.bookings.startTime')}</label><input type="time" className={INPUT} value={form.start_time} onChange={e => setForm({ ...form, start_time: e.target.value })} /></div>
+              <div><label className={LABEL}>{t('events.bookings.endTime')}</label><input type="time" className={INPUT} value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} /></div>
+            </>)}
             <div><label className={LABEL}>{t('events.bookings.guests')}</label><input type="number" className={INPUT} value={form.guest_count} onChange={e => setForm({ ...form, guest_count: e.target.value })} /></div>
           </div>
+          {form.venue_id && avail && (
+            <div className={`mt-3 flex flex-wrap items-center gap-3 px-3 py-2 rounded-lg border ${avail.available ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+              <span className={`text-sm font-bold ${avail.available ? 'text-emerald-700' : 'text-red-700'}`}>{avail.available ? '✓ Hall available' : '✗ Not available'}</span>
+              <span className="text-xs text-[#6b5d52]">{avail.reason}</span>
+              <label className="flex items-center gap-1.5 text-xs ml-auto">Venue rate ₹<input type="number" className={`${INPUT} w-28 py-1`} value={form.venue_rate ?? ''} onChange={e => setForm({ ...form, venue_rate: e.target.value })} /></label>
+            </div>
+          )}
           <div className="flex gap-2 mt-3">
             <button className={BTN_PRIMARY} onClick={create}>{t('common.save')}</button>
             <button className={BTN_GHOST} onClick={() => setShowNew(false)}>{t('common.cancel')}</button>
@@ -1918,6 +1987,15 @@ function EventSettings({ restaurantId, token }: Props) {
       setGstSaved(true); setTimeout(() => setGstSaved(false), 1500);
     } catch (e: any) { alert(e.message); }
   };
+  const [vr, setVr] = useState<any>({ default_turnaround_min: 120, hd_am_start: '08:00', hd_am_end: '14:00', hd_pm_start: '17:00', hd_pm_end: '23:00', weekend_days: '0,6' });
+  const [vrSaved, setVrSaved] = useState(false);
+  useEffect(() => { api('/events/venue-settings').then((r: any) => setVr({ default_turnaround_min: Number(r.default_turnaround_min ?? 120), hd_am_start: r.hd_am_start || '08:00', hd_am_end: r.hd_am_end || '14:00', hd_pm_start: r.hd_pm_start || '17:00', hd_pm_end: r.hd_pm_end || '23:00', weekend_days: r.weekend_days || '0,6' })).catch(() => {}); }, []);
+  const saveVr = async () => {
+    try {
+      await api('/events/venue-settings', { method: 'PUT', body: JSON.stringify(vr) });
+      setVrSaved(true); setTimeout(() => setVrSaved(false), 1500);
+    } catch (e: any) { alert(e.message); }
+  };
   const save = async () => {
     try {
       const gallery = JSON.stringify((form.gallery_list || []).map((s: string) => String(s).trim()).filter(Boolean));
@@ -1972,6 +2050,38 @@ function EventSettings({ restaurantId, token }: Props) {
           {gstSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
         </div>
         <p className="text-[11px] text-[#9d8b7e]">You can still override this per document when generating a quotation or invoice.</p>
+      </div>
+
+      {/* Event & Convention — Venue booking rules (house defaults) */}
+      <div className={`${CARD} mb-4 space-y-3`}>
+        <div className="flex items-center gap-2">
+          <CalendarRange size={16} className="text-[#cc5a16]" />
+          <div>
+            <div className="text-sm font-bold text-[#3d2e22]">Venue booking rules — house defaults</div>
+            <div className="text-[11px] text-[#9d8b7e]">Half-day AM/PM windows, turnaround/prep buffer, and peak days. Individual halls can override these in the Venues master.</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div><label className={LABEL}>Turnaround / prep (min)</label><input type="number" min={0} className={INPUT} value={vr.default_turnaround_min} onChange={e => setVr({ ...vr, default_turnaround_min: Number(e.target.value) })} /></div>
+          <div><label className={LABEL}>Morning (AM) window</label><div className="flex items-center gap-1"><input type="time" className={INPUT} value={vr.hd_am_start} onChange={e => setVr({ ...vr, hd_am_start: e.target.value })} /><span className="text-xs">–</span><input type="time" className={INPUT} value={vr.hd_am_end} onChange={e => setVr({ ...vr, hd_am_end: e.target.value })} /></div></div>
+          <div><label className={LABEL}>Evening (PM) window</label><div className="flex items-center gap-1"><input type="time" className={INPUT} value={vr.hd_pm_start} onChange={e => setVr({ ...vr, hd_pm_start: e.target.value })} /><span className="text-xs">–</span><input type="time" className={INPUT} value={vr.hd_pm_end} onChange={e => setVr({ ...vr, hd_pm_end: e.target.value })} /></div></div>
+        </div>
+        <div>
+          <label className={LABEL}>Weekend / peak days</label>
+          <div className="flex flex-wrap gap-1.5">
+            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => {
+              const set = String(vr.weekend_days || '').split(',').map((s: string) => s.trim()).filter(Boolean);
+              const on = set.includes(String(i));
+              return <button key={d} type="button" onClick={() => { const s = new Set(set); if (on) s.delete(String(i)); else s.add(String(i)); setVr({ ...vr, weekend_days: Array.from(s).sort().join(',') }); }}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${on ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>{d}</button>;
+            })}
+          </div>
+          <p className="text-[11px] text-[#9d8b7e] mt-1">Selected days use the Weekend/Peak column of each hall's price matrix.</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <button className={BTN_PRIMARY} onClick={saveVr}>{t('common.save')}</button>
+          {vrSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
+        </div>
       </div>
 
       <div className={`${CARD} space-y-3`}>

@@ -26,6 +26,7 @@ import {
   createEventTables, seedEventDefaults,
   resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty,
   recomputeEventPaid, eventStaffConflict,
+  halfDayWindow, venueTurnaroundMin,
 } from "./eventsService.ts";
 import { generateEventQuotationPdf, generateEventBEOPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
@@ -22951,6 +22952,12 @@ ${data.tenant.name}`;
          Number(b.hourly_rate || 0), Number(b.half_day_rate || 0), Number(b.daily_rate || 0),
          Number(b.gst_percent ?? 18), b.amenities || null, b.image_url || null, Number(b.display_order || 0)]
       );
+      // Apply the extended price-matrix / window / buffer fields if the create
+      // form sent them (nullable — '' clears back to the tenant default).
+      const ext = ['hourly_min_hours','half_day_am_rate','half_day_pm_rate','weekend_hourly_rate','weekend_half_day_am_rate','weekend_half_day_pm_rate','weekend_daily_rate','hd_am_start','hd_am_end','hd_pm_start','hd_pm_end','turnaround_min'];
+      const ef: string[] = []; const ev: any[] = [];
+      for (const k of ext) { if (b[k] !== undefined) { ef.push(`${k} = ?`); ev.push(b[k] === '' ? null : b[k]); } }
+      if (ef.length) { ev.push(id); await db.run(`UPDATE event_venues SET ${ef.join(', ')} WHERE id = ?`, ev); }
       const row = await db.get("SELECT * FROM event_venues WHERE id = ?", [id]);
       res.status(201).json(row);
     } catch (err: any) { res.status(500).json({ error: "Failed to create venue" }); }
@@ -22963,9 +22970,10 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
-      const allow = ['name','category','ac_type','min_occupancy','max_occupancy','floor_area','hourly_rate','half_day_rate','daily_rate','gst_percent','amenities','image_url','display_order','is_active'];
+      const allow = ['name','category','ac_type','min_occupancy','max_occupancy','floor_area','hourly_rate','half_day_rate','daily_rate','gst_percent','amenities','image_url','display_order','is_active',
+        'hourly_min_hours','half_day_am_rate','half_day_pm_rate','weekend_hourly_rate','weekend_half_day_am_rate','weekend_half_day_pm_rate','weekend_daily_rate','hd_am_start','hd_am_end','hd_pm_start','hd_pm_end','turnaround_min'];
       for (const k of allow) {
-        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
+        if (b[k] !== undefined) { const v = b[k]; fields.push(`${k} = ?`); vals.push(typeof v === 'boolean' ? (v ? 1 : 0) : (v === '' ? null : v)); }
       }
       if (!fields.length) return res.status(400).json({ error: "No fields to update" });
       vals.push(req.params.vid);
@@ -23289,6 +23297,80 @@ ${data.tenant.name}`;
       await writeObjectAudit(db, req, { objectType: 'EVENT_SETTINGS', objectId: 'GST', action: 'UPDATED', summary: `Event GST set to ${enabled ? pct + '%' : 'disabled'}` });
       res.json({ success: true, gst_percent: pct, gst_enabled: enabled });
     } catch (err: any) { console.error("/events gst-settings error:", err); res.status(500).json({ error: "Failed to save GST settings" }); }
+  });
+
+  // ─── VENUE BOOKING-RULE DEFAULTS (tenant-wide) ──────────────────────────────
+  // Half-day AM/PM windows, turnaround/prep buffer, and which days count as
+  // weekend/peak. Per-hall overrides on event_venues win; these are the fallback.
+  app.get("/api/restaurant/:id/events/venue-settings", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const r: any = await db.get("SELECT default_turnaround_min, hd_am_start, hd_am_end, hd_pm_start, hd_pm_end, weekend_days FROM event_profile WHERE id = 1").catch(() => null);
+      res.json({
+        default_turnaround_min: Number(r?.default_turnaround_min ?? 120),
+        hd_am_start: r?.hd_am_start || '08:00', hd_am_end: r?.hd_am_end || '14:00',
+        hd_pm_start: r?.hd_pm_start || '17:00', hd_pm_end: r?.hd_pm_end || '23:00',
+        weekend_days: r?.weekend_days || '0,6',
+      });
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch venue settings" }); }
+  });
+
+  app.put("/api/restaurant/:id/events/venue-settings", authenticate, eventsStaff, requireTabAccess('EVENTS_SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const exists = await db.get("SELECT id FROM event_profile WHERE id = 1").catch(() => null);
+      if (!exists) await db.run("INSERT INTO event_profile (id) VALUES (1)").catch(() => {});
+      await db.run(
+        `UPDATE event_profile SET default_turnaround_min = ?, hd_am_start = ?, hd_am_end = ?, hd_pm_start = ?, hd_pm_end = ?, weekend_days = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
+        [Math.max(0, Number(b.default_turnaround_min ?? 120)), b.hd_am_start || '08:00', b.hd_am_end || '14:00', b.hd_pm_start || '17:00', b.hd_pm_end || '23:00', b.weekend_days || '0,6']
+      );
+      await writeObjectAudit(db, req, { objectType: 'EVENT_SETTINGS', objectId: 'VENUE_RULES', action: 'UPDATED', summary: `Venue rules updated (turnaround ${Number(b.default_turnaround_min ?? 120)}m)` });
+      res.json({ success: true });
+    } catch (err: any) { console.error("/events venue-settings error:", err); res.status(500).json({ error: "Failed to save venue settings" }); }
+  });
+
+  // Live availability verdict for a hall on a date/basis/slot/time — powers the
+  // "Hall available ✓/✗" preview in the booking form. Combines the turnaround-
+  // aware booking conflict, maintenance blocks, and the open-cleaning gate, and
+  // returns the matrix rate for the requested basis so the form can auto-fill it.
+  app.get("/api/restaurant/:id/events/venues/:vid/availability-check", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const venue: any = await db.get("SELECT * FROM event_venues WHERE id = ?", [req.params.vid]);
+      if (!venue) return res.status(404).json({ error: "Venue not found" });
+      const profile: any = await db.get("SELECT * FROM event_profile WHERE id = 1").catch(() => null);
+      const rateBasis = String(req.query.basis || 'DAILY');
+      const eventDate = String(req.query.date || '');
+      if (!eventDate) return res.status(400).json({ error: "date is required" });
+      const endDate = req.query.end_date ? String(req.query.end_date) : null;
+      let slot: string | null = null;
+      let startTime = String(req.query.start || '10:00');
+      let endTime = String(req.query.end || '22:00');
+      if (rateBasis === 'HALF_DAY') {
+        slot = String(req.query.slot || 'AM').toUpperCase() === 'PM' ? 'PM' : 'AM';
+        const w = halfDayWindow(slot, venue, profile);
+        startTime = w.start; endTime = w.end;
+      }
+      const bufferMin = venueTurnaroundMin(venue, profile);
+      const excludeId = req.query.exclude ? String(req.query.exclude) : undefined;
+      const conflict = await venueBookingConflict(db, req.params.vid, eventDate, endDate, startTime, endTime, excludeId, bufferMin);
+      const blocked = conflict ? null : await venueBlockConflict(db, req.params.vid, eventDate);
+      const cleaning = (!conflict && !blocked) ? await hasOpenHousekeepingJob(db, req.params.vid).catch(() => false) : false;
+      const rate = resolveVenueCharge(venue, rateBasis, startTime, endTime, { slot, eventDate, endDate, profile });
+      const available = !conflict && !blocked && !cleaning;
+      const reason = conflict ? `Clashes with an existing booking (incl. ${bufferMin}-min turnaround)`
+        : blocked ? `Hall blocked: ${blocked.reason || 'maintenance'}`
+        : cleaning ? 'Hall has an open cleaning checklist from a prior event'
+        : 'Available';
+      res.json({ available, reason, rate: round2(rate), start_time: startTime, end_time: endTime, slot, buffer_min: bufferMin });
+    } catch (err: any) { console.error("/events venue availability-check error:", err); res.status(500).json({ error: "Failed to check availability" }); }
   });
 
   // Upload an image for the Events public page (hero / gallery / venue photos).
@@ -23690,6 +23772,34 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch booking" }); }
   });
 
+  // Resolve a booking's effective schedule + venue charge from the rate basis.
+  // For HALF_DAY the start/end come from the chosen slot's window (per-hall →
+  // tenant default); the venue charge is the matrix rate (weekend-aware, AM/PM,
+  // multi-day) unless the caller pinned venue_rate. Returns the buffer minutes so
+  // callers can run the turnaround-aware conflict check. Shared by create/update/
+  // preview so the three always agree.
+  const resolveVenueBooking = async (db: any, b: any, existing?: any) => {
+    const rateBasis = b.venue_rate_basis || existing?.venue_rate_basis || 'DAILY';
+    const eventDate = b.event_date || existing?.event_date;
+    const endDate = (b.end_date !== undefined ? b.end_date : existing?.end_date) || null;
+    const venueId = (b.venue_id !== undefined ? b.venue_id : existing?.venue_id) || null;
+    const profile: any = await db.get("SELECT * FROM event_profile WHERE id = 1").catch(() => null);
+    const venue: any = venueId ? await db.get("SELECT * FROM event_venues WHERE id = ?", [venueId]) : null;
+    let slot: string | null = null;
+    let startTime = b.start_time || existing?.start_time || '10:00';
+    let endTime = b.end_time || existing?.end_time || '22:00';
+    if (rateBasis === 'HALF_DAY') {
+      slot = String(b.half_day_slot || existing?.half_day_slot || 'AM').toUpperCase() === 'PM' ? 'PM' : 'AM';
+      const w = halfDayWindow(slot, venue, profile);
+      startTime = w.start; endTime = w.end;
+    }
+    const bufferMin = venue ? venueTurnaroundMin(venue, profile) : 0;
+    const explicitRate = b.venue_rate !== undefined && b.venue_rate !== null && b.venue_rate !== '';
+    let venueRate = explicitRate ? Number(b.venue_rate) : Number(existing?.venue_rate || 0);
+    if (!explicitRate && venue) venueRate = resolveVenueCharge(venue, rateBasis, startTime, endTime, { slot, eventDate, endDate, profile });
+    return { rateBasis, eventDate, endDate, venueId, slot, startTime, endTime, bufferMin, venueRate, venue, profile };
+  };
+
   app.post("/api/restaurant/:id/events/bookings", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -23698,35 +23808,30 @@ ${data.tenant.name}`;
       const b = req.body || {};
       if (!b.customer_name) return res.status(400).json({ error: "customer_name is required" });
       if (!b.event_date) return res.status(400).json({ error: "event_date is required" });
-      const startTime = b.start_time || '10:00';
-      const endTime = b.end_time || '22:00';
-      const rateBasis = b.venue_rate_basis || 'DAILY';
+      const sched = await resolveVenueBooking(db, b);
+      const { rateBasis, startTime, endTime, slot, bufferMin, venueRate } = sched;
 
       // Venue conflict guard (only meaningful for held statuses; INQUIRY skips it).
+      // The check is turnaround-aware: two same-day windows clash unless there's a
+      // buffer-minute gap between them.
       const targetStatus = b.status || 'INQUIRY';
-      if (b.venue_id && (targetStatus === 'CONFIRMED' || targetStatus === 'IN_PROGRESS')) {
-        const conflict = await venueBookingConflict(db, b.venue_id, b.event_date, b.end_date || null, startTime, endTime);
-        if (conflict) return res.status(409).json({ error: "Venue already booked for this date/time" });
-        const blocked = await venueBlockConflict(db, b.venue_id, b.event_date);
+      if (sched.venueId && (targetStatus === 'CONFIRMED' || targetStatus === 'IN_PROGRESS')) {
+        const conflict = await venueBookingConflict(db, sched.venueId, b.event_date, b.end_date || null, startTime, endTime, undefined, bufferMin);
+        if (conflict) return res.status(409).json({ error: "Venue already booked for this date/time (or within its turnaround buffer)" });
+        const blocked = await venueBlockConflict(db, sched.venueId, b.event_date);
         if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
-      }
-
-      let venueRate = Number(b.venue_rate || 0);
-      if (!venueRate && b.venue_id) {
-        const venue: any = await db.get("SELECT * FROM event_venues WHERE id = ?", [b.venue_id]);
-        if (venue) venueRate = resolveVenueCharge(venue, rateBasis, startTime, endTime);
       }
 
       const id = mkEventId('EVT');
       await db.run(
         `INSERT INTO event_bookings
           (id, venue_id, customer_name, customer_phone, customer_email, customer_gstin, event_type, status,
-           event_date, end_date, start_time, end_time, venue_rate_basis, guest_count, booking_source,
+           event_date, end_date, start_time, end_time, venue_rate_basis, half_day_slot, guest_count, booking_source,
            venue_rate, discount, advance_amount, special_requests, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, b.venue_id || null, b.customer_name, b.customer_phone || null, b.customer_email || null,
          b.customer_gstin || null, b.event_type || null, targetStatus,
-         b.event_date, b.end_date || null, startTime, endTime, rateBasis, Number(b.guest_count || 0),
+         b.event_date, b.end_date || null, startTime, endTime, rateBasis, slot, Number(b.guest_count || 0),
          b.booking_source || 'DIRECT', round2(venueRate), Number(b.discount || 0),
          Number(b.advance_amount || 0), b.special_requests || null, req.user?.email || null]
       );
@@ -23777,9 +23882,29 @@ ${data.tenant.name}`;
         }
       }
 
+      // Recompute schedule + venue charge and run the turnaround-aware conflict
+      // check whenever a schedule field changed (the PUT previously bypassed both,
+      // so edits could double-book a hall or leave a stale rate).
+      const schedKeys = ['venue_id','event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot'];
+      const scheduleChanged = schedKeys.some(k => b[k] !== undefined && String(b[k] ?? '') !== String(existing[k] ?? ''));
+      if (scheduleChanged) {
+        const sched = await resolveVenueBooking(db, b, existing);
+        b.start_time = sched.startTime;
+        b.end_time = sched.endTime;
+        b.half_day_slot = sched.rateBasis === 'HALF_DAY' ? sched.slot : null;
+        if (b.venue_rate === undefined || b.venue_rate === null || b.venue_rate === '') b.venue_rate = round2(sched.venueRate);
+        const targetStatus = b.status || existing.status;
+        if (sched.venueId && (targetStatus === 'CONFIRMED' || targetStatus === 'IN_PROGRESS')) {
+          const conflict = await venueBookingConflict(db, sched.venueId, sched.eventDate, sched.endDate, sched.startTime, sched.endTime, req.params.bid, sched.bufferMin);
+          if (conflict) return res.status(409).json({ error: "Venue already booked for this date/time (or within its turnaround buffer)" });
+          const blocked = await venueBlockConflict(db, sched.venueId, sched.eventDate);
+          if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
+        }
+      }
+
       const fields: string[] = []; const vals: any[] = [];
       const allow = ['venue_id','customer_name','customer_phone','customer_email','customer_gstin','event_type',
-        'event_date','end_date','start_time','end_time','venue_rate_basis','guest_count','booking_source',
+        'event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot','guest_count','booking_source',
         'venue_rate','discount','advance_amount','special_requests'];
       for (const k of allow) {
         if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(b[k]); }
@@ -46385,7 +46510,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-gst-config-invoice-gstin-tenant-rename',
+    commit_marker: 'venue-rate-basis-halfday-slots-buffer-pricematrix',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

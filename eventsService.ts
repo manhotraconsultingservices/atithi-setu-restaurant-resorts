@@ -36,26 +36,91 @@ export function hhmmToMin(hhmm: string): number {
   return (h || 0) * 60 + (m || 0);
 }
 
+/** Is this 'YYYY-MM-DD' a peak/weekend day? weekendDays = CSV of DOW (0=Sun..6=Sat). */
+export function isPeakDate(date: string, weekendDays?: string | null): boolean {
+  const set = String(weekendDays ?? '0,6').split(',').map(s => Number(String(s).trim())).filter(n => !Number.isNaN(n));
+  return set.includes(eventDow(date));
+}
+
 /**
- * Resolve the venue charge for a booking window.
- * rate_basis: 'HOURLY' → hourly_rate × hours; 'HALF_DAY' → half_day_rate;
- * 'DAILY' (default) → daily_rate. Falls back gracefully when a rate is 0/NULL.
+ * Effective half-day window [start,end] ('HH:MM') for a slot. Per-venue window
+ * overrides win, else the tenant defaults (event_profile), else hard defaults.
+ * The gap between the AM end and PM start is the guaranteed turnaround/prep time.
+ */
+export function halfDayWindow(slot: string, venue: any, profile: any): { start: string; end: string } {
+  const isPM = String(slot || '').toUpperCase() === 'PM';
+  if (isPM) return {
+    start: venue?.hd_pm_start || profile?.hd_pm_start || '17:00',
+    end:   venue?.hd_pm_end   || profile?.hd_pm_end   || '23:00',
+  };
+  return {
+    start: venue?.hd_am_start || profile?.hd_am_start || '08:00',
+    end:   venue?.hd_am_end   || profile?.hd_am_end   || '14:00',
+  };
+}
+
+/** Turnaround/prep buffer (minutes) for a venue: per-venue → tenant default → 120. */
+export function venueTurnaroundMin(venue: any, profile: any): number {
+  const v = venue?.turnaround_min;
+  if (v !== null && v !== undefined && v !== '') return Math.max(0, Number(v));
+  const p = profile?.default_turnaround_min;
+  if (p !== null && p !== undefined && p !== '') return Math.max(0, Number(p));
+  return 120;
+}
+
+/**
+ * Resolve the venue charge for a booking. Weekend/peak rates apply on peak days
+ * (falling back to the weekday rate when a weekend rate is not set):
+ *   HOURLY   → rate × max(hours, hourly_min_hours)
+ *   HALF_DAY → AM or PM rate by opts.slot (falls back to half_day_rate/daily_rate)
+ *   DAILY    → sum of the per-day rate across the span (multi-day aware, so a span
+ *              mixing weekday & weekend days is priced correctly).
  */
 export function resolveVenueCharge(
-  venue: { hourly_rate?: number; half_day_rate?: number; daily_rate?: number },
+  venue: any,
   rateBasis: string,
   startTime?: string,
-  endTime?: string
+  endTime?: string,
+  opts?: { slot?: string | null; eventDate?: string; endDate?: string | null; profile?: any }
 ): number {
-  const hourly = Number(venue.hourly_rate || 0);
-  const half = Number(venue.half_day_rate || 0);
-  const daily = Number(venue.daily_rate || 0);
-  if (rateBasis === "HOURLY" && startTime && endTime) {
-    const hrs = Math.max(0, (hhmmToMin(endTime) - hhmmToMin(startTime)) / 60);
-    return Math.round(hourly * hrs * 100) / 100;
+  const weekendDays = opts?.profile?.weekend_days;
+  const peak = (d?: string) => (d ? isPeakDate(d, weekendDays) : false);
+  // weekday rate, with the weekend rate substituted on peak days (NULL/'' weekend
+  // rate means "same as weekday").
+  const pick = (weekday: any, weekend: any, isPeak: boolean) => {
+    const wk = Number(weekday || 0);
+    const we = (weekend === null || weekend === undefined || weekend === '') ? wk : Number(weekend);
+    return isPeak ? we : wk;
+  };
+  const evDate = opts?.eventDate;
+
+  if (rateBasis === "HOURLY") {
+    const rate = pick(venue.hourly_rate, venue.weekend_hourly_rate, peak(evDate));
+    const minH = Math.max(0, Number(venue.hourly_min_hours || 0));
+    let hrs = (startTime && endTime) ? Math.max(0, (hhmmToMin(endTime) - hhmmToMin(startTime)) / 60) : 0;
+    hrs = Math.max(hrs, minH);
+    return Math.round(rate * hrs * 100) / 100;
   }
-  if (rateBasis === "HALF_DAY") return half || daily;
-  return daily;
+  if (rateBasis === "HALF_DAY") {
+    const isPM = String(opts?.slot || '').toUpperCase() === 'PM';
+    const amWeekday = venue.half_day_am_rate ?? venue.half_day_rate;
+    const pmWeekday = venue.half_day_pm_rate ?? venue.half_day_rate;
+    const rate = isPM
+      ? pick(pmWeekday, venue.weekend_half_day_pm_rate, peak(evDate))
+      : pick(amWeekday, venue.weekend_half_day_am_rate, peak(evDate));
+    return Math.round((Number(rate || 0) || Number(venue.daily_rate || 0)) * 100) / 100;
+  }
+  // DAILY — sum per-day so a multi-day span prices each day (weekday/weekend) right.
+  const s = evDate ? ymdStr(evDate) : '';
+  const e = opts?.endDate ? ymdStr(opts.endDate) : s;
+  if (!s) return Math.round(Number(venue.daily_rate || 0) * 100) / 100;
+  let total = 0, cur = s, guard = 0;
+  while (guard++ < 400) {
+    total += pick(venue.daily_rate, venue.weekend_daily_rate, peak(cur));
+    if (!e || cur >= e) break;
+    cur = ymdStr(new Date(Date.parse(cur + 'T00:00:00Z') + 86400000));
+  }
+  return Math.round(total * 100) / 100;
 }
 
 /** Normalize a DATE value (pg returns Date objects) to a YYYY-MM-DD string. */
@@ -80,7 +145,8 @@ export async function venueBookingConflict(
   endDate: string | null,
   startTime: string,
   endTime: string,
-  excludeBookingId?: string
+  excludeBookingId?: string,
+  bufferMin: number = 0
 ): Promise<any | null> {
   const newStart = ymdStr(eventDate);
   const ed = endDate ? ymdStr(endDate) : '';
@@ -96,13 +162,20 @@ export async function venueBookingConflict(
       ? [venueId, newEnd, newStart, excludeBookingId]
       : [venueId, newEnd, newStart]
   );
+  const nS = hhmmToMin(startTime), nE = hhmmToMin(endTime);
   for (const r of rows) {
     const exStart = ymdStr(r.event_date);
     const exEnd = ymdStr(r.end_date || r.event_date) > exStart ? ymdStr(r.end_date) : exStart;
     // Either side multi-day → date overlap alone is a conflict.
     if (newEnd > newStart || exEnd > exStart) return r;
-    // Both single-day on the same date → require time-of-day overlap.
-    if (exStart === newStart && String(r.start_time) < endTime && String(r.end_time) > startTime) return r;
+    // Both single-day on the same date → require a turnaround/prep gap of at least
+    // bufferMin between the two windows (setup/teardown time). Two windows clash
+    // when the existing window, widened by the buffer on each side, overlaps the
+    // new one. With buffer 0 this is the plain edge-exclusive overlap.
+    if (exStart === newStart) {
+      const eS = hhmmToMin(String(r.start_time)), eE = hhmmToMin(String(r.end_time));
+      if (eS - bufferMin < nE && eE + bufferMin > nS) return r;
+    }
   }
   return null;
 }
@@ -235,6 +308,25 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // Manual hall status board (VACANT | OCCUPIED | CLEANING | MAINTENANCE | BLOCKED)
   // — mirrors room status. Setting it raises the matching VENUE_<status> checklist.
   await tenantDb.exec("ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'VACANT'").catch(() => {});
+
+  // ── Venue price matrix + half-day windows + turnaround buffer ────────────────
+  // Owner-configured pricing: per-hall rates by basis, with a separate weekend/
+  // peak rate per basis (NULL = same as weekday) and split AM/PM half-day rates.
+  // Half-day windows + turnaround (setup/teardown) buffer are per-hall overrides
+  // that fall back to the tenant defaults on event_profile; the gap between the
+  // AM and PM windows is the guaranteed prep time so two events can't collide.
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS hourly_min_hours INT DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS half_day_am_rate DOUBLE PRECISION`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS half_day_pm_rate DOUBLE PRECISION`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS weekend_hourly_rate DOUBLE PRECISION`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS weekend_half_day_am_rate DOUBLE PRECISION`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS weekend_half_day_pm_rate DOUBLE PRECISION`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS weekend_daily_rate DOUBLE PRECISION`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS hd_am_start TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS hd_am_end TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS hd_pm_start TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS hd_pm_end TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS turnaround_min INT`).catch(() => {});
 
   // ── Rentable inventory master (tables, chairs, sofas, cylinders, plates) ────
   await tenantDb.exec(`
@@ -517,6 +609,9 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // and reports can show tax separately and net it out of revenue. total_amount
   // = subtotal + tax_amount − discount (matches the quotation/invoice model).
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS tax_amount DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  // Which half-day slot (AM/PM) a HALF_DAY booking occupies — drives the effective
+  // start/end window and the AM vs PM price. NULL for HOURLY/DAILY bookings.
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS half_day_slot TEXT`).catch(() => {});
 
   // ── Event-invoice GST config (owner-configurable, default 18%) ───────────────
   // A single event GST rate applies to all non-room event lines (venue, rentals,
@@ -525,6 +620,17 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // the Hotel GST slab settings instead (snapshotted per room at attach time).
   await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS gst_percent DOUBLE PRECISION DEFAULT 18`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS gst_enabled INT DEFAULT 1`).catch(() => {});
+
+  // ── Tenant-wide venue booking-rule defaults ─────────────────────────────────
+  // House defaults for half-day windows, turnaround/prep buffer, and which days
+  // count as weekend/peak (CSV of DOW 0=Sun..6=Sat). Per-hall overrides on
+  // event_venues win when set; these are the fallback.
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS default_turnaround_min INT DEFAULT 120`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS hd_am_start TEXT DEFAULT '08:00'`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS hd_am_end TEXT DEFAULT '14:00'`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS hd_pm_start TEXT DEFAULT '17:00'`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS hd_pm_end TEXT DEFAULT '23:00'`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS weekend_days TEXT DEFAULT '0,6'`).catch(() => {});
 
   // ── Sprint 3: cost & margin ─────────────────────────────────────────────────
   // Cost price on masters + snapshotted onto booking lines (so margin is stable
