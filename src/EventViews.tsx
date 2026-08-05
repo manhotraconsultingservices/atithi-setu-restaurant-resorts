@@ -229,6 +229,15 @@ function EventVenues({ restaurantId, token }: Props) {
     catch (e: any) { alert(e.message); await load(); }
   };
   const VENUE_STATUSES = ['VACANT', 'OCCUPIED', 'CLEANING', 'MAINTENANCE', 'BLOCKED'];
+  // Right-aligned money column that sorts/filters on the numeric value and shows
+  // "—" for a blank rate. Used for every price-matrix cell in the table.
+  const rateCol = (key: string, label: string, opts: any = {}): any => ({
+    key, label, sortable: true, align: 'right' as const,
+    getValue: (r: any) => Number(r[key] || 0),
+    render: (r: any) => (r[key] != null && r[key] !== '') ? money(r[key]) : '—',
+    exportValue: (r: any) => (r[key] != null && r[key] !== '') ? String(r[key]) : '',
+    ...opts,
+  });
 
   return (
     <div>
@@ -302,19 +311,33 @@ function EventVenues({ restaurantId, token }: Props) {
         data={rows}
         rowKey={(r: any) => r.id}
         emptyMessage={t('events.venues.empty')}
+        columnChooser
+        columnFilters
+        tableId="events-venues"
+        exportFilename="venues"
         columns={[
-          { key: 'name', label: t('events.venues.name') },
-          { key: 'category', label: t('common.category') },
-          { key: 'ac_type', label: t('events.venues.acType'), render: (r: any) => r.ac_type === 'AC' ? t('events.venues.ac') : t('events.venues.nonAc') },
-          { key: 'max_occupancy', label: t('events.venues.occupancy'), render: (r: any) => `${r.min_occupancy || 0}–${r.max_occupancy || 0}` },
-          { key: 'daily_rate', label: t('events.venues.dailyRate'), render: (r: any) => money(r.daily_rate) },
-          { key: 'status', label: 'Status', render: (r: any) => (
+          { key: 'name', label: t('events.venues.name'), sortable: true, searchable: true, filterable: true },
+          { key: 'category', label: t('common.category'), sortable: true, filterable: true, filterType: 'select' },
+          { key: 'ac_type', label: t('events.venues.acType'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.ac_type, render: (r: any) => r.ac_type === 'AC' ? t('events.venues.ac') : t('events.venues.nonAc') },
+          { key: 'max_occupancy', label: t('events.venues.occupancy'), sortable: true, align: 'right', getValue: (r: any) => Number(r.max_occupancy || 0), render: (r: any) => `${r.min_occupancy || 0}–${r.max_occupancy || 0}`, exportValue: (r: any) => `${r.min_occupancy || 0}-${r.max_occupancy || 0}` },
+          { key: 'floor_area', label: t('events.venues.floorArea'), sortable: true, defaultHidden: true, render: (r: any) => r.floor_area || '—' },
+          rateCol('hourly_rate', t('events.venues.hourlyRate')),
+          rateCol('half_day_am_rate', 'Half-day AM'),
+          rateCol('half_day_pm_rate', 'Half-day PM'),
+          rateCol('daily_rate', t('events.venues.dailyRate')),
+          rateCol('weekend_hourly_rate', 'Wknd Hourly', { defaultHidden: true }),
+          rateCol('weekend_half_day_am_rate', 'Wknd Half-day AM', { defaultHidden: true }),
+          rateCol('weekend_half_day_pm_rate', 'Wknd Half-day PM', { defaultHidden: true }),
+          rateCol('weekend_daily_rate', 'Wknd Daily', { defaultHidden: true }),
+          { key: 'hourly_min_hours', label: 'Min hrs', sortable: true, align: 'right', defaultHidden: true, getValue: (r: any) => Number(r.hourly_min_hours || 0), render: (r: any) => r.hourly_min_hours || '—' },
+          { key: 'turnaround_min', label: 'Turnaround (min)', sortable: true, align: 'right', defaultHidden: true, getValue: (r: any) => Number(r.turnaround_min || 0), render: (r: any) => (r.turnaround_min != null && r.turnaround_min !== '') ? r.turnaround_min : '—' },
+          { key: 'status', label: 'Status', filterable: true, filterType: 'select', getValue: (r: any) => String(r.status || 'VACANT').toUpperCase(), render: (r: any) => (
             <select value={String(r.status || 'VACANT').toUpperCase()} onChange={e => setStatus(r.id, e.target.value)}
               className="text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20">
               {VENUE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           ) },
-          { key: '_a', label: t('common.actions'), render: (r: any) => (
+          { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>
               <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
@@ -403,14 +426,15 @@ function EventRentals({ restaurantId, token }: Props) {
         data={rows}
         rowKey={(r: any) => r.id}
         emptyMessage={t('events.rentals.empty')}
+        columnChooser columnFilters tableId="events-rentals" exportFilename="rental-inventory"
         columns={[
-          { key: 'name', label: t('common.name') },
-          { key: 'category', label: t('common.category') },
-          { key: 'quantity_owned', label: t('events.rentals.qtyOwned') },
-          { key: 'rent_hourly', label: t('events.rentals.rentHourly'), render: (r: any) => money(r.rent_hourly) },
-          { key: 'rent_daily', label: t('events.rentals.rentDaily'), render: (r: any) => money(r.rent_daily) },
-          { key: 'rent_weekly', label: t('events.rentals.rentWeekly'), render: (r: any) => money(r.rent_weekly) },
-          { key: '_a', label: t('common.actions'), render: (r: any) => (
+          { key: 'name', label: t('common.name'), sortable: true, searchable: true, filterable: true },
+          { key: 'category', label: t('common.category'), sortable: true, filterable: true, filterType: 'select' },
+          { key: 'quantity_owned', label: t('events.rentals.qtyOwned'), sortable: true, align: 'right', getValue: (r: any) => Number(r.quantity_owned || 0) },
+          { key: 'rent_hourly', label: t('events.rentals.rentHourly'), sortable: true, align: 'right', getValue: (r: any) => Number(r.rent_hourly || 0), render: (r: any) => money(r.rent_hourly) },
+          { key: 'rent_daily', label: t('events.rentals.rentDaily'), sortable: true, align: 'right', getValue: (r: any) => Number(r.rent_daily || 0), render: (r: any) => money(r.rent_daily) },
+          { key: 'rent_weekly', label: t('events.rentals.rentWeekly'), sortable: true, align: 'right', getValue: (r: any) => Number(r.rent_weekly || 0), render: (r: any) => money(r.rent_weekly) },
+          { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>
               <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
@@ -480,12 +504,13 @@ function EventServices({ restaurantId, token }: Props) {
         data={rows}
         rowKey={(r: any) => r.id}
         emptyMessage={t('events.services.empty')}
+        columnChooser columnFilters tableId="events-services" exportFilename="event-services"
         columns={[
-          { key: 'name', label: t('common.name') },
-          { key: 'category', label: t('common.category') },
-          { key: 'pricing_type', label: t('events.services.pricingType') },
-          { key: 'rate', label: t('events.services.rate'), render: (r: any) => money(r.rate) },
-          { key: '_a', label: t('common.actions'), render: (r: any) => (
+          { key: 'name', label: t('common.name'), sortable: true, searchable: true, filterable: true },
+          { key: 'category', label: t('common.category'), sortable: true, filterable: true, filterType: 'select' },
+          { key: 'pricing_type', label: t('events.services.pricingType'), sortable: true, filterable: true, filterType: 'select' },
+          { key: 'rate', label: t('events.services.rate'), sortable: true, align: 'right', getValue: (r: any) => Number(r.rate || 0), render: (r: any) => money(r.rate) },
+          { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>
               <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
@@ -575,12 +600,13 @@ function EventCatering({ restaurantId, token }: Props) {
         data={rows}
         rowKey={(r: any) => r.id}
         emptyMessage={t('events.catering.empty')}
+        columnChooser columnFilters tableId="events-catering" exportFilename="catering-packages"
         columns={[
-          { key: 'name', label: t('common.name') },
-          { key: 'package_type', label: t('events.catering.type'), render: (r: any) => r.package_type === 'PLATED' ? t('events.catering.plated') : t('events.catering.buffet') },
-          { key: 'price_per_plate', label: t('events.catering.pricePerPlate'), render: (r: any) => money(r.price_per_plate) },
+          { key: 'name', label: t('common.name'), sortable: true, searchable: true, filterable: true },
+          { key: 'package_type', label: t('events.catering.type'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.package_type, render: (r: any) => r.package_type === 'PLATED' ? t('events.catering.plated') : t('events.catering.buffet') },
+          { key: 'price_per_plate', label: t('events.catering.pricePerPlate'), sortable: true, align: 'right', getValue: (r: any) => Number(r.price_per_plate || 0), render: (r: any) => money(r.price_per_plate) },
           { key: 'menu_json', label: t('events.catering.sections'), render: (r: any) => { try { const m = JSON.parse(r.menu_json || '[]'); return (m || []).map((s: any) => s.section).join(', ') || '—'; } catch { return '—'; } } },
-          { key: '_a', label: t('common.actions'), render: (r: any) => (
+          { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => openEdit(r)}>{t('common.edit')}</button>
               <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
@@ -1711,13 +1737,14 @@ function EventQuotations({ restaurantId, token }: Props) {
         data={rows}
         rowKey={(r: any) => r.id}
         emptyMessage={t('events.quotes.empty')}
+        columnChooser columnFilters tableId="events-quotations" exportFilename="event-quotations"
         columns={[
-          { key: 'quote_number', label: t('events.quotes.number') },
-          { key: 'customer_name', label: t('events.bookings.customer') },
-          { key: 'grand_total', label: t('common.total'), render: (r: any) => money(r.grand_total) },
-          { key: 'valid_until', label: t('events.quotes.validUntil'), render: (r: any) => String(r.valid_until || '').slice(0, 10) },
-          { key: 'status', label: t('common.status'), render: (r: any) => <Pill status={r.status} /> },
-          { key: '_a', label: t('common.actions'), render: (r: any) => (
+          { key: 'quote_number', label: t('events.quotes.number'), sortable: true, searchable: true, filterable: true },
+          { key: 'customer_name', label: t('events.bookings.customer'), sortable: true, searchable: true, filterable: true },
+          { key: 'grand_total', label: t('common.total'), sortable: true, align: 'right', getValue: (r: any) => Number(r.grand_total || 0), render: (r: any) => money(r.grand_total) },
+          { key: 'valid_until', label: t('events.quotes.validUntil'), sortable: true, getValue: (r: any) => String(r.valid_until || '').slice(0, 10), render: (r: any) => String(r.valid_until || '').slice(0, 10) },
+          { key: 'status', label: t('common.status'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.status, render: (r: any) => <Pill status={r.status} /> },
+          { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${r.id}/pdf`, token)}>{t('events.quotes.viewPdf')}</button>
               <button className={BTN_PRIMARY} onClick={() => setSendQuote({ id: r.id, email: r.customer_email || '' })}><Send size={12} />{t('events.quotes.send')}</button>
