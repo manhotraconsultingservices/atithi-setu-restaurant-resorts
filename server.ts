@@ -22905,11 +22905,28 @@ ${data.tenant.name}`;
   });
 
   // ─── Secondary language (i18n) — tenant-level setting ──────────────────────
+  // Regional language a tenant's STATE maps to (limited to the app's supported
+  // secondary languages). Drives the auto-suggested localization + bilingual
+  // invoice language so the owner doesn't pick it manually.
+  const regionalLanguageForState = (state?: string): string => {
+    const s = String(state || '').trim().toLowerCase();
+    if (!s) return '';
+    const map: Record<string, string> = {
+      'tamil nadu': 'ta', 'puducherry': 'ta', 'pondicherry': 'ta',
+      'karnataka': 'kn',
+      'telangana': 'te', 'andhra pradesh': 'te',
+      'uttar pradesh': 'hi', 'madhya pradesh': 'hi', 'bihar': 'hi', 'rajasthan': 'hi',
+      'delhi': 'hi', 'new delhi': 'hi', 'haryana': 'hi', 'uttarakhand': 'hi',
+      'jharkhand': 'hi', 'chhattisgarh': 'hi', 'himachal pradesh': 'hi',
+    };
+    return map[s] || '';
+  };
+
   app.get("/api/restaurant/:id/settings/language", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const r: any = await centralDb.get("SELECT secondary_language FROM restaurants WHERE id = ?", [req.params.id]);
+      const r: any = await centralDb.get("SELECT secondary_language, state FROM restaurants WHERE id = ?", [req.params.id]);
       if (!r) return res.status(404).json({ error: "Restaurant not found" });
-      res.json({ secondary_language: r.secondary_language || null });
+      res.json({ secondary_language: r.secondary_language || null, suggested_language: regionalLanguageForState(r.state), state: r.state || null });
     } catch (err: any) { res.status(500).json({ error: "Failed to read language setting" }); }
   });
 
@@ -23277,14 +23294,18 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const row: any = await db.get("SELECT gst_percent, gst_enabled FROM event_profile WHERE id = 1").catch(() => null);
+      const row: any = await db.get("SELECT gst_percent, gst_enabled, invoice_lang_mode FROM event_profile WHERE id = 1").catch(() => null);
       // GSTIN + regional language live on the central tenant record (shared across
       // modules); surface them here so events owners can manage them in one place.
+      // suggested_language is derived from the tenant's state.
       res.json({
         gst_percent: Number(row?.gst_percent ?? 18),
         gst_enabled: Number(row?.gst_enabled ?? 1),
         gst_number: (check.restaurant as any)?.gst_number || '',
         secondary_language: (check.restaurant as any)?.secondary_language || '',
+        suggested_language: regionalLanguageForState((check.restaurant as any)?.state),
+        state: (check.restaurant as any)?.state || '',
+        invoice_lang_mode: row?.invoice_lang_mode || 'BOTH',
       });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch GST settings" }); }
   });
@@ -23297,10 +23318,11 @@ ${data.tenant.name}`;
       const b = req.body || {};
       const pct = Math.max(0, Number(b.gst_percent ?? 18));
       const enabled = (b.gst_enabled === false || b.gst_enabled === 0 || b.gst_enabled === '0' || b.gst_enabled === 'false') ? 0 : 1;
-      const upd: any = await db.run("UPDATE event_profile SET gst_percent = ?, gst_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", [pct, enabled]);
+      const mode = ['EN', 'REGIONAL', 'BOTH'].includes(String(b.invoice_lang_mode || '').toUpperCase()) ? String(b.invoice_lang_mode).toUpperCase() : 'BOTH';
+      const upd: any = await db.run("UPDATE event_profile SET gst_percent = ?, gst_enabled = ?, invoice_lang_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", [pct, enabled, mode]);
       // Seed the singleton row if a tenant somehow has none yet.
       const exists = await db.get("SELECT id FROM event_profile WHERE id = 1").catch(() => null);
-      if (!exists) await db.run("INSERT INTO event_profile (id, gst_percent, gst_enabled) VALUES (1, ?, ?)", [pct, enabled]).catch(() => {});
+      if (!exists) await db.run("INSERT INTO event_profile (id, gst_percent, gst_enabled, invoice_lang_mode) VALUES (1, ?, ?, ?)", [pct, enabled, mode]).catch(() => {});
       // GSTIN (needed to make the invoice GST-compliant) and the regional language
       // for bilingual invoices live on the central tenant record.
       if (b.gst_number !== undefined) {
@@ -46526,7 +46548,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-invoice-gstin-in-settings',
+    commit_marker: 'events-invoice-lang-mode-state-suggest',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

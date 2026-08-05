@@ -2025,14 +2025,14 @@ function EventSettings({ restaurantId, token }: Props) {
   const [form, setForm] = useState<any>({ hero_title: '', tagline: '', description: '', contact_phone: '', contact_email: '', is_published: true });
   const [saved, setSaved] = useState(false);
   const [secLang, setSecLang] = useState<string>('');
-  const [gst, setGst] = useState<{ gst_percent: number; gst_enabled: boolean; gst_number: string }>({ gst_percent: 18, gst_enabled: true, gst_number: '' });
+  const [gst, setGst] = useState<{ gst_percent: number; gst_enabled: boolean; gst_number: string; invoice_lang_mode: string; suggested_language: string }>({ gst_percent: 18, gst_enabled: true, gst_number: '', invoice_lang_mode: 'BOTH', suggested_language: '' });
   const [gstSaved, setGstSaved] = useState(false);
   useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) { let gl: string[] = []; try { const g = JSON.parse(p.gallery || '[]'); if (Array.isArray(g)) gl = g.filter(Boolean); } catch { /* */ } setForm({ ...p, is_published: Number(p.is_published) !== 0, gallery_list: gl }); } }).catch(() => {}); }, []);
   useEffect(() => { api('/settings/language').then((r) => setSecLang(r.secondary_language || '')).catch(() => {}); }, []);
-  useEffect(() => { api('/events/gst-settings').then((r) => setGst({ gst_percent: Number(r.gst_percent ?? 18), gst_enabled: Number(r.gst_enabled ?? 1) !== 0, gst_number: r.gst_number || '' })).catch(() => {}); }, []);
+  useEffect(() => { api('/events/gst-settings').then((r) => setGst({ gst_percent: Number(r.gst_percent ?? 18), gst_enabled: Number(r.gst_enabled ?? 1) !== 0, gst_number: r.gst_number || '', invoice_lang_mode: r.invoice_lang_mode || 'BOTH', suggested_language: r.suggested_language || '' })).catch(() => {}); }, []);
   const saveGst = async () => {
     try {
-      await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ gst_percent: Number(gst.gst_percent) || 0, gst_enabled: gst.gst_enabled, gst_number: gst.gst_number.trim() }) });
+      await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ gst_percent: Number(gst.gst_percent) || 0, gst_enabled: gst.gst_enabled, gst_number: gst.gst_number.trim(), invoice_lang_mode: gst.invoice_lang_mode }) });
       setGstSaved(true); setTimeout(() => setGstSaved(false), 1500);
     } catch (e: any) { alert(e.message); }
   };
@@ -2073,6 +2073,9 @@ function EventSettings({ restaurantId, token }: Props) {
           </select>
           <span className="text-xs text-[#9d8b7e]">Staff can toggle English ↔ this language.</span>
         </div>
+        {!secLang && gst.suggested_language && (
+          <p className="text-[11px] text-[#9d8b7e] mt-1.5">Suggested for your state: <strong>{LANGUAGE_NAMES[gst.suggested_language] || gst.suggested_language}</strong> — <button className="text-[#cc5a16] font-semibold hover:underline" onClick={() => saveLang(gst.suggested_language)}>Use this</button></p>
+        )}
       </div>
 
       {/* Event & Convention — Invoice GST (owner-configurable default) */}
@@ -2103,6 +2106,15 @@ function EventSettings({ restaurantId, token }: Props) {
           </div>
           <button className={BTN_PRIMARY} onClick={saveGst}>{t('common.save')}</button>
           {gstSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
+        </div>
+        <div>
+          <label className={LABEL}>Invoice language</label>
+          <select className={`${INPUT} max-w-xs`} value={gst.invoice_lang_mode} onChange={e => setGst({ ...gst, invoice_lang_mode: e.target.value })}>
+            <option value="EN">English only</option>
+            <option value="REGIONAL">Regional only</option>
+            <option value="BOTH">English + Regional</option>
+          </select>
+          <p className="text-[11px] text-[#9d8b7e] mt-1">Regional = your state&apos;s language{gst.suggested_language ? ` (${LANGUAGE_NAMES[gst.suggested_language] || gst.suggested_language})` : ''}. Regional / Both print regional script once the font is enabled; until then they fall back to English.</p>
         </div>
         <p className="text-[11px] text-[#9d8b7e]">You can still override this per document when generating a quotation or invoice.</p>
       </div>

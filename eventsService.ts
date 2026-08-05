@@ -620,6 +620,10 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // the Hotel GST slab settings instead (snapshotted per room at attach time).
   await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS gst_percent DOUBLE PRECISION DEFAULT 18`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS gst_enabled INT DEFAULT 1`).catch(() => {});
+  // Invoice/quotation print language: EN (English only) | REGIONAL (regional only)
+  // | BOTH (English + the tenant state's regional language). Regional rendering
+  // needs an embedded Unicode font for the script; falls back to English until then.
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS invoice_lang_mode TEXT DEFAULT 'BOTH'`).catch(() => {});
 
   // ── Tenant-wide venue booking-rule defaults ─────────────────────────────────
   // House defaults for half-day windows, turnaround/prep buffer, and which days
