@@ -919,6 +919,66 @@ async function testEvents() {
     skip('TC-EVT-CANCEL', 'Event cancel', `could not create booking HTTP ${cb.status}`);
   }
 
+  // ── Venue rate-basis + half-day windows + turnaround buffer + multi-day pricing ──
+  // Throwaway hall with a full price matrix + 120-min turnaround. Verifies the
+  // matrix persists, half-day AM/PM price + window resolution, the buffer-aware
+  // conflict guard (AM+PM allowed, a too-soon booking blocked), and multi-day
+  // daily = rate × days. Self-cleaning (cancels bookings + deactivates the hall).
+  {
+    const vd = new Date(Date.now() + 200 * 86400000).toISOString().slice(0, 10);
+    const vc = await api('POST', `/api/restaurant/${restaurantId}/events/venues`, {
+      name: 'UAT Rate Hall', category: 'BANQUET', hourly_rate: 5000, hourly_min_hours: 4,
+      half_day_am_rate: 18000, half_day_pm_rate: 22000, daily_rate: 35000,
+      hd_am_start: '08:00', hd_am_end: '14:00', hd_pm_start: '17:00', hd_pm_end: '23:00', turnaround_min: 120,
+    });
+    if (vc.status === 201 && vc.data?.id) {
+      const vid = vc.data.id;
+      const vg = await api('GET', `/api/restaurant/${restaurantId}/events/venues`);
+      const vrow = (vg.data || []).find((v) => v.id === vid);
+      const matrixOk = vrow && Number(vrow.half_day_am_rate) === 18000 && Number(vrow.half_day_pm_rate) === 22000 && Number(vrow.turnaround_min) === 120;
+      (matrixOk ? pass : fail)('TC-EVT-VENUE-MATRIX', 'Venue price matrix + windows + buffer persist', `am=${vrow?.half_day_am_rate}, pm=${vrow?.half_day_pm_rate}, buf=${vrow?.turnaround_min}`);
+
+      const amBk = await api('POST', `/api/restaurant/${restaurantId}/events/bookings`, {
+        customer_name: 'UAT HD AM', customer_phone: '9990000401', venue_id: vid, event_date: vd,
+        venue_rate_basis: 'HALF_DAY', half_day_slot: 'AM', status: 'CONFIRMED', guest_count: 50,
+      });
+      const amOk = amBk.status === 201 && Number(amBk.data?.venue_rate) === 18000 && amBk.data?.start_time === '08:00' && amBk.data?.end_time === '14:00';
+      (amOk ? pass : fail)('TC-EVT-HD-AM', 'Half-day AM priced + windowed from hall', `rate=${amBk.data?.venue_rate}, ${amBk.data?.start_time}-${amBk.data?.end_time}, http=${amBk.status}`);
+
+      // Within the 120-min turnaround after the AM end (14:00 → 16:00): a 15:00 booking must clash.
+      const clash = await api('POST', `/api/restaurant/${restaurantId}/events/bookings`, {
+        customer_name: 'UAT Clash', customer_phone: '9990000402', venue_id: vid, event_date: vd,
+        venue_rate_basis: 'HOURLY', start_time: '15:00', end_time: '16:30', status: 'CONFIRMED', guest_count: 20,
+      });
+      (clash.status === 409 ? pass : fail)('TC-EVT-BUFFER-BLOCK', 'Turnaround buffer blocks a too-soon booking', `http=${clash.status}`);
+
+      // PM window (17:00) starts after the AM buffer (16:00) → must be allowed.
+      const pmBk = await api('POST', `/api/restaurant/${restaurantId}/events/bookings`, {
+        customer_name: 'UAT HD PM', customer_phone: '9990000403', venue_id: vid, event_date: vd,
+        venue_rate_basis: 'HALF_DAY', half_day_slot: 'PM', status: 'CONFIRMED', guest_count: 50,
+      });
+      const pmOk = pmBk.status === 201 && Number(pmBk.data?.venue_rate) === 22000;
+      (pmOk ? pass : fail)('TC-EVT-BUFFER-OK', 'AM + PM in one hall/day allowed (gap >= buffer)', `rate=${pmBk.data?.venue_rate}, http=${pmBk.status}`);
+
+      // Multi-day DAILY = daily_rate x days (3-day inclusive span → 35000 x 3).
+      const md1 = new Date(Date.now() + 210 * 86400000).toISOString().slice(0, 10);
+      const md2 = new Date(Date.now() + 212 * 86400000).toISOString().slice(0, 10);
+      const mdBk = await api('POST', `/api/restaurant/${restaurantId}/events/bookings`, {
+        customer_name: 'UAT MultiDay', customer_phone: '9990000404', venue_id: vid, event_date: md1, end_date: md2,
+        venue_rate_basis: 'DAILY', status: 'CONFIRMED', guest_count: 100,
+      });
+      const mdOk = mdBk.status === 201 && Number(mdBk.data?.venue_rate) === 105000;
+      (mdOk ? pass : fail)('TC-EVT-MULTIDAY', 'Multi-day daily = rate x days', `rate=${mdBk.data?.venue_rate} (want 105000), http=${mdBk.status}`);
+
+      for (const id of [amBk.data?.id, pmBk.data?.id, mdBk.data?.id, clash.data?.id].filter(Boolean)) {
+        await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${id}/cancel`, { reason: 'UAT cleanup' });
+      }
+      await api('DELETE', `/api/restaurant/${restaurantId}/events/venues/${vid}`);
+    } else {
+      skip('TC-EVT-VENUE-MATRIX', 'Venue rate-basis tests', `could not create venue HTTP ${vc.status}`);
+    }
+  }
+
   const today = new Date().toISOString().slice(0, 10);
   const av = await api('GET', `/api/restaurant/${restaurantId}/events/availability?from=${today}`);
   (av.status === 200 && Array.isArray(av.data?.dates) ? pass : fail)('TC-EVT-005', 'Events availability grid responds', `HTTP ${av.status}`);
