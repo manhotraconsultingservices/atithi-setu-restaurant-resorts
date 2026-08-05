@@ -49312,6 +49312,62 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   );
 }
 
+// SUPER_ADMIN edit-tenant modal — rename a business and/or change its login
+// subdomain. Tenant data is keyed by the immutable restaurant id, so a slug
+// change only re-points the login URL + DNS (provisioned server-side). Warns
+// that the old subdomain (and any bookmarks/QR on it) stops working.
+function EditTenantModal({ tenant, token, onClose, onSaved }: { tenant: any; token: string; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState<string>(tenant?.name || '');
+  const [slug, setSlug] = useState<string>(tenant?.slug || '');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string>('');
+  const origSlug = tenant?.slug || '';
+  const host = window.location.hostname;
+  const parts = host.split('.');
+  const apex = parts.length >= 2 ? parts.slice(-2).join('.') : host;
+  const normSlug = (slug || '').toLowerCase().trim().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const slugChanged = normSlug !== origSlug;
+  const save = async () => {
+    setErr('');
+    if (slugChanged && !window.confirm(`Change the subdomain to "${normSlug}.${apex}"?\n\nThe old address (${origSlug || '—'}.${apex}) will stop working once its DNS is removed — bookmarks/QR codes on it will break. New DNS is provisioned automatically.`)) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/admin/restaurants/${tenant.id}/identity`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ name: name.trim(), slug: normSlug }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setErr(data?.error || 'Failed to save'); setSaving(false); return; }
+      onSaved();
+    } catch (e: any) { setErr(e?.message || 'Failed to save'); setSaving(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl space-y-4" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold font-serif">Edit tenant</h3>
+        <div>
+          <label className="text-xs font-bold text-[#6b5d52] uppercase tracking-wide">Business name</label>
+          <input className="w-full mt-1 border border-[#e8dccf] rounded-lg px-3 py-2 text-sm" value={name} onChange={e => setName(e.target.value)} />
+        </div>
+        <div>
+          <label className="text-xs font-bold text-[#6b5d52] uppercase tracking-wide">Subdomain</label>
+          <div className="flex items-center gap-1 mt-1">
+            <input className="flex-1 border border-[#e8dccf] rounded-lg px-3 py-2 text-sm font-mono" value={slug} onChange={e => setSlug(e.target.value)} />
+            <span className="text-xs text-[#9c8e85] font-mono">.{apex}</span>
+          </div>
+          <p className="text-[11px] text-[#9c8e85] mt-1">Preview: <span className="font-mono text-[#cc5a16]">{normSlug || '—'}.{apex}</span>{slugChanged && <span className="text-amber-600 font-semibold"> — re-points login URL + DNS</span>}</p>
+        </div>
+        {err && <p className="text-xs text-red-600 font-semibold">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="px-4 py-2 rounded-lg text-sm font-semibold text-[#6b5d52] hover:bg-[#faf7f2]" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="px-4 py-2 rounded-lg text-sm font-bold bg-[#cc5a16] text-white hover:bg-[#a84612] disabled:opacity-50" onClick={save} disabled={saving || !name.trim() || !normSlug}>{saving ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SuperAdminDashboard({ token }: { token: string }) {
   const toast = useToast();
   const showConfirm = useConfirm();
@@ -49321,6 +49377,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
   const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS'>('RESTAURANTS');
+  const [editTenant, setEditTenant] = useState<any | null>(null);
 
   // Subscription billing state (admin Billing tab)
   const [billingRows, setBillingRows] = useState<any[]>([]);
@@ -50367,6 +50424,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
             </button>
           </div>
 
+          {editTenant && <EditTenantModal tenant={editTenant} token={token} onClose={() => setEditTenant(null)} onSaved={() => { setEditTenant(null); fetchRestaurants(); }} />}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {filteredRestaurants.map(r => (
               <div key={r.id} className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm space-y-6 flex flex-col">
@@ -50383,6 +50441,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
                   )}>
                     {r.is_active === 1 ? 'Active' : r.is_active === 0 ? 'Pending' : 'Inactive'}
                   </div>
+                  <button onClick={() => setEditTenant(r)} className="ml-2 text-[11px] font-semibold text-[#cc5a16] hover:text-[#a84612] hover:underline shrink-0" title="Edit name / subdomain">Edit</button>
                 </div>
                 
                 <div className="space-y-3 flex-1">

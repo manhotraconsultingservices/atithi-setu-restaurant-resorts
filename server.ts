@@ -6252,6 +6252,56 @@ async function startServer() {
     }
   });
 
+  // Admin: edit a tenant's display name and/or subdomain (slug). SUPER_ADMIN/CTO
+  // only — used when a business owner requests a rename. Tenant DATA is keyed by
+  // the immutable restaurant id (schema `tenant_<id>`), so changing the slug is
+  // data-safe; only the login subdomain + DNS change. The slug is validated
+  // (slugify + reserved list + partial-unique index). When it changes, DNS for
+  // the new subdomain is provisioned in the background (fire-and-forget so a slow
+  // Cloudflare call can't hang the CF-proxied request); the old subdomain is
+  // best-effort deprovisioned. Any live QR/bookmark on the old subdomain dies
+  // once its DNS is removed — communicate the change to the owner.
+  app.patch("/api/admin/restaurants/:id/identity", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const id = req.params.id;
+      const rest: any = await centralDb.get("SELECT id, name, slug FROM restaurants WHERE id = ?", [id]);
+      if (!rest) return res.status(404).json({ error: "Tenant not found" });
+      const b = req.body || {};
+      const newName = (b.name != null && String(b.name).trim() !== '') ? String(b.name).trim() : rest.name;
+      let newSlug: string = rest.slug;
+      let slugChanged = false;
+      if (b.slug != null && String(b.slug).trim() !== '') {
+        const cand = slugify(String(b.slug));
+        if (!cand) return res.status(400).json({ error: "Invalid subdomain — use letters, numbers and hyphens only" });
+        if (RESERVED_SLUGS.has(cand)) return res.status(400).json({ error: `'${cand}' is a reserved subdomain` });
+        if (cand !== rest.slug) {
+          const clash: any = await centralDb.get("SELECT id FROM restaurants WHERE slug = ? AND id <> ?", [cand, id]);
+          if (clash) return res.status(409).json({ error: `Subdomain '${cand}' is already in use` });
+          newSlug = cand;
+          slugChanged = true;
+        }
+      }
+      await centralDb.run("UPDATE restaurants SET name = ?, slug = ? WHERE id = ?", [newName, newSlug, id]);
+      let dnsQueued = false;
+      if (slugChanged && cloudflareIsConfigured()) {
+        const oldSlug = rest.slug;
+        dnsQueued = true;
+        void (async () => {
+          try { await provisionTenantSubdomain(newSlug); console.log(`[tenant-rename] provisioned ${newSlug}`); }
+          catch (e) { console.warn(`[tenant-rename] provision failed for ${newSlug}:`, e); }
+          if (oldSlug) {
+            try { await deprovisionTenantSubdomain(oldSlug); console.log(`[tenant-rename] deprovisioned ${oldSlug}`); }
+            catch (e) { console.warn(`[tenant-rename] deprovision failed for ${oldSlug}:`, e); }
+          }
+        })();
+      }
+      res.json({ success: true, id, name: newName, slug: newSlug, slug_changed: slugChanged, old_slug: rest.slug, dns_queued: dnsQueued });
+    } catch (err: any) {
+      console.error("/api/admin/restaurants/:id/identity error:", err);
+      res.status(500).json({ error: "Failed to update tenant" });
+    }
+  });
+
   // Admin: Toggle Restaurant Status
   app.post("/api/admin/restaurants/:id/toggle-status", authenticate, async (req: AuthRequest, res: Response) => {
     const { is_active } = req.body;
@@ -23210,6 +23260,37 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update profile" }); }
   });
 
+  // ─── EVENT GST SETTINGS (owner-configurable default) ────────────────────────
+  // Default GST rate applied to event invoices/quotations, plus a master switch
+  // to remove GST entirely. Writes ONLY the GST columns so the public-page
+  // profile (hero/gallery/contact) is never clobbered.
+  app.get("/api/restaurant/:id/events/gst-settings", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const row: any = await db.get("SELECT gst_percent, gst_enabled FROM event_profile WHERE id = 1").catch(() => null);
+      res.json({ gst_percent: Number(row?.gst_percent ?? 18), gst_enabled: Number(row?.gst_enabled ?? 1) });
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch GST settings" }); }
+  });
+
+  app.put("/api/restaurant/:id/events/gst-settings", authenticate, eventsStaff, requireTabAccess('EVENTS_SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const pct = Math.max(0, Number(b.gst_percent ?? 18));
+      const enabled = (b.gst_enabled === false || b.gst_enabled === 0 || b.gst_enabled === '0' || b.gst_enabled === 'false') ? 0 : 1;
+      const upd: any = await db.run("UPDATE event_profile SET gst_percent = ?, gst_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", [pct, enabled]);
+      // Seed the singleton row if a tenant somehow has none yet.
+      const exists = await db.get("SELECT id FROM event_profile WHERE id = 1").catch(() => null);
+      if (!exists) await db.run("INSERT INTO event_profile (id, gst_percent, gst_enabled) VALUES (1, ?, ?)", [pct, enabled]).catch(() => {});
+      await writeObjectAudit(db, req, { objectType: 'EVENT_SETTINGS', objectId: 'GST', action: 'UPDATED', summary: `Event GST set to ${enabled ? pct + '%' : 'disabled'}` });
+      res.json({ success: true, gst_percent: pct, gst_enabled: enabled });
+    } catch (err: any) { console.error("/events gst-settings error:", err); res.status(500).json({ error: "Failed to save GST settings" }); }
+  });
+
   // Upload an image for the Events public page (hero / gallery / venue photos).
   // Mirrors the hotel upload endpoint (same multer, same /uploads/<file> URL) but
   // gated to events staff so an events-only tenant can add pictures too.
@@ -23287,21 +23368,42 @@ ${data.tenant.name}`;
   // discount, and the tax-inclusive grand total the customer pays. Mirrors the
   // quotation/invoice model (assembleEventQuoteLines) EXACTLY so the booking
   // screen, quotation and invoice always agree.
+  // Effective event GST rate applied to ALL non-room event lines (venue, rentals,
+  // services, catering). Resolution order: an explicit per-document override
+  // (quotation/invoice can disable → 0, or overwrite the %) wins; otherwise the
+  // tenant default from event_profile (gst_percent, default 18; 0 when the owner
+  // has removed event GST). Hotel-room lines are excluded — they keep their own
+  // snapshotted GST, which follows the Hotel GST slab settings (set at attach time).
+  const resolveEventGstRate = async (db: any, override?: number | null): Promise<number> => {
+    if (override !== undefined && override !== null && !Number.isNaN(Number(override))) return Math.max(0, Number(override));
+    const prof: any = await db.get("SELECT gst_percent, gst_enabled FROM event_profile WHERE id = 1").catch(() => null);
+    return Number(prof?.gst_enabled ?? 1) === 1 ? Number(prof?.gst_percent ?? 18) : 0;
+  };
+  // Parse a per-document GST override from a request body: disable → 0, or an
+  // explicit %; undefined means "use the tenant default".
+  const parseEventGstOverride = (b: any): number | undefined => {
+    if (!b) return undefined;
+    if (b.gst_enabled === false || b.gst_enabled === 0 || b.gst_enabled === '0' || b.gst_enabled === 'false') return 0;
+    if (b.gst_percent !== undefined && b.gst_percent !== null && b.gst_percent !== '') return Math.max(0, Number(b.gst_percent));
+    return undefined;
+  };
+
   const computeEventBill = async (db: any, bookingId: string): Promise<{ subtotal: number; tax: number; discount: number; grand: number }> => {
     const bk: any = await db.get("SELECT venue_id, venue_rate, discount FROM event_bookings WHERE id = ?", [bookingId]);
     if (!bk) return { subtotal: 0, tax: 0, discount: 0, grand: 0 };
+    const evGst = await resolveEventGstRate(db);
     let subtotal = 0, tax = 0;
     const venueRate = Number(bk.venue_rate || 0);
-    if (venueRate > 0) {
-      const venue: any = bk.venue_id ? await db.get("SELECT gst_percent FROM event_venues WHERE id = ?", [bk.venue_id]) : null;
-      const g = Number(venue?.gst_percent ?? 18);
-      subtotal += venueRate; tax += venueRate * g / 100;
+    if (venueRate > 0) { subtotal += venueRate; tax += venueRate * evGst / 100; }
+    // Non-room lines all bill at the single event GST rate.
+    const addLines = (arr: any[], gstPct: number) => { for (const l of arr || []) { const lt = Number(l.line_total || 0); subtotal += lt; tax += lt * gstPct / 100; } };
+    addLines(await db.query("SELECT line_total FROM event_booking_items WHERE booking_id = ?", [bookingId]), evGst);
+    addLines(await db.query("SELECT line_total FROM event_booking_services WHERE booking_id = ?", [bookingId]), evGst);
+    addLines(await db.query("SELECT line_total FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => []), evGst);
+    // Hotel rooms — GST per the Hotel settings, snapshotted on each room line.
+    for (const rm of (await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId])) || []) {
+      const lt = Number(rm.line_total || 0); subtotal += lt; tax += lt * Number(rm.gst_percent ?? 12) / 100;
     }
-    const addLines = (arr: any[]) => { for (const l of arr || []) { const lt = Number(l.line_total || 0); const g = Number(l.gst_percent ?? 18); subtotal += lt; tax += lt * g / 100; } };
-    addLines(await db.query("SELECT line_total, gst_percent FROM event_booking_items WHERE booking_id = ?", [bookingId]));
-    addLines(await db.query("SELECT line_total, gst_percent FROM event_booking_services WHERE booking_id = ?", [bookingId]));
-    addLines(await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId]));
-    addLines(await db.query("SELECT line_total, gst_percent FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => []));
     subtotal = round2(subtotal); tax = round2(tax);
     const discount = round2(Number(bk.discount || 0));
     const grand = round2(subtotal + tax - discount);
@@ -24245,13 +24347,19 @@ ${data.tenant.name}`;
       // nights × rooms × rate for the room line total.
       const nights = Math.max(1, Math.round((new Date(checkOut + 'T00:00:00Z').getTime() - new Date(checkIn + 'T00:00:00Z').getTime()) / 86400000) || 1);
       const lineTotal = round2(rate * numRooms * nights);
+      // Room rent GST follows the Hotel GST slab settings (per the nightly
+      // tariff), snapshotted at attach time — unless the caller explicitly
+      // passes gst_percent.
+      const hotelCfg = await loadHotelTaxConfig(req.params.id).catch(() => undefined);
+      const roomGst = (b.gst_percent !== undefined && b.gst_percent !== null && b.gst_percent !== '')
+        ? Number(b.gst_percent) : gstRateForTariff(rate, hotelCfg);
       const id = mkEventId('EBR');
       await db.run(
         `INSERT INTO event_booking_rooms
            (id, booking_id, room_type_id, room_type_snapshot, check_in_date, check_out_date, num_rooms, quoted_rate, gst_percent, line_total, status)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUOTED')`,
         [id, req.params.bid, b.room_type_id || null, b.room_type_snapshot || b.room_type_name || 'Room',
-         checkIn, checkOut, numRooms, rate, Number(b.gst_percent ?? 12), lineTotal]
+         checkIn, checkOut, numRooms, rate, roomGst, lineTotal]
       );
       await recomputeEventTotal(db, req.params.bid);
       const row = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [id]);
@@ -24291,7 +24399,12 @@ ${data.tenant.name}`;
       const rate = Number(b.quoted_rate ?? room.quoted_rate);
       const nights = Math.max(1, Math.round((new Date(room.check_out_date + 'T00:00:00Z').getTime() - new Date(room.check_in_date + 'T00:00:00Z').getTime()) / 86400000) || 1);
       const lineTotal = round2(rate * numRooms * nights);
-      await db.run("UPDATE event_booking_rooms SET num_rooms = ?, quoted_rate = ?, line_total = ? WHERE id = ?", [numRooms, rate, lineTotal, req.params.rid]);
+      // Re-resolve room GST from the Hotel slab settings for the (possibly new)
+      // nightly rate, unless the caller pins gst_percent explicitly.
+      const hotelCfg = await loadHotelTaxConfig(req.params.id).catch(() => undefined);
+      const roomGst = (b.gst_percent !== undefined && b.gst_percent !== null && b.gst_percent !== '')
+        ? Number(b.gst_percent) : gstRateForTariff(rate, hotelCfg);
+      await db.run("UPDATE event_booking_rooms SET num_rooms = ?, quoted_rate = ?, gst_percent = ?, line_total = ? WHERE id = ?", [numRooms, rate, roomGst, lineTotal, req.params.rid]);
       await recomputeEventTotal(db, req.params.bid);
       const row = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [req.params.rid]);
       res.json(row);
@@ -24369,29 +24482,33 @@ ${data.tenant.name}`;
   // ══════════════════════════════════════════════════════════════════════════
 
   // Assemble quotation lines from a booking's venue + rentals + services + rooms.
-  const assembleEventQuoteLines = async (db: any, bk: any) => {
+  const assembleEventQuoteLines = async (db: any, bk: any, gstOverride?: number) => {
     const lines: any[] = [];
+    // Single event GST rate for all non-room lines (venue/rentals/services/
+    // catering). A per-document override (from the quotation/invoice request)
+    // wins; otherwise the tenant default. Hotel rooms keep their own snapshot.
+    const evGst = await resolveEventGstRate(db, gstOverride);
     if (Number(bk.venue_rate || 0) > 0) {
       const venue: any = bk.venue_id ? await db.get("SELECT * FROM event_venues WHERE id = ?", [bk.venue_id]) : null;
-      const gst = Number(venue?.gst_percent ?? 18);
+      const gst = evGst;
       const amt = round2(bk.venue_rate);
       lines.push({ line_type: 'VENUE', description: `${venue?.name || 'Venue'} (${bk.venue_rate_basis || 'DAILY'})`, quantity: 1, unit_rate: amt, amount: amt, gst_rate: gst, gst_amount: round2(amt * gst / 100) });
     }
     const items: any[] = await db.query("SELECT * FROM event_booking_items WHERE booking_id = ? ORDER BY created_at", [bk.id]);
     for (const it of items) {
-      const gst = Number(it.gst_percent ?? 18);
+      const gst = evGst;
       const d = it.description_snapshot ? ` — ${it.description_snapshot}` : '';
       lines.push({ line_type: 'RENTAL', description: `${it.name_snapshot} × ${it.quantity} (${it.rate_basis} × ${it.duration_units})${d}`, quantity: it.quantity, unit_rate: it.unit_rate, amount: round2(it.line_total), gst_rate: gst, gst_amount: round2(it.line_total * gst / 100) });
     }
     const svcs: any[] = await db.query("SELECT * FROM event_booking_services WHERE booking_id = ? ORDER BY created_at", [bk.id]);
     for (const s of svcs) {
-      const gst = Number(s.gst_percent ?? 18);
+      const gst = evGst;
       const d = s.description_snapshot ? ` — ${s.description_snapshot}` : '';
       lines.push({ line_type: 'SERVICE', description: `${s.name_snapshot} × ${s.quantity}${d}`, quantity: s.quantity, unit_rate: s.unit_rate, amount: round2(s.line_total), gst_rate: gst, gst_amount: round2(s.line_total * gst / 100) });
     }
     const cater: any[] = await db.query("SELECT * FROM event_booking_catering WHERE booking_id = ? ORDER BY created_at", [bk.id]).catch(() => []);
     for (const c of cater) {
-      const gst = Number(c.gst_percent ?? 5);
+      const gst = evGst;
       // Compose a readable menu line from the snapshot JSON, if present.
       let menu = '';
       try { const m = c.menu_snapshot ? JSON.parse(c.menu_snapshot) : null; if (Array.isArray(m)) menu = m.map((s: any) => `${s.section}: ${(s.options || []).join(', ')}`).join(' | '); } catch { /* */ }
@@ -24417,7 +24534,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       if (!bk) return res.status(404).json({ error: "Booking not found" });
-      const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk);
+      const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk, parseEventGstOverride(req.body));
       // Next version + quote number.
       const verRow: any = await db.get("SELECT COALESCE(MAX(version),0) AS v FROM event_quotations WHERE booking_id = ?", [req.params.bid]);
       const version = Number(verRow?.v || 0) + 1;
@@ -24462,6 +24579,19 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch quotation" }); }
   });
 
+  // Supplier block for event quotation/invoice PDFs. The central `restaurants`
+  // registry has no address/phone/email columns — the GSTIN lives in
+  // `gst_number`, contact details come from the events profile, and the address
+  // is composed from city/state (the only locality the registry stores).
+  const eventTenantBlock = (restaurant: any, prof: any) => ({
+    name: restaurant?.name || 'Our Venue',
+    address: [restaurant?.city, restaurant?.state].filter(Boolean).join(', ') || undefined,
+    gstin: restaurant?.gst_number || undefined,
+    phone: prof?.contact_phone || undefined,
+    email: prof?.contact_email || undefined,
+    currency: 'INR',
+  });
+
   // Build the PDF data payload for a quotation.
   const buildQuotePdfData = async (db: any, restaurant: any, qid: string): Promise<EventQuotationData | null> => {
     const q: any = await db.get("SELECT * FROM event_quotations WHERE id = ?", [qid]);
@@ -24471,15 +24601,9 @@ ${data.tenant.name}`;
       `SELECT b.*, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?`,
       [q.booking_id]
     );
+    const prof: any = await db.get("SELECT contact_phone, contact_email FROM event_profile WHERE id = 1").catch(() => null);
     return {
-      tenant: {
-        name: restaurant?.name || 'Our Venue',
-        address: restaurant?.address || undefined,
-        gstin: restaurant?.gstin || undefined,
-        phone: restaurant?.phone || undefined,
-        email: restaurant?.email || undefined,
-        currency: 'INR',
-      },
+      tenant: eventTenantBlock(restaurant, prof),
       quotation: { quote_number: q.quote_number, version: q.version, valid_until: q.valid_until, notes: q.notes, created_at: q.created_at },
       booking: {
         customer_name: bk?.customer_name || '', customer_phone: bk?.customer_phone, customer_email: bk?.customer_email,
@@ -24541,17 +24665,32 @@ ${data.tenant.name}`;
   });
 
   // ─── Invoice PDF + email (Sprint 2) ─────────────────────────────────────────
-  const buildInvoiceData = async (db: any, restaurant: any, bid: string): Promise<EventQuotationData | null> => {
+  const buildInvoiceData = async (db: any, restaurant: any, bid: string, gstOverride?: number): Promise<EventQuotationData | null> => {
     const bk: any = await db.get(`SELECT b.*, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?`, [bid]);
     if (!bk) return null;
-    const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk);
-    const folio: any = await db.get("SELECT invoice_number, created_at FROM folios WHERE event_booking_id = ? AND folio_kind = 'EVENT' ORDER BY created_at DESC LIMIT 1", [bid]).catch(() => null);
+    const prof: any = await db.get("SELECT contact_phone, contact_email FROM event_profile WHERE id = 1").catch(() => null);
+    // Prefer the persisted event folio (what was actually billed at checkout) so
+    // the invoice reflects the exact GST captured then — including any per-invoice
+    // GST override. Fall back to a live assemble for a pre-checkout preview.
+    const folio: any = await db.get("SELECT * FROM folios WHERE event_booking_id = ? AND folio_kind = 'EVENT' ORDER BY created_at DESC LIMIT 1", [bid]).catch(() => null);
+    let lines: any[]; let subtotal: number; let tax: number; let discount: number; let grand: number; let invNo: string; let invAt: string;
+    if (folio) {
+      const fe: any[] = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at", [folio.id]).catch(() => []);
+      lines = fe.map((e: any) => ({ line_type: e.entry_type, description: e.description, quantity: Number(e.quantity), unit_rate: Number(e.unit_price), amount: Number(e.amount), gst_rate: Number(e.gst_rate), gst_amount: Number(e.gst_amount) }));
+      subtotal = Number(folio.subtotal || 0); tax = Number(folio.gst_amount || 0); discount = Number(folio.discount || 0); grand = Number(folio.grand_total || 0);
+      invNo = folio.invoice_number || `INV-${String(bid).slice(-6)}`; invAt = folio.created_at || new Date().toISOString();
+    } else {
+      const a = await assembleEventQuoteLines(db, bk, gstOverride);
+      lines = a.lines.map((l: any) => ({ line_type: l.line_type, description: l.description, quantity: Number(l.quantity), unit_rate: Number(l.unit_rate), amount: Number(l.amount), gst_rate: Number(l.gst_rate), gst_amount: Number(l.gst_amount) }));
+      subtotal = a.subtotal; tax = a.tax; discount = a.discount; grand = a.grand;
+      invNo = `INV-${String(bid).slice(-6)}`; invAt = new Date().toISOString();
+    }
     return {
-      tenant: { name: restaurant?.name || 'Our Venue', address: restaurant?.address || undefined, gstin: restaurant?.gstin || undefined, phone: restaurant?.phone || undefined, email: restaurant?.email || undefined, currency: 'INR' },
-      quotation: { quote_number: folio?.invoice_number || `INV-${String(bid).slice(-6)}`, version: 1, created_at: folio?.created_at || new Date().toISOString() },
-      docLabel: 'TAX INVOICE',
+      tenant: eventTenantBlock(restaurant, prof),
+      quotation: { quote_number: invNo, version: 1, created_at: invAt },
+      docLabel: tax > 0 ? 'TAX INVOICE' : 'INVOICE',
       booking: { customer_name: bk.customer_name || '', customer_phone: bk.customer_phone, customer_email: bk.customer_email, event_type: bk.event_type, event_date: bk.event_date, end_date: bk.end_date, start_time: bk.start_time, end_time: bk.end_time, guest_count: bk.guest_count, venue_name: bk.venue_name },
-      lines: lines.map((l: any) => ({ line_type: l.line_type, description: l.description, quantity: Number(l.quantity), unit_rate: Number(l.unit_rate), amount: Number(l.amount), gst_rate: Number(l.gst_rate), gst_amount: Number(l.gst_amount) })),
+      lines,
       subtotal, tax_amount: tax, discount, grand_total: grand,
     };
   };
@@ -24561,7 +24700,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const data = await buildInvoiceData(db, check.restaurant, req.params.bid);
+      const data = await buildInvoiceData(db, check.restaurant, req.params.bid, parseEventGstOverride(req.query));
       if (!data) return res.status(404).json({ error: "Booking not found" });
       const pdf = await generateEventQuotationPdf(data);
       res.setHeader('Content-Type', 'application/pdf');
@@ -24575,7 +24714,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const data = await buildInvoiceData(db, check.restaurant, req.params.bid);
+      const data = await buildInvoiceData(db, check.restaurant, req.params.bid, parseEventGstOverride(req.body));
       if (!data) return res.status(404).json({ error: "Booking not found" });
       const to = String(req.body?.email || data.booking.customer_email || '').trim();
       if (!to) return res.status(400).json({ error: "No recipient email — add the customer's email first." });
@@ -24626,7 +24765,7 @@ ${data.tenant.name}`;
         const existing = await db.get("SELECT * FROM folios WHERE id = ?", [bk.folio_id]);
         if (existing) return res.json({ ...existing, already_billed: true });
       }
-      const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk);
+      const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk, parseEventGstOverride(req.body));
       const yr = new Date().getFullYear();
       const cntRow: any = await db.get("SELECT COUNT(*)::int AS c FROM folios WHERE folio_kind = 'EVENT'", []);
       const invoiceNumber = `EVT-${yr}-${String(Number(cntRow?.c || 0) + 1).padStart(5, '0')}`;
@@ -46246,7 +46385,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-payment-mychecklist-smarttable-ordersfix',
+    commit_marker: 'event-gst-config-invoice-gstin-tenant-rename',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

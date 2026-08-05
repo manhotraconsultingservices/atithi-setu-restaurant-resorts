@@ -195,7 +195,14 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       };
       totalRow('Subtotal', fmtMoney(data.subtotal, cur));
       if (data.discount > 0) totalRow('Discount', `- ${fmtMoney(data.discount, cur)}`);
-      totalRow('GST', fmtMoney(data.tax_amount, cur));
+      // GST-compliant tax presentation: split into CGST + SGST (intra-state) when
+      // GST is charged; a zero-GST invoice shows no tax line.
+      if (data.tax_amount > 0) {
+        const cgst = Math.round((data.tax_amount / 2) * 100) / 100;
+        const sgst = Math.round((data.tax_amount - cgst) * 100) / 100;
+        totalRow('CGST', fmtMoney(cgst, cur));
+        totalRow('SGST', fmtMoney(sgst, cur));
+      }
       doc.moveTo(totX, y + 2).lineTo(totX + totW, y + 2).lineWidth(1).strokeColor(ACCENT).stroke();
       y += 6;
       totalRow('Grand Total', fmtMoney(data.grand_total, cur), true);

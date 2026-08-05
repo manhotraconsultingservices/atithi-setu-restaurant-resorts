@@ -424,6 +424,8 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
       contact_phone TEXT,
       contact_email TEXT,
       is_published  INT DEFAULT 1,
+      gst_percent   DOUBLE PRECISION DEFAULT 18,  -- event-invoice GST rate (owner-configurable)
+      gst_enabled   INT DEFAULT 1,                -- 0 = remove GST from event invoices
       updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
@@ -515,6 +517,14 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // and reports can show tax separately and net it out of revenue. total_amount
   // = subtotal + tax_amount − discount (matches the quotation/invoice model).
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS tax_amount DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+
+  // ── Event-invoice GST config (owner-configurable, default 18%) ───────────────
+  // A single event GST rate applies to all non-room event lines (venue, rentals,
+  // services, catering). The owner can change the % or disable it entirely
+  // (gst_enabled=0 → GST removed from the invoice). Hotel-room lines always follow
+  // the Hotel GST slab settings instead (snapshotted per room at attach time).
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS gst_percent DOUBLE PRECISION DEFAULT 18`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS gst_enabled INT DEFAULT 1`).catch(() => {});
 
   // ── Sprint 3: cost & margin ─────────────────────────────────────────────────
   // Cost price on masters + snapshotted onto booking lines (so margin is stable

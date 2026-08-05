@@ -982,22 +982,30 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const removeRoom = async (rid: string) => { try { await api(`/events/bookings/${bookingId}/rooms/${rid}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
   const dOnly = (v: any) => String(v || '').slice(0, 10);
 
+  // Per-document GST override for THIS quotation / invoice. Defaults to the
+  // tenant's Event GST setting; the user can disable GST or change the % for just
+  // this document. Hotel rooms always keep their hotel-GST snapshot.
+  const [docGst, setDocGst] = useState<{ enabled: boolean; pct: number }>({ enabled: true, pct: 18 });
+  useEffect(() => { api('/events/gst-settings').then((r: any) => setDocGst({ enabled: Number(r.gst_enabled ?? 1) !== 0, pct: Number(r.gst_percent ?? 18) })).catch(() => {}); }, []);
+  const gstBody = () => ({ gst_enabled: docGst.enabled, gst_percent: docGst.pct });
+  const gstQuery = () => `?gst_enabled=${docGst.enabled ? 1 : 0}&gst_percent=${docGst.pct}`;
+
   const runAct = async (path: string, body: any, okMsg?: string) => {
     const r = await api(`/events/bookings/${bookingId}/${path}`, { method: 'POST', body: JSON.stringify(body) });
     if (r?.warning) alert(r.warning); else if (okMsg) alert(okMsg);
     await load();
   };
-  const act = async (path: string, okMsg?: string) => {
+  const act = async (path: string, okMsg?: string, extraBody?: any) => {
     setBusy(true);
     try {
-      await runAct(path, {}, okMsg);
+      await runAct(path, { ...(extraBody || {}) }, okMsg);
     } catch (e: any) {
       const d = e?.data;
       // Housekeeping gate: the venue still has an open cleaning job from a prior
       // event. A manager/owner may override — re-send confirm with override_cleaning.
       if (d?.housekeeping_blocked && d?.can_override) {
         if (window.confirm(`${d.error}\n\nConfirm this booking anyway and override the venue's pending housekeeping?`)) {
-          try { await runAct(path, { override_cleaning: true }, okMsg); }
+          try { await runAct(path, { ...(extraBody || {}), override_cleaning: true }, okMsg); }
           catch (e2: any) { alert(e2.message); }
         }
       } else if (d?.housekeeping_blocked) {
@@ -1009,7 +1017,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   };
   const genQuote = async () => {
     setBusy(true);
-    try { const q = await api(`/events/bookings/${bookingId}/quotations`, { method: 'POST', body: JSON.stringify({}) }); await openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, token); await load(); }
+    try { const q = await api(`/events/bookings/${bookingId}/quotations`, { method: 'POST', body: JSON.stringify(gstBody()) }); await openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, token); await load(); }
     catch (e: any) { alert(e.message); } finally { setBusy(false); }
   };
 
@@ -1237,14 +1245,22 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       {/* Staff rostering — assign roster staff to the event per working date */}
       <StaffPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} onChanged={load} />
 
+      {/* GST override for the quotation / invoice generated next */}
+      <div className="flex flex-wrap items-center gap-3 mt-4 mb-1 px-3 py-2 rounded-lg bg-[#faf6f1] border border-[#efe6db]">
+        <span className="text-[11px] font-bold text-[#6b5d52] uppercase tracking-wide">Invoice GST</span>
+        <label className="flex items-center gap-1.5 text-xs"><input type="checkbox" checked={docGst.enabled} onChange={e => setDocGst({ ...docGst, enabled: e.target.checked })} />Charge GST</label>
+        <label className="flex items-center gap-1.5 text-xs">%<input type="number" min={0} max={28} step={0.5} disabled={!docGst.enabled} className={`${INPUT} w-20 py-1`} value={docGst.pct} onChange={e => setDocGst({ ...docGst, pct: Number(e.target.value) })} /></label>
+        <span className="text-[10px] text-[#9d8b7e]">Applies to the quotation / invoice you generate next. Hotel rooms follow Hotel GST.</span>
+      </div>
+
       {/* Lifecycle actions */}
-      <div className="flex flex-wrap gap-2 mt-4">
+      <div className="flex flex-wrap gap-2 mt-1">
         <button className={BTN_GHOST} disabled={busy} onClick={genQuote}><FileText size={13} />{t('events.bookings.generateQuote')}</button>
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/beo.pdf`, token)}><ClipboardList size={13} />{t('events.bookings.beo')}</button>
-        <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/invoice.pdf`, token)}><FileText size={13} />{t('events.bookings.invoice')}</button>
+        <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/invoice.pdf${gstQuery()}`, token)}><FileText size={13} />{t('events.bookings.invoice')}</button>
         <button className={BTN_GHOST} onClick={() => setEmailInvoice(true)}><Send size={13} />{t('events.bookings.emailInvoice')}</button>
         {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
-        {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout')}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
+        {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout', undefined, gstBody())}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_GHOST} disabled={busy} onClick={() => act('complete')}>{t('events.bookings.complete')}</button>}
         {editable && <button className={BTN_DANGER} disabled={busy} onClick={() => setShowCancel(true)}>{t('events.bookings.cancel')}</button>}
       </div>
@@ -1891,8 +1907,17 @@ function EventSettings({ restaurantId, token }: Props) {
   const [form, setForm] = useState<any>({ hero_title: '', tagline: '', description: '', contact_phone: '', contact_email: '', is_published: true });
   const [saved, setSaved] = useState(false);
   const [secLang, setSecLang] = useState<string>('');
+  const [gst, setGst] = useState<{ gst_percent: number; gst_enabled: boolean }>({ gst_percent: 18, gst_enabled: true });
+  const [gstSaved, setGstSaved] = useState(false);
   useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) { let gl: string[] = []; try { const g = JSON.parse(p.gallery || '[]'); if (Array.isArray(g)) gl = g.filter(Boolean); } catch { /* */ } setForm({ ...p, is_published: Number(p.is_published) !== 0, gallery_list: gl }); } }).catch(() => {}); }, []);
   useEffect(() => { api('/settings/language').then((r) => setSecLang(r.secondary_language || '')).catch(() => {}); }, []);
+  useEffect(() => { api('/events/gst-settings').then((r) => setGst({ gst_percent: Number(r.gst_percent ?? 18), gst_enabled: Number(r.gst_enabled ?? 1) !== 0 })).catch(() => {}); }, []);
+  const saveGst = async () => {
+    try {
+      await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ gst_percent: Number(gst.gst_percent) || 0, gst_enabled: gst.gst_enabled }) });
+      setGstSaved(true); setTimeout(() => setGstSaved(false), 1500);
+    } catch (e: any) { alert(e.message); }
+  };
   const save = async () => {
     try {
       const gallery = JSON.stringify((form.gallery_list || []).map((s: string) => String(s).trim()).filter(Boolean));
@@ -1921,6 +1946,32 @@ function EventSettings({ restaurantId, token }: Props) {
           </select>
           <span className="text-xs text-[#9d8b7e]">Staff can toggle English ↔ this language.</span>
         </div>
+      </div>
+
+      {/* Event & Convention — Invoice GST (owner-configurable default) */}
+      <div className={`${CARD} mb-4 space-y-3`}>
+        <div className="flex items-center gap-2">
+          <FileText size={16} className="text-[#cc5a16]" />
+          <div>
+            <div className="text-sm font-bold text-[#3d2e22]">Invoice GST — Event &amp; Convention</div>
+            <div className="text-[11px] text-[#9d8b7e]">Default GST applied to event quotations &amp; invoices (venue, rentals, services, catering). Hotel rooms always follow the Hotel GST slab settings.</div>
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={gst.gst_enabled} onChange={e => setGst({ ...gst, gst_enabled: e.target.checked })} />
+          Charge GST on event invoices
+        </label>
+        <div className="flex items-end gap-3">
+          <div>
+            <label className={LABEL}>Default GST %</label>
+            <input type="number" min={0} max={28} step={0.5} className={`${INPUT} max-w-[120px]`} value={gst.gst_percent}
+              disabled={!gst.gst_enabled}
+              onChange={e => setGst({ ...gst, gst_percent: Number(e.target.value) })} />
+          </div>
+          <button className={BTN_PRIMARY} onClick={saveGst}>{t('common.save')}</button>
+          {gstSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
+        </div>
+        <p className="text-[11px] text-[#9d8b7e]">You can still override this per document when generating a quotation or invoice.</p>
       </div>
 
       <div className={`${CARD} space-y-3`}>
