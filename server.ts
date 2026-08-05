@@ -23278,7 +23278,14 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const row: any = await db.get("SELECT gst_percent, gst_enabled FROM event_profile WHERE id = 1").catch(() => null);
-      res.json({ gst_percent: Number(row?.gst_percent ?? 18), gst_enabled: Number(row?.gst_enabled ?? 1) });
+      // GSTIN + regional language live on the central tenant record (shared across
+      // modules); surface them here so events owners can manage them in one place.
+      res.json({
+        gst_percent: Number(row?.gst_percent ?? 18),
+        gst_enabled: Number(row?.gst_enabled ?? 1),
+        gst_number: (check.restaurant as any)?.gst_number || '',
+        secondary_language: (check.restaurant as any)?.secondary_language || '',
+      });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch GST settings" }); }
   });
 
@@ -23294,8 +23301,17 @@ ${data.tenant.name}`;
       // Seed the singleton row if a tenant somehow has none yet.
       const exists = await db.get("SELECT id FROM event_profile WHERE id = 1").catch(() => null);
       if (!exists) await db.run("INSERT INTO event_profile (id, gst_percent, gst_enabled) VALUES (1, ?, ?)", [pct, enabled]).catch(() => {});
+      // GSTIN (needed to make the invoice GST-compliant) and the regional language
+      // for bilingual invoices live on the central tenant record.
+      if (b.gst_number !== undefined) {
+        await centralDb.run("UPDATE restaurants SET gst_number = ? WHERE id = ?", [String(b.gst_number || '').trim() || null, req.params.id]).catch(() => {});
+      }
+      if (b.secondary_language !== undefined) {
+        const lang = b.secondary_language ? String(b.secondary_language).slice(0, 8) : null;
+        await centralDb.run("UPDATE restaurants SET secondary_language = ? WHERE id = ?", [lang, req.params.id]).catch(() => {});
+      }
       await writeObjectAudit(db, req, { objectType: 'EVENT_SETTINGS', objectId: 'GST', action: 'UPDATED', summary: `Event GST set to ${enabled ? pct + '%' : 'disabled'}` });
-      res.json({ success: true, gst_percent: pct, gst_enabled: enabled });
+      res.json({ success: true, gst_percent: pct, gst_enabled: enabled, gst_number: b.gst_number, secondary_language: b.secondary_language });
     } catch (err: any) { console.error("/events gst-settings error:", err); res.status(500).json({ error: "Failed to save GST settings" }); }
   });
 
@@ -46510,7 +46526,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'settings-capability-sections-multiday-calc',
+    commit_marker: 'events-invoice-gstin-in-settings',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

@@ -2025,14 +2025,14 @@ function EventSettings({ restaurantId, token }: Props) {
   const [form, setForm] = useState<any>({ hero_title: '', tagline: '', description: '', contact_phone: '', contact_email: '', is_published: true });
   const [saved, setSaved] = useState(false);
   const [secLang, setSecLang] = useState<string>('');
-  const [gst, setGst] = useState<{ gst_percent: number; gst_enabled: boolean }>({ gst_percent: 18, gst_enabled: true });
+  const [gst, setGst] = useState<{ gst_percent: number; gst_enabled: boolean; gst_number: string }>({ gst_percent: 18, gst_enabled: true, gst_number: '' });
   const [gstSaved, setGstSaved] = useState(false);
   useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) { let gl: string[] = []; try { const g = JSON.parse(p.gallery || '[]'); if (Array.isArray(g)) gl = g.filter(Boolean); } catch { /* */ } setForm({ ...p, is_published: Number(p.is_published) !== 0, gallery_list: gl }); } }).catch(() => {}); }, []);
   useEffect(() => { api('/settings/language').then((r) => setSecLang(r.secondary_language || '')).catch(() => {}); }, []);
-  useEffect(() => { api('/events/gst-settings').then((r) => setGst({ gst_percent: Number(r.gst_percent ?? 18), gst_enabled: Number(r.gst_enabled ?? 1) !== 0 })).catch(() => {}); }, []);
+  useEffect(() => { api('/events/gst-settings').then((r) => setGst({ gst_percent: Number(r.gst_percent ?? 18), gst_enabled: Number(r.gst_enabled ?? 1) !== 0, gst_number: r.gst_number || '' })).catch(() => {}); }, []);
   const saveGst = async () => {
     try {
-      await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ gst_percent: Number(gst.gst_percent) || 0, gst_enabled: gst.gst_enabled }) });
+      await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ gst_percent: Number(gst.gst_percent) || 0, gst_enabled: gst.gst_enabled, gst_number: gst.gst_number.trim() }) });
       setGstSaved(true); setTimeout(() => setGstSaved(false), 1500);
     } catch (e: any) { alert(e.message); }
   };
@@ -2083,6 +2083,12 @@ function EventSettings({ restaurantId, token }: Props) {
             <div className="text-sm font-bold text-[#3d2e22]">Invoice GST — Event &amp; Convention</div>
             <div className="text-[11px] text-[#9d8b7e]">Default GST applied to event quotations &amp; invoices (venue, rentals, services, catering). Hotel rooms always follow the Hotel GST slab settings.</div>
           </div>
+        </div>
+        <div>
+          <label className={LABEL}>GSTIN (business GST number)</label>
+          <input className={`${INPUT} max-w-md font-mono`} value={gst.gst_number} placeholder="e.g. 27ABCDE1234F1Z5"
+            onChange={e => setGst({ ...gst, gst_number: e.target.value.toUpperCase() })} />
+          <p className="text-[11px] text-[#9d8b7e] mt-1">{gst.gst_number ? 'Prints on every event quotation & tax invoice.' : 'Required for a GST-compliant tax invoice — without it the invoice shows no GSTIN.'}</p>
         </div>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={gst.gst_enabled} onChange={e => setGst({ ...gst, gst_enabled: e.target.checked })} />
