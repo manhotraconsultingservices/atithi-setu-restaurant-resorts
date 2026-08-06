@@ -24048,6 +24048,8 @@ ${data.tenant.name}`;
       const b = req.body || {};
       if (!b.customer_name) return res.status(400).json({ error: "customer_name is required" });
       if (!b.event_date) return res.status(400).json({ error: "event_date is required" });
+      if (b.guest_count !== undefined && b.guest_count !== null && b.guest_count !== '' && Number(b.guest_count) < 0) return res.status(400).json({ error: "Guest count cannot be negative." });
+      if (b.discount !== undefined && b.discount !== null && b.discount !== '' && Number(b.discount) < 0) return res.status(400).json({ error: "Discount cannot be negative." });
       const sched = await resolveVenueBooking(db, b);
       const { rateBasis, startTime, endTime, slot, bufferMin, venueRate } = sched;
 
@@ -24135,6 +24137,8 @@ ${data.tenant.name}`;
       // Recompute schedule + venue charge and run the turnaround-aware conflict
       // check whenever a schedule field changed (the PUT previously bypassed both,
       // so edits could double-book a hall or leave a stale rate).
+      if (b.guest_count !== undefined && b.guest_count !== null && b.guest_count !== '' && Number(b.guest_count) < 0) return res.status(400).json({ error: "Guest count cannot be negative." });
+      if (b.discount !== undefined && b.discount !== null && b.discount !== '' && Number(b.discount) < 0) return res.status(400).json({ error: "Discount cannot be negative." });
       const schedKeys = ['venue_id','event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot'];
       const scheduleChanged = schedKeys.some(k => b[k] !== undefined && String(b[k] ?? '') !== String(existing[k] ?? ''));
       if (scheduleChanged) {
@@ -24221,6 +24225,18 @@ ${data.tenant.name}`;
       // F-E03: idempotent — a booking already cancelled must NOT re-run the unwind
       // (that would double-reverse the GL and re-cancel hotel rooms).
       if (existing.status === 'CANCELLED') return res.json({ success: true, already_cancelled: true });
+      // Payment-integrity guard: a booking with money collected can't be cancelled
+      // silently — the caller must acknowledge the collected advance (refund/reversal
+      // is handled separately) by passing acknowledge_refund/force. Surfaces the
+      // amount so the UI can warn before proceeding.
+      const collected = round2(Number(existing.advance_amount || 0));
+      const ackRefund = req.body?.acknowledge_refund === true || req.body?.force === true;
+      if (collected > 0 && !ackRefund) {
+        return res.status(409).json({
+          error: `This booking has ₹${collected.toFixed(2)} collected. Cancelling does not auto-refund — confirm you will handle the refund/reversal separately to proceed.`,
+          requires_refund_ack: true, collected,
+        });
+      }
       await db.run(
         "UPDATE event_bookings SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancellation_reason = ?, cancel_reason_note = ? WHERE id = ?",
         [req.user?.email || null, req.body?.reason || null, req.body?.note || null, req.params.bid]
@@ -24388,6 +24404,22 @@ ${data.tenant.name}`;
       const b = req.body || {};
       const amount = round2(Number(b.amount || 0));
       if (!(amount > 0)) return res.status(400).json({ error: "Amount must be greater than 0" });
+      // Cannot record a payment against a cancelled booking.
+      if (bk.status === 'CANCELLED') return res.status(409).json({ error: "Cannot record a payment on a cancelled booking." });
+      // Overpayment guard — a receipt may not push total paid past the Grand Total
+      // (blocks the duplicate-payment / negative-balance bugs). advance_amount is
+      // kept in sync = SUM(event_payments.amount); outstanding = grand − paid.
+      const grandDue = round2(Number(bk.total_amount || 0));
+      const alreadyPaid = round2(Number(bk.advance_amount || 0));
+      const outstanding = round2(Math.max(0, grandDue - alreadyPaid));
+      if (grandDue > 0 && amount > outstanding + 0.01) {
+        return res.status(409).json({
+          error: outstanding <= 0.01
+            ? `This booking is already fully paid (₹${grandDue.toFixed(2)}). No further payment is due.`
+            : `Payment ₹${amount.toFixed(2)} exceeds the outstanding balance of ₹${outstanding.toFixed(2)}. Record at most the balance due.`,
+          outstanding, grand_total: grandDue, paid: alreadyPaid,
+        });
+      }
       const pid = mkEventId('EPY');
       await db.run(
         `INSERT INTO event_payments (id, booking_id, schedule_id, amount, method, reference, paid_at, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -24461,6 +24493,16 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const pay: any = await db.get("SELECT * FROM event_payments WHERE id = ?", [req.params.pid]);
       if (!pay) return res.status(404).json({ error: "Payment not found" });
+      // Financial-integrity lock: once the booking is confirmed or invoiced, a
+      // recorded receipt cannot be silently deleted (it has hit the GL as an
+      // advance and, post-checkout, recognized revenue). Requires an explicit
+      // override (?force=1) reserved for an authorized reversal workflow.
+      const payBk: any = await db.get("SELECT status, folio_id FROM event_bookings WHERE id = ?", [pay.booking_id]).catch(() => null);
+      const locked = payBk && (['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].includes(payBk.status) || payBk.folio_id);
+      const force = String(req.query.force || '') === '1';
+      if (locked && !force) {
+        return res.status(409).json({ error: "This booking is confirmed — recorded payments can't be deleted directly. Cancel the booking or raise a refund/reversal to reverse a receipt.", locked: true });
+      }
       await db.run("DELETE FROM event_payments WHERE id = ?", [req.params.pid]);
       // Events ↔ Accounts: pull the mirrored receipt back out of the cash ledger.
       await db.run("DELETE FROM petty_cash WHERE reference_id = ?", [`EVENT-PAY-${req.params.pid}`]).catch(() => {});
@@ -46771,8 +46813,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-kpi-margin-targets-alerts-cash',
+    commit_marker: 'events-scenario-bugfixes+hide-property-type',
     code_features: [
+      'events-scenario-bugfixes',                   // payment overpayment/duplicate guard, cancel-paid requires refund-ack, delete-payment confirm-lock, negative guest/discount rejected, discount-balance refresh, invoice PDF tab title, no payment on cancelled booking
+      'hide-property-type-settings',                // Brand & Settings Property Type module-picker card hidden (owner-read-only, managed by SuperAdmin) — settings shown directly
       'events-kpi-margin-targets-alerts-cash',      // true margin (venue cost_per_day); monthly revenue/occupancy targets + attainment; dashboard alerts (overdue + low-deposit upcoming); cash-collected-by-month from payment ledger
       'events-kpi-pack',                            // /events/analytics adds AR aging, deposit%, forward book, value-at-risk, RevPAR/space yield, quote acceptance + speed-to-quote, booking pace, lead time, repeat-customer%, cancellation rate; dashboard tiles/cards + CSV
       'home-events-tile',                           // Home launchpad shows an Events & Convention module tile when events_enabled (was Hotel/Restaurant/Spa only)

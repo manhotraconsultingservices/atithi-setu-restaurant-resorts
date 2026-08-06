@@ -794,7 +794,10 @@ function PaymentPanel({ restaurantId, token, booking, editable, onChanged }: Pro
     try { setSched(await api(`/events/bookings/${bid}/schedule`)); } catch { setSched([]); }
     try { setPay(await api(`/events/bookings/${bid}/payments`)); } catch { /* */ }
   };
-  useEffect(() => { load(); }, [bid]);
+  // Re-fetch when the booking's grand total or discount changes (not just the id)
+  // so the Paid/Balance figures refresh immediately after a discount edit — the
+  // server balance is total_amount − paid, and total_amount moves with discount.
+  useEffect(() => { load(); }, [bid, booking.total_amount, booking.discount]);
 
   const genSchedule = async () => { try { await api(`/events/bookings/${bid}/schedule/generate`, { method: 'POST', body: JSON.stringify({}) }); await load(); } catch (e: any) { alert(e.message); } };
   const delSched = async (sid: string) => { try { await api(`/events/schedule/${sid}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
@@ -945,11 +948,21 @@ function CancelEventDialog({ restaurantId, token, bookingId, onClose, onCancelle
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const REASONS = ['Price too high', 'Date unavailable', 'Went with competitor', 'Event postponed', 'Customer unresponsive', 'Other'];
-  const submit = async () => {
+  const submit = async (acknowledgeRefund = false) => {
     if (!reason) { alert(t('events.cancel.pickReason')); return; }
     setBusy(true);
-    try { await api(`/events/bookings/${bookingId}/cancel`, { method: 'POST', body: JSON.stringify({ reason, note }) }); onCancelled(); onClose(); }
-    catch (e: any) { alert(e.message); setBusy(false); }
+    try {
+      await api(`/events/bookings/${bookingId}/cancel`, { method: 'POST', body: JSON.stringify({ reason, note, acknowledge_refund: acknowledgeRefund }) });
+      onCancelled(); onClose();
+    } catch (e: any) {
+      // Booking has money collected — confirm the manual refund/reversal, then retry.
+      if (e?.data?.requires_refund_ack && !acknowledgeRefund) {
+        setBusy(false);
+        if (window.confirm(`${e.data.error}\n\nProceed with cancellation?`)) { await submit(true); }
+        return;
+      }
+      alert(e.message); setBusy(false);
+    }
   };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
@@ -963,7 +976,7 @@ function CancelEventDialog({ restaurantId, token, bookingId, onClose, onCancelle
         <textarea className={INPUT} rows={2} value={note} onChange={e => setNote(e.target.value)} />
         <div className="flex justify-end gap-2 mt-4">
           <button className={BTN_GHOST} onClick={onClose} disabled={busy}>{t('events.cancel.keep')}</button>
-          <button className={BTN_DANGER} onClick={submit} disabled={busy || !reason}>{t('events.bookings.cancel')}</button>
+          <button className={BTN_DANGER} onClick={() => submit()} disabled={busy || !reason}>{t('events.bookings.cancel')}</button>
         </div>
       </div>
     </div>

@@ -26473,7 +26473,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               and a Contact Sales CTA, but cannot self-activate. The
               backend `/hotel/enable` endpoint enforces the same gate — even
               if a user re-enables the button via DevTools, the API
-              returns 403.                                                  */}
+              returns 403.
+              HIDDEN per owner request — module activation is managed by
+              AtithiSetu / SuperAdmin, so this read-only picker was just noise in
+              owner settings. Gated off (kept for reference / re-enable).        */}
+          {false && (
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm relative overflow-hidden">
             <div className="absolute top-0 left-0 right-0 h-[3px] bg-[#b8860b]"></div>
             <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
@@ -26547,6 +26551,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             )}
           </div>
+          )}
 
           {/* Capability section sub-nav — only shows tabs for modules this
               tenant actually has. Shared "Business & Billing" is always first. */}

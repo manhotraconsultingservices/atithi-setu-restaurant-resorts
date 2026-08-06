@@ -111,13 +111,17 @@ const INV_LABELS: Record<string, Record<string, string>> = {
 export async function generateEventQuotationPdf(data: EventQuotationData): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
+      // Title-case the document type from docLabel so the browser-tab title (which
+      // reads the PDF Title metadata) matches the document — "Tax Invoice INV-…"
+      // for an invoice, not "Quotation INV-…".
+      const docTitleType = (data.docLabel || 'QUOTATION').replace(/\b\w+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
       const doc = new PDFDocument({
         size: 'A4',
         margin: 0,
         info: {
-          Title: `Quotation ${data.quotation.quote_number}`,
+          Title: `${docTitleType} ${data.quotation.quote_number}`,
           Author: data.tenant.name,
-          Subject: `Event quotation for ${data.booking.customer_name}`,
+          Subject: `Event ${docTitleType.toLowerCase()} for ${data.booking.customer_name}`,
         },
       });
       const chunks: Buffer[] = [];
