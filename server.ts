@@ -23555,10 +23555,12 @@ ${data.tenant.name}`;
     return `${w}${n === 1 ? '' : 's'}`;
   };
 
-  const computeEventBill = async (db: any, bookingId: string): Promise<{ subtotal: number; tax: number; discount: number; grand: number }> => {
+  const computeEventBill = async (db: any, bookingId: string, gstOverride?: number): Promise<{ subtotal: number; tax: number; discount: number; grand: number }> => {
     const bk: any = await db.get("SELECT venue_id, venue_rate, discount, venue_rate_basis, event_date, end_date, start_time, end_time FROM event_bookings WHERE id = ?", [bookingId]);
     if (!bk) return { subtotal: 0, tax: 0, discount: 0, grand: 0 };
-    const evGst = await resolveEventGstRate(db);
+    // A per-document GST override (from the ledger's Invoice-GST toggle) wins;
+    // otherwise the tenant default. Hotel rooms always keep their own snapshot.
+    const evGst = await resolveEventGstRate(db, gstOverride);
     const units = eventUnits(bk);
     // Each entry is a pre-discount taxable amount + its own GST rate.
     const taxable: { amt: number; rate: number }[] = [];
@@ -24035,8 +24037,10 @@ ${data.tenant.name}`;
       const catering = await db.query("SELECT * FROM event_booking_catering WHERE booking_id = ? ORDER BY created_at", [req.params.bid]).catch(() => []);
       const quotations = await db.query("SELECT * FROM event_quotations WHERE booking_id = ? ORDER BY version DESC", [req.params.bid]);
       // Bill breakdown (subtotal / GST / discount / grand) so the UI can show a
-      // proper tax-aware ledger instead of deriving it from total_amount.
-      const bill = await computeEventBill(db, req.params.bid);
+      // proper tax-aware ledger instead of deriving it from total_amount. Honors a
+      // per-request GST override (?gst_enabled=0 / ?gst_percent=) so the ledger
+      // live-previews the Invoice-GST toggle before a quotation/invoice is raised.
+      const bill = await computeEventBill(db, req.params.bid, parseEventGstOverride(req.query));
       res.json({ ...bk, items, services, rooms, catering, quotations, bill });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch booking" }); }
   });
@@ -46857,8 +46861,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-module-gating+events-notifications',
+    commit_marker: 'events-ledger-gst-toggle-live',
     code_features: [
+      'events-ledger-gst-toggle-live',              // booking-detail bill ledger live-previews the Invoice-GST toggle: computeEventBill accepts a gst override, GET booking honors ?gst_enabled/?gst_percent, ledger re-fetches when the toggle changes (GST + grand total update to 0 when GST is turned off)
       'notif-module-gating',                        // notification config UI hides notification groups for modules the tenant hasn't enabled (Orders/Bookings/Delivery/Inventory→Restaurant, Hotel→Hotel, Events group→Events); common groups always shown
       'events-notifications',                       // Events & Convention notifications: EVENT_BOOKING_CREATED / QUOTATION_SENT / CONFIRMED / PAYMENT_RECEIVED / CANCELLED triggers + EVENT_UPCOMING_REMINDER cron (10:15 IST, T-2d) + templates
       'events-audit-diff',                          // audit log renders before/after as a readable Field·Before·After table (was raw single-line JSON), with pretty-JSON fallback

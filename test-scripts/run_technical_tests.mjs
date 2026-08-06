@@ -991,8 +991,15 @@ async function testEvents() {
           const grandOk = Math.abs(Number(bill.grand || 0) - wantGrand) < 0.05;
           (subOk && taxOk && notGross && grandOk ? pass : fail)('TC-EVT-BILL-GST-AFTER-DISCOUNT',
             'Event GST charged on discounted (net) base', `sub=${sub}, disc=${bill.discount}, tax=${bill.tax} (want ${wantTax}, gross ${grossTax}), grand=${bill.grand}`);
+          // The Invoice-GST toggle must live-preview in the ledger: fetching the
+          // booking bill with ?gst_enabled=0 zeroes the GST + drops it from grand.
+          const off = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/${mdBk.data.id}?gst_enabled=0`);
+          const offBill = off.data?.bill;
+          const offOk = offBill && Math.abs(Number(offBill.tax || 0)) < 0.02 && Math.abs(Number(offBill.grand || 0) - (Number(offBill.subtotal || 0) - Number(offBill.discount || 0))) < 0.05;
+          (offOk ? pass : fail)('TC-EVT-BILL-GST-OVERRIDE-OFF', 'Bill GST override off → tax 0 + grand ex-GST', `tax=${offBill?.tax}, grand=${offBill?.grand}, sub=${offBill?.subtotal}, disc=${offBill?.discount}`);
         } else {
           skip('TC-EVT-BILL-GST-AFTER-DISCOUNT', 'GST-after-discount', 'booking bill breakdown missing');
+          skip('TC-EVT-BILL-GST-OVERRIDE-OFF', 'GST override off', 'booking bill breakdown missing');
         }
       }
 

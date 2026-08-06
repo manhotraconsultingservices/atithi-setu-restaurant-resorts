@@ -1005,7 +1005,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     api('/events/venues').then((r: any) => setVenueOpts(Array.isArray(r) ? r : [])).catch(() => {});
   }, [venues]);
 
-  const load = async () => { try { setBk(await api(`/events/bookings/${bookingId}`)); setNonce(n => n + 1); } catch (e: any) { alert(e.message); } };
+  const load = async () => { try { setBk(await api(`/events/bookings/${bookingId}${gstReady ? gstQuery() : ''}`)); setNonce(n => n + 1); } catch (e: any) { alert(e.message); } };
   useEffect(() => { load(); api('/events/rental-items').then(setRentals).catch(() => {}); api('/events/services').then(setServices).catch(() => {}); api('/events/catering-packages').then(setCaterPkgs).catch(() => {}); }, [bookingId]);
 
   // Catering line helpers (parallel to rentals/services). pax defaults to the
@@ -1117,7 +1117,14 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   // tenant's Event GST setting; the user can disable GST or change the % for just
   // this document. Hotel rooms always keep their hotel-GST snapshot.
   const [docGst, setDocGst] = useState<{ enabled: boolean; pct: number }>({ enabled: true, pct: 18 });
-  useEffect(() => { api('/events/gst-settings').then((r: any) => setDocGst({ enabled: Number(r.gst_enabled ?? 1) !== 0, pct: Number(r.gst_percent ?? 18) })).catch(() => {}); }, []);
+  // gstReady flips once the tenant default has loaded — until then the bill fetch
+  // sends NO override so the ledger shows the true default, not the {enabled,18}
+  // placeholder above.
+  const [gstReady, setGstReady] = useState(false);
+  useEffect(() => { api('/events/gst-settings').then((r: any) => { setDocGst({ enabled: Number(r.gst_enabled ?? 1) !== 0, pct: Number(r.gst_percent ?? 18) }); setGstReady(true); }).catch(() => setGstReady(true)); }, []);
+  // Re-fetch the bill whenever the Invoice-GST toggle changes so the ledger
+  // (GST line + grand total) live-previews exactly what will be invoiced.
+  useEffect(() => { if (gstReady) load(); }, [gstReady, docGst.enabled, docGst.pct]); // eslint-disable-line react-hooks/exhaustive-deps
   const gstBody = () => ({ gst_enabled: docGst.enabled, gst_percent: docGst.pct });
   const gstQuery = () => `?gst_enabled=${docGst.enabled ? 1 : 0}&gst_percent=${docGst.pct}`;
 
