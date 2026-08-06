@@ -1198,6 +1198,35 @@ async function testEvents() {
       fail('TC-EVT-016', 'Booking bill breakdown returned', `HTTP ${g.status}, bill=${JSON.stringify(bill)}`);
     }
   }
+
+  // TC-EVT-MIGRATION: CSV data-migration utility. Validate flags a fresh row OK,
+  // commit creates exactly one, a re-validate of the same name flags DUPLICATE, and
+  // a re-commit skips it (0 created / 1 skipped) — the hard "no double-migration"
+  // constraint. Owner/admin only. Self-cleaning (the migrated item is deleted).
+  {
+    const migName = `UAT MIG Item ${Date.now()}`;
+    const rows = [{ name: migName, category: 'FURNITURE', unit: 'piece', rent_daily: '500' }];
+    const v1 = await api('POST', `/api/restaurant/${restaurantId}/events/migration/validate`, { entity: 'RENTAL_ITEM', rows });
+    if (v1.status === 403) {
+      skip('TC-EVT-MIGRATION', 'CSV migration validate/commit/dedup', 'user is not owner/admin');
+    } else if (v1.status === 200 && Array.isArray(v1.data?.rows)) {
+      const freshOk = v1.data.rows[0]?.status === 'OK';
+      const c1 = await api('POST', `/api/restaurant/${restaurantId}/events/migration/commit`, { entity: 'RENTAL_ITEM', rows });
+      const created = c1.status === 200 && c1.data?.created === 1;
+      const v2 = await api('POST', `/api/restaurant/${restaurantId}/events/migration/validate`, { entity: 'RENTAL_ITEM', rows });
+      const dupFlagged = v2.status === 200 && v2.data?.rows?.[0]?.status === 'DUPLICATE';
+      const c2 = await api('POST', `/api/restaurant/${restaurantId}/events/migration/commit`, { entity: 'RENTAL_ITEM', rows });
+      const dupSkipped = c2.status === 200 && c2.data?.created === 0 && c2.data?.skipped === 1;
+      (freshOk && created && dupFlagged && dupSkipped ? pass : fail)('TC-EVT-MIGRATION',
+        'Migration validates, commits once, and blocks duplicate re-migration',
+        `freshOk=${freshOk}, created=${created}, dupFlagged=${dupFlagged}, dupSkipped=${dupSkipped}`);
+      const list = await api('GET', `/api/restaurant/${restaurantId}/events/rental-items`);
+      const made = (Array.isArray(list.data) ? list.data : []).find(r => r.name === migName);
+      if (made?.id) await api('DELETE', `/api/restaurant/${restaurantId}/events/rental-items/${made.id}`); // clean up
+    } else {
+      fail('TC-EVT-MIGRATION', 'Migration validate', `HTTP ${v1.status}`);
+    }
+  }
 }
 
 // ── Housekeeping (cleaning checklist workflow) tests ────────────────────────

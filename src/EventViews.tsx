@@ -1856,6 +1856,27 @@ function downloadCsv(filename: string, rows: (string | number)[][]) {
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
 }
 
+// Minimal RFC-4180-ish CSV parser (handles quotes, escaped quotes, embedded
+// commas + newlines). Returns an array of string-cell rows; blank rows dropped.
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = []; let row: string[] = []; let field = ''; let inQ = false;
+  const src = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const pushField = () => { row.push(field); field = ''; };
+  const pushRow = () => { rows.push(row); row = []; };
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (inQ) {
+      if (ch === '"') { if (src[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += ch;
+    } else if (ch === '"') { inQ = true; }
+    else if (ch === ',') pushField();
+    else if (ch === '\n') { pushField(); pushRow(); }
+    else field += ch;
+  }
+  if (field.length || row.length) { pushField(); pushRow(); }
+  return rows.filter(r => r.some(c => String(c).trim() !== ''));
+}
+
 // Shared analytics fetch over a selectable period window.
 function useEventAnalytics(restaurantId: string, token: string) {
   const api = makeApi(restaurantId, token);
@@ -2462,6 +2483,143 @@ function LanguageToggle() {
 // ════════════════════════════════════════════════════════════════════════
 // Dispatcher
 // ════════════════════════════════════════════════════════════════════════
+// ── Data Migration utility — owner-only bulk CSV import with server validation,
+// duplicate detection, and an editable fix-it grid. Download a template, upload a
+// filled CSV, fix any flagged cells inline, then migrate only the OK rows. ──────
+function EventMigration({ restaurantId, token }: Props) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const [specs, setSpecs] = useState<any[]>([]);
+  const [entity, setEntity] = useState<string>('RENTAL_ITEM');
+  const [rows, setRows] = useState<Record<string, string>[]>([]);
+  const [val, setVal] = useState<any[] | null>(null);
+  const [summary, setSummary] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { api('/events/migration/spec').then((r: any) => setSpecs(r.entities || [])).catch(() => {}); }, []);
+  const spec = specs.find(s => s.id === entity);
+  const cols: any[] = spec?.columns || [];
+
+  const clearAll = () => { setRows([]); setVal(null); setSummary(null); setDirty(false); if (fileRef.current) fileRef.current.value = ''; };
+  const pickEntity = (e: string) => { setEntity(e); clearAll(); };
+  const template = () => { if (cols.length) downloadCsv(`migration-${entity.toLowerCase()}-template.csv`, [cols.map((c: any) => c.key)]); };
+
+  const validate = async (data: Record<string, string>[]) => {
+    if (!data.length) { setVal(null); return; }
+    setBusy(true);
+    try { const r = await api('/events/migration/validate', { method: 'POST', body: JSON.stringify({ entity, rows: data }) }); setVal(r.rows || []); setDirty(false); }
+    catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+  const onFile = async (f?: File) => {
+    if (!f) return; setSummary(null);
+    try {
+      const grid = parseCsv(await f.text());
+      if (grid.length < 2) { alert(t('events.mig.needRows')); return; }
+      const headers = grid[0].map(h => String(h).trim());
+      const objs = grid.slice(1).map(r => { const o: Record<string, string> = {}; headers.forEach((h, i) => { o[h] = r[i] !== undefined ? String(r[i]) : ''; }); return o; });
+      setRows(objs); await validate(objs);
+    } catch (e: any) { alert(e.message); }
+  };
+  const setCell = (i: number, key: string, v: string) => { setRows(rs => rs.map((r, idx) => idx === i ? { ...r, [key]: v } : r)); setDirty(true); };
+  const addRow = () => { setRows(rs => [...rs, Object.fromEntries(cols.map((c: any) => [c.key, '']))]); setDirty(true); };
+  const delRow = (i: number) => { setRows(rs => rs.filter((_, idx) => idx !== i)); setVal(v => (v ? v.filter((_, idx) => idx !== i) : v)); };
+  const migrate = async () => {
+    if (!rows.length || !window.confirm(t('events.mig.confirm', { n: rows.length }))) return;
+    setBusy(true);
+    try { const r = await api('/events/migration/commit', { method: 'POST', body: JSON.stringify({ entity, rows }) }); setSummary(r); await validate(rows); }
+    catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+
+  const meta: Record<string, { label: string; color: string; bg: string }> = {
+    OK: { label: t('events.mig.ready'), color: '#059669', bg: '#e9f7ef' },
+    DUPLICATE: { label: t('events.mig.duplicate'), color: '#b45309', bg: '#fef3e2' },
+    ERROR: { label: t('events.mig.error'), color: '#dc2626', bg: '#fdecec' },
+  };
+  const counts = val ? { ok: val.filter(v => v.status === 'OK').length, dup: val.filter(v => v.status === 'DUPLICATE').length, err: val.filter(v => v.status === 'ERROR').length } : null;
+
+  return (
+    <div>
+      <SectionHeader icon={<Upload size={18} />} title={t('events.mig.title')} sub={t('events.mig.sub')} />
+      <div className={`${CARD} mb-4`}>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className={LABEL}>{t('events.mig.entity')}</label>
+            <select className={`${INPUT} w-auto`} value={entity} onChange={e => pickEntity(e.target.value)}>
+              {(specs.length ? specs : [{ id: entity, label: entity }]).map((s: any) => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+          </div>
+          <button className={BTN_GHOST} onClick={template}><FileText size={13} />{t('events.mig.downloadTemplate')}</button>
+          <button className={BTN_GHOST} onClick={() => fileRef.current?.click()}><Upload size={13} />{t('events.mig.upload')}</button>
+          <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={e => onFile(e.target.files?.[0])} />
+          {rows.length > 0 && <button className={BTN_GHOST} onClick={clearAll}><X size={13} />{t('events.mig.clear')}</button>}
+        </div>
+        <p className="text-[11px] text-[#9d8b7e] mt-2">{t('events.mig.help')}</p>
+      </div>
+
+      {summary && (
+        <div className="mb-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+          <strong>{t('events.mig.done')}</strong> — {t('events.mig.created', { n: summary.created })} · {t('events.mig.skippedDup', { n: summary.skipped })} · {t('events.mig.failed', { n: summary.failed })}
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div className={`${CARD} mb-4`}>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2 text-xs flex-wrap">
+              {counts && <>
+                <span className="px-2 py-0.5 rounded-full font-bold" style={{ background: '#e9f7ef', color: '#059669' }}>{counts.ok} {t('events.mig.ready')}</span>
+                <span className="px-2 py-0.5 rounded-full font-bold" style={{ background: '#fef3e2', color: '#b45309' }}>{counts.dup} {t('events.mig.duplicate')}</span>
+                <span className="px-2 py-0.5 rounded-full font-bold" style={{ background: '#fdecec', color: '#dc2626' }}>{counts.err} {t('events.mig.error')}</span>
+              </>}
+              {dirty && <span className="text-[#b45309] font-semibold">{t('events.mig.dirty')}</span>}
+            </div>
+            <div className="flex items-center gap-2">
+              <button className={BTN_GHOST} onClick={addRow}><Plus size={13} />{t('events.mig.addRow')}</button>
+              <button className={BTN_GHOST} disabled={busy} onClick={() => validate(rows)}><RefreshCw size={13} className={busy ? 'animate-spin' : ''} />{t('events.mig.validate')}</button>
+              <button className={BTN_PRIMARY} disabled={busy || dirty || !counts || counts.ok === 0} onClick={migrate}><Check size={13} />{t('events.mig.migrate', { n: counts?.ok || 0 })}</button>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="text-xs border-collapse">
+              <thead>
+                <tr className="text-left text-[#9d8b7e] border-b border-[#e8dccf]">
+                  <th className="py-1.5 pr-2">{t('events.mig.status')}</th>
+                  {cols.map((c: any) => <th key={c.key} className="py-1.5 px-2 whitespace-nowrap font-semibold">{c.label}{c.required ? ' *' : ''}</th>)}
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => {
+                  const rv = val && !dirty ? val[i] : null;
+                  const m = rv?.status ? meta[rv.status] : null;
+                  return (
+                    <tr key={i} className="border-b border-[#f0e9df] align-top">
+                      <td className="py-1 pr-2">{m ? <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap" style={{ background: m.bg, color: m.color }}>{m.label}</span> : <span className="text-[#c9bcae]">—</span>}</td>
+                      {cols.map((c: any) => {
+                        const err = rv?.errors?.[c.key]; const warn = rv?.warnings?.[c.key];
+                        return (
+                          <td key={c.key} className="py-1 px-1">
+                            <input value={r[c.key] ?? ''} onChange={e => setCell(i, c.key, e.target.value)} title={err || warn || c.hint || ''}
+                              className={`w-full min-w-[7rem] px-1.5 py-1 rounded border text-xs ${err ? 'border-rose-400 bg-rose-50' : warn ? 'border-amber-300 bg-amber-50' : 'border-[#e8dccf]'}`} />
+                          </td>
+                        );
+                      })}
+                      <td className="py-1 pl-1"><button onClick={() => delRow(i)} title={t('events.mig.removeRow')}><Trash2 size={13} className="text-rose-400" /></button></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {val && !dirty && ((counts?.err || 0) + (counts?.dup || 0)) > 0 && <p className="text-[11px] text-[#9d8b7e] mt-2">{t('events.mig.note')}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EventsModuleInner({ restaurantId, token, tab }: Props & { tab: string }) {
   switch (tab) {
     case 'EVENTS_DASHBOARD': return <EventDashboard restaurantId={restaurantId} token={token} />;
@@ -2474,6 +2632,7 @@ function EventsModuleInner({ restaurantId, token, tab }: Props & { tab: string }
     case 'EVENTS_QUOTATIONS': return <EventQuotations restaurantId={restaurantId} token={token} />;
     case 'EVENTS_REPORTS': return <EventReports restaurantId={restaurantId} token={token} />;
     case 'EVENTS_SETTINGS': return <EventSettings restaurantId={restaurantId} token={token} />;
+    case 'EVENTS_MIGRATION': return <EventMigration restaurantId={restaurantId} token={token} />;
     default: return null;
   }
 }

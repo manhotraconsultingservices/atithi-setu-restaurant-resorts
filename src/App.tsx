@@ -8804,6 +8804,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'EVENTS_HOUSEKEEPING'                      // event-scoped cleaning checklist under the Events nav
     | 'CHECKLISTS'                               // owner config — hotel/room checklist templates (PMS nav)
     | 'EVENTS_CHECKLISTS'                        // owner config — event checklist templates (Events & Convention nav)
+    | 'EVENTS_MIGRATION'                         // owner-only CSV migration utility (bookings / invoices / rentals / add-ons)
     | 'MY_CHECKLIST'                             // personal — checklist instances assigned to me / my role
     | 'CHECKLIST_BOARD'                          // manager/owner — every checklist instance across the property
     | 'STATUS_BOARD'                             // rooms + halls status grid, flip inline
@@ -12776,7 +12777,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Full(3) for any role that doesn't have them configured yet. This prevents
         // an owner from accidentally revoking access simply by opening the matrix
         // and saving before explicitly setting a level for these new tabs.
-        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'EVENTS_MIGRATION', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
           // Spa operational tabs — grantable in Staff Access from now on; prefill Full
           // so spa staff on tenants that pre-configured the matrix aren't locked out.
           'SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_INVENTORY'];
@@ -14037,6 +14038,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_HOUSEKEEPING', label: 'Cleaning Checklist' },
               ...(isOwnerOrAdmin ? [{ id: 'EVENTS_CHECKLISTS', label: 'Checklist Templates' } as NavTab] : []),
               { id: 'EVENTS_REPORTS',    label: 'Events Reports' },
+              ...(isOwnerOrAdmin ? [{ id: 'EVENTS_MIGRATION', label: 'Data Migration' } as NavTab] : []),
               { id: 'EVENTS_SETTINGS',   label: 'Public Page Settings' },
             ],
           },
@@ -14136,6 +14138,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           if (id === 'CHECKLISTS') return isOwnerOrAdmin;
           // Event checklist config — owner-only, and only when Events is enabled.
           if (id === 'EVENTS_CHECKLISTS') return isOwnerOrAdmin && isEventsEnabled;
+          if (id === 'EVENTS_MIGRATION') return isOwnerOrAdmin && isEventsEnabled;
           // My Checklist is the personal work queue — visible to every staff member.
           if (id === 'MY_CHECKLIST') return true;
           // Checklist Board is the manager/owner cockpit over every checklist instance.
@@ -14838,7 +14841,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="EVENT" /></div>
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
-      ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS') && isEventsEnabled ? (
+      ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS' || activeTab === 'EVENTS_MIGRATION') && isEventsEnabled ? (
         <LanguageProvider secondary={secondaryLanguage}>
           <EventsModule restaurantId={restaurantId} token={token!} tab={activeTab} />
         </LanguageProvider>
@@ -25692,6 +25695,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_REPORTS',    label: 'Event Reports',      description: 'Events reporting hub — revenue, venue utilization, upcoming events, CSV export.', eventsOnly: true },
               { id: 'EVENTS_SETTINGS',   label: 'Events Page Settings', description: 'Public events page config — hero, tagline, gallery photos.', eventsOnly: true },
               { id: 'EVENTS_CHECKLISTS', label: 'Event Checklist Templates', description: 'Owner config: build event-hall checklist templates (setup / daily / post-event), set triggers, and assign to all or specific venues. Owner-only.', eventsOnly: true },
+              { id: 'EVENTS_MIGRATION',  label: 'Event Data Migration', description: 'Owner-only CSV import for bookings, sales invoices, rental inventory and add-on services — validate + dedup + editable fix-it grid.', eventsOnly: true },
               // Spa & Wellness tabs (only shown when the Spa module is enabled).
               { id: 'SPA_CALENDAR',     label: 'Spa Calendar',       description: 'Therapist × time appointment calendar — book, reschedule, view the day.', spaOnly: true },
               { id: 'SPA_APPOINTMENTS', label: 'Spa Appointments',   description: 'Appointment list, status, checkout to folio / invoice.', spaOnly: true },
@@ -50030,7 +50034,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // Events & Convention tabs (shown only when the selected restaurant has events_enabled)
   const EVENTS_TABS = [
     'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_VENUES', 'EVENTS_RENTALS',
-    'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS',
+    'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS', 'EVENTS_MIGRATION',
   ];
   // Spa & Wellness tabs (shown only when the selected restaurant has spa_enabled)
   const SPA_TABS = [

@@ -23992,6 +23992,235 @@ ${data.tenant.name}`;
     }
   });
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // DATA MIGRATION UTILITY — CSV import for Events masters + transactions.
+  // Flow: download template → upload CSV → server validates + flags duplicates →
+  // owner fixes rows in an editable grid → commit creates only OK, non-duplicate
+  // rows. Owner/admin only. Every insert mirrors the normal create path so a
+  // migrated row is indistinguishable from a hand-created one, and a natural-key
+  // dedup (checked live at both validate and commit) prevents double-migration.
+  // ══════════════════════════════════════════════════════════════════════════
+  const MIG_LABELS: Record<string, string> = { RENTAL_ITEM: 'Rental Inventory', ADDON_SERVICE: 'Add-on Services', BOOKING: 'Bookings', SALES_INVOICE: 'Sales Invoices' };
+  const MIG_COLS: Record<string, any[]> = {
+    RENTAL_ITEM: [
+      { key: 'name', label: 'Name', required: true, type: 'text', hint: 'duplicate key' },
+      { key: 'category', label: 'Category', type: 'enum', enum: ['FURNITURE', 'KITCHEN', 'DECOR', 'AV', 'UTILITY', 'OTHER'], default: 'FURNITURE' },
+      { key: 'unit', label: 'Unit', type: 'text', default: 'piece' },
+      { key: 'quantity_owned', label: 'Quantity Owned', type: 'number', default: 0 },
+      { key: 'rent_hourly', label: 'Rent / Hour', type: 'number', default: 0 },
+      { key: 'rent_daily', label: 'Rent / Day', type: 'number', default: 0 },
+      { key: 'rent_weekly', label: 'Rent / Week', type: 'number', default: 0 },
+      { key: 'deposit', label: 'Deposit', type: 'number', default: 0 },
+      { key: 'gst_percent', label: 'GST %', type: 'number', default: 18 },
+      { key: 'cost_price', label: 'Cost Price', type: 'number', default: 0 },
+      { key: 'description', label: 'Description', type: 'text' },
+    ],
+    ADDON_SERVICE: [
+      { key: 'name', label: 'Name', required: true, type: 'text', hint: 'duplicate key' },
+      { key: 'category', label: 'Category', type: 'enum', enum: ['STAFF', 'SECURITY', 'PARKING', 'DECORATION', 'CATERING', 'AV', 'OTHER'], default: 'STAFF' },
+      { key: 'pricing_type', label: 'Pricing Type', type: 'enum', enum: ['PER_EVENT', 'PER_HOUR', 'PER_DAY', 'PER_PERSON', 'PER_UNIT'], default: 'PER_EVENT' },
+      { key: 'rate', label: 'Rate', type: 'number', default: 0 },
+      { key: 'gst_percent', label: 'GST %', type: 'number', default: 18 },
+      { key: 'cost_price', label: 'Cost Price', type: 'number', default: 0 },
+      { key: 'description', label: 'Description', type: 'text' },
+    ],
+    BOOKING: [
+      { key: 'customer_name', label: 'Customer Name', required: true, type: 'text' },
+      { key: 'customer_phone', label: 'Phone', type: 'text', hint: 'part of the duplicate key' },
+      { key: 'customer_email', label: 'Email', type: 'text' },
+      { key: 'event_type', label: 'Event Type', type: 'text', default: 'OTHER' },
+      { key: 'event_date', label: 'Event Date', required: true, type: 'date', hint: 'YYYY-MM-DD' },
+      { key: 'end_date', label: 'End Date', type: 'date' },
+      { key: 'start_time', label: 'Start Time', type: 'time', default: '10:00' },
+      { key: 'end_time', label: 'End Time', type: 'time', default: '22:00' },
+      { key: 'venue', label: 'Venue', type: 'text', hint: 'must match a venue name' },
+      { key: 'venue_rate_basis', label: 'Rate Basis', type: 'enum', enum: ['HOURLY', 'HALF_DAY', 'DAILY'], default: 'DAILY' },
+      { key: 'guest_count', label: 'Guests', type: 'number', default: 0 },
+      { key: 'status', label: 'Status', type: 'enum', enum: ['INQUIRY', 'QUOTED', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED'], default: 'INQUIRY' },
+      { key: 'venue_rate', label: 'Venue Rate', type: 'number', default: 0 },
+      { key: 'discount', label: 'Discount', type: 'number', default: 0 },
+      { key: 'advance_amount', label: 'Advance Paid', type: 'number', default: 0 },
+      { key: 'special_requests', label: 'Notes', type: 'text' },
+    ],
+    SALES_INVOICE: [
+      { key: 'invoice_number', label: 'Invoice Number', required: true, type: 'text', hint: 'duplicate key' },
+      { key: 'invoice_date', label: 'Invoice Date', required: true, type: 'date', hint: 'YYYY-MM-DD' },
+      { key: 'customer_name', label: 'Customer Name', required: true, type: 'text' },
+      { key: 'customer_phone', label: 'Phone', type: 'text' },
+      { key: 'customer_email', label: 'Email', type: 'text' },
+      { key: 'event_type', label: 'Event Type', type: 'text', default: 'OTHER' },
+      { key: 'venue', label: 'Venue', type: 'text' },
+      { key: 'subtotal', label: 'Subtotal', required: true, type: 'number' },
+      { key: 'discount', label: 'Discount', type: 'number', default: 0 },
+      { key: 'gst_amount', label: 'GST Amount', type: 'number', default: 0 },
+      { key: 'grand_total', label: 'Grand Total', required: true, type: 'number' },
+      { key: 'advance_amount', label: 'Amount Paid', type: 'number', default: 0 },
+    ],
+  };
+  const migParseDate = (v: any): string | null => {
+    const s = String(v ?? '').trim(); if (!s) return null;
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+    m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/); if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    return null;
+  };
+  const migParseTime = (v: any): string | null => {
+    const s = String(v ?? '').trim(); if (!s) return null;
+    const m = s.match(/^(\d{1,2}):(\d{2})$/); if (!m) return null;
+    const h = Number(m[1]), mi = Number(m[2]); if (h > 23 || mi > 59) return null;
+    return `${String(h).padStart(2, '0')}:${m[2]}`;
+  };
+  const migCoerce = (cols: any[], raw: any): { data: any; errors: Record<string, string> } => {
+    const data: any = {}; const errors: Record<string, string> = {};
+    for (const c of cols) {
+      const v = raw?.[c.key];
+      const empty = v === undefined || v === null || String(v).trim() === '';
+      if (empty) {
+        if (c.required) { errors[c.key] = 'Required'; data[c.key] = ''; }
+        else data[c.key] = c.default !== undefined ? c.default : (c.type === 'number' ? 0 : '');
+        continue;
+      }
+      if (c.type === 'number') {
+        const n = Number(String(v).replace(/[₹,\s]/g, ''));
+        if (!Number.isFinite(n)) errors[c.key] = 'Not a number';
+        else if (n < 0) errors[c.key] = 'Cannot be negative';
+        data[c.key] = Number.isFinite(n) ? n : v;
+      } else if (c.type === 'date') {
+        const d = migParseDate(v); if (!d) errors[c.key] = 'Invalid date (YYYY-MM-DD)'; data[c.key] = d || v;
+      } else if (c.type === 'time') {
+        const t = migParseTime(v); if (!t) errors[c.key] = 'Invalid time (HH:MM)'; data[c.key] = t || v;
+      } else if (c.type === 'enum') {
+        const up = String(v).trim().toUpperCase().replace(/\s+/g, '_');
+        if (!c.enum.includes(up)) errors[c.key] = `One of: ${c.enum.join(', ')}`; data[c.key] = c.enum.includes(up) ? up : v;
+      } else { data[c.key] = String(v).trim(); }
+    }
+    return { data, errors };
+  };
+  const migDedupKey = (entity: string, d: any): string => {
+    if (entity === 'RENTAL_ITEM' || entity === 'ADDON_SERVICE') return String(d.name || '').trim().toLowerCase();
+    if (entity === 'BOOKING') return `${String(d.customer_phone || d.customer_name || '').trim().toLowerCase()}|${d.event_date || ''}`;
+    if (entity === 'SALES_INVOICE') return String(d.invoice_number || '').trim().toLowerCase();
+    return '';
+  };
+  const migExistingKeys = async (db: any, entity: string): Promise<Set<string>> => {
+    const set = new Set<string>();
+    const ymd = (v: any) => (v instanceof Date ? v.toISOString() : String(v || '')).slice(0, 10);
+    try {
+      if (entity === 'RENTAL_ITEM') for (const r of await db.query("SELECT name FROM event_rental_items")) set.add(String(r.name || '').trim().toLowerCase());
+      else if (entity === 'ADDON_SERVICE') for (const r of await db.query("SELECT name FROM event_services")) set.add(String(r.name || '').trim().toLowerCase());
+      else if (entity === 'BOOKING') for (const r of await db.query("SELECT customer_phone, customer_name, event_date FROM event_bookings")) set.add(`${String(r.customer_phone || r.customer_name || '').trim().toLowerCase()}|${ymd(r.event_date)}`);
+      else if (entity === 'SALES_INVOICE') for (const r of await db.query("SELECT invoice_number FROM folios WHERE folio_kind = 'EVENT' AND invoice_number IS NOT NULL")) set.add(String(r.invoice_number || '').trim().toLowerCase());
+    } catch { /* table may not exist yet */ }
+    return set;
+  };
+  const migVenueMap = async (db: any): Promise<Record<string, string>> => {
+    const map: Record<string, string> = {};
+    try { for (const v of await db.query("SELECT id, name FROM event_venues")) map[String(v.name || '').trim().toLowerCase()] = v.id; } catch { /* */ }
+    return map;
+  };
+  const migValidate = async (db: any, entity: string, rows: any[]) => {
+    const cols = MIG_COLS[entity];
+    const existing = await migExistingKeys(db, entity);
+    const venues = (entity === 'BOOKING' || entity === 'SALES_INVOICE') ? await migVenueMap(db) : {};
+    const seen = new Set<string>();
+    const out = rows.map((raw: any, i: number) => {
+      const { data, errors } = migCoerce(cols, raw);
+      const warnings: Record<string, string> = {};
+      if ((entity === 'BOOKING' || entity === 'SALES_INVOICE') && String(data.venue || '').trim()) {
+        if (!venues[String(data.venue).trim().toLowerCase()]) warnings.venue = 'No matching venue — imported without a venue';
+      }
+      if (entity === 'BOOKING' && data.end_date && data.event_date && !errors.end_date && !errors.event_date && data.end_date < data.event_date) errors.end_date = 'End date is before event date';
+      if (entity === 'SALES_INVOICE' && !errors.grand_total && !errors.subtotal) {
+        const expect = round2(Number(data.subtotal || 0) - Number(data.discount || 0) + Number(data.gst_amount || 0));
+        if (Math.abs(expect - Number(data.grand_total || 0)) > 1) warnings.grand_total = `Subtotal − discount + GST = ${expect}`;
+      }
+      const key = migDedupKey(entity, data);
+      let status = Object.keys(errors).length ? 'ERROR' : 'OK';
+      if (status === 'OK' && key && (existing.has(key) || seen.has(key))) status = 'DUPLICATE';
+      if (status === 'OK' && key) seen.add(key);
+      return { index: i, data, errors, warnings, status };
+    });
+    return { entity, columns: cols, rows: out, summary: { total: out.length, ok: out.filter(r => r.status === 'OK').length, error: out.filter(r => r.status === 'ERROR').length, duplicate: out.filter(r => r.status === 'DUPLICATE').length } };
+  };
+  const migInsert = async (db: any, entity: string, d: any, venueId: string | null, user: string): Promise<void> => {
+    if (entity === 'RENTAL_ITEM') {
+      await db.run(`INSERT INTO event_rental_items (id, name, category, unit, quantity_owned, rent_hourly, rent_daily, rent_weekly, deposit, gst_percent, display_order, notes, description, cost_price, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+        [mkEventId('ERI'), d.name, d.category || 'FURNITURE', d.unit || 'piece', Number(d.quantity_owned || 0), Number(d.rent_hourly || 0), Number(d.rent_daily || 0), Number(d.rent_weekly || 0), Number(d.deposit || 0), Number(d.gst_percent ?? 18), 0, null, d.description || null, Number(d.cost_price || 0)]);
+    } else if (entity === 'ADDON_SERVICE') {
+      await db.run(`INSERT INTO event_services (id, name, category, pricing_type, rate, gst_percent, display_order, notes, description, cost_price, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,1)`,
+        [mkEventId('ESV'), d.name, d.category || 'STAFF', d.pricing_type || 'PER_EVENT', Number(d.rate || 0), Number(d.gst_percent ?? 18), 0, null, d.description || null, Number(d.cost_price || 0)]);
+    } else if (entity === 'BOOKING') {
+      const id = mkEventId('EVT');
+      await db.run(`INSERT INTO event_bookings (id, venue_id, customer_name, customer_phone, customer_email, event_type, status, event_date, end_date, start_time, end_time, venue_rate_basis, guest_count, venue_rate, discount, advance_amount, special_requests, booking_source, created_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'MIGRATION', ?)`,
+        [id, venueId, d.customer_name, d.customer_phone || null, d.customer_email || null, d.event_type || 'OTHER', d.status || 'INQUIRY', d.event_date, d.end_date || null, d.start_time || '10:00', d.end_time || '22:00', d.venue_rate_basis || 'DAILY', Number(d.guest_count || 0), Number(d.venue_rate || 0), Number(d.discount || 0), Number(d.advance_amount || 0), d.special_requests || null, user]);
+      await recomputeEventTotal(db, id);
+    } else if (entity === 'SALES_INVOICE') {
+      const id = mkEventId('EVT');
+      const grand = round2(Number(d.grand_total || 0)), gst = round2(Number(d.gst_amount || 0)), disc = round2(Number(d.discount || 0)), sub = round2(Number(d.subtotal || 0)), paid = round2(Number(d.advance_amount || 0));
+      // Historical invoice → a COMPLETED booking carrying the imported totals + an
+      // EVENT folio. Totals are set directly (not recomputed) since there are no
+      // line items. No GL posting (pre-system revenue).
+      await db.run(`INSERT INTO event_bookings (id, venue_id, customer_name, customer_phone, customer_email, event_type, status, event_date, guest_count, discount, advance_amount, total_amount, tax_amount, booking_source, created_by)
+        VALUES (?,?,?,?,?,?, 'COMPLETED', ?, 0, ?, ?, ?, ?, 'MIGRATION', ?)`,
+        [id, venueId, d.customer_name, d.customer_phone || null, d.customer_email || null, d.event_type || 'OTHER', d.invoice_date, disc, paid, grand, gst, user]);
+      const fid = mkEventId('EFO');
+      await db.run(`INSERT INTO folios (id, booking_id, event_booking_id, status, subtotal, gst_amount, discount, grand_total, doc_type, folio_kind, invoice_number, created_at)
+        VALUES (?,?,?, ?, ?,?,?,?, 'INVOICE', 'EVENT', ?, ?)`,
+        [fid, id, id, paid >= grand - 0.01 ? 'settled' : 'open', sub, gst, disc, grand, d.invoice_number, d.invoice_date]);
+      await db.run("UPDATE event_bookings SET folio_id = ? WHERE id = ?", [fid, id]).catch(() => {});
+      if (paid > 0) await db.run(`INSERT INTO event_payments (id, booking_id, amount, method, reference, paid_at, note, recorded_by) VALUES (?,?,?, 'MIGRATION', ?, ?, 'Imported invoice', ?)`,
+        [mkEventId('EPY'), id, paid, d.invoice_number || null, d.invoice_date, user]).catch(() => {});
+    }
+  };
+  const migCommit = async (db: any, entity: string, rows: any[], user: string) => {
+    const cols = MIG_COLS[entity];
+    const existing = await migExistingKeys(db, entity);
+    const venues = (entity === 'BOOKING' || entity === 'SALES_INVOICE') ? await migVenueMap(db) : {};
+    const seen = new Set<string>();
+    let created = 0, skipped = 0, failed = 0; const results: any[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const { data, errors } = migCoerce(cols, rows[i]);
+      if (Object.keys(errors).length) { failed++; results.push({ index: i, status: 'ERROR', errors }); continue; }
+      const venueId = (entity === 'BOOKING' || entity === 'SALES_INVOICE') && String(data.venue || '').trim() ? (venues[String(data.venue).trim().toLowerCase()] || null) : null;
+      const key = migDedupKey(entity, data);
+      if (key && (existing.has(key) || seen.has(key))) { skipped++; results.push({ index: i, status: 'DUPLICATE' }); continue; }
+      try { await migInsert(db, entity, data, venueId, user); created++; if (key) { existing.add(key); seen.add(key); } results.push({ index: i, status: 'CREATED' }); }
+      catch (e: any) { failed++; results.push({ index: i, status: 'ERROR', errors: { _row: e?.message || 'insert failed' } }); }
+    }
+    return { created, skipped, failed, results };
+  };
+  const migOwnerOnly = (req: AuthRequest) => ['OWNER', 'SUPER_ADMIN', 'CTO', 'ADMIN'].includes(String(req.user?.role || '').toUpperCase());
+
+  app.get("/api/restaurant/:id/events/migration/spec", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    res.json({ entities: Object.keys(MIG_COLS).map(k => ({ id: k, label: MIG_LABELS[k], columns: MIG_COLS[k] })) });
+  });
+  app.post("/api/restaurant/:id/events/migration/validate", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    if (!migOwnerOnly(req)) return res.status(403).json({ error: 'Owner or admin only' });
+    try {
+      const db = await getTenantDb(req.params.id); const { entity, rows } = req.body || {};
+      if (!MIG_COLS[entity]) return res.status(400).json({ error: 'Unknown entity' });
+      if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows must be an array' });
+      res.json(await migValidate(db, entity, rows.slice(0, 2000)));
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Validation failed' }); }
+  });
+  app.post("/api/restaurant/:id/events/migration/commit", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    if (!migOwnerOnly(req)) return res.status(403).json({ error: 'Owner or admin only' });
+    try {
+      const db = await getTenantDb(req.params.id); const { entity, rows } = req.body || {};
+      if (!MIG_COLS[entity]) return res.status(400).json({ error: 'Unknown entity' });
+      if (!Array.isArray(rows)) return res.status(400).json({ error: 'rows must be an array' });
+      const summary = await migCommit(db, entity, rows.slice(0, 2000), req.user?.email || req.user?.id || 'migration');
+      await writeObjectAudit(db, req, { objectType: 'EVENT_MIGRATION', objectId: entity, action: 'MIGRATED', summary: `Imported ${MIG_LABELS[entity] || entity}: ${summary.created} created · ${summary.skipped} duplicate · ${summary.failed} failed` });
+      res.json(summary);
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Migration failed' }); }
+  });
+
   // ─── BOOKINGS ──────────────────────────────────────────────────────────────
   app.get("/api/restaurant/:id/events/bookings", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
@@ -46861,8 +47090,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-ledger-gst-toggle-live',
+    commit_marker: 'events-csv-migration-utility',
     code_features: [
+      'events-csv-migration-utility',               // owner-only CSV data-migration utility for Events: Rental Inventory / Add-on Services / Bookings / Sales Invoices — download template → upload CSV → server validates + coerces + flags duplicates (natural-key dedup checked at validate AND commit) → editable fix-it grid → commit inserts only OK non-duplicate rows via the same create paths as hand entry (GET/POST validate/commit + spec endpoints, EVENT_MIGRATION audit)
       'events-ledger-gst-toggle-live',              // booking-detail bill ledger live-previews the Invoice-GST toggle: computeEventBill accepts a gst override, GET booking honors ?gst_enabled/?gst_percent, ledger re-fetches when the toggle changes (GST + grand total update to 0 when GST is turned off)
       'notif-module-gating',                        // notification config UI hides notification groups for modules the tenant hasn't enabled (Orders/Bookings/Delivery/Inventory→Restaurant, Hotel→Hotel, Events group→Events); common groups always shown
       'events-notifications',                       // Events & Convention notifications: EVENT_BOOKING_CREATED / QUOTATION_SENT / CONFIRMED / PAYMENT_RECEIVED / CANCELLED triggers + EVENT_UPCOMING_REMINDER cron (10:15 IST, T-2d) + templates
