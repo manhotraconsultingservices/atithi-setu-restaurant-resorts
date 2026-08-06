@@ -180,6 +180,36 @@ function Pill({ status }: { status: string }) {
   return <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${STATUS_COLOR[status] || 'bg-gray-100 text-gray-600 border-gray-200'}`}>{status}</span>;
 }
 
+// ── Payment status of a booking's bill ───────────────────────────────────────
+// Derived from the bill's grand total vs. what has been received (paid =
+// advance_amount, which the payment endpoint keeps in sync with the sum of
+// event_payments). Drives the Paid / Partially paid / Pending pill on the
+// bookings (invoice) table and the Outstanding-by-Invoice report.
+type PayStatus = 'PAID' | 'PARTIAL' | 'PENDING' | 'NONE';
+function evPayStatus(total: any, paid: any): PayStatus {
+  const tot = Number(total || 0), p = Number(paid || 0);
+  if (tot <= 0) return 'NONE';            // nothing billed yet
+  if (p >= tot - 0.01) return 'PAID';     // penny tolerance for rounding
+  if (p > 0) return 'PARTIAL';
+  return 'PENDING';
+}
+function evPayLabel(t: any, total: any, paid: any): string {
+  const s = evPayStatus(total, paid);
+  return s === 'PAID' ? t('events.pay.paid') : s === 'PARTIAL' ? t('events.pay.partial') : s === 'PENDING' ? t('events.pay.pending') : '—';
+}
+const PAY_COLOR: Record<PayStatus, string> = {
+  PAID:    'bg-emerald-50 text-emerald-700 border-emerald-200',
+  PARTIAL: 'bg-amber-50 text-amber-700 border-amber-200',
+  PENDING: 'bg-rose-50 text-rose-700 border-rose-200',
+  NONE:    'bg-gray-100 text-gray-500 border-gray-200',
+};
+function PaymentPill({ total, paid }: { total: any; paid: any }) {
+  const { t } = useT();
+  const s = evPayStatus(total, paid);
+  const label = s === 'NONE' ? '—' : evPayLabel(t, total, paid);
+  return <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${PAY_COLOR[s]}`}>{label}</span>;
+}
+
 function SectionHeader({ icon, title, sub, action }: { icon: React.ReactNode; title: string; sub?: string; action?: React.ReactNode }) {
   return (
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
@@ -754,6 +784,9 @@ function EventBookings({ restaurantId, token }: Props) {
           { key: 'event_date', label: t('events.bookings.eventDate'), sortable: true, getValue: (r: any) => String(r.event_date || '').slice(0, 10), render: (r: any) => { const s = String(r.event_date || '').slice(0, 10); const e = String(r.end_date || '').slice(0, 10); return e && e > s ? `${s} → ${e}` : s; } },
           { key: 'guest_count', label: t('events.bookings.guests'), sortable: true, align: 'right' },
           { key: 'total_amount', label: t('common.total'), sortable: true, align: 'right', getValue: (r: any) => Number(r.total_amount || 0), render: (r: any) => money(r.total_amount), exportValue: (r: any) => String(r.total_amount ?? '') },
+          { key: 'advance_amount', label: t('events.bookings.advance'), sortable: true, align: 'right', getValue: (r: any) => Number(r.advance_amount || 0), render: (r: any) => money(r.advance_amount), exportValue: (r: any) => String(r.advance_amount ?? '') },
+          { key: 'outstanding', label: t('events.dash.outstanding'), sortable: true, align: 'right', getValue: (r: any) => Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0)), render: (r: any) => money(Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0))), exportValue: (r: any) => String(Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0))) },
+          { key: 'pay_status', label: t('events.bookings.payment'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => evPayLabel(t, r.total_amount, r.advance_amount), render: (r: any) => <PaymentPill total={r.total_amount} paid={r.advance_amount} />, exportValue: (r: any) => evPayLabel(t, r.total_amount, r.advance_amount) },
           { key: 'status', label: t('common.status'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.status, render: (r: any) => <Pill status={r.status} /> },
           { key: '_a', label: t('common.actions'), noExport: true, render: (r: any) => <button className={BTN_GHOST} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{t('common.edit')}</button> },
         ]}
@@ -2203,8 +2236,9 @@ function EventReports({ restaurantId, token }: Props) {
     data.revenueByMonth.forEach((v: any) => rows.push([v.month, v.events, v.covers, v.revenue]));
     rows.push([], ['CATERING'], ['Package', 'Type', 'Covers', 'Revenue']);
     data.cateringByPackage.forEach((v: any) => rows.push([v.name, v.package_type, v.covers, v.revenue]));
-    rows.push([], ['RECEIVABLES'], ['Customer', 'Event date', 'Total', 'Advance', 'Outstanding']);
-    data.receivables.forEach((v: any) => rows.push([v.customer_name, v.event_date, v.total_amount, v.advance_amount, v.outstanding]));
+    rows.push([], ['OUTSTANDING BY INVOICE'], ['Invoice / Booking', 'Customer', 'Venue', 'Event date', 'Total', 'Paid', 'Outstanding', 'Payment status']);
+    [...data.receivables].sort((a: any, b: any) => Number(b.outstanding || 0) - Number(a.outstanding || 0))
+      .forEach((v: any) => rows.push([v.id, v.customer_name, v.venue_name || '', v.event_date, v.total_amount, v.advance_amount, v.outstanding, evPayLabel(t, v.total_amount, v.advance_amount)]));
     if (data.aging) {
       const a = data.aging;
       rows.push([], ['RECEIVABLES AGING'], ['Bucket', 'Amount'],
@@ -2260,8 +2294,56 @@ function EventReports({ restaurantId, token }: Props) {
             data.revenueByMonth.map((v: any) => [v.month, v.events, v.covers, money(v.revenue)]))}
           {table(t('events.dash.catering'), [t('events.dash.package'), t('events.dash.covers'), t('common.total')],
             data.cateringByPackage.map((v: any) => [`${v.name} (${v.package_type})`, v.covers, money(v.revenue)]))}
-          {table(t('events.dash.receivables'), [t('events.bookings.customer'), t('events.bookings.eventDate'), t('common.total'), t('events.bookings.advance'), t('events.dash.outstanding')],
-            data.receivables.map((v: any) => [v.customer_name, v.event_date, money(v.total_amount), money(v.advance_amount), money(v.outstanding)]))}
+          {(() => {
+            // Outstanding by invoice — one row per contracted booking (each is an
+            // invoice/bill), sorted by what's still owed. Total / Paid / Outstanding
+            // + a Paid/Partial/Pending status, with a grand-total footer.
+            const rec = [...(data.receivables || [])].sort((a: any, b: any) => Number(b.outstanding || 0) - Number(a.outstanding || 0));
+            const tBill = rec.reduce((s: number, r: any) => s + Number(r.total_amount || 0), 0);
+            const tPaid = rec.reduce((s: number, r: any) => s + Number(r.advance_amount || 0), 0);
+            const tOut = rec.reduce((s: number, r: any) => s + Number(r.outstanding || 0), 0);
+            return (
+              <div className={`${CARD} mb-4`}>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="font-bold text-sm">{t('events.reports.outstandingByInvoice')}</h3>
+                  <span className="text-xs text-[#9d8b7e]">{t('events.dash.outstanding')}: <strong className="text-[#b45309]">{money(tOut)}</strong></span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead><tr className="text-left text-[#9d8b7e] border-b border-[#e8dccf]">
+                      <th className="py-1.5 pr-3 font-semibold">{t('events.bookings.bookingId')}</th>
+                      <th className="py-1.5 pr-3 font-semibold">{t('events.bookings.customer')}</th>
+                      <th className="py-1.5 pr-3 font-semibold">{t('events.bookings.venue')}</th>
+                      <th className="py-1.5 pr-3 font-semibold">{t('events.bookings.eventDate')}</th>
+                      <th className="py-1.5 pr-3 font-semibold text-right">{t('common.total')}</th>
+                      <th className="py-1.5 pr-3 font-semibold text-right">{t('events.bookings.advance')}</th>
+                      <th className="py-1.5 pr-3 font-semibold text-right">{t('events.dash.outstanding')}</th>
+                      <th className="py-1.5 pr-3 font-semibold">{t('events.bookings.payment')}</th>
+                    </tr></thead>
+                    <tbody>{rec.length === 0 ? <tr><td colSpan={8} className="py-2 text-[#9d8b7e]">—</td></tr> : rec.map((r: any) => (
+                      <tr key={r.id} className="border-b border-[#f0e9df]">
+                        <td className="py-1.5 pr-3 font-mono text-[11px]">{r.id}</td>
+                        <td className="py-1.5 pr-3">{r.customer_name}</td>
+                        <td className="py-1.5 pr-3">{r.venue_name || '—'}</td>
+                        <td className="py-1.5 pr-3">{String(r.event_date || '').slice(0, 10)}</td>
+                        <td className="py-1.5 pr-3 tabular-nums text-right">{money(r.total_amount)}</td>
+                        <td className="py-1.5 pr-3 tabular-nums text-right">{money(r.advance_amount)}</td>
+                        <td className="py-1.5 pr-3 tabular-nums text-right font-semibold">{money(r.outstanding)}</td>
+                        <td className="py-1.5 pr-3"><PaymentPill total={r.total_amount} paid={r.advance_amount} /></td>
+                      </tr>
+                    ))}</tbody>
+                    {rec.length > 0 && <tfoot><tr className="border-t-2 border-[#e8dccf] font-bold">
+                      <td className="py-1.5 pr-3" colSpan={4}>{t('common.total')}</td>
+                      <td className="py-1.5 pr-3 tabular-nums text-right">{money(tBill)}</td>
+                      <td className="py-1.5 pr-3 tabular-nums text-right">{money(tPaid)}</td>
+                      <td className="py-1.5 pr-3 tabular-nums text-right text-[#b45309]">{money(tOut)}</td>
+                      <td></td>
+                    </tr></tfoot>}
+                  </table>
+                </div>
+              </div>
+            );
+          })()}
           {table(t('events.dash.lostReasons'), [t('events.cancel.reason'), t('events.dash.events')],
             (data.lostReasons || []).map((v: any) => [v.reason, v.count]))}
         </>
