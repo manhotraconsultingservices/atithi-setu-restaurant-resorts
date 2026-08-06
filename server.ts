@@ -23595,6 +23595,35 @@ ${data.tenant.name}`;
     return grand;
   };
 
+  // Fire an Events & Convention notification (fire-and-forget so a slow SMTP /
+  // Telegram call never blocks the request — see the Cloudflare 502 gotcha). Builds
+  // the common data block from the booking (customer, event type/date, venue,
+  // guests) + passes customerEmail/customerPhone so CUSTOMER-role recipients
+  // resolve, and merges any event-specific `extra` fields. Honors the owner's
+  // notification_settings via triggerNotification (no row → no send).
+  const notifyEvent = (restaurantId: string, eventName: string, bk: any, extra: Record<string, any> = {}): void => {
+    (async () => {
+      try {
+        const db = await getTenantDb(restaurantId);
+        let venueName = bk?.venue_name || null;
+        if (!venueName && bk?.venue_id) venueName = (await db.get("SELECT name FROM event_venues WHERE id = ?", [bk.venue_id]).catch(() => null))?.name || null;
+        const d = (v: any) => (v instanceof Date ? v.toISOString() : String(v || '')).slice(0, 10);
+        await triggerNotification(restaurantId, eventName, {
+          customerEmail: bk?.customer_email || undefined,
+          customerPhone: bk?.customer_phone || undefined,
+          customer_name: bk?.customer_name || '',
+          customer_phone: bk?.customer_phone || '',
+          event_type: bk?.event_type || '',
+          event_date: d(bk?.event_date),
+          end_date: bk?.end_date ? d(bk.end_date) : '',
+          venue_name: venueName,
+          guest_count: bk?.guest_count ?? '',
+          ...extra,
+        });
+      } catch (e) { console.warn('[events] notifyEvent failed:', (e as any)?.message || e); }
+    })();
+  };
+
   // Insert booking line items (rentals + services) from request arrays.
   const insertEventLines = async (db: any, bookingId: string, body: any) => {
     if (Array.isArray(body.items)) {
@@ -24081,6 +24110,7 @@ ${data.tenant.name}`;
       await recomputeEventTotal(db, id);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [id]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: id, action: 'CREATED', summary: `Booking created for ${b.customer_name} on ${b.event_date} (${targetStatus})`, after: row });
+      notifyEvent(req.params.id, 'EVENT_BOOKING_CREATED', row);
       res.status(201).json(row);
     } catch (err: any) {
       console.error("/events/bookings create error:", err);
@@ -24278,6 +24308,7 @@ ${data.tenant.name}`;
       }
 
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'CANCELLED', summary: `Booking cancelled${req.body?.reason ? ` — ${req.body.reason}` : ''}${unwind.hotel_rooms_cancelled ? ` · ${unwind.hotel_rooms_cancelled} hotel room(s) released` : ''}${unwind.revenue_reversed ? ' · revenue reversed + folio voided' : ''}`, before: { status: existing.status }, after: { status: 'CANCELLED' } });
+      notifyEvent(req.params.id, 'EVENT_CANCELLED', existing, { reason: req.body?.reason || '', paid: Number(existing.advance_amount || 0) });
       res.json({ success: true, unwind });
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel booking" }); }
   });
@@ -24482,6 +24513,11 @@ ${data.tenant.name}`;
         }
       } catch (glErr) { console.error('[GL] event-payment capture failed:', glErr); }
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'PAYMENT_RECORDED', summary: `Payment ${amount} via ${b.method || 'CASH'} (total paid ${paid})` });
+      notifyEvent(req.params.id, 'EVENT_PAYMENT_RECEIVED', bk, {
+        amount, method: b.method || 'CASH',
+        grand_total: Number(bk.total_amount || 0), paid,
+        balance: round2(Math.max(0, Number(bk.total_amount || 0) - paid)),
+      });
       res.status(201).json({ success: true, payment_id: pid, paid, balance: round2(Number(bk.total_amount || 0) - paid) });
     } catch (err: any) { res.status(500).json({ error: "Failed to record payment" }); }
   });
@@ -24882,6 +24918,11 @@ ${data.tenant.name}`;
       await db.run("UPDATE event_bookings SET status = 'CONFIRMED' WHERE id = ?", [req.params.bid]);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: `Booking CONFIRMED${rooms.length ? ` · ${roomResults.filter(r => r.ok).length}/${rooms.length} hotel room(s) booked` : ''}`, before: { status: bk.status }, after: { status: 'CONFIRMED' } });
+      notifyEvent(req.params.id, 'EVENT_CONFIRMED', row, {
+        grand_total: Number(row.total_amount || 0),
+        advance: Number(row.advance_amount || 0),
+        balance: round2(Math.max(0, Number(row.total_amount || 0) - Number(row.advance_amount || 0))),
+      });
       const failed = roomResults.filter(r => !r.ok);
       res.json({
         ...row,
@@ -25174,6 +25215,9 @@ ${data.tenant.name}`;
       if (!sent) return res.status(502).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download." });
       await db.run("UPDATE event_quotations SET status = 'SENT', sent_at = CURRENT_TIMESTAMP, sent_to_email = ? WHERE id = ?", [to, req.params.qid]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_QUOTATION', objectId: req.params.qid, action: 'SENT', summary: `Quotation emailed to ${to}` });
+      notifyEvent(req.params.id, 'EVENT_QUOTATION_SENT', data.booking || {}, {
+        quote_number: data.quotation?.quote_number, grand_total: Number((data as any).grand_total || 0), sent_to: to,
+      });
       res.json({ success: true, sent_to: to });
     } catch (err: any) {
       console.error("/events quotation send error:", err);
@@ -46813,8 +46857,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-audit-diff+venue-edit',
+    commit_marker: 'notif-module-gating+events-notifications',
     code_features: [
+      'notif-module-gating',                        // notification config UI hides notification groups for modules the tenant hasn't enabled (Orders/Bookings/Delivery/Inventory→Restaurant, Hotel→Hotel, Events group→Events); common groups always shown
+      'events-notifications',                       // Events & Convention notifications: EVENT_BOOKING_CREATED / QUOTATION_SENT / CONFIRMED / PAYMENT_RECEIVED / CANCELLED triggers + EVENT_UPCOMING_REMINDER cron (10:15 IST, T-2d) + templates
       'events-audit-diff',                          // audit log renders before/after as a readable Field·Before·After table (was raw single-line JSON), with pretty-JSON fallback
       'events-venue-edit-after-create',             // event booking detail has a venue selector; changing it re-resolves the venue charge (backend already supported the PUT)
       'events-scenario-bugfixes',                   // payment overpayment/duplicate guard, cancel-paid requires refund-ack, delete-payment confirm-lock, negative guest/discount rejected, discount-balance refresh, invoice PDF tab title, no payment on cancelled booking
@@ -48552,6 +48598,79 @@ ${data.tenant.name}`;
     } catch (err) {
       console.error('[pre-arrival] cron error:', err);
     }
+  }, { timezone: 'Asia/Kolkata' });
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // Events & Convention — upcoming-event reminder (daily at 10:15 IST).
+  // For every events-enabled tenant, find CONFIRMED / IN_PROGRESS event bookings
+  // whose event_date is exactly 2 days out (IST) and fire EVENT_UPCOMING_REMINDER
+  // (configurable per-tenant via notification_settings). Dedup via a central
+  // ledger so reruns / manual triggers don't double-send. Mirrors pre-arrival.
+  // ═════════════════════════════════════════════════════════════════════════
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS sent_event_reminders (
+      id SERIAL PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      booking_id TEXT NOT NULL,
+      sent_on DATE NOT NULL DEFAULT CURRENT_DATE,
+      UNIQUE (tenant_id, booking_id, sent_on)
+    )
+  `).catch(() => {});
+
+  cron.schedule('15 10 * * *', async () => {
+    try {
+      const LEAD_DAYS = 2;
+      const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const todayIST = (tzDate.split(',')[0] || '').trim();
+      const targetDate = new Date(todayIST + 'T00:00:00Z');
+      targetDate.setUTCDate(targetDate.getUTCDate() + LEAD_DAYS);
+      const targetIso = targetDate.toISOString().slice(0, 10);
+
+      const tenants = await centralDb.query("SELECT id FROM restaurants WHERE is_active = 1 AND events_enabled = 1");
+      let totalSent = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          const bookings: any[] = await db.query(
+            `SELECT b.id, b.customer_name, b.customer_phone, b.customer_email, b.event_type,
+                    b.event_date, b.guest_count, b.total_amount, b.advance_amount, v.name AS venue_name
+               FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
+              WHERE b.status IN ('CONFIRMED','IN_PROGRESS') AND b.event_date = ?`,
+            [targetIso]
+          ).catch(() => []);
+          for (const b of bookings) {
+            try {
+              await centralDb.run(
+                `INSERT INTO sent_event_reminders (tenant_id, booking_id, sent_on) VALUES (?, ?, CURRENT_DATE)
+                 ON CONFLICT (tenant_id, booking_id, sent_on) DO NOTHING`,
+                [t.id, b.id]
+              );
+              const dup: any = await centralDb.get(
+                `SELECT COUNT(*) AS n FROM sent_event_reminders WHERE tenant_id = ? AND booking_id = ? AND sent_on = CURRENT_DATE`,
+                [t.id, b.id]
+              );
+              if (Number(dup?.n || 0) > 1) continue;
+            } catch { /* race — fine */ }
+            try {
+              await triggerNotification(t.id, 'EVENT_UPCOMING_REMINDER', {
+                customerEmail: b.customer_email || undefined,
+                customerPhone: b.customer_phone || undefined,
+                customer_name: b.customer_name || '',
+                event_type: b.event_type || '',
+                event_date: String(b.event_date).slice(0, 10),
+                venue_name: b.venue_name || null,
+                guest_count: b.guest_count ?? '',
+                days: LEAD_DAYS,
+                balance: round2(Math.max(0, Number(b.total_amount || 0) - Number(b.advance_amount || 0))),
+              });
+              totalSent++;
+            } catch (e) { console.warn(`[event-reminder] failed for booking ${b.id}:`, e); }
+          }
+        } catch (e) { console.warn(`[event-reminder] tenant ${t.id} skipped:`, e); }
+      }
+      await centralDb.run(`DELETE FROM sent_event_reminders WHERE sent_on < (CURRENT_DATE - INTERVAL '90 days')`).catch(() => {});
+      console.log(`[event-reminder] done — ${totalSent} upcoming-event reminders sent.`);
+    } catch (err) { console.error('[event-reminder] cron error:', err); }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[pre-arrival] Pre-arrival email cron started — daily at 10:00 IST (T-3 days from check-in)');
 

@@ -1503,6 +1503,109 @@ export function buildNotificationContent(
       };
     }
 
+    /* ── Events & Convention ──────────────────────────────────────────── */
+
+    case 'EVENT_BOOKING_CREATED': {
+      const dates = data.end_date && data.end_date !== data.event_date ? `${data.event_date} → ${data.end_date}` : data.event_date;
+      return {
+        subject: `🎉 New event enquiry — ${data.event_type || 'Event'} on ${data.event_date} — ${r}`,
+        text:
+          `🎉 *New event enquiry*\n` +
+          `Customer: ${data.customer_name || '—'}${data.customer_phone ? ` (${data.customer_phone})` : ''}\n` +
+          `Type: ${data.event_type || '—'}\nDate: ${dates}\nVenue: ${data.venue_name || '—'}\nGuests: ${data.guest_count || '—'}\n\n` +
+          `Open Events → Bookings to prepare a quotation.`,
+        html:
+          `<h2 style="color:#7c3aed">🎉 New event enquiry</h2>` +
+          `<p>Customer: <strong>${data.customer_name || '—'}</strong>${data.customer_phone ? ` (${data.customer_phone})` : ''}</p>` +
+          `<p>Type: <strong>${data.event_type || '—'}</strong><br>Date: <strong>${dates}</strong><br>Venue: <strong>${data.venue_name || '—'}</strong><br>Guests: <strong>${data.guest_count || '—'}</strong></p>` +
+          `<p style="color:#6b5d52;font-size:13px">Open Events → Bookings to prepare a quotation.</p>`,
+      };
+    }
+
+    case 'EVENT_QUOTATION_SENT':
+      return {
+        subject: `📄 Quotation ${data.quote_number || ''} sent — ${data.customer_name || ''} — ${r}`,
+        text:
+          `📄 *Quotation sent*\nQuote: ${data.quote_number || '—'}\nCustomer: ${data.customer_name || '—'}\n` +
+          `Value: ₹${Number(data.grand_total || 0).toLocaleString('en-IN')}\n${data.sent_to ? `Emailed to: ${data.sent_to}` : ''}`,
+        html:
+          `<h2 style="color:#7c3aed">📄 Quotation sent</h2>` +
+          `<p>Quote <strong>${data.quote_number || '—'}</strong> for <strong>${data.customer_name || '—'}</strong></p>` +
+          `<p>Value: <strong>₹${Number(data.grand_total || 0).toLocaleString('en-IN')}</strong>${data.sent_to ? `<br>Emailed to: ${data.sent_to}` : ''}</p>`,
+      };
+
+    case 'EVENT_CONFIRMED':
+      return {
+        subject: `✅ Event confirmed — ${data.event_type || 'Event'} on ${data.event_date} — ${r}`,
+        text:
+          `Hi ${data.customer_name || 'there'},\n\nYour ${data.event_type || 'event'} at ${r} is CONFIRMED. 🎉\n\n` +
+          `Date: ${data.event_date}\nVenue: ${data.venue_name || '—'}\nGuests: ${data.guest_count || '—'}\n` +
+          `Total: ₹${Number(data.grand_total || 0).toLocaleString('en-IN')}\n` +
+          (Number(data.balance || 0) > 0 ? `Balance due: ₹${Number(data.balance).toLocaleString('en-IN')}\n` : '') +
+          `\nWe look forward to hosting you!\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#059669;margin-top:0">✅ Your event is confirmed!</h2>` +
+          `<p>Hi <strong>${data.customer_name || 'there'}</strong>,</p>` +
+          `<p>Your <strong>${data.event_type || 'event'}</strong> at <strong>${r}</strong> is confirmed. 🎉</p>` +
+          `<div style="background:#faf7f2;padding:16px;border-radius:8px;margin:16px 0;color:#6b5d52;font-size:14px">` +
+          `<p style="margin:2px 0">Date: <strong>${data.event_date}</strong></p>` +
+          `<p style="margin:2px 0">Venue: <strong>${data.venue_name || '—'}</strong></p>` +
+          `<p style="margin:2px 0">Guests: <strong>${data.guest_count || '—'}</strong></p>` +
+          `<p style="margin:2px 0">Total: <strong>₹${Number(data.grand_total || 0).toLocaleString('en-IN')}</strong></p>` +
+          (Number(data.balance || 0) > 0 ? `<p style="margin:2px 0">Balance due: <strong>₹${Number(data.balance).toLocaleString('en-IN')}</strong></p>` : '') +
+          `</div><p style="color:#6b5d52;font-size:13px">We look forward to hosting you!<br><strong>${r}</strong></p></div>`,
+      };
+
+    case 'EVENT_PAYMENT_RECEIVED':
+      return {
+        subject: `💰 Payment received — ₹${Number(data.amount || 0).toLocaleString('en-IN')} — ${r}`,
+        text:
+          `Hi ${data.customer_name || 'there'},\n\nWe've received your payment of ₹${Number(data.amount || 0).toLocaleString('en-IN')}${data.method ? ` via ${data.method}` : ''} for your event on ${data.event_date}.\n\n` +
+          `Total: ₹${Number(data.grand_total || 0).toLocaleString('en-IN')}\nPaid so far: ₹${Number(data.paid || 0).toLocaleString('en-IN')}\nBalance: ₹${Number(data.balance || 0).toLocaleString('en-IN')}\n\nThank you!\n— ${r}`,
+        html:
+          `<h2 style="color:#059669">💰 Payment received</h2>` +
+          `<p>Hi <strong>${data.customer_name || 'there'}</strong>, we've received <strong>₹${Number(data.amount || 0).toLocaleString('en-IN')}</strong>${data.method ? ` via ${data.method}` : ''} for your event on <strong>${data.event_date}</strong>.</p>` +
+          `<div style="background:#faf7f2;padding:12px;border-radius:8px;color:#6b5d52;font-size:14px">` +
+          `<p style="margin:2px 0">Total: <strong>₹${Number(data.grand_total || 0).toLocaleString('en-IN')}</strong></p>` +
+          `<p style="margin:2px 0">Paid: <strong>₹${Number(data.paid || 0).toLocaleString('en-IN')}</strong></p>` +
+          `<p style="margin:2px 0">Balance: <strong>₹${Number(data.balance || 0).toLocaleString('en-IN')}</strong></p>` +
+          `</div><p style="color:#6b5d52;font-size:13px">Thank you!<br><strong>${r}</strong></p>`,
+      };
+
+    case 'EVENT_CANCELLED':
+      return {
+        subject: `❌ Event cancelled — ${data.event_type || 'Event'} on ${data.event_date} — ${r}`,
+        text:
+          `The ${data.event_type || 'event'} for ${data.customer_name || '—'} on ${data.event_date} has been cancelled.\n` +
+          (data.reason ? `Reason: ${data.reason}\n` : '') +
+          (Number(data.paid || 0) > 0 ? `Collected to date: ₹${Number(data.paid).toLocaleString('en-IN')} — process any refund separately.\n` : ''),
+        html:
+          `<h2 style="color:#dc2626">❌ Event cancelled</h2>` +
+          `<p>The <strong>${data.event_type || 'event'}</strong> for <strong>${data.customer_name || '—'}</strong> on <strong>${data.event_date}</strong> has been cancelled.</p>` +
+          (data.reason ? `<p>Reason: ${data.reason}</p>` : '') +
+          (Number(data.paid || 0) > 0 ? `<p style="color:#b45309">Collected to date: <strong>₹${Number(data.paid).toLocaleString('en-IN')}</strong> — process any refund separately.</p>` : ''),
+      };
+
+    case 'EVENT_UPCOMING_REMINDER':
+      return {
+        subject: `📅 Reminder: your event at ${r} is on ${data.event_date}`,
+        text:
+          `Hi ${data.customer_name || 'there'},\n\nA friendly reminder that your ${data.event_type || 'event'} at ${r} is coming up${data.days != null ? ` in ${data.days} day(s)` : ''}, on ${data.event_date}.\n\n` +
+          `Venue: ${data.venue_name || '—'}\nGuests: ${data.guest_count || '—'}\n` +
+          (Number(data.balance || 0) > 0 ? `Balance due: ₹${Number(data.balance).toLocaleString('en-IN')} — kindly clear before the event.\n` : '') +
+          `\nWe look forward to hosting you!\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">📅 Your event is coming up!</h2>` +
+          `<p>Hi <strong>${data.customer_name || 'there'}</strong>, your <strong>${data.event_type || 'event'}</strong> at <strong>${r}</strong> is on <strong>${data.event_date}</strong>${data.days != null ? ` (in ${data.days} day(s))` : ''}.</p>` +
+          `<div style="background:#faf7f2;padding:16px;border-radius:8px;margin:16px 0;color:#6b5d52;font-size:14px">` +
+          `<p style="margin:2px 0">Venue: <strong>${data.venue_name || '—'}</strong></p>` +
+          `<p style="margin:2px 0">Guests: <strong>${data.guest_count || '—'}</strong></p>` +
+          (Number(data.balance || 0) > 0 ? `<p style="margin:2px 0">Balance due: <strong>₹${Number(data.balance).toLocaleString('en-IN')}</strong></p>` : '') +
+          `</div><p style="color:#6b5d52;font-size:13px">We look forward to hosting you!<br><strong>${r}</strong></p></div>`,
+      };
+
     /* ── Default fallback ─────────────────────────────────────────────── */
 
     default:

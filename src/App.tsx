@@ -18885,7 +18885,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
         </div>
       ) : activeTab === 'NOTIFICATIONS' ? (
-        <NotificationSettings restaurantId={restaurantId} token={token} />
+        <NotificationSettings restaurantId={restaurantId} token={token} isHotelEnabled={isHotelEnabled} isRestaurantEnabled={isRestaurantEnabled} isSpaEnabled={isSpaEnabled} isEventsEnabled={isEventsEnabled} />
       ) : activeTab === 'FEEDBACK' ? (
         <div className="space-y-8">
           <div className="flex justify-between items-center">
@@ -63769,7 +63769,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
 const NOTIFICATION_EVENTS: {
   id: string; label: string; roles: string[];
   group: 'Orders' | 'Payments' | 'Bookings' | 'Feedback & Reports' | 'Hotel'
-       | 'Loyalty' | 'Staff' | 'Delivery & OTA' | 'Inventory' | 'System';
+       | 'Loyalty' | 'Staff' | 'Delivery & OTA' | 'Inventory' | 'System' | 'Events & Convention';
   description: string;
   schedulable?: boolean;
 }[] = [
@@ -63822,7 +63822,27 @@ const NOTIFICATION_EVENTS: {
   { id: 'ITEM_MAPPING_ALERT',         label: 'Channel Item-Mapping Alert',    roles: ['OWNER', 'MANAGER'],                                  group: 'System', description: 'Fired when a channel-manager item mapping needs attention' },
   { id: 'SYNC_JOB_DEAD',              label: 'Channel Sync Failed',           roles: ['OWNER'],                                             group: 'System', description: 'Fired when a channel-sync job fails after all retries' },
   { id: 'WEBHOOK_SIGNATURE_FAILURE',  label: 'Webhook Security Alert',        roles: ['OWNER'],                                             group: 'System', description: 'Fired when an inbound webhook fails signature verification' },
+  // Events & Convention (only shown when the Events module is enabled)
+  { id: 'EVENT_BOOKING_CREATED',      label: 'New Event Enquiry',             roles: ['OWNER', 'MANAGER'],                                  group: 'Events & Convention', description: 'Fired when a new event booking / enquiry is created' },
+  { id: 'EVENT_QUOTATION_SENT',       label: 'Quotation Sent',                roles: ['OWNER', 'MANAGER'],                                  group: 'Events & Convention', description: 'Fired when an event quotation is emailed to the customer' },
+  { id: 'EVENT_CONFIRMED',            label: 'Event Confirmed',               roles: ['OWNER', 'MANAGER', 'CUSTOMER'],                      group: 'Events & Convention', description: 'Sent when an event booking is confirmed' },
+  { id: 'EVENT_PAYMENT_RECEIVED',     label: 'Event Payment Received',        roles: ['OWNER', 'MANAGER', 'CUSTOMER'],                      group: 'Events & Convention', description: 'Fired when a payment is recorded against an event booking' },
+  { id: 'EVENT_CANCELLED',            label: 'Event Cancelled',               roles: ['OWNER', 'MANAGER', 'CUSTOMER'],                      group: 'Events & Convention', description: 'Fired when an event booking is cancelled' },
+  { id: 'EVENT_UPCOMING_REMINDER',    label: 'Upcoming Event Reminder',       roles: ['CUSTOMER', 'OWNER'],                                 group: 'Events & Convention', description: 'Sent to the customer a couple of days before a confirmed event' },
 ];
+
+// Which capability flag each notification group belongs to. Groups NOT listed
+// here are common (shown to every tenant). The notification-settings screen hides
+// a group entirely when the tenant does not have that module enabled, so an owner
+// only ever configures notifications for the modules they actually run.
+const NOTIFICATION_GROUP_MODULE: Record<string, 'RESTAURANT' | 'HOTEL' | 'EVENTS' | 'SPA'> = {
+  'Orders': 'RESTAURANT',
+  'Bookings': 'RESTAURANT',
+  'Delivery & OTA': 'RESTAURANT',
+  'Inventory': 'RESTAURANT',
+  'Hotel': 'HOTEL',
+  'Events & Convention': 'EVENTS',
+};
 
 const NOTIFICATION_CHANNELS = [
   { id: 'whatsapp_enabled', label: 'WhatsApp', icon: MessageSquare },
@@ -63831,7 +63851,7 @@ const NOTIFICATION_CHANNELS = [
   { id: 'telegram_enabled', label: 'Telegram',  icon: MessageCircle },
 ];
 
-function NotificationSettings({ restaurantId, token }: { restaurantId: string, token: string }) {
+function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestaurantEnabled, isSpaEnabled, isEventsEnabled }: { restaurantId: string, token: string, isHotelEnabled?: boolean, isRestaurantEnabled?: boolean, isSpaEnabled?: boolean, isEventsEnabled?: boolean }) {
   const toast = useToast();
   const [settings, setSettings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63927,11 +63947,24 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
   if (loading) return <div className="p-12 text-center text-[#6b5d52] font-medium">Loading notification settings…</div>;
 
   // Group events by their category
+  // Only surface notification groups for modules this tenant actually has enabled
+  // — a group with no module mapping is common (always shown). Keeps the config
+  // screen to just the notifications the owner can actually act on.
+  const moduleEnabled = (m: string): boolean =>
+    m === 'RESTAURANT' ? isRestaurantEnabled !== false
+    : m === 'HOTEL' ? !!isHotelEnabled
+    : m === 'EVENTS' ? !!isEventsEnabled
+    : m === 'SPA' ? !!isSpaEnabled
+    : true;
+  const visibleEvents = NOTIFICATION_EVENTS.filter(e => {
+    const mod = NOTIFICATION_GROUP_MODULE[e.group];
+    return !mod || moduleEnabled(mod);
+  });
   const eventGroups = Array.from(
-    new Set(NOTIFICATION_EVENTS.map(e => e.group))
+    new Set(visibleEvents.map(e => e.group))
   ).map(group => ({
     group,
-    events: NOTIFICATION_EVENTS.filter(e => e.group === group),
+    events: visibleEvents.filter(e => e.group === group),
   }));
 
   // Channel config status pills (purely UI — keys match env var prefixes)
