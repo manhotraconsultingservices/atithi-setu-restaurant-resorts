@@ -997,6 +997,13 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const [emailInvoice, setEmailInvoice] = useState(false);
   const [caterPkgs, setCaterPkgs] = useState<any[]>([]);
   const [nonce, setNonce] = useState(0);
+  // Venue options for the change-venue selector. Prefer the list passed in; when
+  // opened via a drill-down that doesn't pass one (e.g. the dashboard), fetch it.
+  const [venueOpts, setVenueOpts] = useState<any[]>(venues || []);
+  useEffect(() => {
+    if (venues && venues.length) { setVenueOpts(venues); return; }
+    api('/events/venues').then((r: any) => setVenueOpts(Array.isArray(r) ? r : [])).catch(() => {});
+  }, [venues]);
 
   const load = async () => { try { setBk(await api(`/events/bookings/${bookingId}`)); setNonce(n => n + 1); } catch (e: any) { alert(e.message); } };
   useEffect(() => { load(); api('/events/rental-items').then(setRentals).catch(() => {}); api('/events/services').then(setServices).catch(() => {}); api('/events/catering-packages').then(setCaterPkgs).catch(() => {}); }, [bookingId]);
@@ -1080,6 +1087,16 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     if (String(bk[field] || '') === v) return;
     await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [field]: v }) });
     await load();
+  };
+  // Change the venue after creation — the backend re-resolves the venue charge for
+  // the new hall (and re-runs the conflict check for held bookings). Surfaces a
+  // 409 (double-booked / blocked) instead of failing silently.
+  const commitVenue = async (venueId: string) => {
+    if (String(bk.venue_id || '') === String(venueId || '')) return;
+    try {
+      await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ venue_id: venueId || null }) });
+      await load();
+    } catch (e: any) { alert(e.message); await load(); }
   };
 
   const loadHotel = async () => {
@@ -1198,6 +1215,16 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
                   <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#9d8b7e]"><Mail size={11} />{t('events.bookings.email')}</span>
                   <input type="email" defaultValue={bk.customer_email || ''} onBlur={e => commitContact('customer_email', e.target.value)} placeholder="name@email.com"
                     className={`mt-0.5 w-full px-2 py-1 rounded-lg border text-xs ${hasEmail ? 'border-[#e8dccf]' : 'border-amber-300 bg-amber-50'}`} />
+                </label>
+                {/* Venue is editable after creation — changing it recalculates the venue charge. */}
+                <label className="block sm:col-span-2">
+                  <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#9d8b7e]"><Building2 size={11} />{t('events.bookings.venue')}</span>
+                  <select value={bk.venue_id || ''} onChange={e => commitVenue(e.target.value)}
+                    className="mt-0.5 w-full px-2 py-1 rounded-lg border border-[#e8dccf] text-xs bg-white">
+                    <option value="">—</option>
+                    {venueOpts.map((v: any) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                  </select>
+                  <span className="mt-0.5 block text-[10px] text-[#9d8b7e]">{t('events.bookings.venueEditHint')}</span>
                 </label>
               </div>
             ) : (

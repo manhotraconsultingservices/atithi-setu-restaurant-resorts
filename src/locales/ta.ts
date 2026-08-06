@@ -109,6 +109,7 @@ export const ta: Record<string, string> = {
   'events.bookings.startTime': 'தொடக்க நேரம்',
   'events.bookings.endTime': 'முடிவு நேரம்',
   'events.bookings.guests': 'விருந்தினர்கள்',
+  'events.bookings.venueEditHint': 'மண்டபத்தை மாற்றினால் மண்டபக் கட்டணம் மறு கணக்கிடப்படும்.',
   'events.bookings.rateBasis': 'கட்டண அடிப்படை',
   'events.bookings.discount': 'தள்ளுபடி',
   'events.bookings.advance': 'முன்பணம்',

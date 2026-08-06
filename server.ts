@@ -46813,8 +46813,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-scenario-bugfixes+hide-property-type',
+    commit_marker: 'events-audit-diff+venue-edit',
     code_features: [
+      'events-audit-diff',                          // audit log renders before/after as a readable Field·Before·After table (was raw single-line JSON), with pretty-JSON fallback
+      'events-venue-edit-after-create',             // event booking detail has a venue selector; changing it re-resolves the venue charge (backend already supported the PUT)
       'events-scenario-bugfixes',                   // payment overpayment/duplicate guard, cancel-paid requires refund-ack, delete-payment confirm-lock, negative guest/discount rejected, discount-balance refresh, invoice PDF tab title, no payment on cancelled booking
       'hide-property-type-settings',                // Brand & Settings Property Type module-picker card hidden (owner-read-only, managed by SuperAdmin) — settings shown directly
       'events-kpi-margin-targets-alerts-cash',      // true margin (venue cost_per_day); monthly revenue/occupancy targets + attainment; dashboard alerts (overdue + low-deposit upcoming); cash-collected-by-month from payment ledger

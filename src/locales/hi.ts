@@ -109,6 +109,7 @@ export const hi: Record<string, string> = {
   'events.bookings.startTime': 'आरंभ समय',
   'events.bookings.endTime': 'समाप्ति समय',
   'events.bookings.guests': 'अतिथि',
+  'events.bookings.venueEditHint': 'स्थल बदलने पर स्थल शुल्क पुनः गणना होता है।',
   'events.bookings.rateBasis': 'दर आधार',
   'events.bookings.discount': 'छूट',
   'events.bookings.advance': 'अग्रिम',

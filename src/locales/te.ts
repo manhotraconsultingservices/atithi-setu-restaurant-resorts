@@ -109,6 +109,7 @@ export const te: Record<string, string> = {
   'events.bookings.startTime': 'ప్రారంభ సమయం',
   'events.bookings.endTime': 'ముగింపు సమయం',
   'events.bookings.guests': 'అతిథులు',
+  'events.bookings.venueEditHint': 'వేదికను మార్చితే వేదిక ఛార్జీ మళ్ళీ లెక్కించబడుతుంది.',
   'events.bookings.rateBasis': 'రేటు ఆధారం',
   'events.bookings.discount': 'తగ్గింపు',
   'events.bookings.advance': 'అడ్వాన్స్',

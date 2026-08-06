@@ -116,6 +116,7 @@ export const en: Record<string, string> = {
   'events.bookings.startTime': 'Start time',
   'events.bookings.endTime': 'End time',
   'events.bookings.guests': 'Guests',
+  'events.bookings.venueEditHint': 'Changing the venue recalculates the venue charge.',
   'events.bookings.rateBasis': 'Rate basis',
   'events.bookings.discount': 'Discount',
   'events.bookings.advance': 'Advance',

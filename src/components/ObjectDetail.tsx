@@ -65,6 +65,54 @@ function timeAgo(iso: string): string {
   return String(iso || '').replace('T', ' ').slice(0, 16);
 }
 
+// ── Audit change diff — render before/after as a readable field-wise table
+// (Field · Before · After) instead of a raw single-line JSON blob. Falls back to
+// pretty-printed JSON when the payload isn't a plain object. ──────────────────
+const auditPrettyKey = (k: string): string => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+const auditFmtVal = (v: any): string => {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'object') { try { return JSON.stringify(v); } catch { return String(v); } }
+  return String(v);
+};
+function AuditChangeDiff({ beforeJson, afterJson }: { beforeJson?: string; afterJson?: string }) {
+  const isObj = (o: any) => !!o && typeof o === 'object' && !Array.isArray(o);
+  let before: any = null, after: any = null, parseFail = false;
+  try { before = beforeJson ? JSON.parse(beforeJson) : null; } catch { parseFail = true; }
+  try { after = afterJson ? JSON.parse(afterJson) : null; } catch { parseFail = true; }
+  if (parseFail || (!isObj(before) && !isObj(after))) {
+    const pretty = (s?: string) => { if (!s) return ''; try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; } };
+    return (
+      <pre className="p-2 rounded-lg bg-[#faf7f2] border border-[#e8dccf] text-[10px] overflow-x-auto whitespace-pre-wrap">{beforeJson ? `before:\n${pretty(beforeJson)}${afterJson ? '\n\n' : ''}` : ''}{afterJson ? `after:\n${pretty(afterJson)}` : ''}</pre>
+    );
+  }
+  const b = before || {}, a = after || {};
+  const bothPresent = isObj(before) && isObj(after);
+  const keys = Array.from(new Set([...Object.keys(b), ...Object.keys(a)])).sort();
+  const rows = keys.filter(k => !bothPresent || JSON.stringify(b[k]) !== JSON.stringify(a[k]));
+  if (rows.length === 0) return <div className="text-[11px] text-[#9d8b7e] px-2 py-1.5">No field-level changes.</div>;
+  const valueHeader = bothPresent ? 'After' : (isObj(after) ? 'Value' : 'Removed value');
+  return (
+    <div className="p-2 rounded-lg bg-[#faf7f2] border border-[#e8dccf] overflow-x-auto">
+      <table className="w-full text-[11px]">
+        <thead><tr className="text-left text-[#9d8b7e] border-b border-[#e8dccf]">
+          <th className="py-1 pr-4 font-semibold">Field</th>
+          {bothPresent && <th className="py-1 pr-4 font-semibold">Before</th>}
+          <th className="py-1 pr-4 font-semibold">{valueHeader}</th>
+        </tr></thead>
+        <tbody>
+          {rows.map(k => (
+            <tr key={k} className="border-b border-[#f4efe8] align-top">
+              <td className="py-1 pr-4 font-medium text-[#3d3128] whitespace-nowrap">{auditPrettyKey(k)}</td>
+              {bothPresent && <td className="py-1 pr-4 text-rose-600 break-all">{auditFmtVal(b[k])}</td>}
+              <td className="py-1 pr-4 text-emerald-700 break-all">{auditFmtVal(bothPresent ? a[k] : (isObj(after) ? a[k] : b[k]))}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── Audit log node (smart table) ─────────────────────────────────────────────
 function AuditView({ url, token, nonce }: { url: string; token: string; nonce?: number }) {
   const [rows, setRows] = useState<any[] | null>(null);
