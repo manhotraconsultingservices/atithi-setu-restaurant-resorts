@@ -970,6 +970,32 @@ async function testEvents() {
       const mdOk = mdBk.status === 201 && Number(mdBk.data?.venue_rate) === 105000;
       (mdOk ? pass : fail)('TC-EVT-MULTIDAY', 'Multi-day daily = rate x days', `rate=${mdBk.data?.venue_rate} (want 105000), http=${mdBk.status}`);
 
+      // GST-after-discount on a real multi-day booking: apply a discount, then the
+      // bill's GST must be charged on the NET (subtotal − discount), not the gross.
+      if (mdBk.status === 201 && mdBk.data?.id) {
+        const gs = await api('GET', `/api/restaurant/${restaurantId}/events/gst-settings`);
+        const rate = Number(gs.data?.gst_enabled ?? 1) !== 0 ? Number(gs.data?.gst_percent ?? 18) : 0;
+        const disc = 10000;
+        await api('PUT', `/api/restaurant/${restaurantId}/events/bookings/${mdBk.data.id}`, { discount: disc });
+        const gmd = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/${mdBk.data.id}`);
+        const bill = gmd.data?.bill;
+        if (bill) {
+          const r2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+          const sub = Number(bill.subtotal || 0);
+          const wantTax = r2((sub - disc) * rate / 100);          // AFTER discount
+          const grossTax = r2(sub * rate / 100);                   // the OLD (buggy) value
+          const wantGrand = r2((sub - disc) + Number(bill.tax || 0));
+          const subOk = Math.abs(sub - 105000) < 0.02;             // multi-day venue fed the bill
+          const taxOk = Math.abs(Number(bill.tax || 0) - wantTax) < 0.05;
+          const notGross = rate === 0 || Math.abs(Number(bill.tax || 0) - grossTax) > 0.05;
+          const grandOk = Math.abs(Number(bill.grand || 0) - wantGrand) < 0.05;
+          (subOk && taxOk && notGross && grandOk ? pass : fail)('TC-EVT-BILL-GST-AFTER-DISCOUNT',
+            'Event GST charged on discounted (net) base', `sub=${sub}, disc=${bill.discount}, tax=${bill.tax} (want ${wantTax}, gross ${grossTax}), grand=${bill.grand}`);
+        } else {
+          skip('TC-EVT-BILL-GST-AFTER-DISCOUNT', 'GST-after-discount', 'booking bill breakdown missing');
+        }
+      }
+
       for (const id of [amBk.data?.id, pmBk.data?.id, mdBk.data?.id, clash.data?.id].filter(Boolean)) {
         await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${id}/cancel`, { reason: 'UAT cleanup' });
       }

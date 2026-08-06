@@ -23508,25 +23508,68 @@ ${data.tenant.name}`;
     return undefined;
   };
 
+  // How many rate-basis units an event spans — the multiplier applied to rental
+  // and service lines so a multi-day / multi-hour event bills them per day/hour,
+  // not once. HOURLY → whole hours (min 1); DAILY → inclusive day span
+  // (event_date..end_date, min 1); HALF_DAY / single-day → 1. The venue charge is
+  // already summed per-day by resolveVenueCharge, so this is NOT applied to it.
+  const eventUnits = (bk: any): number => {
+    const basis = String(bk?.venue_rate_basis || 'DAILY').toUpperCase();
+    if (basis === 'HALF_DAY') return 1;
+    if (basis === 'HOURLY') {
+      const toMin = (t: any) => { const [h, m] = String(t ?? '').split(':'); const H = Number(h), M = Number(m); return (Number.isFinite(H) ? H : 0) * 60 + (Number.isFinite(M) ? M : 0); };
+      const mins = toMin(bk?.end_time) - toMin(bk?.start_time);
+      return mins > 0 ? Math.max(1, Math.round(mins / 60)) : 1;
+    }
+    // DAILY (default) — inclusive whole-day span.
+    const ymd = (v: any) => (v instanceof Date ? v.toISOString() : String(v ?? '')).slice(0, 10);
+    const s = ymd(bk?.event_date);
+    const e = bk?.end_date ? ymd(bk.end_date) : s;
+    if (!s || !e || e <= s) return 1;
+    const days = Math.round((Date.parse(e + 'T00:00:00Z') - Date.parse(s + 'T00:00:00Z')) / 86400000) + 1;
+    return Math.max(1, days);
+  };
+  // Effective rental duration: an explicit per-line duration (owner set >1) wins;
+  // otherwise the rental scales with the event's own span. So a 3-day event
+  // charges single-unit rentals ×3, while a rental booked for an explicit number
+  // of units keeps that number.
+  const rentalUnits = (line: any, units: number): number => {
+    const dur = Number(line?.duration_units || 1);
+    return dur > 1 ? dur : Math.max(1, units);
+  };
+  const eventUnitWord = (bk: any, n: number): string => {
+    const w = String(bk?.venue_rate_basis || 'DAILY').toUpperCase() === 'HOURLY' ? 'hr' : 'day';
+    return `${w}${n === 1 ? '' : 's'}`;
+  };
+
   const computeEventBill = async (db: any, bookingId: string): Promise<{ subtotal: number; tax: number; discount: number; grand: number }> => {
-    const bk: any = await db.get("SELECT venue_id, venue_rate, discount FROM event_bookings WHERE id = ?", [bookingId]);
+    const bk: any = await db.get("SELECT venue_id, venue_rate, discount, venue_rate_basis, event_date, end_date, start_time, end_time FROM event_bookings WHERE id = ?", [bookingId]);
     if (!bk) return { subtotal: 0, tax: 0, discount: 0, grand: 0 };
     const evGst = await resolveEventGstRate(db);
-    let subtotal = 0, tax = 0;
+    const units = eventUnits(bk);
+    // Each entry is a pre-discount taxable amount + its own GST rate.
+    const taxable: { amt: number; rate: number }[] = [];
     const venueRate = Number(bk.venue_rate || 0);
-    if (venueRate > 0) { subtotal += venueRate; tax += venueRate * evGst / 100; }
-    // Non-room lines all bill at the single event GST rate.
-    const addLines = (arr: any[], gstPct: number) => { for (const l of arr || []) { const lt = Number(l.line_total || 0); subtotal += lt; tax += lt * gstPct / 100; } };
-    addLines(await db.query("SELECT line_total FROM event_booking_items WHERE booking_id = ?", [bookingId]), evGst);
-    addLines(await db.query("SELECT line_total FROM event_booking_services WHERE booking_id = ?", [bookingId]), evGst);
-    addLines(await db.query("SELECT line_total FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => []), evGst);
-    // Hotel rooms — GST per the Hotel settings, snapshotted on each room line.
-    for (const rm of (await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId])) || []) {
-      const lt = Number(rm.line_total || 0); subtotal += lt; tax += lt * Number(rm.gst_percent ?? 12) / 100;
-    }
-    subtotal = round2(subtotal); tax = round2(tax);
-    const discount = round2(Number(bk.discount || 0));
-    const grand = round2(subtotal + tax - discount);
+    if (venueRate > 0) taxable.push({ amt: round2(venueRate), rate: evGst });
+    // Rentals — unit × qty × effective duration (scales with the event span).
+    for (const it of (await db.query("SELECT unit_rate, quantity, duration_units FROM event_booking_items WHERE booking_id = ?", [bookingId])) || [])
+      taxable.push({ amt: round2(Number(it.unit_rate || 0) * Number(it.quantity || 1) * rentalUnits(it, units)), rate: evGst });
+    // Services — unit × qty × event span (multi-day/hour billing rule).
+    for (const s of (await db.query("SELECT unit_rate, quantity FROM event_booking_services WHERE booking_id = ?", [bookingId])) || [])
+      taxable.push({ amt: round2(Number(s.unit_rate || 0) * Number(s.quantity || 1) * Math.max(1, units)), rate: evGst });
+    // Catering — priced per plate (pax), independent of the event span.
+    for (const c of (await db.query("SELECT line_total FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => [])) || [])
+      taxable.push({ amt: round2(Number(c.line_total || 0)), rate: evGst });
+    // Hotel rooms — already priced per-night; keep their own snapshotted GST.
+    for (const rm of (await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId])) || [])
+      taxable.push({ amt: round2(Number(rm.line_total || 0)), rate: Number(rm.gst_percent ?? 12) });
+    const subtotal = round2(taxable.reduce((sum, t) => sum + t.amt, 0));
+    // Discount comes off BEFORE GST. Allocate it across lines proportionally so
+    // each line is taxed on its discounted (net) share.
+    const discount = round2(Math.min(Math.max(0, Number(bk.discount || 0)), subtotal));
+    const netFactor = subtotal > 0 ? (subtotal - discount) / subtotal : 1;
+    const tax = round2(taxable.reduce((sum, t) => sum + round2(t.amt * netFactor * t.rate / 100), 0));
+    const grand = round2((subtotal - discount) + tax);
     return { subtotal, tax, discount, grand };
   };
 
@@ -23901,19 +23944,29 @@ ${data.tenant.name}`;
       // (rental/service/catering cost snapshots). Only enforced once costs exist.
       if (b.discount !== undefined && Number(b.discount) > 0) {
         const bid = req.params.bid;
-        const q = async (sql: string) => { try { const r: any = await db.get(sql, [bid]); return Number(r?.v || 0); } catch { return 0; } };
-        const subtotal = round2(
-          Number(existing.venue_rate || 0) +
-          await q("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_items WHERE booking_id = ?") +
-          await q("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_services WHERE booking_id = ?") +
-          await q("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_catering WHERE booking_id = ?") +
-          await q("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'")
-        );
-        const totalCost = round2(
-          await q("SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS v FROM event_booking_items WHERE booking_id = ?") +
-          await q("SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS v FROM event_booking_services WHERE booking_id = ?") +
-          await q("SELECT COALESCE(SUM(cost_snapshot*pax),0) AS v FROM event_booking_catering WHERE booking_id = ?")
-        );
+        // Revenue + cost must scale with the event span exactly like the bill
+        // (computeEventBill), or a legitimate multi-day discount is wrongly
+        // rejected. Use the merged booking so a simultaneous date change counts.
+        const units = eventUnits({ ...existing, ...b });
+        const rows = async (sql: string) => { try { return (await db.query(sql, [bid])) || []; } catch { return []; } };
+        const scalar = async (sql: string) => { try { const r: any = await db.get(sql, [bid]); return Number(r?.v || 0); } catch { return 0; } };
+        let revenue = Number(existing.venue_rate || 0);
+        let cost = 0;
+        for (const it of await rows("SELECT unit_rate, quantity, duration_units, cost_snapshot FROM event_booking_items WHERE booking_id = ?")) {
+          const dur = rentalUnits(it, units);
+          revenue += Number(it.unit_rate || 0) * Number(it.quantity || 1) * dur;
+          cost += Number(it.cost_snapshot || 0) * Number(it.quantity || 1) * dur;
+        }
+        for (const s of await rows("SELECT unit_rate, quantity, cost_snapshot FROM event_booking_services WHERE booking_id = ?")) {
+          const su = Math.max(1, units);
+          revenue += Number(s.unit_rate || 0) * Number(s.quantity || 1) * su;
+          cost += Number(s.cost_snapshot || 0) * Number(s.quantity || 1) * su;
+        }
+        revenue += await scalar("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_catering WHERE booking_id = ?");
+        revenue += await scalar("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'");
+        cost += await scalar("SELECT COALESCE(SUM(cost_snapshot*pax),0) AS v FROM event_booking_catering WHERE booking_id = ?");
+        const subtotal = round2(revenue);
+        const totalCost = round2(cost);
         if (totalCost > 0 && round2(subtotal - Number(b.discount)) < totalCost) {
           const maxDisc = round2(Math.max(0, subtotal - totalCost));
           return res.status(409).json({ error: `Discount too high — this would sell below cost (variable cost Rs. ${totalCost.toFixed(2)}). Maximum discount is Rs. ${maxDisc.toFixed(2)}.` });
@@ -24651,42 +24704,47 @@ ${data.tenant.name}`;
     // catering). A per-document override (from the quotation/invoice request)
     // wins; otherwise the tenant default. Hotel rooms keep their own snapshot.
     const evGst = await resolveEventGstRate(db, gstOverride);
+    const units = eventUnits(bk);
     if (Number(bk.venue_rate || 0) > 0) {
       const venue: any = bk.venue_id ? await db.get("SELECT * FROM event_venues WHERE id = ?", [bk.venue_id]) : null;
-      const gst = evGst;
       const amt = round2(bk.venue_rate);
-      lines.push({ line_type: 'VENUE', description: `${venue?.name || 'Venue'} (${bk.venue_rate_basis || 'DAILY'})`, quantity: 1, unit_rate: amt, amount: amt, gst_rate: gst, gst_amount: round2(amt * gst / 100) });
+      lines.push({ line_type: 'VENUE', description: `${venue?.name || 'Venue'} (${bk.venue_rate_basis || 'DAILY'})`, quantity: 1, unit_rate: amt, amount: amt, gst_rate: evGst, gst_amount: 0 });
     }
     const items: any[] = await db.query("SELECT * FROM event_booking_items WHERE booking_id = ? ORDER BY created_at", [bk.id]);
     for (const it of items) {
-      const gst = evGst;
+      const dur = rentalUnits(it, units);
+      const amt = round2(Number(it.unit_rate || 0) * Number(it.quantity || 1) * dur);
       const d = it.description_snapshot ? ` — ${it.description_snapshot}` : '';
-      lines.push({ line_type: 'RENTAL', description: `${it.name_snapshot} × ${it.quantity} (${it.rate_basis} × ${it.duration_units})${d}`, quantity: it.quantity, unit_rate: it.unit_rate, amount: round2(it.line_total), gst_rate: gst, gst_amount: round2(it.line_total * gst / 100) });
+      lines.push({ line_type: 'RENTAL', description: `${it.name_snapshot} × ${it.quantity} (${it.rate_basis} × ${dur})${d}`, quantity: it.quantity, unit_rate: it.unit_rate, amount: amt, gst_rate: evGst, gst_amount: 0 });
     }
     const svcs: any[] = await db.query("SELECT * FROM event_booking_services WHERE booking_id = ? ORDER BY created_at", [bk.id]);
     for (const s of svcs) {
-      const gst = evGst;
+      const su = Math.max(1, units);
+      const amt = round2(Number(s.unit_rate || 0) * Number(s.quantity || 1) * su);
       const d = s.description_snapshot ? ` — ${s.description_snapshot}` : '';
-      lines.push({ line_type: 'SERVICE', description: `${s.name_snapshot} × ${s.quantity}${d}`, quantity: s.quantity, unit_rate: s.unit_rate, amount: round2(s.line_total), gst_rate: gst, gst_amount: round2(s.line_total * gst / 100) });
+      const spanNote = su > 1 ? ` × ${su} ${eventUnitWord(bk, su)}` : '';
+      lines.push({ line_type: 'SERVICE', description: `${s.name_snapshot} × ${s.quantity}${spanNote}${d}`, quantity: s.quantity, unit_rate: s.unit_rate, amount: amt, gst_rate: evGst, gst_amount: 0 });
     }
     const cater: any[] = await db.query("SELECT * FROM event_booking_catering WHERE booking_id = ? ORDER BY created_at", [bk.id]).catch(() => []);
     for (const c of cater) {
-      const gst = evGst;
       // Compose a readable menu line from the snapshot JSON, if present.
       let menu = '';
       try { const m = c.menu_snapshot ? JSON.parse(c.menu_snapshot) : null; if (Array.isArray(m)) menu = m.map((s: any) => `${s.section}: ${(s.options || []).join(', ')}`).join(' | '); } catch { /* */ }
       const d = [c.description_snapshot, menu].filter(Boolean).join(' — ');
-      lines.push({ line_type: 'FNB', description: `${c.name_snapshot} (${c.package_type_snapshot}) × ${c.pax} pax${d ? ` — ${d}` : ''}`, quantity: c.pax, unit_rate: c.price_per_plate, amount: round2(c.line_total), gst_rate: gst, gst_amount: round2(c.line_total * gst / 100) });
+      lines.push({ line_type: 'FNB', description: `${c.name_snapshot} (${c.package_type_snapshot}) × ${c.pax} pax${d ? ` — ${d}` : ''}`, quantity: c.pax, unit_rate: c.price_per_plate, amount: round2(c.line_total), gst_rate: evGst, gst_amount: 0 });
     }
     const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED' ORDER BY created_at", [bk.id]);
     for (const rm of rooms) {
-      const gst = Number(rm.gst_percent ?? 12);
-      lines.push({ line_type: 'HOTEL_ROOM', description: `${rm.room_type_snapshot} × ${rm.num_rooms} (${rm.check_in_date} → ${rm.check_out_date})`, quantity: rm.num_rooms, unit_rate: rm.quoted_rate, amount: round2(rm.line_total), gst_rate: gst, gst_amount: round2(rm.line_total * gst / 100) });
+      lines.push({ line_type: 'HOTEL_ROOM', description: `${rm.room_type_snapshot} × ${rm.num_rooms} (${rm.check_in_date} → ${rm.check_out_date})`, quantity: rm.num_rooms, unit_rate: rm.quoted_rate, amount: round2(rm.line_total), gst_rate: Number(rm.gst_percent ?? 12), gst_amount: 0 });
     }
     const subtotal = round2(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
+    // Discount comes off BEFORE GST — allocate proportionally and tax each line
+    // on its net (discounted) share. Mirrors computeEventBill exactly.
+    const discount = round2(Math.min(Math.max(0, Number(bk.discount || 0)), subtotal));
+    const netFactor = subtotal > 0 ? (subtotal - discount) / subtotal : 1;
+    for (const l of lines) l.gst_amount = round2(Number(l.amount) * netFactor * Number(l.gst_rate) / 100);
     const tax = round2(lines.reduce((s, l) => s + Number(l.gst_amount || 0), 0));
-    const discount = round2(bk.discount || 0);
-    const grand = round2(subtotal + tax - discount);
+    const grand = round2((subtotal - discount) + tax);
     return { lines, subtotal, tax, discount, grand };
   };
 
@@ -46554,8 +46612,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-bilingual-invoice-noto-font',
+    commit_marker: 'events-billing-gst-after-discount-multiday',
     code_features: [
+      'events-billing-gst-after-discount-multiday', // GST charged on discounted (net) base; rentals+services ×days/hours; venue already per-day; computeEventBill == assembleEventQuoteLines
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
       'checkin-checklist-validate-setting',  // owner toggle checklist_validate_on_checkin gates the CHECK_IN trigger

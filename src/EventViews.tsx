@@ -1140,6 +1140,18 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const evVenueRate = Number(bk.venue_rate || 0);
   const evPerDay = evDays > 0 ? evVenueRate / evDays : evVenueRate;
   const evUniform = Math.abs(evPerDay * evDays - evVenueRate) < 0.5;
+  // Event span multiplier — mirrors the backend eventUnits(): rentals + services
+  // bill per hour (HOURLY) / per day (DAILY multi-day), so the itemized lines
+  // reconcile with the bill subtotal. HALF_DAY / single-day → 1.
+  const evUnits = (() => {
+    const basis = String(bk.venue_rate_basis || 'DAILY').toUpperCase();
+    if (basis === 'HALF_DAY') return 1;
+    if (basis === 'HOURLY') { const m = (t: any) => { const [h, mm] = String(t ?? '').split(':'); const H = Number(h), M = Number(mm); return (isFinite(H) ? H : 0) * 60 + (isFinite(M) ? M : 0); }; const mins = m(bk.end_time) - m(bk.start_time); return mins > 0 ? Math.max(1, Math.round(mins / 60)) : 1; }
+    return evDays;
+  })();
+  const rentalUnitsFor = (it: any) => { const d = Number(it.duration_units || 1); return d > 1 ? d : Math.max(1, evUnits); };
+  const spanWord = String(bk.venue_rate_basis || 'DAILY').toUpperCase() === 'HOURLY' ? 'hr' : 'day';
+  const spanNote = (n: number) => n > 1 ? ` × ${n} ${spanWord}${n === 1 ? '' : 's'}` : '';
 
   return (
     <ObjectDetail
@@ -1263,15 +1275,15 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             </select>}</div>
           {(bk.items || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.items || []).map((it: any, i: number) => (
             <div key={it.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
-              <span className="flex-1 min-w-0 truncate">{it.name_snapshot} <span className="text-[#9d8b7e]">({it.rate_basis})</span></span>
+              <span className="flex-1 min-w-0 truncate">{it.name_snapshot} <span className="text-[#9d8b7e]">({it.rate_basis}{spanNote(rentalUnitsFor(it))})</span></span>
               {editable ? (
                 <>
                   <input type="number" min={0} defaultValue={it.quantity} title="Qty" onBlur={e => commitLine('items', i, 'quantity', e.target.value)} className="w-11 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
                   <span className="text-[#9d8b7e]">×₹</span>
                   <input type="number" min={0} defaultValue={it.unit_rate} title="Unit price" onBlur={e => commitLine('items', i, 'unit_rate', e.target.value)} className="w-16 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
                 </>
-              ) : <span className="text-[#9d8b7e]">{it.quantity} × {money(it.unit_rate)}</span>}
-              <span className="w-16 text-right font-semibold">{money(it.line_total)}</span>
+              ) : <span className="text-[#9d8b7e]">{it.quantity} × {money(it.unit_rate)}{spanNote(rentalUnitsFor(it))}</span>}
+              <span className="w-16 text-right font-semibold">{money(Number(it.unit_rate || 0) * Number(it.quantity || 1) * rentalUnitsFor(it))}</span>
               {editable && <button onClick={() => removeLine('items', i)}><X size={12} className="text-rose-500" /></button>}
             </div>
           ))}
@@ -1285,15 +1297,15 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             </select>}</div>
           {(bk.services || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.services || []).map((sv: any, i: number) => (
             <div key={sv.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
-              <span className="flex-1 min-w-0 truncate">{sv.name_snapshot}</span>
+              <span className="flex-1 min-w-0 truncate">{sv.name_snapshot}{evUnits > 1 ? <span className="text-[#9d8b7e]"> ({spanNote(evUnits).trim()})</span> : null}</span>
               {editable ? (
                 <>
                   <input type="number" min={0} defaultValue={sv.quantity} title="Qty" onBlur={e => commitLine('services', i, 'quantity', e.target.value)} className="w-11 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
                   <span className="text-[#9d8b7e]">×₹</span>
                   <input type="number" min={0} defaultValue={sv.unit_rate} title="Unit price" onBlur={e => commitLine('services', i, 'unit_rate', e.target.value)} className="w-16 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
                 </>
-              ) : <span className="text-[#9d8b7e]">{sv.quantity} × {money(sv.unit_rate)}</span>}
-              <span className="w-16 text-right font-semibold">{money(sv.line_total)}</span>
+              ) : <span className="text-[#9d8b7e]">{sv.quantity} × {money(sv.unit_rate)}{spanNote(evUnits)}</span>}
+              <span className="w-16 text-right font-semibold">{money(Number(sv.unit_rate || 0) * Number(sv.quantity || 1) * Math.max(1, evUnits))}</span>
               {editable && <button onClick={() => removeLine('services', i)}><X size={12} className="text-rose-500" /></button>}
             </div>
           ))}
