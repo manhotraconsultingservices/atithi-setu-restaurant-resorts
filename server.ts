@@ -23716,6 +23716,7 @@ ${data.tenant.name}`;
       const venueUtilization = Object.entries(venueMap).map(([vid, v]) => ({
         venue_id: vid, name: v.name, events: v.events, revenue: round2(v.revenue),
         bookedDays: v.days.size, utilizationPct: Math.min(100, Math.round(v.days.size / periodDays * 100)),
+        revPerBookedDay: v.days.size > 0 ? round2(v.revenue / v.days.size) : 0,
       })).sort((a, b) => b.revenue - a.revenue);
 
       const typeMap: Record<string, { count: number; revenue: number }> = {};
@@ -23789,12 +23790,105 @@ ${data.tenant.name}`;
         overdue = round2(Number(od?.[0]?.t || 0));
       } catch { /* schedule table may not exist on un-migrated tenant */ }
 
+      // Whole days from b to a (positive when a is later than b).
+      const daysBetween = (a: string, b: string) => Math.round((Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z')) / 86400000);
+
+      // ── AR AGING — net outstanding of won bookings, aged by event date.
+      // Buckets are relative to today; a balance on a future event is "not yet
+      // due" (forward AR), delivered events age 0-30 / 31-60 / 61-90 / 90+.
+      const aging = { notDue: 0, d0_30: 0, d31_60: 0, d61_90: 0, d90plus: 0, total: 0 };
+      for (const r of won) {
+        const bal = round2(Math.max(0, num(r.total_amount) - num(r.advance_amount)));
+        if (bal <= 0) continue;
+        aging.total = round2(aging.total + bal);
+        const ed = ymd(r.event_date);
+        if (ed > today) { aging.notDue = round2(aging.notDue + bal); continue; }
+        const age = daysBetween(today, ed);
+        if (age <= 30) aging.d0_30 = round2(aging.d0_30 + bal);
+        else if (age <= 60) aging.d31_60 = round2(aging.d31_60 + bal);
+        else if (age <= 90) aging.d61_90 = round2(aging.d61_90 + bal);
+        else aging.d90plus = round2(aging.d90plus + bal);
+      }
+
+      // ── CASH & RISK RATIOS ───────────────────────────────────────────────
+      const grossContract = sum(won, r => num(r.total_amount));
+      const depositCollectionPct = grossContract > 0 ? Math.round(advanceCollected / grossContract * 100) : 0;
+      const forwardWon = won.filter(r => ymd(r.event_date) >= today);
+      const deliveredWon = won.filter(r => ymd(r.event_date) < today);
+      const forwardRevenue = sum(forwardWon, r => netAmt(r));
+      const deliveredRevenue = sum(deliveredWon, r => netAmt(r));
+      const valueAtRisk = round2(forwardWon.reduce((s, r) => s + Math.max(0, num(r.total_amount) - num(r.advance_amount)), 0));
+      const cancellationRate = rows.length > 0 ? Math.round(lostCount / rows.length * 100) : 0;
+
+      // ── REPEAT CUSTOMERS (by phone) ──────────────────────────────────────
+      const custMap: Record<string, number> = {};
+      for (const r of rows) { const k = String(r.customer_phone || '').trim(); if (k) custMap[k] = (custMap[k] || 0) + 1; }
+      const distinctCustomers = Object.keys(custMap).length;
+      const repeatCustomers = Object.values(custMap).filter(c => c > 1).length;
+      const repeatCustomerPct = distinctCustomers > 0 ? Math.round(repeatCustomers / distinctCustomers * 100) : 0;
+
+      // ── SPACE YIELD (RevPAR per available function-space-day) ─────────────
+      let activeVenues = 0;
+      try { const av: any = await db.get(`SELECT COUNT(*)::int AS c FROM event_venues WHERE is_active = 1`); activeVenues = num(av?.c); } catch { /* */ }
+      const totalBookedDays = Object.values(venueMap).reduce((s, v) => s + v.days.size, 0);
+      const revPerAvailableDay = activeVenues > 0 ? round2(confirmedRevenue / (activeVenues * periodDays)) : 0;
+      const avgRatePerBookedDay = totalBookedDays > 0 ? round2(confirmedRevenue / totalBookedDays) : 0;
+      const spaceOccupancyPct = activeVenues > 0 ? Math.min(100, Math.round(totalBookedDays / (activeVenues * periodDays) * 100)) : 0;
+
+      // ── BOOKING PACE + LEAD TIME (by created_at = demand inflow) ──────────
+      const paceMap: Record<string, { inquiries: number; won: number }> = {};
+      for (const r of rows) {
+        const m = ymd(r.created_at).slice(0, 7);
+        if (m.length < 7) continue;
+        if (!paceMap[m]) paceMap[m] = { inquiries: 0, won: 0 };
+        paceMap[m].inquiries += 1; if (isWon(r.status)) paceMap[m].won += 1;
+      }
+      const bookingPaceByMonth = Object.keys(paceMap).sort().map(m => ({ month: m, inquiries: paceMap[m].inquiries, won: paceMap[m].won }));
+      let leadSum = 0, leadN = 0;
+      for (const r of won) { const d = daysBetween(ymd(r.event_date), ymd(r.created_at)); if (Number.isFinite(d) && d >= 0) { leadSum += d; leadN += 1; } }
+      const avgLeadTimeDays = leadN > 0 ? Math.round(leadSum / leadN) : 0;
+
+      // ── QUOTATION EFFECTIVENESS ──────────────────────────────────────────
+      let quoteStats = { quoted: 0, sent: 0, accepted: 0, acceptanceRate: 0, avgVersions: 0, avgDaysToQuote: 0 };
+      try {
+        const q: any[] = await db.query(
+          `SELECT q.booking_id, q.status, q.version, q.created_at, b.created_at AS booking_created
+             FROM event_quotations q JOIN event_bookings b ON b.id = q.booking_id`, []);
+        if (q.length) {
+          const byBk: Record<string, any[]> = {};
+          for (const x of q) { (byBk[x.booking_id] = byBk[x.booking_id] || []).push(x); }
+          const bkIds = Object.keys(byBk);
+          let sent = 0, accepted = 0, verSum = 0, dqSum = 0, dqN = 0;
+          for (const bid of bkIds) {
+            const qs = byBk[bid];
+            if (qs.some(x => ['SENT', 'ACCEPTED', 'REJECTED', 'EXPIRED'].includes(x.status))) sent += 1;
+            if (qs.some(x => x.status === 'ACCEPTED')) accepted += 1;
+            verSum += Math.max(...qs.map(x => num(x.version)));
+            const first = qs.map(x => ymd(x.created_at)).sort()[0];
+            const bc = ymd(qs[0].booking_created);
+            if (first && bc) { const d = daysBetween(first, bc); if (Number.isFinite(d) && d >= 0) { dqSum += d; dqN += 1; } }
+          }
+          quoteStats = {
+            quoted: bkIds.length, sent, accepted,
+            acceptanceRate: sent > 0 ? Math.round(accepted / sent * 100) : 0,
+            avgVersions: bkIds.length > 0 ? round2(verSum / bkIds.length) : 0,
+            avgDaysToQuote: dqN > 0 ? Math.round(dqSum / dqN) : 0,
+          };
+        }
+      } catch { /* quotations table may not exist on un-migrated tenant */ }
+
       res.json({
         window: { from, to, days: periodDays },
         kpis: { totalEvents: rows.length, wonCount, lostCount, winRate, avgBookingValue, totalCovers,
           confirmedRevenue, pipelineRevenue, realizedRevenue, advanceCollected, outstanding, discountGiven,
-          cateringCovers, cateringRevenue, overdue, totalCost, margin, marginPct },
+          cateringCovers, cateringRevenue, overdue, totalCost, margin, marginPct,
+          // ── new KPIs ──
+          depositCollectionPct, cancellationRate, repeatCustomerPct, repeatCustomers, distinctCustomers,
+          forwardRevenue, deliveredRevenue, valueAtRisk, revPerAvailableDay, avgRatePerBookedDay,
+          spaceOccupancyPct, avgLeadTimeDays, activeVenues, totalBookedDays,
+          quoteAcceptanceRate: quoteStats.acceptanceRate, avgDaysToQuote: quoteStats.avgDaysToQuote },
         funnel, revenueByMonth, venueUtilization, eventTypeMix, leadSources, cateringByPackage, upcoming, receivables, lostReasons,
+        aging, bookingPaceByMonth, quoteStats,
       });
     } catch (err: any) {
       console.error("/events/analytics error:", err);
@@ -46612,8 +46706,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'home-events-tile',
+    commit_marker: 'events-kpi-pack',
     code_features: [
+      'events-kpi-pack',                            // /events/analytics adds AR aging, deposit%, forward book, value-at-risk, RevPAR/space yield, quote acceptance + speed-to-quote, booking pace, lead time, repeat-customer%, cancellation rate; dashboard tiles/cards + CSV
       'home-events-tile',                           // Home launchpad shows an Events & Convention module tile when events_enabled (was Hotel/Restaurant/Spa only)
       'events-billing-gst-after-discount-multiday', // GST charged on discounted (net) base; rentals+services ×days/hours; venue already per-day; computeEventBill == assembleEventQuoteLines
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter

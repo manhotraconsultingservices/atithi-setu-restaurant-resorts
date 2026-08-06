@@ -1872,6 +1872,7 @@ function EventDashboard({ restaurantId, token }: Props) {
   const openLeads = data ? ((data.funnel.find((f: any) => f.status === 'INQUIRY')?.count || 0) + (data.funnel.find((f: any) => f.status === 'QUOTED')?.count || 0)) : 0;
   const maxMonth = Math.max(1, ...((data?.revenueByMonth || []).map((m: any) => m.revenue)));
   const maxFunnel = Math.max(1, ...((data?.funnel || []).map((f: any) => f.count)));
+  const maxPace = Math.max(1, ...((data?.bookingPaceByMonth || []).map((m: any) => m.inquiries)));
 
   return (
     <div>
@@ -1890,6 +1891,59 @@ function EventDashboard({ restaurantId, token }: Props) {
             {tile(t('events.dash.catering'), money(k.cateringRevenue), `${k.cateringCovers} ${t('events.dash.plates')}`, '#b45309')}
             {tile(t('events.dash.discount'), money(k.discountGiven), t('events.dash.givenWon'), '#9ca3af')}
           </div>
+
+          {/* Cash, space-yield and sales-effectiveness KPIs. */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            {tile(t('events.dash.depositPct'), `${k.depositCollectionPct || 0}%`, t('events.dash.ofContract'), '#0891b2')}
+            {tile(t('events.dash.spaceYield'), money(k.revPerAvailableDay || 0), `${k.spaceOccupancyPct || 0}% ${t('events.dash.spaceOcc')}`, '#6366f1')}
+            {tile(t('events.dash.quoteAccept'), `${k.quoteAcceptanceRate || 0}%`, `${t('events.dash.avgQuoteIn')} ${k.avgDaysToQuote || 0}${t('events.dash.dShort')}`, '#059669')}
+            {tile(t('events.dash.repeatClients'), `${k.repeatCustomerPct || 0}%`, `${k.repeatCustomers || 0} ${t('common.of')} ${k.distinctCustomers || 0}`, '#7c3aed')}
+          </div>
+
+          {/* AR aging + On-the-books (forward book & cash at risk). */}
+          {(() => {
+            const ag = data.aging || { notDue: 0, d0_30: 0, d31_60: 0, d61_90: 0, d90plus: 0, total: 0 };
+            const buckets = [
+              { key: 'notDue', label: t('events.dash.agingNotDue'), val: Number(ag.notDue || 0), color: '#94a3b8', past: false },
+              { key: 'd0_30', label: '0–30', val: Number(ag.d0_30 || 0), color: '#22c55e', past: true },
+              { key: 'd31_60', label: '31–60', val: Number(ag.d31_60 || 0), color: '#eab308', past: true },
+              { key: 'd61_90', label: '61–90', val: Number(ag.d61_90 || 0), color: '#f97316', past: true },
+              { key: 'd90plus', label: '90+', val: Number(ag.d90plus || 0), color: '#dc2626', past: true },
+            ];
+            const maxB = Math.max(1, ...buckets.map(b => b.val));
+            return (
+              <div className="grid md:grid-cols-2 gap-4 mb-4">
+                <div className={CARD}>
+                  <h3 className="font-bold text-sm mb-3 flex items-center justify-between">{t('events.dash.arAging')}
+                    <span className="text-xs font-normal text-[#6b5d52] tabular-nums">{money(ag.total)}</span></h3>
+                  {buckets.map(b => (
+                    <div key={b.key} className="mb-2">
+                      <div className="flex items-center justify-between text-xs mb-0.5">
+                        <span style={{ color: b.color }}>{b.label}{b.past ? ` ${t('events.dash.daysPastEvent')}` : ''}</span>
+                        <span className="tabular-nums text-[#6b5d52]">{money(b.val)}</span>
+                      </div>
+                      <div className="h-2 rounded bg-[#f0e9df] overflow-hidden">
+                        <div className="h-full rounded" style={{ width: `${Math.round(b.val / maxB * 100)}%`, background: b.color }} />
+                      </div>
+                    </div>
+                  ))}
+                  <p className="text-[10px] text-[#9d8b7e] mt-1">{t('events.dash.agingNote')}</p>
+                </div>
+                <div className={CARD}>
+                  <h3 className="font-bold text-sm mb-3">{t('events.dash.onTheBooks')}</h3>
+                  <div className="space-y-2 text-xs">
+                    <div className="flex items-center justify-between"><span className="text-[#6b5d52]">{t('events.dash.deliveredRev')}</span><span className="tabular-nums font-semibold">{money(k.deliveredRevenue || 0)}</span></div>
+                    <div className="flex items-center justify-between"><span className="text-[#6b5d52]">{t('events.dash.forwardRev')}</span><span className="tabular-nums font-semibold text-[#2563eb]">{money(k.forwardRevenue || 0)}</span></div>
+                    <div className="flex items-center justify-between"><span className="text-[#6b5d52]">{t('events.dash.valueAtRisk')}</span><span className="tabular-nums font-semibold text-rose-600">{money(k.valueAtRisk || 0)}</span></div>
+                    <div className="flex items-center justify-between"><span className="text-[#6b5d52]">{t('events.dash.avgLead')}</span><span className="tabular-nums font-semibold">{k.avgLeadTimeDays || 0} {t('events.dash.days')}</span></div>
+                    <div className="flex items-center justify-between"><span className="text-[#6b5d52]">{t('events.dash.cancelRate')}</span><span className="tabular-nums font-semibold">{k.cancellationRate || 0}%</span></div>
+                    <div className="flex items-center justify-between"><span className="text-[#6b5d52]">{t('events.dash.avgRatePerDay')}</span><span className="tabular-nums font-semibold">{money(k.avgRatePerBookedDay || 0)}</span></div>
+                  </div>
+                  <p className="text-[10px] text-[#9d8b7e] mt-2">{t('events.dash.onBooksNote')}</p>
+                </div>
+              </div>
+            );
+          })()}
 
           <div className="grid md:grid-cols-2 gap-4 mb-4">
             <div className={CARD}>
@@ -1932,6 +1986,22 @@ function EventDashboard({ restaurantId, token }: Props) {
                 <span className="w-24 text-right tabular-nums font-semibold">{money(v.revenue)}</span>
               </div>
             ))}
+          </div>
+
+          {/* Booking pace — demand inflow by month booking was created. */}
+          <div className={`${CARD} mb-4`}>
+            <h3 className="font-bold text-sm mb-3">{t('events.dash.bookingPace')}</h3>
+            {(data.bookingPaceByMonth || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : data.bookingPaceByMonth.map((m: any) => (
+              <div key={m.month} className="mb-2">
+                <div className="flex items-center justify-between text-xs mb-0.5">
+                  <span>{m.month}</span><span className="tabular-nums text-[#6b5d52]">{m.inquiries} {t('events.dash.inquiriesShort')} · {m.won} {t('events.dash.wonShort')}</span>
+                </div>
+                <div className="h-2 rounded bg-[#f0e9df] overflow-hidden">
+                  <div className="h-full rounded bg-[#0891b2]" style={{ width: `${Math.round(m.inquiries / maxPace * 100)}%` }} />
+                </div>
+              </div>
+            ))}
+            <p className="text-[10px] text-[#9d8b7e] mt-1">{t('events.dash.paceNote')}</p>
           </div>
 
           <div className="grid md:grid-cols-2 gap-4">
@@ -1985,6 +2055,28 @@ function EventReports({ restaurantId, token }: Props) {
     data.cateringByPackage.forEach((v: any) => rows.push([v.name, v.package_type, v.covers, v.revenue]));
     rows.push([], ['RECEIVABLES'], ['Customer', 'Event date', 'Total', 'Advance', 'Outstanding']);
     data.receivables.forEach((v: any) => rows.push([v.customer_name, v.event_date, v.total_amount, v.advance_amount, v.outstanding]));
+    if (data.aging) {
+      const a = data.aging;
+      rows.push([], ['RECEIVABLES AGING'], ['Bucket', 'Amount'],
+        ['Not yet due', a.notDue], ['0-30 past event', a.d0_30], ['31-60', a.d31_60], ['61-90', a.d61_90], ['90+', a.d90plus], ['Total', a.total]);
+    }
+    if (data.bookingPaceByMonth) {
+      rows.push([], ['BOOKING PACE (by created month)'], ['Month', 'Inquiries', 'Won']);
+      data.bookingPaceByMonth.forEach((v: any) => rows.push([v.month, v.inquiries, v.won]));
+    }
+    if (data.quoteStats) {
+      const q = data.quoteStats;
+      rows.push([], ['QUOTATION EFFECTIVENESS'], ['Metric', 'Value'],
+        ['Bookings quoted', q.quoted], ['Quotes sent', q.sent], ['Accepted', q.accepted],
+        ['Acceptance %', q.acceptanceRate], ['Avg versions', q.avgVersions], ['Avg days to quote', q.avgDaysToQuote]);
+    }
+    const kk = data.kpis || {};
+    rows.push([], ['BUSINESS KPIs'], ['Metric', 'Value'],
+      ['Deposit collected %', kk.depositCollectionPct], ['Cancellation rate %', kk.cancellationRate],
+      ['Repeat customer %', kk.repeatCustomerPct], ['Forward (contracted) revenue', kk.forwardRevenue],
+      ['Delivered revenue', kk.deliveredRevenue], ['Uncollected on upcoming', kk.valueAtRisk],
+      ['RevPAR / available hall-day', kk.revPerAvailableDay], ['Avg rate / booked day', kk.avgRatePerBookedDay],
+      ['Space occupancy %', kk.spaceOccupancyPct], ['Avg lead time (days)', kk.avgLeadTimeDays]);
     downloadCsv(`events-report-${from}_${to}.csv`, rows);
   };
 

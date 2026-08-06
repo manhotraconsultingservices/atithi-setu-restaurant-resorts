@@ -1055,8 +1055,24 @@ async function testEvents() {
     const funnelOk = an.data.funnel.length === 6 && Array.isArray(an.data.venueUtilization) && Array.isArray(an.data.receivables);
     const wrOk = wr >= 0 && wr <= 100;
     (funnelOk && wrOk ? pass : fail)('TC-EVT-012', 'Events analytics dashboard responds with valid shape', `HTTP ${an.status}, winRate=${wr}, funnel=${an.data.funnel.length}`);
+
+    // TC-EVT-KPI: new business KPI pack — AR aging, cash/yield/sales-effectiveness.
+    const k = an.data.kpis || {};
+    const ag = an.data.aging || {};
+    const kpiKeys = ['depositCollectionPct', 'cancellationRate', 'repeatCustomerPct', 'forwardRevenue', 'deliveredRevenue',
+      'valueAtRisk', 'revPerAvailableDay', 'avgRatePerBookedDay', 'spaceOccupancyPct', 'avgLeadTimeDays', 'quoteAcceptanceRate', 'avgDaysToQuote'];
+    const kpiPresent = kpiKeys.every(kk => typeof k[kk] === 'number');
+    const agKeys = ['notDue', 'd0_30', 'd31_60', 'd61_90', 'd90plus', 'total'];
+    const agPresent = agKeys.every(kk => typeof ag[kk] === 'number');
+    // Aging buckets must reconcile to the total (fp tolerance).
+    const agSum = agKeys.slice(0, 5).reduce((s, kk) => s + Number(ag[kk] || 0), 0);
+    const agReconciles = Math.abs(agSum - Number(ag.total || 0)) < 0.5;
+    const paceOk = Array.isArray(an.data.bookingPaceByMonth) && an.data.quoteStats && typeof an.data.quoteStats.acceptanceRate === 'number';
+    (kpiPresent && agPresent && agReconciles && paceOk ? pass : fail)('TC-EVT-KPI', 'Business KPI pack present + aging reconciles',
+      `kpi=${kpiPresent}, aging=${agPresent}, reconciles=${agReconciles} (${agSum} vs ${ag.total}), pace/quote=${paceOk}`);
   } else if (an.status === 403 || an.status === 404) {
     skip('TC-EVT-012', 'Events analytics', `HTTP ${an.status}`);
+    skip('TC-EVT-KPI', 'Business KPI pack', `HTTP ${an.status}`);
   } else {
     fail('TC-EVT-012', 'Events analytics dashboard responds', `HTTP ${an.status}`);
   }
