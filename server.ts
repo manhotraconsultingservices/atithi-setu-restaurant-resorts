@@ -46612,8 +46612,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-billing-gst-after-discount-multiday',
+    commit_marker: 'home-events-tile',
     code_features: [
+      'home-events-tile',                           // Home launchpad shows an Events & Convention module tile when events_enabled (was Hotel/Restaurant/Spa only)
       'events-billing-gst-after-discount-multiday', // GST charged on discounted (net) base; rentals+services ×days/hours; venue already per-day; computeEventBill == assembleEventQuoteLines
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option

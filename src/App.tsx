@@ -14325,6 +14325,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           onOpenHotel={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
           onOpenRestaurant={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
           onOpenSpa={() => setActiveTab('SPA_CALENDAR')}
+          onOpenEvents={() => setActiveTab('EVENTS_DASHBOARD')}
           onNewBooking={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
           onNewOrder={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
           onOpenReports={() => { setDashboardMode('HOTEL'); setActiveTab('FRONT_OFFICE_REPORTS'); }}
@@ -42185,11 +42186,11 @@ const HotelLateFeeBanner: React.FC<{
 function HotelHomeLaunchpad({
   restaurantId, token, propertyName, restaurantImageUrl, isHotelEnabled, isRestaurantEnabled,
   onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports, isSpaEnabled, onOpenSpa, role,
-  isEventsEnabled,
+  isEventsEnabled, onOpenEvents,
 }: {
   restaurantId: string; token: string; propertyName: string; restaurantImageUrl?: string;
   isHotelEnabled: boolean; isRestaurantEnabled: boolean; isSpaEnabled: boolean; isEventsEnabled?: boolean;
-  onOpenHotel: () => void; onOpenRestaurant: () => void; onOpenSpa: () => void;
+  onOpenHotel: () => void; onOpenRestaurant: () => void; onOpenSpa: () => void; onOpenEvents?: () => void;
   onNewBooking: () => void; onNewOrder: () => void; onOpenReports: () => void;
   role: string | null;
 }) {
@@ -42231,7 +42232,7 @@ function HotelHomeLaunchpad({
 
   const s = snap || {};
   const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-  const tileCount = (isHotelEnabled ? 1 : 0) + (isRestaurantEnabled ? 1 : 0) + (isSpaEnabled ? 1 : 0);
+  const tileCount = (isHotelEnabled ? 1 : 0) + (isRestaurantEnabled ? 1 : 0) + (isSpaEnabled ? 1 : 0) + (isEventsEnabled ? 1 : 0);
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -42245,7 +42246,7 @@ function HotelHomeLaunchpad({
         {/* Module tiles — branded with the property's own name + photo. When a
             hero/cover image is set it becomes the tile wallpaper (dark overlay
             for legibility); otherwise the tile falls back to a clean accent card. */}
-        <div className={cn('grid gap-4 mb-6', tileCount === 3 ? 'sm:grid-cols-3' : tileCount === 2 ? 'sm:grid-cols-2' : 'grid-cols-1')}>
+        <div className={cn('grid gap-4 mb-6', tileCount >= 3 ? 'sm:grid-cols-2 lg:grid-cols-3' : tileCount === 2 ? 'sm:grid-cols-2' : 'grid-cols-1')}>
           {isHotelEnabled && (() => {
             const hasImg = !!heroUrl;
             return (
@@ -42310,6 +42311,23 @@ function HotelHomeLaunchpad({
                   <div className="text-xl font-bold font-serif truncate text-[#1a1208]">{propertyName}</div>
                   <div className="text-[12px] mb-2 text-[#3d3128]">Appointments · therapists · packages</div>
                   <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: '#7e5792' }}>Manage spa <ChevronRight size={15} /></div>
+                </div>
+              </div>
+            </button>
+          )}
+          {isEventsEnabled && (
+            <button type="button" onClick={onOpenEvents}
+              className="relative text-left rounded-3xl overflow-hidden border transition-all hover:shadow-lg group min-h-[190px] flex bg-white"
+              style={{ borderColor: 'rgba(124,58,237,0.2)' }}>
+              <div className="relative p-5 w-full flex flex-col">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: '#f1ecfe', color: '#7c3aed' }}><CalendarRange size={22} /></span>
+                </div>
+                <div className="mt-auto">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: '#7c3aed' }}>Events & Convention</div>
+                  <div className="text-xl font-bold font-serif truncate text-[#1a1208]">{propertyName}</div>
+                  <div className="text-[12px] mb-2 text-[#3d3128]">Halls · bookings · quotations · catering</div>
+                  <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: '#7c3aed' }}>Manage events <ChevronRight size={15} /></div>
                 </div>
               </div>
             </button>
