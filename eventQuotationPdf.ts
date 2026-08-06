@@ -8,6 +8,7 @@
  */
 
 import PDFDocument from 'pdfkit';
+import { existsSync } from 'fs';
 
 export interface EventQuotationLine {
   line_type: string;
@@ -33,6 +34,8 @@ export interface EventQuotationData {
   tax_amount: number;
   discount: number;
   grand_total: number;
+  lang2?: string;      // regional language code (hi/ta/te/kn/…), from tenant state
+  langMode?: string;   // EN | REGIONAL | BOTH — how to print fixed labels
 }
 
 const INK = '#1f2937';
@@ -87,6 +90,24 @@ function lineTypeLabel(t: string): string {
   }
 }
 
+// Regional-script Noto fonts shipped with the VPS (fonts-noto package). Used to
+// print invoice labels in the tenant state's language. Missing file → English.
+const NOTO_DIR = '/usr/share/fonts/truetype/noto/';
+const NOTO_SCRIPT: Record<string, string> = {
+  hi: 'NotoSansDevanagari-Regular.ttf', mr: 'NotoSansDevanagari-Regular.ttf',
+  ta: 'NotoSansTamil-Regular.ttf', te: 'NotoSansTelugu-Regular.ttf',
+  kn: 'NotoSansKannada-Regular.ttf', ml: 'NotoSansMalayalam-Regular.ttf',
+  bn: 'NotoSansBengali-Regular.ttf', gu: 'NotoSansGujarati-Regular.ttf',
+  pa: 'NotoSansGurmukhi-Regular.ttf', or: 'NotoSansOriya-Regular.ttf',
+};
+// Fixed invoice labels per script. Any missing key falls back to English.
+const INV_LABELS: Record<string, Record<string, string>> = {
+  hi: { taxInvoice: 'कर चालान', invoice: 'चालान', quotation: 'कोटेशन', preparedFor: 'प्राप्तकर्ता', eventDetails: 'कार्यक्रम विवरण', subtotal: 'उप-योग', discount: 'छूट', cgst: 'सीजीएसटी', sgst: 'एसजीएसटी', grandTotal: 'कुल योग', notes: 'टिप्पणियाँ', gstin: 'जीएसटीआईएन' },
+  ta: { taxInvoice: 'வரி விலைப்பட்டியல்', invoice: 'விலைப்பட்டியல்', quotation: 'விலைப்புள்ளி', preparedFor: 'பெறுநர்', eventDetails: 'நிகழ்வு விவரம்', subtotal: 'கூட்டுத்தொகை', discount: 'தள்ளுபடி', cgst: 'சிஜிஎஸ்டி', sgst: 'எஸ்ஜிஎஸ்டி', grandTotal: 'மொத்தத் தொகை', notes: 'குறிப்புகள்', gstin: 'ஜிஎஸ்டிஐஎன்' },
+  te: { taxInvoice: 'పన్ను ఇన్‌వాయిస్', invoice: 'ఇన్‌వాయిస్', quotation: 'కొటేషన్', preparedFor: 'గ్రహీత', eventDetails: 'ఈవెంట్ వివరాలు', subtotal: 'ఉప మొత్తం', discount: 'తగ్గింపు', cgst: 'సీజీఎస్టీ', sgst: 'ఎస్జీఎస్టీ', grandTotal: 'మొత్తం', notes: 'గమనికలు', gstin: 'జీఎస్టీఐఎన్' },
+  kn: { taxInvoice: 'ತೆರಿಗೆ ಸರಕುಪಟ್ಟಿ', invoice: 'ಸರಕುಪಟ್ಟಿ', quotation: 'ದರಪಟ್ಟಿ', preparedFor: 'ಗ್ರಾಹಕ', eventDetails: 'ಕಾರ್ಯಕ್ರಮ ವಿವರ', subtotal: 'ಉಪಮೊತ್ತ', discount: 'ರಿಯಾಯಿತಿ', cgst: 'ಸಿಜಿಎಸ್ಟಿ', sgst: 'ಎಸ್ಜಿಎಸ್ಟಿ', grandTotal: 'ಒಟ್ಟು ಮೊತ್ತ', notes: 'ಟಿಪ್ಪಣಿಗಳು', gstin: 'ಜಿಎಸ್ಟಿಐಎನ್' },
+};
+
 export async function generateEventQuotationPdf(data: EventQuotationData): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
@@ -106,6 +127,25 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       const cur = data.tenant.currency || 'INR';
       const PAGE_W = 595.28;
       const M = 42;
+
+      // Bilingual label support. Register the tenant state's Noto font if present;
+      // if the font is missing we silently stay English (never render .notdef boxes).
+      const lang2 = String(data.lang2 || '').toLowerCase();
+      const langMode = String(data.langMode || 'EN').toUpperCase();
+      let regionalOk = false;
+      if (lang2 && langMode !== 'EN' && NOTO_SCRIPT[lang2]) {
+        try { const fp = NOTO_DIR + NOTO_SCRIPT[lang2]; if (existsSync(fp)) { doc.registerFont('regional', fp); doc.font('regional'); doc.font('Helvetica'); regionalOk = true; } } catch { regionalOk = false; }
+      }
+      const dict = INV_LABELS[lang2] || {};
+      // L(en, key) → { t, f }: t is the string to draw, f is the font to use for it
+      // ('regional' when the string carries regional script, else null = caller's Latin font).
+      const L = (en: string, key: string): { t: string; f: string | null } => {
+        if (!regionalOk || langMode === 'EN') return { t: en, f: null };
+        const reg = dict[key];
+        if (!reg) return { t: en, f: null };
+        if (langMode === 'REGIONAL') return { t: reg, f: 'regional' };
+        return { t: `${en} / ${reg}`, f: 'regional' };
+      };
       const INNER = PAGE_W - M * 2;
       let y = M;
 
@@ -117,10 +157,12 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       if (data.tenant.address) { doc.text(waSafe(data.tenant.address), M, hy, { width: INNER - 170 }); hy += 12; }
       const contactBits = [data.tenant.phone, data.tenant.email].filter(Boolean).join('  ·  ');
       if (contactBits) { doc.text(contactBits, M, hy, { width: INNER - 170 }); hy += 12; }
-      if (data.tenant.gstin) doc.text(`GSTIN: ${data.tenant.gstin}`, M, hy, { width: INNER - 170 });
+      if (data.tenant.gstin) { const gL = L('GSTIN', 'gstin'); doc.font(gL.f || 'Helvetica').fontSize(9).fillColor(MUTED).text(`${gL.t}: ${data.tenant.gstin}`, M, hy, { width: INNER - 170 }); doc.font('Helvetica'); }
 
       // Quotation title block (right)
-      doc.font('Helvetica-Bold').fontSize(16).fillColor(ACCENT).text(waSafe(data.docLabel || 'QUOTATION'), M, 24, { width: INNER, align: 'right' });
+      const docKey = data.docLabel === 'TAX INVOICE' ? 'taxInvoice' : data.docLabel === 'INVOICE' ? 'invoice' : 'quotation';
+      const docL = L(data.docLabel || 'QUOTATION', docKey);
+      doc.font(docL.f || 'Helvetica-Bold').fontSize(16).fillColor(ACCENT).text(docL.t, M, 24, { width: INNER, align: 'right' });
       doc.font('Helvetica').fontSize(9).fillColor(INK);
       doc.text(`No: ${data.quotation.quote_number}  (v${data.quotation.version})`, M, 48, { width: INNER, align: 'right' });
       const issued = ymd(data.quotation.created_at) || new Date().toISOString().slice(0, 10);
@@ -130,8 +172,9 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       y = 118;
 
       // ── Customer + event details ─────────────────────────────────────────
-      doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text('Prepared For', M, y);
-      doc.font('Helvetica-Bold').fontSize(10).text('Event Details', M + INNER / 2, y);
+      const pfL = L('Prepared For', 'preparedFor'); const edL = L('Event Details', 'eventDetails');
+      doc.font(pfL.f || 'Helvetica-Bold').fontSize(10).fillColor(INK).text(pfL.t, M, y, { width: INNER / 2 - 10 });
+      doc.font(edL.f || 'Helvetica-Bold').fontSize(10).fillColor(INK).text(edL.t, M + INNER / 2, y);
       y += 15;
       doc.font('Helvetica').fontSize(9).fillColor(INK);
       const leftLines = [
@@ -187,31 +230,34 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       y += 10;
       const totX = M + INNER - 220;
       const totW = 220;
-      const totalRow = (label: string, val: string, bold = false) => {
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 10.5 : 9).fillColor(INK);
-        doc.text(label, totX, y, { width: totW - 90 });
+      const totalRow = (en: string, key: string, val: string, bold = false) => {
+        const lbl = L(en, key);
+        doc.font(lbl.f || (bold ? 'Helvetica-Bold' : 'Helvetica')).fontSize(bold ? 10.5 : 9).fillColor(INK);
+        doc.text(lbl.t, totX, y, { width: totW - 90, lineBreak: false });
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica');
         doc.text(val, totX + totW - 90, y, { width: 90, align: 'right' });
         y += bold ? 18 : 14;
       };
-      totalRow('Subtotal', fmtMoney(data.subtotal, cur));
-      if (data.discount > 0) totalRow('Discount', `- ${fmtMoney(data.discount, cur)}`);
+      totalRow('Subtotal', 'subtotal', fmtMoney(data.subtotal, cur));
+      if (data.discount > 0) totalRow('Discount', 'discount', `- ${fmtMoney(data.discount, cur)}`);
       // GST-compliant tax presentation: split into CGST + SGST (intra-state) when
       // GST is charged; a zero-GST invoice shows no tax line.
       if (data.tax_amount > 0) {
         const cgst = Math.round((data.tax_amount / 2) * 100) / 100;
         const sgst = Math.round((data.tax_amount - cgst) * 100) / 100;
-        totalRow('CGST', fmtMoney(cgst, cur));
-        totalRow('SGST', fmtMoney(sgst, cur));
+        totalRow('CGST', 'cgst', fmtMoney(cgst, cur));
+        totalRow('SGST', 'sgst', fmtMoney(sgst, cur));
       }
       doc.moveTo(totX, y + 2).lineTo(totX + totW, y + 2).lineWidth(1).strokeColor(ACCENT).stroke();
       y += 6;
-      totalRow('Grand Total', fmtMoney(data.grand_total, cur), true);
+      totalRow('Grand Total', 'grandTotal', fmtMoney(data.grand_total, cur), true);
 
       // ── Notes + footer ───────────────────────────────────────────────────
       y += 18;
       if (data.quotation.notes) {
         const notes = waSafe(data.quotation.notes);
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Notes', M, y);
+        const notesL = L('Notes', 'notes');
+        doc.font(notesL.f || 'Helvetica-Bold').fontSize(9).fillColor(INK).text(notesL.t, M, y);
         y += 13;
         doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(notes, M, y, { width: INNER });
         y += doc.heightOfString(notes, { width: INNER }) + 12;

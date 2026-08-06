@@ -24764,7 +24764,9 @@ ${data.tenant.name}`;
       `SELECT b.*, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?`,
       [q.booking_id]
     );
-    const prof: any = await db.get("SELECT contact_phone, contact_email FROM event_profile WHERE id = 1").catch(() => null);
+    const prof: any = await db.get("SELECT contact_phone, contact_email, invoice_lang_mode FROM event_profile WHERE id = 1").catch(() => null);
+    const langMode = String(prof?.invoice_lang_mode || 'BOTH').toUpperCase();
+    const lang2 = String((restaurant as any)?.secondary_language || regionalLanguageForState((restaurant as any)?.state) || '').toLowerCase();
     return {
       tenant: eventTenantBlock(restaurant, prof),
       quotation: { quote_number: q.quote_number, version: q.version, valid_until: q.valid_until, notes: q.notes, created_at: q.created_at },
@@ -24775,6 +24777,7 @@ ${data.tenant.name}`;
       },
       lines: lines.map(l => ({ line_type: l.line_type, description: l.description, quantity: Number(l.quantity), unit_rate: Number(l.unit_rate), amount: Number(l.amount), gst_rate: Number(l.gst_rate), gst_amount: Number(l.gst_amount) })),
       subtotal: Number(q.subtotal), tax_amount: Number(q.tax_amount), discount: Number(q.discount), grand_total: Number(q.grand_total),
+      lang2, langMode,
     };
   };
 
@@ -24831,7 +24834,9 @@ ${data.tenant.name}`;
   const buildInvoiceData = async (db: any, restaurant: any, bid: string, gstOverride?: number): Promise<EventQuotationData | null> => {
     const bk: any = await db.get(`SELECT b.*, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?`, [bid]);
     if (!bk) return null;
-    const prof: any = await db.get("SELECT contact_phone, contact_email FROM event_profile WHERE id = 1").catch(() => null);
+    const prof: any = await db.get("SELECT contact_phone, contact_email, invoice_lang_mode FROM event_profile WHERE id = 1").catch(() => null);
+    const langMode = String(prof?.invoice_lang_mode || 'BOTH').toUpperCase();
+    const lang2 = String((restaurant as any)?.secondary_language || regionalLanguageForState((restaurant as any)?.state) || '').toLowerCase();
     // Prefer the persisted event folio (what was actually billed at checkout) so
     // the invoice reflects the exact GST captured then — including any per-invoice
     // GST override. Fall back to a live assemble for a pre-checkout preview.
@@ -24855,6 +24860,7 @@ ${data.tenant.name}`;
       booking: { customer_name: bk.customer_name || '', customer_phone: bk.customer_phone, customer_email: bk.customer_email, event_type: bk.event_type, event_date: bk.event_date, end_date: bk.end_date, start_time: bk.start_time, end_time: bk.end_time, guest_count: bk.guest_count, venue_name: bk.venue_name },
       lines,
       subtotal, tax_amount: tax, discount, grand_total: grand,
+      lang2, langMode,
     };
   };
 
@@ -46548,7 +46554,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-invoice-lang-mode-state-suggest',
+    commit_marker: 'events-bilingual-invoice-noto-font',
     code_features: [
       'checklist-templates-per-module',     // hotel checklists in PMS, event checklists in Events & Convention; facilityScope filter
       'checklist-applies-to-multiselect',   // multi-select rooms/venues + explicit "Apply to all" option
