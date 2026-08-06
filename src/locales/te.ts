@@ -200,6 +200,7 @@ export const te: Record<string, string> = {
   'events.pay.paid': 'చెల్లించబడింది',
   'events.pay.partial': 'పాక్షిక చెల్లింపు',
   'events.pay.pending': 'పెండింగ్',
+  'events.pay.afterEvent': 'ఈ ఈవెంట్ పూర్తయింది — అయినా బకాయి చెల్లింపును నమోదు చేయవచ్చు.',
   'events.dash.advance': 'అడ్వాన్స్',
   'events.dash.covers': 'మొత్తం కవర్లు',
   'events.dash.guestsServed': 'అతిథులు (నిర్ధారిత)',

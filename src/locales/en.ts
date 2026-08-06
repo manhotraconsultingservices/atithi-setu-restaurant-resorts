@@ -282,6 +282,7 @@ export const en: Record<string, string> = {
   'events.pay.paid': 'Paid',
   'events.pay.partial': 'Partially paid',
   'events.pay.pending': 'Pending',
+  'events.pay.afterEvent': 'This event is complete — you can still record the outstanding payment.',
   'events.pay.balance': 'Balance',
   'events.pay.record': 'Record payment',
   'events.pay.schedule': 'Payment schedule',

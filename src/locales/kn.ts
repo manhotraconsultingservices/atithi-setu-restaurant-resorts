@@ -200,6 +200,7 @@ export const kn: Record<string, string> = {
   'events.pay.paid': 'ಪಾವತಿಸಲಾಗಿದೆ',
   'events.pay.partial': 'ಭಾಗಶಃ ಪಾವತಿ',
   'events.pay.pending': 'ಪಾವತಿ ಬಾಕಿ',
+  'events.pay.afterEvent': 'ಈ ಕಾರ್ಯಕ್ರಮ ಮುಗಿದಿದೆ — ಆದರೂ ಬಾಕಿ ಪಾವತಿಯನ್ನು ದಾಖಲಿಸಬಹುದು.',
   'events.dash.advance': 'ಮುಂಗಡ',
   'events.dash.covers': 'ಒಟ್ಟು ಕವರ್‌ಗಳು',
   'events.dash.guestsServed': 'ಅತಿಥಿಗಳು (ದೃಢೀಕೃತ)',

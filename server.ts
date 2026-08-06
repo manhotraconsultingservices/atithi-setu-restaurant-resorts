@@ -47090,8 +47090,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-invoice-payment-status',
+    commit_marker: 'events-post-event-payment',
     code_features: [
+      'events-post-event-payment',                  // event booking payment panel now lets staff record a payment AFTER the event is COMPLETED (customers often settle the balance late): PaymentPanel gains a `canRecord` flag (true unless CANCELLED) separate from `editable` (ledger edit/delete, still locked once COMPLETED) — Record-payment + pay-instalment buttons show on completed bookings, matching the backend which only blocks receipts on CANCELLED; receipt-delete lock unchanged. Hint shown on completed bookings with a balance.
       'events-invoice-payment-status',              // Events bookings (invoice) table gains Advance / Outstanding / Payment-status (Paid · Partially paid · Pending) columns derived from total_amount vs advance_amount; Reports gets an "Outstanding by Invoice" report (invoice id, customer, total, paid, outstanding, status + grand-total footer) + enriched CSV. Frontend-only (analytics receivables already returns id/status/outstanding).
       'events-csv-migration-utility',               // owner-only CSV data-migration utility for Events: Rental Inventory / Add-on Services / Bookings / Sales Invoices — download template → upload CSV → server validates + coerces + flags duplicates (natural-key dedup checked at validate AND commit) → editable fix-it grid → commit inserts only OK non-duplicate rows via the same create paths as hand entry (GET/POST validate/commit + spec endpoints, EVENT_MIGRATION audit)
       'events-ledger-gst-toggle-live',              // booking-detail bill ledger live-previews the Invoice-GST toggle: computeEventBill accepts a gst override, GET booking honors ?gst_enabled/?gst_percent, ledger re-fetches when the toggle changes (GST + grand total update to 0 when GST is turned off)

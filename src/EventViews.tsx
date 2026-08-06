@@ -813,7 +813,12 @@ function HotelRoomAddRow({ rt, onAdd }: { rt: any; onAdd: (rate: number, rooms: 
 
 // ── Booking detail: lines, hotel rooms, quotation, lifecycle ────────────────
 // ── Payment schedule + receipts (Sprint 1: cash & revenue integrity) ─────────
-function PaymentPanel({ restaurantId, token, booking, editable, onChanged }: Props & { booking: any; editable: boolean; onChanged: () => void }) {
+// `editable` gates ledger restructuring + deletion (locked once the booking is
+// COMPLETED). `canRecord` gates money-in actions (record payment / pay an
+// instalment) and stays true for any non-cancelled booking — so a customer who
+// pays AFTER the event is complete can still be receipted, matching the backend
+// which blocks new receipts only for CANCELLED bookings.
+function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onChanged }: Props & { booking: any; editable: boolean; canRecord: boolean; onChanged: () => void }) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const bid = booking.id;
@@ -851,9 +856,12 @@ function PaymentPanel({ restaurantId, token, booking, editable, onChanged }: Pro
         <div className="flex items-center gap-3 text-xs">
           <span className="text-[#6b5d52]">{t('events.pay.paid')} <b className="text-emerald-700 tabular-nums">{money(pay.paid)}</b></span>
           <span className="text-[#6b5d52]">{t('events.pay.balance')} <b className="text-rose-600 tabular-nums">{money(pay.balance)}</b></span>
-          {editable && <button className={BTN_PRIMARY} onClick={() => openPay()}><Plus size={12} />{t('events.pay.record')}</button>}
+          {canRecord && <button className={BTN_PRIMARY} onClick={() => openPay()}><Plus size={12} />{t('events.pay.record')}</button>}
         </div>
       </div>
+      {!editable && canRecord && Number(pay.balance) > 0.01 && (
+        <p className="text-[11px] text-[#9d8b7e] -mt-1 mb-2">{t('events.pay.afterEvent')}</p>
+      )}
 
       <div className="flex items-center justify-between mt-1 mb-1">
         <span className="text-[11px] font-bold uppercase tracking-wide text-[#9d8b7e]">{t('events.pay.schedule')}</span>
@@ -871,7 +879,7 @@ function PaymentPanel({ restaurantId, token, booking, editable, onChanged }: Pro
                 {overdue ? t('events.pay.overdue') : s.status === 'PAID' ? t('events.pay.paidStatus') : t('events.pay.due')}
               </span>
             </span>
-            {editable && s.status !== 'PAID' && <button className={BTN_GHOST} onClick={() => openPay(s)}>{t('events.pay.pay')}</button>}
+            {canRecord && s.status !== 'PAID' && <button className={BTN_GHOST} onClick={() => openPay(s)}>{t('events.pay.pay')}</button>}
             {editable && <button onClick={() => delSched(s.id)}><X size={12} className="text-rose-500" /></button>}
           </div>
         );
@@ -1194,6 +1202,10 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
   if (!bk) return <div className="text-sm text-[#6b5d52]">{t('common.loading')}</div>;
   const editable = bk.status !== 'COMPLETED' && bk.status !== 'CANCELLED';
+  // Payments stay collectable after the event is over (customers often settle the
+  // balance post-event); only a cancelled booking freezes money-in, matching the
+  // backend payment guard.
+  const canRecordPayment = bk.status !== 'CANCELLED';
   // Bill ledger figures come from the backend breakdown (subtotal / GST / discount
   // / grand). total_amount is now the tax-inclusive grand total; older responses
   // without `bill` fall back to deriving from total_amount (treated as pre-tax).
@@ -1450,7 +1462,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       </div>
 
       {/* Payment schedule + receipts */}
-      <PaymentPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} onChanged={load} />
+      <PaymentPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} canRecord={canRecordPayment} onChanged={load} />
 
       {/* Staff rostering — assign roster staff to the event per working date */}
       <StaffPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} onChanged={load} />

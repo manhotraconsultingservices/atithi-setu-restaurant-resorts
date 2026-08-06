@@ -200,6 +200,7 @@ export const ta: Record<string, string> = {
   'events.pay.paid': 'செலுத்தப்பட்டது',
   'events.pay.partial': 'பகுதி பணம்',
   'events.pay.pending': 'நிலுவையில்',
+  'events.pay.afterEvent': 'இந்த நிகழ்வு முடிந்துவிட்டது — இருப்பினும் நிலுவைத் தொகையைப் பதிவு செய்யலாம்.',
   'events.dash.advance': 'முன்பணம்',
   'events.dash.covers': 'மொத்த கவர்கள்',
   'events.dash.guestsServed': 'விருந்தினர் (உறுதி)',

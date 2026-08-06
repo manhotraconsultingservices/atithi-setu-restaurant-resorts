@@ -1146,6 +1146,16 @@ async function testEvents() {
         (over.status === 409 ? pass : fail)('TC-EVT-GUARD-OVERPAY', 'Overpayment beyond balance rejected', `HTTP ${over.status} (want 409)`);
         const okPay = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${gid}/payments`, { amount: 100, method: 'CASH' });
         (okPay.status === 201 ? pass : fail)('TC-EVT-GUARD-PAYOK', 'Valid partial payment accepted', `HTTP ${okPay.status} (want 201)`);
+        // Post-event payment: customers often settle the balance after the event is
+        // done. Completing the booking must NOT block a further receipt — only a
+        // CANCELLED booking freezes money-in. Guards the reported scenario.
+        const comp = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${gid}/complete`, {});
+        if (comp.status === 200) {
+          const postPay = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${gid}/payments`, { amount: 50, method: 'CASH', reference: 'post-event' });
+          (postPay.status === 201 ? pass : fail)('TC-EVT-GUARD-PAYAFTERDONE', 'Payment accepted after event marked COMPLETED', `HTTP ${postPay.status} (want 201)`);
+        } else {
+          skip('TC-EVT-GUARD-PAYAFTERDONE', 'Payment after completion', `complete HTTP ${comp.status}`);
+        }
         const cNoAck = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${gid}/cancel`, { reason: 'UAT' });
         (cNoAck.status === 409 && cNoAck.data?.requires_refund_ack ? pass : fail)('TC-EVT-GUARD-CANCELPAID', 'Cancel with payment requires refund ack', `HTTP ${cNoAck.status} (want 409)`);
         await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${gid}/cancel`, { reason: 'UAT cleanup', acknowledge_refund: true }); // cleanup

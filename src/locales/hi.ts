@@ -200,6 +200,7 @@ export const hi: Record<string, string> = {
   'events.pay.paid': 'भुगतान हो गया',
   'events.pay.partial': 'आंशिक भुगतान',
   'events.pay.pending': 'लंबित',
+  'events.pay.afterEvent': 'यह कार्यक्रम पूरा हो चुका है — फिर भी बकाया भुगतान दर्ज किया जा सकता है।',
   'events.dash.advance': 'अग्रिम',
   'events.dash.covers': 'कुल कवर',
   'events.dash.guestsServed': 'अतिथि (पुष्ट)',
