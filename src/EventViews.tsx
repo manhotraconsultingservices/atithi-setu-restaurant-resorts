@@ -287,6 +287,7 @@ function EventVenues({ restaurantId, token }: Props) {
             </div>
             <div><label className={LABEL}>Hourly — min hours</label><input type="number" className={INPUT} value={form.hourly_min_hours ?? ''} onChange={e => setForm({ ...form, hourly_min_hours: e.target.value })} placeholder="e.g. 4" /></div>
             <div><label className={LABEL}>Turnaround / prep (min)</label><input type="number" className={INPUT} value={form.turnaround_min ?? ''} onChange={e => setForm({ ...form, turnaround_min: e.target.value })} placeholder="house default" /></div>
+            <div><label className={LABEL}>{t('events.venues.costPerDay')}</label><input type="number" className={INPUT} value={form.cost_per_day ?? ''} onChange={e => setForm({ ...form, cost_per_day: e.target.value })} placeholder="0" title={t('events.venues.costPerDayHint')} /></div>
             <div className="col-span-2 md:col-span-3">
               <label className={LABEL}>Half-day windows (blank = house default) — the gap between AM end & PM start is the guaranteed prep time</label>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -1873,6 +1874,9 @@ function EventDashboard({ restaurantId, token }: Props) {
   const maxMonth = Math.max(1, ...((data?.revenueByMonth || []).map((m: any) => m.revenue)));
   const maxFunnel = Math.max(1, ...((data?.funnel || []).map((f: any) => f.count)));
   const maxPace = Math.max(1, ...((data?.bookingPaceByMonth || []).map((m: any) => m.inquiries)));
+  const maxReceipt = Math.max(1, ...((data?.receiptsByMonth || []).map((m: any) => m.amount)));
+  const alerts: any[] = data?.alerts || [];
+  const tg = data?.targets;
 
   return (
     <div>
@@ -1880,6 +1884,67 @@ function EventDashboard({ restaurantId, token }: Props) {
       <PeriodBar from={from} to={to} setFrom={setFrom} setTo={setTo} />
       {loading || !data ? <p className="text-sm text-[#6b5d52]">{t('common.loading')}</p> : (
         <>
+          {/* Action alerts — overdue cash + under-deposited upcoming events. */}
+          {alerts.length > 0 && (
+            <div className="mb-4 space-y-2">
+              {alerts.map((a: any, i: number) => (
+                <div key={i} className="rounded-2xl border border-rose-200 bg-rose-50 p-3">
+                  <div className="flex items-center gap-2 text-sm font-bold text-rose-700">
+                    <AlertTriangle size={15} />
+                    {a.type === 'OVERDUE'
+                      ? `${t('events.dash.alertOverdue')} — ${money(a.amount)}`
+                      : `${t('events.dash.alertLowDeposit', { count: a.count })} — ${t('events.dash.shortfall')} ${money(a.amount)}`}
+                  </div>
+                  {a.type === 'LOW_DEPOSIT' && Array.isArray(a.items) && (
+                    <div className="mt-1.5 space-y-0.5">
+                      {a.items.slice(0, 6).map((it: any) => (
+                        <button key={it.id} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: it.id }])}
+                          className="w-full flex items-center justify-between text-xs text-rose-800 hover:bg-rose-100 rounded px-1.5 py-0.5 text-left">
+                          <span className="min-w-0 truncate">{it.customer_name} <span className="text-rose-500">· {it.event_date} · {t('events.dash.inDays', { n: it.daysToEvent })}</span></span>
+                          <span className="shrink-0 tabular-nums">{it.collectedPct}% · {money(it.shortfall)}</span>
+                        </button>
+                      ))}
+                      {a.items.length > 6 && <div className="text-[11px] text-rose-500 px-1.5">+{a.items.length - 6} {t('common.more')}</div>}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Target vs actual — this calendar month (only when a target is set). */}
+          {tg && (tg.monthlyRevenueTarget > 0 || tg.occupancyTargetPct > 0) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              {tg.monthlyRevenueTarget > 0 && (() => {
+                const pct = Math.min(100, tg.revenueAttainmentPct);
+                const col = tg.revenueAttainmentPct >= 100 ? '#059669' : tg.revenueAttainmentPct >= 70 ? '#d97706' : '#dc2626';
+                return (
+                  <div className={CARD}>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="font-bold">{t('events.dash.revenueTarget')}</span>
+                      <span className="tabular-nums text-[#6b5d52]">{money(tg.currentMonthRevenue)} / {money(tg.monthlyRevenueTarget)}</span>
+                    </div>
+                    <div className="h-3 rounded bg-[#f0e9df] overflow-hidden"><div className="h-full rounded" style={{ width: `${pct}%`, background: col }} /></div>
+                    <div className="text-right text-lg font-bold mt-0.5 tabular-nums" style={{ color: col }}>{tg.revenueAttainmentPct}%</div>
+                  </div>
+                );
+              })()}
+              {tg.occupancyTargetPct > 0 && (() => {
+                const pct = Math.min(100, tg.occupancyAttainmentPct);
+                const col = tg.occupancyAttainmentPct >= 100 ? '#059669' : tg.occupancyAttainmentPct >= 70 ? '#d97706' : '#dc2626';
+                return (
+                  <div className={CARD}>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="font-bold">{t('events.dash.occupancyTarget')}</span>
+                      <span className="tabular-nums text-[#6b5d52]">{tg.occupancyPct}% / {tg.occupancyTargetPct}%</span>
+                    </div>
+                    <div className="h-3 rounded bg-[#f0e9df] overflow-hidden"><div className="h-full rounded" style={{ width: `${pct}%`, background: col }} /></div>
+                    <div className="text-right text-lg font-bold mt-0.5 tabular-nums" style={{ color: col }}>{tg.occupancyAttainmentPct}%</div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
             {tile(t('events.dash.confirmedRevenue'), money(k.confirmedRevenue), `${k.wonCount} ${t('events.dash.wonEvents')}`)}
             {tile(t('events.dash.pipeline'), money(k.pipelineRevenue), `${openLeads} ${t('events.dash.openLeads')}`, '#2563eb')}
@@ -1988,20 +2053,37 @@ function EventDashboard({ restaurantId, token }: Props) {
             ))}
           </div>
 
-          {/* Booking pace — demand inflow by month booking was created. */}
-          <div className={`${CARD} mb-4`}>
-            <h3 className="font-bold text-sm mb-3">{t('events.dash.bookingPace')}</h3>
-            {(data.bookingPaceByMonth || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : data.bookingPaceByMonth.map((m: any) => (
-              <div key={m.month} className="mb-2">
-                <div className="flex items-center justify-between text-xs mb-0.5">
-                  <span>{m.month}</span><span className="tabular-nums text-[#6b5d52]">{m.inquiries} {t('events.dash.inquiriesShort')} · {m.won} {t('events.dash.wonShort')}</span>
+          {/* Booking pace (demand inflow) + Cash collected (actual receipts). */}
+          <div className="grid md:grid-cols-2 gap-4 mb-4">
+            <div className={CARD}>
+              <h3 className="font-bold text-sm mb-3">{t('events.dash.bookingPace')}</h3>
+              {(data.bookingPaceByMonth || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : data.bookingPaceByMonth.map((m: any) => (
+                <div key={m.month} className="mb-2">
+                  <div className="flex items-center justify-between text-xs mb-0.5">
+                    <span>{m.month}</span><span className="tabular-nums text-[#6b5d52]">{m.inquiries} {t('events.dash.inquiriesShort')} · {m.won} {t('events.dash.wonShort')}</span>
+                  </div>
+                  <div className="h-2 rounded bg-[#f0e9df] overflow-hidden">
+                    <div className="h-full rounded bg-[#0891b2]" style={{ width: `${Math.round(m.inquiries / maxPace * 100)}%` }} />
+                  </div>
                 </div>
-                <div className="h-2 rounded bg-[#f0e9df] overflow-hidden">
-                  <div className="h-full rounded bg-[#0891b2]" style={{ width: `${Math.round(m.inquiries / maxPace * 100)}%` }} />
+              ))}
+              <p className="text-[10px] text-[#9d8b7e] mt-1">{t('events.dash.paceNote')}</p>
+            </div>
+            <div className={CARD}>
+              <h3 className="font-bold text-sm mb-3 flex items-center justify-between">{t('events.dash.cashCollected')}
+                <span className="text-xs font-normal text-[#6b5d52] tabular-nums">{money(k.receiptsTotal || 0)}</span></h3>
+              {(data.receiptsByMonth || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : data.receiptsByMonth.map((m: any) => (
+                <div key={m.month} className="mb-2">
+                  <div className="flex items-center justify-between text-xs mb-0.5">
+                    <span>{m.month}</span><span className="tabular-nums text-[#6b5d52]">{money(m.amount)}</span>
+                  </div>
+                  <div className="h-2 rounded bg-[#f0e9df] overflow-hidden">
+                    <div className="h-full rounded bg-[#059669]" style={{ width: `${Math.round(m.amount / maxReceipt * 100)}%` }} />
+                  </div>
                 </div>
-              </div>
-            ))}
-            <p className="text-[10px] text-[#9d8b7e] mt-1">{t('events.dash.paceNote')}</p>
+              ))}
+              <p className="text-[10px] text-[#9d8b7e] mt-1">{t('events.dash.cashNote')}</p>
+            </div>
           </div>
 
           <div className="grid md:grid-cols-2 gap-4">
@@ -2131,13 +2213,26 @@ function EventSettings({ restaurantId, token }: Props) {
   const [secLang, setSecLang] = useState<string>('');
   const [gst, setGst] = useState<{ gst_percent: number; gst_enabled: boolean; gst_number: string; invoice_lang_mode: string; suggested_language: string }>({ gst_percent: 18, gst_enabled: true, gst_number: '', invoice_lang_mode: 'BOTH', suggested_language: '' });
   const [gstSaved, setGstSaved] = useState(false);
+  // Business targets + cash-risk alert thresholds (Sprint 4). Shares the
+  // gst-settings endpoint (both live on event_profile).
+  const [biz, setBiz] = useState<{ monthly_revenue_target: number; occupancy_target_pct: number; min_deposit_pct: number; deposit_due_days: number }>({ monthly_revenue_target: 0, occupancy_target_pct: 0, min_deposit_pct: 25, deposit_due_days: 14 });
+  const [bizSaved, setBizSaved] = useState(false);
   useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) { let gl: string[] = []; try { const g = JSON.parse(p.gallery || '[]'); if (Array.isArray(g)) gl = g.filter(Boolean); } catch { /* */ } setForm({ ...p, is_published: Number(p.is_published) !== 0, gallery_list: gl }); } }).catch(() => {}); }, []);
   useEffect(() => { api('/settings/language').then((r) => setSecLang(r.secondary_language || '')).catch(() => {}); }, []);
-  useEffect(() => { api('/events/gst-settings').then((r) => setGst({ gst_percent: Number(r.gst_percent ?? 18), gst_enabled: Number(r.gst_enabled ?? 1) !== 0, gst_number: r.gst_number || '', invoice_lang_mode: r.invoice_lang_mode || 'BOTH', suggested_language: r.suggested_language || '' })).catch(() => {}); }, []);
+  useEffect(() => { api('/events/gst-settings').then((r) => {
+    setGst({ gst_percent: Number(r.gst_percent ?? 18), gst_enabled: Number(r.gst_enabled ?? 1) !== 0, gst_number: r.gst_number || '', invoice_lang_mode: r.invoice_lang_mode || 'BOTH', suggested_language: r.suggested_language || '' });
+    setBiz({ monthly_revenue_target: Number(r.monthly_revenue_target ?? 0), occupancy_target_pct: Number(r.occupancy_target_pct ?? 0), min_deposit_pct: Number(r.min_deposit_pct ?? 25), deposit_due_days: Number(r.deposit_due_days ?? 14) });
+  }).catch(() => {}); }, []);
   const saveGst = async () => {
     try {
       await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ gst_percent: Number(gst.gst_percent) || 0, gst_enabled: gst.gst_enabled, gst_number: gst.gst_number.trim(), invoice_lang_mode: gst.invoice_lang_mode }) });
       setGstSaved(true); setTimeout(() => setGstSaved(false), 1500);
+    } catch (e: any) { alert(e.message); }
+  };
+  const saveBiz = async () => {
+    try {
+      await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ monthly_revenue_target: Number(biz.monthly_revenue_target) || 0, occupancy_target_pct: Number(biz.occupancy_target_pct) || 0, min_deposit_pct: Number(biz.min_deposit_pct) || 0, deposit_due_days: Number(biz.deposit_due_days) || 0 }) });
+      setBizSaved(true); setTimeout(() => setBizSaved(false), 1500);
     } catch (e: any) { alert(e.message); }
   };
   const [vr, setVr] = useState<any>({ default_turnaround_min: 120, hd_am_start: '08:00', hd_am_end: '14:00', hd_pm_start: '17:00', hd_pm_end: '23:00', weekend_days: '0,6' });
@@ -2252,6 +2347,28 @@ function EventSettings({ restaurantId, token }: Props) {
         <div className="flex items-center gap-3">
           <button className={BTN_PRIMARY} onClick={saveVr}>{t('common.save')}</button>
           {vrSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
+        </div>
+      </div>
+
+      {/* Business targets + cash-risk alerts (drives dashboard attainment + alerts) */}
+      <div className={`${CARD} mb-4 space-y-3`}>
+        <div className="flex items-center gap-2">
+          <IndianRupee size={16} className="text-[#cc5a16]" />
+          <div>
+            <div className="text-sm font-bold text-[#3d2e22]">{t('events.settings.targetsTitle')}</div>
+            <div className="text-[11px] text-[#9d8b7e]">{t('events.settings.targetsSub')}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div><label className={LABEL}>{t('events.settings.monthlyRevenueTarget')} (₹)</label><input type="number" min={0} className={INPUT} value={biz.monthly_revenue_target} onChange={e => setBiz({ ...biz, monthly_revenue_target: Number(e.target.value) })} placeholder="0 = no target" /></div>
+          <div><label className={LABEL}>{t('events.settings.occupancyTarget')} (%)</label><input type="number" min={0} max={100} className={INPUT} value={biz.occupancy_target_pct} onChange={e => setBiz({ ...biz, occupancy_target_pct: Number(e.target.value) })} placeholder="0 = no target" /></div>
+          <div><label className={LABEL}>{t('events.settings.minDeposit')} (%)</label><input type="number" min={0} max={100} className={INPUT} value={biz.min_deposit_pct} onChange={e => setBiz({ ...biz, min_deposit_pct: Number(e.target.value) })} /></div>
+          <div><label className={LABEL}>{t('events.settings.depositDueDays')}</label><input type="number" min={0} className={INPUT} value={biz.deposit_due_days} onChange={e => setBiz({ ...biz, deposit_due_days: Number(e.target.value) })} /></div>
+        </div>
+        <p className="text-[11px] text-[#9d8b7e]">{t('events.settings.targetsNote')}</p>
+        <div className="flex items-center gap-3">
+          <button className={BTN_PRIMARY} onClick={saveBiz}>{t('common.save')}</button>
+          {bizSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
         </div>
       </div>
 

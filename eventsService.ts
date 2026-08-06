@@ -642,6 +642,19 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   await tenantDb.exec(`ALTER TABLE event_rental_items ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_services ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_catering_packages ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  // Venue operating cost per booked day (owner-set; 0 = untracked). Completes the
+  // true-margin picture — margin subtracts venue cost = cost_per_day × booked days.
+  await tenantDb.exec(`ALTER TABLE event_venues ADD COLUMN IF NOT EXISTS cost_per_day DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+
+  // ── Sprint 4: business targets + cash-risk alert config (event_profile) ──────
+  // Owner-set monthly revenue + occupancy targets (dashboard attainment), and the
+  // deposit-policy thresholds that drive the low-deposit alert: an upcoming
+  // confirmed event with < min_deposit_pct collected within deposit_due_days is
+  // flagged. All default-safe (0 target = no attainment bar; 25%/14d defaults).
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS monthly_revenue_target DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS occupancy_target_pct DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS min_deposit_pct DOUBLE PRECISION DEFAULT 25`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS deposit_due_days INT DEFAULT 14`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_items ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_services ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_catering ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});

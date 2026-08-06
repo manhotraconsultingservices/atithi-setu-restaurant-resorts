@@ -558,6 +558,33 @@ list (confirmed/in-progress ranked ahead of inquiry/quoted), renders the primary
 them. **Do not** revert `cellFor` to `.find()` — that silently hides every booking but
 the first (the bug this replaced).
 
+### Events analytics / KPIs (`GET /events/analytics`)
+
+One endpoint (`server.ts`) powers the Operations Dashboard + Reports; everything is
+computed in JS from a single windowed booking pull (`?from&to`, default ±180d). Payload:
+`kpis` (headline numbers), `funnel`, `revenueByMonth`, `venueUtilization`, `eventTypeMix`,
+`leadSources`, `cateringByPackage`, `upcoming`, `receivables`, `lostReasons`, plus
+`aging`, `bookingPaceByMonth`, `quoteStats`, `receiptsByMonth`, `targets`, `alerts`.
+
+* **Revenue is NET of GST** — `netAmt = total_amount − tax_amount`; receivables/outstanding
+  use **gross** `total_amount`. `WON = CONFIRMED|IN_PROGRESS|COMPLETED`, `PIPE = INQUIRY|QUOTED`.
+* **True margin:** `totalCost = lineCost (cost_snapshot of rentals/services/catering) +
+  venueCost (event_venues.cost_per_day × booked days)`. Hotel-room cost is **excluded on
+  purpose** (billed through the Hotel P&L — counting it here double-counts).
+* **AR aging** (`aging`): net outstanding of won bookings, aged by **event date** —
+  `notDue` (future) / `d0_30` / `d31_60` / `d61_90` / `d90plus`, reconciling to `total`.
+* **Space yield:** `revPerAvailableDay` (RevPAR = confirmedRevenue ÷ activeVenues×periodDays),
+  `avgRatePerBookedDay`, `spaceOccupancyPct`; per-venue `revPerBookedDay`.
+* **Targets + alerts** live on `event_profile`: `monthly_revenue_target`,
+  `occupancy_target_pct`, `min_deposit_pct` (default 25), `deposit_due_days` (default 14).
+  `targets` returns current-month attainment; `alerts` = `OVERDUE` (any overdue schedule
+  cash) + `LOW_DEPOSIT` (upcoming won events inside the deposit window under min-deposit %).
+  Owner sets these + venue `cost_per_day` in Events → Public Page Settings / Venues master.
+* **Cash vs revenue:** `receiptsByMonth` is actual money in (from `event_payments.paid_at`),
+  distinct from `revenueByMonth` (contracted, by event date).
+* Reads on possibly-unmigrated tables are `.catch()`-guarded so old tenants never 500.
+  Regression: `TC-EVT-KPI` in `run_technical_tests.mjs` asserts the KPI keys + aging reconcile.
+
 ---
 
 ## Recent Feature Additions (2026-05 cycle — Hotel PMS expansion + OTA Channel Manager)

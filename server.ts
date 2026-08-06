@@ -22971,7 +22971,7 @@ ${data.tenant.name}`;
       );
       // Apply the extended price-matrix / window / buffer fields if the create
       // form sent them (nullable — '' clears back to the tenant default).
-      const ext = ['hourly_min_hours','half_day_am_rate','half_day_pm_rate','weekend_hourly_rate','weekend_half_day_am_rate','weekend_half_day_pm_rate','weekend_daily_rate','hd_am_start','hd_am_end','hd_pm_start','hd_pm_end','turnaround_min'];
+      const ext = ['hourly_min_hours','half_day_am_rate','half_day_pm_rate','weekend_hourly_rate','weekend_half_day_am_rate','weekend_half_day_pm_rate','weekend_daily_rate','hd_am_start','hd_am_end','hd_pm_start','hd_pm_end','turnaround_min','cost_per_day'];
       const ef: string[] = []; const ev: any[] = [];
       for (const k of ext) { if (b[k] !== undefined) { ef.push(`${k} = ?`); ev.push(b[k] === '' ? null : b[k]); } }
       if (ef.length) { ev.push(id); await db.run(`UPDATE event_venues SET ${ef.join(', ')} WHERE id = ?`, ev); }
@@ -22988,7 +22988,7 @@ ${data.tenant.name}`;
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
       const allow = ['name','category','ac_type','min_occupancy','max_occupancy','floor_area','hourly_rate','half_day_rate','daily_rate','gst_percent','amenities','image_url','display_order','is_active',
-        'hourly_min_hours','half_day_am_rate','half_day_pm_rate','weekend_hourly_rate','weekend_half_day_am_rate','weekend_half_day_pm_rate','weekend_daily_rate','hd_am_start','hd_am_end','hd_pm_start','hd_pm_end','turnaround_min'];
+        'hourly_min_hours','half_day_am_rate','half_day_pm_rate','weekend_hourly_rate','weekend_half_day_am_rate','weekend_half_day_pm_rate','weekend_daily_rate','hd_am_start','hd_am_end','hd_pm_start','hd_pm_end','turnaround_min','cost_per_day'];
       for (const k of allow) {
         if (b[k] !== undefined) { const v = b[k]; fields.push(`${k} = ?`); vals.push(typeof v === 'boolean' ? (v ? 1 : 0) : (v === '' ? null : v)); }
       }
@@ -23294,7 +23294,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const row: any = await db.get("SELECT gst_percent, gst_enabled, invoice_lang_mode FROM event_profile WHERE id = 1").catch(() => null);
+      const row: any = await db.get("SELECT gst_percent, gst_enabled, invoice_lang_mode, monthly_revenue_target, occupancy_target_pct, min_deposit_pct, deposit_due_days FROM event_profile WHERE id = 1").catch(() => null);
       // GSTIN + regional language live on the central tenant record (shared across
       // modules); surface them here so events owners can manage them in one place.
       // suggested_language is derived from the tenant's state.
@@ -23306,6 +23306,11 @@ ${data.tenant.name}`;
         suggested_language: regionalLanguageForState((check.restaurant as any)?.state),
         state: (check.restaurant as any)?.state || '',
         invoice_lang_mode: row?.invoice_lang_mode || 'BOTH',
+        // Business targets + cash-risk alert thresholds (Sprint 4).
+        monthly_revenue_target: Number(row?.monthly_revenue_target ?? 0),
+        occupancy_target_pct: Number(row?.occupancy_target_pct ?? 0),
+        min_deposit_pct: row?.min_deposit_pct != null ? Number(row.min_deposit_pct) : 25,
+        deposit_due_days: row?.deposit_due_days != null ? Number(row.deposit_due_days) : 14,
       });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch GST settings" }); }
   });
@@ -23323,6 +23328,14 @@ ${data.tenant.name}`;
       // Seed the singleton row if a tenant somehow has none yet.
       const exists = await db.get("SELECT id FROM event_profile WHERE id = 1").catch(() => null);
       if (!exists) await db.run("INSERT INTO event_profile (id, gst_percent, gst_enabled, invoice_lang_mode) VALUES (1, ?, ?, ?)", [pct, enabled, mode]).catch(() => {});
+      // Business targets + cash-risk alert thresholds (Sprint 4). Only the fields
+      // the form sent are updated; clamps keep them in sane ranges.
+      const tf: string[] = []; const tv: any[] = [];
+      if (b.monthly_revenue_target !== undefined) { tf.push('monthly_revenue_target = ?'); tv.push(Math.max(0, Number(b.monthly_revenue_target) || 0)); }
+      if (b.occupancy_target_pct !== undefined) { tf.push('occupancy_target_pct = ?'); tv.push(Math.min(100, Math.max(0, Number(b.occupancy_target_pct) || 0))); }
+      if (b.min_deposit_pct !== undefined) { tf.push('min_deposit_pct = ?'); tv.push(Math.min(100, Math.max(0, Number(b.min_deposit_pct) || 0))); }
+      if (b.deposit_due_days !== undefined) { tf.push('deposit_due_days = ?'); tv.push(Math.max(0, Math.round(Number(b.deposit_due_days) || 0))); }
+      if (tf.length) await db.run(`UPDATE event_profile SET ${tf.join(', ')} WHERE id = 1`, tv).catch(() => {});
       // GSTIN (needed to make the invoice GST-compliant) and the regional language
       // for bilingual invoices live on the central tenant record.
       if (b.gst_number !== undefined) {
@@ -23750,19 +23763,31 @@ ${data.tenant.name}`;
         cateringRevenue = round2(cater.reduce((s, c) => s + num(c.revenue), 0));
       }
 
-      // Variable cost of won events (rentals + services + catering line cost
-      // snapshots). Venue/hotel-room cost is not tracked, so margin here is a
-      // contribution proxy: sell − variable cost.
-      let totalCost = 0;
+      // Cost of won events: variable line cost snapshots (rentals + services +
+      // catering) PLUS venue operating cost (cost_per_day × booked days). Hotel
+      // rooms are intentionally excluded — they are billed through to the Hotel
+      // P&L, so counting their cost here would double-count. lineCost is the
+      // variable contribution cost; totalCost is the fuller gross-margin cost.
+      let lineCost = 0, venueCost = 0;
       if (wonIds.length) {
         const ph = wonIds.map(() => '?').join(',');
         const cq = async (sql: string) => { try { const r: any[] = await db.query(sql, wonIds); return num(r?.[0]?.c); } catch { return 0; } };
-        totalCost = round2(
+        lineCost = round2(
           (await cq(`SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS c FROM event_booking_items WHERE booking_id IN (${ph})`)) +
           (await cq(`SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS c FROM event_booking_services WHERE booking_id IN (${ph})`)) +
           (await cq(`SELECT COALESCE(SUM(cost_snapshot*pax),0) AS c FROM event_booking_catering WHERE booking_id IN (${ph})`))
         );
       }
+      // Venue operating cost = per-venue cost_per_day × that venue's booked days
+      // in the window (booked days already computed in venueMap).
+      try {
+        const vcRows: any[] = await db.query(`SELECT id, COALESCE(cost_per_day,0) AS cost_per_day FROM event_venues`).catch(() => []);
+        const vcMap: Record<string, number> = {};
+        for (const v of vcRows) vcMap[v.id] = num(v.cost_per_day);
+        for (const [vid, v] of Object.entries(venueMap)) venueCost += (vcMap[vid] || 0) * v.days.size;
+        venueCost = round2(venueCost);
+      } catch { /* cost_per_day may not exist on un-migrated tenant */ }
+      const totalCost = round2(lineCost + venueCost);
       const margin = round2(confirmedRevenue - totalCost);
       const marginPct = confirmedRevenue > 0 ? Math.round(margin / confirmedRevenue * 100) : 0;
 
@@ -23877,6 +23902,45 @@ ${data.tenant.name}`;
         }
       } catch { /* quotations table may not exist on un-migrated tenant */ }
 
+      // ── CASH COLLECTED — receipts by month, from the payment ledger (actual
+      // money in, distinct from contracted revenue by event date). ───────────
+      const receiptsMap: Record<string, number> = {};
+      try {
+        const pays: any[] = await db.query(`SELECT paid_at, amount FROM event_payments WHERE paid_at >= ? AND paid_at <= ?`, [from, to]).catch(() => []);
+        for (const p of pays) { const m = ymd(p.paid_at).slice(0, 7); if (m.length < 7) continue; receiptsMap[m] = round2((receiptsMap[m] || 0) + num(p.amount)); }
+      } catch { /* payments table may not exist on un-migrated tenant */ }
+      const receiptsByMonth = Object.keys(receiptsMap).sort().map(m => ({ month: m, amount: receiptsMap[m] }));
+      const receiptsTotal = round2(receiptsByMonth.reduce((s, r) => s + r.amount, 0));
+
+      // ── TARGETS + ATTAINMENT (owner-set monthly goals) ───────────────────
+      const prof: any = await db.get(`SELECT monthly_revenue_target, occupancy_target_pct, min_deposit_pct, deposit_due_days FROM event_profile WHERE id = 1`).catch(() => null);
+      const monthlyRevenueTarget = round2(num(prof?.monthly_revenue_target));
+      const occupancyTargetPct = num(prof?.occupancy_target_pct);
+      const minDepositPct = prof?.min_deposit_pct != null ? num(prof.min_deposit_pct) : 25;
+      const depositDueDays = prof?.deposit_due_days != null ? num(prof.deposit_due_days) : 14;
+      const curMonth = today.slice(0, 7);
+      const currentMonthRevenue = round2(num((revenueByMonth.find(m => m.month === curMonth) || {}).revenue));
+      const targets = {
+        monthlyRevenueTarget, occupancyTargetPct, minDepositPct, depositDueDays,
+        currentMonthRevenue,
+        revenueAttainmentPct: monthlyRevenueTarget > 0 ? Math.round(currentMonthRevenue / monthlyRevenueTarget * 100) : 0,
+        occupancyPct: spaceOccupancyPct,
+        occupancyAttainmentPct: occupancyTargetPct > 0 ? Math.round(spaceOccupancyPct / occupancyTargetPct * 100) : 0,
+      };
+
+      // ── ALERTS — things that need action now (overdue cash + upcoming events
+      // under-deposited within the deposit window). ────────────────────────
+      const alerts: any[] = [];
+      if (overdue > 0) alerts.push({ type: 'OVERDUE', severity: 'high', amount: overdue });
+      const lowDeposit = forwardWon.map(r => {
+        const dte = daysBetween(ymd(r.event_date), today);
+        const tot = num(r.total_amount);
+        const pct = tot > 0 ? Math.round(num(r.advance_amount) / tot * 100) : 100;
+        return { id: r.id, customer_name: r.customer_name, venue_name: r.venue_name, event_date: ymd(r.event_date), daysToEvent: dte, collectedPct: pct, total_amount: tot, advance_amount: num(r.advance_amount), shortfall: round2(Math.max(0, tot * minDepositPct / 100 - num(r.advance_amount))) };
+      }).filter(r => r.daysToEvent >= 0 && r.daysToEvent <= depositDueDays && r.collectedPct < minDepositPct)
+        .sort((a, b) => a.daysToEvent - b.daysToEvent);
+      if (lowDeposit.length) alerts.push({ type: 'LOW_DEPOSIT', severity: 'high', count: lowDeposit.length, minDepositPct, depositDueDays, amount: round2(lowDeposit.reduce((s, r) => s + r.shortfall, 0)), items: lowDeposit.slice(0, 20) });
+
       res.json({
         window: { from, to, days: periodDays },
         kpis: { totalEvents: rows.length, wonCount, lostCount, winRate, avgBookingValue, totalCovers,
@@ -23886,9 +23950,10 @@ ${data.tenant.name}`;
           depositCollectionPct, cancellationRate, repeatCustomerPct, repeatCustomers, distinctCustomers,
           forwardRevenue, deliveredRevenue, valueAtRisk, revPerAvailableDay, avgRatePerBookedDay,
           spaceOccupancyPct, avgLeadTimeDays, activeVenues, totalBookedDays,
-          quoteAcceptanceRate: quoteStats.acceptanceRate, avgDaysToQuote: quoteStats.avgDaysToQuote },
+          quoteAcceptanceRate: quoteStats.acceptanceRate, avgDaysToQuote: quoteStats.avgDaysToQuote,
+          lineCost, venueCost, receiptsTotal },
         funnel, revenueByMonth, venueUtilization, eventTypeMix, leadSources, cateringByPackage, upcoming, receivables, lostReasons,
-        aging, bookingPaceByMonth, quoteStats,
+        aging, bookingPaceByMonth, quoteStats, receiptsByMonth, targets, alerts,
       });
     } catch (err: any) {
       console.error("/events/analytics error:", err);
@@ -46706,8 +46771,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-kpi-pack',
+    commit_marker: 'events-kpi-margin-targets-alerts-cash',
     code_features: [
+      'events-kpi-margin-targets-alerts-cash',      // true margin (venue cost_per_day); monthly revenue/occupancy targets + attainment; dashboard alerts (overdue + low-deposit upcoming); cash-collected-by-month from payment ledger
       'events-kpi-pack',                            // /events/analytics adds AR aging, deposit%, forward book, value-at-risk, RevPAR/space yield, quote acceptance + speed-to-quote, booking pace, lead time, repeat-customer%, cancellation rate; dashboard tiles/cards + CSV
       'home-events-tile',                           // Home launchpad shows an Events & Convention module tile when events_enabled (was Hotel/Restaurant/Spa only)
       'events-billing-gst-after-discount-multiday', // GST charged on discounted (net) base; rentals+services ×days/hours; venue already per-day; computeEventBill == assembleEventQuoteLines
