@@ -879,7 +879,7 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
                 {overdue ? t('events.pay.overdue') : s.status === 'PAID' ? t('events.pay.paidStatus') : t('events.pay.due')}
               </span>
             </span>
-            {canRecord && s.status !== 'PAID' && <button className={BTN_GHOST} onClick={() => openPay(s)}>{t('events.pay.pay')}</button>}
+            {canRecord && s.status !== 'PAID' && Number(pay.balance) > 0.01 && <button className={BTN_GHOST} onClick={() => openPay(s)}>{t('events.pay.pay')}</button>}
             {editable && <button onClick={() => delSched(s.id)}><X size={12} className="text-rose-500" /></button>}
           </div>
         );

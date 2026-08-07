@@ -25,7 +25,7 @@ import {
 import {
   createEventTables, seedEventDefaults,
   resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty,
-  recomputeEventPaid, eventStaffConflict,
+  recomputeEventPaid, reconcileEventSchedule, eventStaffConflict,
   halfDayWindow, venueTurnaroundMin,
 } from "./eventsService.ts";
 import { generateEventQuotationPdf, generateEventBEOPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
@@ -24552,7 +24552,10 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const rows = await db.query("SELECT * FROM event_payment_schedule WHERE booking_id = ? ORDER BY sort_order, due_date", [req.params.bid]).catch(() => []);
+      // Reconcile against actual receipts on read — the schedule is a projection of
+      // payments, so instalments reflect PAID/DUE correctly no matter which path
+      // recorded the money (fixes stale "Pay" after a booking is fully settled).
+      const rows = await reconcileEventSchedule(db, req.params.bid);
       res.json(rows);
     } catch (err: any) { res.status(500).json({ error: "Failed to load schedule" }); }
   });
@@ -24612,7 +24615,8 @@ ${data.tenant.name}`;
           [mkEventId('EPS'), req.params.bid, s.label || 'Instalment', due, amount, pct, order++]);
       }
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'SCHEDULE_GENERATED', summary: `${splits.length}-stage payment schedule generated` });
-      const rows = await db.query("SELECT * FROM event_payment_schedule WHERE booking_id = ? ORDER BY sort_order, due_date", [req.params.bid]);
+      // Reflect any payments already recorded against this booking on the fresh plan.
+      const rows = await reconcileEventSchedule(db, req.params.bid);
       res.json(rows);
     } catch (err: any) { res.status(500).json({ error: "Failed to generate schedule" }); }
   });
@@ -24689,32 +24693,12 @@ ${data.tenant.name}`;
         `INSERT INTO event_payments (id, booking_id, schedule_id, amount, method, reference, paid_at, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [pid, req.params.bid, b.schedule_id || null, amount, b.method || 'CASH', b.reference || null, b.paid_at || new Date().toISOString().slice(0, 10), b.note || null, req.user?.email || null]
       );
-      // Allocate to the schedule. If a specific instalment was chosen, apply to it;
-      // otherwise AUTO-ALLOCATE across the DUE instalments (oldest first) so a general
-      // "Record Payment" (schedule_id not sent) still marks the schedule Paid. This was
-      // the reported bug: payments recorded without an instalment left every row DUE.
-      if (b.schedule_id) {
-        const sched: any = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [b.schedule_id]);
-        if (sched) {
-          const paidAmt = round2(Number(sched.paid_amount || 0) + amount);
-          const status = paidAmt >= Number(sched.amount || 0) - 0.01 ? 'PAID' : 'DUE';
-          await db.run("UPDATE event_payment_schedule SET paid_amount = ?, status = ?, paid_at = CASE WHEN ? = 'PAID' THEN CURRENT_TIMESTAMP ELSE paid_at END WHERE id = ?", [paidAmt, status, status, b.schedule_id]);
-        }
-      } else {
-        let remaining = amount;
-        const dueRows: any[] = await db.query("SELECT * FROM event_payment_schedule WHERE booking_id = ? AND status NOT IN ('PAID','WAIVED') ORDER BY due_date ASC, sort_order ASC", [req.params.bid]).catch(() => []);
-        for (const row of (dueRows || [])) {
-          if (remaining <= 0.01) break;
-          const owed = round2(Number(row.amount || 0) - Number(row.paid_amount || 0));
-          if (owed <= 0) continue;
-          const applied = Math.min(remaining, owed);
-          const newPaid = round2(Number(row.paid_amount || 0) + applied);
-          const newStatus = newPaid >= Number(row.amount || 0) - 0.01 ? 'PAID' : 'DUE';
-          await db.run("UPDATE event_payment_schedule SET paid_amount = ?, status = ?, paid_at = CASE WHEN ? = 'PAID' THEN CURRENT_TIMESTAMP ELSE paid_at END WHERE id = ?", [newPaid, newStatus, newStatus, row.id]);
-          remaining = round2(remaining - applied);
-        }
-      }
       const paid = await recomputeEventPaid(db, req.params.bid);
+      // Re-project the whole schedule from total receipts (oldest instalment first).
+      // Single source of truth for instalment status — a full payment marks every
+      // instalment PAID regardless of whether a specific one was chosen, so the
+      // schedule never leaves a "Pay" button on a fully-settled booking.
+      await reconcileEventSchedule(db, req.params.bid);
       // ── Events ↔ Accounts: post the receipt to the cash ledger (petty_cash) ──
       // Idempotent via reference_id, so it surfaces in the Expense Journal /
       // accounts reports without ever double-counting. Mirrors the HR payroll bridge.
@@ -24780,15 +24764,10 @@ ${data.tenant.name}`;
         sourceType: 'EVENT_ADVANCE_REVERSAL', sourceId: req.params.pid,
         reason: 'Event payment deleted', postedBy: req.user?.email || req.user?.id || null,
       });
-      if (pay.schedule_id) {
-        const sched: any = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [pay.schedule_id]);
-        if (sched) {
-          const paidAmt = round2(Math.max(0, Number(sched.paid_amount || 0) - Number(pay.amount || 0)));
-          const status = (Number(sched.amount || 0) > 0 && paidAmt >= Number(sched.amount || 0) - 0.01) ? 'PAID' : 'DUE';
-          await db.run("UPDATE event_payment_schedule SET paid_amount = ?, status = ? WHERE id = ?", [paidAmt, status, pay.schedule_id]);
-        }
-      }
       const paid = await recomputeEventPaid(db, pay.booking_id);
+      // Re-project the schedule from the remaining receipts so reversing a payment
+      // correctly un-marks the instalments it had covered.
+      await reconcileEventSchedule(db, pay.booking_id);
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: pay.booking_id, action: 'PAYMENT_REVERSED', summary: `Payment ${pay.amount} reversed (total paid ${paid})` });
       res.json({ success: true, paid });
     } catch (err: any) { res.status(500).json({ error: "Failed to delete payment" }); }
@@ -47090,8 +47069,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-post-event-payment',
+    commit_marker: 'events-schedule-reconcile-pagination',
     code_features: [
+      'events-schedule-reconcile-pagination',       // (1) DataTable: the pagination bar (with its Rows-per-page selector) now stays visible after the user raises the page size even if all rows fit one page (was: totalPages>1 only, so the selector vanished and couldn't be reverted) — condition is now totalPages>1 || pageSize!==default. (2) Payment schedule: instalment status is reconciled from actual receipts (reconcileEventSchedule, oldest-first) on schedule read/generate + after every payment insert/delete — a full payment now marks ALL instalments PAID and hides the Pay button (also gated on outstanding balance>0), no matter which path recorded the money.
       'events-post-event-payment',                  // event booking payment panel now lets staff record a payment AFTER the event is COMPLETED (customers often settle the balance late): PaymentPanel gains a `canRecord` flag (true unless CANCELLED) separate from `editable` (ledger edit/delete, still locked once COMPLETED) — Record-payment + pay-instalment buttons show on completed bookings, matching the backend which only blocks receipts on CANCELLED; receipt-delete lock unchanged. Hint shown on completed bookings with a balance.
       'events-invoice-payment-status',              // Events bookings (invoice) table gains Advance / Outstanding / Payment-status (Paid · Partially paid · Pending) columns derived from total_amount vs advance_amount; Reports gets an "Outstanding by Invoice" report (invoice id, customer, total, paid, outstanding, status + grand-total footer) + enriched CSV. Frontend-only (analytics receivables already returns id/status/outstanding).
       'events-csv-migration-utility',               // owner-only CSV data-migration utility for Events: Rental Inventory / Add-on Services / Bookings / Sales Invoices — download template → upload CSV → server validates + coerces + flags duplicates (natural-key dedup checked at validate AND commit) → editable fix-it grid → commit inserts only OK non-duplicate rows via the same create paths as hand entry (GET/POST validate/commit + spec endpoints, EVENT_MIGRATION audit)

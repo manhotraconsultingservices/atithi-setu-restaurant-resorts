@@ -724,6 +724,41 @@ export async function recomputeEventPaid(tenantDb: DbInterface, bookingId: strin
   return paid;
 }
 
+/**
+ * Reconcile a booking's payment-schedule instalments against the total actually
+ * received, so the schedule is a pure projection of payments and can never drift.
+ * Fills the plan oldest-first (the standard for a payment schedule): each
+ * instalment is marked PAID once cumulative receipts cover it, DUE otherwise.
+ * This is the single source of truth for instalment status — it makes every
+ * payment path consistent (general receipt, per-instalment "Pay", checkout
+ * settlement) and self-heals rounding drift, WAIVED rows are left untouched.
+ * Idempotent; returns the reconciled rows in display order.
+ */
+export async function reconcileEventSchedule(tenantDb: DbInterface, bookingId: string): Promise<any[]> {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const rows: any[] = await tenantDb.query(
+    "SELECT * FROM event_payment_schedule WHERE booking_id = ? ORDER BY sort_order, due_date", [bookingId],
+  ).catch(() => []);
+  if (!rows || rows.length === 0) return rows || [];
+  const paidRow: any[] = await tenantDb.query("SELECT COALESCE(SUM(amount),0) AS t FROM event_payments WHERE booking_id = ?", [bookingId]);
+  let pool = r2(Number(paidRow?.[0]?.t || 0));
+  for (const row of rows) {
+    if (String(row.status) === 'WAIVED') continue;
+    const amt = r2(Number(row.amount || 0));
+    const applied = r2(Math.max(0, Math.min(pool, amt)));
+    pool = r2(pool - applied);
+    const status = amt > 0 && applied >= amt - 0.01 ? 'PAID' : 'DUE';
+    if (r2(Number(row.paid_amount || 0)) !== applied || String(row.status) !== status) {
+      await tenantDb.run(
+        "UPDATE event_payment_schedule SET paid_amount = ?, status = ?, paid_at = CASE WHEN ? = 'PAID' THEN COALESCE(paid_at, CURRENT_TIMESTAMP) ELSE NULL END WHERE id = ?",
+        [applied, status, status, row.id],
+      );
+      row.paid_amount = applied; row.status = status;
+    }
+  }
+  return rows;
+}
+
 // ── Seed a couple of sensible defaults so a fresh tenant sees a populated master.
 export async function seedEventDefaults(tenantDb: DbInterface): Promise<number> {
   let seeded = 0;

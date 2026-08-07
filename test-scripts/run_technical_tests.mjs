@@ -1209,6 +1209,36 @@ async function testEvents() {
     }
   }
 
+  // TC-EVT-SCHED-FULLPAY: after a full payment every schedule instalment must read
+  // PAID (no stale "Pay" button). The schedule is reconciled from actual receipts on
+  // read, so a full settlement marks all instalments regardless of how it was paid.
+  // Self-cleaning (throwaway booking cancelled with refund ack).
+  {
+    const sDate = new Date(Date.now() + 320 * 86400000).toISOString().slice(0, 10);
+    const sb = await api('POST', `/api/restaurant/${restaurantId}/events/bookings`, { customer_name: 'UAT Sched Full', customer_phone: '9990000781', event_date: sDate, guest_count: 30 });
+    if (sb.status === 201 && sb.data?.id) {
+      const sid = sb.data.id;
+      await api('PUT', `/api/restaurant/${restaurantId}/events/bookings/${sid}`, { venue_rate: 8000 });
+      const gen = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${sid}/schedule/generate`, {});
+      const g = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/${sid}`);
+      const total = Number(g.data?.total_amount || 0);
+      if (gen.status === 200 && total > 0) {
+        await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${sid}/payments`, { amount: total, method: 'CASH', reference: 'full' });
+        const sched = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/${sid}/schedule`);
+        const rows = Array.isArray(sched.data) ? sched.data : [];
+        const allPaid = rows.length > 0 && rows.every(r => String(r.status) === 'PAID');
+        (allPaid ? pass : fail)('TC-EVT-SCHED-FULLPAY', 'All instalments PAID after full payment', `rows=${rows.length}, statuses=${rows.map(r => r.status).join(',')}`);
+      } else {
+        skip('TC-EVT-SCHED-FULLPAY', 'Schedule full-payment reconcile', `gen HTTP ${gen.status}, total ${total}`);
+      }
+      await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${sid}/cancel`, { reason: 'UAT cleanup', acknowledge_refund: true }); // cleanup
+    } else if (sb.status === 403) {
+      skip('TC-EVT-SCHED-FULLPAY', 'Schedule full-payment reconcile', 'no EVENTS_BOOKINGS access');
+    } else {
+      skip('TC-EVT-SCHED-FULLPAY', 'Schedule full-payment reconcile', `booking create HTTP ${sb.status}`);
+    }
+  }
+
   // TC-EVT-MIGRATION: CSV data-migration utility. Validate flags a fresh row OK,
   // commit creates exactly one, a re-validate of the same name flags DUPLICATE, and
   // a re-commit skips it (0 created / 1 skipped) — the hard "no double-migration"

@@ -416,7 +416,10 @@ export function DataTable<T = any>({
         </table>
       </div>
 
-      {!hidePagination && totalPages > 1 && (
+      {/* Keep the bar (and its Rows-per-page selector) visible once the user has
+          changed the page size, even if the larger size now fits on one page —
+          otherwise the control that changed it disappears and can't be reverted. */}
+      {!hidePagination && (totalPages > 1 || pageSize !== defaultPageSize) && (
         <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-t border-[#f0ebe4] bg-[#faf7f2]/30 text-xs text-[#6b5d52]">
           <div className="flex items-center gap-2">
             <span className="text-[#9c8e85]">Rows per page:</span>
