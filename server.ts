@@ -23972,6 +23972,103 @@ ${data.tenant.name}`;
         .sort((a, b) => a.daysToEvent - b.daysToEvent);
       if (lowDeposit.length) alerts.push({ type: 'LOW_DEPOSIT', severity: 'high', count: lowDeposit.length, minDepositPct, depositDueDays, amount: round2(lowDeposit.reduce((s, r) => s + r.shortfall, 0)), items: lowDeposit.slice(0, 20) });
 
+      // ══════════════════════════════════════════════════════════════════════
+      // "Manage-the-business" layer — turns the scoreboard into a management
+      // tool: period-over-period variance, segment (event-type / venue)
+      // contribution margin, and customer-concentration risk.
+      // ══════════════════════════════════════════════════════════════════════
+      const vcMap2: Record<string, number> = {};
+      try { for (const v of await db.query(`SELECT id, COALESCE(cost_per_day,0) AS cost_per_day FROM event_venues`)) vcMap2[String(v.id)] = num(v.cost_per_day); } catch { /* cost_per_day may be absent */ }
+      const bookedDaysInWindow = (r: any, wFrom: string, wTo: string): number => {
+        const s = ymd(r.event_date); const e0 = ymd(r.end_date || r.event_date); const e = e0 > s ? e0 : s;
+        let d = s < wFrom ? wFrom : s; const cap = e > wTo ? wTo : e; let n = 0;
+        while (d <= cap) { n++; d = new Date(new Date(d + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10); }
+        return n;
+      };
+
+      // ── SEGMENT PROFITABILITY — contribution margin by event type & by venue.
+      // Per-booking direct cost = its line-cost snapshots + its venue day-cost
+      // (hotel rooms excluded, same as the aggregate margin above).
+      const costItem: Record<string, number> = {}, costSvc: Record<string, number> = {}, costCat: Record<string, number> = {};
+      if (wonIds.length) {
+        const ph = wonIds.map(() => '?').join(',');
+        const grp = async (tbl: string, qty: string, tgt: Record<string, number>) => {
+          try { for (const x of await db.query(`SELECT booking_id, COALESCE(SUM(cost_snapshot*${qty}),0) AS c FROM ${tbl} WHERE booking_id IN (${ph}) GROUP BY booking_id`, wonIds)) tgt[String(x.booking_id)] = num(x.c); } catch { /* */ }
+        };
+        await grp('event_booking_items', 'quantity', costItem);
+        await grp('event_booking_services', 'quantity', costSvc);
+        await grp('event_booking_catering', 'pax', costCat);
+      }
+      const bookingCost: Record<string, number> = {};
+      for (const r of won) {
+        const vc = (vcMap2[String(r.venue_id)] || 0) * bookedDaysInWindow(r, from, to);
+        bookingCost[r.id] = round2((costItem[r.id] || 0) + (costSvc[r.id] || 0) + (costCat[r.id] || 0) + vc);
+      }
+      const segAgg = (keyOf: (r: any) => string) => {
+        const m: Record<string, { key: string; events: number; revenue: number; cost: number }> = {};
+        for (const r of won) { const key = keyOf(r); if (!m[key]) m[key] = { key, events: 0, revenue: 0, cost: 0 }; m[key].events += 1; m[key].revenue += netAmt(r); m[key].cost += bookingCost[r.id]; }
+        return Object.values(m).map(s => {
+          const revenue = round2(s.revenue), cost = round2(s.cost), marginV = round2(revenue - cost);
+          return { key: s.key, events: s.events, revenue, cost, margin: marginV, marginPct: revenue > 0 ? Math.round(marginV / revenue * 100) : 0, revenueSharePct: confirmedRevenue > 0 ? Math.round(revenue / confirmedRevenue * 100) : 0 };
+        }).sort((a, b) => b.margin - a.margin);
+      };
+      const segmentByType = segAgg(r => r.event_type || 'OTHER');
+      const segmentByVenue = segAgg(r => r.venue_name || 'Unassigned');
+
+      // ── CUSTOMER CONCENTRATION — top accounts + new-vs-repeat revenue split.
+      const repeatPhones = new Set(Object.entries(custMap).filter(([, c]) => (c as number) > 1).map(([k]) => k));
+      const custRev: Record<string, { name: string; events: number; revenue: number }> = {};
+      for (const r of won) { const k = String(r.customer_phone || '').trim() || `n:${r.customer_name}`; if (!custRev[k]) custRev[k] = { name: r.customer_name || '—', events: 0, revenue: 0 }; custRev[k].events += 1; custRev[k].revenue += netAmt(r); }
+      const custArr = Object.values(custRev).map(c => ({ name: c.name, events: c.events, revenue: round2(c.revenue) })).sort((a, b) => b.revenue - a.revenue);
+      const top5Revenue = round2(custArr.slice(0, 5).reduce((s, c) => s + c.revenue, 0));
+      let repeatRevenue = 0, newRevenue = 0;
+      for (const r of won) { const k = String(r.customer_phone || '').trim(); if (k && repeatPhones.has(k)) repeatRevenue += netAmt(r); else newRevenue += netAmt(r); }
+      const concentration = {
+        topCustomers: custArr.slice(0, 8),
+        top5SharePct: confirmedRevenue > 0 ? Math.round(top5Revenue / confirmedRevenue * 100) : 0,
+        repeatRevenue: round2(repeatRevenue), newRevenue: round2(newRevenue),
+      };
+
+      // ── PERIOD-OVER-PERIOD — same core KPIs for the immediately preceding
+      // equal-length window, so every headline reads as a trend, not a snapshot.
+      const priorTo = new Date(new Date(from + 'T00:00:00Z').getTime() - 86400000).toISOString().slice(0, 10);
+      const priorFrom = new Date(new Date(priorTo + 'T00:00:00Z').getTime() - (periodDays - 1) * 86400000).toISOString().slice(0, 10);
+      const computeWindowCore = async (wFrom: string, wTo: string) => {
+        const wRows: any[] = await db.query(
+          `SELECT b.id, b.venue_id, b.status, b.event_date, b.end_date, b.total_amount, b.tax_amount
+             FROM event_bookings b WHERE b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?`, [wTo, wFrom]).catch(() => []);
+        const wWon = wRows.filter(r => isWon(r.status));
+        const wLost = wRows.filter(r => r.status === 'CANCELLED');
+        const revenue = sum(wWon, netAmt);
+        const wonC = wWon.length, lostC = wLost.length;
+        const winR = (wonC + lostC) > 0 ? Math.round(wonC / (wonC + lostC) * 100) : 0;
+        const avg = wonC > 0 ? round2(revenue / wonC) : 0;
+        const pipe = sum(wRows.filter(r => PIPE.includes(r.status)), netAmt);
+        let lc = 0, vc = 0; const ids = wWon.map(r => r.id);
+        if (ids.length) {
+          const ph = ids.map(() => '?').join(',');
+          const cq = async (sql: string) => { try { const r: any[] = await db.query(sql, ids); return num(r?.[0]?.c); } catch { return 0; } };
+          lc = round2(
+            (await cq(`SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS c FROM event_booking_items WHERE booking_id IN (${ph})`)) +
+            (await cq(`SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS c FROM event_booking_services WHERE booking_id IN (${ph})`)) +
+            (await cq(`SELECT COALESCE(SUM(cost_snapshot*pax),0) AS c FROM event_booking_catering WHERE booking_id IN (${ph})`)));
+          for (const r of wWon) vc += (vcMap2[String(r.venue_id)] || 0) * bookedDaysInWindow(r, wFrom, wTo);
+        }
+        const cost = round2(lc + vc), marg = round2(revenue - cost);
+        return { revenue, wonCount: wonC, lostCount: lostC, winRate: winR, avgBookingValue: avg, pipelineRevenue: pipe, margin: marg, marginPct: revenue > 0 ? Math.round(marg / revenue * 100) : 0 };
+      };
+      const prior = await computeWindowCore(priorFrom, priorTo);
+      const pctDelta = (cur: number, prev: number): number | null => prev > 0 ? Math.round((cur - prev) / prev * 100) : null;
+      const deltas = {
+        confirmedRevenue: pctDelta(confirmedRevenue, prior.revenue),
+        wonCount: pctDelta(wonCount, prior.wonCount),
+        avgBookingValue: pctDelta(avgBookingValue, prior.avgBookingValue),
+        pipelineRevenue: pctDelta(pipelineRevenue, prior.pipelineRevenue),
+        margin: pctDelta(margin, prior.margin),
+        winRatePp: winRate - prior.winRate,       // percentage-point change (a rate)
+        marginPctPp: marginPct - prior.marginPct,  // percentage-point change (a rate)
+      };
+
       res.json({
         window: { from, to, days: periodDays },
         kpis: { totalEvents: rows.length, wonCount, lostCount, winRate, avgBookingValue, totalCovers,
@@ -23985,6 +24082,8 @@ ${data.tenant.name}`;
           lineCost, venueCost, receiptsTotal },
         funnel, revenueByMonth, venueUtilization, eventTypeMix, leadSources, cateringByPackage, upcoming, receivables, lostReasons,
         aging, bookingPaceByMonth, quoteStats, receiptsByMonth, targets, alerts,
+        // ── manage-the-business layer ──
+        segmentByType, segmentByVenue, concentration, prior, priorWindow: { from: priorFrom, to: priorTo }, deltas,
       });
     } catch (err: any) {
       console.error("/events/analytics error:", err);
@@ -24644,6 +24743,13 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
+      // A paid (or part-paid) instalment can't be deleted — removing it would orphan
+      // the row while its receipt stays recorded, leaving the schedule inconsistent
+      // with the money collected. Only unpaid (DUE) rows are removable.
+      const row: any = await db.get("SELECT status, paid_amount FROM event_payment_schedule WHERE id = ?", [req.params.sid]);
+      if (row && (String(row.status) === 'PAID' || Number(row.paid_amount || 0) > 0)) {
+        return res.status(409).json({ error: "This instalment is paid and can't be deleted. Reverse the payment first if you need to remove it." });
+      }
       await db.run("DELETE FROM event_payment_schedule WHERE id = ?", [req.params.sid]);
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to delete schedule row" }); }
@@ -47069,8 +47175,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-schedule-reconcile-pagination',
+    commit_marker: 'events-kpi-manage-layer',
     code_features: [
+      'events-kpi-manage-layer',                    // Events analytics "manage-the-business" layer: (a) period-over-period deltas — core KPIs recomputed for the prior equal-length window (computeWindowCore), dashboard tiles show ▲/▼ vs prior (% for money/counts, pp for rates); (b) segment contribution margin — segmentByType/segmentByVenue return per-segment revenue/cost/margin/marginPct/revenueShare from per-booking direct cost, reconciles to confirmedRevenue, shown as a Type/Venue toggle "Where the profit comes from" card (green=margin, amber=cost, bar=revenue); (c) customer concentration — top accounts, top5SharePct, new-vs-repeat revenue split. Plus BUGFIX: a PAID payment-schedule instalment can no longer be deleted (frontend hides the ×, backend DELETE returns 409) — previously it orphaned the row while the receipt stayed recorded.
       'events-schedule-reconcile-pagination',       // (1) DataTable: the pagination bar (with its Rows-per-page selector) now stays visible after the user raises the page size even if all rows fit one page (was: totalPages>1 only, so the selector vanished and couldn't be reverted) — condition is now totalPages>1 || pageSize!==default. (2) Payment schedule: instalment status is reconciled from actual receipts (reconcileEventSchedule, oldest-first) on schedule read/generate + after every payment insert/delete — a full payment now marks ALL instalments PAID and hides the Pay button (also gated on outstanding balance>0), no matter which path recorded the money.
       'events-post-event-payment',                  // event booking payment panel now lets staff record a payment AFTER the event is COMPLETED (customers often settle the balance late): PaymentPanel gains a `canRecord` flag (true unless CANCELLED) separate from `editable` (ledger edit/delete, still locked once COMPLETED) — Record-payment + pay-instalment buttons show on completed bookings, matching the backend which only blocks receipts on CANCELLED; receipt-delete lock unchanged. Hint shown on completed bookings with a balance.
       'events-invoice-payment-status',              // Events bookings (invoice) table gains Advance / Outstanding / Payment-status (Paid · Partially paid · Pending) columns derived from total_amount vs advance_amount; Reports gets an "Outstanding by Invoice" report (invoice id, customer, total, paid, outstanding, status + grand-total footer) + enriched CSV. Frontend-only (analytics receivables already returns id/status/outstanding).

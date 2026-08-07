@@ -1077,9 +1077,23 @@ async function testEvents() {
     const paceOk = Array.isArray(an.data.bookingPaceByMonth) && an.data.quoteStats && typeof an.data.quoteStats.acceptanceRate === 'number';
     (kpiPresent && agPresent && agReconciles && paceOk ? pass : fail)('TC-EVT-KPI', 'Business KPI pack present + aging reconciles',
       `kpi=${kpiPresent}, aging=${agPresent}, reconciles=${agReconciles} (${agSum} vs ${ag.total}), pace/quote=${paceOk}`);
+
+    // TC-EVT-KPI2: manage-the-business layer — period-over-period deltas, segment
+    // contribution margin, and customer concentration. Segment revenue must
+    // reconcile to confirmed revenue; concentration share is a valid 0–100.
+    const segT = an.data.segmentByType, conc = an.data.concentration, dl = an.data.deltas, pr = an.data.prior;
+    const layerPresent = Array.isArray(segT) && Array.isArray(an.data.segmentByVenue) && conc && dl && pr && an.data.priorWindow;
+    const segReconciles = layerPresent
+      ? Math.abs(segT.reduce((s, x) => s + Number(x.revenue || 0), 0) - Number(k.confirmedRevenue || 0)) < 1
+      : false;
+    const segShape = layerPresent && segT.every(x => typeof x.margin === 'number' && typeof x.marginPct === 'number' && typeof x.revenueSharePct === 'number');
+    const concShape = layerPresent && typeof conc.top5SharePct === 'number' && conc.top5SharePct >= 0 && conc.top5SharePct <= 100 && Array.isArray(conc.topCustomers);
+    (layerPresent && segReconciles && segShape && concShape ? pass : fail)('TC-EVT-KPI2', 'Segment margin + concentration + PoP deltas present and reconcile',
+      `present=${layerPresent}, segReconciles=${segReconciles}, segShape=${segShape}, concShape=${concShape}`);
   } else if (an.status === 403 || an.status === 404) {
     skip('TC-EVT-012', 'Events analytics', `HTTP ${an.status}`);
     skip('TC-EVT-KPI', 'Business KPI pack', `HTTP ${an.status}`);
+    skip('TC-EVT-KPI2', 'Manage-the-business layer', `HTTP ${an.status}`);
   } else {
     fail('TC-EVT-012', 'Events analytics dashboard responds', `HTTP ${an.status}`);
   }
@@ -1228,6 +1242,12 @@ async function testEvents() {
         const rows = Array.isArray(sched.data) ? sched.data : [];
         const allPaid = rows.length > 0 && rows.every(r => String(r.status) === 'PAID');
         (allPaid ? pass : fail)('TC-EVT-SCHED-FULLPAY', 'All instalments PAID after full payment', `rows=${rows.length}, statuses=${rows.map(r => r.status).join(',')}`);
+        // A paid instalment must NOT be deletable (would orphan the row while the
+        // receipt stays recorded). Server returns 409.
+        if (rows[0]?.id) {
+          const del = await api('DELETE', `/api/restaurant/${restaurantId}/events/schedule/${rows[0].id}`);
+          (del.status === 409 ? pass : fail)('TC-EVT-SCHED-DELGUARD', 'Paid instalment cannot be deleted', `HTTP ${del.status} (want 409)`);
+        }
       } else {
         skip('TC-EVT-SCHED-FULLPAY', 'Schedule full-payment reconcile', `gen HTTP ${gen.status}, total ${total}`);
       }

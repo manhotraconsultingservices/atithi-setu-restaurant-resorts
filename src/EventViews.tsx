@@ -880,7 +880,9 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
               </span>
             </span>
             {canRecord && s.status !== 'PAID' && Number(pay.balance) > 0.01 && <button className={BTN_GHOST} onClick={() => openPay(s)}>{t('events.pay.pay')}</button>}
-            {editable && <button onClick={() => delSched(s.id)}><X size={12} className="text-rose-500" /></button>}
+            {/* A paid instalment can't be deleted — that would orphan the row while
+                the receipt stays recorded. Only unpaid (DUE) rows are removable. */}
+            {editable && s.status !== 'PAID' && Number(s.paid_amount || 0) <= 0 && <button onClick={() => delSched(s.id)}><X size={12} className="text-rose-500" /></button>}
           </div>
         );
       })}
@@ -1967,6 +1969,7 @@ function EventDashboard({ restaurantId, token }: Props) {
   const { t } = useT();
   const { data, loading, from, to, setFrom, setTo } = useEventAnalytics(restaurantId, token);
   const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
+  const [segMode, setSegMode] = useState<'type' | 'venue'>('type');
 
   const top = objStack[objStack.length - 1];
   if (top) return (
@@ -1976,10 +1979,22 @@ function EventDashboard({ restaurantId, token }: Props) {
   );
 
   const k = data?.kpis;
-  const tile = (label: string, value: string, sub?: string, accent = '#cc5a16') => (
+  // Period-over-period badge: ▲/▼ vs the previous equal-length window. `pp` renders a
+  // percentage-point change (for rates); otherwise a percent change. `goodUp` flips the
+  // colour when down-is-good. null base (no prior activity) renders nothing.
+  const deltaBadge = (d: number | null | undefined, kind: 'pct' | 'pp' = 'pct', goodUp = true) => {
+    if (d === null || d === undefined) return null;
+    if (d === 0) return <span className="text-[10px] font-semibold text-[#9d8b7e]">±0</span>;
+    const up = d > 0, good = up === goodUp;
+    return <span className="text-[10px] font-bold" style={{ color: good ? '#059669' : '#dc2626' }}>{up ? '▲' : '▼'}{Math.abs(d)}{kind === 'pp' ? 'pp' : '%'}</span>;
+  };
+  const tile = (label: string, value: string, sub?: string, accent = '#cc5a16', delta?: React.ReactNode) => (
     <div className={CARD}>
       <div className="text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e]">{label}</div>
-      <div className="text-2xl font-bold mt-0.5 tabular-nums" style={{ color: accent }}>{value}</div>
+      <div className="flex items-baseline gap-1.5 mt-0.5">
+        <span className="text-2xl font-bold tabular-nums" style={{ color: accent }}>{value}</span>
+        {delta}
+      </div>
       {sub && <div className="text-[11px] text-[#6b5d52] mt-0.5">{sub}</div>}
     </div>
   );
@@ -2058,17 +2073,18 @@ function EventDashboard({ restaurantId, token }: Props) {
               })()}
             </div>
           )}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-            {tile(t('events.dash.confirmedRevenue'), money(k.confirmedRevenue), `${k.wonCount} ${t('events.dash.wonEvents')}`)}
-            {tile(t('events.dash.pipeline'), money(k.pipelineRevenue), `${openLeads} ${t('events.dash.openLeads')}`, '#2563eb')}
-            {tile(t('events.dash.winRate'), `${k.winRate}%`, `${k.wonCount} ${t('common.of')} ${k.wonCount + k.lostCount}`, '#059669')}
-            {tile(t('events.dash.avgValue'), money(k.avgBookingValue), t('events.dash.perEvent'), '#7c3aed')}
-            {tile(t('events.dash.margin'), money(k.margin || 0), `${k.marginPct || 0}% · ${t('events.dash.afterCost')}`, Number(k.margin) >= 0 ? '#059669' : '#dc2626')}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-1">
+            {tile(t('events.dash.confirmedRevenue'), money(k.confirmedRevenue), `${k.wonCount} ${t('events.dash.wonEvents')}`, '#cc5a16', deltaBadge(data.deltas?.confirmedRevenue))}
+            {tile(t('events.dash.pipeline'), money(k.pipelineRevenue), `${openLeads} ${t('events.dash.openLeads')}`, '#2563eb', deltaBadge(data.deltas?.pipelineRevenue))}
+            {tile(t('events.dash.winRate'), `${k.winRate}%`, `${k.wonCount} ${t('common.of')} ${k.wonCount + k.lostCount}`, '#059669', deltaBadge(data.deltas?.winRatePp, 'pp'))}
+            {tile(t('events.dash.avgValue'), money(k.avgBookingValue), t('events.dash.perEvent'), '#7c3aed', deltaBadge(data.deltas?.avgBookingValue))}
+            {tile(t('events.dash.margin'), money(k.margin || 0), `${k.marginPct || 0}% · ${t('events.dash.afterCost')}`, Number(k.margin) >= 0 ? '#059669' : '#dc2626', deltaBadge(data.deltas?.marginPctPp, 'pp'))}
             {tile(t('events.dash.outstanding'), money(k.outstanding), Number(k.overdue) > 0 ? `${t('events.dash.overdueLabel')} ${money(k.overdue)}` : `${t('events.dash.advance')} ${money(k.advanceCollected)}`, '#dc2626')}
             {tile(t('events.dash.covers'), String(k.totalCovers), t('events.dash.guestsServed'))}
             {tile(t('events.dash.catering'), money(k.cateringRevenue), `${k.cateringCovers} ${t('events.dash.plates')}`, '#b45309')}
             {tile(t('events.dash.discount'), money(k.discountGiven), t('events.dash.givenWon'), '#9ca3af')}
           </div>
+          <p className="text-[10px] text-[#9d8b7e] mb-4 flex items-center gap-1"><span className="text-emerald-600">▲</span>/<span className="text-rose-600">▼</span> {t('events.dash.vsPrior')}</p>
 
           {/* Cash, space-yield and sales-effectiveness KPIs. */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
@@ -2076,6 +2092,70 @@ function EventDashboard({ restaurantId, token }: Props) {
             {tile(t('events.dash.spaceYield'), money(k.revPerAvailableDay || 0), `${k.spaceOccupancyPct || 0}% ${t('events.dash.spaceOcc')}`, '#6366f1')}
             {tile(t('events.dash.quoteAccept'), `${k.quoteAcceptanceRate || 0}%`, `${t('events.dash.avgQuoteIn')} ${k.avgDaysToQuote || 0}${t('events.dash.dShort')}`, '#059669')}
             {tile(t('events.dash.repeatClients'), `${k.repeatCustomerPct || 0}%`, `${k.repeatCustomers || 0} ${t('common.of')} ${k.distinctCustomers || 0}`, '#7c3aed')}
+          </div>
+
+          {/* Profit-by-segment + customer concentration — where the money is made
+              and where the risk sits. This is the "manage profitably" view. */}
+          <div className="grid md:grid-cols-2 gap-4 mb-4">
+            <div className={CARD}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-bold text-sm">{t('events.dash.profitBy')}</h3>
+                <div className="flex gap-1">
+                  {(['type', 'venue'] as const).map(m => (
+                    <button key={m} onClick={() => setSegMode(m)}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] font-bold border ${segMode === m ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>
+                      {m === 'type' ? t('events.dash.byType') : t('events.dash.byVenue')}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {(() => {
+                const seg = (segMode === 'type' ? data.segmentByType : data.segmentByVenue) || [];
+                if (!seg.length) return <p className="text-xs text-[#9d8b7e]">—</p>;
+                const maxRev = Math.max(1, ...seg.map((s: any) => s.revenue));
+                return seg.slice(0, 8).map((s: any) => (
+                  <div key={s.key} className="mb-2">
+                    <div className="flex items-center justify-between text-xs mb-0.5 gap-2">
+                      <span className="font-medium truncate min-w-0">{s.key} <span className="text-[#9d8b7e]">· {s.events} {t('events.dash.evShort')}</span></span>
+                      <span className="tabular-nums text-[#6b5d52] shrink-0">{money(s.revenue)} · <b style={{ color: s.marginPct >= 0 ? '#059669' : '#dc2626' }}>{s.marginPct}%</b></span>
+                    </div>
+                    <div className="h-2.5 rounded bg-[#f0e9df] overflow-hidden flex" title={`${t('events.dash.marginShort')} ${money(s.margin)} · ${t('events.dash.costShort')} ${money(s.cost)}`}>
+                      <div className="h-full" style={{ width: `${Math.round(Math.max(0, s.margin) / maxRev * 100)}%`, background: '#059669' }} />
+                      <div className="h-full" style={{ width: `${Math.round(Math.max(0, s.revenue - Math.max(0, s.margin)) / maxRev * 100)}%`, background: '#f59e0b' }} />
+                    </div>
+                  </div>
+                ));
+              })()}
+              <p className="text-[10px] text-[#9d8b7e] mt-1"><span className="text-emerald-600">■</span> {t('events.dash.marginShort')} · <span className="text-amber-500">■</span> {t('events.dash.costShort')} · {t('events.dash.profitNote')}</p>
+            </div>
+
+            <div className={CARD}>
+              <h3 className="font-bold text-sm mb-3 flex items-center justify-between">{t('events.dash.concentration')}
+                <span className="text-xs font-normal text-[#6b5d52]">{t('events.dash.top5')} <b className={(data.concentration?.top5SharePct || 0) >= 60 ? 'text-rose-600' : ''}>{data.concentration?.top5SharePct || 0}%</b></span></h3>
+              {(() => {
+                const c = data.concentration || {};
+                const nr = Number(c.newRevenue || 0), rr = Number(c.repeatRevenue || 0), tot = Math.max(1, nr + rr);
+                return (
+                  <div className="mb-3">
+                    <div className="h-3 rounded overflow-hidden flex bg-[#f0e9df]">
+                      <div className="h-full" style={{ width: `${Math.round(rr / tot * 100)}%`, background: '#7c3aed' }} />
+                      <div className="h-full" style={{ width: `${Math.round(nr / tot * 100)}%`, background: '#c4b5fd' }} />
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] mt-1">
+                      <span className="text-[#7c3aed]">{t('events.dash.repeatRev')} · {money(rr)}</span>
+                      <span className="text-[#9d8b7e]">{t('events.dash.newRev')} · {money(nr)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
+              {(data.concentration?.topCustomers || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : data.concentration.topCustomers.slice(0, 6).map((c: any, i: number) => (
+                <div key={i} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
+                  <span className="min-w-0 truncate">{c.name} <span className="text-[#9d8b7e]">· {c.events} {t('events.dash.evShort')}</span></span>
+                  <span className="tabular-nums font-semibold shrink-0">{money(c.revenue)}</span>
+                </div>
+              ))}
+              <p className="text-[10px] text-[#9d8b7e] mt-1">{t('events.dash.concentrationNote')}</p>
+            </div>
           </div>
 
           {/* AR aging + On-the-books (forward book & cash at risk). */}

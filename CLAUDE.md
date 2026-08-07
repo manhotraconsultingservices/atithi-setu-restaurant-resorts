@@ -582,8 +582,20 @@ computed in JS from a single windowed booking pull (`?from&to`, default ±180d).
   Owner sets these + venue `cost_per_day` in Events → Public Page Settings / Venues master.
 * **Cash vs revenue:** `receiptsByMonth` is actual money in (from `event_payments.paid_at`),
   distinct from `revenueByMonth` (contracted, by event date).
+* **Manage-the-business layer** (turns the scoreboard into a management tool):
+  * `deltas` + `prior` + `priorWindow` — the core KPIs (revenue, wonCount, avg value,
+    pipeline, margin) recomputed for the **immediately-preceding equal-length window**;
+    `deltas` are % changes, except `winRatePp`/`marginPctPp` which are **percentage-point**
+    changes (rates). Dashboard tiles render ▲/▼ badges. `computeWindowCore()` helper.
+  * `segmentByType` / `segmentByVenue` — **contribution margin by segment**: per-booking
+    direct cost (its line-cost snapshots + its venue day-cost) aggregated by event type /
+    venue → `{key, events, revenue, cost, margin, marginPct, revenueSharePct}`. Segment
+    revenue reconciles to `confirmedRevenue`. This is the "where do I make money" view.
+  * `concentration` — `topCustomers`, `top5SharePct` (concentration risk), and
+    `repeatRevenue` vs `newRevenue` (repeat = phone seen >1× in window).
 * Reads on possibly-unmigrated tables are `.catch()`-guarded so old tenants never 500.
-  Regression: `TC-EVT-KPI` in `run_technical_tests.mjs` asserts the KPI keys + aging reconcile.
+  Regression: `TC-EVT-KPI` (KPI keys + aging reconcile) + `TC-EVT-KPI2` (segment margin
+  reconciles + concentration + PoP deltas) in `run_technical_tests.mjs`.
 
 ---
 
