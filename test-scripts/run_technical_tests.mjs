@@ -1298,6 +1298,38 @@ async function testEvents() {
     }
   }
 
+  // TC-EVT-SCHED-CONFIG: owner-configurable payment split. A 30/50/20 split set in
+  // Settings drives the generated schedule; a split not totalling 100% is rejected.
+  // Non-destructive — captures the original split and restores it.
+  {
+    const g0 = await api('GET', `/api/restaurant/${restaurantId}/events/gst-settings`);
+    if (g0.status === 403) {
+      skip('TC-EVT-SCHED-CONFIG', 'Configurable payment split', 'no EVENTS_SETTINGS access');
+    } else if (g0.status === 200) {
+      const orig = g0.data?.payment_schedule_splits;
+      const bad = await api('PUT', `/api/restaurant/${restaurantId}/events/gst-settings`, { payment_schedule_splits: [{ label: 'A', percent: 60, offsetDays: 0 }, { label: 'B', percent: 30, offsetDays: -7 }] });
+      (bad.status === 400 ? pass : fail)('TC-EVT-SCHED-CONFIG-VALIDATE', 'Split not totalling 100% is rejected', `HTTP ${bad.status} (want 400)`);
+      const put = await api('PUT', `/api/restaurant/${restaurantId}/events/gst-settings`, { payment_schedule_splits: [{ label: 'Deposit', percent: 30, offsetDays: 0 }, { label: 'Interim', percent: 50, offsetDays: -30 }, { label: 'Balance', percent: 20, offsetDays: -7 }] });
+      if (put.status === 200) {
+        const sDate = new Date(Date.now() + 340 * 86400000).toISOString().slice(0, 10);
+        const sb = await api('POST', `/api/restaurant/${restaurantId}/events/bookings`, { customer_name: 'UAT Split', customer_phone: '9990000783', event_date: sDate, guest_count: 20 });
+        if (sb.status === 201 && sb.data?.id) {
+          const sid = sb.data.id;
+          await api('PUT', `/api/restaurant/${restaurantId}/events/bookings/${sid}`, { venue_rate: 10000 });
+          const gen = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${sid}/schedule/generate`, {});
+          const rows = Array.isArray(gen.data) ? gen.data : [];
+          const pcts = rows.map(r => Math.round(Number(r.percent))).join('/');
+          (rows.length === 3 && pcts === '30/50/20' ? pass : fail)('TC-EVT-SCHED-CONFIG', 'Generate uses the configured 30/50/20 split', `rows=${rows.length}, pcts=${pcts}`);
+          await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${sid}/cancel`, { reason: 'UAT cleanup', acknowledge_refund: true });
+        } else { skip('TC-EVT-SCHED-CONFIG', 'Configurable payment split', `booking create HTTP ${sb.status}`); }
+      } else { skip('TC-EVT-SCHED-CONFIG', 'Configurable payment split', `settings PUT HTTP ${put.status}`); }
+      // Restore the original split.
+      await api('PUT', `/api/restaurant/${restaurantId}/events/gst-settings`, { payment_schedule_splits: Array.isArray(orig) ? orig : [] });
+    } else {
+      skip('TC-EVT-SCHED-CONFIG', 'Configurable payment split', `settings GET HTTP ${g0.status}`);
+    }
+  }
+
   // TC-EVT-MIGRATION: CSV data-migration utility. Validate flags a fresh row OK,
   // commit creates exactly one, a re-validate of the same name flags DUPLICATE, and
   // a re-commit skips it (0 created / 1 skipped) — the hard "no double-migration"

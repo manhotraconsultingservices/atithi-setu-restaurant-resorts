@@ -212,7 +212,7 @@ export const pa: Record<string, string> = {
   'events.pay.balance': 'ਬਕਾਇਆ ਰਕਮ',
   'events.pay.record': 'ਭੁਗਤਾਨ ਦਰਜ ਕਰੋ',
   'events.pay.schedule': 'ਭੁਗਤਾਨ ਸਮਾਂ-ਸਾਰਣੀ',
-  'events.pay.generate': 'ਬਣਾਓ (25/50/25)',
+  'events.pay.generate': 'ਸ਼ਡਿਊਲ ਬਣਾਓ',
   'events.pay.noSchedule': 'ਹਾਲੇ ਕੋਈ ਸਮਾਂ-ਸਾਰਣੀ ਨਹੀਂ — ਪੜਾਅਵਾਰ ਜਮ੍ਹਾਂ ਜੋੜਨ ਲਈ ਬਣਾਓ।',
   'events.pay.receipts': 'ਰਸੀਦਾਂ',
   'events.pay.pay': 'ਭੁਗਤਾਨ ਕਰੋ',

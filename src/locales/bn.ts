@@ -212,7 +212,7 @@ export const bn: Record<string, string> = {
   'events.pay.balance': 'বাকি',
   'events.pay.record': 'পেমেন্ট রেকর্ড করুন',
   'events.pay.schedule': 'পেমেন্ট সূচি',
-  'events.pay.generate': 'তৈরি করুন (25/50/25)',
+  'events.pay.generate': 'সময়সূচী তৈরি করুন',
   'events.pay.noSchedule': 'এখনও কোনো সূচি নেই — ধাপে ধাপে জমা যোগ করতে তৈরি করুন।',
   'events.pay.receipts': 'রসিদ',
   'events.pay.pay': 'পরিশোধ করুন',

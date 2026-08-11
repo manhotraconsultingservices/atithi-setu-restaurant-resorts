@@ -212,7 +212,7 @@ export const gu: Record<string, string> = {
   'events.pay.balance': 'બાકી',
   'events.pay.record': 'ચુકવણી નોંધો',
   'events.pay.schedule': 'ચુકવણી સમયપત્રક',
-  'events.pay.generate': 'બનાવો (25/50/25)',
+  'events.pay.generate': 'શેડ્યૂલ બનાવો',
   'events.pay.noSchedule': 'હજી કોઈ સમયપત્રક નથી — તબક્કાવાર ડિપોઝિટ ઉમેરવા બનાવો.',
   'events.pay.receipts': 'રસીદો',
   'events.pay.pay': 'ચૂકવો',

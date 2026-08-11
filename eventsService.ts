@@ -655,6 +655,11 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS occupancy_target_pct DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS min_deposit_pct DOUBLE PRECISION DEFAULT 25`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS deposit_due_days INT DEFAULT 14`).catch(() => {});
+  // Owner-configurable payment-schedule stages (the "Generate schedule" split).
+  // JSON array of { label, percent, offsetDays } where offsetDays is relative to
+  // the event date (0 = due at booking, -30 = 30 days before). NULL = the built-in
+  // 25/50/25 default. Percentages should total 100.
+  await tenantDb.exec(`ALTER TABLE event_profile ADD COLUMN IF NOT EXISTS payment_schedule_splits TEXT`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_items ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_services ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_catering ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});

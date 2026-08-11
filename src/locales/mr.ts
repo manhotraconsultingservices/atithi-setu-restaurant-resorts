@@ -212,7 +212,7 @@ export const mr: Record<string, string> = {
   'events.pay.balance': 'शिल्लक',
   'events.pay.record': 'देयक नोंदवा',
   'events.pay.schedule': 'देयक वेळापत्रक',
-  'events.pay.generate': 'तयार करा (25/50/25)',
+  'events.pay.generate': 'वेळापत्रक तयार करा',
   'events.pay.noSchedule': 'अजून वेळापत्रक नाही — टप्प्याटप्प्याने ठेवी जोडण्यासाठी तयार करा.',
   'events.pay.receipts': 'पावत्या',
   'events.pay.pay': 'भरा',

@@ -149,6 +149,27 @@ function _invoicePolicies(r: any, mod: 'hotel' | 'events') {
   };
 }
 
+// Owner-configurable event payment-schedule stages. `offsetDays` is relative to
+// the event date (0 = at booking; -30 = 30 days before). NULL config → this
+// 25/50/25 default. Percentages should total 100.
+const DEFAULT_EVENT_SPLITS = [
+  { label: 'Booking deposit', percent: 25, offsetDays: 0 },
+  { label: 'Interim payment', percent: 50, offsetDays: -30 },
+  { label: 'Balance', percent: 25, offsetDays: -7 },
+];
+function parseEventSplits(raw: any): Array<{ label: string; percent: number; offsetDays: number }> {
+  try {
+    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (Array.isArray(arr) && arr.length) {
+      const clean = arr
+        .map((s: any) => ({ label: String(s?.label || 'Instalment').slice(0, 60), percent: Math.max(0, Number(s?.percent) || 0), offsetDays: Math.round(Number(s?.offsetDays) || 0) }))
+        .filter(s => s.percent > 0);
+      if (clean.length) return clean;
+    }
+  } catch { /* malformed — fall back to default */ }
+  return DEFAULT_EVENT_SPLITS;
+}
+
 function _makeMimeFilter(allowed: Set<string>) {
   return (_req: Request, file: any, cb: any) => {
     const mime = String(file?.mimetype || '').toLowerCase();
@@ -23343,7 +23364,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const row: any = await db.get("SELECT gst_percent, gst_enabled, invoice_lang_mode, monthly_revenue_target, occupancy_target_pct, min_deposit_pct, deposit_due_days FROM event_profile WHERE id = 1").catch(() => null);
+      const row: any = await db.get("SELECT gst_percent, gst_enabled, invoice_lang_mode, monthly_revenue_target, occupancy_target_pct, min_deposit_pct, deposit_due_days, payment_schedule_splits FROM event_profile WHERE id = 1").catch(() => null);
       // GSTIN + regional language live on the central tenant record (shared across
       // modules); surface them here so events owners can manage them in one place.
       // suggested_language is derived from the tenant's state.
@@ -23360,6 +23381,9 @@ ${data.tenant.name}`;
         occupancy_target_pct: Number(row?.occupancy_target_pct ?? 0),
         min_deposit_pct: row?.min_deposit_pct != null ? Number(row.min_deposit_pct) : 25,
         deposit_due_days: row?.deposit_due_days != null ? Number(row.deposit_due_days) : 14,
+        // Owner-configured payment-schedule stages (always an array; falls back to
+        // the built-in 25/50/25 when unset).
+        payment_schedule_splits: parseEventSplits(row?.payment_schedule_splits),
       });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch GST settings" }); }
   });
@@ -23370,6 +23394,23 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
+      // Validate the payment-schedule split up-front (before any write) so an
+      // invalid total can't leave a partial save. undefined = not sent (unchanged);
+      // null = reset to the built-in 25/50/25 default.
+      let splitsJson: string | null | undefined = undefined;
+      if (b.payment_schedule_splits !== undefined) {
+        const raw = Array.isArray(b.payment_schedule_splits) ? b.payment_schedule_splits : [];
+        const stages = raw
+          .map((s: any) => ({ label: String(s?.label || 'Instalment').slice(0, 60), percent: Math.max(0, Math.min(100, Number(s?.percent) || 0)), offsetDays: Math.round(Number(s?.offsetDays) || 0) }))
+          .filter((s: any) => s.percent > 0);
+        if (stages.length) {
+          const sum = stages.reduce((a: number, s: any) => a + s.percent, 0);
+          if (Math.abs(sum - 100) > 0.5) return res.status(400).json({ error: `Payment stages must total 100% (currently ${Math.round(sum)}%).` });
+          splitsJson = JSON.stringify(stages);
+        } else {
+          splitsJson = null;
+        }
+      }
       const pct = Math.max(0, Number(b.gst_percent ?? 18));
       const enabled = (b.gst_enabled === false || b.gst_enabled === 0 || b.gst_enabled === '0' || b.gst_enabled === 'false') ? 0 : 1;
       const mode = ['EN', 'REGIONAL', 'BOTH'].includes(String(b.invoice_lang_mode || '').toUpperCase()) ? String(b.invoice_lang_mode).toUpperCase() : 'BOTH';
@@ -23384,6 +23425,7 @@ ${data.tenant.name}`;
       if (b.occupancy_target_pct !== undefined) { tf.push('occupancy_target_pct = ?'); tv.push(Math.min(100, Math.max(0, Number(b.occupancy_target_pct) || 0))); }
       if (b.min_deposit_pct !== undefined) { tf.push('min_deposit_pct = ?'); tv.push(Math.min(100, Math.max(0, Number(b.min_deposit_pct) || 0))); }
       if (b.deposit_due_days !== undefined) { tf.push('deposit_due_days = ?'); tv.push(Math.max(0, Math.round(Number(b.deposit_due_days) || 0))); }
+      if (splitsJson !== undefined) { tf.push('payment_schedule_splits = ?'); tv.push(splitsJson); }
       if (tf.length) await db.run(`UPDATE event_profile SET ${tf.join(', ')} WHERE id = 1`, tv).catch(() => {});
       // GSTIN (needed to make the invoice GST-compliant) and the regional language
       // for bilingual invoices live on the central tenant record.
@@ -24741,11 +24783,15 @@ ${data.tenant.name}`;
       if (!bk) return res.status(404).json({ error: "Booking not found" });
       const ymd = (v: any) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
       const eventDate = ymd(bk.event_date);
-      const splits: any[] = (Array.isArray(req.body?.splits) && req.body.splits.length) ? req.body.splits : [
-        { label: 'Booking deposit', percent: 25, offsetDays: 0 },
-        { label: 'Interim payment', percent: 50, offsetDays: -30 },
-        { label: 'Balance', percent: 25, offsetDays: -7 },
-      ];
+      // Splits: an explicit body override wins; otherwise the owner's configured
+      // schedule (Events → Settings), falling back to the built-in 25/50/25.
+      let splits: any[];
+      if (Array.isArray(req.body?.splits) && req.body.splits.length) {
+        splits = req.body.splits;
+      } else {
+        const cfg: any = await db.get("SELECT payment_schedule_splits FROM event_profile WHERE id = 1").catch(() => null);
+        splits = parseEventSplits(cfg?.payment_schedule_splits);
+      }
       const total = Number(bk.total_amount || 0);
       await db.run("DELETE FROM event_payment_schedule WHERE booking_id = ? AND status = 'DUE'", [req.params.bid]);
       let order = 0;
@@ -47296,8 +47342,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-invoice-header-policies-fix',
+    commit_marker: 'event-configurable-payment-split',
     code_features: [
+      'event-configurable-payment-split',            // Owner-configurable event payment-schedule split: Events → Settings gains a "Payment schedule" editor (stages with label / % / days-before-event, add/remove, live 100% total). Stored on event_profile.payment_schedule_splits (JSON); the "Generate schedule" button now uses it (backend default when no body.splits), falling back to 25/50/25. gst-settings GET/PUT read/write it (PUT rejects a split that doesn't total 100%). Generate button label no longer hardcodes 25/50/25. TC-EVT-SCHED-CONFIG(+VALIDATE) tests.
       'event-invoice-header-policies-fix',           // Event PDF fixes: (1) header no longer overlaps/overflows — identity block (name/address/contact/GSTIN) is laid out by MEASURED text height and the band grows to fit, so a long wrapping address can't collide with the contact line or push the GSTIN out of view; (2) the event INVOICE-from-booking path (buildInvoiceData) now includes `policies`, so Cancellation / Terms / Payment print on the invoice too (previously only the quotation path had them).
       'invoice-preview-button',                      // Settings → Business Profile gains "Preview PMS invoice" + "Preview Event quotation" buttons: POST /invoice-preview.pdf?module=hotel|events renders a one-page SAMPLE PDF from the current (unsaved) profile fields (overlaid on the saved row) using the real templates — owner/admin (SETTINGS) only; frontend fetches with auth + opens the blob in a new tab. TC-SET-INVPREVIEW-* smoke test.
       'invoice-business-profile-policies',           // Business Profile for invoices: editable logo (existing) + address_line1/2, city/state, PIN, business_location, GSTIN (existing), business phone/email under Settings → Business Profile; printed in BOTH hotel (classic + boutique) and event PDF headers via shared _invoiceSeller helper (5 hotel call sites deduped). Plus per-module invoice POLICY blocks — Cancellation Policy / Terms & Conditions / Payment Terms, SEPARATE for PMS (invoice_*_hotel) and Events (invoice_*_events) — printed near the footer of every invoice and (for events) every quotation. New restaurants columns + PATCH /:id writes; TC-SET-BIZPROFILE round-trip test.

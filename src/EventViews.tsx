@@ -2459,11 +2459,20 @@ function EventSettings({ restaurantId, token }: Props) {
   // gst-settings endpoint (both live on event_profile).
   const [biz, setBiz] = useState<{ monthly_revenue_target: number; occupancy_target_pct: number; min_deposit_pct: number; deposit_due_days: number }>({ monthly_revenue_target: 0, occupancy_target_pct: 0, min_deposit_pct: 25, deposit_due_days: 14 });
   const [bizSaved, setBizSaved] = useState(false);
+  // Owner-configurable payment-schedule split (the "Generate schedule" stages).
+  const [splits, setSplits] = useState<Array<{ label: string; percent: number; offsetDays: number }>>([
+    { label: 'Booking deposit', percent: 25, offsetDays: 0 },
+    { label: 'Interim payment', percent: 50, offsetDays: -30 },
+    { label: 'Balance', percent: 25, offsetDays: -7 },
+  ]);
+  const [splitsSaved, setSplitsSaved] = useState(false);
+  const splitTotal = splits.reduce((a, s) => a + (Number(s.percent) || 0), 0);
   useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) { let gl: string[] = []; try { const g = JSON.parse(p.gallery || '[]'); if (Array.isArray(g)) gl = g.filter(Boolean); } catch { /* */ } setForm({ ...p, is_published: Number(p.is_published) !== 0, gallery_list: gl }); } }).catch(() => {}); }, []);
   useEffect(() => { api('/settings/language').then((r) => setSecLang(r.secondary_language || '')).catch(() => {}); }, []);
   useEffect(() => { api('/events/gst-settings').then((r) => {
     setGst({ gst_percent: Number(r.gst_percent ?? 18), gst_enabled: Number(r.gst_enabled ?? 1) !== 0, gst_number: r.gst_number || '', invoice_lang_mode: r.invoice_lang_mode || 'BOTH', suggested_language: r.suggested_language || '' });
     setBiz({ monthly_revenue_target: Number(r.monthly_revenue_target ?? 0), occupancy_target_pct: Number(r.occupancy_target_pct ?? 0), min_deposit_pct: Number(r.min_deposit_pct ?? 25), deposit_due_days: Number(r.deposit_due_days ?? 14) });
+    if (Array.isArray(r.payment_schedule_splits) && r.payment_schedule_splits.length) setSplits(r.payment_schedule_splits.map((s: any) => ({ label: String(s.label || ''), percent: Number(s.percent) || 0, offsetDays: Math.round(Number(s.offsetDays) || 0) })));
   }).catch(() => {}); }, []);
   const saveGst = async () => {
     try {
@@ -2475,6 +2484,16 @@ function EventSettings({ restaurantId, token }: Props) {
     try {
       await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ monthly_revenue_target: Number(biz.monthly_revenue_target) || 0, occupancy_target_pct: Number(biz.occupancy_target_pct) || 0, min_deposit_pct: Number(biz.min_deposit_pct) || 0, deposit_due_days: Number(biz.deposit_due_days) || 0 }) });
       setBizSaved(true); setTimeout(() => setBizSaved(false), 1500);
+    } catch (e: any) { alert(e.message); }
+  };
+  const setSplit = (i: number, patch: Partial<{ label: string; percent: number; offsetDays: number }>) => setSplits(s => s.map((x, idx) => idx === i ? { ...x, ...patch } : x));
+  const addSplit = () => setSplits(s => [...s, { label: `Instalment ${s.length + 1}`, percent: 0, offsetDays: -7 }]);
+  const delSplit = (i: number) => setSplits(s => s.filter((_, idx) => idx !== i));
+  const saveSplits = async () => {
+    if (Math.abs(splitTotal - 100) > 0.5) { alert(t('events.settings.scheduleTotalErr', { n: Math.round(splitTotal) })); return; }
+    try {
+      await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ payment_schedule_splits: splits }) });
+      setSplitsSaved(true); setTimeout(() => setSplitsSaved(false), 1500);
     } catch (e: any) { alert(e.message); }
   };
   const [vr, setVr] = useState<any>({ default_turnaround_min: 120, hd_am_start: '08:00', hd_am_end: '14:00', hd_pm_start: '17:00', hd_pm_end: '23:00', weekend_days: '0,6' });
@@ -2611,6 +2630,39 @@ function EventSettings({ restaurantId, token }: Props) {
         <div className="flex items-center gap-3">
           <button className={BTN_PRIMARY} onClick={saveBiz}>{t('common.save')}</button>
           {bizSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
+        </div>
+      </div>
+
+      {/* Payment schedule split — the stages the "Generate schedule" button creates. */}
+      <div className={`${CARD} space-y-3`}>
+        <div>
+          <div className="text-sm font-bold text-[#3d2e22]">{t('events.settings.scheduleTitle')}</div>
+          <div className="text-[11px] text-[#9d8b7e]">{t('events.settings.scheduleSub')}</div>
+        </div>
+        <div className="space-y-2">
+          <div className="hidden md:flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e] px-1">
+            <span className="flex-1">{t('events.settings.scheduleStage')}</span>
+            <span className="w-20 text-right">%</span>
+            <span className="w-28 text-right">{t('events.settings.scheduleDaysBefore')}</span>
+            <span className="w-6" />
+          </div>
+          {splits.map((s, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input className={`${INPUT} flex-1`} value={s.label} onChange={e => setSplit(i, { label: e.target.value })} placeholder={t('events.settings.scheduleStage')} />
+              <input type="number" min={0} max={100} className={`${INPUT} w-20 text-right`} value={s.percent} onChange={e => setSplit(i, { percent: Number(e.target.value) || 0 })} />
+              <input type="number" min={0} className={`${INPUT} w-28 text-right`} value={-s.offsetDays} onChange={e => setSplit(i, { offsetDays: -(Number(e.target.value) || 0) })} title={t('events.settings.scheduleDaysBeforeHint')} />
+              <button onClick={() => delSplit(i)} className="w-6 text-rose-400 hover:text-rose-600" title={t('common.delete')} disabled={splits.length <= 1}><X size={14} /></button>
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center justify-between">
+          <button className={BTN_GHOST} onClick={addSplit}><Plus size={13} />{t('events.settings.scheduleAddStage')}</button>
+          <span className={`text-xs font-bold tabular-nums ${Math.abs(splitTotal - 100) < 0.5 ? 'text-emerald-600' : 'text-rose-600'}`}>{t('events.settings.scheduleTotal')}: {Math.round(splitTotal)}%</span>
+        </div>
+        <p className="text-[11px] text-[#9d8b7e]">{t('events.settings.scheduleNote')}</p>
+        <div className="flex items-center gap-3">
+          <button className={BTN_PRIMARY} onClick={saveSplits} disabled={Math.abs(splitTotal - 100) > 0.5}>{t('common.save')}</button>
+          {splitsSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
         </div>
       </div>
 
