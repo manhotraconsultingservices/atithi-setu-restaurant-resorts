@@ -365,11 +365,17 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
          .lineWidth(0.5).strokeColor(HAIR).stroke();
       sumY += 6;
       const drawMiniRow = (lbl: string, value: string, accent = false) => {
-        doc.fillColor(accent ? ACCENT : MUTED).font(accent ? 'Helvetica-Bold' : 'Helvetica').fontSize(9)
-           .text(lbl, sumLeftX, sumY, { width: sumLeftW * 0.6 });
+        // Measure the label so a long payment-ledger label that wraps to a
+        // second line grows the row rather than overlapping the row below.
+        const lblW = sumLeftW * 0.6;
+        doc.font(accent ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
+        const lblH = Math.ceil(doc.heightOfString(lbl, { width: lblW }));
+        const rowH = Math.max(14, lblH + 4);
+        doc.fillColor(accent ? ACCENT : MUTED)
+           .text(lbl, sumLeftX, sumY, { width: lblW });
         doc.fillColor(accent ? ACCENT : INK_SOFT).font('Helvetica').fontSize(9)
-           .text(value, sumLeftX + sumLeftW * 0.6, sumY, { width: sumLeftW * 0.4 - 8, align: 'right' });
-        sumY += 14;
+           .text(value, sumLeftX + lblW, sumY, { width: sumLeftW * 0.4 - 8, align: 'right' });
+        sumY += rowH;
       };
       drawMiniRow('Subtotal', money(data.tenant, data.folio.subtotal * sign));
       if (data.folio.discount > 0) {
@@ -655,15 +661,25 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
       ] as [string, string | undefined][]).filter((s): s is [string, string] => !!(s[1] && String(s[1]).trim()));
 
       if (_polSections.length) {
-        for (const [h, body] of _polSections) {
+        // Clear separation from the block above.
+        y += 8;
+        const polOpts = { width: INNER_W, lineGap: 1.5 };
+        _polSections.forEach(([h, body], i) => {
           const txt = String(body).trim();
-          const bodyH = doc.font('Helvetica').fontSize(7.5).heightOfString(txt, { width: INNER_W });
-          ensureSpace(bodyH + 22);
-          doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text(h, M, y, { characterSpacing: 1 });
-          y += 12;
-          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5).text(txt, M, y, { width: INNER_W });
-          y += bodyH + 8;
-        }
+          const bodyH = doc.font('Helvetica').fontSize(8).heightOfString(txt, polOpts);
+          // Keep the heading with the first lines of its body + the section gap.
+          ensureSpace(bodyH + 34);
+          if (i > 0) {
+            // Hairline divider so the three policy blocks read as distinct.
+            doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.5).strokeColor(HAIR).stroke();
+            y += 14;
+          }
+          doc.fillColor(INK).font('Helvetica-Bold').fontSize(8.5).text(h, M, y, { characterSpacing: 1 });
+          y += 15;
+          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(8).text(txt, M, y, polOpts);
+          y += bodyH + 6;
+        });
+        y += 10;
         ensureSpace(52);
         doc.moveTo(PAGE_W - M - 150, y + 30).lineTo(PAGE_W - M - 10, y + 30).lineWidth(0.5).strokeColor(INK).stroke();
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9).text(`For ${data.hotel.name}`, PAGE_W - M - 150, y, { width: 140, align: 'center' });

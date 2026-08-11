@@ -512,22 +512,33 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       const igst = (isIndia && !sameState) ? data.folio.gstAmount : 0;
 
       const drawTotalRow = (text: string, value: string, bold: boolean = false, accent: boolean = false) => {
-        // PDF-FIX: never let the GRAND TOTAL bold row clip. Bold rows
-        // (GRAND_TOTAL is the prime example) draw a 22px accent rect at
-        // y-3 — if we're near the bottom edge, page-break first so the
-        // entire row sits on the new page intact rather than ribboned.
-        ensureSpace(bold ? 25 : 16);
+        // Measure the label at its own column width so a long payment-ledger
+        // label (e.g. "Advance · Credit Card · 2026-08-11 14:30") that wraps to
+        // a second line GROWS the row instead of colliding with the row below.
+        // Bold rows (GRAND TOTAL / Balance Due) draw an accent bar and carry a
+        // little breathing room above + below so they never touch a neighbour.
+        const lblW = labelW - 4;
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 11 : 9.5);
+        const lblH = Math.ceil(doc.heightOfString(text, { width: lblW }));
         if (bold) {
-          doc.rect(totalsX, y - 3, totalsW, 22).fill(ACCENT);
+          const boxH = Math.max(22, lblH + 8);
+          ensureSpace(boxH + 8);            // page-break with room for the whole bar
+          y += 4;                            // breathing room above the accent bar
+          doc.rect(totalsX, y - 3, totalsW, boxH).fill(ACCENT);
           doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(11);
+          doc.text(text,  totalsX + 10,          y + 3, { width: lblW,        align: 'left'  });
+          doc.text(value, totalsX + 10 + labelW, y + 3, { width: valueW - 20, align: 'right' });
+          y += boxH;                         // content resumes just below the bar
         } else {
+          const rowH = Math.max(16, lblH + 6);
+          ensureSpace(rowH);
           doc.fillColor(accent ? ACCENT : INK_SOFT)
              .font(accent ? 'Helvetica-Bold' : 'Helvetica')
              .fontSize(9.5);
+          doc.text(text,  totalsX + 10,          y, { width: lblW,        align: 'left'  });
+          doc.text(value, totalsX + 10 + labelW, y, { width: valueW - 20, align: 'right' });
+          y += rowH;
         }
-        doc.text(text, totalsX + 10, y + (bold ? 3 : 0), { width: labelW, align: 'left' });
-        doc.text(value, totalsX + 10 + labelW, y + (bold ? 3 : 0), { width: valueW - 20, align: 'right' });
-        y += bold ? 25 : 16;
       };
 
       // Phase 2: format every line via money(tenant, n). For Indian tenants
@@ -706,7 +717,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
            .text(paySLbl.hi, M + 14, y + 15);
       }
       doc.fillColor(INK).font('Helvetica-Bold').fontSize(12)
-         .text(statusText, M + 14, y + 22);
+         .text(statusText, M + 14, y + 22, { width: INNER_W / 2 - 24, lineBreak: false });
       if (data.folio.paymentMethod) {
         const mLbl = label('METHOD');
         doc.fillColor(MUTED).font('Helvetica').fontSize(8.5)
@@ -735,15 +746,25 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       ] as [string, string | undefined][]).filter((s): s is [string, string] => !!(s[1] && String(s[1]).trim()));
 
       if (_polSections.length) {
-        for (const [h, body] of _polSections) {
+        // Clear separation from the payment-status banner above.
+        y += 8;
+        const polOpts = { width: INNER_W, lineGap: 1.5 };
+        _polSections.forEach(([h, body], i) => {
           const txt = String(body).trim();
-          const bodyH = doc.font('Helvetica').fontSize(7.5).heightOfString(txt, { width: INNER_W });
-          ensureSpace(bodyH + 22);
-          doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text(h, M, y, { characterSpacing: 1 });
-          y += 12;
-          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5).text(txt, M, y, { width: INNER_W });
-          y += bodyH + 8;
-        }
+          const bodyH = doc.font('Helvetica').fontSize(8).heightOfString(txt, polOpts);
+          // Keep the heading with the first lines of its body + the section gap.
+          ensureSpace(bodyH + 34);
+          if (i > 0) {
+            // Hairline divider so the three policy blocks read as distinct.
+            doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.5).strokeColor(HAIR).stroke();
+            y += 14;
+          }
+          doc.fillColor(INK).font('Helvetica-Bold').fontSize(8.5).text(h, M, y, { characterSpacing: 1 });
+          y += 15;
+          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(8).text(txt, M, y, polOpts);
+          y += bodyH + 6;
+        });
+        y += 10;
         ensureSpace(52);
         doc.moveTo(PAGE_W - M - 150, y + 30).lineTo(PAGE_W - M - 10, y + 30).lineWidth(0.5).strokeColor(INK).stroke();
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9).text(`For ${data.hotel.name}`, PAGE_W - M - 150, y, { width: 140, align: 'center' });
