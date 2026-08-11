@@ -25590,6 +25590,7 @@ ${data.tenant.name}`;
       booking: { customer_name: bk.customer_name || '', customer_phone: bk.customer_phone, customer_email: bk.customer_email, event_type: bk.event_type, event_date: bk.event_date, end_date: bk.end_date, start_time: bk.start_time, end_time: bk.end_time, guest_count: bk.guest_count, venue_name: bk.venue_name },
       lines,
       subtotal, tax_amount: tax, discount, grand_total: grand,
+      policies: _invoicePolicies(restaurant, 'events'),
       lang2, langMode,
     };
   };
@@ -47295,8 +47296,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-preview-button',
+    commit_marker: 'event-invoice-header-policies-fix',
     code_features: [
+      'event-invoice-header-policies-fix',           // Event PDF fixes: (1) header no longer overlaps/overflows — identity block (name/address/contact/GSTIN) is laid out by MEASURED text height and the band grows to fit, so a long wrapping address can't collide with the contact line or push the GSTIN out of view; (2) the event INVOICE-from-booking path (buildInvoiceData) now includes `policies`, so Cancellation / Terms / Payment print on the invoice too (previously only the quotation path had them).
       'invoice-preview-button',                      // Settings → Business Profile gains "Preview PMS invoice" + "Preview Event quotation" buttons: POST /invoice-preview.pdf?module=hotel|events renders a one-page SAMPLE PDF from the current (unsaved) profile fields (overlaid on the saved row) using the real templates — owner/admin (SETTINGS) only; frontend fetches with auth + opens the blob in a new tab. TC-SET-INVPREVIEW-* smoke test.
       'invoice-business-profile-policies',           // Business Profile for invoices: editable logo (existing) + address_line1/2, city/state, PIN, business_location, GSTIN (existing), business phone/email under Settings → Business Profile; printed in BOTH hotel (classic + boutique) and event PDF headers via shared _invoiceSeller helper (5 hotel call sites deduped). Plus per-module invoice POLICY blocks — Cancellation Policy / Terms & Conditions / Payment Terms, SEPARATE for PMS (invoice_*_hotel) and Events (invoice_*_events) — printed near the footer of every invoice and (for events) every quotation. New restaurants columns + PATCH /:id writes; TC-SET-BIZPROFILE round-trip test.
       'events-kpi-manage-layer',                    // Events analytics "manage-the-business" layer: (a) period-over-period deltas — core KPIs recomputed for the prior equal-length window (computeWindowCore), dashboard tiles show ▲/▼ vs prior (% for money/counts, pp for rates); (b) segment contribution margin — segmentByType/segmentByVenue return per-segment revenue/cost/margin/marginPct/revenueShare from per-booking direct cost, reconciles to confirmedRevenue, shown as a Type/Venue toggle "Where the profit comes from" card (green=margin, amber=cost, bar=revenue); (c) customer concentration — top accounts, top5SharePct, new-vs-repeat revenue split. Plus BUGFIX: a PAID payment-schedule instalment can no longer be deleted (frontend hides the ×, backend DELETE returns 409) — previously it orphaned the row while the receipt stayed recorded.
