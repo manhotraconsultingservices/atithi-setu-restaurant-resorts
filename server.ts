@@ -5040,7 +5040,13 @@ function requireRole(allowedRoles: string[]) {
 // alone on POST/PATCH/DELETE routes that touch booking, folio, credentials,
 // or document state. Owners and managers can configure granular UI access
 // separately; this is the server-side defense-in-depth layer.
-const hotelStaff = requireRole(HOTEL_OPERATIONAL_ROLES);
+// hotelStaff / eventsStaff are defined further below (after
+// getTabPermissionsForRole) as PERMISSION-AWARE module gates — see
+// requireModuleAccess. They admit not just the fixed operational allowlist but
+// also any CUSTOM role the owner has granted a module tab to in Staff Access.
+// This is the fix for "user assigned to a role but has no access": a custom
+// role that was granted Event/Hotel tabs used to be rejected by the old
+// fixed-allowlist requireRole() before the per-tab check ever ran.
 // HOUSEKEEPING and MAINTENANCE can update service-request status (their
 // primary workflow) but not financial operations (confirm-bill / waive-bill).
 const serviceRequestStaff = requireRole([...HOTEL_OPERATIONAL_ROLES, 'HOUSEKEEPING', 'MAINTENANCE']);
@@ -5077,7 +5083,7 @@ const spaStaff = requireRole(SPA_OPERATIONAL_ROLES);
 // Events & Convention mutations: open to operational roles plus the dedicated
 // EVENTS_MANAGER role. Tab-level permissions (EVENTS_*) refine access on top.
 const EVENTS_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'EVENTS_MANAGER'];
-const eventsStaff = requireRole(EVENTS_OPERATIONAL_ROLES);
+// eventsStaff is defined below as a permission-aware module gate (requireModuleAccess).
 
 // ─────────────────────────────────────────────────────────────────────────
 // RBAC-4 — Permission-aware tab guard (consults restaurant_role_permissions)
@@ -5141,12 +5147,17 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
     if (perms !== null) {
       const RBAC_NEWLY_ADDED = [
         'HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'HOUSEKEEPING',
-        // Events & Convention tabs — added after the matrix already shipped, so a
-        // tenant who saved Staff Access before Events existed must default these to
-        // Full(3) (not 0), else events staff get 403 until the owner re-saves.
-        'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_VENUES',
-        'EVENTS_RENTALS', 'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS',
-        'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS',
+        // NOTE: the core Events tabs (EVENTS_DASHBOARD … EVENTS_SETTINGS) are
+        // deliberately NOT defaulted to Full here. Doing so caused the reported
+        // "owner set the role to None but the user still had full access" bug:
+        // the Staff Access matrix shows these as None for a role that never had
+        // them set, yet this default silently granted level 3. Migration safety
+        // for these tabs is now handled per-role in requireTabAction, which
+        // grandfathers only the module's built-in operational roles for a tab
+        // that isn't in the saved matrix — the matrix stays authoritative for
+        // custom / restricted roles. EVENTS_CHECKLISTS stays defaulted because
+        // the frontend matrix pre-fills it identically (owner-only config tab).
+        'EVENTS_CHECKLISTS',
         'CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
         // Spa & Wellness — operational tabs; module-gated, so harmless on non-spa
         // tenants and prevents locking spa staff out on tenants that pre-configured
@@ -5182,6 +5193,62 @@ function invalidateTabCacheForTenant(tenantId: string) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// RBAC — module tab catalogues + permission-aware module gate
+// ─────────────────────────────────────────────────────────────────────────
+// The Staff-Access tab ids that belong to each module. Used by (a) the module
+// gate below to admit a custom role the owner granted any tab of the module,
+// and (b) requireTabAction's migration-safety fallback for a tab that isn't in
+// a role's saved matrix.
+const HOTEL_TAB_IDS = ['ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS',
+  'HOUSEKEEPING', 'CHECKLISTS', 'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ',
+  'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'HOTEL_INVENTORY'];
+const EVENTS_TAB_IDS = ['EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS',
+  'EVENTS_VENUES', 'EVENTS_RENTALS', 'EVENTS_SERVICES', 'EVENTS_CATERING',
+  'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS',
+  'EVENTS_MIGRATION'];
+const _HOTEL_TAB_SET = new Set(HOTEL_TAB_IDS);
+const _EVENTS_TAB_SET = new Set(EVENTS_TAB_IDS);
+
+// For a tab a role has NOT been explicitly granted (absent from a saved matrix
+// row — i.e. a tab that shipped after the owner last saved Staff Access),
+// return the module's built-in operational role list so requireTabAction can
+// grandfather those standard roles without silently granting custom roles.
+function _moduleOperationalRolesForTab(tabId: string): string[] | null {
+  if (_EVENTS_TAB_SET.has(tabId)) return EVENTS_OPERATIONAL_ROLES;
+  if (_HOTEL_TAB_SET.has(tabId)) return HOTEL_OPERATIONAL_ROLES;
+  return null;
+}
+
+// Permission-aware module gate. Replaces the fixed-allowlist requireRole() on
+// hotel / events module endpoints so a CUSTOM role the owner created and then
+// granted module tabs to actually gets in — the fix for "assigned to a role but
+// no access". Fine-grained per-endpoint checks (requireTabAccess) still run on
+// top for the exact tab + action.
+//
+//   • OWNER / SUPER_ADMIN / CTO                         → always allowed
+//   • a built-in operational role for the module        → allowed (per-tab check still applies)
+//   • a custom role granted ≥ View on any module tab    → allowed (per-tab check still applies)
+//   • anyone else                                       → 403
+function requireModuleAccess(moduleTabs: string[], operationalRoles: string[], moduleLabel: string) {
+  const opSet = new Set(operationalRoles.map(r => r.toUpperCase()));
+  return async (req: AuthRequest, res: Response, next: NextFunction) => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (!role) return res.status(401).json({ error: 'Authentication required' });
+    if (role === 'SUPER_ADMIN' || role === 'CTO' || role === 'OWNER') return next();
+    if (opSet.has(role)) return next();
+    let perms: TabPerms | null = null;
+    try { perms = await getTabPermissionsForRole(req.params.id, role); } catch { perms = null; }
+    if (perms && moduleTabs.some(t => (perms![t] ?? 0) >= 1)) return next();
+    return res.status(403).json({
+      error: `Your role (${role}) has no access to the ${moduleLabel} module. Ask the property owner to grant it in Settings → Staff Access.`,
+    });
+  };
+}
+
+const hotelStaff = requireModuleAccess(HOTEL_TAB_IDS, HOTEL_OPERATIONAL_ROLES, 'Hotel');
+const eventsStaff = requireModuleAccess(EVENTS_TAB_IDS, EVENTS_OPERATIONAL_ROLES, 'Events & Convention');
+
 /**
  * Build a middleware that requires the caller's role to have access to a
  * given UI tab in the per-tenant Staff Access matrix.
@@ -5206,7 +5273,22 @@ function requireTabAction(tabId: string, action: 'READ' | 'CREATE' | 'UPDATE' | 
       const tenantId = req.params.id;
       if (!tenantId) return next();
       const perms = await getTabPermissionsForRole(tenantId, role);
-      if (perms === null) return next(); // no restriction configured
+      if (perms === null) return next(); // role never configured — role-class gate is the baseline
+      if (!(tabId in perms)) {
+        // The owner's saved matrix has no entry for this tab — it shipped after
+        // they last saved Staff Access. Grandfather the module's built-in
+        // operational roles so standard staff aren't locked out, but DENY
+        // custom / restricted roles: for them the matrix (which renders this
+        // tab as None) is authoritative. This is the fix for the reported
+        // "owner set None but the user still had access" symptom.
+        const opRoles = _moduleOperationalRolesForTab(tabId);
+        if (opRoles && opRoles.includes(role)) return next();
+        return res.status(403).json({
+          error: `Your role (${role}) does not have access to "${tabId}". Ask the owner to grant it in Staff Access.`,
+          required_tab: tabId,
+          required_action: action,
+        });
+      }
       const level = (perms[tabId] ?? 0) as number;
       if (level >= minLevel) return next();
       return res.status(403).json({
@@ -7038,8 +7120,14 @@ async function startServer() {
       const perms = await getTabPermissionsForRole(req.params.id, userRole || '');
       if (perms === null) return res.json({ allowed_tabs: null, tab_permissions: null });
       const allowed_tabs = Object.keys(perms).filter(k => (perms[k] ?? 0) >= 1);
+      // A configured role with ZERO viewable tabs means the owner deliberately
+      // restricted it to nothing — NOT "no restriction". Returning null here
+      // made the frontend treat the role as unrestricted and show every menu
+      // (the reported "user sees menus they shouldn't" leak). Emit the
+      // fully-informed marker '__perm_v3__' (see PERMS_V3_MARKER in App.tsx) so
+      // isTabVisible() hides every unlisted tab instead of revealing all.
       res.json({
-        allowed_tabs: allowed_tabs.length > 0 ? allowed_tabs : null,
+        allowed_tabs: allowed_tabs.length > 0 ? allowed_tabs : ['__perm_v3__'],
         tab_permissions: perms,
       });
     } catch (err) {
@@ -23013,7 +23101,7 @@ ${data.tenant.name}`;
   });
 
   // ─── VENUES (convention halls) ─────────────────────────────────────────────
-  app.get("/api/restaurant/:id/events/venues", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/venues", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23104,7 +23192,7 @@ ${data.tenant.name}`;
   });
 
   // Venue blocks (maintenance / hold)
-  app.get("/api/restaurant/:id/events/venue-blocks", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/venue-blocks", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23143,7 +23231,7 @@ ${data.tenant.name}`;
   });
 
   // ─── RENTAL ITEMS (inventory master) ───────────────────────────────────────
-  app.get("/api/restaurant/:id/events/rental-items", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/rental-items", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23203,7 +23291,7 @@ ${data.tenant.name}`;
   });
 
   // ─── ADD-ON SERVICES (serving staff, security, parking, decoration) ─────────
-  app.get("/api/restaurant/:id/events/services", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/services", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23262,7 +23350,7 @@ ${data.tenant.name}`;
   });
 
   // ─── CATERING PACKAGES (Buffet / Plated menus) ─────────────────────────────
-  app.get("/api/restaurant/:id/events/catering-packages", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/catering-packages", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23322,7 +23410,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PUBLIC PROFILE (staff-side config) ────────────────────────────────────
-  app.get("/api/restaurant/:id/events/profile", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/profile", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23359,7 +23447,7 @@ ${data.tenant.name}`;
   // Default GST rate applied to event invoices/quotations, plus a master switch
   // to remove GST entirely. Writes ONLY the GST columns so the public-page
   // profile (hero/gallery/contact) is never clobbered.
-  app.get("/api/restaurant/:id/events/gst-settings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/gst-settings", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23444,7 +23532,7 @@ ${data.tenant.name}`;
   // ─── VENUE BOOKING-RULE DEFAULTS (tenant-wide) ──────────────────────────────
   // Half-day AM/PM windows, turnaround/prep buffer, and which days count as
   // weekend/peak. Per-hall overrides on event_venues win; these are the fallback.
-  app.get("/api/restaurant/:id/events/venue-settings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/venue-settings", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23480,7 +23568,7 @@ ${data.tenant.name}`;
   // "Hall available ✓/✗" preview in the booking form. Combines the turnaround-
   // aware booking conflict, maintenance blocks, and the open-cleaning gate, and
   // returns the matrix rate for the requested basis so the form can auto-fill it.
-  app.get("/api/restaurant/:id/events/venues/:vid/availability-check", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/venues/:vid/availability-check", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23532,7 +23620,7 @@ ${data.tenant.name}`;
   // whether it is FREE, BOOKED (a CONFIRMED/IN_PROGRESS event overlaps), or
   // BLOCKED (maintenance/hold). Mirrors the hotel availability response shape so
   // the frontend calendar component is reused with venues as rows.
-  app.get("/api/restaurant/:id/events/availability", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/availability", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23570,7 +23658,7 @@ ${data.tenant.name}`;
   });
 
   // Rental-item availability for a date: owned − committed(CONFIRMED/IN_PROGRESS).
-  app.get("/api/restaurant/:id/events/rental-availability", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/rental-availability", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -23778,7 +23866,7 @@ ${data.tenant.name}`;
   // One-shot operations cockpit for the Events & Convention business: pipeline,
   // conversion, venue utilization, revenue trend, receivables, covers. Computed
   // in JS from a single windowed pull (per-tenant volumes are small).
-  app.get("/api/restaurant/:id/events/analytics", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/analytics", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24381,7 +24469,7 @@ ${data.tenant.name}`;
   };
   const migOwnerOnly = (req: AuthRequest) => ['OWNER', 'SUPER_ADMIN', 'CTO', 'ADMIN'].includes(String(req.user?.role || '').toUpperCase());
 
-  app.get("/api/restaurant/:id/events/migration/spec", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/migration/spec", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     res.json({ entities: Object.keys(MIG_COLS).map(k => ({ id: k, label: MIG_LABELS[k], columns: MIG_COLS[k] })) });
@@ -24412,7 +24500,7 @@ ${data.tenant.name}`;
   });
 
   // ─── BOOKINGS ──────────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24439,7 +24527,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/events/bookings/:bid", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24737,7 +24825,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PAYMENT SCHEDULE (staged deposits) ────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24851,7 +24939,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PAYMENTS (receipts) ───────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25124,7 +25212,7 @@ ${data.tenant.name}`;
   };
 
   // Read hotel availability + rates for an event's dates (read-only, quote time).
-  app.get("/api/restaurant/:id/events/bookings/:bid/hotel-availability", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/hotel-availability", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25443,7 +25531,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/events/quotations/:qid", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/quotations/:qid", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25557,7 +25645,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/events/quotations/:qid/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/quotations/:qid/pdf", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25575,7 +25663,7 @@ ${data.tenant.name}`;
   });
 
   // ─── BEO / function sheet PDF (Sprint 2) ────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings/:bid/beo.pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/beo.pdf", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25641,7 +25729,7 @@ ${data.tenant.name}`;
     };
   };
 
-  app.get("/api/restaurant/:id/events/bookings/:bid/invoice.pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/invoice.pdf", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25766,7 +25854,7 @@ ${data.tenant.name}`;
   // ══════════════════════════════════════════════════════════════════════════
 
   // ── EVENT BOOKING ──────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings/:bid/audit", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/audit", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25775,7 +25863,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
   });
 
-  app.get("/api/restaurant/:id/events/bookings/:bid/where-used", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/where-used", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25793,7 +25881,7 @@ ${data.tenant.name}`;
   });
 
   // ── EVENT QUOTATION ────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/events/quotations/:qid/audit", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/quotations/:qid/audit", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25802,7 +25890,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
   });
 
-  app.get("/api/restaurant/:id/events/quotations/:qid/where-used", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/quotations/:qid/where-used", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25821,7 +25909,7 @@ ${data.tenant.name}`;
   });
 
   // ── EVENT FOLIO (invoice) — overview + audit + where-used ───────────────────
-  app.get("/api/restaurant/:id/events/folios/:fid", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/folios/:fid", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25844,7 +25932,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load folio" }); }
   });
 
-  app.get("/api/restaurant/:id/events/folios/:fid/audit", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/folios/:fid/audit", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25853,7 +25941,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
   });
 
-  app.get("/api/restaurant/:id/events/folios/:fid/where-used", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/folios/:fid/where-used", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27344,7 +27432,7 @@ ${data.tenant.name}`;
   });
 
   // ─── ROOMS CRUD ───────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/rooms", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/rooms", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27508,7 +27596,7 @@ ${data.tenant.name}`;
 
   // ─── RATE PLANS — Sprint C-RP ───────────────────────────────────────
   // CRUD for date-range price overrides + per-room rate preview.
-  app.get("/api/restaurant/:id/hotel/rate-overrides", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/rate-overrides", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27593,7 +27681,7 @@ ${data.tenant.name}`;
   // PUT  /hotel/rate-grid  — batch-save cell edits as single-date TYPE overrides.
   // POST /hotel/publish-rates — explicit "Publish Rates" → triggerAllRoomRatePush.
   // POST /hotel/bulk-rate-update — mass insert override across a date range.
-  app.get("/api/restaurant/:id/hotel/rate-grid", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/rate-grid", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27946,7 +28034,7 @@ ${data.tenant.name}`;
   // GET /hotel/rate-preview?room_id=X&start=Y&end=Z
   // Per-night breakdown for a date range — used by the booking modal
   // to show "Total: ₹X with rate-plan breakdown" before submit.
-  app.get("/api/restaurant/:id/hotel/rate-preview", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/rate-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27968,7 +28056,7 @@ ${data.tenant.name}`;
   // every enabled rule against (current occupancy %, days-out to
   // check-in); the highest-priority matching rule applies its
   // multiplier on top of the rate-plan resolved rate.
-  app.get("/api/restaurant/:id/hotel/yield-rules", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/yield-rules", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28035,7 +28123,7 @@ ${data.tenant.name}`;
   //     base_rate, applied_multiplier, suggested_rate, mode,
   //     reason, occupancy, days_out, matching_rule
   //   }
-  app.get("/api/restaurant/:id/hotel/yield-suggest", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/yield-suggest", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28235,7 +28323,7 @@ ${data.tenant.name}`;
   //   - reason: human label of the blocker ('Guest stay' | 'Maintenance' | ...)
   //   - capacity / base_rate / amenities / image — copied from the room +
   //     its type (type values used as fallback when the room itself lacks).
-  app.get("/api/restaurant/:id/hotel/find-available-rooms", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/find-available-rooms", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28628,7 +28716,7 @@ ${data.tenant.name}`;
   // that physical rooms can belong to. Metadata only at this stage — the
   // booking flow still binds to a specific room. Future work (rate plans,
   // inventory pooling, OTA mapping) keys off these.
-  app.get("/api/restaurant/:id/hotel/room-types", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/room-types", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28701,7 +28789,7 @@ ${data.tenant.name}`;
   // Non-booking unavailability records (maintenance, owner stays, OTA holds).
   // Treated identically to bookings by the availability/overlap check but
   // have no guest / folio / payment lifecycle.
-  app.get("/api/restaurant/:id/hotel/room-holds", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/room-holds", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28788,7 +28876,7 @@ ${data.tenant.name}`;
   });
 
   // ─── SERVICES (catalogue) CRUD ────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/services", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/services", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -29341,7 +29429,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/service-requests", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/service-requests", authenticate, serviceRequestStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -29419,7 +29507,7 @@ ${data.tenant.name}`;
   });
 
   // ─── BOOKINGS stats — counts for KPI tiles, always unfiltered ───────────
-  app.get("/api/restaurant/:id/hotel/bookings/stats", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/stats", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -29456,7 +29544,7 @@ ${data.tenant.name}`;
   });
 
   // ─── BOOKINGS — list / create / cancel / check-in / check-out ────────────
-  app.get("/api/restaurant/:id/hotel/bookings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -29628,7 +29716,7 @@ ${data.tenant.name}`;
   // channel-sync audit log). Zero-filled across [from, to] so the chart
   // has a point for every day. No schema change — all three series come
   // from columns/logs that already exist.
-  app.get("/api/restaurant/:id/hotel/reports/booking-trend", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/booking-trend", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -30533,7 +30621,7 @@ ${data.tenant.name}`;
   // REQ 5 — Returning-guest lookup: aggregate every past stay for a phone
   // number. Surfaces lifetime stays, total spend, and the most recent
   // stay so the front desk can welcome a returning guest with context.
-  app.get("/api/restaurant/:id/hotel/guests/lookup", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/guests/lookup", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -31343,7 +31431,7 @@ ${data.tenant.name}`;
   // CRUD for iCal subscription URLs. The cron worker (further down)
   // fetches each enabled feed every 30 min and creates BOOKED rows for
   // any new VEVENT UIDs.
-  app.get("/api/restaurant/:id/hotel/ical-feeds", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/ical-feeds", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -31449,7 +31537,7 @@ ${data.tenant.name}`;
   // Agoda is out of scope for this sprint; this commit just exposes
   // the UI surface so the owner can enter keys, which a follow-up
   // worker can consume.
-  app.get("/api/restaurant/:id/hotel/channel-credentials", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-credentials", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -31758,7 +31846,7 @@ ${data.tenant.name}`;
   //
   // Resolution order at inbound time:
   //   exact (channel + code + plan) → (channel + code + NULL) → type-level
-  app.get("/api/restaurant/:id/hotel/channel-room-mappings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-room-mappings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -31839,7 +31927,7 @@ ${data.tenant.name}`;
   // CRUD for rate_plans table. Auto-seeds the 4 industry-standard plans
   // (BAR / NRF / LSTAY / MEMBER) on first GET if the table is empty —
   // owner can edit/rename/delete from there.
-  app.get("/api/restaurant/:id/hotel/rate-plans", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/rate-plans", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -31920,7 +32008,7 @@ ${data.tenant.name}`;
   // ════════════════════════════════════════════════════════════════════
   // Aggregates commission paid/owed per channel for a date range. Used
   // by the Channel Manager Commission tab + monthly P&L reconciliation.
-  app.get("/api/restaurant/:id/hotel/reports/commission-summary", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/commission-summary", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -31979,7 +32067,7 @@ ${data.tenant.name}`;
   //   • top_channel_by_net, best_margin_channel, worst_margin_channel
   //   • concentration_top1, concentration_top2 (revenue share)
   //   • channel_count
-  app.get("/api/restaurant/:id/hotel/reports/ota-360", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/ota-360", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -32201,7 +32289,7 @@ ${data.tenant.name}`;
   };
 
   // ─── TRAVEL AGENTS CRUD ────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/agents", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/agents", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -32259,7 +32347,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PARTNER INVOICES ──────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/partner-invoices", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/partner-invoices", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -32395,7 +32483,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PARTNER PAYMENTS ──────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/partner-payments", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/partner-payments", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -32467,7 +32555,7 @@ ${data.tenant.name}`;
   // Per-partner aging grid: Current / 30-60d / 60-90d / 90+d.
   // Outstanding = net_due - net_received, per invoice.
   // Bucket by (today - due_date) for invoiced amounts.
-  app.get("/api/restaurant/:id/hotel/reports/receivables-aging", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/receivables-aging", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -32810,7 +32898,7 @@ ${data.tenant.name}`;
   });
 
   // Per-partner statement: bookings + invoices + payments + running balance.
-  app.get("/api/restaurant/:id/hotel/reports/partner-statement", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/partner-statement", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const partnerType = String(req.query.partner_type || 'OTA');
@@ -32881,7 +32969,7 @@ ${data.tenant.name}`;
   //   PARTIAL   → on an invoice, some payment received
   //   PAID      → fully settled
   //   OVERDUE   → past invoice due_date and not PAID
-  app.get("/api/restaurant/:id/hotel/reports/outstanding-payments", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/outstanding-payments", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33086,7 +33174,7 @@ ${data.tenant.name}`;
   //
   // Query params: date=YYYY-MM-DD (defaults to today)
   //               range=N (defaults to 1, max 31 — rolling N-day window)
-  app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const today = new Date().toISOString().slice(0, 10);
@@ -33314,7 +33402,7 @@ ${data.tenant.name}`;
   // rows. The queue worker (cron) auto-retries up to 5 times with
   // exponential backoff; this UI surface lets the operator inspect
   // queued/failed/permanently_failed rows and manually retry or dismiss.
-  app.get("/api/restaurant/:id/hotel/channel-sync-queue", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-sync-queue", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33367,7 +33455,7 @@ ${data.tenant.name}`;
   // ════════════════════════════════════════════════════════════════════
   // ─── RECONCILIATION REPORTS (Gap 8) ────────────────────────────────
   // ════════════════════════════════════════════════════════════════════
-  app.get("/api/restaurant/:id/hotel/channel-reconciliation-reports", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-reconciliation-reports", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33818,7 +33906,7 @@ ${data.tenant.name}`;
 
   // ─── WEBHOOK AUDIT LOG VIEWER (owner-facing) ───────────────────────
   // Powers the channel-manager dashboard's "Recent inbound events" pane.
-  app.get("/api/restaurant/:id/hotel/webhook-log", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/webhook-log", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -35063,7 +35151,7 @@ ${data.tenant.name}`;
   //   - current_window = bookings created in [now-N, now]
   //   - prior_window   = bookings created in [now-N-365, now-365]
   //   - daily = per-day pace for both windows (charts in UI)
-  app.get("/api/restaurant/:id/hotel/reports/pickup-pace", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/pickup-pace", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -35133,7 +35221,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/booking-lead-time", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/booking-lead-time", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const buckets: any[] = await db.query(`
@@ -35938,7 +36026,7 @@ ${data.tenant.name}`;
   });
 
   // List groups (room_booking_groups + booking count per group).
-  app.get("/api/restaurant/:id/hotel/booking-groups", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/booking-groups", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36393,7 +36481,7 @@ ${data.tenant.name}`;
   });
 
   // GET group-revenue report: revenue by group, filterable by date range.
-  app.get("/api/restaurant/:id/hotel/reports/group-revenue", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/group-revenue", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37607,7 +37695,7 @@ ${data.tenant.name}`;
 
   // Pre-check-in perk preview — UI shows a banner BEFORE the cashier
   // taps Check-In so they can prepare the complimentary perk in advance.
-  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/perk-preview", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/perk-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38197,7 +38285,7 @@ ${data.tenant.name}`;
 
   // Late-checkout preview — UI fetches this before opening the checkout
   // modal so the cashier can see the late-fee that will be added.
-  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/late-checkout-preview", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/late-checkout-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38220,7 +38308,7 @@ ${data.tenant.name}`;
   // Cancellation refund preview — UI fetches this before showing the
   // cancel-confirm modal so the cashier can see the refund the guest
   // is entitled to. Pure read; does not mutate the booking.
-  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/cancellation-preview", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/cancellation-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38505,7 +38593,7 @@ ${data.tenant.name}`;
   // ─── CHANNEL MANAGER RE-SYNC LOG (Phase H1 scaffold) ─────────────────────
   // Today: log-only. The actual OTA push (Booking.com, MakeMyTrip, etc.)
   // is a follow-up commit that will read the 'queued' rows and forward.
-  app.get("/api/restaurant/:id/hotel/channel-sync/log", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-sync/log", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38710,7 +38798,7 @@ ${data.tenant.name}`;
     }
   }
 
-  app.get("/api/restaurant/:id/hotel/tariff", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/tariff", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38991,7 +39079,7 @@ ${data.tenant.name}`;
   // for min/max, no auto-refund, no auto-late-checkout fee). Designed to
   // be backward-compatible so every pre-existing tenant sees no change
   // until the owner explicitly configures a rule.
-  app.get("/api/restaurant/:id/hotel/settings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/settings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -39144,7 +39232,7 @@ ${data.tenant.name}`;
   // GET the current property profile (mostly read from the restaurants
   // table; convenient single endpoint so the UI doesn't have to know
   // which columns live where).
-  app.get("/api/restaurant/:id/hotel/property-profile", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/property-profile", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const r: any = check.restaurant;
@@ -39336,7 +39424,7 @@ ${data.tenant.name}`;
   });
 
   // ─── Property-level gallery CRUD ─────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/property-gallery", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/property-gallery", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const db = await getTenantDb(req.params.id);
@@ -39365,7 +39453,7 @@ ${data.tenant.name}`;
   });
 
   // ─── Per-room-type gallery CRUD ──────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/room-types/:typeId/gallery", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/room-types/:typeId/gallery", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const db = await getTenantDb(req.params.id);
@@ -40446,7 +40534,7 @@ ${data.tenant.name}`;
   });
 
 
-  app.get("/api/restaurant/:id/hotel/folios/:folioId/invoice-pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/invoice-pdf", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -41123,7 +41211,7 @@ ${data.tenant.name}`;
   });
 
   // ─── HOTEL ANALYTICS (Phase 3) ────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/analytics", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/analytics", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -41257,7 +41345,7 @@ ${data.tenant.name}`;
   });
 
   // GET /hotel/compliance/form-c/:bookingId/pdf — generate & download Form-C PDF (Phase 4)
-  app.get("/api/restaurant/:id/hotel/compliance/form-c/:bookingId/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/compliance/form-c/:bookingId/pdf", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -41345,7 +41433,7 @@ ${data.tenant.name}`;
   });
 
   // ─── FAQ / KNOWLEDGE-BASE CRUD (Phase 4) ────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/concierge/faqs", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/concierge/faqs", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -47342,8 +47430,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-configurable-payment-split',
+    commit_marker: 'rbac-hotel-events-read-gate-custom-roles',
     code_features: [
+      'rbac-hotel-events-read-gate-custom-roles',     // RBAC remediation (Hotel + Events). (F2) hotelStaff/eventsStaff are now PERMISSION-AWARE module gates (requireModuleAccess) — a CUSTOM role the owner granted a module tab to gets in, instead of being blanket-403'd by the old fixed-allowlist requireRole(); fixes "assigned to a role but no access". (F1) ~77 Hotel + Events GET (read) endpoints that were `authenticate`-only are now module-gated (eventsStaff / hotelStaff; hotel/service-requests keeps serviceRequestStaff for HK/MAINT; hotel/availability stays open as the events→hotel bridge seam) — an unauthorised role can no longer read bookings/folios/analytics/guest PII via the API. (F3) removed the silent default-to-Full for core Events tabs (owner saw None but staff had full access); requireTabAction now grandfathers ONLY a module's built-in operational roles for a tab absent from the saved matrix, so the matrix stays authoritative for custom/restricted roles. (F4) /my-permissions no longer collapses a configured-but-nothing-allowed role to null (which showed every menu) — it emits the __perm_v3__ marker so unlisted tabs hide; preview-as-role mirrors it. TC-RBAC-READ-EVT/READ-HOTEL/CUSTOM-EVT/F3-ABSENT regression tests.
       'event-configurable-payment-split',            // Owner-configurable event payment-schedule split: Events → Settings gains a "Payment schedule" editor (stages with label / % / days-before-event, add/remove, live 100% total). Stored on event_profile.payment_schedule_splits (JSON); the "Generate schedule" button now uses it (backend default when no body.splits), falling back to 25/50/25. gst-settings GET/PUT read/write it (PUT rejects a split that doesn't total 100%). Generate button label no longer hardcodes 25/50/25. TC-EVT-SCHED-CONFIG(+VALIDATE) tests.
       'event-invoice-header-policies-fix',           // Event PDF fixes: (1) header no longer overlaps/overflows — identity block (name/address/contact/GSTIN) is laid out by MEASURED text height and the band grows to fit, so a long wrapping address can't collide with the contact line or push the GSTIN out of view; (2) the event INVOICE-from-booking path (buildInvoiceData) now includes `policies`, so Cancellation / Terms / Payment print on the invoice too (previously only the quotation path had them).
       'invoice-preview-button',                      // Settings → Business Profile gains "Preview PMS invoice" + "Preview Event quotation" buttons: POST /invoice-preview.pdf?module=hotel|events renders a one-page SAMPLE PDF from the current (unsaved) profile fields (overlaid on the saved row) using the real templates — owner/admin (SETTINGS) only; frontend fetches with auth + opens the blob in a new tab. TC-SET-INVPREVIEW-* smoke test.

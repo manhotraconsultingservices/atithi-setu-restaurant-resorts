@@ -14165,9 +14165,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const effectiveAllowedTabs = previewRole
           ? (() => {
               const perms = staffAccess[previewRole];
-              if (!perms || Object.keys(perms).length === 0) return null; // no restriction
+              if (!perms || Object.keys(perms).length === 0) return null; // role unconfigured → no restriction
               const readable = Object.keys(perms).filter(k => ((perms[k] ?? 0) as number) >= 1);
-              return readable.length > 0 ? readable : null;
+              // Configured-but-nothing-viewable = restricted to nothing, not
+              // "no restriction". Mirror /my-permissions: emit the V3 marker so
+              // the preview hides every unlisted tab instead of showing all.
+              return readable.length > 0 ? readable : [PERMS_V3_MARKER];
             })()
           : allowedTabs;
         // STAFF_ACCESS hard-gate: owners always see it (it's dropped from

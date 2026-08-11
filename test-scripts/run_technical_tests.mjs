@@ -2375,6 +2375,74 @@ async function testRBACHardening() {
     }
     if (waiterId) { try { await api('DELETE', `/api/owner/staff/${waiterId}`); } catch {} }
   }
+
+  // ── RBAC REMEDIATION — custom-role access (F2), module read-gating (F1) and
+  //    matrix-authoritative-for-absent-tabs (F3). Creates a throwaway user with
+  //    a UNIQUE custom role, drives its Staff Access grants, and asserts the
+  //    server honours them. Self-cleaning: blanks the role + deletes the user.
+  {
+    const tag = Date.now();
+    const role = `RBACX${tag}`;               // uppercase+digits → survives role.toUpperCase()
+    const loginId = `rbacx_${tag}`;
+    const pwd = `Rb!${tag}xZ`;
+    const rpIds = ['TC-RBAC-READ-EVT', 'TC-RBAC-READ-HOTEL', 'TC-RBAC-CUSTOM-EVT', 'TC-RBAC-F3-ABSENT'];
+    let uid = null, tok = '';
+    const mk = await api('POST', '/api/owner/staff', { name: `RBAC Custom ${tag}`, role, loginId, password: pwd, employee_type: 'LOGIN' });
+    if (mk.status === 200 || mk.status === 201) {
+      uid = mk.data?.id || mk.data?.staff?.id || null;
+      const lg = await api('POST', '/api/auth/login', { loginId, password: pwd, restaurantId });
+      tok = lg.data?.jwt_token || lg.data?.token || '';
+    }
+    if (!tok) {
+      rpIds.forEach(id => skip(id, 'RBAC custom-role remediation', `could not create/login a throwaway custom-role user (create=${mk.status})`));
+    } else {
+      // F1 + F2a — an UNGRANTED custom role must be 403'd on a module read.
+      const evtBefore = await api('GET', `/api/restaurant/${restaurantId}/events/bookings`, null, tok);
+      if (evtBefore.status === 403) pass('TC-RBAC-READ-EVT', 'Ungranted custom role 403 on GET /events/bookings (reads are module-gated)', '403 as expected');
+      else if (evtBefore.status === 404) skip('TC-RBAC-READ-EVT', 'Events read gate', 'events module not enabled on this tenant');
+      else fail('TC-RBAC-READ-EVT', 'Ungranted custom role must be 403 on GET /events/bookings', `got ${evtBefore.status} — read endpoint is not gated (F1 leak)`);
+
+      const hotBefore = await api('GET', `/api/restaurant/${restaurantId}/hotel/bookings`, null, tok);
+      if (hotBefore.status === 403) pass('TC-RBAC-READ-HOTEL', 'Ungranted custom role 403 on GET /hotel/bookings (reads are module-gated)', '403 as expected');
+      else if (hotBefore.status === 404) skip('TC-RBAC-READ-HOTEL', 'Hotel read gate', 'hotel module not enabled on this tenant');
+      else fail('TC-RBAC-READ-HOTEL', 'Ungranted custom role must be 403 on GET /hotel/bookings', `got ${hotBefore.status} — read endpoint is not gated (F1 leak)`);
+
+      // Grant the custom role EVENTS_BOOKINGS (Edit) only — NOT EVENTS_VENUES.
+      const cur = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
+      const map = (cur.data && typeof cur.data === 'object' && !Array.isArray(cur.data)) ? { ...cur.data } : {};
+      map[role] = { EVENTS_BOOKINGS: 2 };
+      await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, map);
+
+      // F2b — the GRANTED custom role can now READ events bookings. This is the
+      // core "assigned to a role but no access" fix: a custom role the owner
+      // granted a module tab used to be blanket-403'd by the old requireRole().
+      const evtAfter = await api('GET', `/api/restaurant/${restaurantId}/events/bookings`, null, tok);
+      if (evtAfter.status === 200) pass('TC-RBAC-CUSTOM-EVT', 'Granted custom role CAN GET /events/bookings (F2 custom-role access works)', '200 after grant');
+      else if (evtAfter.status === 404) skip('TC-RBAC-CUSTOM-EVT', 'Custom-role events access', 'events module not enabled on this tenant');
+      else fail('TC-RBAC-CUSTOM-EVT', 'Granted custom role should read /events/bookings', `got ${evtAfter.status} — custom role still blocked (F2 not fixed)`);
+
+      // F3 — EVENTS_VENUES was NOT granted (absent from the role's matrix). A
+      // custom role must be DENIED the venue mutation: the matrix, which shows
+      // that tab as None, is authoritative (no silent default-to-Full).
+      const venCreate = await api('POST', `/api/restaurant/${restaurantId}/events/venues`, { name: `RBACtest ${tag}`, capacity: 10 }, tok);
+      if (venCreate.status === 403) pass('TC-RBAC-F3-ABSENT', 'Custom role DENIED mutation on ungranted EVENTS_VENUES (matrix authoritative)', '403 as expected');
+      else if (venCreate.status === 404) skip('TC-RBAC-F3-ABSENT', 'Absent-tab enforcement', 'events module not enabled on this tenant');
+      else {
+        const vid = venCreate.data?.id;
+        if (vid) { try { await api('DELETE', `/api/restaurant/${restaurantId}/events/venues/${vid}`); } catch {} }
+        fail('TC-RBAC-F3-ABSENT', 'Custom role must be 403 on ungranted EVENTS_VENUES mutation', `got ${venCreate.status} — absent tab silently granted (F3 not fixed)`);
+      }
+
+      // Cleanup — blank the throwaway role's matrix entry so it stops matching.
+      try {
+        const c2 = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
+        const m2 = (c2.data && typeof c2.data === 'object' && !Array.isArray(c2.data)) ? { ...c2.data } : {};
+        m2[role] = {};
+        await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, m2);
+      } catch {}
+    }
+    if (uid) { try { await api('DELETE', `/api/owner/staff/${uid}`); } catch {} }
+  }
 }
 
 // ── Summary report ─────────────────────────────────────────────────────────
