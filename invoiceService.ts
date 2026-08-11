@@ -154,10 +154,10 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         data.hotel.fssai ? `FSSAI Lic: ${data.hotel.fssai}${data.hotel.fssaiValidUntil ? ` (valid until ${data.hotel.fssaiValidUntil})` : ''}` : null,
       ].filter(Boolean) as string[];
       doc.fillColor(MUTED).font('Helvetica').fontSize(8.5);
-      let hY = y + 28;
+      let hY = y + 26;
       for (const line of hotelAddrLines) {
         doc.text(line, M + logoW, hY, { width: INNER_W * 0.6 - logoW });
-        hY += 11;
+        hY += 10;
       }
 
       // Title box (right) — TAX INVOICE or CREDIT NOTE
@@ -177,11 +177,11 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
            .text(orig.hi, PAGE_W - M - 150, y + 46, { width: 150, align: 'center' });
       }
 
-      y = Math.max(hY, y + (orig.hi ? 58 : 50)) + 18;
+      y = Math.max(hY, y + (orig.hi ? 52 : 46)) + 12;
 
       // Divider
       doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.5).strokeColor(HAIR).stroke();
-      y += 16;
+      y += 12;
 
       // Credit-note sub-banner
       if (data.isCreditNote && data.parentInvoiceNumber) {
@@ -231,7 +231,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         ['POS',         data.placeOfSupply || data.hotel.state || 'N/A'],
       ];
       let metaY = y;
-      const rowH = drawBilingual ? 18 : 15;
+      const rowH = drawBilingual ? 16 : 14;
       doc.roundedRect(metaCol2X, y, metaColW, 10 + metaRows.length * rowH, 4)
          .lineWidth(0.5).strokeColor(HAIR).stroke();
       metaY += 6;
@@ -250,7 +250,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         metaY += rowH;
       }
 
-      y = Math.max(billY, metaY) + 18;
+      y = Math.max(billY, metaY) + 12;
 
       // ────────────── Stay details strip ──────────────
       const stayCols: Array<{ labelKey: keyof typeof L; value: string }> = [
@@ -263,22 +263,22 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         { labelKey: 'NIGHTS',    value: String(computeNights(data.stay.checkInDate, data.stay.checkOutDate)) },
         { labelKey: 'GUESTS',    value: String(data.stay.numGuests || 1) },
       ];
-      const stripH = drawBilingual ? 56 : 44;
+      const stripH = drawBilingual ? 48 : 38;
       doc.roundedRect(M, y, INNER_W, stripH, 4).fill(HIGHLIGHT);
       const colW = INNER_W / stayCols.length;
       stayCols.forEach((c, i) => {
         const cx = M + i * colW;
         const lbl = label(c.labelKey);
         doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(7)
-           .text(lbl.en, cx + 12, y + 8, { width: colW - 20, characterSpacing: 1 });
+           .text(lbl.en, cx + 12, y + 7, { width: colW - 20, characterSpacing: 1 });
         if (lbl.hi) {
           doc.font('Hindi-Bold').fontSize(6.5)
-             .text(lbl.hi, cx + 12, y + 16, { width: colW - 20 });
+             .text(lbl.hi, cx + 12, y + 15, { width: colW - 20 });
         }
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(10)
-           .text(c.value, cx + 12, y + (lbl.hi ? 28 : 22), { width: colW - 20 });
+           .text(c.value, cx + 12, y + (lbl.hi ? 26 : 19), { width: colW - 20 });
       });
-      y += stripH + 16;
+      y += stripH + 12;
 
       // ────────────── LINE ITEMS TABLE ──────────────
       // COLUMN-FIT (client report: "Rate column overflowing"):
@@ -521,16 +521,16 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 11 : 9.5);
         const lblH = Math.ceil(doc.heightOfString(text, { width: lblW }));
         if (bold) {
-          const boxH = Math.max(22, lblH + 8);
-          ensureSpace(boxH + 8);            // page-break with room for the whole bar
-          y += 4;                            // breathing room above the accent bar
+          const boxH = Math.max(21, lblH + 7);
+          ensureSpace(boxH + 6);            // page-break with room for the whole bar
+          y += 2;                            // slight breathing room above the accent bar
           doc.rect(totalsX, y - 3, totalsW, boxH).fill(ACCENT);
           doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(11);
           doc.text(text,  totalsX + 10,          y + 3, { width: lblW,        align: 'left'  });
           doc.text(value, totalsX + 10 + labelW, y + 3, { width: valueW - 20, align: 'right' });
           y += boxH;                         // content resumes just below the bar
         } else {
-          const rowH = Math.max(16, lblH + 6);
+          const rowH = Math.max(15, lblH + 5);
           ensureSpace(rowH);
           doc.fillColor(accent ? ACCENT : INK_SOFT)
              .font(accent ? 'Helvetica-Bold' : 'Helvetica')
@@ -644,7 +644,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       // must reflect the displayed (rounded) grand, not the raw value.
       doc.fillColor(INK).font('Helvetica-BoldOblique').fontSize(10)
          .text(amountInWords(Math.abs(displayedGrand), data.tenant), M + 12, y + (amtLbl.hi ? 20 : 14), { width: INNER_W - 24 });
-      y += (drawBilingual ? 44 : 36);
+      y += (drawBilingual ? 40 : 32);
 
       // ────────────── R-3: GST E-INVOICE (IRN) ──────────────
       // Render the IRN stamp + signed QR ONLY when a real IRN has been
@@ -706,9 +706,9 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         : data.folio.status === 'settled' ? '#edf7f2'
         : data.folio.status === 'voided'   ? '#f0ebe4' : '#fef6e7';
 
-      // PDF-FIX: payment status banner is 40px + 16px gap; force-break if tight.
-      ensureSpace(56);
-      doc.roundedRect(M, y, INNER_W, 40, 4).fillAndStroke(statusBg, statusColor);
+      // PDF-FIX: payment status banner is 40px + gap; force-break if tight.
+      ensureSpace(46);
+      doc.roundedRect(M, y, INNER_W, 36, 4).fillAndStroke(statusBg, statusColor);
       const paySLbl = label('PAY_STATUS');
       doc.fillColor(statusColor).font('Helvetica-Bold').fontSize(9)
          .text(paySLbl.en, M + 14, y + 6, { characterSpacing: 1 });
@@ -732,7 +732,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(10)
            .text(fmtDateTime(data.folio.settledAt), M + INNER_W / 2 + 90, y + 22, { width: 120 });
       }
-      y += 56;
+      y += 42;
 
       // ────────────── Policies + Signature ──────────────
       // Owner-authored policy sections (set under Settings → Business Profile)
@@ -746,29 +746,39 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       ] as [string, string | undefined][]).filter((s): s is [string, string] => !!(s[1] && String(s[1]).trim()));
 
       if (_polSections.length) {
-        // Clear separation from the payment-status banner above.
-        y += 8;
-        const polOpts = { width: INNER_W, lineGap: 1.5 };
+        // Modest separation from the payment-status banner above.
+        y += 6;
+        const polOpts = { width: INNER_W, lineGap: 0.5 };
         _polSections.forEach(([h, body], i) => {
           const txt = String(body).trim();
-          const bodyH = doc.font('Helvetica').fontSize(8).heightOfString(txt, polOpts);
-          // Keep the heading with the first lines of its body + the section gap.
-          ensureSpace(bodyH + 34);
+          const bodyH = doc.font('Helvetica').fontSize(7.5).heightOfString(txt, polOpts);
+          ensureSpace(bodyH + 22);
           if (i > 0) {
-            // Hairline divider so the three policy blocks read as distinct.
-            doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.5).strokeColor(HAIR).stroke();
-            y += 14;
+            // Thin hairline keeps the three policy blocks distinct without
+            // eating much vertical space.
+            doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.4).strokeColor(HAIR).stroke();
+            y += 7;
           }
-          doc.fillColor(INK).font('Helvetica-Bold').fontSize(8.5).text(h, M, y, { characterSpacing: 1 });
-          y += 15;
-          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(8).text(txt, M, y, polOpts);
-          y += bodyH + 6;
+          doc.fillColor(INK).font('Helvetica-Bold').fontSize(8).text(h, M, y, { characterSpacing: 0.8 });
+          y += 11;
+          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5).text(txt, M, y, polOpts);
+          y += bodyH + 5;
         });
-        y += 10;
-        ensureSpace(52);
-        doc.moveTo(PAGE_W - M - 150, y + 30).lineTo(PAGE_W - M - 10, y + 30).lineWidth(0.5).strokeColor(INK).stroke();
+        // Signature — keep it on THIS page directly below the policies. Only
+        // break to a new page when it genuinely cannot clear the footer, so a
+        // nearly-full invoice never strands "For <business>" alone on page 2
+        // with a big blank gap above it.
+        const SIG_H = 40;
+        if (y + 4 + SIG_H > PAGE_H - 48) {
+          doc.addPage();
+          doc.rect(0, 0, PAGE_W, 6).fill(ACCENT);
+          y = 30;
+        } else {
+          y += 4;
+        }
+        doc.moveTo(PAGE_W - M - 150, y + 24).lineTo(PAGE_W - M - 10, y + 24).lineWidth(0.5).strokeColor(INK).stroke();
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9).text(`For ${data.hotel.name}`, PAGE_W - M - 150, y, { width: 140, align: 'center' });
-        doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(label('AUTH_SIG').en, PAGE_W - M - 150, y + 34, { width: 140, align: 'center' });
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(label('AUTH_SIG').en, PAGE_W - M - 150, y + 28, { width: 140, align: 'center' });
       } else {
         // Default generic terms + side-by-side signature (backward-compatible).
         ensureSpace(80);

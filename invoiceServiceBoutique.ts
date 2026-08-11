@@ -270,7 +270,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
         ['Nights',    `${nights}  ·  Guests ${data.stay.numGuests || 1}`],
         ['Place',     data.placeOfSupply || data.hotel.state || '—'],
       ];
-      const stayCardH = 15 + (label('ROOM').hi ? 10 : 0) + 8 + stayRows.length * 14 + 10;
+      const stayCardH = 15 + (label('ROOM').hi ? 10 : 0) + 8 + stayRows.length * 12 + 10;
       const cardH = Math.max(billCardH, stayCardH);
 
       // Bill-To card
@@ -304,10 +304,10 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
            .text(k, sLabelX, sY, { width: cardW / 2 - cardPad });
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
            .text(v || '—', sValueX, sY - 1, { width: sValueW, align: 'right' });
-        sY += 14;
+        sY += 12;
       }
 
-      y += cardH + 18;
+      y += cardH + 12;
 
       // ═══ SUMMARY BAND ══════════════════════════════════════════════
       // Per-category totals + subtotal/discount/tax + boxed grand total.
@@ -445,7 +445,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
            { width: sumRightW, align: 'center', characterSpacing: 1.5 }
          );
 
-      y = Math.max(sumY, y + gtBoxH) + 16;
+      y = Math.max(sumY, y + gtBoxH) + 12;
 
       // ═══ AMOUNT IN WORDS ═══════════════════════════════════════════
       const _amtBoxH = drawBilingual ? 34 : 26;
@@ -460,7 +460,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
       }
       doc.fillColor(INK).font('Helvetica-BoldOblique').fontSize(10)
          .text(amountInWords(Math.abs(displayedGrand), data.tenant), M + 12, y + (amtLbl.hi ? 20 : 14), { width: INNER_W - 24 });
-      y += (drawBilingual ? 44 : 36);
+      y += (drawBilingual ? 40 : 32);
 
       // ═══ LINE ITEMS (reused from Classic) ══════════════════════════
       // For Phase 1 we render the standard Classic line-items table. Phase
@@ -661,29 +661,35 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
       ] as [string, string | undefined][]).filter((s): s is [string, string] => !!(s[1] && String(s[1]).trim()));
 
       if (_polSections.length) {
-        // Clear separation from the block above.
-        y += 8;
-        const polOpts = { width: INNER_W, lineGap: 1.5 };
+        // Modest separation from the block above.
+        y += 6;
+        const polOpts = { width: INNER_W, lineGap: 0.5 };
         _polSections.forEach(([h, body], i) => {
           const txt = String(body).trim();
-          const bodyH = doc.font('Helvetica').fontSize(8).heightOfString(txt, polOpts);
-          // Keep the heading with the first lines of its body + the section gap.
-          ensureSpace(bodyH + 34);
+          const bodyH = doc.font('Helvetica').fontSize(7.5).heightOfString(txt, polOpts);
+          ensureSpace(bodyH + 22);
           if (i > 0) {
-            // Hairline divider so the three policy blocks read as distinct.
-            doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.5).strokeColor(HAIR).stroke();
-            y += 14;
+            doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.4).strokeColor(HAIR).stroke();
+            y += 7;
           }
-          doc.fillColor(INK).font('Helvetica-Bold').fontSize(8.5).text(h, M, y, { characterSpacing: 1 });
-          y += 15;
-          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(8).text(txt, M, y, polOpts);
-          y += bodyH + 6;
+          doc.fillColor(INK).font('Helvetica-Bold').fontSize(8).text(h, M, y, { characterSpacing: 0.8 });
+          y += 11;
+          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5).text(txt, M, y, polOpts);
+          y += bodyH + 5;
         });
-        y += 10;
-        ensureSpace(52);
-        doc.moveTo(PAGE_W - M - 150, y + 30).lineTo(PAGE_W - M - 10, y + 30).lineWidth(0.5).strokeColor(INK).stroke();
+        // Keep the signature on THIS page unless it genuinely can't clear the
+        // footer, so it never strands alone on a near-empty second page.
+        const SIG_H = 40;
+        if (y + 4 + SIG_H > PAGE_H - 48) {
+          doc.addPage();
+          doc.rect(0, 0, PAGE_W, 6).fill(ACCENT);
+          y = 30;
+        } else {
+          y += 4;
+        }
+        doc.moveTo(PAGE_W - M - 150, y + 24).lineTo(PAGE_W - M - 10, y + 24).lineWidth(0.5).strokeColor(INK).stroke();
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9).text(`For ${data.hotel.name}`, PAGE_W - M - 150, y, { width: 140, align: 'center' });
-        doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(label('AUTH_SIG').en, PAGE_W - M - 150, y + 34, { width: 140, align: 'center' });
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(label('AUTH_SIG').en, PAGE_W - M - 150, y + 28, { width: 140, align: 'center' });
       } else {
         ensureSpace(72);
         const termsLbl = label('TERMS');
