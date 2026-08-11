@@ -175,25 +175,51 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       // advances by its MEASURED height so a long (wrapping) address never
       // overlaps the contact / GSTIN lines or pushes the GSTIN out of the band.
       const TOP = 22;
-      const RIGHT_W = 178;            // reserved on the right for the doc-title block
+      // Two hard-bounded columns so NOTHING in the header can overflow into its
+      // neighbour, whatever the language or the length of the name / invoice no:
+      //   • left  = business identity, wrapped within idW
+      //   • right = doc title + meta, wrapped within RIGHT_W (its own column)
+      // A GUTTER keeps a gap between them; the band grows to the taller column.
+      const RIGHT_W = 182;            // reserved right column for the doc-title + meta
+      const GUTTER = 14;              // gap between the identity block and the right column
       const logoAbs = resolveEventLogoPath(data.tenant.logoPath);
       const idX = M + (logoAbs ? 66 : 0);
-      const idW = INNER - RIGHT_W - (idX - M);
+      const idW = INNER - RIGHT_W - GUTTER - (idX - M);
+      const rx = PAGE_W - M - RIGHT_W; // left edge of the right column
       const nameStr = waSafe(data.tenant.name);
       const addrStr = data.tenant.address ? waSafe(data.tenant.address) : '';
       const contactStr = [data.tenant.phone, data.tenant.email].filter(Boolean).join('  ·  ');
       const gstStr = data.tenant.gstin ? `${L('GSTIN', 'gstin').t}: ${data.tenant.gstin}` : '';
+
+      // Measure the LEFT identity block (each line wraps within idW).
       const nameH = doc.font('Helvetica-Bold').fontSize(18).heightOfString(nameStr, { width: idW });
       doc.font('Helvetica').fontSize(9);
       const addrH = addrStr ? doc.heightOfString(addrStr, { width: idW }) : 0;
       const contactH = contactStr ? doc.heightOfString(contactStr, { width: idW }) : 0;
       const gstH = gstStr ? doc.heightOfString(gstStr, { width: idW }) : 0;
       const idH = nameH + 4 + (addrH ? addrH + 2 : 0) + (contactH ? contactH + 2 : 0) + gstH;
-      const bandH = Math.max(96, TOP + idH + 12);
+
+      // Measure the RIGHT doc-title block (bounded to RIGHT_W so a bilingual
+      // title or a long invoice number wraps inside the column instead of
+      // spilling left over the business name — the reported header overlap).
+      const docKey = data.docLabel === 'TAX INVOICE' ? 'taxInvoice' : data.docLabel === 'INVOICE' ? 'invoice' : 'quotation';
+      const docL = L(data.docLabel || 'QUOTATION', docKey);
+      const noStr = `No: ${data.quotation.quote_number}  (v${data.quotation.version})`;
+      const issued = ymd(data.quotation.created_at) || new Date().toISOString().slice(0, 10);
+      const docDateStr = `Date: ${issued}`;
+      const validStr = data.quotation.valid_until ? `Valid until: ${ymd(data.quotation.valid_until)}` : '';
+      const titleH = doc.font(docL.f || 'Helvetica-Bold').fontSize(16).heightOfString(docL.t, { width: RIGHT_W });
+      doc.font('Helvetica').fontSize(9);
+      const noH = doc.heightOfString(noStr, { width: RIGHT_W });
+      const dateH = doc.heightOfString(docDateStr, { width: RIGHT_W });
+      const validH = validStr ? doc.heightOfString(validStr, { width: RIGHT_W }) : 0;
+      const rightH = titleH + 6 + noH + 2 + dateH + (validH ? 2 + validH : 0);
+
+      const bandH = Math.max(96, TOP + Math.max(idH, rightH) + 12);
       doc.rect(0, 0, PAGE_W, bandH).fill(BAND);
       if (logoAbs) { try { doc.image(logoAbs, M, TOP, { fit: [54, 54] }); } catch { /* unreadable image — skip */ } }
 
-      // Identity (left)
+      // Identity (left) — advance each line by its MEASURED height.
       let ty = TOP;
       doc.fillColor(INK).font('Helvetica-Bold').fontSize(18).text(nameStr, idX, ty, { width: idW }); ty += nameH + 4;
       doc.font('Helvetica').fontSize(9).fillColor(MUTED);
@@ -201,15 +227,13 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       if (contactStr) { doc.text(contactStr, idX, ty, { width: idW }); ty += contactH + 2; }
       if (gstStr) { const gL = L('GSTIN', 'gstin'); doc.font(gL.f || 'Helvetica').fontSize(9).fillColor(MUTED).text(gstStr, idX, ty, { width: idW }); doc.font('Helvetica'); }
 
-      // Doc-title block (right)
-      const docKey = data.docLabel === 'TAX INVOICE' ? 'taxInvoice' : data.docLabel === 'INVOICE' ? 'invoice' : 'quotation';
-      const docL = L(data.docLabel || 'QUOTATION', docKey);
-      doc.font(docL.f || 'Helvetica-Bold').fontSize(16).fillColor(ACCENT).text(docL.t, M, TOP + 2, { width: INNER, align: 'right' });
+      // Doc-title block (right) — bounded to the right column, measured advance.
+      let ry = TOP + 2;
+      doc.font(docL.f || 'Helvetica-Bold').fontSize(16).fillColor(ACCENT).text(docL.t, rx, ry, { width: RIGHT_W, align: 'right' }); ry += titleH + 6;
       doc.font('Helvetica').fontSize(9).fillColor(INK);
-      doc.text(`No: ${data.quotation.quote_number}  (v${data.quotation.version})`, M, TOP + 26, { width: INNER, align: 'right' });
-      const issued = ymd(data.quotation.created_at) || new Date().toISOString().slice(0, 10);
-      doc.text(`Date: ${issued}`, M, TOP + 38, { width: INNER, align: 'right' });
-      if (data.quotation.valid_until) doc.text(`Valid until: ${ymd(data.quotation.valid_until)}`, M, TOP + 50, { width: INNER, align: 'right' });
+      doc.text(noStr, rx, ry, { width: RIGHT_W, align: 'right' }); ry += noH + 2;
+      doc.text(docDateStr, rx, ry, { width: RIGHT_W, align: 'right' }); ry += dateH + 2;
+      if (validStr) doc.text(validStr, rx, ry, { width: RIGHT_W, align: 'right' });
 
       y = bandH + 20;
 

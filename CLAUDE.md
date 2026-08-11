@@ -158,6 +158,20 @@ End-to-end stock control: **catalog → recipes → auto-deduction → procureme
 * `buildPOEmailBody(data)` returns `{ subject, text, html }` — the HTML mirrors the PDF summary.
 * Endpoints: `GET /api/inventory/purchase-orders/:id/pdf`, `POST /api/inventory/purchase-orders/:id/email`.
 
+### PDF layout — NO-OVERFLOW rule (invoices, quotations, and every generated document)
+
+**Design principle (non-negotiable): text must NEVER overflow, overlap, or clip in any invoice / quotation / BEO / PO / folio PDF, for any tenant, in any language, at any content length.** These are legal/customer-facing documents — a long business name, a wrapping address, a bilingual (EN + regional-script) label, or a long invoice number must degrade gracefully, never collide.
+
+Applies to `invoiceService.ts` (Classic), `invoiceServiceBoutique.ts` (Boutique), `eventQuotationPdf.ts` (event quotation + tax invoice + BEO), `poService.ts`, and any future PDF generator. pdfkit does **manual** `x,y` placement with **no auto-layout**, so the generator is fully responsible for fit. Rules:
+
+1. **Every `doc.text()` gets an explicit `width`.** Never draw unbounded text — an omitted `width` lets a long string run off the page or across a neighbouring column. Bound it to the column it lives in.
+2. **Never right-align across the full page width to sit something on the right.** Give the right-hand block (doc title, invoice no/date, totals) its **own reserved column** (`x = PAGE_W - M - COL_W`, `width: COL_W`, `align: 'right'`), with a gutter to the left block. Right-aligning across `INNER` makes long text grow *left* into the identity/name — the "pconvention header overlap" bug.
+3. **Advance `y` by the MEASURED height**, not a hardcoded line height: `const h = doc.heightOfString(str, { width }); doc.text(str, x, y, { width }); y += h + gap;`. A wrapping value must push the next line/row down, never sit on top of it. This is why totals rows, policy blocks, and the header identity all measure-and-grow.
+4. **Bands/boxes grow to fit their content** — compute the band height from the measured content (`bandH = Math.max(min, TOP + Math.max(leftH, rightH) + pad)`), never a fixed height that a long value can exceed.
+5. **Numeric columns:** currency/amount cells use `align: 'right'` with a width sized for the largest realistic value; keep the currency CODE in the header (`money`/`moneyNumeric`), not the symbol (pdfkit Helvetica lacks the ₹ glyph → renders as a stray superscript and drifts the column).
+6. **Bilingual labels are wider.** A regional Noto font is present on the VPS (absent locally), so `EN / regional` strings render *much* wider in production than in a local render — always measure with the actual label + font and bound to the column; never assume the English width.
+7. **Verify with a stress render** (long name + long address + long invoice number + bilingual) that captures each `doc.text` box and asserts **zero same-band overlaps** before shipping a PDF change — don't eyeball only the happy path.
+
 **Notifications** (templates in `notificationService.ts`):
 `STOCK_LOW`, `STOCK_CRITICAL` (days_of_cover < supplier.lead_time_days), `PO_DELIVERY_DUE_TODAY`, `PHYSICAL_COUNT_DUE`. STOCK_LOW/CRITICAL include the auto-generated `autoPOId` when the cron created a DRAFT PO.
 
