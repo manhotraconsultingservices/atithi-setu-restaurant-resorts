@@ -22812,14 +22812,23 @@ ${data.tenant.name}`;
         if (isEventsStaff) clauses.push("facility_type = 'EVENT'");
         where += ` AND (${clauses.join(' OR ')})`;
       }
-      if (state === 'ASSIGNED') where += " AND workflow_state = 'ASSIGNED'";
-      else if (state === 'COMPLETE') where += " AND workflow_state = 'COMPLETE'";
+      // Bucket by the authoritative lifecycle field `status` (always set on
+      // insert + on complete), NOT `workflow_state` (added by a later ALTER;
+      // legacy rows — and any raise path that didn't set it — leave it NULL).
+      // Filtering "To do" on `workflow_state = 'ASSIGNED'` silently HID every
+      // OPEN checklist whose workflow_state was NULL, so a Housekeeping user saw
+      // only their Completed jobs even though the manager Checklist Board (which
+      // keys off `status`) still listed the open ones. A manager-parked DRAFT is
+      // still excluded from the to-do list.
+      if (state === 'ASSIGNED') where += " AND status = 'OPEN' AND COALESCE(workflow_state,'ASSIGNED') <> 'DRAFT'";
+      else if (state === 'COMPLETE') where += " AND status IN ('DONE','OVERRIDDEN')";
       const jobs: any[] = await db.query(
-        `SELECT id, facility_type, facility_id, facility_label, source_ref, guest_label, status, workflow_state,
+        `SELECT id, facility_type, facility_id, facility_label, source_ref, guest_label, status,
+                COALESCE(workflow_state, CASE WHEN status IN ('DONE','OVERRIDDEN') THEN 'COMPLETE' ELSE 'ASSIGNED' END) AS workflow_state,
                 template_name, category_id, trigger_event, blocks_release, assigned_to_role, assigned_to_user,
                 assigned_at, created_at, completed_at, completed_by, due_date
            FROM housekeeping_jobs WHERE ${where}
-          ORDER BY (workflow_state = 'ASSIGNED') DESC, created_at DESC LIMIT 300`,
+          ORDER BY (status = 'OPEN') DESC, created_at DESC LIMIT 300`,
         params
       ).catch(() => []);
       for (const j of (jobs || [])) {
@@ -47430,8 +47439,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-single-page-fit',
+    commit_marker: 'checklist-my-status-bucketing-fix',
     code_features: [
+      'checklist-my-status-bucketing-fix',            // Housekeeping "My Checklist" bug: staff saw only Done checklists; Open/In-Progress were invisible. Root cause: /checklists/my bucketed the To-do vs Completed tabs on the NULLABLE `workflow_state` column (added by a later ALTER), so any OPEN job with workflow_state=NULL (legacy rows / raise paths that didn't set it) was hidden from "To do" — while the manager Checklist Board, which keys off the authoritative `status` field, still listed them, and completed jobs (workflow_state set to COMPLETE on completion) still showed. Fix: bucket by `status` (To-do = status OPEN & not DRAFT; Completed = status DONE/OVERRIDDEN) and normalise workflow_state on read via COALESCE so the status pill + To-do count are correct for legacy rows. Ownership filter unchanged (no over-share). TC-CHK-MY-BUCKET regression test.
       'invoice-single-page-fit',                      // Tax-invoice PDF now fits on ONE page incl. the "For <business>" signature + Authorised Signatory (both Classic + Boutique; no logic/label/data change). Root cause: bilingual (Hindi sub-label) invoices are tall and the signature was force-paginated to a near-empty page 2. Compressed vertical rhythm — header/address line-height, two-column meta box row height, stay-details strip + card row heights, amount-in-words + payment-status banner heights, totals-row + policy spacing — and made the signature stay on the page unless it genuinely can't clear the footer (else it page-breaks as before). Verified: 2/3/4-item bilingual invoices all render single-page with zero same-column overlaps.
       'invoice-totals-policies-layout-polish',        // Tax-invoice PDF layout polish (Classic + Boutique, no logic/label/data change). Totals rows now MEASURE the label and grow the row so a long payment-ledger label (e.g. "Advance · Credit Card · 2026-08-11 14:30") that wraps to a 2nd line no longer overlaps the row beneath — fixes the crowding around Grand Total / payment lines / Balance Due. Bold rows (GRAND TOTAL, Balance Due) get breathing room above + below their accent bar so they never touch a neighbour. Payment-status text is width-clamped so it can't collide with the Method/Settled-On block. Policy blocks (Cancellation Policy / Terms & Conditions / Payment Terms) now separated by hairline dividers with generous section spacing, stronger heading hierarchy (black bold), and a more readable body (8pt + line spacing). Verified: measure-and-grow keeps every totals/payment/policy row advancing down the page (no overlap), page-breaks stay clean (no clip).
       'rbac-hotel-events-read-gate-custom-roles',     // RBAC remediation (Hotel + Events). (F2) hotelStaff/eventsStaff are now PERMISSION-AWARE module gates (requireModuleAccess) — a CUSTOM role the owner granted a module tab to gets in, instead of being blanket-403'd by the old fixed-allowlist requireRole(); fixes "assigned to a role but no access". (F1) ~77 Hotel + Events GET (read) endpoints that were `authenticate`-only are now module-gated (eventsStaff / hotelStaff; hotel/service-requests keeps serviceRequestStaff for HK/MAINT; hotel/availability stays open as the events→hotel bridge seam) — an unauthorised role can no longer read bookings/folios/analytics/guest PII via the API. (F3) removed the silent default-to-Full for core Events tabs (owner saw None but staff had full access); requireTabAction now grandfathers ONLY a module's built-in operational roles for a tab absent from the saved matrix, so the matrix stays authoritative for custom/restricted roles. (F4) /my-permissions no longer collapses a configured-but-nothing-allowed role to null (which showed every menu) — it emits the __perm_v3__ marker so unlisted tabs hide; preview-as-role mirrors it. TC-RBAC-READ-EVT/READ-HOTEL/CUSTOM-EVT/F3-ABSENT regression tests.

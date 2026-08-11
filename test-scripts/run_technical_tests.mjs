@@ -1494,6 +1494,28 @@ async function testChecklists() {
       await cleanupJob(jid);
     } else { fail('TC-CHK-MANUAL', 'Manual start', `HTTP ${started.status} — ${JSON.stringify(started.data)}`); }
 
+    // TC-CHK-MY-BUCKET — "My Checklist" must bucket by the authoritative `status`
+    // field, NOT the nullable `workflow_state`. Regression: an OPEN checklist
+    // whose workflow_state was NULL vanished from the "To do" (state=ASSIGNED)
+    // tab, so a Housekeeping user saw only Done. A freshly-raised OPEN job must
+    // appear under state=ASSIGNED (all rows status=OPEN) and never under COMPLETE.
+    const mb = await api('POST', `/api/restaurant/${R}/checklists/jobs`, { template_id: tplId, facility_type: 'ROOM', facility_id: roomId, facility_label: 'UAT MyBucket' });
+    const mbJid = mb.data?.job_ids?.[0];
+    if (mbJid) {
+      const toDo = await api('GET', `/api/restaurant/${R}/checklists/my?state=ASSIGNED`);
+      const done = await api('GET', `/api/restaurant/${R}/checklists/my?state=COMPLETE`);
+      const toDoJobs = Array.isArray(toDo.data?.jobs) ? toDo.data.jobs : [];
+      const doneJobs = Array.isArray(done.data?.jobs) ? done.data.jobs : [];
+      const inToDo = toDoJobs.some(j => j.id === mbJid);
+      const notInDone = !doneJobs.some(j => j.id === mbJid);
+      const toDoAllOpen = toDoJobs.every(j => j.status === 'OPEN');
+      const doneAllClosed = doneJobs.every(j => ['DONE', 'OVERRIDDEN'].includes(j.status));
+      (inToDo && notInDone && toDoAllOpen && doneAllClosed ? pass : fail)('TC-CHK-MY-BUCKET',
+        'My Checklist buckets by status — a raised OPEN job shows under To-do, not Completed',
+        `inToDo=${inToDo} notInDone=${notInDone} toDoAllOpen=${toDoAllOpen} doneAllClosed=${doneAllClosed}`);
+      await cleanupJob(mbJid);
+    } else { skip('TC-CHK-MY-BUCKET', 'My Checklist status bucketing', `could not raise a job (HTTP ${mb.status})`); }
+
     // TC-CHK-MULTI — one trigger raises one job per template (checkout can spawn 2).
     const tpl2 = await api('POST', `/api/restaurant/${R}/checklists/templates`, { name: `UAT Insp2 ${Date.now()}`, facility_type: 'ROOM', trigger_event: 'MANUAL', steps: [{ label: 'Spot check', is_mandatory: false }] });
     if (tpl2.status === 201 && tpl2.data?.id) {
