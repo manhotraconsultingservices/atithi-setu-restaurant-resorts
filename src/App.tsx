@@ -13460,6 +13460,34 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
 
+  // Render a one-page SAMPLE invoice/quotation from the CURRENT (possibly unsaved)
+  // Business Profile so the owner sees their branding + policies before saving.
+  const previewInvoice = async (module: 'hotel' | 'events') => {
+    if (!restaurant) return;
+    try {
+      const r = restaurant as any;
+      const body = {
+        name: r.name, gst_number: r.gst_number, invoice_template: r.invoice_template, logo_url: r.logo_url,
+        address_line1: r.address_line1, address_line2: r.address_line2, city: r.city, state: r.state, pincode: r.pincode,
+        business_location: r.business_location, business_phone: r.business_phone, business_email: r.business_email,
+        invoice_terms_hotel: r.invoice_terms_hotel, invoice_cancellation_hotel: r.invoice_cancellation_hotel, invoice_payment_hotel: r.invoice_payment_hotel,
+        invoice_terms_events: r.invoice_terms_events, invoice_cancellation_events: r.invoice_cancellation_events, invoice_payment_events: r.invoice_payment_events,
+      };
+      const res = await fetch(`/api/restaurant/${restaurantId}/invoice-preview.pdf?module=${module}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) { toast.error('Could not render preview'); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch {
+      toast.error('Could not render preview');
+    }
+  };
+
   const fetchMenu = async () => {
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/menu`);
@@ -27581,6 +27609,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="pt-4 border-t border-[#f0ebe4]">
               <h4 className="text-sm font-bold text-[#1a1a1a] mb-1">Business Profile</h4>
               <p className="text-[11px] text-[#6b5d52] mb-3">Appears on the header of every PMS and Event invoice &amp; quotation, alongside your logo (above) and GST number.</p>
+              <div className="flex flex-wrap items-center gap-2 mb-4">
+                <button type="button" onClick={() => previewInvoice('hotel')} className="text-xs font-semibold px-3 py-2 rounded-xl bg-white border border-[#cc5a16]/30 text-[#cc5a16] hover:bg-[#cc5a16]/5 transition-colors">Preview PMS invoice</button>
+                <button type="button" onClick={() => previewInvoice('events')} className="text-xs font-semibold px-3 py-2 rounded-xl bg-white border border-[#7c3aed]/30 text-[#7c3aed] hover:bg-[#7c3aed]/5 transition-colors">Preview Event quotation</button>
+                <span className="text-[10px] text-[#9c8e85]">Opens a sample PDF from your current entries — no save needed.</span>
+              </div>
               <div className="space-y-3">
                 <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="Address line 1"
                   value={(restaurant as any)?.address_line1 || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, address_line1: e.target.value } as any) : null)} />

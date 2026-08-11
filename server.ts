@@ -25452,6 +25452,65 @@ ${data.tenant.name}`;
     };
   };
 
+  // ── Invoice / quotation PREVIEW ─────────────────────────────────────────────
+  // Renders a one-page SAMPLE PDF from the tenant's Business Profile so the owner
+  // can see their branding + policy blocks without a real booking. The request
+  // body may carry the current (unsaved) profile fields so the preview is WYSIWYG
+  // — they overlay the saved row. Owner/admin (SETTINGS) only.
+  app.post("/api/restaurant/:id/invoice-preview.pdf", authenticate, restaurantAdmin, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const saved: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [req.params.id]);
+      if (!saved) return res.status(404).json({ error: "Tenant not found" });
+      const b = req.body || {};
+      const OVR = ['name', 'gst_number', 'logo_url', 'address_line1', 'address_line2', 'city', 'state', 'pincode',
+        'business_location', 'business_phone', 'business_email', 'invoice_template', 'fssai_license_number',
+        'invoice_terms_hotel', 'invoice_cancellation_hotel', 'invoice_payment_hotel',
+        'invoice_terms_events', 'invoice_cancellation_events', 'invoice_payment_events'];
+      const r: any = { ...saved };
+      for (const k of OVR) if (b[k] !== undefined) r[k] = b[k];
+      const mod = String((req.query.module as string) || b.module || 'hotel').toLowerCase();
+      const today = new Date().toISOString().slice(0, 10);
+
+      let pdf: Buffer;
+      if (mod === 'events') {
+        let prof: any = null;
+        try { const tdb = await getTenantDb(req.params.id); prof = await tdb.get("SELECT contact_phone, contact_email FROM event_profile WHERE id = 1"); } catch { /* events may not be set up */ }
+        pdf = await generateEventQuotationPdf({
+          tenant: eventTenantBlock(r, prof),
+          quotation: { quote_number: 'SAMPLE-PREVIEW', version: 1, valid_until: undefined, created_at: today },
+          docLabel: 'QUOTATION',
+          booking: { customer_name: 'Sample Client', customer_phone: '', event_type: 'Wedding Reception', event_date: '2026-12-12', guest_count: 200, venue_name: 'Grand Ballroom' },
+          lines: [
+            { line_type: 'VENUE', description: 'Grand Ballroom — full day', quantity: 1, unit_rate: 150000, amount: 150000, gst_rate: 18, gst_amount: 27000 },
+            { line_type: 'CATERING', description: 'Gold veg menu — 200 pax', quantity: 200, unit_rate: 850, amount: 170000, gst_rate: 5, gst_amount: 8500 },
+          ],
+          subtotal: 320000, tax_amount: 35500, discount: 10000, grand_total: 345500,
+          policies: _invoicePolicies(r, 'events'), langMode: 'EN',
+        });
+      } else {
+        pdf = await generateInvoicePdf({
+          hotel: _invoiceSeller(r),
+          policies: _invoicePolicies(r, 'hotel'),
+          guest: { name: 'Sample Guest', phone: '', state: r.state || undefined },
+          stay: { roomName: 'Deluxe Room', bookingId: 'PREVIEW', checkInDate: '2026-08-01', checkOutDate: '2026-08-04', numGuests: 2 },
+          folio: { id: 'PREVIEW', invoiceNumber: 'SAMPLE-PREVIEW', invoiceDate: today, subtotal: 13500, discount: 500, gstAmount: 1515, grandTotal: 14515, status: 'partial', amountPaid: 10000, balanceDue: 4515 },
+          entries: [
+            { description: 'Deluxe Room — 3 nights', entryType: 'ROOM', quantity: 3, unitPrice: 4000, amount: 12000, gstRate: 12, gstAmount: 1440, hsnCode: '996311' },
+            { description: 'Restaurant — in-room dining', entryType: 'FNB', quantity: 1, unitPrice: 1500, amount: 1500, gstRate: 5, gstAmount: 75, hsnCode: '996331' },
+          ],
+          placeOfSupply: r.state || undefined,
+          tenant: { invoice_template: (String(r.invoice_template).toUpperCase() === 'BOUTIQUE' ? 'BOUTIQUE' : 'CLASSIC') },
+        } as any);
+      }
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'inline; filename="invoice-preview.pdf"');
+      return res.send(pdf);
+    } catch (err: any) {
+      console.error("/invoice-preview error:", err);
+      return res.status(500).json({ error: "Failed to render invoice preview" });
+    }
+  });
+
   app.get("/api/restaurant/:id/events/quotations/:qid/pdf", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -47236,8 +47295,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-business-profile-policies',
+    commit_marker: 'invoice-preview-button',
     code_features: [
+      'invoice-preview-button',                      // Settings → Business Profile gains "Preview PMS invoice" + "Preview Event quotation" buttons: POST /invoice-preview.pdf?module=hotel|events renders a one-page SAMPLE PDF from the current (unsaved) profile fields (overlaid on the saved row) using the real templates — owner/admin (SETTINGS) only; frontend fetches with auth + opens the blob in a new tab. TC-SET-INVPREVIEW-* smoke test.
       'invoice-business-profile-policies',           // Business Profile for invoices: editable logo (existing) + address_line1/2, city/state, PIN, business_location, GSTIN (existing), business phone/email under Settings → Business Profile; printed in BOTH hotel (classic + boutique) and event PDF headers via shared _invoiceSeller helper (5 hotel call sites deduped). Plus per-module invoice POLICY blocks — Cancellation Policy / Terms & Conditions / Payment Terms, SEPARATE for PMS (invoice_*_hotel) and Events (invoice_*_events) — printed near the footer of every invoice and (for events) every quotation. New restaurants columns + PATCH /:id writes; TC-SET-BIZPROFILE round-trip test.
       'events-kpi-manage-layer',                    // Events analytics "manage-the-business" layer: (a) period-over-period deltas — core KPIs recomputed for the prior equal-length window (computeWindowCore), dashboard tiles show ▲/▼ vs prior (% for money/counts, pp for rates); (b) segment contribution margin — segmentByType/segmentByVenue return per-segment revenue/cost/margin/marginPct/revenueShare from per-booking direct cost, reconciles to confirmedRevenue, shown as a Type/Venue toggle "Where the profit comes from" card (green=margin, amber=cost, bar=revenue); (c) customer concentration — top accounts, top5SharePct, new-vs-repeat revenue split. Plus BUGFIX: a PAID payment-schedule instalment can no longer be deleted (frontend hides the ×, backend DELETE returns 409) — previously it orphaned the row while the receipt stayed recorded.
       'events-schedule-reconcile-pagination',       // (1) DataTable: the pagination bar (with its Rows-per-page selector) now stays visible after the user raises the page size even if all rows fit one page (was: totalPages>1 only, so the selector vanished and couldn't be reverted) — condition is now totalPages>1 || pageSize!==default. (2) Payment schedule: instalment status is reconciled from actual receipts (reconcileEventSchedule, oldest-first) on schedule read/generate + after every payment insert/delete — a full payment now marks ALL instalments PAID and hides the Pay button (also gated on outstanding balance>0), no matter which path recorded the money.

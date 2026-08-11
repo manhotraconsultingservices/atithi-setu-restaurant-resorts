@@ -177,6 +177,14 @@ async function testRestaurant() {
     } else {
       fail('TC-SET-BIZPROFILE', 'Business profile PATCH', `HTTP ${patch.status}`);
     }
+
+    // TC-SET-INVPREVIEW: the Settings "Preview invoice" endpoint renders a sample
+    // PDF from the (posted) business profile — for both PMS and Events.
+    for (const mod of ['hotel', 'events']) {
+      const prev = await api('POST', `/api/restaurant/${restaurantId}/invoice-preview.pdf?module=${mod}`, {});
+      if (prev.status === 403) { skip(`TC-SET-INVPREVIEW-${mod}`, 'Invoice preview renders', 'user lacks SETTINGS access'); }
+      else (prev.status === 200 && String(prev.data).slice(0, 4) === '%PDF' ? pass : fail)(`TC-SET-INVPREVIEW-${mod}`, `Invoice preview (${mod}) renders a PDF`, `HTTP ${prev.status}, head=${JSON.stringify(String(prev.data).slice(0, 5))}`);
+    }
   } else {
     fail('TC-SET-000', 'Restaurant settings endpoint responds', `HTTP ${st.status}`);
   }
