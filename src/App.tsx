@@ -13420,6 +13420,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           invoice_number_prefix: String((restaurant as any).invoice_number_prefix || 'INV-').trim() || 'INV-',
           invoice_yearly_reset: (restaurant as any).invoice_yearly_reset ? 1 : 0,
           invoice_template: (restaurant as any).invoice_template || 'CLASSIC',
+          // Business Profile — printed on PMS + Event invoices/quotations.
+          address_line1: (restaurant as any).address_line1 || '',
+          address_line2: (restaurant as any).address_line2 || '',
+          city: (restaurant as any).city || '',
+          state: (restaurant as any).state || '',
+          pincode: (restaurant as any).pincode || '',
+          business_location: (restaurant as any).business_location || '',
+          business_phone: (restaurant as any).business_phone || '',
+          business_email: (restaurant as any).business_email || '',
+          invoice_terms_hotel: (restaurant as any).invoice_terms_hotel || '',
+          invoice_cancellation_hotel: (restaurant as any).invoice_cancellation_hotel || '',
+          invoice_payment_hotel: (restaurant as any).invoice_payment_hotel || '',
+          invoice_terms_events: (restaurant as any).invoice_terms_events || '',
+          invoice_cancellation_events: (restaurant as any).invoice_cancellation_events || '',
+          invoice_payment_events: (restaurant as any).invoice_payment_events || '',
         })
       });
       if (!res.ok) {
@@ -27559,6 +27574,60 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm"
                   />
                 </button>
+              </div>
+            </div>
+
+            {/* ── Business Profile — printed on PMS + Event invoices ────── */}
+            <div className="pt-4 border-t border-[#f0ebe4]">
+              <h4 className="text-sm font-bold text-[#1a1a1a] mb-1">Business Profile</h4>
+              <p className="text-[11px] text-[#6b5d52] mb-3">Appears on the header of every PMS and Event invoice &amp; quotation, alongside your logo (above) and GST number.</p>
+              <div className="space-y-3">
+                <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="Address line 1"
+                  value={(restaurant as any)?.address_line1 || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, address_line1: e.target.value } as any) : null)} />
+                <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="Address line 2"
+                  value={(restaurant as any)?.address_line2 || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, address_line2: e.target.value } as any) : null)} />
+                <div className="grid grid-cols-3 gap-3">
+                  <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="City"
+                    value={(restaurant as any)?.city || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, city: e.target.value } as any) : null)} />
+                  <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="State"
+                    value={(restaurant as any)?.state || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, state: e.target.value } as any) : null)} />
+                  <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="PIN code"
+                    value={(restaurant as any)?.pincode || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, pincode: e.target.value } as any) : null)} />
+                </div>
+                <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="Business location / landmark (e.g. Near City Mall, MG Road)"
+                  value={(restaurant as any)?.business_location || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, business_location: e.target.value } as any) : null)} />
+                <div className="grid grid-cols-2 gap-3">
+                  <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="Business phone"
+                    value={(restaurant as any)?.business_phone || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, business_phone: e.target.value } as any) : null)} />
+                  <input className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none" placeholder="Business email"
+                    value={(restaurant as any)?.business_email || ''} onChange={e => setRestaurant(prev => prev ? ({ ...prev, business_email: e.target.value } as any) : null)} />
+                </div>
+              </div>
+            </div>
+
+            {/* ── Invoice Policies — separate for PMS and Events ────────── */}
+            <div className="pt-4 border-t border-[#f0ebe4]">
+              <h4 className="text-sm font-bold text-[#1a1a1a] mb-1">Invoice Policies</h4>
+              <p className="text-[11px] text-[#6b5d52] mb-3">Printed at the bottom of every invoice (and Event quotation). Keep separate wording for Hotel / PMS and for Events.</p>
+              <div className="grid md:grid-cols-2 gap-6">
+                {([
+                  { mod: 'hotel', label: 'Hotel / PMS', color: '#cc5a16' },
+                  { mod: 'events', label: 'Events', color: '#7c3aed' },
+                ] as const).map(({ mod, label, color }) => (
+                  <div key={mod} className="space-y-2">
+                    <p className="text-[11px] font-bold uppercase tracking-widest" style={{ color }}>{label}</p>
+                    {([
+                      { key: `invoice_cancellation_${mod}`, ph: 'Cancellation policy' },
+                      { key: `invoice_terms_${mod}`, ph: 'Terms & conditions' },
+                      { key: `invoice_payment_${mod}`, ph: 'Payment terms' },
+                    ]).map(({ key, ph }) => (
+                      <textarea key={key} rows={3} placeholder={ph}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none resize-y"
+                        value={(restaurant as any)?.[key] || ''}
+                        onChange={e => setRestaurant(prev => prev ? ({ ...prev, [key]: e.target.value } as any) : null)} />
+                    ))}
+                  </div>
+                ))}
               </div>
             </div>
 

@@ -118,6 +118,37 @@ const DOC_MIMES = new Set([
 // "General" uploads (logos, ID docs, bills, watermarks) — image or PDF.
 const GENERAL_ALLOWED_MIMES = new Set([...IMAGE_MIMES, ...DOC_MIMES]);
 
+// ── Invoice business-identity + policy blocks (shared by every PMS invoice
+// call site). Built from a central `restaurants` row; missing columns simply
+// degrade to undefined so headers/policies are omitted, never crash.
+function _invoiceSeller(r: any) {
+  const addr = [r?.address_line1, r?.address_line2, r?.business_location].map((x: any) => String(x || '').trim()).filter(Boolean).join(', ');
+  return {
+    name: r?.name || '',
+    address: addr || undefined,
+    city: r?.city || undefined,
+    state: r?.state || undefined,
+    pincode: r?.pincode || undefined,
+    gstin: r?.gst_number || undefined,
+    phone: r?.business_phone || r?.phone || undefined,
+    email: r?.business_email || r?.admin_id || undefined,
+    logoPath: r?.logo_url || undefined,
+    fssai: r?.fssai_license_number || null,
+    fssaiValidUntil: r?.fssai_license_valid_until || null,
+  };
+}
+// Owner-authored policy blocks printed on the invoice. `mod` picks the PMS
+// ('hotel') or Events ('events') set. Empty strings become undefined so a blank
+// policy renders nothing.
+function _invoicePolicies(r: any, mod: 'hotel' | 'events') {
+  const clean = (v: any) => { const s = String(v || '').trim(); return s || undefined; };
+  return {
+    cancellation: clean(r?.[`invoice_cancellation_${mod}`]),
+    terms: clean(r?.[`invoice_terms_${mod}`]),
+    payment: clean(r?.[`invoice_payment_${mod}`]),
+  };
+}
+
 function _makeMimeFilter(allowed: Set<string>) {
   return (_req: Request, file: any, cb: any) => {
     const mime = String(file?.mimetype || '').toLowerCase();
@@ -5671,6 +5702,24 @@ async function startServer() {
     console.log("[invoice-numbering-migration] mode + prefix + yearly_reset columns ensured");
   } catch (err) {
     console.error("[invoice-numbering-migration] Warning:", err);
+  }
+
+  // Business Profile for invoices — the identity + policy block printed on every
+  // PMS and Event invoice/quotation. address_line1/2 + pincode already exist for
+  // e-invoicing (re-ensured here); business_phone/email + per-module policy texts
+  // (Cancellation / Terms / Payment) are new and edited under Settings → Business.
+  try {
+    for (const col of [
+      'address_line1 TEXT', 'address_line2 TEXT', 'pincode TEXT', 'business_location TEXT',
+      'business_phone TEXT', 'business_email TEXT',
+      'invoice_terms_hotel TEXT', 'invoice_cancellation_hotel TEXT', 'invoice_payment_hotel TEXT',
+      'invoice_terms_events TEXT', 'invoice_cancellation_events TEXT', 'invoice_payment_events TEXT',
+    ]) {
+      await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS ${col}`);
+    }
+    console.log("[business-profile-migration] address + contact + per-module invoice policy columns ensured");
+  } catch (err) {
+    console.error("[business-profile-migration] Warning:", err);
   }
 
   // ====== Per-tenant hotel schema migrations ======
@@ -25360,16 +25409,19 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch quotation" }); }
   });
 
-  // Supplier block for event quotation/invoice PDFs. The central `restaurants`
-  // registry has no address/phone/email columns — the GSTIN lives in
-  // `gst_number`, contact details come from the events profile, and the address
-  // is composed from city/state (the only locality the registry stores).
+  // Supplier block for event quotation/invoice PDFs. Business identity now lives
+  // on the central `restaurants` row (edited under Settings → Business Profile):
+  // full street address + location + city/state/pincode, logo, GSTIN, and
+  // business phone/email — falling back to the events-profile contact when unset.
   const eventTenantBlock = (restaurant: any, prof: any) => ({
     name: restaurant?.name || 'Our Venue',
-    address: [restaurant?.city, restaurant?.state].filter(Boolean).join(', ') || undefined,
+    address: [restaurant?.address_line1, restaurant?.address_line2, restaurant?.business_location,
+              [restaurant?.city, restaurant?.state].filter(Boolean).join(', '), restaurant?.pincode]
+             .map((x: any) => String(x || '').trim()).filter(Boolean).join(', ') || undefined,
     gstin: restaurant?.gst_number || undefined,
-    phone: prof?.contact_phone || undefined,
-    email: prof?.contact_email || undefined,
+    phone: restaurant?.business_phone || prof?.contact_phone || undefined,
+    email: restaurant?.business_email || prof?.contact_email || undefined,
+    logoPath: restaurant?.logo_url || undefined,
     currency: 'INR',
   });
 
@@ -25395,6 +25447,7 @@ ${data.tenant.name}`;
       },
       lines: lines.map(l => ({ line_type: l.line_type, description: l.description, quantity: Number(l.quantity), unit_rate: Number(l.unit_rate), amount: Number(l.amount), gst_rate: Number(l.gst_rate), gst_amount: Number(l.gst_amount) })),
       subtotal: Number(q.subtotal), tax_amount: Number(q.tax_amount), discount: Number(q.discount), grand_total: Number(q.grand_total),
+      policies: _invoicePolicies(restaurant, 'events'),
       lang2, langMode,
     };
   };
@@ -26640,11 +26693,8 @@ ${data.tenant.name}`;
       const out = await getFolioOutstanding(db, folio.id).catch(() => null);
       const invNum = folio.invoice_number || `SPA-${new Date().getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
       const pdf = await generateInvoicePdf({
-        hotel: {
-          name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number,
-          phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined,
-          fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null,
-        },
+        hotel: _invoiceSeller(hotel),
+        policies: _invoicePolicies(hotel, 'hotel'),
         guest: {
           name: folio.client_name || 'Guest', phone: folio.client_phone, email: folio.client_email,
           nationality: null, state: hotel.state, gstin: null,
@@ -37926,7 +37976,8 @@ ${data.tenant.name}`;
 
           const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
           const pdf = await generateInvoicePdf({
-            hotel: { name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number, phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined, fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null },
+            hotel: _invoiceSeller(hotel),
+            policies: _invoicePolicies(hotel, 'hotel'),
             guest: { name: b.guest_name || 'Guest', phone: b.guest_phone, email: b.guest_email, nationality: b.guest_nationality, state: b.guest_state },
             stay:  {
               roomName: folio.room_name || folio.room_id,
@@ -40149,17 +40200,8 @@ ${data.tenant.name}`;
     // R-3 — group invoices don't have a single folio; IRN block suppressed.
     const _irnRow: any = null;
     const pdf = await generateInvoicePdf({
-      hotel: {
-        name:     hotel.name,
-        city:     hotel.city,
-        state:    hotel.state,
-        gstin:    hotel.gst_number,
-        phone:    hotel.phone,
-        email:    hotel.admin_id,
-        logoPath: hotel.logo_url || undefined,
-        fssai:           hotel.fssai_license_number || null,
-        fssaiValidUntil: hotel.fssai_license_valid_until || null,
-      },
+      hotel: _invoiceSeller(hotel),
+      policies: _invoicePolicies(hotel, 'hotel'),
       guest: {
         name:        recipientName,
         phone:       (group?.contact_phone) || first.guest_phone,
@@ -40345,17 +40387,8 @@ ${data.tenant.name}`;
       // Folio payment ledger → Paid / Balance Due lines on the invoice.
       const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
       const pdf = await generateInvoicePdf({
-        hotel: {
-          name:     hotel.name,
-          city:     hotel.city,
-          state:    hotel.state,
-          gstin:    hotel.gst_number,
-          phone:    hotel.phone,
-          email:    hotel.admin_id,
-          logoPath: hotel.logo_url || undefined,
-          fssai:           hotel.fssai_license_number || null,
-          fssaiValidUntil: hotel.fssai_license_valid_until || null,
-        },
+        hotel: _invoiceSeller(hotel),
+        policies: _invoicePolicies(hotel, 'hotel'),
         guest: {
           name:         folio.guest_name || 'Guest',
           phone:        folio.guest_phone,
@@ -40501,7 +40534,8 @@ ${data.tenant.name}`;
       // Folio payment ledger → Paid / Balance Due lines on the emailed invoice.
       const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
       const pdf = await generateInvoicePdf({
-        hotel: { name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number, phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined, fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null },
+        hotel: _invoiceSeller(hotel),
+        policies: _invoicePolicies(hotel, 'hotel'),
         guest: { name: folio.guest_name || 'Guest', phone: folio.guest_phone, email: folio.guest_email, nationality: folio.guest_nationality, state: folio.guest_state },
         stay:  {
           roomName: folio.room_name || folio.room_id,
@@ -41338,7 +41372,16 @@ ${data.tenant.name}`;
         // (default) or 'BOUTIQUE'. Any other value is rejected; null /
         // undefined leaves the existing value unchanged.
         invoice_template,
+        // Business Profile (printed on PMS + Event invoices/quotations). Any
+        // field left undefined stays unchanged; an empty string clears it.
+        address_line1, address_line2, city, state, pincode, business_location,
+        business_phone, business_email,
+        invoice_terms_hotel, invoice_cancellation_hotel, invoice_payment_hotel,
+        invoice_terms_events, invoice_cancellation_events, invoice_payment_events,
       } = req.body;
+      // COALESCE-friendly text coercion: undefined → null (keep existing);
+      // provided (incl. empty) → trimmed string (empty string clears the field).
+      const _txt = (v: any): string | null => v === undefined ? null : String(v ?? '').trim();
       let safeInvoiceTemplate: string | null = null;
       if (invoice_template !== undefined && invoice_template !== null) {
         const t = String(invoice_template).toUpperCase();
@@ -41430,7 +41473,21 @@ ${data.tenant.name}`;
           fssai_license_number = COALESCE(?, fssai_license_number),
           fssai_license_valid_until = COALESCE(?, fssai_license_valid_until),
           min_margin_percent = COALESCE(?, min_margin_percent),
-          invoice_template = COALESCE(?, invoice_template)
+          invoice_template = COALESCE(?, invoice_template),
+          address_line1 = COALESCE(?, address_line1),
+          address_line2 = COALESCE(?, address_line2),
+          city = COALESCE(?, city),
+          state = COALESCE(?, state),
+          pincode = COALESCE(?, pincode),
+          business_location = COALESCE(?, business_location),
+          business_phone = COALESCE(?, business_phone),
+          business_email = COALESCE(?, business_email),
+          invoice_terms_hotel = COALESCE(?, invoice_terms_hotel),
+          invoice_cancellation_hotel = COALESCE(?, invoice_cancellation_hotel),
+          invoice_payment_hotel = COALESCE(?, invoice_payment_hotel),
+          invoice_terms_events = COALESCE(?, invoice_terms_events),
+          invoice_cancellation_events = COALESCE(?, invoice_cancellation_events),
+          invoice_payment_events = COALESCE(?, invoice_payment_events)
         WHERE id = ?
       `, [
         name,
@@ -41451,6 +41508,10 @@ ${data.tenant.name}`;
         safeFssaiValid,
         safeMinMargin,
         safeInvoiceTemplate,
+        _txt(address_line1), _txt(address_line2), _txt(city), _txt(state), _txt(pincode), _txt(business_location),
+        _txt(business_phone), _txt(business_email),
+        _txt(invoice_terms_hotel), _txt(invoice_cancellation_hotel), _txt(invoice_payment_hotel),
+        _txt(invoice_terms_events), _txt(invoice_cancellation_events), _txt(invoice_payment_events),
         req.params.id
       ]);
 
@@ -47175,8 +47236,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-kpi-manage-layer',
+    commit_marker: 'invoice-business-profile-policies',
     code_features: [
+      'invoice-business-profile-policies',           // Business Profile for invoices: editable logo (existing) + address_line1/2, city/state, PIN, business_location, GSTIN (existing), business phone/email under Settings → Business Profile; printed in BOTH hotel (classic + boutique) and event PDF headers via shared _invoiceSeller helper (5 hotel call sites deduped). Plus per-module invoice POLICY blocks — Cancellation Policy / Terms & Conditions / Payment Terms, SEPARATE for PMS (invoice_*_hotel) and Events (invoice_*_events) — printed near the footer of every invoice and (for events) every quotation. New restaurants columns + PATCH /:id writes; TC-SET-BIZPROFILE round-trip test.
       'events-kpi-manage-layer',                    // Events analytics "manage-the-business" layer: (a) period-over-period deltas — core KPIs recomputed for the prior equal-length window (computeWindowCore), dashboard tiles show ▲/▼ vs prior (% for money/counts, pp for rates); (b) segment contribution margin — segmentByType/segmentByVenue return per-segment revenue/cost/margin/marginPct/revenueShare from per-booking direct cost, reconciles to confirmedRevenue, shown as a Type/Venue toggle "Where the profit comes from" card (green=margin, amber=cost, bar=revenue); (c) customer concentration — top accounts, top5SharePct, new-vs-repeat revenue split. Plus BUGFIX: a PAID payment-schedule instalment can no longer be deleted (frontend hides the ×, backend DELETE returns 409) — previously it orphaned the row while the receipt stayed recorded.
       'events-schedule-reconcile-pagination',       // (1) DataTable: the pagination bar (with its Rows-per-page selector) now stays visible after the user raises the page size even if all rows fit one page (was: totalPages>1 only, so the selector vanished and couldn't be reverted) — condition is now totalPages>1 || pageSize!==default. (2) Payment schedule: instalment status is reconciled from actual receipts (reconcileEventSchedule, oldest-first) on schedule read/generate + after every payment insert/delete — a full payment now marks ALL instalments PAID and hides the Pay button (also gated on outstanding balance>0), no matter which path recorded the money.
       'events-post-event-payment',                  // event booking payment panel now lets staff record a payment AFTER the event is COMPLETED (customers often settle the balance late): PaymentPanel gains a `canRecord` flag (true unless CANCELLED) separate from `editable` (ledger edit/delete, still locked once COMPLETED) — Record-payment + pay-instalment buttons show on completed bookings, matching the backend which only blocks receipts on CANCELLED; receipt-delete lock unchanged. Hint shown on completed bookings with a balance.

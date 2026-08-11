@@ -9,6 +9,22 @@
 
 import PDFDocument from 'pdfkit';
 import { existsSync } from 'fs';
+import path from 'path';
+
+// Resolve a "/uploads/foo.png" web path or an absolute FS path to a readable
+// PNG/JPG for pdfkit's doc.image (which supports PNG + JPG only). Kept local so
+// this renderer stays decoupled from the hotel invoice module.
+function resolveEventLogoPath(p?: string): string | null {
+  if (!p) return null;
+  try {
+    let abs: string;
+    if (p.startsWith('/uploads/')) abs = path.join(process.cwd(), 'public', p.replace(/^\//, ''));
+    else if (path.isAbsolute(p)) abs = p;
+    else abs = path.join(process.cwd(), p);
+    if (existsSync(abs) && ['.png', '.jpg', '.jpeg'].includes(path.extname(abs).toLowerCase())) return abs;
+  } catch { /* swallow */ }
+  return null;
+}
 
 export interface EventQuotationLine {
   line_type: string;
@@ -21,7 +37,7 @@ export interface EventQuotationLine {
 }
 
 export interface EventQuotationData {
-  tenant: { name: string; address?: string; gstin?: string; phone?: string; email?: string; currency?: string };
+  tenant: { name: string; address?: string; gstin?: string; phone?: string; email?: string; currency?: string; logoPath?: string };
   quotation: { quote_number: string; version: number; valid_until?: string; notes?: string; created_at?: string };
   docLabel?: string;  // header label; defaults to 'QUOTATION'. Pass 'TAX INVOICE' to render an invoice.
   booking: {
@@ -34,6 +50,8 @@ export interface EventQuotationData {
   tax_amount: number;
   discount: number;
   grand_total: number;
+  // Owner-authored policy blocks printed on the quotation AND the invoice.
+  policies?: { cancellation?: string; terms?: string; payment?: string };
   lang2?: string;      // regional language code (hi/ta/te/kn/…), from tenant state
   langMode?: string;   // EN | REGIONAL | BOTH — how to print fixed labels
 }
@@ -155,13 +173,18 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
 
       // ── Header band ──────────────────────────────────────────────────────
       doc.rect(0, 0, PAGE_W, 96).fill(BAND);
-      doc.fillColor(INK).font('Helvetica-Bold').fontSize(20).text(waSafe(data.tenant.name), M, 24, { width: INNER - 160 });
+      // Business logo (left), then identity text shifted right to make room.
+      let idX = M;
+      const logoAbs = resolveEventLogoPath(data.tenant.logoPath);
+      if (logoAbs) { try { doc.image(logoAbs, M, 20, { fit: [54, 54] }); idX = M + 66; } catch { /* unreadable image — skip */ } }
+      const idW = INNER - 170 - (idX - M);
+      doc.fillColor(INK).font('Helvetica-Bold').fontSize(20).text(waSafe(data.tenant.name), idX, 24, { width: idW });
       doc.font('Helvetica').fontSize(9).fillColor(MUTED);
       let hy = 48;
-      if (data.tenant.address) { doc.text(waSafe(data.tenant.address), M, hy, { width: INNER - 170 }); hy += 12; }
+      if (data.tenant.address) { doc.text(waSafe(data.tenant.address), idX, hy, { width: idW }); hy += 12; }
       const contactBits = [data.tenant.phone, data.tenant.email].filter(Boolean).join('  ·  ');
-      if (contactBits) { doc.text(contactBits, M, hy, { width: INNER - 170 }); hy += 12; }
-      if (data.tenant.gstin) { const gL = L('GSTIN', 'gstin'); doc.font(gL.f || 'Helvetica').fontSize(9).fillColor(MUTED).text(`${gL.t}: ${data.tenant.gstin}`, M, hy, { width: INNER - 170 }); doc.font('Helvetica'); }
+      if (contactBits) { doc.text(contactBits, idX, hy, { width: idW }); hy += 12; }
+      if (data.tenant.gstin) { const gL = L('GSTIN', 'gstin'); doc.font(gL.f || 'Helvetica').fontSize(9).fillColor(MUTED).text(`${gL.t}: ${data.tenant.gstin}`, idX, hy, { width: idW }); doc.font('Helvetica'); }
 
       // Quotation title block (right)
       const docKey = data.docLabel === 'TAX INVOICE' ? 'taxInvoice' : data.docLabel === 'INVOICE' ? 'invoice' : 'quotation';
@@ -266,6 +289,22 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
         doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(notes, M, y, { width: INNER });
         y += doc.heightOfString(notes, { width: INNER }) + 12;
       }
+      // ── Policies (Cancellation / Terms / Payment) — owner-authored, printed on
+      // every quotation AND invoice. Page-break when a long block would overflow.
+      const pol = data.policies || {};
+      const polSections = ([
+        ['Cancellation Policy', pol.cancellation],
+        ['Terms & Conditions', pol.terms],
+        ['Payment Terms', pol.payment],
+      ] as [string, string | undefined][]).filter((s): s is [string, string] => !!(s[1] && String(s[1]).trim()));
+      for (const [ph, body] of polSections) {
+        const txt = waSafe(String(body).trim());
+        const bodyH = doc.font('Helvetica').fontSize(8.5).heightOfString(txt, { width: INNER });
+        if (y + bodyH + 26 > 812) { doc.addPage(); y = M; }
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text(ph, M, y); y += 13;
+        doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(txt, M, y, { width: INNER }); y += bodyH + 12;
+      }
+
       const isInvoice = /INVOICE/i.test(data.docLabel || '');
       doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(
         isInvoice

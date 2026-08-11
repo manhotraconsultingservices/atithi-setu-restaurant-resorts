@@ -146,6 +146,37 @@ async function testRestaurant() {
   const st = await api('GET', `/api/restaurant/${restaurantId}`);
   if (st.status === 200 && st.data.id) {
     pass('TC-SET-000', 'Restaurant settings endpoint responds');
+
+    // TC-SET-BIZPROFILE: Business Profile (invoice header) + per-module invoice
+    // policy text round-trip through PATCH /:id. Non-destructive — captures the
+    // originals, writes markers, verifies persistence, then restores.
+    const r = st.data;
+    const marker = `UAT-LOC-${Date.now()}`;
+    const termMarker = `UAT terms ${Date.now()}`;
+    // Echo the non-COALESCE core fields so the round-trip can't clobber them.
+    const core = {
+      name: r.name, gst_number: r.gst_number, gst_percentage: r.gst_percentage,
+      is_gst_enabled: r.is_gst_enabled, template_id: r.template_id, table_count: r.table_count,
+      upi_id: r.upi_id, checkout_mode: r.checkout_mode,
+    };
+    const patch = await api('PATCH', `/api/restaurant/${restaurantId}`, {
+      ...core, business_location: marker, invoice_terms_hotel: termMarker, invoice_cancellation_events: termMarker,
+    });
+    if (patch.status === 403) {
+      skip('TC-SET-BIZPROFILE', 'Business profile + invoice policies persist', 'user lacks SETTINGS access');
+    } else if (patch.status === 200) {
+      const g1 = await api('GET', `/api/restaurant/${restaurantId}`);
+      const ok = g1.status === 200 && g1.data?.business_location === marker
+        && g1.data?.invoice_terms_hotel === termMarker && g1.data?.invoice_cancellation_events === termMarker;
+      (ok ? pass : fail)('TC-SET-BIZPROFILE', 'Business profile + per-module invoice policies persist via settings',
+        `loc=${g1.data?.business_location}, termsHotel=${g1.data?.invoice_terms_hotel === termMarker}, cancelEvents=${g1.data?.invoice_cancellation_events === termMarker}`);
+      // Restore originals (empty string clears a previously-null field).
+      await api('PATCH', `/api/restaurant/${restaurantId}`, {
+        ...core, business_location: r.business_location || '', invoice_terms_hotel: r.invoice_terms_hotel || '', invoice_cancellation_events: r.invoice_cancellation_events || '',
+      });
+    } else {
+      fail('TC-SET-BIZPROFILE', 'Business profile PATCH', `HTTP ${patch.status}`);
+    }
   } else {
     fail('TC-SET-000', 'Restaurant settings endpoint responds', `HTTP ${st.status}`);
   }

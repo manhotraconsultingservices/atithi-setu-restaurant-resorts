@@ -110,6 +110,13 @@ export interface InvoiceData {
     fssai?: string | null;        // R-2 — 14-digit FSSAI licence (food-safety mandatory in India)
     fssaiValidUntil?: string | null;
   };
+  // Owner-authored policy blocks printed near the invoice footer. Any field may
+  // be blank/absent; the renderer only prints the sections that have text.
+  policies?: {
+    cancellation?: string;
+    terms?: string;
+    payment?: string;
+  };
   guest: {
     name: string;
     phone?: string;

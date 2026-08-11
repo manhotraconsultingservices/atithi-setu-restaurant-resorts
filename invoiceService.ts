@@ -723,37 +723,61 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       }
       y += 56;
 
-      // ────────────── Terms + Signature ──────────────
-      // PDF-FIX: ~80px for terms+signature block; force-break if tight.
-      ensureSpace(80);
-      const termsLbl = label('TERMS');
-      doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8)
-         .text(termsLbl.en, M, y, { characterSpacing: 1 });
-      doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5);
-      const terms = data.isCreditNote ? [
-        '• This credit note reverses all or part of the original invoice.',
-        '• Refund, if any, will be processed via the original payment method.',
-        '• Retain this document for your records and GST filings.',
-      ] : [
-        '• Please retain this invoice as proof of payment.',
-        '• Taxes are charged as per applicable Indian GST law.',
-        '• For any discrepancy, contact the hotel within 7 days of check-out.',
-        '• Subject to local jurisdiction.',
-      ];
-      let termY = y + 14;
-      for (const t of terms) {
-        doc.text(t, M, termY, { width: INNER_W * 0.55 });
-        termY += 11;
-      }
+      // ────────────── Policies + Signature ──────────────
+      // Owner-authored policy sections (set under Settings → Business Profile)
+      // replace the generic default terms when present. Each prints full-width so
+      // multi-paragraph policies wrap cleanly; page-breaks are honoured per section.
+      const _pol = data.policies || {};
+      const _polSections = ([
+        ['CANCELLATION POLICY', _pol.cancellation],
+        ['TERMS & CONDITIONS', _pol.terms],
+        ['PAYMENT TERMS', _pol.payment],
+      ] as [string, string | undefined][]).filter((s): s is [string, string] => !!(s[1] && String(s[1]).trim()));
 
-      // Signature
-      doc.moveTo(PAGE_W - M - 150, y + 46)
-         .lineTo(PAGE_W - M - 10,  y + 46)
-         .lineWidth(0.5).strokeColor(INK).stroke();
-      doc.fillColor(MUTED).font('Helvetica').fontSize(8)
-         .text(label('AUTH_SIG').en, PAGE_W - M - 150, y + 50, { width: 140, align: 'center' });
-      doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
-         .text(`For ${data.hotel.name}`, PAGE_W - M - 150, y + 12, { width: 140, align: 'center' });
+      if (_polSections.length) {
+        for (const [h, body] of _polSections) {
+          const txt = String(body).trim();
+          const bodyH = doc.font('Helvetica').fontSize(7.5).heightOfString(txt, { width: INNER_W });
+          ensureSpace(bodyH + 22);
+          doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text(h, M, y, { characterSpacing: 1 });
+          y += 12;
+          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5).text(txt, M, y, { width: INNER_W });
+          y += bodyH + 8;
+        }
+        ensureSpace(52);
+        doc.moveTo(PAGE_W - M - 150, y + 30).lineTo(PAGE_W - M - 10, y + 30).lineWidth(0.5).strokeColor(INK).stroke();
+        doc.fillColor(INK).font('Helvetica-Bold').fontSize(9).text(`For ${data.hotel.name}`, PAGE_W - M - 150, y, { width: 140, align: 'center' });
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(label('AUTH_SIG').en, PAGE_W - M - 150, y + 34, { width: 140, align: 'center' });
+      } else {
+        // Default generic terms + side-by-side signature (backward-compatible).
+        ensureSpace(80);
+        const termsLbl = label('TERMS');
+        doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8)
+           .text(termsLbl.en, M, y, { characterSpacing: 1 });
+        doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5);
+        const terms = data.isCreditNote ? [
+          '• This credit note reverses all or part of the original invoice.',
+          '• Refund, if any, will be processed via the original payment method.',
+          '• Retain this document for your records and GST filings.',
+        ] : [
+          '• Please retain this invoice as proof of payment.',
+          '• Taxes are charged as per applicable Indian GST law.',
+          '• For any discrepancy, contact the hotel within 7 days of check-out.',
+          '• Subject to local jurisdiction.',
+        ];
+        let termY = y + 14;
+        for (const t of terms) {
+          doc.text(t, M, termY, { width: INNER_W * 0.55 });
+          termY += 11;
+        }
+        doc.moveTo(PAGE_W - M - 150, y + 46)
+           .lineTo(PAGE_W - M - 10,  y + 46)
+           .lineWidth(0.5).strokeColor(INK).stroke();
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8)
+           .text(label('AUTH_SIG').en, PAGE_W - M - 150, y + 50, { width: 140, align: 'center' });
+        doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
+           .text(`For ${data.hotel.name}`, PAGE_W - M - 150, y + 12, { width: 140, align: 'center' });
+      }
 
       // ────────────── Footer ──────────────
       const footerY = PAGE_H - 40;
