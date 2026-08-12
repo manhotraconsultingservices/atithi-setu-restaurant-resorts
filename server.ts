@@ -5249,6 +5249,24 @@ function requireModuleAccess(moduleTabs: string[], operationalRoles: string[], m
 const hotelStaff = requireModuleAccess(HOTEL_TAB_IDS, HOTEL_OPERATIONAL_ROLES, 'Hotel');
 const eventsStaff = requireModuleAccess(EVENTS_TAB_IDS, EVENTS_OPERATIONAL_ROLES, 'Events & Convention');
 
+// Sensible STARTING permissions for a custom role, keyed off its scope. Without
+// this, a custom role has no permission row at all → the assigned user either
+// sees everything (fail-open) or, once the owner saves an all-None column for
+// it, sees NO menus (getTabPermissionsForRole returns an all-zero map →
+// /my-permissions emits the hide-all __perm_v3__ marker). This gives the role a
+// usable operational baseline the owner can refine in Settings → Staff Access.
+function defaultCustomRolePerms(scope?: string | null): TabPerms {
+  const s = String(scope || 'BOTH').toUpperCase();
+  const base: TabPerms = { MY_CHECKLIST: 1 };
+  const HOTEL: TabPerms = { HOTEL_BOOKINGS: 2, ROOMS: 1, SERVICE_REQUESTS: 2, SERVICES: 1, FOLIOS: 2, HOUSEKEEPING: 2, FRONT_OFFICE_REPORTS: 1 };
+  const EVENTS: TabPerms = { EVENTS_DASHBOARD: 1, EVENTS_CALENDAR: 1, EVENTS_BOOKINGS: 2, EVENTS_VENUES: 1, EVENTS_RENTALS: 1, EVENTS_SERVICES: 1, EVENTS_CATERING: 1, EVENTS_QUOTATIONS: 2, EVENTS_REPORTS: 1 };
+  const REST: TabPerms = { MENU: 1, INVOICES: 2, QR: 2, INVENTORY: 1, LOYALTY: 1 };
+  if (s === 'HOTEL') return { ...base, ...HOTEL };
+  if (s === 'EVENTS') return { ...base, ...EVENTS };
+  if (s === 'RESTAURANT') return { ...base, ...REST };
+  return { ...base, ...HOTEL, ...EVENTS, ...REST }; // BOTH / unknown
+}
+
 /**
  * Build a middleware that requires the caller's role to have access to a
  * given UI tab in the per-tenant Staff Access matrix.
@@ -7117,7 +7135,40 @@ async function startServer() {
   app.get("/api/restaurant/:id/my-permissions", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const userRole = req.user?.role;
-      const perms = await getTabPermissionsForRole(req.params.id, userRole || '');
+      let perms = await getTabPermissionsForRole(req.params.id, userRole || '');
+      // Self-heal a CUSTOM role that has no usable grants — either no matrix row
+      // at all (fail-open: would show every menu) or an all-None row saved by the
+      // owner UI (locks the user out of every menu, the reported "created a user
+      // in a custom role but they see nothing" bug). Seed the scope-based default
+      // ONCE so the assigned user gets a working baseline on their next login,
+      // with no owner action required. Only fires for CUSTOM_ roles with zero
+      // viewable tabs — a custom role with any real grant is left untouched.
+      const isCustom = String(userRole || '').toUpperCase().startsWith('CUSTOM_');
+      const hasAnyView = !!perms && Object.keys(perms).some(k => (perms![k] ?? 0) >= 1);
+      if (isCustom && !hasAnyView) {
+        try {
+          const roleKey = String(userRole).toUpperCase();
+          let scope = 'BOTH';
+          try {
+            const tdb = await getTenantDb(req.params.id);
+            const cr: any = await tdb.get(
+              "SELECT scope FROM custom_roles WHERE id = ? AND restaurant_id = ? LIMIT 1",
+              [roleKey, req.params.id]
+            );
+            if (cr?.scope) scope = String(cr.scope);
+          } catch { /* fall back to BOTH */ }
+          await centralDb.run(
+            `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
+             VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
+             ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
+            [req.params.id, roleKey, JSON.stringify(defaultCustomRolePerms(scope))]
+          );
+          invalidateTabCacheForTenant(req.params.id);
+          perms = await getTabPermissionsForRole(req.params.id, userRole || '');
+        } catch (healErr) {
+          console.error('[my-permissions] custom-role self-heal failed (non-fatal):', healErr);
+        }
+      }
       if (perms === null) return res.json({ allowed_tabs: null, tab_permissions: null });
       const allowed_tabs = Object.keys(perms).filter(k => (perms[k] ?? 0) >= 1);
       // A configured role with ZERO viewable tabs means the owner deliberately
@@ -30482,6 +30533,24 @@ ${data.tenant.name}`;
         `INSERT INTO custom_roles (id, restaurant_id, name, emoji, scope) VALUES (?, ?, ?, ?, ?)`,
         [id, req.params.id, name.trim(), emoji || '👤', scope || 'BOTH']
       );
+      // Seed a usable permission baseline for the new role in the CENTRAL Staff-
+      // Access matrix. Without a row here, a user assigned to this role hits the
+      // "no menus" bug: getTabPermissionsForRole returns null (fail-open) until
+      // the owner opens Staff Access and — because the matrix pre-fills a custom
+      // column as all-None — saves an all-zero row, which /my-permissions then
+      // reports as the hide-everything marker. Seeding a scope-based default (and
+      // surfacing those levels in the matrix) breaks that trap. INSERT OR IGNORE
+      // so a re-created id never clobbers an existing configured row.
+      try {
+        await centralDb.run(
+          `INSERT OR IGNORE INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions)
+           VALUES (?, ?, '[]', ?)`,
+          [req.params.id, id, JSON.stringify(defaultCustomRolePerms(scope))]
+        );
+        invalidateTabCacheForTenant(req.params.id);
+      } catch (seedErr) {
+        console.error('[custom-roles] default permission seed failed (non-fatal):', seedErr);
+      }
       res.json({ id, name: name.trim(), emoji: emoji || '👤', scope: scope || 'BOTH' });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to create custom role" });
@@ -47439,8 +47508,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-invoice-address-wrap-fix',
+    commit_marker: 'rbac-custom-role-default-perms',
     code_features: [
+      'rbac-custom-role-default-perms',               // Fix: "owner created a user in a CUSTOM role but the user sees no menu / no commands" (reported: abc user, manhotra-consulting). Root cause: a custom role got NO permission row in restaurant_role_permissions — the default seed only covers the 8 built-in roles, and the Staff-Access matrix pre-fills a custom column as all-None. So a custom-role user hit one of two failure modes: no row → getTabPermissionsForRole returns null → /my-permissions returns allowed_tabs:null → frontend shows EVERYTHING (fail-open leak); OR the owner saved an all-None column → /my-permissions returns the hide-all __perm_v3__ marker → NO menus (the reported lockout). Fix: (1) defaultCustomRolePerms(scope) gives a scope-based operational baseline (HOTEL/EVENTS/RESTAURANT/BOTH → View/Edit on that module's core tabs + MY_CHECKLIST); (2) POST /custom-roles now SEEDS that baseline into the central matrix on creation (INSERT OR IGNORE, so it never clobbers a configured row) — new roles show sensible defaults in Staff Access instead of all-None; (3) /my-permissions SELF-HEALS an existing CUSTOM_ role that resolves to zero viewable tabs (no row OR all-None) by upserting the scope default on the user's next login — so the existing "abc" role recovers with no owner action. Only touches CUSTOM_-prefixed roles with zero grants; a custom role with any real grant, and every built-in role, are left untouched. Closes both the lockout and the fail-open leak. TC-RBAC-CUSTOM-SEED/MYPERM/HEAL regression tests + offline decision-path sim (15/15 green).
       'hotel-invoice-address-wrap-fix',               // Classic hotel/PMS invoice header: the identity address block advanced the y-cursor by a FIXED 10px per line, so a long street address (or website) that wrapped to 2 lines collided with the city / website / contact / GSTIN lines below it (reported on the convention tenant — name auto-shrink was fine but the address overlapped). Now each address line advances by its MEASURED height, so wrapped lines push the next line down. Validated with the reported long address on Classic/Boutique/Event: zero header overlaps.
       'hotel-folio-name-autoshrink',                  // Extended the business-name auto-shrink to the HOTEL / PMS folio invoice (generateInvoicePdf → Classic + Boutique), which renders the guest-bill / folio PDF. Shared fitFontSize() helper in invoiceServiceShared.ts. CLASSIC: name shrinks 22 → 12pt to fit ≤ 2 lines AND the address block now starts below the MEASURED name height (was a fixed y+26 offset that a wrapped name overlapped). BOUTIQUE: name shrinks 20 → 11pt to stay on ONE line so its fixed sub-tag / compliance / address rows stay collision-free. Validated on a PMS folio with "PARANDHAYYA'S CONVENTION CENTER PVT LTD": Classic 15.5pt/2 lines, Boutique 11.5pt/1 line, zero header overlaps; short names keep full size; extreme names degrade with no overlap.
       'event-invoice-name-autoshrink',                // Event invoice/quotation PDF: the business NAME now auto-shrinks (18 → 11pt via fitFontSize) so a very long legal name (e.g. "PARANDHAYYA'S CONVENTION CENTER PVT LTD") fits in ≤ 2 lines inside its header column instead of wrapping to 3+ lines and overflowing. Validated: PARANDHAYYA name → 16pt/2 lines (was 18pt/3 lines), a 72-char name → 12pt/2 lines, short names stay 18pt/1 line; zero header overlaps in every case.

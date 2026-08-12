@@ -2465,6 +2465,76 @@ async function testRBACHardening() {
     }
     if (uid) { try { await api('DELETE', `/api/owner/staff/${uid}`); } catch {} }
   }
+
+  // ── Custom-role DEFAULT permission baseline (the "created a user in a custom
+  //    role but they see no menus" fix) ──────────────────────────────────────
+  // A custom role created via POST /custom-roles must get a seeded permission
+  // row (seed-on-create) so a user assigned to it can actually see menus; and a
+  // custom role whose matrix was saved all-None must SELF-HEAL on the user's
+  // next /my-permissions call. Both guard against /my-permissions returning the
+  // hide-everything __perm_v3__ marker (full lockout) or null (fail-open leak).
+  {
+    const dIds = ['TC-RBAC-CUSTOM-SEED', 'TC-RBAC-CUSTOM-MYPERM', 'TC-RBAC-CUSTOM-HEAL'];
+    const tag = Date.now();
+    const cr = await api('POST', `/api/restaurant/${restaurantId}/custom-roles`, { name: `CustDef ${tag}`, emoji: '🧪', scope: 'HOTEL' });
+    const roleId = cr.data?.id || null;
+    if (!roleId) {
+      dIds.forEach(id => skip(id, 'Custom-role default baseline', `could not create custom role (status=${cr.status})`));
+    } else {
+      // TC-RBAC-CUSTOM-SEED — the create seeded a non-empty central matrix row.
+      const rp = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
+      const seeded = (rp.data && typeof rp.data === 'object') ? rp.data[roleId] : null;
+      if (seeded && typeof seeded === 'object' && Object.values(seeded).some(v => Number(v) >= 1)) {
+        pass('TC-RBAC-CUSTOM-SEED', 'New custom role gets a seeded (non-empty) permission baseline on creation', `HOTEL_BOOKINGS=${seeded.HOTEL_BOOKINGS}`);
+      } else {
+        fail('TC-RBAC-CUSTOM-SEED', 'New custom role must be seeded with a default permission row', `matrix row for ${roleId} = ${JSON.stringify(seeded)}`);
+      }
+
+      // Create a user assigned to this custom role and log in as them.
+      const loginId = `custdef_${tag}`;
+      const pwd = `Cd!${tag}xZ`;
+      const mk = await api('POST', '/api/owner/staff', { name: `CustDef User ${tag}`, role: roleId, loginId, password: pwd, employee_type: 'LOGIN' });
+      const uid = mk.data?.id || mk.data?.staff?.id || null;
+      let tok = '';
+      if (mk.status === 200 || mk.status === 201) {
+        const lg = await api('POST', '/api/auth/login', { loginId, password: pwd, restaurantId });
+        tok = lg.data?.jwt_token || lg.data?.token || '';
+      }
+      if (!tok) {
+        skip('TC-RBAC-CUSTOM-MYPERM', 'Custom-role user /my-permissions', `could not create/login custom-role user (create=${mk.status})`);
+        skip('TC-RBAC-CUSTOM-HEAL', 'Custom-role self-heal', 'no token');
+      } else {
+        // TC-RBAC-CUSTOM-MYPERM — the assigned user sees a real menu, not the
+        // hide-all marker and not null.
+        const mp = await api('GET', `/api/restaurant/${restaurantId}/my-permissions`, null, tok);
+        const at = mp.data?.allowed_tabs;
+        const menuOk = Array.isArray(at) && at.length > 0 && !at.includes('__perm_v3__') && at.includes('HOTEL_BOOKINGS');
+        if (menuOk) pass('TC-RBAC-CUSTOM-MYPERM', 'Custom-role user /my-permissions returns a usable menu (not lockout, not fail-open)', `${at.length} tabs incl HOTEL_BOOKINGS`);
+        else fail('TC-RBAC-CUSTOM-MYPERM', 'Custom-role user must see menus via /my-permissions', `allowed_tabs=${JSON.stringify(at)}`);
+
+        // TC-RBAC-CUSTOM-HEAL — force the matrix to all-None (owner-saved-empty
+        // trap), then confirm /my-permissions self-heals back to a usable menu.
+        const c = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
+        const m = (c.data && typeof c.data === 'object' && !Array.isArray(c.data)) ? { ...c.data } : {};
+        m[roleId] = { HOTEL_BOOKINGS: 0, ROOMS: 0, FOLIOS: 0, MY_CHECKLIST: 0, HOUSEKEEPING: 0 };
+        await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, m);
+        // TTL cache is 30s; the self-heal invalidates on write, so read directly.
+        const mp2 = await api('GET', `/api/restaurant/${restaurantId}/my-permissions`, null, tok);
+        const at2 = mp2.data?.allowed_tabs;
+        const healed = Array.isArray(at2) && at2.length > 0 && !at2.includes('__perm_v3__');
+        if (healed) pass('TC-RBAC-CUSTOM-HEAL', 'All-None custom role self-heals to a usable menu on next /my-permissions', `${at2.length} tabs after heal`);
+        else fail('TC-RBAC-CUSTOM-HEAL', 'All-None custom role must self-heal (not stay locked out)', `allowed_tabs=${JSON.stringify(at2)}`);
+      }
+      if (uid) { try { await api('DELETE', `/api/owner/staff/${uid}`); } catch {} }
+      try { await api('DELETE', `/api/restaurant/${restaurantId}/custom-roles/${roleId}`); } catch {}
+      try {
+        const c3 = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
+        const m3 = (c3.data && typeof c3.data === 'object' && !Array.isArray(c3.data)) ? { ...c3.data } : {};
+        m3[roleId] = {};
+        await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, m3);
+      } catch {}
+    }
+  }
 }
 
 // ── Summary report ─────────────────────────────────────────────────────────
