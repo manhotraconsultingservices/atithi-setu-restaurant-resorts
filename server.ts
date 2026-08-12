@@ -5270,8 +5270,9 @@ function defaultCustomRolePerms(scope?: string | null): TabPerms {
 // Built-in / system roles that must NEVER be auto-healed to a baseline — the
 // owner controls these explicitly, and an all-None here can be deliberate.
 const _SYSTEM_ROLE_SET = new Set([
-  'OWNER', 'SUPER_ADMIN', 'CTO', 'SALES_REP', 'MANAGER', 'GUEST', 'CUSTOMER',
+  'OWNER', 'SUPER_ADMIN', 'CTO', 'ADMIN', 'SALES_REP', 'MANAGER', 'GUEST', 'CUSTOMER',
   'WAITER', 'CHEF', 'CASHIER', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE', 'THERAPIST',
+  'EVENTS_MANAGER',
 ]);
 
 // Look up a role in the tenant custom_roles table (by id OR name, case-insensitive).
@@ -7214,21 +7215,28 @@ async function startServer() {
       // any real grant is left alone.
       const roleKey = String(userRole || '').toUpperCase();
       const hasAnyView = !!perms && Object.keys(perms).some(k => (perms![k] ?? 0) >= 1);
+      // A logged-in user whose role is NOT a built-in/system role but resolves to
+      // ZERO viewable tabs is locked out of every menu — the reported bug. This is
+      // only ever a non-system role (a custom role, incl. one that was renamed,
+      // soft-deleted, or stored under a free-text id). We do NOT require the role
+      // to still exist in custom_roles: the mere fact that a real user holds it and
+      // it grants nothing is enough to give it the baseline. Built-in roles
+      // (_SYSTEM_ROLE_SET) are never touched, and any role with ≥1 grant is left
+      // exactly as configured, so this cannot over-grant a deliberately-restricted
+      // role. scope comes from custom_roles when resolvable, else BOTH.
       if (roleKey && !hasAnyView && !_SYSTEM_ROLE_SET.has(roleKey)) {
-        const scope = await _lookupCustomRoleScope(req.params.id, roleKey);
-        if (scope !== null) {           // confirmed custom role → give it a baseline
-          try {
-            await centralDb.run(
-              `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
-               VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
-               ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
-              [req.params.id, roleKey, JSON.stringify(defaultCustomRolePerms(scope))]
-            );
-            invalidateTabCacheForTenant(req.params.id);
-            perms = await getTabPermissionsForRole(req.params.id, userRole || '');
-          } catch (healErr) {
-            console.error('[my-permissions] custom-role self-heal failed (non-fatal):', healErr);
-          }
+        try {
+          const scope = (await _lookupCustomRoleScope(req.params.id, roleKey)) || 'BOTH';
+          await centralDb.run(
+            `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
+             VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
+             ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
+            [req.params.id, roleKey, JSON.stringify(defaultCustomRolePerms(scope))]
+          );
+          invalidateTabCacheForTenant(req.params.id);
+          perms = await getTabPermissionsForRole(req.params.id, userRole || '');
+        } catch (healErr) {
+          console.error('[my-permissions] custom-role self-heal failed (non-fatal):', healErr);
         }
       }
       if (perms === null) return res.json({ allowed_tabs: null, tab_permissions: null });
@@ -47631,8 +47639,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-custom-role-heal-v2',
+    commit_marker: 'rbac-custom-role-heal-v3',
     code_features: [
+      'rbac-custom-role-heal-v3',                     // Round-3: made the custom-role heal bulletproof after abc STILL saw no menus. /my-permissions now seeds the baseline for ANY non-system role (not in _SYSTEM_ROLE_SET) that resolves to zero viewable tabs — it no longer requires the role to still exist in custom_roles, so a renamed / soft-deleted / free-text orphan role also heals on the user's next login. _SYSTEM_ROLE_SET completed with ADMIN + EVENTS_MANAGER (from the backend *_OPERATIONAL_ROLES constants) so a real built-in role is never re-granted. Net guarantee: any logged-in non-owner/non-built-in user gets a working menu the moment their app refetches /my-permissions (fresh login / reload) — no dependency on the role's provenance. Confirmed the frontend nav is driven purely by allowedTabs (isTabVisible), with no role-class gate on operational tabs, so a healthy allowed_tabs list always renders menus. tsc clean.
       'rbac-custom-role-heal-v2',                     // Round-2 hardening of the custom-role "no menus" fix (abc @ manhotra-consulting still locked out after v1). v1 only self-healed roles whose id literally started with CUSTOM_ and only on the affected user's own /my-permissions call. Now: (a) "is this a custom role?" is resolved from the tenant custom_roles table by id OR name (_lookupCustomRoleScope), so a role assigned to a user under any id/name still heals; built-in/system roles (_SYSTEM_ROLE_SET) are never touched. (b) _healZeroAccessCustomRoles(tenant) backfills EVERY active custom role with a missing/all-None central row, and it runs inside owner-facing GET /role-permissions — so the moment the OWNER opens Settings → Staff Access, abc's role is healed with NO dependency on abc re-logging in (the matrix then shows the restored View/Edit levels). (c) New owner-only GET /rbac-diagnostics dumps each custom role's resolved permission state + every LOGIN staff member's stored role and how many tabs it resolves to (MISSING row = would show everything; 0 viewable = would show nothing) — so a lockout can be diagnosed from data instead of guesswork. tsc clean.
       'rbac-custom-role-default-perms',               // Fix: "owner created a user in a CUSTOM role but the user sees no menu / no commands" (reported: abc user, manhotra-consulting). Root cause: a custom role got NO permission row in restaurant_role_permissions — the default seed only covers the 8 built-in roles, and the Staff-Access matrix pre-fills a custom column as all-None. So a custom-role user hit one of two failure modes: no row → getTabPermissionsForRole returns null → /my-permissions returns allowed_tabs:null → frontend shows EVERYTHING (fail-open leak); OR the owner saved an all-None column → /my-permissions returns the hide-all __perm_v3__ marker → NO menus (the reported lockout). Fix: (1) defaultCustomRolePerms(scope) gives a scope-based operational baseline (HOTEL/EVENTS/RESTAURANT/BOTH → View/Edit on that module's core tabs + MY_CHECKLIST); (2) POST /custom-roles now SEEDS that baseline into the central matrix on creation (INSERT OR IGNORE, so it never clobbers a configured row) — new roles show sensible defaults in Staff Access instead of all-None; (3) /my-permissions SELF-HEALS an existing CUSTOM_ role that resolves to zero viewable tabs (no row OR all-None) by upserting the scope default on the user's next login — so the existing "abc" role recovers with no owner action. Only touches CUSTOM_-prefixed roles with zero grants; a custom role with any real grant, and every built-in role, are left untouched. Closes both the lockout and the fail-open leak. TC-RBAC-CUSTOM-SEED/MYPERM/HEAL regression tests + offline decision-path sim (15/15 green).
       'hotel-invoice-address-wrap-fix',               // Classic hotel/PMS invoice header: the identity address block advanced the y-cursor by a FIXED 10px per line, so a long street address (or website) that wrapped to 2 lines collided with the city / website / contact / GSTIN lines below it (reported on the convention tenant — name auto-shrink was fine but the address overlapped). Now each address line advances by its MEASURED height, so wrapped lines push the next line down. Validated with the reported long address on Classic/Boutique/Event: zero header overlaps.
