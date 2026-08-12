@@ -40165,11 +40165,16 @@ const CheckInWizardModal: React.FC<{
   };
 
   // Check-in checklist gate — the server returns 409 { checklist_incomplete, jobs }
-  // until every mandatory arrival task is ticked. We render those tasks inline and
-  // block "Confirm Check-In" until they're done.
+  // ONLY for a BLOCKING check-in checklist (blocks_release=1) that still has
+  // mandatory tasks pending. We render those tasks inline and block "Confirm
+  // Check-In" until they're done. A NON-BLOCKING checklist must never gate
+  // check-in, so we count pending mandatory tasks only from blocking jobs
+  // (defence in depth — the server already returns blocking jobs only).
   const [checklistJobs, setChecklistJobs] = useState<any[]>([]);
   const [tickBusy, setTickBusy] = useState('');
-  const chkPendMand = checklistJobs.reduce((n, j) => n + (j.tasks || []).filter((t: any) => Number(t.is_mandatory) === 1 && Number(t.is_done) === 0).length, 0);
+  const chkPendMand = checklistJobs.reduce((n, j) => Number(j.blocks_release) === 1
+    ? n + (j.tasks || []).filter((t: any) => Number(t.is_mandatory) === 1 && Number(t.is_done) === 0).length
+    : n, 0);
   const tickTask = async (jobId: string, taskId: string, next: boolean) => {
     setTickBusy(taskId);
     setChecklistJobs(js => js.map(j => j.id !== jobId ? j : { ...j, tasks: j.tasks.map((t: any) => t.id === taskId ? { ...t, is_done: next ? 1 : 0 } : t) }));

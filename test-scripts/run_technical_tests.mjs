@@ -1538,6 +1538,47 @@ async function testChecklists() {
       }
       await api('DELETE', `/api/restaurant/${R}/checklists/templates/${gTpl.data.id}`);
     }
+
+    // TC-CHK-CHECKIN-NONBLOCK — a NON-BLOCKING CHECK_IN checklist must NEVER
+    // block guest check-in. Regression (reported): the check-in gate counted
+    // mandatory tasks across ALL open CHECK_IN jobs (not only blocks_release=1),
+    // so a non-blocking arrival checklist returned 409 checklist_incomplete and
+    // froze the Confirm Check-In button. Create a non-blocking CHECK_IN template
+    // + a booking (which raises it) and confirm check-in is NOT 409-blocked by it.
+    const ciTpl = await api('POST', `/api/restaurant/${R}/checklists/templates`, {
+      name: `UAT CI NonBlock ${Date.now()}`, facility_type: 'ROOM', trigger_event: 'CHECK_IN',
+      blocks_release: false, steps: [{ label: 'Welcome amenities', is_mandatory: true }],
+    });
+    if (ciTpl.status === 201 && ciTpl.data?.id) {
+      const ciIn  = new Date(Date.now() + 20 * 86400000).toISOString().slice(0, 10);
+      const ciOut = new Date(Date.now() + 21 * 86400000).toISOString().slice(0, 10);
+      const ciBk = await api('POST', `/api/restaurant/${R}/hotel/bookings`, {
+        room_id: roomId, guest_name: 'NonBlock CheckIn (Autotest)', guest_phone: '9999900042',
+        num_guests: 1, check_in_date: ciIn, check_out_date: ciOut, booking_source: 'DIRECT',
+      });
+      if (ciBk.status === 201 && ciBk.data?.id) {
+        const ci = await api('POST', `/api/restaurant/${R}/hotel/bookings/${ciBk.data.id}/checkin`, {});
+        // The ONLY failure that proves the bug: check-in refused (409) because a
+        // NON-blocking checklist has pending tasks. Any other outcome (200, or a
+        // 400 from the phone/ID-doc guards) means the non-blocking checklist did
+        // not gate check-in.
+        const blockedByNonBlocking = ci.status === 409 && ci.data?.checklist_incomplete === true
+          && Array.isArray(ci.data?.jobs) && ci.data.jobs.some(j => Number(j.blocks_release) === 0);
+        (!blockedByNonBlocking ? pass : fail)('TC-CHK-CHECKIN-NONBLOCK',
+          'A non-blocking CHECK_IN checklist does not block guest check-in (409 gate is blocks_release=1 only)',
+          blockedByNonBlocking ? `check-in 409'd on a non-blocking checklist (blocks_release in 409 jobs = ${JSON.stringify(ci.data.jobs.map(j => Number(j.blocks_release)))})` : `checkin HTTP ${ci.status}`);
+        await api('POST', `/api/restaurant/${R}/hotel/bookings/${ciBk.data.id}/cancel`, { reason: 'Test cleanup' });
+      } else if (ciBk.status === 409) {
+        skip('TC-CHK-CHECKIN-NONBLOCK', 'Non-blocking check-in gate', 'room conflict on test dates');
+      } else {
+        skip('TC-CHK-CHECKIN-NONBLOCK', 'Non-blocking check-in gate', `could not create booking (${ciBk.status})`);
+      }
+      await api('DELETE', `/api/restaurant/${R}/checklists/templates/${ciTpl.data.id}`);
+    } else if (ciTpl.status === 403) {
+      skip('TC-CHK-CHECKIN-NONBLOCK', 'Non-blocking check-in gate', 'need OWNER role');
+    } else {
+      skip('TC-CHK-CHECKIN-NONBLOCK', 'Non-blocking check-in gate', `template create HTTP ${ciTpl.status}`);
+    }
   } else {
     skip('TC-CHK-ASSIGN', 'Assignment + manual start + gating', tplId ? 'no hotel room on this tenant' : 'template not created');
     skip('TC-CHK-MANUAL', 'Manual start', tplId ? 'no hotel room on this tenant' : 'template not created');
