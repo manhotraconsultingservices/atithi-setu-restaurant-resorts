@@ -2449,22 +2449,29 @@ function LocationSwitcher({ token, currentRestaurantId, currentRestaurantName }:
   const [showBrandDashboard, setShowBrandDashboard] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
 
-  // Lazy-fetch on first open
+  // Fetch the accessible-locations count on MOUNT (not lazily on open). The
+  // switcher only makes sense for owners with 2+ locations, so we must know the
+  // count BEFORE deciding whether to render the control at all. The old
+  // lazy-on-open fetch caused a reported bug: a single-location owner saw the
+  // "Location" button, clicked it, the fetch THEN returned total_locations=1, and
+  // the guard below unmounted the whole switcher — so the dropdown "disappeared"
+  // the instant it was clicked.
   useEffect(() => {
-    if (!open || data) return;
+    let abort = false;
     setLoading(true);
     fetch('/api/brand/my-locations', { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.ok ? r.json() : null)
-      .then(d => setData(d))
+      .then(d => { if (!abort) setData(d); })
       .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [open, data, token]);
+      .finally(() => { if (!abort) setLoading(false); });
+    return () => { abort = true; };
+  }, [token]);
 
-  // Hide the entire switcher when there's only one location — most owners
-  // don't need it cluttering the nav.
-  if (data && data.total_locations < 2) return null;
-  // Before the first fetch, render a slim placeholder so the nav doesn't
-  // jump when the data arrives.
+  // Render NOTHING until we know there are 2+ locations: this hides the switcher
+  // entirely for single-location owners (the common case) instead of showing a
+  // control that vanishes when clicked. Multi-location owners get the fully
+  // loaded dropdown, so a click opens it immediately (no lazy fetch, no flash).
+  if (!data || data.total_locations < 2) return null;
 
   const switchTo = async (restaurantId: string) => {
     if (restaurantId === currentRestaurantId) { setOpen(false); return; }
