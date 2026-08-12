@@ -166,8 +166,12 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       // not a fixed offset — so it can never sit on top of a wrapped name.
       let hY = y + Math.max(26, Math.ceil(nameH) + 6);
       for (const line of hotelAddrLines) {
+        // Advance by each line's MEASURED height — a long address (or website)
+        // wraps to 2 lines, and a fixed 10px step let the wrapped line collide
+        // with the line below (city / website / contact / GSTIN).
+        const lh = doc.heightOfString(line, { width: nameW });
         doc.text(line, M + logoW, hY, { width: nameW });
-        hY += 10;
+        hY += Math.max(10, Math.ceil(lh) + 1);
       }
 
       // Title box (right) — TAX INVOICE or CREDIT NOTE
