@@ -2327,6 +2327,18 @@ export default function App() {
     );
   }
 
+  // Roles that have a DEDICATED dashboard component in the <main> dispatch
+  // below. ANY other authenticated role — notably an owner-created CUSTOM role
+  // (id `CUSTOM_*`, or any non-built-in role string) — must fall through to the
+  // full permission-aware OwnerDashboard, which is the shell that renders the
+  // left nav filtered by the role's Staff-Access grants (owner-only tabs stay
+  // hidden because isOwnerOrAdmin is false for them). Without this, a custom-role
+  // user matched NO branch in <main> and saw an empty dashboard (header only) —
+  // the reported "created a user in a custom role but they see no menu/command"
+  // bug (abc @ manhotra-consulting).
+  const BUILTIN_DASHBOARD_ROLES = ['SUPER_ADMIN', 'CTO', 'SALES_REP', 'OWNER', 'MANAGER', 'CHEF', 'WAITER', 'CASHIER', 'THERAPIST', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE', 'CUSTOMER', 'OTA', 'AGENT'];
+  const isCustomRoleUser = !!role && !BUILTIN_DASHBOARD_ROLES.includes(role);
+
   return (
     <div className="min-h-screen bg-[#faf7f2]">
       <nav className="bg-white border-b border-[#cc5a16]/10 px-3 py-3 sm:px-4 sm:py-4 md:px-6 flex justify-between items-center sticky top-0 z-50">
@@ -2382,7 +2394,7 @@ export default function App() {
         {role === 'SUPER_ADMIN' && <SuperAdminDashboard token={token!} />}
         {role === 'CTO' && <CTODashboard token={token!} />}
         {role === 'SALES_REP' && <SalesRepresentativeDashboard token={token!} />}
-        {(role === 'OWNER' || role === 'MANAGER') && (
+        {(role === 'OWNER' || role === 'MANAGER' || isCustomRoleUser) && (
           <OwnerDashboard
             restaurantId={restaurantId!}
             token={token!}
