@@ -97,6 +97,23 @@ function waSafe(s: any): string {
     .replace(/₹/g, 'Rs.');  // ₹ (belt-and-suspenders; fmtMoney already avoids it)
 }
 
+/**
+ * Largest font size in [minSize, maxSize] at which `text` fits within `width` in
+ * at most `maxLines` lines. Lets a long business name AUTO-SHRINK so a very long
+ * legal name (e.g. "PARANDHAYYA'S CONVENTION CENTER PVT LTD") stays inside its
+ * column in ≤ 2 lines instead of overflowing / stacking at a fixed 18pt.
+ */
+function fitFontSize(doc: any, text: string, width: number, maxSize: number, minSize: number, maxLines: number, font = 'Helvetica-Bold'): number {
+  if (!text || width <= 0) return maxSize;
+  doc.font(font);
+  for (let s = maxSize; s >= minSize; s -= 0.5) {
+    doc.fontSize(s);
+    // heightOfString of N lines ≈ N × size × ~1.15; allow a little slack.
+    if (doc.heightOfString(text, { width }) <= maxLines * s * 1.2 + 1) return s;
+  }
+  return minSize;
+}
+
 function lineTypeLabel(t: string): string {
   switch (t) {
     case 'VENUE': return 'Venue';
@@ -192,7 +209,11 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       const gstStr = data.tenant.gstin ? `${L('GSTIN', 'gstin').t}: ${data.tenant.gstin}` : '';
 
       // Measure the LEFT identity block (each line wraps within idW).
-      const nameH = doc.font('Helvetica-Bold').fontSize(18).heightOfString(nameStr, { width: idW });
+      // Auto-shrink the business name (18 → 11pt) so a very long legal name
+      // (e.g. "PARANDHAYYA'S CONVENTION CENTER PVT LTD") fits in ≤ 2 lines inside
+      // its column instead of overflowing / stacking at a fixed 18pt.
+      const nameSize = fitFontSize(doc, nameStr, idW, 18, 11, 2);
+      const nameH = doc.font('Helvetica-Bold').fontSize(nameSize).heightOfString(nameStr, { width: idW });
       doc.font('Helvetica').fontSize(9);
       const addrH = addrStr ? doc.heightOfString(addrStr, { width: idW }) : 0;
       const contactH = contactStr ? doc.heightOfString(contactStr, { width: idW }) : 0;
@@ -221,7 +242,7 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
 
       // Identity (left) — advance each line by its MEASURED height.
       let ty = TOP;
-      doc.fillColor(INK).font('Helvetica-Bold').fontSize(18).text(nameStr, idX, ty, { width: idW }); ty += nameH + 4;
+      doc.fillColor(INK).font('Helvetica-Bold').fontSize(nameSize).text(nameStr, idX, ty, { width: idW }); ty += nameH + 4;
       doc.font('Helvetica').fontSize(9).fillColor(MUTED);
       if (addrStr) { doc.text(addrStr, idX, ty, { width: idW }); ty += addrH + 2; }
       if (contactStr) { doc.text(contactStr, idX, ty, { width: idW }); ty += contactH + 2; }
