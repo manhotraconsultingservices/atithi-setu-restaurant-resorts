@@ -2327,17 +2327,23 @@ export default function App() {
     );
   }
 
-  // Roles that have a DEDICATED dashboard component in the <main> dispatch
-  // below. ANY other authenticated role — notably an owner-created CUSTOM role
-  // (id `CUSTOM_*`, or any non-built-in role string) — must fall through to the
-  // full permission-aware OwnerDashboard, which is the shell that renders the
-  // left nav filtered by the role's Staff-Access grants (owner-only tabs stay
-  // hidden because isOwnerOrAdmin is false for them). Without this, a custom-role
-  // user matched NO branch in <main> and saw an empty dashboard (header only) —
-  // the reported "created a user in a custom role but they see no menu/command"
-  // bug (abc @ manhotra-consulting).
+  // Roles with a special top-level dashboard that is NOT the permission-aware
+  // OwnerDashboard: platform roles (SUPER_ADMIN/CTO/SALES_REP) and guest/partner
+  // roles (CUSTOMER/OTA/AGENT). Any authenticated role NOT in this set — an
+  // owner-created CUSTOM role (id `CUSTOM_*`) — falls through to OwnerDashboard.
   const BUILTIN_DASHBOARD_ROLES = ['SUPER_ADMIN', 'CTO', 'SALES_REP', 'OWNER', 'MANAGER', 'CHEF', 'WAITER', 'CASHIER', 'THERAPIST', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE', 'CUSTOMER', 'OTA', 'AGENT'];
   const isCustomRoleUser = !!role && !BUILTIN_DASHBOARD_ROLES.includes(role);
+
+  // OOTB (out-of-the-box) OPERATIONAL staff roles. These used to render their
+  // own fixed dashboards (ChefDashboard / WaiterDashboard / TherapistDashboard /
+  // HotelStaffDashboard) that IGNORED the Staff-Access permission matrix — so
+  // granting/revoking tabs for these roles did nothing ("OOTB roles not
+  // working"). They now render the SAME permission-aware OwnerDashboard as every
+  // other operator, which filters the left nav by allowed_tabs. Each of these
+  // roles keeps its curated real-time board as its HOME landing (rendered inside
+  // OwnerDashboard's content), so no operational function is lost.
+  const OOTB_STAFF_DASHBOARD_ROLES = ['CHEF', 'WAITER', 'CASHIER', 'THERAPIST', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE'];
+  const usesOwnerDashboard = role === 'OWNER' || role === 'MANAGER' || isCustomRoleUser || OOTB_STAFF_DASHBOARD_ROLES.includes(role || '');
 
   return (
     <div className="min-h-screen bg-[#faf7f2]">
@@ -2394,18 +2400,21 @@ export default function App() {
         {role === 'SUPER_ADMIN' && <SuperAdminDashboard token={token!} />}
         {role === 'CTO' && <CTODashboard token={token!} />}
         {role === 'SALES_REP' && <SalesRepresentativeDashboard token={token!} />}
-        {(role === 'OWNER' || role === 'MANAGER' || isCustomRoleUser) && (
+        {/* Every operator — OWNER, MANAGER, the OOTB operational staff roles
+            (CHEF/WAITER/CASHIER/THERAPIST/FRONT_DESK/HOUSEKEEPING/MAINTENANCE/
+            CONCIERGE) and any CUSTOM role — renders the SAME permission-aware
+            OwnerDashboard, so Settings → Staff Access actually controls each
+            role's left nav (owner-only tabs stay hidden — isOwnerOrAdmin is
+            false for staff). The OOTB roles keep their curated real-time board
+            as their HOME landing (inside OwnerDashboard). Previously the OOTB
+            roles rendered fixed dashboards that ignored the grant matrix, so
+            configuring them was a no-op — the reported "OOTB roles not working". */}
+        {usesOwnerDashboard && (
           <OwnerDashboard
             restaurantId={restaurantId!}
             token={token!}
             onRestaurantUpdate={(name) => setRestaurantName(name)}
           />
-        )}
-        {role === 'CHEF' && <ChefDashboard restaurantId={restaurantId!} token={token!} />}
-        {(role === 'WAITER' || role === 'CASHIER') && <WaiterDashboard restaurantId={restaurantId!} token={token!} />}
-        {role === 'THERAPIST' && <TherapistDashboard restaurantId={restaurantId!} token={token!} />}
-        {['FRONT_DESK','HOUSEKEEPING','MAINTENANCE','CONCIERGE'].includes(role || '') && (
-          <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={role!} />
         )}
         {/* Hospitality: if URL has ?room=, render the in-room guest UI;
             otherwise render the classic restaurant customer UI. */}
@@ -14389,6 +14398,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </p>
         </div>
       ) : activeTab === 'HOME' ? (
+        // OOTB operational staff roles keep their curated real-time board as
+        // their HOME landing — kitchen queue (CHEF), order/tables/waiter-calls
+        // board (WAITER/CASHIER), today's schedule (THERAPIST), arrivals /
+        // guest-requests worklist (FRONT_DESK/HOUSEKEEPING/MAINTENANCE/
+        // CONCIERGE). So routing them through this permission-aware shell (which
+        // fixes "OOTB roles not working" by making Staff Access drive their nav)
+        // costs them nothing operationally. Owner/Manager/custom get the launchpad.
+        currentRole === 'CHEF' ? (
+          <ChefDashboard restaurantId={restaurantId!} token={token!} />
+        ) : (currentRole === 'WAITER' || currentRole === 'CASHIER') ? (
+          <WaiterDashboard restaurantId={restaurantId!} token={token!} />
+        ) : currentRole === 'THERAPIST' ? (
+          <TherapistDashboard restaurantId={restaurantId!} token={token!} />
+        ) : (currentRole === 'FRONT_DESK' || currentRole === 'HOUSEKEEPING' || currentRole === 'MAINTENANCE' || currentRole === 'CONCIERGE') ? (
+          <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={currentRole} />
+        ) : (
         <HotelHomeLaunchpad
           restaurantId={restaurantId!}
           token={token!}
@@ -14407,6 +14432,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           onOpenReports={() => { setDashboardMode('HOTEL'); setActiveTab('FRONT_OFFICE_REPORTS'); }}
           role={localStorage.getItem('role')}
         />
+        )
       ) : activeTab === 'MENU' ? (
         <div className="space-y-5">
           {/* ── Header ── */}

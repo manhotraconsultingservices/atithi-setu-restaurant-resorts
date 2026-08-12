@@ -12,7 +12,7 @@
  *   RESTAURANT_ID=<tenant-id>
  */
 
-import { writeFileSync } from 'fs';
+import { writeFileSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -2638,6 +2638,33 @@ function generateReport() {
   return failed;
 }
 
+// ── Frontend source guard (no server needed) ────────────────────────────────
+// The OOTB operational staff roles (CHEF/WAITER/CASHIER/THERAPIST/FRONT_DESK/
+// HOUSEKEEPING/MAINTENANCE/CONCIERGE) must render the permission-aware
+// OwnerDashboard so Settings → Staff Access actually controls their left nav.
+// They used to render fixed dashboards (ChefDashboard/WaiterDashboard/
+// TherapistDashboard/HotelStaffDashboard) that ignored the grant matrix —
+// "OOTB roles not working". This guard fails if a fixed-dashboard <main>
+// dispatch branch is reintroduced for those roles.
+function checkOotbRoleRouting() {
+  try {
+    const src = readFileSync(join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+    const hasOotbConst   = /OOTB_STAFF_DASHBOARD_ROLES\s*=/.test(src);
+    const routesViaOwner = /usesOwnerDashboard\s*&&\s*\(\s*[\s\S]{0,80}<OwnerDashboard/.test(src);
+    // The retired fixed-dashboard dispatch branches must NOT exist any more.
+    const fixedChef       = /role\s*===\s*'CHEF'\s*&&\s*<ChefDashboard/.test(src);
+    const fixedWaiter     = /role\s*===\s*'WAITER'[\s\S]{0,40}&&\s*<WaiterDashboard/.test(src);
+    const fixedTherapist  = /role\s*===\s*'THERAPIST'\s*&&\s*<TherapistDashboard/.test(src);
+    const fixedHotelStaff = /includes\(role[\s\S]{0,20}&&\s*\(\s*<HotelStaffDashboard/.test(src);
+    const ok = hasOotbConst && routesViaOwner && !fixedChef && !fixedWaiter && !fixedTherapist && !fixedHotelStaff;
+    (ok ? pass : fail)('TC-RBAC-OOTB-ROUTING',
+      'OOTB staff roles route through the permission-aware OwnerDashboard (Staff Access applies), not fixed dashboards',
+      ok ? '' : `ootbConst=${hasOotbConst} routesViaOwner=${routesViaOwner} fixedChef=${fixedChef} fixedWaiter=${fixedWaiter} fixedTherapist=${fixedTherapist} fixedHotelStaff=${fixedHotelStaff}`);
+  } catch (e) {
+    skip('TC-RBAC-OOTB-ROUTING', 'OOTB role routing guard', `could not read src/App.tsx (${e?.message || e})`);
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -2646,6 +2673,7 @@ async function main() {
   console.log(`  Target: ${BASE_URL}`);
   console.log('═'.repeat(60));
 
+  checkOotbRoleRouting();
   await testAuth();
   await testRestaurant();
   await testHotel();
