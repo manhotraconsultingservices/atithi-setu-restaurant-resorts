@@ -283,6 +283,27 @@ export function resolveLogoPath(p?: string): string | null {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Adaptive font fit — auto-shrink a long business name so it never overflows
+// ─────────────────────────────────────────────────────────────────────
+// Returns the largest font size in [minSize, maxSize] at which `text` fits
+// within `width` in at most `maxLines` lines. Used for the hotel/business name
+// in every invoice header so a very long legal name (e.g. "PARANDHAYYA'S
+// CONVENTION CENTER PVT LTD") shrinks to fit instead of wrapping to 3+ lines and
+// overflowing / colliding with the address block below it.
+export function fitFontSize(
+  doc: any, text: string, width: number, maxSize: number, minSize: number, maxLines: number, font = 'Helvetica-Bold'
+): number {
+  if (!text || width <= 0) return maxSize;
+  doc.font(font);
+  for (let s = maxSize; s >= minSize; s -= 0.5) {
+    doc.fontSize(s);
+    // heightOfString of N lines ≈ N × size × ~1.15; allow a little slack.
+    if (doc.heightOfString(text, { width }) <= maxLines * s * 1.2 + 1) return s;
+  }
+  return minSize;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Currency formatting
 // ─────────────────────────────────────────────────────────────────────
 

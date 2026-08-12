@@ -31,6 +31,7 @@ import {
   entryTypeLabel, hsnForEntry, normaliseState,
   categoryForEntry,
   amountInWords,
+  fitFontSize,
 } from './invoiceServiceShared.js';
 // Re-export the interface so existing `import { InvoiceData } from './invoiceService'`
 // consumers (server.ts) keep working without an edit.
@@ -139,8 +140,15 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
           console.warn('Logo image failed:', e);
         }
       }
-      doc.fillColor(INK).font('Helvetica-Bold').fontSize(22)
-         .text(data.hotel.name.toUpperCase(), M + logoW, y, { width: INNER_W * 0.6 - logoW });
+      // Business name auto-shrinks (22 → 12pt) so a long legal name fits in
+      // ≤ 2 lines within its column instead of overflowing / colliding with the
+      // address block below it.
+      const nameW = INNER_W * 0.6 - logoW;
+      const nameStr = data.hotel.name.toUpperCase();
+      const nameSize = fitFontSize(doc, nameStr, nameW, 22, 12, 2);
+      const nameH = doc.font('Helvetica-Bold').fontSize(nameSize).heightOfString(nameStr, { width: nameW });
+      doc.fillColor(INK).font('Helvetica-Bold').fontSize(nameSize)
+         .text(nameStr, M + logoW, y, { width: nameW });
       const hotelAddrLines = [
         data.hotel.address,
         [data.hotel.city, data.hotel.state, data.hotel.pincode].filter(Boolean).join(' · '),
@@ -154,9 +162,11 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         data.hotel.fssai ? `FSSAI Lic: ${data.hotel.fssai}${data.hotel.fssaiValidUntil ? ` (valid until ${data.hotel.fssaiValidUntil})` : ''}` : null,
       ].filter(Boolean) as string[];
       doc.fillColor(MUTED).font('Helvetica').fontSize(8.5);
-      let hY = y + 26;
+      // Address starts BELOW the actual (possibly shrunk / 2-line) name height —
+      // not a fixed offset — so it can never sit on top of a wrapped name.
+      let hY = y + Math.max(26, Math.ceil(nameH) + 6);
       for (const line of hotelAddrLines) {
-        doc.text(line, M + logoW, hY, { width: INNER_W * 0.6 - logoW });
+        doc.text(line, M + logoW, hY, { width: nameW });
         hY += 10;
       }
 

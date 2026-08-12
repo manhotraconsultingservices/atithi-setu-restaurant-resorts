@@ -42,6 +42,7 @@ import {
   fmtDate, fmtDateTime, computeNights,
   entryTypeLabel, hsnForEntry, normaliseState,
   amountInWords,
+  fitFontSize,
   categoryForEntry, categoryLabel, type EntryCategory,
   type InvoiceData,
   type LabelKey,
@@ -147,7 +148,11 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
       // Hotel name — boutique uses a serif display face for warmth. PDFKit
       // ships Times-Roman & Times-Bold; Times-Bold reads as "serif display"
       // at 18pt which is a meaningful upgrade from Classic's Helvetica-Bold.
-      doc.fillColor(INK).font('Times-Bold').fontSize(20)
+      // Business name auto-shrinks (20 → 11pt) so a long legal name stays on ONE
+      // line within its column — keeping the sub-tag / compliance / address rows
+      // (drawn at fixed offsets just below) collision-free.
+      const nameSizeB = fitFontSize(doc, data.hotel.name || '', identityW, 20, 11, 1, 'Times-Bold');
+      doc.fillColor(INK).font('Times-Bold').fontSize(nameSizeB)
          .text(data.hotel.name, identityX, y, { width: identityW });
 
       // Sub-tag line under the name. Boutique convention.
