@@ -5267,6 +5267,67 @@ function defaultCustomRolePerms(scope?: string | null): TabPerms {
   return { ...base, ...HOTEL, ...EVENTS, ...REST }; // BOTH / unknown
 }
 
+// Built-in / system roles that must NEVER be auto-healed to a baseline — the
+// owner controls these explicitly, and an all-None here can be deliberate.
+const _SYSTEM_ROLE_SET = new Set([
+  'OWNER', 'SUPER_ADMIN', 'CTO', 'SALES_REP', 'MANAGER', 'GUEST', 'CUSTOMER',
+  'WAITER', 'CHEF', 'CASHIER', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE', 'THERAPIST',
+]);
+
+// Look up a role in the tenant custom_roles table (by id OR name, case-insensitive).
+// Returns its scope if it IS a custom role, or null if it is not (so callers can
+// tell a genuine custom role apart from a built-in / typo role). Custom roles are
+// normally created with a `CUSTOM_`-prefixed id, but a role assigned to a user may
+// be stored under any id/name — this resolves both.
+async function _lookupCustomRoleScope(tenantId: string, roleRaw: string): Promise<string | null> {
+  const roleKey = String(roleRaw || '').toUpperCase();
+  if (!roleKey) return null;
+  try {
+    const tdb = await getTenantDb(tenantId);
+    const cr: any = await tdb.get(
+      "SELECT scope FROM custom_roles WHERE (UPPER(id) = ? OR UPPER(name) = ?) AND is_active = 1 LIMIT 1",
+      [roleKey, roleKey]
+    );
+    if (cr) return String(cr.scope || 'BOTH');
+  } catch { /* tenant db unavailable → treat as not-custom */ }
+  return roleKey.startsWith('CUSTOM_') ? 'BOTH' : null;
+}
+
+// Heal EVERY active custom role that has no usable permission grant (missing
+// central row, or an all-None row that would lock the assigned user out of every
+// menu). Idempotent + safe: only touches roles present in the tenant custom_roles
+// table, never a built-in role. Called from owner-facing reads (Staff Access) so
+// a broken custom role like the reported "abc" recovers the moment the owner
+// opens the matrix — no dependency on the affected user re-logging in. Returns the
+// list of healed role ids.
+async function _healZeroAccessCustomRoles(tenantId: string): Promise<string[]> {
+  const healed: string[] = [];
+  try {
+    const tdb = await getTenantDb(tenantId);
+    const roles: any[] = await tdb.query(
+      "SELECT id, scope FROM custom_roles WHERE restaurant_id = ? AND is_active = 1",
+      [tenantId]
+    );
+    for (const r of roles) {
+      const roleKey = String(r.id).toUpperCase();
+      const perms = await getTabPermissionsForRole(tenantId, roleKey);
+      const hasAny = !!perms && Object.keys(perms).some(k => (perms![k] ?? 0) >= 1);
+      if (hasAny) continue;
+      await centralDb.run(
+        `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
+         VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
+        [tenantId, roleKey, JSON.stringify(defaultCustomRolePerms(r.scope))]
+      );
+      healed.push(roleKey);
+    }
+    if (healed.length) invalidateTabCacheForTenant(tenantId);
+  } catch (e) {
+    console.error('[custom-role backfill] _healZeroAccessCustomRoles failed:', e);
+  }
+  return healed;
+}
+
 /**
  * Build a middleware that requires the caller's role to have access to a
  * given UI tab in the per-tenant Staff Access matrix.
@@ -6886,6 +6947,11 @@ async function startServer() {
   app.get("/api/restaurant/:id/role-permissions", authenticate, async (req: AuthRequest, res: Response) => {
     if (!requireOwnerOrAdmin(req, res)) return;
     try {
+      // Self-heal any custom role locked out of every menu (missing / all-None
+      // central row) before returning the matrix — so a broken role like the
+      // reported "abc" recovers the moment the owner opens Staff Access, and the
+      // matrix immediately shows its restored baseline levels.
+      await _healZeroAccessCustomRoles(req.params.id);
       const rows = await centralDb.query(
         "SELECT role, allowed_tabs, tab_permissions FROM restaurant_role_permissions WHERE restaurant_id = ?",
         [req.params.id]
@@ -7139,34 +7205,30 @@ async function startServer() {
       // Self-heal a CUSTOM role that has no usable grants — either no matrix row
       // at all (fail-open: would show every menu) or an all-None row saved by the
       // owner UI (locks the user out of every menu, the reported "created a user
-      // in a custom role but they see nothing" bug). Seed the scope-based default
-      // ONCE so the assigned user gets a working baseline on their next login,
-      // with no owner action required. Only fires for CUSTOM_ roles with zero
-      // viewable tabs — a custom role with any real grant is left untouched.
-      const isCustom = String(userRole || '').toUpperCase().startsWith('CUSTOM_');
+      // in a custom role but they see nothing" bug, abc @ manhotra-consulting).
+      // Seed the scope-based default so the assigned user gets a working baseline
+      // on their next login, with no owner action required. "Is this a custom
+      // role?" is resolved from the tenant custom_roles table (by id OR name), NOT
+      // just the CUSTOM_ id prefix — a role assigned to a user may be stored under
+      // any id. Built-in / system roles are never touched, and a custom role with
+      // any real grant is left alone.
+      const roleKey = String(userRole || '').toUpperCase();
       const hasAnyView = !!perms && Object.keys(perms).some(k => (perms![k] ?? 0) >= 1);
-      if (isCustom && !hasAnyView) {
-        try {
-          const roleKey = String(userRole).toUpperCase();
-          let scope = 'BOTH';
+      if (roleKey && !hasAnyView && !_SYSTEM_ROLE_SET.has(roleKey)) {
+        const scope = await _lookupCustomRoleScope(req.params.id, roleKey);
+        if (scope !== null) {           // confirmed custom role → give it a baseline
           try {
-            const tdb = await getTenantDb(req.params.id);
-            const cr: any = await tdb.get(
-              "SELECT scope FROM custom_roles WHERE id = ? AND restaurant_id = ? LIMIT 1",
-              [roleKey, req.params.id]
+            await centralDb.run(
+              `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
+               VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
+               ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
+              [req.params.id, roleKey, JSON.stringify(defaultCustomRolePerms(scope))]
             );
-            if (cr?.scope) scope = String(cr.scope);
-          } catch { /* fall back to BOTH */ }
-          await centralDb.run(
-            `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
-             VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
-             ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
-            [req.params.id, roleKey, JSON.stringify(defaultCustomRolePerms(scope))]
-          );
-          invalidateTabCacheForTenant(req.params.id);
-          perms = await getTabPermissionsForRole(req.params.id, userRole || '');
-        } catch (healErr) {
-          console.error('[my-permissions] custom-role self-heal failed (non-fatal):', healErr);
+            invalidateTabCacheForTenant(req.params.id);
+            perms = await getTabPermissionsForRole(req.params.id, userRole || '');
+          } catch (healErr) {
+            console.error('[my-permissions] custom-role self-heal failed (non-fatal):', healErr);
+          }
         }
       }
       if (perms === null) return res.json({ allowed_tabs: null, tab_permissions: null });
@@ -7183,6 +7245,67 @@ async function startServer() {
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch permissions" });
+    }
+  });
+
+  // Owner-only RBAC diagnostics — surfaces exactly why a staff user sees (or does
+  // not see) menus: the tenant's custom roles + their resolved permission state,
+  // and every LOGIN staff member's stored role + how many tabs it resolves to.
+  // Read-only; no PII beyond name/login_id/role. Runs the custom-role self-heal
+  // first, so opening this also fixes any zero-access custom role.
+  app.get("/api/restaurant/:id/rbac-diagnostics", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const tenantId = req.params.id;
+      const healed = await _healZeroAccessCustomRoles(tenantId);
+      const tdb = await getTenantDb(tenantId);
+      const customRoles: any[] = await tdb.query(
+        "SELECT id, name, scope, is_active FROM custom_roles WHERE restaurant_id = ?",
+        [tenantId]
+      ).catch(() => []);
+      const staff: any[] = await tdb.query(
+        "SELECT id, name, login_id, role, employee_type, is_active FROM attendance_staff WHERE employee_type = 'LOGIN'"
+      ).catch(() => []);
+      const customIdSet = new Set(customRoles.map(r => String(r.id).toUpperCase()));
+      const customNameSet = new Set(customRoles.map(r => String(r.name).toUpperCase()));
+
+      const roleReport = [];
+      for (const r of customRoles) {
+        const roleKey = String(r.id).toUpperCase();
+        const perms = await getTabPermissionsForRole(tenantId, roleKey);
+        const viewable = perms ? Object.keys(perms).filter(k => (perms[k] ?? 0) >= 1) : [];
+        roleReport.push({
+          id: r.id, name: r.name, scope: r.scope, is_active: r.is_active,
+          has_perm_row: perms !== null,
+          viewable_tab_count: viewable.length,
+          viewable_sample: viewable.slice(0, 12),
+        });
+      }
+
+      const staffReport = [];
+      for (const s of staff) {
+        const roleKey = String(s.role || '').toUpperCase();
+        const isCustom = customIdSet.has(roleKey) || customNameSet.has(roleKey) || roleKey.startsWith('CUSTOM_');
+        const perms = await getTabPermissionsForRole(tenantId, roleKey);
+        const viewable = perms ? Object.keys(perms).filter(k => (perms[k] ?? 0) >= 1) : null;
+        staffReport.push({
+          id: s.id, name: s.name, login_id: s.login_id, role: s.role,
+          is_active: s.is_active,
+          role_is_custom: isCustom,
+          role_is_system: _SYSTEM_ROLE_SET.has(roleKey),
+          perms_row: perms === null ? 'MISSING (would show ALL menus)' : `${viewable!.length} viewable tabs`,
+        });
+      }
+
+      res.json({
+        tenant_id: tenantId,
+        healed_now: healed,
+        custom_roles: roleReport,
+        login_staff: staffReport,
+        note: 'A LOGIN staff whose role is not custom and not system, with a MISSING perms row, will see everything; with 0 viewable tabs, will see nothing. Custom roles are auto-healed on this call.',
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to run RBAC diagnostics" });
     }
   });
 
@@ -47508,8 +47631,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-custom-role-default-perms',
+    commit_marker: 'rbac-custom-role-heal-v2',
     code_features: [
+      'rbac-custom-role-heal-v2',                     // Round-2 hardening of the custom-role "no menus" fix (abc @ manhotra-consulting still locked out after v1). v1 only self-healed roles whose id literally started with CUSTOM_ and only on the affected user's own /my-permissions call. Now: (a) "is this a custom role?" is resolved from the tenant custom_roles table by id OR name (_lookupCustomRoleScope), so a role assigned to a user under any id/name still heals; built-in/system roles (_SYSTEM_ROLE_SET) are never touched. (b) _healZeroAccessCustomRoles(tenant) backfills EVERY active custom role with a missing/all-None central row, and it runs inside owner-facing GET /role-permissions — so the moment the OWNER opens Settings → Staff Access, abc's role is healed with NO dependency on abc re-logging in (the matrix then shows the restored View/Edit levels). (c) New owner-only GET /rbac-diagnostics dumps each custom role's resolved permission state + every LOGIN staff member's stored role and how many tabs it resolves to (MISSING row = would show everything; 0 viewable = would show nothing) — so a lockout can be diagnosed from data instead of guesswork. tsc clean.
       'rbac-custom-role-default-perms',               // Fix: "owner created a user in a CUSTOM role but the user sees no menu / no commands" (reported: abc user, manhotra-consulting). Root cause: a custom role got NO permission row in restaurant_role_permissions — the default seed only covers the 8 built-in roles, and the Staff-Access matrix pre-fills a custom column as all-None. So a custom-role user hit one of two failure modes: no row → getTabPermissionsForRole returns null → /my-permissions returns allowed_tabs:null → frontend shows EVERYTHING (fail-open leak); OR the owner saved an all-None column → /my-permissions returns the hide-all __perm_v3__ marker → NO menus (the reported lockout). Fix: (1) defaultCustomRolePerms(scope) gives a scope-based operational baseline (HOTEL/EVENTS/RESTAURANT/BOTH → View/Edit on that module's core tabs + MY_CHECKLIST); (2) POST /custom-roles now SEEDS that baseline into the central matrix on creation (INSERT OR IGNORE, so it never clobbers a configured row) — new roles show sensible defaults in Staff Access instead of all-None; (3) /my-permissions SELF-HEALS an existing CUSTOM_ role that resolves to zero viewable tabs (no row OR all-None) by upserting the scope default on the user's next login — so the existing "abc" role recovers with no owner action. Only touches CUSTOM_-prefixed roles with zero grants; a custom role with any real grant, and every built-in role, are left untouched. Closes both the lockout and the fail-open leak. TC-RBAC-CUSTOM-SEED/MYPERM/HEAL regression tests + offline decision-path sim (15/15 green).
       'hotel-invoice-address-wrap-fix',               // Classic hotel/PMS invoice header: the identity address block advanced the y-cursor by a FIXED 10px per line, so a long street address (or website) that wrapped to 2 lines collided with the city / website / contact / GSTIN lines below it (reported on the convention tenant — name auto-shrink was fine but the address overlapped). Now each address line advances by its MEASURED height, so wrapped lines push the next line down. Validated with the reported long address on Classic/Boutique/Event: zero header overlaps.
       'hotel-folio-name-autoshrink',                  // Extended the business-name auto-shrink to the HOTEL / PMS folio invoice (generateInvoicePdf → Classic + Boutique), which renders the guest-bill / folio PDF. Shared fitFontSize() helper in invoiceServiceShared.ts. CLASSIC: name shrinks 22 → 12pt to fit ≤ 2 lines AND the address block now starts below the MEASURED name height (was a fixed y+26 offset that a wrapped name overlapped). BOUTIQUE: name shrinks 20 → 11pt to stay on ONE line so its fixed sub-tag / compliance / address rows stay collision-free. Validated on a PMS folio with "PARANDHAYYA'S CONVENTION CENTER PVT LTD": Classic 15.5pt/2 lines, Boutique 11.5pt/1 line, zero header overlaps; short names keep full size; extreme names degrade with no overlap.
