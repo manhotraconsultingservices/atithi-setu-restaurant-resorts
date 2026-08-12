@@ -1268,15 +1268,23 @@ export default function App() {
   };
 
   useEffect(() => {
+    // Legacy role NORMALISATION only — never a force-logout.
+    //
+    // This effect used to force-logout any role not in a hardcoded 14-item
+    // allowlist. That allowlist did not include CUSTOM roles (id `CUSTOM_*`),
+    // nor the built-ins CASHIER / THERAPIST / EVENTS_MANAGER — so EVERY
+    // custom-role user (e.g. "abc") was ejected to the login page on every
+    // page load, regardless of the access granted to them in Staff Access.
+    // That was the true root cause of "created a user in a custom role but they
+    // can't see any menu or command": they were never actually staying logged
+    // in. The backend JWT + /my-permissions are the source of truth for what a
+    // role may see and do, so an authenticated user must NOT be logged out here
+    // just because their role isn't in a static frontend list.
     const savedRole = localStorage.getItem('role');
-    const validRoles: UserRole[] = ['SUPER_ADMIN', 'OWNER', 'CHEF', 'WAITER', 'CUSTOMER', 'SALES_REP', 'CTO', 'MANAGER', 'HOUSEKEEPING', 'FRONT_DESK', 'CONCIERGE', 'MAINTENANCE', 'OTA', 'AGENT'];
-    if (savedRole && !validRoles.includes(savedRole as UserRole)) {
-      if (savedRole === 'ADMIN') {
-        setRole('SUPER_ADMIN');
-        localStorage.setItem('role', 'SUPER_ADMIN');
-      } else {
-        handleLogout();
-      }
+    if (savedRole === 'ADMIN') {
+      // Historical alias — map the retired 'ADMIN' role onto SUPER_ADMIN.
+      setRole('SUPER_ADMIN');
+      localStorage.setItem('role', 'SUPER_ADMIN');
     }
   }, []);
 
