@@ -2479,7 +2479,7 @@ async function testRBACHardening() {
       // Grant the custom role EVENTS_BOOKINGS (Edit) + HR_PAYROLL (View).
       const cur = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
       const map = (cur.data && typeof cur.data === 'object' && !Array.isArray(cur.data)) ? { ...cur.data } : {};
-      map[role] = { EVENTS_BOOKINGS: 2, HR_PAYROLL: 1 };
+      map[role] = { EVENTS_BOOKINGS: 2, HR_PAYROLL: 1, SERVICE_REQUESTS: 1 };
       await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, map);
 
       // F2b — the GRANTED custom role can now READ events bookings. This is the
@@ -2498,6 +2498,18 @@ async function testRBACHardening() {
       const hrAfter = await api('GET', `/api/restaurant/${restaurantId}/hr/employees`, null, tok);
       if (hrAfter.status === 200) pass('TC-RBAC-HR-ALLOW', 'Custom role granted HR_PAYROLL CAN GET /hr/employees (workforce module gate admits it)', '200 after grant');
       else fail('TC-RBAC-HR-ALLOW', 'Custom role granted HR_PAYROLL must load /hr/employees, not 403', `got ${hrAfter.status} — workforce gate still blocks granted custom roles`);
+
+      // Service Requests / Service Catalogue — the GRANTED custom role can now GET
+      // /hotel/service-requests. Reported "Service Catalogue unauthorized": the
+      // endpoint was gated by the fixed-allowlist serviceRequestStaff (requireRole),
+      // which 403'd every custom role with "your role is not authorized for this
+      // action" (leaking onto the PMS Service Catalogue banner). It now uses the
+      // permission-aware module gate keyed on SERVICE_REQUESTS. A 403 = regression;
+      // 200 = fixed; other statuses (hotel not fully set up here) = skip.
+      const srAfter = await api('GET', `/api/restaurant/${restaurantId}/hotel/service-requests`, null, tok);
+      if (srAfter.status === 200) pass('TC-RBAC-SVCREQ-ALLOW', 'Custom role granted SERVICE_REQUESTS CAN GET /hotel/service-requests (was requireRole 403)', '200 after grant');
+      else if (srAfter.status === 403) fail('TC-RBAC-SVCREQ-ALLOW', 'Custom role granted SERVICE_REQUESTS must not be 403 on /hotel/service-requests', 'got 403 — serviceRequestStaff still a fixed allowlist that ignores custom-role grants');
+      else skip('TC-RBAC-SVCREQ-ALLOW', 'Custom-role service-requests access', `status ${srAfter.status} (hotel not fully enabled on this tenant)`);
 
       // STRICT ENFORCEMENT — the custom role was granted ONLY { EVENTS_BOOKINGS,
       // HR_PAYROLL }. Its /my-permissions allowed_tabs must contain exactly those

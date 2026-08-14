@@ -12938,13 +12938,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       toast.error(err?.message || 'Failed to copy permissions');
     }
   };
+  // Clear hotelError on success: it's a SHARED banner (rendered on the Service
+  // Catalogue, Service Requests, etc.), so a failure from one loader must not
+  // linger on an unrelated tab whose own data loaded fine. (Reported: the PMS
+  // Service Catalogue showed "not authorized" from a service-requests 403 even
+  // though the catalogue itself loaded.)
   const fetchHotelServices = async () => {
     if (!isHotelEnabled) return;
-    try { setHotelServices(await hotelApi('/services')); } catch (err: any) { setHotelError(err.message); }
+    try { setHotelServices(await hotelApi('/services')); setHotelError(''); } catch (err: any) { setHotelError(err.message); }
   };
   const fetchHotelRequests = async () => {
     if (!isHotelEnabled) return;
-    try { setHotelRequests(await hotelApi('/service-requests?status=PENDING,ACKNOWLEDGED,IN_PROGRESS')); } catch (err: any) { setHotelError(err.message); }
+    try { setHotelRequests(await hotelApi('/service-requests?status=PENDING,ACKNOWLEDGED,IN_PROGRESS')); setHotelError(''); } catch (err: any) { setHotelError(err.message); }
   };
 
   // Auto-fetch holds when the block-dates modal opens for a room.
