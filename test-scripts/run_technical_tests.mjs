@@ -2470,10 +2470,16 @@ async function testRBACHardening() {
       else if (hotBefore.status === 404) skip('TC-RBAC-READ-HOTEL', 'Hotel read gate', 'hotel module not enabled on this tenant');
       else fail('TC-RBAC-READ-HOTEL', 'Ungranted custom role must be 403 on GET /hotel/bookings', `got ${hotBefore.status} — read endpoint is not gated (F1 leak)`);
 
-      // Grant the custom role EVENTS_BOOKINGS (Edit) only — NOT EVENTS_VENUES.
+      // HR (Workforce) — an UNGRANTED custom role must be 403 on /hr/employees
+      // (the workforce module gate denies it — and must NOT fail-open).
+      const hrBefore = await api('GET', `/api/restaurant/${restaurantId}/hr/employees`, null, tok);
+      if (hrBefore.status === 403) pass('TC-RBAC-HR-DENY', 'Ungranted custom role 403 on GET /hr/employees (workforce module-gated)', '403 as expected');
+      else fail('TC-RBAC-HR-DENY', 'Ungranted custom role must be 403 on GET /hr/employees', `got ${hrBefore.status} — HR endpoint not gated (fail-open leak)`);
+
+      // Grant the custom role EVENTS_BOOKINGS (Edit) + HR_PAYROLL (View).
       const cur = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
       const map = (cur.data && typeof cur.data === 'object' && !Array.isArray(cur.data)) ? { ...cur.data } : {};
-      map[role] = { EVENTS_BOOKINGS: 2 };
+      map[role] = { EVENTS_BOOKINGS: 2, HR_PAYROLL: 1 };
       await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, map);
 
       // F2b — the GRANTED custom role can now READ events bookings. This is the
@@ -2483,6 +2489,15 @@ async function testRBACHardening() {
       if (evtAfter.status === 200) pass('TC-RBAC-CUSTOM-EVT', 'Granted custom role CAN GET /events/bookings (F2 custom-role access works)', '200 after grant');
       else if (evtAfter.status === 404) skip('TC-RBAC-CUSTOM-EVT', 'Custom-role events access', 'events module not enabled on this tenant');
       else fail('TC-RBAC-CUSTOM-EVT', 'Granted custom role should read /events/bookings', `got ${evtAfter.status} — custom role still blocked (F2 not fixed)`);
+
+      // HR (Workforce) — the GRANTED custom role can now load HR employees. The
+      // reported "HR & Payroll HTTP 403" bug: Workforce endpoints were gated by
+      // the fixed-allowlist restaurantStaff (which 403'd every custom role before
+      // the per-tab check ran); they now use the permission-aware workforceStaff
+      // module gate, so a role granted HR_PAYROLL gets in.
+      const hrAfter = await api('GET', `/api/restaurant/${restaurantId}/hr/employees`, null, tok);
+      if (hrAfter.status === 200) pass('TC-RBAC-HR-ALLOW', 'Custom role granted HR_PAYROLL CAN GET /hr/employees (workforce module gate admits it)', '200 after grant');
+      else fail('TC-RBAC-HR-ALLOW', 'Custom role granted HR_PAYROLL must load /hr/employees, not 403', `got ${hrAfter.status} — workforce gate still blocks granted custom roles`);
 
       // F3 — EVENTS_VENUES was NOT granted (absent from the role's matrix). A
       // custom role must be DENIED the venue mutation: the matrix, which shows

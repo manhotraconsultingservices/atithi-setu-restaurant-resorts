@@ -5249,6 +5249,20 @@ function requireModuleAccess(moduleTabs: string[], operationalRoles: string[], m
 const hotelStaff = requireModuleAccess(HOTEL_TAB_IDS, HOTEL_OPERATIONAL_ROLES, 'Hotel');
 const eventsStaff = requireModuleAccess(EVENTS_TAB_IDS, EVENTS_OPERATIONAL_ROLES, 'Events & Convention');
 
+// Workforce (HR & Payroll · Roster · Timesheet · Operational Payroll) is a
+// cross-module concern — it applies to hotel/spa/events staff, not just
+// restaurant staff. These endpoints were gated by the fixed-allowlist
+// `restaurantStaff` (requireRole), which 403'd BEFORE the per-tab
+// requireTabAccess ran — so a CUSTOM role the owner granted HR/Payroll access to
+// (and even a FRONT_DESK/THERAPIST) could never load HR data ("HR & Payroll HTTP
+// 403"). `workforceStaff` is the permission-aware module gate: OWNER/MANAGER/
+// SUPER_ADMIN/CTO plus any role granted ≥View on a Workforce tab pass the coarse
+// gate; the exact-tab requireTabAccess still runs on top. It also (unlike a bare
+// requireTabAccess, which fail-opens when a role has no saved matrix row) keeps
+// denying seedless guest/partner roles (CUSTOMER/OTA/AGENT → perms null → 403).
+const WORKFORCE_TAB_IDS = ['HR_PAYROLL', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL'];
+const workforceStaff = requireModuleAccess(WORKFORCE_TAB_IDS, ['MANAGER'], 'Workforce');
+
 // Sensible STARTING permissions for a custom role, keyed off its scope. Without
 // this, a custom role has no permission row at all → the assigned user either
 // sees everything (fail-open) or, once the owner saves an all-None column for
@@ -13157,7 +13171,7 @@ async function startServer() {
   // start_time, end_time, template_id?, status?, notes?}, ...] }.
   // Writes change log rows for every diff and enqueues SHIFT_ASSIGNED /
   // SHIFT_UPDATED notifications via triggerNotification.
-  app.post("/api/restaurant/:id/roster", authenticate, restaurantStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/roster", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -13225,7 +13239,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/roster/:slotId", authenticate, restaurantStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/roster/:slotId", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -13263,7 +13277,7 @@ async function startServer() {
   // from one date range to another, shifted by the same number of days.
   // Each copied slot starts in DRAFT so the owner can review before
   // publishing (no notifications fire until publish).
-  app.post("/api/restaurant/:id/roster/copy", authenticate, restaurantStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/roster/copy", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -13509,7 +13523,7 @@ async function startServer() {
   }
   (globalThis as any).__recomputeTimesheet = _recomputeTimesheet;
 
-  app.post("/api/restaurant/:id/timesheet/recompute", authenticate, restaurantStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/timesheet/recompute", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
     try {
       const start = String(req.body?.start || '').trim();
       const end   = String(req.body?.end   || '').trim();
@@ -13524,7 +13538,7 @@ async function startServer() {
 
   // ── Phase S2 — Payroll & approval endpoints ─────────────────────────
   // Approve or reject a single timesheet row. Sets status, who, when, notes.
-  app.patch("/api/restaurant/:id/timesheet/:staffId/:date/approval", authenticate, restaurantStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/timesheet/:staffId/:date/approval", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -13558,7 +13572,7 @@ async function startServer() {
   // Bulk approve/reject all PENDING rows in a date range. Saves the owner
   // from clicking through every row when variance was a known one-off
   // (e.g. festival day, training, sick leave handled out-of-band).
-  app.post("/api/restaurant/:id/timesheet/bulk-approval", authenticate, restaurantStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/timesheet/bulk-approval", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -13823,7 +13837,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/restaurant/:id/timesheet-config", authenticate, restaurantStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/timesheet-config", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -13868,7 +13882,7 @@ async function startServer() {
   // Document upload reuses existing multer + /uploads pipeline.
 
   // List all employees with HR field projection.
-  app.get("/api/restaurant/:id/hr/employees", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/employees", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const statusFilter = String(req.query.status || '').toUpperCase().trim();
@@ -13914,7 +13928,7 @@ async function startServer() {
 
   // Detail — staff row + salary structure history + recent payslips
   // + employment-doc list. Single round-trip for the detail modal.
-  app.get("/api/restaurant/:id/hr/employees/:staffId", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/employees/:staffId", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const staff: any = await db.get(
@@ -13941,7 +13955,7 @@ async function startServer() {
   // Update HR fields. Strictly the HR profile — NOT login fields
   // (role / login_id / password). Those stay on the existing Staff
   // Access endpoint to preserve the RBAC separation.
-  app.put("/api/restaurant/:id/hr/employees/:staffId", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/hr/employees/:staffId", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
@@ -13991,7 +14005,7 @@ async function startServer() {
   // CSV export — same shape as the list endpoint, formatted for
   // Excel consumption with BOM. Owner uses this for offline payroll
   // reconciliation + statutory filing prep.
-  app.get("/api/restaurant/:id/hr/employees.csv", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/employees.csv", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -14039,7 +14053,7 @@ async function startServer() {
   // for HR we'd ideally have a dedicated `hr_documents` table but
   // Phase 1 stays minimal: docs are URLs on a JSON column.
   // (Track as a Phase 2 follow-up if multi-doc-per-staff is needed.)
-  app.post("/api/restaurant/:id/hr/employees/:staffId/documents", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/employees/:staffId/documents", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
       const url = `/uploads/${req.file.filename}`;
@@ -14130,7 +14144,7 @@ async function startServer() {
   }
 
   // ── Salary Components master ───────────────────────────────────────────
-  app.get("/api/restaurant/:id/hr/salary-components", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/salary-components", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query(
@@ -14143,7 +14157,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hr/salary-components", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/salary-components", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const id = b.id || randomUUID();
@@ -14176,7 +14190,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hr/salary-components/:componentId", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hr/salary-components/:componentId", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("DELETE FROM salary_components WHERE id = ?", [req.params.componentId]);
@@ -14188,7 +14202,7 @@ async function startServer() {
   });
 
   // ── Salary Structures (per-employee, versioned) ────────────────────────
-  app.get("/api/restaurant/:id/hr/salary-structures/:staffId", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/salary-structures/:staffId", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query(
@@ -14203,7 +14217,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hr/salary-structures", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/salary-structures", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const staff_id = String(b.staff_id || '').trim();
@@ -14271,7 +14285,7 @@ async function startServer() {
   });
 
   // ── Payroll Runs ───────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/payroll/runs", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/payroll/runs", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const where: string[] = [];
@@ -14287,7 +14301,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const year = Number(req.body?.year);
       const month = Number(req.body?.month);
@@ -14314,7 +14328,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/restaurant/:id/payroll/runs/:runId/payslips", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/payroll/runs/:runId/payslips", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
@@ -14334,7 +14348,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs/:runId/compute", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs/:runId/compute", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
@@ -14537,7 +14551,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs/:runId/approve", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs/:runId/approve", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -14587,7 +14601,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs/:runId/lock", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs/:runId/lock", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -14607,7 +14621,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs/:runId/mark-paid", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs/:runId/mark-paid", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -14695,7 +14709,7 @@ async function startServer() {
     return { data, recipientEmail: staff.email || null };
   }
 
-  app.get("/api/restaurant/:id/payroll/payslips/:payslipId/pdf", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/payroll/payslips/:payslipId/pdf", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const { data } = await buildPayslipPdfData(req.params.id, req.params.payslipId);
       const pdf = await generatePayslipPdf(data);
@@ -14708,7 +14722,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/payslips/:payslipId/email", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/payslips/:payslipId/email", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const { data, recipientEmail } = await buildPayslipPdfData(req.params.id, req.params.payslipId);
       const to = String(req.body?.to || recipientEmail || '').trim();
@@ -14739,7 +14753,7 @@ You can also view all your payslips in the employee portal.
   });
 
   // Bank-advice CSV export (NPCI / banking system import format)
-  app.get("/api/restaurant/:id/payroll/runs/:runId/export.csv", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/payroll/runs/:runId/export.csv", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
@@ -14782,7 +14796,7 @@ You can also view all your payslips in the employee portal.
   // ══════════════════════════════════════════════════════════════════════
 
   // EPF ECR text file for a payroll run
-  app.get("/api/restaurant/:id/payroll/runs/:runId/epf-ecr.txt", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/payroll/runs/:runId/epf-ecr.txt", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
@@ -14834,7 +14848,7 @@ You can also view all your payslips in the employee portal.
   });
 
   // Form 24Q quarterly TDS return
-  app.get("/api/restaurant/:id/payroll/quarterly/24q.pdf", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/payroll/quarterly/24q.pdf", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const year = Number(req.query.year);
       const quarter = String(req.query.quarter || '').toUpperCase() as 'Q1' | 'Q2' | 'Q3' | 'Q4';
@@ -14899,7 +14913,7 @@ You can also view all your payslips in the employee portal.
   });
 
   // Form 16 annual TDS certificate per employee
-  app.get("/api/restaurant/:id/payroll/annual/form16/:staffId.pdf", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/payroll/annual/form16/:staffId.pdf", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const fy = String(req.query.fy || '').trim() || '2025-26';
       const [fyStartStr] = fy.split('-');
@@ -15019,7 +15033,7 @@ You can also view all your payslips in the employee portal.
   // State machine: DRAFT → SUBMITTED → MANAGER_APPROVED → HR_APPROVED → REIMBURSED
   //                                                                   ↘ REJECTED
 
-  app.get("/api/restaurant/:id/hr/expenses", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/expenses", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const where: string[] = [];
@@ -15047,7 +15061,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const staff_id = String(b.staff_id || '').trim();
@@ -15082,7 +15096,7 @@ You can also view all your payslips in the employee portal.
   });
 
   // Receipt upload (multipart)
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/receipt", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/receipt", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), upload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
       const item_id = String(req.body?.item_id || '').trim();
@@ -15098,7 +15112,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/submit", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/submit", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -15119,7 +15133,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/approve", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/approve", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       // 2-step: SUBMITTED → MANAGER_APPROVED → HR_APPROVED
       // Determine which step from the body OR from the current state
@@ -15169,7 +15183,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/reject", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/reject", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const reason = String(req.body?.reason || '').trim() || 'No reason provided';
       const db = await getTenantDb(req.params.id);
@@ -15192,7 +15206,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/attach-to-run", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/attach-to-run", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const run_id = String(req.body?.payroll_run_id || '').trim();
       if (!run_id) return res.status(400).json({ error: 'payroll_run_id required' });
@@ -15222,7 +15236,7 @@ You can also view all your payslips in the employee portal.
   // ══════════════════════════════════════════════════════════════════════
 
   // Templates
-  app.get("/api/restaurant/:id/hr/offer-letter-templates", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/offer-letter-templates", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       let rows = await db.query("SELECT * FROM offer_letter_templates ORDER BY is_default DESC, name");
@@ -15243,7 +15257,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letter-templates", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letter-templates", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const id = b.id || randomUUID();
@@ -15272,7 +15286,7 @@ You can also view all your payslips in the employee portal.
   });
 
   // Offer letters
-  app.get("/api/restaurant/:id/hr/offer-letters", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/offer-letters", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const where: string[] = [];
@@ -15289,7 +15303,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const candidate_name = String(b.candidate_name || '').trim();
@@ -15389,7 +15403,7 @@ You can also view all your payslips in the employee portal.
     };
   }
 
-  app.get("/api/restaurant/:id/hr/offer-letters/:offerId/pdf", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/offer-letters/:offerId/pdf", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const data = await buildOfferLetterData(req.params.id, req.params.offerId);
       const pdf = await generateOfferLetterPdf(data);
@@ -15402,7 +15416,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/send", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/send", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const data = await buildOfferLetterData(req.params.id, req.params.offerId);
       const to = String(req.body?.to || data.candidate.email || '').trim();
@@ -15438,7 +15452,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/accept", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/accept", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -15459,7 +15473,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/decline", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/decline", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -15480,7 +15494,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/upload-signed", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/upload-signed", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), upload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
       const url = `/uploads/${req.file.filename}`;
@@ -15629,7 +15643,7 @@ ${data.tenant.name}`;
   // HR-P1 #141 — Statutory Config Settings
   // ══════════════════════════════════════════════════════════════════════
 
-  app.get("/api/restaurant/:id/hr/statutory-config", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hr/statutory-config", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const cfg = await getStatutoryConfig(db);
@@ -15642,7 +15656,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.put("/api/restaurant/:id/hr/statutory-config", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/hr/statutory-config", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const db = await getTenantDb(req.params.id);
@@ -47642,8 +47656,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ootb-roles-permission-aware-dashboard',
+    commit_marker: 'hr-workforce-permission-gate',
     code_features: [
+      'hr-workforce-permission-gate',                // Fix (root cause): "HR & Payroll HTTP 403" for custom roles. The HR/Payroll/Roster/Timesheet endpoints were gated by `restaurantStaff` (= requireRole(RESTAURANT_OPERATIONAL_ROLES), a FIXED allowlist) BEFORE the per-tab `requireTabAccess('HR_PAYROLL')` — so a custom role the owner granted HR access to was 403'd at the allowlist and never reached the permission check (two 403s on the Employees section). Workforce is cross-module (applies to hotel/spa/events staff too), so the restaurant-role allowlist was the wrong gate. Fix: new permission-aware `workforceStaff = requireModuleAccess(['HR_PAYROLL','ROSTER','TIMESHEET','STAFF_PAYROLL'], ['MANAGER'], 'Workforce')` swapped in for restaurantStaff on all 48 Workforce endpoints; requireTabAccess still runs on top for the exact tab. Now: a custom role (or FRONT_DESK/THERAPIST) granted HR_PAYROLL loads HR; ungranted roles get a clean 403; OWNER/MANAGER unchanged; and — unlike a bare requireTabAccess which fail-opens on a seedless role — seedless guest/partner roles (CUSTOMER/OTA/AGENT) are still denied (module gate returns 403 when perms is null). Verified: offline gate sim 12/12; regression tests TC-RBAC-HR-DENY (ungranted 403) + TC-RBAC-HR-ALLOW (granted 200). tsc clean. NOTE residual (same class, not touched): restaurantStaff still gates restaurant tabs (MENU/INVENTORY/LOYALTY/DELIVERY) so a custom role granted THOSE is still blocked — convert restaurantStaff→requireModuleAccess to finish the sweep.
       'ootb-roles-permission-aware-dashboard',       // Fix (root cause): "OOTB roles not working" — the 8 built-in operational staff roles (CHEF/WAITER/CASHIER/THERAPIST/FRONT_DESK/HOUSEKEEPING/MAINTENANCE/CONCIERGE) rendered FIXED role-specific dashboards (ChefDashboard/WaiterDashboard/TherapistDashboard/HotelStaffDashboard) that never read /my-permissions or allowed_tabs — so granting/revoking tabs for them in Settings → Staff Access was a NO-OP (concrete gaps: FRONT_DESK couldn't open Folios/manage bookings, CASHIER — wrongly rendered WaiterDashboard — had no invoices view, CHEF no Menu, HOUSEKEEPING no Housekeeping page). These were legacy blank-screen patches that predate/sidestep RBAC. Fix: ALL operator roles (owner/manager/custom/OOTB-staff) now render the permission-aware OwnerDashboard, whose left nav is filtered by allowed_tabs; owner-only tabs stay hidden (isOwnerOrAdmin=false for staff). Each OOTB role KEEPS its curated real-time board as its HOME landing (rendered inside OwnerDashboard) — kitchen queue, order/tables/waiter-calls board, therapist schedule, arrivals/guest-requests worklist — so nothing operational is lost while Staff Access finally controls their nav. Verified across all 8 OOTB roles (offline sim 68/68: each routes to OwnerDashboard, keeps its HOME board, resolves a non-empty nav with its job-critical tabs reachable, owner-only tabs hidden). Source-guard regression test TC-RBAC-OOTB-ROUTING. tsc + vite build clean.
       'location-switcher-eager-fetch-fix',           // Fix: top-bar "Location" dropdown (LocationSwitcher) disappeared the instant it was clicked (reported on a single-location owner, e.g. Ankur Cafe). Root cause: the component lazy-fetched /api/brand/my-locations ON OPEN, then `if (data && data.total_locations < 2) return null` — so a single-location owner saw the button (data still null), clicked it, the fetch returned total_locations=1, and the whole switcher UNMOUNTED. Fix: fetch the location count on MOUNT (not on open) and render nothing until we know there are 2+ locations — so single-location owners never see the switcher (its intended "hidden for one location" behaviour) and multi-location owners get a pre-loaded dropdown that opens instantly on click. Frontend-only; tsc + vite build clean.
       'checkin-nonblocking-checklist-fix',           // Fix: a NON-BLOCKING (blocks_release=0) CHECK_IN checklist was blocking guest check-in — the "Confirm Check-In" button stayed disabled until all mandatory tasks were done. Root cause: the check-in checklist gate (server.ts ~37602) selected ALL open CHECK_IN jobs (`WHERE source_ref=? AND trigger_event='CHECK_IN' AND status='OPEN'`) and 409'd if any had pending mandatory tasks — ignoring blocks_release. Now the gate query filters `AND blocks_release = 1`, so ONLY a blocking check-in checklist can 409/refuse check-in; a non-blocking one is still raised (front desk can work it) but never prevents check-in. Frontend hardened too: the wizard's pending-mandatory counter (chkPendMand) only counts jobs with blocks_release===1, so the Confirm button never disables for a non-blocking checklist. TC-CHK-CHECKIN-NONBLOCK regression test (non-blocking CHECK_IN template + booking → check-in must not 409 on that checklist). tsc + vite build clean.
