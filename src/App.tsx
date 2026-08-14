@@ -189,6 +189,26 @@ function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boo
   return false;
 }
 
+// Content-pane access must AGREE with the sidebar's isVisible(), or a tab can
+// appear in the nav yet render "Access Restricted" when opened (reported: PCC
+// Security sees "Cleaning Checklist" but it shows Access Restricted). Two of
+// isVisible()'s special cases don't match a plain isTabVisible(activeTab):
+//   • MY_CHECKLIST (and HOME) are always reachable — personal queue / launchpad
+//     — but their ids aren't in a custom role's saved list (which carries the
+//     '__perm_complete__' marker), so isTabVisible would wrongly hide the content.
+//   • EVENTS_HOUSEKEEPING is gated on the HOUSEKEEPING permission (its content is
+//     served by HOUSEKEEPING-keyed endpoints), not on its own id.
+// Keep these two maps in lockstep with isVisible() (App.tsx, the MY_CHECKLIST /
+// EVENTS_HOUSEKEEPING branches).
+const CONTENT_ALWAYS_ALLOWED = new Set<string>(['HOME', 'MY_CHECKLIST']);
+const CONTENT_PERM_ALIAS: Record<string, string> = { EVENTS_HOUSEKEEPING: 'HOUSEKEEPING' };
+function isContentAccessible(activeTab: string, allowedTabs: string[] | null | undefined): boolean {
+  if (!allowedTabs) return true;                      // owner/manager — no restriction
+  if (CONTENT_ALWAYS_ALLOWED.has(activeTab)) return true;
+  const permId = CONTENT_PERM_ALIAS[activeTab] || activeTab;
+  return isTabVisible(permId, allowedTabs);
+}
+
 // ─── CSV helpers — shared by inventory module ─────────────────────────────────
 // downloadCsv / parseCsv used by Ingredients, Suppliers, POs, GRNs sub-views
 // for export + import. Handles quoted fields, embedded commas, escaped quotes.
@@ -14399,7 +14419,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       <div className="flex-1 min-w-0 space-y-6 md:space-y-8">
 
 
-      {allowedTabs && !isTabVisible(activeTab, allowedTabs) ? (
+      {!isContentAccessible(activeTab, allowedTabs) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center">
             <Lock size={28} className="text-red-400" />

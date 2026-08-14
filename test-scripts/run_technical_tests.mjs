@@ -2696,6 +2696,29 @@ function checkOotbRoleRouting() {
   }
 }
 
+// The content pane's access guard must agree with the sidebar (isVisible), or a
+// tab can show in the nav yet render "Access Restricted" when opened (reported:
+// PCC Security sees Cleaning Checklist but it's Access Restricted; My Checklist
+// likewise after the strict-permissions fix). Guard: content uses
+// isContentAccessible (which aliases EVENTS_HOUSEKEEPING→HOUSEKEEPING and treats
+// MY_CHECKLIST/HOME as always reachable), NOT a bare isTabVisible(activeTab).
+function checkContentGuardConsistency() {
+  try {
+    const src = readFileSync(join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+    const usesHelper       = /!isContentAccessible\(activeTab,\s*allowedTabs\)/.test(src);
+    const noBareGuard      = !/allowedTabs\s*&&\s*!isTabVisible\(activeTab,\s*allowedTabs\)\s*\?/.test(src);
+    const helperDefined    = /function\s+isContentAccessible\s*\(/.test(src);
+    const aliasesEvtHk     = /CONTENT_PERM_ALIAS[\s\S]{0,80}EVENTS_HOUSEKEEPING\s*:\s*.HOUSEKEEPING./.test(src);
+    const alwaysMyChecklist = /CONTENT_ALWAYS_ALLOWED\s*=\s*new Set[\s\S]{0,60}MY_CHECKLIST/.test(src);
+    const ok = usesHelper && noBareGuard && helperDefined && aliasesEvtHk && alwaysMyChecklist;
+    (ok ? pass : fail)('TC-RBAC-CONTENT-GUARD',
+      'Content-pane access guard agrees with sidebar visibility (no "visible but Access Restricted")',
+      ok ? '' : `usesHelper=${usesHelper} noBareGuard=${noBareGuard} helperDefined=${helperDefined} aliasesEvtHk=${aliasesEvtHk} alwaysMyChecklist=${alwaysMyChecklist}`);
+  } catch (e) {
+    skip('TC-RBAC-CONTENT-GUARD', 'Content-guard consistency', `could not read src/App.tsx (${e?.message || e})`);
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -2705,6 +2728,7 @@ async function main() {
   console.log('═'.repeat(60));
 
   checkOotbRoleRouting();
+  checkContentGuardConsistency();
   await testAuth();
   await testRestaurant();
   await testHotel();
