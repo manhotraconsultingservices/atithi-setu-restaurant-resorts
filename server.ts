@@ -5144,7 +5144,16 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
     // won't have them in tab_permissions. Default them to Full(3) so staff
     // keep seeing these tabs until the owner explicitly restricts them via
     // the updated Staff Access UI.
-    if (perms !== null) {
+    //
+    // CRITICAL: this grandfathering is ONLY for BUILT-IN roles, whose saved lists
+    // may predate these tabs. A CUSTOM role is created fresh via the modern Staff
+    // Access UI with a DELIBERATE, COMPLETE tab set — grandfathering it silently
+    // grants modules the owner never assigned (the reported "unassigned modules
+    // still visible/accessible across all custom roles"). For a custom role the
+    // saved set is authoritative: NO injection, so requireTabAction/Access denies
+    // every unassigned tab and /my-permissions omits them.
+    const _isBuiltinRole = _SYSTEM_ROLE_SET.has(String(role).toUpperCase());
+    if (perms !== null && _isBuiltinRole) {
       const RBAC_NEWLY_ADDED = [
         'HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'HOUSEKEEPING',
         // NOTE: the core Events tabs (EVENTS_DASHBOARD … EVENTS_SETTINGS) are
@@ -7261,8 +7270,19 @@ async function startServer() {
       // (the reported "user sees menus they shouldn't" leak). Emit the
       // fully-informed marker '__perm_v3__' (see PERMS_V3_MARKER in App.tsx) so
       // isTabVisible() hides every unlisted tab instead of revealing all.
+      //
+      // For a CUSTOM (non-built-in) role the saved set is COMPLETE and
+      // authoritative — the owner assigned exactly these tabs via the modern
+      // Staff Access UI. Append the '__perm_complete__' marker so the frontend
+      // isTabVisible() grandfathers NOTHING (no ALWAYS_VISIBLE / V2 / V3 legacy
+      // tabs leak in — the reported "unassigned modules still visible"). Built-in
+      // roles keep their legacy grandfathering unchanged.
+      const isCustomRole = !!roleKey && !_SYSTEM_ROLE_SET.has(roleKey);
+      const outTabs = allowed_tabs.length > 0
+        ? (isCustomRole ? [...allowed_tabs, '__perm_complete__'] : allowed_tabs)
+        : ['__perm_v3__'];
       res.json({
-        allowed_tabs: allowed_tabs.length > 0 ? allowed_tabs : ['__perm_v3__'],
+        allowed_tabs: outTabs,
         tab_permissions: perms,
       });
     } catch (err) {
@@ -47656,8 +47676,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hr-workforce-permission-gate',
+    commit_marker: 'custom-role-strict-permissions',
     code_features: [
+      'custom-role-strict-permissions',              // Fix (root cause): "Custom Role permissions not enforced — unassigned modules still visible/accessible across ALL custom roles." Two GRANDFATHER layers (built for legacy migration) were over-granting fresh custom roles: (1) backend getTabPermissionsForRole injected RBAC_NEWLY_ADDED (Procurement, Expense Journal, Housekeeping, Checklists, Status Board, all Spa tabs, Hotel Inventory) at Full(3) for ANY absent key; (2) frontend isTabVisible grandfathered ALWAYS_VISIBLE_TABS (Inventory, Delivery, Loyalty, Roster, Timesheet, Staff Payroll, Hotel Reports, Channel Manager, Public Booking, Restaurant Reports, HR Payroll, Procurement, All Reports) for markerless lists. So a custom role assigned only e.g. Events still SAW + could act on ~30 unassigned modules. A custom role is created FRESH via the modern Staff Access UI = deliberate, COMPLETE set → no grandfathering. Fix: (a) getTabPermissionsForRole injects RBAC_NEWLY_ADDED ONLY for built-in roles (`_SYSTEM_ROLE_SET`) — a custom role's perms = exactly what's saved, so requireTabAction/Access denies every unassigned tab (no Full(3) leak = actions restricted too); (b) /my-permissions appends a new `__perm_complete__` marker for custom roles; (c) App.tsx isTabVisible: when that marker is present, grandfather NOTHING (tab visible only if explicitly granted). Built-in roles + owner/manager keep legacy grandfathering UNCHANGED (no marker, injection still applies). Verified: offline full-flow sim 34/34 (custom role assigned 1 tab → all 21 previously-leaking tabs hidden, no Full-level injected; built-in WAITER + OWNER unchanged); regression TC-RBAC-CUSTOM-STRICT (/my-permissions returns only granted tabs + complete marker, 0 leaks). tsc + vite build clean.
       'hr-workforce-permission-gate',                // Fix (root cause): "HR & Payroll HTTP 403" for custom roles. The HR/Payroll/Roster/Timesheet endpoints were gated by `restaurantStaff` (= requireRole(RESTAURANT_OPERATIONAL_ROLES), a FIXED allowlist) BEFORE the per-tab `requireTabAccess('HR_PAYROLL')` — so a custom role the owner granted HR access to was 403'd at the allowlist and never reached the permission check (two 403s on the Employees section). Workforce is cross-module (applies to hotel/spa/events staff too), so the restaurant-role allowlist was the wrong gate. Fix: new permission-aware `workforceStaff = requireModuleAccess(['HR_PAYROLL','ROSTER','TIMESHEET','STAFF_PAYROLL'], ['MANAGER'], 'Workforce')` swapped in for restaurantStaff on all 48 Workforce endpoints; requireTabAccess still runs on top for the exact tab. Now: a custom role (or FRONT_DESK/THERAPIST) granted HR_PAYROLL loads HR; ungranted roles get a clean 403; OWNER/MANAGER unchanged; and — unlike a bare requireTabAccess which fail-opens on a seedless role — seedless guest/partner roles (CUSTOMER/OTA/AGENT) are still denied (module gate returns 403 when perms is null). Verified: offline gate sim 12/12; regression tests TC-RBAC-HR-DENY (ungranted 403) + TC-RBAC-HR-ALLOW (granted 200). tsc clean. NOTE residual (same class, not touched): restaurantStaff still gates restaurant tabs (MENU/INVENTORY/LOYALTY/DELIVERY) so a custom role granted THOSE is still blocked — convert restaurantStaff→requireModuleAccess to finish the sweep.
       'ootb-roles-permission-aware-dashboard',       // Fix (root cause): "OOTB roles not working" — the 8 built-in operational staff roles (CHEF/WAITER/CASHIER/THERAPIST/FRONT_DESK/HOUSEKEEPING/MAINTENANCE/CONCIERGE) rendered FIXED role-specific dashboards (ChefDashboard/WaiterDashboard/TherapistDashboard/HotelStaffDashboard) that never read /my-permissions or allowed_tabs — so granting/revoking tabs for them in Settings → Staff Access was a NO-OP (concrete gaps: FRONT_DESK couldn't open Folios/manage bookings, CASHIER — wrongly rendered WaiterDashboard — had no invoices view, CHEF no Menu, HOUSEKEEPING no Housekeeping page). These were legacy blank-screen patches that predate/sidestep RBAC. Fix: ALL operator roles (owner/manager/custom/OOTB-staff) now render the permission-aware OwnerDashboard, whose left nav is filtered by allowed_tabs; owner-only tabs stay hidden (isOwnerOrAdmin=false for staff). Each OOTB role KEEPS its curated real-time board as its HOME landing (rendered inside OwnerDashboard) — kitchen queue, order/tables/waiter-calls board, therapist schedule, arrivals/guest-requests worklist — so nothing operational is lost while Staff Access finally controls their nav. Verified across all 8 OOTB roles (offline sim 68/68: each routes to OwnerDashboard, keeps its HOME board, resolves a non-empty nav with its job-critical tabs reachable, owner-only tabs hidden). Source-guard regression test TC-RBAC-OOTB-ROUTING. tsc + vite build clean.
       'location-switcher-eager-fetch-fix',           // Fix: top-bar "Location" dropdown (LocationSwitcher) disappeared the instant it was clicked (reported on a single-location owner, e.g. Ankur Cafe). Root cause: the component lazy-fetched /api/brand/my-locations ON OPEN, then `if (data && data.total_locations < 2) return null` — so a single-location owner saw the button (data still null), clicked it, the fetch returned total_locations=1, and the whole switcher UNMOUNTED. Fix: fetch the location count on MOUNT (not on open) and render nothing until we know there are 2+ locations — so single-location owners never see the switcher (its intended "hidden for one location" behaviour) and multi-location owners get a pre-loaded dropdown that opens instantly on click. Frontend-only; tsc + vite build clean.

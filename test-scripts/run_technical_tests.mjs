@@ -2499,6 +2499,22 @@ async function testRBACHardening() {
       if (hrAfter.status === 200) pass('TC-RBAC-HR-ALLOW', 'Custom role granted HR_PAYROLL CAN GET /hr/employees (workforce module gate admits it)', '200 after grant');
       else fail('TC-RBAC-HR-ALLOW', 'Custom role granted HR_PAYROLL must load /hr/employees, not 403', `got ${hrAfter.status} — workforce gate still blocks granted custom roles`);
 
+      // STRICT ENFORCEMENT — the custom role was granted ONLY { EVENTS_BOOKINGS,
+      // HR_PAYROLL }. Its /my-permissions allowed_tabs must contain exactly those
+      // (plus the '__perm_complete__' marker) and MUST NOT contain any unassigned
+      // module. Regression for "unassigned modules still visible across all custom
+      // roles" — caused by RBAC_NEWLY_ADDED injection + ALWAYS_VISIBLE grandfather.
+      const mp = await api('GET', `/api/restaurant/${restaurantId}/my-permissions`, null, tok);
+      const at = Array.isArray(mp.data?.allowed_tabs) ? mp.data.allowed_tabs : [];
+      const hasComplete = at.includes('__perm_complete__');
+      const hasGranted  = at.includes('EVENTS_BOOKINGS') && at.includes('HR_PAYROLL');
+      const leaked = ['PROCUREMENT', 'EXPENSE_JOURNAL', 'HOUSEKEEPING', 'CHECKLISTS', 'STATUS_BOARD', 'HOTEL_INVENTORY', 'SPA_CALENDAR', 'INVENTORY', 'LOYALTY', 'DELIVERY', 'ROSTER', 'TIMESHEET'].filter(t => at.includes(t));
+      if (hasComplete && hasGranted && leaked.length === 0) {
+        pass('TC-RBAC-CUSTOM-STRICT', 'Custom-role /my-permissions returns ONLY granted tabs (+ complete marker) — no grandfather leak', `${at.length} tabs, 0 leaks`);
+      } else {
+        fail('TC-RBAC-CUSTOM-STRICT', 'Custom role must see only its assigned tabs (unassigned modules must be hidden)', `complete=${hasComplete} granted=${hasGranted} leaked=[${leaked.join(',')}] allowed=${JSON.stringify(at)}`);
+      }
+
       // F3 — EVENTS_VENUES was NOT granted (absent from the role's matrix). A
       // custom role must be DENIED the venue mutation: the matrix, which shows
       // that tab as None, is authoritative (no silent default-to-Full).

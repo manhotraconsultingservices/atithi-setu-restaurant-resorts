@@ -130,6 +130,13 @@ const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY',
 // by every consumer except isTabVisible().
 const PERMS_V2_MARKER = '__perm_v2__';
 const PERMS_V3_MARKER = '__perm_v3__';
+// Emitted by /my-permissions for a CUSTOM role: its saved tab set is COMPLETE
+// and authoritative (assigned via the modern Staff Access UI). When present,
+// isTabVisible grandfathers NOTHING — a tab is visible only if explicitly in the
+// list — so unassigned modules never leak in via legacy grandfathering. (The
+// backend also stops injecting RBAC_NEWLY_ADDED for custom roles, so the API
+// denies them too.)
+const PERMS_COMPLETE_MARKER = '__perm_complete__';
 
 // Tabs that did NOT exist when V2 markers were being written. If a list
 // has a V2 marker but no V3 marker, the admin couldn't have informed
@@ -161,6 +168,12 @@ function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boo
   if (id === 'HOME') return true;   // launchpad is the default landing — always reachable
   if (!allowedTabs || allowedTabs.length === 0) return true;
   if (allowedTabs.includes(id)) return true;
+  if (allowedTabs.includes(PERMS_COMPLETE_MARKER)) {
+    // A CUSTOM role's list is COMPLETE — the owner assigned exactly these tabs.
+    // Grandfather nothing: a tab not explicitly present is hidden. (id was
+    // already matched by the includes() check above, so reaching here = absent.)
+    return false;
+  }
   if (allowedTabs.includes(PERMS_V3_MARKER)) {
     // Fully-informed exclusion as of V3 UI generation — but grandfather
     // any tab introduced after V3 was shipped (admin couldn't have seen it).
