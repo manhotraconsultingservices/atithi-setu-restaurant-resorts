@@ -47920,8 +47920,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-events-daybook-integration',
+    commit_marker: 'shift-handover',
     code_features: [
+      'shift-handover',                             // Cash Shift Handover — a joint denomination count with DUAL sign-off, added as an ADDITIVE layer over the EOD Cash Drawer engine (nothing on the existing open/close/approve path changes). Answers "how does one cashier hand the till to the next on shift change." Flow: the OUTGOING cashier initiates a handover on their OPEN drawer (POST /accounting/cash-drawers/:drawerId/handover) with a joint count + the split into carry-over float (stays in the till) vs deposit (submitted up); that is the FIRST signature (status PENDING_ACCEPT). The INCOMING cashier (or a manager) ACCEPTS (POST /accounting/cash-handovers/:id/accept) — the SECOND signature — which atomically: (1) trues up any over/short to 6010 Cash Over/Short, (2) posts the deposit through Cr 1000 Cash in Hand → Dr 1005 Cash in Transit (or 1010 Bank) [source CASH_DRAWER_DEPOSIT, ref CD-<yr>-<seq>], (3) closes the outgoing drawer as APPROVED (the two signatures ARE the dual control — so the existing day-lock "all drawers approved" gate works unchanged), and (4) opens the incoming cashier's drawer with opening_float = carry-over float. GET /accounting/cash-handovers lists them (cashiers see only their own; managers all); POST …/cancel disputes/withdraws a pending one (outgoing drawer stays OPEN to recount). New tenant table `cash_handovers` (dual signatures from_signed_by/at + to_signed_by/at, counted/expected/variance, carry_over_float, deposit_amount, deposit_to, gl refs). Day-Close sheet now returns `handovers[]` and the frontend Cash Drawers tab gains a "Hand over" action + a joint-count modal + a "Shift handovers" section (accept/cancel). RBAC: initiate = drawer owner or manager (_acctStaff); accept = incoming cashier or manager, and the outgoing signer cannot also accept unless a manager. Reconciles to GL: after accept, book Cash 1000 = carry-over float (deposit removed, variance trued up) = the incoming drawer's opening float. Verified: deterministic offline sim (test-scripts/e2e_shift_handover_sim.mjs — carry-over + deposit = counted, deposit routes to 1005/1010, variance to 6010, book cash after handover == carry-over == next opening float, dual-signature guard, trial balance Dr=Cr) + live suite TC-CD-HANDOVER. tsc + vite build clean.
       'spa-events-daybook-integration',             // Integrate Spa & Wellness and Events & Convention into the Accounting module + Day Book (parity with Hotel/Restaurant). Spa & Events already posted GL at settlement (SPA_SETTLEMENT→4040 Spa Revenue, SPA_SALE, EVENT_SETTLEMENT→4050 Banquet & Events Revenue, EVENT_ADVANCE Dr Cash/Cr 2100) so the journals reached the Day Book — but they were illegible and spa deposits were invisible until final settlement. Three changes: (1) LEGIBILITY — the frontend SOURCE_LABEL map + GL Ledger source dropdown were missing SPA_SETTLEMENT / SPA_SALE / SPA_INTERIM / EVENT_SETTLEMENT (rendered as raw "SPA SETTLEMENT"), FOLIO_SETTLEMENT was mislabeled "Hotel / Spa / Events" (it is hotel-only), and a phantom EVENT_PAYMENT filter matched nothing. Now every spa/event/reversal source has a friendly label, FOLIO_SETTLEMENT = "Hotel — folio settlement", and the GL Ledger Source dropdown is module-grouped (Restaurant / Hotel / Spa & Wellness / Events & Convention / Purchases / Payroll / Overheads / Cash control / Adjustments) with the phantom removed. (2) PER-MODULE ROLLUP — a new SOURCE_MODULE map rolls every source_type up to its business module; the Cash-by-source card (Cash Book + EOD Day-Close) now leads with a "Cash by module (today)" table (Restaurant/Hotel/Spa/Events/…) with the raw per-source list collapsed under a details toggle, and the Day Book gains a "By module (this day)" summary — revenue recognised (net Cr on 4xxx) + cash/bank in (net Dr on 1000/1010/1020) attributed to the module that raised each journal. (3) SPA DEPOSIT CASH TIMING — a spa folio receipt that does NOT clear the bill is now recorded as INTERIM and posted to the GL AT RECEIPT (Dr Cash/Bank, Cr 2100 Advances; journal INTPAY-<pid>, source SPA_INTERIM) so it lands in the same day's Day Book / Cash Book — exactly the fix already shipped for hotel folios (_postFolioGl applies ADVANCE+INTERIM against AR at settlement, so cash is never double-counted and every sub-block stays balanced). Voiding a not-yet-settled spa interim reverses INTPAY (SPA_INTERIM_REVERSAL); once the folio is settled the interim is absorbed and left untouched. Additive only — no existing GL/settlement/cash-drawer path changed. Verified: deterministic offline sim (test-scripts/e2e_spa_events_daybook_sim.mjs — spa same-day full pay, spa multi-day deposit shows day-1 cash + no double count at settlement, spa interim void, event advance+settlement, module rollup attribution, trial balance Dr=Cr) + live suite TC-ACCT-SPA-EVT-DAYBOOK. tsc + vite build clean.
       'expenses-payments-loans',                    // New: a single "Expenses & Payments" screen + "Loans / EMI" tracker in Accounting → "Expenses & Loans" group — so the owner can record rent, electricity, water, internet, salary, staff advance, EMI, repairs, marketing, office, professional, misc, paid by Cash / Bank / UPI / Cheque, WITHOUT touching Dr/Cr (the old Expense Journal was cash-only and had no Rent/EMI). Backend (owner-only): POST/GET /accounting/expense-payments auto-posts the correct double-entry — Dr the mapped expense account (RENT→new 5250, ELECTRICITY→5400, SALARY→5100, INTEREST→5460, …) or Dr 1210 Advances to Staff (staff advance = recoverable asset) or, for EMI, Dr 2700 Loan Payable (principal) + Dr 5460 Interest on Loans (interest); Cr Cash 1000 or Bank 1010 by method (source_type EXPENSE_PAYMENT). POST/GET /accounting/loans — a loan master with running outstanding; create posts Dr Cash/Bank (or Dr 3200 Opening Balance Equity for a pre-existing balance) / Cr 2700 Loan Payable; each EMI decrements outstanding by principal and auto-CLOSES at zero. New COA: 2700 Loan Payable, 3200 Opening Balance Equity, 5250 Rent, 5460 Interest on Loans. New tables loans + expense_payments. Expense-category mapper gains RENT/LEASE→5250, INTEREST→5460. GL Ledger source dropdown + cash-by-source labels gain EXPENSE_PAYMENT + LOAN. Verified: deterministic offline sim 12/12 (test-scripts/e2e_expense_payment_sim.mjs — every category balanced, cash-vs-bank routing, EMI principal/interest split, loan outstanding decrement + close, trial balance Dr=Cr) + live suite TC-ACCT-EXPPAY/LOANS/EXPVAL. tsc + vite build clean.
       'daybook-open-tables-ar',                     // Accounting review follow-ups (a) + (b). (a) DAY BOOK — new "Day Book" sub-tab under Accounting → Ledger: a single day's journal entries listed chronologically and grouped by journal_ref (sales / purchases / payments received / manual), each with its Dr/Cr lines, source label, and a day-total footer that flags balanced ✓ vs OUT OF BALANCE. Frontend-only — reuses GET /accounting/gl-entries?from=date&to=date (no backend/GL change). (b) OPEN TABLES — UNINVOICED F&B RECEIVABLE — new owner-only GET /accounting/open-tables-receivable returns the running value of dine-in table_sessions still OPEN/BILL_REQUESTED (Σ non-cancelled orders per session) as {total,count,tables[]}; surfaced as an amber card on the Cash Book so credit dine-in is visible BEFORE it settles. This is a DERIVED snapshot only — deliberately NOT posted to the GL (restaurant revenue is recognised at settlement), so it never affects the trial balance; the card copy says so. Verified: tsc + vite build clean; suite checks TC-ACCT-OPENTBL (endpoint 200 + shape) + TC-ACCT-CASHSRC (cash-book carries cash_by_source); endpoints deployed 401/404; Day Book + Open-tables UI in the live bundle.
@@ -49128,6 +49129,159 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
+  // ── Shift Handover ─────────────────────────────────────────────────────────
+  // A joint denomination count with DUAL sign-off, additive over the drawer engine.
+  // The outgoing cashier initiates (first signature) with the joint count + the
+  // carry-over/deposit split; the incoming cashier accepts (second signature),
+  // which closes the outgoing drawer APPROVED (the two signatures are the dual
+  // control), deposits the submitted cash through Cash-in-Transit (1005)/Bank (1010),
+  // trues up any over/short to 6010, and opens the incoming cashier's drawer with
+  // the carry-over float. Nothing on the existing open/close/approve path changes.
+  app.post("/api/restaurant/:id/accounting/cash-drawers/:drawerId/handover", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const d: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
+      if (!d) return res.status(404).json({ error: 'Drawer not found.' });
+      const own = String(d.cashier_id) === _drawerUserId(req);
+      if (!own && !_isMgr(req)) return res.status(403).json({ error: 'Only the drawer owner or a manager can hand over this drawer.' });
+      if (String(d.status) !== 'OPEN') return res.status(409).json({ error: `Drawer is ${String(d.status).toLowerCase()} — only an open drawer can be handed over.` });
+      if (await _dayLocked(db, req.params.id, d.business_date)) return res.status(409).json({ error: 'This business day is locked.' });
+      const dup: any = await db.get("SELECT id FROM cash_handovers WHERE from_drawer_id=? AND status='PENDING_ACCEPT'", [d.id]).catch(() => null);
+      if (dup?.id) return res.status(409).json({ error: 'A handover is already pending on this drawer.', handover_id: dup.id });
+      const body = req.body || {};
+      const toCashierName = String(body.to_cashier_name || '').trim();
+      if (!toCashierName) return res.status(400).json({ error: 'Name of the incoming cashier is required.' });
+      const denoms = Array.isArray(body.denominations) ? body.denominations : [];
+      let counted = _acctRound(body.counted_cash);
+      if (denoms.length > 0) counted = _acctRound(denoms.reduce((s: number, r: any) => s + Number(r.denom || 0) * Number(r.qty || 0), 0));
+      if (counted <= 0) return res.status(400).json({ error: 'Counted cash must be greater than zero.' });
+      const expected = _acctRound(Number(d.opening_float || 0) + await _drawerMovementNow(db, req.params.id, d.id));
+      const variance = _acctRound(counted - expected);
+      // Resolve the split: carry-over float stays in the till, deposit is submitted upward.
+      let carry = body.carry_over_float != null ? _acctRound(body.carry_over_float) : null;
+      let deposit = body.deposit_amount != null ? _acctRound(body.deposit_amount) : null;
+      if (carry == null && deposit == null) { deposit = 0; carry = counted; }
+      else if (carry == null) carry = _acctRound(counted - (deposit as number));
+      else if (deposit == null) deposit = _acctRound(counted - (carry as number));
+      if ((carry as number) < 0 || (deposit as number) < 0) return res.status(400).json({ error: 'Carry-over float and deposit cannot be negative.' });
+      if (Math.abs(_acctRound((carry as number) + (deposit as number)) - counted) > 0.01) return res.status(400).json({ error: `Carry-over (${carry}) + deposit (${deposit}) must equal counted cash (${counted}).` });
+      const id = `HND-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO cash_handovers (id, restaurant_id, business_date, status, from_drawer_id, from_cashier_id, from_cashier_name, to_cashier_id, to_cashier_name, shift_label, denominations, counted_cash, expected_cash, variance, carry_over_float, deposit_amount, deposit_to, from_signed_by, from_signed_at, note)
+         VALUES (?, ?, ?, 'PENDING_ACCEPT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+        [id, req.params.id, d.business_date, d.id, d.cashier_id, d.cashier_name, (body.to_cashier_id ? String(body.to_cashier_id) : null), toCashierName, body.shift_label || d.shift_label || null, JSON.stringify(denoms), counted, expected, variance, carry, deposit, String(body.deposit_to || 'SAFE'), _drawerUserId(req), body.note || null]
+      );
+      const row = await db.get("SELECT * FROM cash_handovers WHERE id=?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // List handovers (managers: all; cashiers: only those they are a party to).
+  app.get("/api/restaurant/:id/accounting/cash-handovers", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { date, status } = req.query as Record<string, string>;
+      const clauses = ['restaurant_id = ?']; const params: any[] = [req.params.id];
+      if (date)   { clauses.push('business_date = ?'); params.push(date); }
+      if (status) { clauses.push('status = ?'); params.push(String(status).toUpperCase()); }
+      if (!_isMgr(req)) { const u = _drawerUserId(req); clauses.push('(from_cashier_id = ? OR to_cashier_id = ?)'); params.push(u, u); }
+      const rows = await db.query(`SELECT * FROM cash_handovers WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT 500`, params);
+      res.json(Array.isArray(rows) ? rows : []);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Accept a handover (SECOND signature — the incoming cashier or a manager). Runs the
+  // whole atomic transfer: variance → deposit → close outgoing → open incoming.
+  app.post("/api/restaurant/:id/accounting/cash-handovers/:handoverId/accept", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const h: any = await db.get("SELECT * FROM cash_handovers WHERE id=? AND restaurant_id=?", [req.params.handoverId, req.params.id]);
+      if (!h) return res.status(404).json({ error: 'Handover not found.' });
+      if (String(h.status) !== 'PENDING_ACCEPT') return res.status(409).json({ error: `Handover is already ${String(h.status).toLowerCase()}.` });
+      const me = _drawerUserId(req);
+      const isIncoming = h.to_cashier_id && String(h.to_cashier_id) === me;
+      if (!isIncoming && !_isMgr(req)) return res.status(403).json({ error: 'Only the incoming cashier (or a manager) can accept this handover.' });
+      // A real second person must sign; a manager may override (they are the control).
+      if (String(h.from_signed_by) === me && !_isMgr(req)) return res.status(403).json({ error: 'The outgoing cashier cannot also accept — a second person must sign.' });
+      if (await _dayLocked(db, req.params.id, h.business_date)) return res.status(409).json({ error: 'This business day is locked.' });
+      const from: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [h.from_drawer_id, req.params.id]);
+      if (!from) return res.status(404).json({ error: 'Outgoing drawer not found.' });
+      if (String(from.status) !== 'OPEN') return res.status(409).json({ error: `Outgoing drawer is ${String(from.status).toLowerCase()} — cannot complete handover.` });
+      const incomingId = h.to_cashier_id || me;
+      const openDup: any = await db.get("SELECT id FROM cash_drawers WHERE restaurant_id=? AND cashier_id=? AND business_date=? AND status IN ('OPEN','PENDING_APPROVAL')", [req.params.id, incomingId, h.business_date]).catch(() => null);
+      if (openDup?.id) return res.status(409).json({ error: 'The incoming cashier already has an open drawer — close it first.', drawer_id: openDup.id });
+      const date = h.business_date;
+      const variance = _acctRound(h.variance);
+      const deposit = _acctRound(h.deposit_amount);
+      const carry = _acctRound(h.carry_over_float);
+      // 1) True up over/short so book cash matches the joint physical count.
+      let varRef: string | null = null;
+      if (Math.abs(variance) >= 0.01) {
+        const seq = await getNextTenantSequence(db, 'cashdrawer');
+        varRef = `CD-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+        const lines: GlLine[] = [
+          { account_code: '1000', account_name: 'Cash in Hand',      dr_amount: variance > 0 ? variance : 0,  cr_amount: variance < 0 ? -variance : 0, narration: `Shift handover variance ${date}` },
+          { account_code: '6010', account_name: 'Cash Over / Short', dr_amount: variance < 0 ? -variance : 0, cr_amount: variance > 0 ? variance : 0,  narration: `Shift handover variance ${date}` },
+        ];
+        await _postGlEntries(db, req.params.id, varRef, date, 'CASH_DRAWER_VARIANCE', h.id, lines, me);
+      }
+      // 2) Deposit the submitted cash out of the drawer (Cash-in-Transit / Bank).
+      let depRef: string | null = null;
+      if (deposit > 0.009) {
+        const seq = await getNextTenantSequence(db, 'cashdrawer');
+        depRef = `CD-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+        const toBank = String(h.deposit_to || 'SAFE').toUpperCase() === 'BANK';
+        const acct = toBank ? { code: '1010', name: 'Bank — Main Account' } : { code: '1005', name: 'Cash in Transit' };
+        const lines: GlLine[] = [
+          { account_code: acct.code, account_name: acct.name, dr_amount: deposit, cr_amount: 0, narration: `Shift handover deposit ${date} (${h.from_cashier_name || ''} → ${h.to_cashier_name || ''})` },
+          { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 0, cr_amount: deposit, narration: `Shift handover deposit ${date}` },
+        ];
+        await _postGlEntries(db, req.params.id, depRef, date, 'CASH_DRAWER_DEPOSIT', h.id, lines, me);
+      }
+      // 3) Close the outgoing drawer — APPROVED (the two signatures are the approval).
+      await db.run(
+        `UPDATE cash_drawers SET status='APPROVED', counted_cash=?, denominations=?, expected_cash=?, variance=?, deposit_amount=?, deposit_to=?, retained_float=?, closed_at=CURRENT_TIMESTAMP, closed_by=?, approved_by=?, approved_at=CURRENT_TIMESTAMP, approval_note=?, deposit_journal_ref=?, variance_journal_ref=? WHERE id=?`,
+        [h.counted_cash, h.denominations, h.expected_cash, variance, deposit, h.deposit_to, carry, h.from_signed_by, me, `Shift handover → ${h.to_cashier_name || ''}`, depRef, varRef, from.id]
+      );
+      // 4) Open the incoming cashier's drawer with the carry-over float.
+      const toDrawerId = `DRW-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO cash_drawers (id, restaurant_id, business_date, shift_label, cashier_id, cashier_name, status, opening_float, opened_by, note)
+         VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)`,
+        [toDrawerId, req.params.id, date, h.shift_label || from.shift_label || null, incomingId, h.to_cashier_name, carry, me, `Opened by shift handover ${h.id} from ${h.from_cashier_name || ''}`]
+      );
+      // 5) Finalise the handover — second signature.
+      await db.run(
+        `UPDATE cash_handovers SET status='ACCEPTED', to_drawer_id=?, to_cashier_id=?, to_signed_by=?, to_signed_at=CURRENT_TIMESTAMP, deposit_journal_ref=?, variance_journal_ref=? WHERE id=?`,
+        [toDrawerId, incomingId, me, depRef, varRef, h.id]
+      );
+      const handover = await db.get("SELECT * FROM cash_handovers WHERE id=?", [h.id]);
+      const from_drawer = await db.get("SELECT * FROM cash_drawers WHERE id=?", [from.id]);
+      const to_drawer = await db.get("SELECT * FROM cash_drawers WHERE id=?", [toDrawerId]);
+      res.json({ handover, from_drawer, to_drawer });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Cancel / dispute a pending handover (a party to it, or a manager). The outgoing
+  // drawer stays OPEN so it can be recounted or handed over again.
+  app.post("/api/restaurant/:id/accounting/cash-handovers/:handoverId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const h: any = await db.get("SELECT * FROM cash_handovers WHERE id=? AND restaurant_id=?", [req.params.handoverId, req.params.id]);
+      if (!h) return res.status(404).json({ error: 'Handover not found.' });
+      if (String(h.status) !== 'PENDING_ACCEPT') return res.status(409).json({ error: `Handover is already ${String(h.status).toLowerCase()}.` });
+      const me = _drawerUserId(req);
+      const party = String(h.from_cashier_id) === me || String(h.to_cashier_id) === me || String(h.from_signed_by) === me;
+      if (!party && !_isMgr(req)) return res.status(403).json({ error: 'Only a party to the handover or a manager can cancel it.' });
+      await db.run("UPDATE cash_handovers SET status='CANCELLED', cancel_reason=? WHERE id=?", [String(req.body?.reason || 'Cancelled'), h.id]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
   // EOD Day-Close sheet: drawers + totals + GL cash position + (manager) tender
   // breakdown + cash expenses + lock status.
   app.get("/api/restaurant/:id/accounting/day-close", authenticate, async (req: AuthRequest, res: Response) => {
@@ -49173,11 +49327,15 @@ ${data.tenant.name}`;
         cashBySource = (rows || []).map(r => ({ source_type: r.source_type || 'UNKNOWN', in: _acctRound(r.din), out: _acctRound(r.dout) }));
       }
       const lockRow: any = await db.get("SELECT * FROM cash_day_locks WHERE restaurant_id=? AND business_date=?", [req.params.id, date]).catch(() => null);
+      const hClauses = ['restaurant_id=?', 'business_date=?']; const hParams: any[] = [req.params.id, date];
+      if (!isMgr) { hClauses.push('(from_cashier_id=? OR to_cashier_id=?)'); const u = _drawerUserId(req); hParams.push(u, u); }
+      const handovers: any[] = await db.query(`SELECT * FROM cash_handovers WHERE ${hClauses.join(' AND ')} ORDER BY created_at DESC`, hParams).catch(() => []);
       res.json({
         date,
         locked: String(lockRow?.status || '') === 'LOCKED',
         lock: lockRow || null,
         drawers: Array.isArray(drawers) ? drawers : [],
+        handovers: Array.isArray(handovers) ? handovers : [],
         totals,
         gl_cash: { opening: cashOpening, in: cashIn, out: cashOut, closing: _acctRound(cashOpening + cashIn - cashOut) },
         tender,

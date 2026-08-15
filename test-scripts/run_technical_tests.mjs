@@ -2390,6 +2390,18 @@ async function testCashDrawer() {
     fail('TC-CD-GUARD', 'drawer close guard', `expected 404/403, got ${guard.status}`);
   }
 
+  // TC-CD-HANDOVER: Shift Handover endpoints are deployed. The list returns an array,
+  // and initiating a handover on a bogus drawer reaches the handler (404, no mutation).
+  const hoList = await api('GET', `/api/restaurant/${restaurantId}/accounting/cash-handovers`);
+  const hoGuard = await api('POST', `/api/restaurant/${restaurantId}/accounting/cash-drawers/AUTOTEST-BOGUS/handover`, { to_cashier_name: 'X', counted_cash: 100 });
+  if (Array.isArray(hoList.data) && (hoGuard.status === 404 || hoGuard.status === 403)) {
+    pass('TC-CD-HANDOVER', `handovers list deployed (${hoList.data.length}); initiate guarded (HTTP ${hoGuard.status})`);
+  } else if (hoList.status === 403) {
+    skip('TC-CD-HANDOVER', 'shift handover', 'not owner');
+  } else {
+    fail('TC-CD-HANDOVER', 'shift handover', `list HTTP ${hoList.status}, guard HTTP ${hoGuard.status}`);
+  }
+
   // TC-ACCT-OPENTBL: open-tables (uninvoiced F&B) receivable — deployed + shape.
   const otr = await api('GET', `/api/restaurant/${restaurantId}/accounting/open-tables-receivable`);
   if (otr.status === 200 && typeof otr.data?.total === 'number' && Array.isArray(otr.data?.tables)) {

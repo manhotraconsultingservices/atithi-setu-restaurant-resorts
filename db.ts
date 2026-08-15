@@ -2677,6 +2677,44 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       UNIQUE (restaurant_id, business_date)
     );
 
+    -- Shift handover: a joint denomination count with dual sign-off. The outgoing
+    -- cashier initiates (first signature); the incoming cashier accepts (second
+    -- signature), which closes the outgoing drawer APPROVED, deposits the submitted
+    -- cash through Cash-in-Transit (1005)/Bank (1010), trues up over/short to 6010,
+    -- and opens the incoming cashier's drawer with the carry-over float. Additive over
+    -- the cash_drawers engine — nothing on the existing open/close/approve path changes.
+    CREATE TABLE IF NOT EXISTS cash_handovers (
+      id                   TEXT PRIMARY KEY,
+      restaurant_id        TEXT NOT NULL,
+      business_date        TEXT NOT NULL,
+      status               TEXT NOT NULL DEFAULT 'PENDING_ACCEPT', -- PENDING_ACCEPT | ACCEPTED | CANCELLED
+      from_drawer_id       TEXT NOT NULL,
+      from_cashier_id      TEXT,
+      from_cashier_name    TEXT,
+      to_drawer_id         TEXT,
+      to_cashier_id        TEXT,
+      to_cashier_name      TEXT,
+      shift_label          TEXT,
+      denominations        TEXT,
+      counted_cash         REAL DEFAULT 0,
+      expected_cash        REAL DEFAULT 0,
+      variance             REAL DEFAULT 0,
+      carry_over_float     REAL DEFAULT 0,
+      deposit_amount       REAL DEFAULT 0,
+      deposit_to           TEXT,
+      from_signed_by       TEXT,
+      from_signed_at       TEXT,
+      to_signed_by         TEXT,
+      to_signed_at         TEXT,
+      deposit_journal_ref  TEXT,
+      variance_journal_ref TEXT,
+      note                 TEXT,
+      cancel_reason        TEXT,
+      created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_cashhandover_res_date ON cash_handovers (restaurant_id, business_date);
+    CREATE INDEX IF NOT EXISTS idx_cashhandover_from ON cash_handovers (from_drawer_id, status);
+
     -- Loans / EMI: liability master with a running outstanding balance. Each EMI
     -- (recorded via expense_payments) splits principal (reduces this) + interest.
     CREATE TABLE IF NOT EXISTS loans (

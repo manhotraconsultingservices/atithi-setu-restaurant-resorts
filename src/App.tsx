@@ -8039,8 +8039,16 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   const [cdDeposit, setCdDeposit] = useState('');
   const [cdDepositTo, setCdDepositTo] = useState('BANK');
   const [cdPostVar, setCdPostVar] = useState(true);
+  // Shift handover (joint count + dual sign-off)
+  const [handoverDrawer, setHandoverDrawer] = useState<any>(null);
+  const [hoTo, setHoTo] = useState('');
+  const [hoDenomQty, setHoDenomQty] = useState<Record<number, string>>({});
+  const [hoDeposit, setHoDeposit] = useState('');
+  const [hoDepositTo, setHoDepositTo] = useState('SAFE');
+  const [hoShift, setHoShift] = useState('');
   const loadDayClose = useCallback(() => { setLoading(true); acctApi(`/accounting/day-close?date=${dcDate}`).then(d => { if (d && !d.error) setDayClose(d); }).finally(() => setLoading(false)); }, [acctApi, dcDate]);
   const cdCountedTotal = DENOMS.reduce((s, dn) => s + dn * (parseInt(denomQty[dn] || '0', 10) || 0), 0);
+  const hoCountedTotal = DENOMS.reduce((s, dn) => s + dn * (parseInt(hoDenomQty[dn] || '0', 10) || 0), 0);
   const openDrawer = async () => {
     setCdMsg(null);
     const res = await acctApi('/accounting/cash-drawers', { method: 'POST', body: JSON.stringify({ business_date: dcDate, opening_float: parseFloat(ndFloat) || 0, shift_label: ndShift || null, cashier_name: ndCashier || null }) });
@@ -8056,6 +8064,17 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
     if (res && !res.error) { setClosingDrawer(null); setDenomQty({}); setCdDeposit(''); setCdMsg({ type: 'ok', text: `Counted ${fmtAmt(res.counted_cash)} · variance ${fmtAmt(res.variance)} — sent for approval` }); loadDayClose(); }
     else setCdMsg({ type: 'err', text: res?.error || 'Failed to submit count' });
   };
+  const submitHandover = async () => {
+    if (!handoverDrawer) return;
+    setCdMsg(null);
+    const denominations = DENOMS.map(dn => ({ denom: dn, qty: parseInt(hoDenomQty[dn] || '0', 10) || 0 })).filter(x => x.qty > 0);
+    const deposit_amount = parseFloat(hoDeposit) || 0;
+    const res = await acctApi(`/accounting/cash-drawers/${handoverDrawer.id}/handover`, { method: 'POST', body: JSON.stringify({ to_cashier_name: hoTo.trim(), denominations, counted_cash: hoCountedTotal, deposit_amount, carry_over_float: hoCountedTotal - deposit_amount, deposit_to: hoDepositTo, shift_label: hoShift || null }) });
+    if (res && !res.error) { setHandoverDrawer(null); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoShift(''); setCdMsg({ type: 'ok', text: `Handover to ${res.to_cashier_name} started — awaiting their sign-off` }); loadDayClose(); }
+    else setCdMsg({ type: 'err', text: res?.error || 'Failed to start handover' });
+  };
+  const acceptHandover = async (h: any) => { setCdMsg(null); const res = await acctApi(`/accounting/cash-handovers/${h.id}/accept`, { method: 'POST', body: JSON.stringify({}) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: `Handover accepted — ${h.to_cashier_name}'s drawer opened with ${fmtAmt(h.carry_over_float)}` }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Failed to accept handover' }); };
+  const cancelHandover = async (h: any) => { setCdMsg(null); const res = await acctApi(`/accounting/cash-handovers/${h.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Cancelled' }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: 'Handover cancelled' }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Failed to cancel' }); };
   const approveDrawer = async (d: any) => { const res = await acctApi(`/accounting/cash-drawers/${d.id}/approve`, { method: 'POST', body: JSON.stringify({ post_variance: cdPostVar }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: `Approved ${d.cashier_name}` }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Approve failed' }); };
   const rejectDrawer = async (d: any) => { const res = await acctApi(`/accounting/cash-drawers/${d.id}/reject`, { method: 'POST', body: JSON.stringify({ reason: 'Recount requested' }) }); if (res && !res.error) loadDayClose(); else setCdMsg({ type: 'err', text: res?.error || 'Reject failed' }); };
   const lockDay = async () => { const res = await acctApi('/accounting/day-close/lock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: 'Day locked' }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Lock failed' }); };
@@ -8951,6 +8970,7 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
                     <td className="px-3 py-2"><span className={`text-xs rounded-full px-2 py-0.5 whitespace-nowrap ${d.status === 'APPROVED' ? 'bg-emerald-100 text-emerald-800' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-800' : d.status === 'REJECTED' ? 'bg-rose-100 text-rose-800' : 'bg-sky-100 text-sky-800'}`}>{String(d.status).replace(/_/g, ' ')}</span></td>
                     <td className="px-3 py-2 whitespace-nowrap">
                       {(d.status === 'OPEN' || d.status === 'REJECTED') && <button onClick={() => { setClosingDrawer(d); setDenomQty({}); setCdDeposit(''); }} className="text-xs text-[#a0522d] underline">Close &amp; count</button>}
+                      {d.status === 'OPEN' && <button onClick={() => { setHandoverDrawer(d); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoShift(d.shift_label || ''); }} className="text-xs text-sky-700 underline ml-2">Hand over</button>}
                       {d.status === 'PENDING_APPROVAL' && (<span className="flex gap-2"><button onClick={() => approveDrawer(d)} className="text-xs text-emerald-700 underline">Approve</button><button onClick={() => rejectDrawer(d)} className="text-xs text-rose-700 underline">Reject</button></span>)}
                       {d.status === 'APPROVED' && <span className="text-[11px] font-mono text-[#9c8e85]">{d.deposit_journal_ref || '✓'}</span>}
                     </td>
@@ -8959,6 +8979,32 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
               </table>
             </div>
           ) : dayClose ? <p className="text-sm text-[#6b5d52] italic">No drawers opened for this day yet.</p> : null}
+
+          {dayClose && (dayClose.handovers || []).length > 0 && (
+            <div className="rounded-lg border border-[#e8ded0] bg-white p-3">
+              <p className="text-[11px] text-[#6b5d52] uppercase tracking-wide font-semibold mb-2">🔁 Shift handovers</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead><tr className="text-left text-[#9c8e85]">{['From → To', 'Counted', 'Carry-over', 'Deposit', 'Variance', 'Status', ''].map(h => <th key={h} className="py-1 font-medium whitespace-nowrap">{h}</th>)}</tr></thead>
+                  <tbody>{dayClose.handovers.map((h: any) => (
+                    <tr key={h.id} className="border-t border-[#f0e8d8]">
+                      <td className="py-1.5 whitespace-nowrap"><span className="font-medium text-[#5a4a3a]">{h.from_cashier_name || '—'}</span> <span className="text-[#9c8e85]">→</span> <span className="font-medium text-[#5a4a3a]">{h.to_cashier_name || '—'}</span></td>
+                      <td className="py-1.5 text-right tabular-nums">{fmtAmt(h.counted_cash)}</td>
+                      <td className="py-1.5 text-right tabular-nums">{fmtAmt(h.carry_over_float)}</td>
+                      <td className="py-1.5 text-right tabular-nums">{fmtAmt(h.deposit_amount)}</td>
+                      <td className={`py-1.5 text-right tabular-nums ${Math.abs(Number(h.variance || 0)) >= 0.01 ? 'text-rose-700 font-semibold' : ''}`}>{fmtAmt(h.variance)}</td>
+                      <td className="py-1.5"><span className={`text-xs rounded-full px-2 py-0.5 whitespace-nowrap ${h.status === 'ACCEPTED' ? 'bg-emerald-100 text-emerald-800' : h.status === 'PENDING_ACCEPT' ? 'bg-amber-100 text-amber-800' : 'bg-stone-200 text-stone-700'}`}>{String(h.status).replace(/_/g, ' ')}</span></td>
+                      <td className="py-1.5 whitespace-nowrap">
+                        {h.status === 'PENDING_ACCEPT' && !dayClose.locked && (<span className="flex gap-2"><button onClick={() => acceptHandover(h)} className="text-xs text-emerald-700 underline">Accept &amp; sign</button><button onClick={() => cancelHandover(h)} className="text-xs text-rose-700 underline">Cancel</button></span>)}
+                        {h.status === 'ACCEPTED' && <span className="text-[11px] font-mono text-[#9c8e85]">{h.deposit_journal_ref || '✓'}</span>}
+                      </td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+              <p className="text-[11px] text-[#9c8e85] mt-2">A handover is a joint count with two signatures — the outgoing cashier starts it, the incoming cashier accepts. On accept, the deposit posts through Cash-in-Transit (1005) and the incoming drawer opens with the carry-over float.</p>
+            </div>
+          )}
 
           <label className="flex items-center gap-2 text-xs text-[#6b5d52]"><input type="checkbox" checked={cdPostVar} onChange={e => setCdPostVar(e.target.checked)} /> On approve, post any over/short to Cash Over/Short (6010)</label>
           <p className="text-[11px] text-[#9c8e85]">Expected = opening float + net cash (GL 1000) collected during the drawer’s shift. Approving posts the deposit (Cash → Bank / Cash-in-Transit) and, if ticked, trues up over/short. Lock the day once every drawer is approved.</p>
@@ -8987,6 +9033,37 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
                 <div className="flex gap-2 justify-end pt-2">
                   <button onClick={() => setClosingDrawer(null)} className="px-3 py-1.5 text-sm text-[#6b5d52] rounded hover:bg-[#f5f0e8]">Cancel</button>
                   <button onClick={submitClose} disabled={cdCountedTotal <= 0} className={AC_BTN}>Submit for approval</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {handoverDrawer && (
+            <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-3" onClick={e => { if (e.target === e.currentTarget) setHandoverDrawer(null); }}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 space-y-3 max-h-[90vh] overflow-y-auto">
+                <h3 className="text-lg font-bold text-[#1a1208]">Shift handover — {handoverDrawer.cashier_name}</h3>
+                <p className="text-xs text-[#6b5d52]">Count the drawer <span className="font-semibold">together</span> with the incoming cashier, then split it into the float they keep and the cash you submit. You sign now; they sign on accept.</p>
+                <div><label className="text-xs text-[#6b5d52] block">Incoming cashier</label><input value={hoTo} onChange={e => setHoTo(e.target.value)} placeholder="Name of the next cashier" className={`${AC_INPUT} mt-1 w-full`} /></div>
+                <div className="grid grid-cols-2 gap-2">
+                  {DENOMS.map(dn => (
+                    <div key={dn} className="flex items-center gap-2">
+                      <span className="text-sm text-[#6b5d52] w-14 text-right tabular-nums">₹{dn}</span>
+                      <span className="text-[#9c8e85]">×</span>
+                      <input type="number" min="0" value={hoDenomQty[dn] || ''} onChange={e => setHoDenomQty({ ...hoDenomQty, [dn]: e.target.value })} placeholder="0" className="w-16 text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums" />
+                      <span className="text-xs text-[#9c8e85] tabular-nums ml-auto">{fmtAmt(dn * (parseInt(hoDenomQty[dn] || '0', 10) || 0))}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center justify-between border-t border-[#f0e8d8] pt-2"><span className="font-semibold text-[#1a1208]">Counted total</span><span className="text-xl font-bold text-[#1a1208] tabular-nums">{fmtAmt(hoCountedTotal)}</span></div>
+                <div className="flex flex-wrap items-end gap-3">
+                  <div><label className="text-xs text-[#6b5d52] block">Deposit / submit ₹</label><input type="number" value={hoDeposit} onChange={e => setHoDeposit(e.target.value)} placeholder="0.00" className={`${AC_INPUT} mt-1 w-28 tabular-nums`} /></div>
+                  <div><label className="text-xs text-[#6b5d52] block">Deposit to</label><select value={hoDepositTo} onChange={e => setHoDepositTo(e.target.value)} className={`${AC_INPUT} mt-1`}><option value="SAFE">Safe (Cash in Transit)</option><option value="MANAGER">Manager (Cash in Transit)</option><option value="BANK">Bank</option></select></div>
+                  <div className="text-xs text-[#6b5d52]">Carry-over float: <span className="font-semibold tabular-nums">{fmtAmt(hoCountedTotal - (parseFloat(hoDeposit) || 0))}</span></div>
+                </div>
+                <p className="text-[11px] text-[#9c8e85]">Carry-over stays in the till and becomes the next cashier’s opening float. The deposit is removed and booked to {hoDepositTo === 'BANK' ? 'Bank (1010)' : 'Cash in Transit (1005)'}. Over/short trues up to 6010 on accept.</p>
+                <div className="flex gap-2 justify-end pt-2">
+                  <button onClick={() => setHandoverDrawer(null)} className="px-3 py-1.5 text-sm text-[#6b5d52] rounded hover:bg-[#f5f0e8]">Cancel</button>
+                  <button onClick={submitHandover} disabled={hoCountedTotal <= 0 || !hoTo.trim()} className={AC_BTN}>Start handover (sign)</button>
                 </div>
               </div>
             </div>
