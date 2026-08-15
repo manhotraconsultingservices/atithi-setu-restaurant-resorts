@@ -200,7 +200,10 @@ function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boo
 //     served by HOUSEKEEPING-keyed endpoints), not on its own id.
 // Keep these two maps in lockstep with isVisible() (App.tsx, the MY_CHECKLIST /
 // EVENTS_HOUSEKEEPING branches).
-const CONTENT_ALWAYS_ALLOWED = new Set<string>(['HOME', 'MY_CHECKLIST']);
+// CASH_DRAWER (cashier till + shift handover) is nav-gated to cash-handling roles
+// in isVisible(); its content is served by cashier-accessible (_acctStaff) endpoints,
+// so treat it as always content-reachable (the nav is the gate, the backend enforces).
+const CONTENT_ALWAYS_ALLOWED = new Set<string>(['HOME', 'MY_CHECKLIST', 'CASH_DRAWER']);
 const CONTENT_PERM_ALIAS: Record<string, string> = { EVENTS_HOUSEKEEPING: 'HOUSEKEEPING' };
 function isContentAccessible(activeTab: string, allowedTabs: string[] | null | undefined): boolean {
   if (!allowedTabs) return true;                      // owner/manager — no restriction
@@ -7889,11 +7892,14 @@ function SettlementUploadForm({
   );
 }
 
-function AccountingView({ restaurantId, token }: { restaurantId: string; token: string }) {
+function AccountingView({ restaurantId, token, initialTab, cashierMode }: { restaurantId: string; token: string; initialTab?: string; cashierMode?: boolean }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
     | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
     | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
-  const [acctTab, setAcctTab] = useState<SubTab>('TRIAL');
+  // cashierMode (used by the top-level "Cash" nav item) opens straight on the
+  // Cash Drawers panel and hides the rest of the ledger nav, so a cashier reaches
+  // their till + shift handover in one click without the owner-only accounting tabs.
+  const [acctTab, setAcctTab] = useState<SubTab>((initialTab as SubTab) || 'TRIAL');
   const [coa, setCoa] = useState<any[]>([]);
   const [glEntries, setGlEntries] = useState<any[]>([]);
   const [trialBalance, setTrialBalance] = useState<any[]>([]);
@@ -8322,10 +8328,11 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Ledger &amp; Books</h2>
-        <p className="text-sm text-[#6b5d52] mt-1">Double-entry GL · Trial balance · TDS tracker · Manual journals</p>
+        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{cashierMode ? 'Cash Drawer & Shift Handover' : 'Ledger & Books'}</h2>
+        <p className="text-sm text-[#6b5d52] mt-1">{cashierMode ? 'Open your till · count & close · hand over to the next shift' : 'Double-entry GL · Trial balance · TDS tracker · Manual journals'}</p>
       </div>
 
+      {!cashierMode && (
       <div className="space-y-2">
         <div className="flex gap-1.5 flex-wrap">
           {ACCT_GROUPS.map(g => (
@@ -8344,6 +8351,7 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
           ))}
         </div>
       </div>
+      )}
 
       {loading && <p className="text-sm text-[#6b5d52] animate-pulse">Loading...</p>}
 
@@ -8971,7 +8979,7 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
                     <td className="px-3 py-2 whitespace-nowrap">
                       {(d.status === 'OPEN' || d.status === 'REJECTED') && <button onClick={() => { setClosingDrawer(d); setDenomQty({}); setCdDeposit(''); }} className="text-xs text-[#a0522d] underline">Close &amp; count</button>}
                       {d.status === 'OPEN' && <button onClick={() => { setHandoverDrawer(d); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoShift(d.shift_label || ''); }} className="text-xs text-sky-700 underline ml-2">Hand over</button>}
-                      {d.status === 'PENDING_APPROVAL' && (<span className="flex gap-2"><button onClick={() => approveDrawer(d)} className="text-xs text-emerald-700 underline">Approve</button><button onClick={() => rejectDrawer(d)} className="text-xs text-rose-700 underline">Reject</button></span>)}
+                      {d.status === 'PENDING_APPROVAL' && (dayClose?.can_lock ? (<span className="flex gap-2"><button onClick={() => approveDrawer(d)} className="text-xs text-emerald-700 underline">Approve</button><button onClick={() => rejectDrawer(d)} className="text-xs text-rose-700 underline">Reject</button></span>) : <span className="text-[11px] text-amber-700">awaiting manager approval</span>)}
                       {d.status === 'APPROVED' && <span className="text-[11px] font-mono text-[#9c8e85]">{d.deposit_journal_ref || '✓'}</span>}
                     </td>
                   </tr>
@@ -9504,6 +9512,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ACCOUNTS_VENDOR_AGING'                     // Vendor aging — what we owe suppliers
     | 'SPA_BILLING'                               // Spa settlement ledger in Accounts context
     | 'ACCOUNTING'                                // Double-entry GL · trial balance · TDS tracker
+    | 'CASH_DRAWER'                               // Cashier till + shift handover (top-level shortcut into the Cash Drawers panel)
     | 'ALL_REPORTS'                              // Unified reports hub (Aiosell-style — all 26 reports)
     | 'HOME'                                      // post-login launchpad (welcome + Hotel/Restaurant tiles)
   >('HOME');
@@ -14793,6 +14802,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
+            // Cash = one-click cashier till + shift handover, surfaced out of the
+            // owner-only Ledger & Books so cash-handling staff reach it directly.
+            id: 'CASH', label: 'Cash', icon: <IndianRupee size={16} />,
+            visible: true,
+            tabs: [
+              { id: 'CASH_DRAWER', label: 'Cash Drawer' },
+            ],
+          },
+          {
             id: 'INVENTORY_MGR', label: 'Inventory', icon: <Package size={16} />,
             visible: true,
             tabs: [
@@ -14889,6 +14907,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // they are never locked out by a stale permission save. Staff
           // visibility still flows through isTabVisible (V3 fix handles it).
           if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING' || id === 'ACCOUNTING') && isOwnerOrAdmin) return true;
+          // Cash Drawer (till + shift handover) — the underlying endpoints are cashier-
+          // accessible (_acctStaff), so surface it to cash-handling roles directly, plus
+          // any role the owner grants it in Staff Access.
+          if (id === 'CASH_DRAWER') return isOwnerOrAdmin || currentRole === 'MANAGER' || currentRole === 'CASHIER' || currentRole === 'FRONT_DESK' || isTabVisible(id, effectiveAllowedTabs);
           // Spa Billing — module-gated AND permissionable (was hard-forced visible).
           if (id === 'SPA_BILLING') return isSpaEnabled && (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs));
           // The Events-module cleaning tab reuses the shared HOUSEKEEPING
@@ -18927,6 +18949,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : activeTab === 'ACCOUNTING' ? (
         <div className="p-1"><AccountingView restaurantId={restaurantId} token={token!} /></div>
+      ) : activeTab === 'CASH_DRAWER' ? (
+        <div className="p-1"><AccountingView restaurantId={restaurantId} token={token!} initialTab="CASHDRAWER" cashierMode /></div>
       ) : activeTab === 'REPORTS' ? (
         // Hotel-mode owners get hotel-focused KPIs (occupancy, ADR,
         // RevPAR, ancillary, guest rating) instead of restaurant
