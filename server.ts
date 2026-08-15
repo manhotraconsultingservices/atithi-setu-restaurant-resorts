@@ -47866,8 +47866,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'restaurant-bill-charge-to-room',
+    commit_marker: 'eod-cash-drawer',
     code_features: [
+      'eod-cash-drawer',                            // Enhancement (client demo gap): "how to handle cash collected during the day" → a per-cashier EOD Cash Drawer / Day-Close, added to Accounting (Controls → "Cash Drawers"). Additive over the existing Cash Book / Cash Count / Petty Cash / GL — NO settlement path is touched. New tenant tables `cash_drawers` (lifecycle OPEN→PENDING_APPROVAL→APPROVED|REJECTED) + `cash_day_locks`, and COA account `1005 Cash in Transit`. Model: a drawer = one cashier's till for a shift; **expected cash = opening float + net GL Cash-in-Hand (1000) movement during the drawer's open window** (standard POS drawer math; reconciles to the same GL account the Cash Book already trusts — the window uses a column-to-column timestamp compare dr.opened_at↔gl.created_at so it is timezone-safe). Endpoints (all under /api/restaurant/:id/accounting, gated: cashiers manage their OWN drawer via ownership, managers oversee, unlock owner-only): GET/POST cash-drawers (list/open), GET cash-drawers/:id (detail + live expected, revealed to managers or after close so a cashier counts blind), POST …/close (denomination-grid count → expected snapshot + variance → PENDING_APPROVAL), POST …/approve (posts the deposit journal Cr 1000 → Dr 1010 Bank / 1005 Transit, and optional variance journal 1000↔6010 Cash Over/Short), POST …/reject, GET day-close (EOD sheet: drawers + totals + GL cash position + manager tender breakdown from payment rows + cash expenses + lock state), POST day-close/lock (requires every drawer APPROVED) + /unlock. Frontend: Accounting → Controls → "Cash Drawers" — open-drawer form, per-cashier drawers table with Close&count (denomination modal, auto-total, deposit + retained float) / Approve / Reject, EOD summary cards, GL cash position, tender breakdown, Lock day. NOTE (documented limitation): per-cashier attribution is exact for sequential shifts; concurrent same-day cashiers share the GL-net window and the manager reconciles at the EOD sheet (a hard per-payment drawer stamp is the follow-up for shared-login concurrency). Verified: deterministic offline sim 14/14 (test-scripts/e2e_cash_drawer_sim.mjs — expected math, denomination count, deposit GL, shortage true-up to 6010, sequential-shift attribution, lock gate) + live suite checks TC-CD-LIST/DAYCLOSE/RECONCILE(day-close GL cash == Cash Book)/GUARD + endpoints deployed (401/404). tsc + vite build clean.
       'restaurant-bill-charge-to-room',              // Enhancement: a restaurant DINE-IN / walk-in guest who is a checked-in hotel guest can now push their whole table bill onto their room folio instead of paying immediately — and it clears with the room in one settlement at check-out. Additive only; the CASH/CARD/UPI close path, the order-POST CHARGE_TO_ROOM path, `postOrderToFolio`, and the checkout/settle flow are all UNCHANGED. New: (1) the Table Bill modal (`PostpaidInvoiceModal`) gains a 4th settlement option "🏨 Charge to Hotel Room" (only rendered when the property has in-house guests) with a searchable room/guest picker; (2) `GET /api/restaurant/:id/hotel/in-house-rooms` (restaurantStaff) returns the minimal CHECKED_IN room+guest+open_folio list for the picker — tolerant, returns [] for restaurant-only tenants so the option stays hidden; (3) `POST /api/restaurant/:id/sessions/:token/charge-to-room {booking_id, room_id}` (restaurantStaff) validates the room is CHECKED_IN in-tenant, posts each non-cancelled session order to the guest's open folio via the SAME idempotent `postOrderToFolio` choke point (subtype RESTAURANT, itemised at the hotel F&B GST slab — no per-item rate passed), tags the orders CHARGE_TO_ROOM + DELIVERED (NOT paid — no cash GL; F&B revenue is recognised at folio settlement like every other charge-to-room order), then closes the session as CHARGE_TO_ROOM and frees the table. At check-out the existing folio flow sweeps + totals room+F&B, takes one FINAL payment, and marks the invoice settled/paid — so "clear restaurant + hotel in one go" needs no new checkout code. Idempotent (already-posted orders skipped; a re-submit on an already-charged session returns success). Verified: deterministic offline billing simulation (item→folio mapping, hotel-slab GST, folio total, no-double-post idempotency, orders-not-marked-paid, one-payment checkout → outstanding 0 → settled) [PASS]; live suite checks TC-CTR-INHOUSE (in-house-rooms 200 + array shape) + TC-CTR-GUARD (charge-to-room validates with structured 4xx, not a route-404/500) + a best-effort self-cleaning full-chain TC-CTR-E2E that SKIPs unless a checked-in guest + open table session are discoverable; deployed endpoints probed 401/400-not-404. Final in-app confirmation with a real checked-in guest recommended. tsc + vite build clean.
       'checklist-templates-honor-grant',             // Enhancement (owner-approved): "Checklist Templates" (PMS `CHECKLISTS` + Events `EVENTS_CHECKLISTS`) were hard-gated to Owner-only in the nav (`isOwnerOrAdmin`), even though the Staff Access matrix advertised them as grantable — so granting had no effect. Now permission-aware end-to-end: (1) frontend nav array always includes the tabs and `isVisible` returns `isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs)` — owner always, plus any role the owner grants the tab; (2) both tabs REMOVED from backend `RBAC_NEWLY_ADDED` so they're no longer auto-injected at Full for built-in roles (which would leak the config tab into every built-in staff nav once it stopped being owner-only) — the grant is now authoritative; (3) new `checklistViewStaff = requireModuleAccess(['CHECKLISTS','EVENTS_CHECKLISTS'], [MANAGER/FRONT_DESK/CONCIERGE/HOUSEKEEPING/MAINTENANCE/EVENTS_MANAGER], 'Checklists')` replaces the fixed `hkStaff` allowlist on the 4 config READ endpoints (categories/templates/template-detail/assignments GET), so a granted custom role can VIEW templates without a 403; (4) Staff Access matrix descriptions updated (no longer say "Owner-only"). Template CREATE/EDIT/DELETE stay owner-only (`requireOwnerOrAdmin` in each write handler) — granted roles VIEW, not edit. Nav and API now agree (a nav-visible checklist tab is never API-403). Verified: offline sim 21/21 (owner in; granted custom role in [nav+API]; ungranted out; built-in WAITER no longer leaks; unrestricted MANAGER in; EVENTS_CHECKLISTS honors isEventsEnabled; nav-visible⇒API-allows invariant) + live regression TC-RBAC-CHK-GRANT. NOTE: the reported "owner can't see these" was an oversight — the owner always saw them; this ships the owner-approved "honor the grant" for delegated roles. tsc + vite build clean.
       'service-requests-permission-aware-gate',      // Fix (root cause): "Service Catalogue unauthorized error for every Custom Role (PMS → Service Catalogue)." The hotel service-requests endpoints (GET /hotel/service-requests + PATCH .../status) were gated by `serviceRequestStaff = requireRole([...HOTEL_OPERATIONAL_ROLES, HOUSEKEEPING, MAINTENANCE])` — a FIXED allowlist that ignores the custom role's assigned permissions and 403s with "Your role (X) is not authorized for this action." That error is stored in the SHARED `hotelError` banner state, which the PMS Service Catalogue (SERVICES tab) also renders (App.tsx ~20916) — so even though the catalogue's own /services call (permission-aware hotelStaff) loads fine and the Add/Edit/Delete buttons render (static JSX), the unrelated service-requests 403 bled onto the page. Two-part fix: (1) BACKEND — `serviceRequestStaff` is now `requireModuleAccess(['SERVICE_REQUESTS'], [...HOTEL_OPERATIONAL_ROLES, HOUSEKEEPING, MAINTENANCE], 'Service Requests')`, mirroring hotelStaff: built-in ops roles pass, PLUS any custom role the owner granted the SERVICE_REQUESTS tab (≥View); the status-PATCH still layers requireTabAccess('SERVICE_REQUESTS') for the exact write level. Built-in roles + seedless guest/partner roles unchanged (no fail-open). (2) FRONTEND — `fetchHotelServices`/`fetchHotelRequests` now clear `hotelError` on success, so a failure from one loader can't linger on an unrelated tab's shared banner. Verified: offline gate sim 13/13 (custom granted SERVICE_REQUESTS admitted [old requireRole denied]; ungranted denied; FRONT_DESK/CONCIERGE/HOUSEKEEPING/MAINTENANCE/MANAGER/OWNER admitted; WAITER/CHEF/OTA/CUSTOMER denied) + live regression TC-RBAC-SVCREQ-ALLOW (custom role granted SERVICE_REQUESTS GETs /hotel/service-requests without 403). Same residual class still open: `restaurantStaff` (97 routes) + `spaStaff` (36 routes, incl. Spa Service Catalogue SPA_CATALOG) remain fixed requireRole allowlists — flagged, not converted here (blast radius).
@@ -48702,6 +48703,270 @@ ${data.tenant.name}`;
         [ccId, req.params.id, date, sess, counted, expected, variance, by, note || null, journalRef]);
       const row = await db.get("SELECT * FROM cash_counts WHERE id = ?", [ccId]);
       res.status(201).json({ ...row, expected_amount: expected, counted_amount: counted, variance, variance_journal_ref: journalRef });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── EOD Cash Drawer (per-cashier till) ─────────────────────────────────────
+  // Additive over the existing Cash Book / Cash Count / GL — NO settlement path
+  // is modified. Expected drawer cash = opening float + net GL Cash-in-Hand
+  // (1000) movement during the drawer's open window (standard POS drawer math;
+  // reconciles to the same GL the Cash Book already trusts). The window uses a
+  // column-to-column timestamp compare (dr.opened_at ↔ gl.created_at) so it is
+  // immune to any Node/DB timezone drift.
+  const _acctRound = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+  const _NON_STAFF_ROLES = new Set(['CUSTOMER', 'OTA', 'AGENT', 'GUEST']);
+  const _MANAGER_ROLES = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'];
+  const _isMgr = (req: AuthRequest) => _MANAGER_ROLES.includes(String(req.user?.role || ''));
+  const _drawerUserId = (req: AuthRequest) => String((req.user as any)?.id || (req.user as any)?.email || '');
+  const _acctStaff = (req: AuthRequest, res: Response): boolean => {
+    if (_NON_STAFF_ROLES.has(String(req.user?.role || ''))) { res.status(403).json({ error: 'Forbidden' }); return false; }
+    return true;
+  };
+  const _acctManager = (req: AuthRequest, res: Response): boolean => {
+    if (!_isMgr(req)) { res.status(403).json({ error: 'Only a manager or owner can do this.' }); return false; }
+    return true;
+  };
+  const _dayLocked = async (db: any, restaurantId: string, date: string): Promise<boolean> => {
+    const row: any = await db.get("SELECT status FROM cash_day_locks WHERE restaurant_id=? AND business_date=?", [restaurantId, date]).catch(() => null);
+    return String(row?.status || '') === 'LOCKED';
+  };
+  // Net GL 1000 movement since the drawer opened, up to NOW — DB-clock safe.
+  const _drawerMovementNow = async (db: any, restaurantId: string, drawerId: string): Promise<number> => {
+    const r: any = await db.get(
+      `SELECT COALESCE(SUM(g.dr_amount - g.cr_amount), 0) AS mv
+         FROM gl_entries g
+         JOIN cash_drawers dr ON dr.id = ? AND dr.restaurant_id = ?
+        WHERE g.restaurant_id = dr.restaurant_id AND g.is_reversed = 0 AND g.account_code = '1000'
+          AND g.created_at > dr.opened_at AND g.created_at <= NOW()`,
+      [drawerId, restaurantId]
+    ).catch(() => ({ mv: 0 }));
+    return _acctRound(Number(r?.mv || 0));
+  };
+
+  // List drawers (managers: all; cashiers: only their own).
+  app.get("/api/restaurant/:id/accounting/cash-drawers", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { date, status } = req.query as Record<string, string>;
+      const clauses = ['restaurant_id = ?']; const params: any[] = [req.params.id];
+      if (date)   { clauses.push('business_date = ?'); params.push(date); }
+      if (status) { clauses.push('status = ?'); params.push(String(status).toUpperCase()); }
+      if (!_isMgr(req)) { clauses.push('cashier_id = ?'); params.push(_drawerUserId(req)); }
+      const rows = await db.query(`SELECT * FROM cash_drawers WHERE ${clauses.join(' AND ')} ORDER BY opened_at DESC LIMIT 500`, params);
+      res.json(Array.isArray(rows) ? rows : []);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Open a drawer (declare opening float). Cashier opens their own; a manager may
+  // open on behalf of another cashier. Blocked if the day is locked or the cashier
+  // already has an open/pending drawer for that date.
+  app.post("/api/restaurant/:id/accounting/cash-drawers", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const body = req.body || {};
+      const date = String(body.business_date || new Date().toISOString().slice(0, 10));
+      if (await _dayLocked(db, req.params.id, date)) return res.status(409).json({ error: 'This business day is locked. Ask an owner to unlock it to open a drawer.' });
+      const selfId = _drawerUserId(req);
+      const cashierId = (_isMgr(req) && body.cashier_id) ? String(body.cashier_id) : selfId;
+      const cashierName = String(body.cashier_name || (req.user as any)?.name || (req.user as any)?.email || 'Cashier');
+      const dup: any = await db.get("SELECT id FROM cash_drawers WHERE restaurant_id=? AND cashier_id=? AND business_date=? AND status IN ('OPEN','PENDING_APPROVAL')", [req.params.id, cashierId, date]).catch(() => null);
+      if (dup?.id) return res.status(409).json({ error: 'This cashier already has an open drawer for today.', drawer_id: dup.id });
+      const id = `DRW-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO cash_drawers (id, restaurant_id, business_date, shift_label, cashier_id, cashier_name, status, opening_float, opened_by, note)
+         VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)`,
+        [id, req.params.id, date, body.shift_label || null, cashierId, cashierName, _acctRound(body.opening_float), selfId, body.note || null]
+      );
+      const row = await db.get("SELECT * FROM cash_drawers WHERE id=?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Drawer detail. Expected is revealed to a manager, or once the drawer is
+  // closed — a cashier counting blind does not see expected until they submit.
+  app.get("/api/restaurant/:id/accounting/cash-drawers/:drawerId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const d: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
+      if (!d) return res.status(404).json({ error: 'Drawer not found.' });
+      const own = String(d.cashier_id) === _drawerUserId(req);
+      if (!own && !_isMgr(req)) return res.status(403).json({ error: 'Forbidden' });
+      const reveal = _isMgr(req) || String(d.status) !== 'OPEN';
+      let liveExpected: number | null = null;
+      if (reveal) liveExpected = String(d.status) === 'OPEN'
+        ? _acctRound(Number(d.opening_float || 0) + await _drawerMovementNow(db, req.params.id, d.id))
+        : _acctRound(Number(d.expected_cash || 0));
+      res.json({ ...d, live_expected: liveExpected });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Close a drawer — submit the denomination count + deposit. Computes the
+  // expected snapshot + variance; status -> PENDING_APPROVAL. No GL yet.
+  app.post("/api/restaurant/:id/accounting/cash-drawers/:drawerId/close", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const d: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
+      if (!d) return res.status(404).json({ error: 'Drawer not found.' });
+      const own = String(d.cashier_id) === _drawerUserId(req);
+      if (!own && !_isMgr(req)) return res.status(403).json({ error: 'Forbidden' });
+      if (!['OPEN', 'REJECTED'].includes(String(d.status))) return res.status(409).json({ error: `Drawer is already ${String(d.status).toLowerCase()}.` });
+      if (await _dayLocked(db, req.params.id, d.business_date)) return res.status(409).json({ error: 'This business day is locked.' });
+      const body = req.body || {};
+      const denoms = Array.isArray(body.denominations) ? body.denominations : [];
+      let counted = _acctRound(body.counted_cash);
+      if (denoms.length > 0) counted = _acctRound(denoms.reduce((s: number, r: any) => s + Number(r.denom || 0) * Number(r.qty || 0), 0));
+      const expected = _acctRound(Number(d.opening_float || 0) + await _drawerMovementNow(db, req.params.id, d.id));
+      const variance = _acctRound(counted - expected);
+      const depositAmt = _acctRound(body.deposit_amount);
+      const retained = body.retained_float != null ? _acctRound(body.retained_float) : _acctRound(counted - depositAmt);
+      await db.run(
+        `UPDATE cash_drawers SET status='PENDING_APPROVAL', counted_cash=?, denominations=?, expected_cash=?, variance=?, deposit_amount=?, deposit_to=?, retained_float=?, closed_at=CURRENT_TIMESTAMP, closed_by=?, note=COALESCE(?, note), reject_reason=NULL WHERE id=?`,
+        [counted, JSON.stringify(denoms), expected, variance, depositAmt, body.deposit_to || null, retained, _drawerUserId(req), body.note || null, req.params.drawerId]
+      );
+      const row = await db.get("SELECT * FROM cash_drawers WHERE id=?", [req.params.drawerId]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Approve a closed drawer (manager). Posts the deposit journal (Cr 1000 -> Dr
+  // 1010 Bank or 1005 Cash in Transit) and, if requested, a variance journal
+  // (1000 <-> 6010 Cash Over/Short). status -> APPROVED.
+  app.post("/api/restaurant/:id/accounting/cash-drawers/:drawerId/approve", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctManager(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const d: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
+      if (!d) return res.status(404).json({ error: 'Drawer not found.' });
+      if (String(d.status) !== 'PENDING_APPROVAL') return res.status(409).json({ error: `Drawer is ${String(d.status).toLowerCase()} — only a pending drawer can be approved.` });
+      const by = _drawerUserId(req);
+      const date = d.business_date;
+      const postVariance = !!req.body?.post_variance;
+      let depositRef: string | null = d.deposit_journal_ref || null;
+      const depositAmt = _acctRound(d.deposit_amount);
+      if (depositAmt > 0.009 && !depositRef) {
+        const seq = await getNextTenantSequence(db, 'cashdrawer');
+        depositRef = `CD-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+        const toBank = String(d.deposit_to || 'BANK').toUpperCase() === 'BANK';
+        const acct = toBank ? { code: '1010', name: 'Bank — Main Account' } : { code: '1005', name: 'Cash in Transit' };
+        const lines: GlLine[] = [
+          { account_code: acct.code, account_name: acct.name, dr_amount: depositAmt, cr_amount: 0, narration: `Cash drawer deposit ${date} (${d.cashier_name || ''})` },
+          { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 0, cr_amount: depositAmt, narration: `Cash drawer deposit ${date}` },
+        ];
+        await _postGlEntries(db, req.params.id, depositRef, date, 'CASH_DRAWER_DEPOSIT', d.id, lines, by);
+      }
+      let varRef: string | null = d.variance_journal_ref || null;
+      const v = _acctRound(d.variance);
+      if (postVariance && Math.abs(v) >= 0.01 && !varRef) {
+        const seq = await getNextTenantSequence(db, 'cashdrawer');
+        varRef = `CD-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+        const lines: GlLine[] = [
+          { account_code: '1000', account_name: 'Cash in Hand',      dr_amount: v > 0 ? v : 0,  cr_amount: v < 0 ? -v : 0, narration: `Cash drawer variance ${date}` },
+          { account_code: '6010', account_name: 'Cash Over / Short', dr_amount: v < 0 ? -v : 0, cr_amount: v > 0 ? v : 0,  narration: `Cash drawer variance ${date}` },
+        ];
+        await _postGlEntries(db, req.params.id, varRef, date, 'CASH_DRAWER_VARIANCE', d.id, lines, by);
+      }
+      await db.run(
+        `UPDATE cash_drawers SET status='APPROVED', approved_by=?, approved_at=CURRENT_TIMESTAMP, approval_note=?, deposit_journal_ref=?, variance_journal_ref=? WHERE id=?`,
+        [by, req.body?.approval_note || null, depositRef, varRef, req.params.drawerId]
+      );
+      const row = await db.get("SELECT * FROM cash_drawers WHERE id=?", [req.params.drawerId]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Reject a pending drawer back for recount (manager). status -> REJECTED.
+  app.post("/api/restaurant/:id/accounting/cash-drawers/:drawerId/reject", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctManager(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const d: any = await db.get("SELECT status FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
+      if (!d) return res.status(404).json({ error: 'Drawer not found.' });
+      if (String(d.status) !== 'PENDING_APPROVAL') return res.status(409).json({ error: 'Only a pending drawer can be rejected.' });
+      await db.run("UPDATE cash_drawers SET status='REJECTED', reject_reason=? WHERE id=?", [String(req.body?.reason || 'Recount requested'), req.params.drawerId]);
+      const row = await db.get("SELECT * FROM cash_drawers WHERE id=?", [req.params.drawerId]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // EOD Day-Close sheet: drawers + totals + GL cash position + (manager) tender
+  // breakdown + cash expenses + lock status.
+  app.get("/api/restaurant/:id/accounting/day-close", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctStaff(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const date = String((req.query as any).date || new Date().toISOString().slice(0, 10));
+      const isMgr = _isMgr(req);
+      const dClauses = ['restaurant_id=?', 'business_date=?']; const dParams: any[] = [req.params.id, date];
+      if (!isMgr) { dClauses.push('cashier_id=?'); dParams.push(_drawerUserId(req)); }
+      const drawers: any[] = await db.query(`SELECT * FROM cash_drawers WHERE ${dClauses.join(' AND ')} ORDER BY opened_at`, dParams).catch(() => []);
+      const totals = (Array.isArray(drawers) ? drawers : []).reduce((a: any, d: any) => ({
+        opening_float: _acctRound(a.opening_float + Number(d.opening_float || 0)),
+        expected: _acctRound(a.expected + Number(d.expected_cash || 0)),
+        counted: _acctRound(a.counted + Number(d.counted_cash || 0)),
+        variance: _acctRound(a.variance + Number(d.variance || 0)),
+        deposit: _acctRound(a.deposit + Number(d.deposit_amount || 0)),
+      }), { opening_float: 0, expected: 0, counted: 0, variance: 0, deposit: 0 });
+      const g = async (sql: string, p: any[]) => { const r: any = await db.get(sql, p).catch(() => ({ v: 0 })); return _acctRound(r?.v || 0); };
+      const cashOpening = await g(`SELECT COALESCE(SUM(dr_amount-cr_amount),0) AS v FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code='1000' AND entry_date < ?`, [req.params.id, date]);
+      const cashIn  = await g(`SELECT COALESCE(SUM(dr_amount),0) AS v FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code='1000' AND entry_date = ?`, [req.params.id, date]);
+      const cashOut = await g(`SELECT COALESCE(SUM(cr_amount),0) AS v FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code='1000' AND entry_date = ?`, [req.params.id, date]);
+      let tender: any = null; let cashExpense = 0;
+      if (isMgr) {
+        const t: Record<string, number> = { CASH: 0, CARD: 0, UPI: 0, BANK_TRANSFER: 0, OTHER: 0 };
+        const norm = (m: string) => { const u = String(m || '').toUpperCase(); return t[u] !== undefined ? u : 'OTHER'; };
+        const ord: any[] = await db.query(`SELECT payment_method AS m, COALESCE(SUM(total_amount),0) AS v FROM orders WHERE deleted_at IS NULL AND UPPER(COALESCE(status,''))<>'CANCELLED' AND payment_status='PAID' AND created_at::date = ?::date GROUP BY payment_method`, [date]).catch(() => []);
+        for (const r of (ord || [])) t[norm(r.m)] += Number(r.v || 0);
+        const fp: any[] = await db.query(`SELECT payment_method AS m, COALESCE(SUM(amount),0) AS v FROM folio_payments WHERE (is_voided IS NULL OR is_voided=0) AND UPPER(COALESCE(payment_type,''))<>'REFUND' AND recorded_at::date = ?::date GROUP BY payment_method`, [date]).catch(() => []);
+        for (const r of (fp || [])) t[norm(r.m)] += Number(r.v || 0);
+        tender = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, _acctRound(v)]));
+        cashExpense = await g(`SELECT COALESCE(SUM(amount),0) AS v FROM petty_cash WHERE UPPER(COALESCE(direction,''))='OUT' AND entry_date = ?`, [date]);
+      }
+      const lockRow: any = await db.get("SELECT * FROM cash_day_locks WHERE restaurant_id=? AND business_date=?", [req.params.id, date]).catch(() => null);
+      res.json({
+        date,
+        locked: String(lockRow?.status || '') === 'LOCKED',
+        lock: lockRow || null,
+        drawers: Array.isArray(drawers) ? drawers : [],
+        totals,
+        gl_cash: { opening: cashOpening, in: cashIn, out: cashOut, closing: _acctRound(cashOpening + cashIn - cashOut) },
+        tender,
+        cash_expense: cashExpense,
+        can_lock: isMgr,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Lock a business day (manager) — requires every drawer APPROVED.
+  app.post("/api/restaurant/:id/accounting/day-close/lock", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctManager(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const date = String(req.body?.business_date || new Date().toISOString().slice(0, 10));
+      const open: any = await db.get("SELECT COUNT(*) AS n FROM cash_drawers WHERE restaurant_id=? AND business_date=? AND status IN ('OPEN','PENDING_APPROVAL')", [req.params.id, date]).catch(() => ({ n: 0 }));
+      if (Number(open?.n || 0) > 0) return res.status(409).json({ error: `${open.n} drawer(s) still open or pending approval — approve them before locking the day.` });
+      const id = `CDL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO cash_day_locks (id, restaurant_id, business_date, status, locked_by, note)
+         VALUES (?, ?, ?, 'LOCKED', ?, ?)
+         ON CONFLICT (restaurant_id, business_date) DO UPDATE SET status='LOCKED', locked_by=EXCLUDED.locked_by, locked_at=CURRENT_TIMESTAMP, note=EXCLUDED.note`,
+        [id, req.params.id, date, _drawerUserId(req), req.body?.note || null]
+      );
+      res.json({ success: true, date, locked: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Unlock a business day (owner only).
+  app.post("/api/restaurant/:id/accounting/day-close/unlock", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const date = String(req.body?.business_date || new Date().toISOString().slice(0, 10));
+      await db.run("UPDATE cash_day_locks SET status='UNLOCKED' WHERE restaurant_id=? AND business_date=?", [req.params.id, date]);
+      res.json({ success: true, date, locked: false });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 

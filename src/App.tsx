@@ -7892,7 +7892,7 @@ function SettlementUploadForm({
 function AccountingView({ restaurantId, token }: { restaurantId: string; token: string }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
     | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
-    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT';
+    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER';
   const [acctTab, setAcctTab] = useState<SubTab>('TRIAL');
   const [coa, setCoa] = useState<any[]>([]);
   const [glEntries, setGlEntries] = useState<any[]>([]);
@@ -8026,6 +8026,41 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   const loadPeriods = useCallback(() => { setLoading(true); Promise.all([acctApi('/accounting/periods'), acctApi('/accounting/periods/exceptions')]).then(([p, e]) => { if (Array.isArray(p)) setPeriods(p); if (Array.isArray(e)) setPeriodsExc(e); }).finally(() => setLoading(false)); }, [acctApi]);
   const loadCashCount = useCallback(() => { setLoading(true); acctApi(`/accounting/cash-count?date=${asOfDate}`).then(d => { if (d && !d.error) setCashCount(d); }).finally(() => setLoading(false)); }, [acctApi, asOfDate]);
 
+  // ── EOD Cash Drawers (per-cashier till) ──────────────────────────────────
+  const DENOMS = [2000, 500, 200, 100, 50, 20, 10, 5, 2, 1];
+  const [dcDate, setDcDate] = useState(todayStr);
+  const [dayClose, setDayClose] = useState<any>(null);
+  const [ndFloat, setNdFloat] = useState('');
+  const [ndShift, setNdShift] = useState('');
+  const [ndCashier, setNdCashier] = useState('');
+  const [cdMsg, setCdMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [closingDrawer, setClosingDrawer] = useState<any>(null);
+  const [denomQty, setDenomQty] = useState<Record<number, string>>({});
+  const [cdDeposit, setCdDeposit] = useState('');
+  const [cdDepositTo, setCdDepositTo] = useState('BANK');
+  const [cdPostVar, setCdPostVar] = useState(true);
+  const loadDayClose = useCallback(() => { setLoading(true); acctApi(`/accounting/day-close?date=${dcDate}`).then(d => { if (d && !d.error) setDayClose(d); }).finally(() => setLoading(false)); }, [acctApi, dcDate]);
+  const cdCountedTotal = DENOMS.reduce((s, dn) => s + dn * (parseInt(denomQty[dn] || '0', 10) || 0), 0);
+  const openDrawer = async () => {
+    setCdMsg(null);
+    const res = await acctApi('/accounting/cash-drawers', { method: 'POST', body: JSON.stringify({ business_date: dcDate, opening_float: parseFloat(ndFloat) || 0, shift_label: ndShift || null, cashier_name: ndCashier || null }) });
+    if (res && !res.error) { setNdFloat(''); setNdShift(''); setNdCashier(''); setCdMsg({ type: 'ok', text: `Drawer opened for ${res.cashier_name}` }); loadDayClose(); }
+    else setCdMsg({ type: 'err', text: res?.error || 'Failed to open drawer' });
+  };
+  const submitClose = async () => {
+    if (!closingDrawer) return;
+    setCdMsg(null);
+    const denominations = DENOMS.map(dn => ({ denom: dn, qty: parseInt(denomQty[dn] || '0', 10) || 0 })).filter(x => x.qty > 0);
+    const deposit_amount = parseFloat(cdDeposit) || 0;
+    const res = await acctApi(`/accounting/cash-drawers/${closingDrawer.id}/close`, { method: 'POST', body: JSON.stringify({ denominations, counted_cash: cdCountedTotal, deposit_amount, deposit_to: cdDepositTo, retained_float: cdCountedTotal - deposit_amount }) });
+    if (res && !res.error) { setClosingDrawer(null); setDenomQty({}); setCdDeposit(''); setCdMsg({ type: 'ok', text: `Counted ${fmtAmt(res.counted_cash)} · variance ${fmtAmt(res.variance)} — sent for approval` }); loadDayClose(); }
+    else setCdMsg({ type: 'err', text: res?.error || 'Failed to submit count' });
+  };
+  const approveDrawer = async (d: any) => { const res = await acctApi(`/accounting/cash-drawers/${d.id}/approve`, { method: 'POST', body: JSON.stringify({ post_variance: cdPostVar }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: `Approved ${d.cashier_name}` }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Approve failed' }); };
+  const rejectDrawer = async (d: any) => { const res = await acctApi(`/accounting/cash-drawers/${d.id}/reject`, { method: 'POST', body: JSON.stringify({ reason: 'Recount requested' }) }); if (res && !res.error) loadDayClose(); else setCdMsg({ type: 'err', text: res?.error || 'Reject failed' }); };
+  const lockDay = async () => { const res = await acctApi('/accounting/day-close/lock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: 'Day locked' }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Lock failed' }); };
+  const unlockDay = async () => { const res = await acctApi('/accounting/day-close/unlock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) loadDayClose(); else setCdMsg({ type: 'err', text: res?.error || 'Unlock failed' }); };
+
   useEffect(() => { if (acctTab === 'PNL') loadPnl(); }, [acctTab, loadPnl]);
   useEffect(() => { if (acctTab === 'BALANCESHEET') loadBalanceSheet(); }, [acctTab, loadBalanceSheet]);
   useEffect(() => { if (acctTab === 'CASHFLOW') loadCashFlowGl(); }, [acctTab, loadCashFlowGl]);
@@ -8036,6 +8071,7 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   useEffect(() => { if (acctTab === 'BANKREC') loadBankRec(); }, [acctTab, loadBankRec]);
   useEffect(() => { if (acctTab === 'PERIODS') loadPeriods(); }, [acctTab, loadPeriods]);
   useEffect(() => { if (acctTab === 'CASHCOUNT') loadCashCount(); }, [acctTab, loadCashCount]);
+  useEffect(() => { if (acctTab === 'CASHDRAWER') loadDayClose(); }, [acctTab, loadDayClose]);
 
   const closePeriod = async () => {
     if (!pcKey || !pcFrom || !pcTo) return;
@@ -8106,14 +8142,14 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
     PNL: 'Profit & Loss', BALANCESHEET: 'Balance Sheet', CASHFLOW: 'Cash Flow',
     GST: 'GST Outstanding', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
     CASHBOOK: 'Cash Book', AGING_AR: 'AR Aging', AGING_AP: 'AP Aging', BANKREC: 'Bank Reconciliation',
-    TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count',
+    TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
   };
   const ACCT_GROUPS: { key: string; label: string; tabs: SubTab[] }[] = [
     { key: 'LEDGER', label: 'Ledger', tabs: ['TRIAL', 'GL', 'JOURNAL'] },
     { key: 'STATEMENTS', label: 'Statements', tabs: ['PNL', 'BALANCESHEET', 'CASHFLOW'] },
     { key: 'GST', label: 'GST', tabs: ['GST', 'GSTR1', 'GSTR3B'] },
     { key: 'WORKING', label: 'Working Capital', tabs: ['CASHBOOK', 'AGING_AR', 'AGING_AP', 'BANKREC'] },
-    { key: 'CONTROLS', label: 'Controls', tabs: ['TDS', 'PERIODS', 'CASHCOUNT'] },
+    { key: 'CONTROLS', label: 'Controls', tabs: ['CASHDRAWER', 'CASHCOUNT', 'PERIODS', 'TDS'] },
   ];
   const activeGroup = ACCT_GROUPS.find(g => g.tabs.includes(acctTab)) || ACCT_GROUPS[0];
 
@@ -8667,6 +8703,119 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
             </div>
           )}
           <p className="text-[11px] text-[#9c8e85]">Expected balance is the GL Cash-in-Hand closing through the chosen date. Posting the variance journal brings the books onto the physical count.</p>
+        </div>
+      )}
+
+      {acctTab === 'CASHDRAWER' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">Business date</label>
+            <input type="date" value={dcDate} onChange={e => setDcDate(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadDayClose} className={AC_BTN}>Load</button>
+            {dayClose?.locked
+              ? (<span className="text-xs font-semibold text-rose-700 flex items-center gap-1">🔒 Day locked <button onClick={unlockDay} className="underline">unlock</button></span>)
+              : (dayClose?.can_lock && <button onClick={lockDay} className="px-3 py-1.5 bg-[#1a1208] text-white text-sm rounded hover:bg-black">Lock day</button>)}
+            {cdMsg && <span className={`text-sm ${cdMsg.type === 'ok' ? 'text-emerald-700' : 'text-rose-700'}`}>{cdMsg.text}</span>}
+          </div>
+
+          {!dayClose?.locked && (
+            <div className="rounded-lg border border-[#e8ded0] bg-white p-3 flex flex-wrap items-end gap-2">
+              <div><label className="text-xs text-[#6b5d52] block">Cashier</label><input value={ndCashier} onChange={e => setNdCashier(e.target.value)} placeholder="Cashier name" className={`${AC_INPUT} mt-1`} /></div>
+              <div><label className="text-xs text-[#6b5d52] block">Opening float ₹</label><input type="number" value={ndFloat} onChange={e => setNdFloat(e.target.value)} placeholder="0.00" className={`${AC_INPUT} mt-1 w-28 tabular-nums`} /></div>
+              <div><label className="text-xs text-[#6b5d52] block">Shift</label><input value={ndShift} onChange={e => setNdShift(e.target.value)} placeholder="Morning / Evening" className={`${AC_INPUT} mt-1`} /></div>
+              <button onClick={openDrawer} className={AC_BTN}>Open drawer</button>
+            </div>
+          )}
+
+          {dayClose && (
+            <div className="grid sm:grid-cols-4 gap-3">
+              {[['Opening float', dayClose.totals?.opening_float], ['Expected', dayClose.totals?.expected], ['Counted', dayClose.totals?.counted], ['Deposited', dayClose.totals?.deposit]].map(([l, v]) => (
+                <div key={l as string} className="rounded-lg border border-[#e8ded0] bg-white p-3"><p className="text-[11px] text-[#6b5d52] uppercase tracking-wide">{l}</p><p className="text-xl font-bold text-[#1a1208] mt-0.5 tabular-nums">{fmtAmt(v as number)}</p></div>
+              ))}
+            </div>
+          )}
+
+          {dayClose && (
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div className="rounded-lg border border-[#e8ded0] bg-white p-3">
+                <p className="text-[11px] text-[#6b5d52] uppercase tracking-wide mb-1">GL Cash-in-Hand (1000) · {dayClose.date}</p>
+                <div className="grid grid-cols-2 gap-1 text-sm">
+                  <span className="text-[#6b5d52]">Opening</span><span className="text-right tabular-nums">{fmtAmt(dayClose.gl_cash?.opening)}</span>
+                  <span className="text-[#6b5d52]">Received today</span><span className="text-right tabular-nums text-emerald-700">{fmtAmt(dayClose.gl_cash?.in)}</span>
+                  <span className="text-[#6b5d52]">Paid / deposited</span><span className="text-right tabular-nums text-rose-700">{fmtAmt(dayClose.gl_cash?.out)}</span>
+                  <span className="text-[#1a1208] font-semibold border-t border-[#f0e8d8] pt-1">Closing</span><span className="text-right tabular-nums font-bold border-t border-[#f0e8d8] pt-1">{fmtAmt(dayClose.gl_cash?.closing)}</span>
+                </div>
+              </div>
+              {dayClose.tender && (
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-3">
+                  <p className="text-[11px] text-[#6b5d52] uppercase tracking-wide mb-1">Collections by tender (today)</p>
+                  <div className="grid grid-cols-2 gap-1 text-sm">
+                    {Object.entries(dayClose.tender).map(([k, v]) => (<React.Fragment key={k}><span className="text-[#6b5d52]">{k.replace(/_/g, ' ')}</span><span className="text-right tabular-nums">{fmtAmt(v as number)}</span></React.Fragment>))}
+                    <span className="text-[#6b5d52] border-t border-[#f0e8d8] pt-1">Cash expenses</span><span className="text-right tabular-nums text-rose-700 border-t border-[#f0e8d8] pt-1">{fmtAmt(dayClose.cash_expense)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {dayClose && (dayClose.drawers || []).length > 0 ? (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left">
+                  {['Cashier', 'Shift', 'Opening', 'Expected', 'Counted', 'Variance', 'Deposit', 'Status', ''].map(h => <th key={h} className="px-3 py-2 font-semibold text-[#1a1208] whitespace-nowrap">{h}</th>)}
+                </tr></thead>
+                <tbody>{dayClose.drawers.map((d: any) => (
+                  <tr key={d.id} className="border-t border-[#f0e8d8]">
+                    <td className="px-3 py-2 whitespace-nowrap">{d.cashier_name}</td>
+                    <td className="px-3 py-2 text-[#6b5d52]">{d.shift_label || '—'}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(d.opening_float)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{d.status === 'OPEN' ? '—' : fmtAmt(d.expected_cash)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{d.status === 'OPEN' ? '—' : fmtAmt(d.counted_cash)}</td>
+                    <td className={`px-3 py-2 text-right tabular-nums ${Math.abs(Number(d.variance || 0)) >= 0.01 ? 'text-rose-700 font-semibold' : ''}`}>{d.status === 'OPEN' ? '—' : fmtAmt(d.variance)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(d.deposit_amount)}</td>
+                    <td className="px-3 py-2"><span className={`text-xs rounded-full px-2 py-0.5 whitespace-nowrap ${d.status === 'APPROVED' ? 'bg-emerald-100 text-emerald-800' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-800' : d.status === 'REJECTED' ? 'bg-rose-100 text-rose-800' : 'bg-sky-100 text-sky-800'}`}>{String(d.status).replace(/_/g, ' ')}</span></td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {(d.status === 'OPEN' || d.status === 'REJECTED') && <button onClick={() => { setClosingDrawer(d); setDenomQty({}); setCdDeposit(''); }} className="text-xs text-[#a0522d] underline">Close &amp; count</button>}
+                      {d.status === 'PENDING_APPROVAL' && (<span className="flex gap-2"><button onClick={() => approveDrawer(d)} className="text-xs text-emerald-700 underline">Approve</button><button onClick={() => rejectDrawer(d)} className="text-xs text-rose-700 underline">Reject</button></span>)}
+                      {d.status === 'APPROVED' && <span className="text-[11px] font-mono text-[#9c8e85]">{d.deposit_journal_ref || '✓'}</span>}
+                    </td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : dayClose ? <p className="text-sm text-[#6b5d52] italic">No drawers opened for this day yet.</p> : null}
+
+          <label className="flex items-center gap-2 text-xs text-[#6b5d52]"><input type="checkbox" checked={cdPostVar} onChange={e => setCdPostVar(e.target.checked)} /> On approve, post any over/short to Cash Over/Short (6010)</label>
+          <p className="text-[11px] text-[#9c8e85]">Expected = opening float + net cash (GL 1000) collected during the drawer’s shift. Approving posts the deposit (Cash → Bank / Cash-in-Transit) and, if ticked, trues up over/short. Lock the day once every drawer is approved.</p>
+
+          {closingDrawer && (
+            <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-3" onClick={e => { if (e.target === e.currentTarget) setClosingDrawer(null); }}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 space-y-3 max-h-[90vh] overflow-y-auto">
+                <h3 className="text-lg font-bold text-[#1a1208]">Close drawer — {closingDrawer.cashier_name}</h3>
+                <p className="text-xs text-[#6b5d52]">Enter the note &amp; coin counts. The total is computed for you.</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {DENOMS.map(dn => (
+                    <div key={dn} className="flex items-center gap-2">
+                      <span className="text-sm text-[#6b5d52] w-14 text-right tabular-nums">₹{dn}</span>
+                      <span className="text-[#9c8e85]">×</span>
+                      <input type="number" min="0" value={denomQty[dn] || ''} onChange={e => setDenomQty({ ...denomQty, [dn]: e.target.value })} placeholder="0" className="w-16 text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums" />
+                      <span className="text-xs text-[#9c8e85] tabular-nums ml-auto">{fmtAmt(dn * (parseInt(denomQty[dn] || '0', 10) || 0))}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center justify-between border-t border-[#f0e8d8] pt-2"><span className="font-semibold text-[#1a1208]">Counted total</span><span className="text-xl font-bold text-[#1a1208] tabular-nums">{fmtAmt(cdCountedTotal)}</span></div>
+                <div className="flex flex-wrap items-end gap-3">
+                  <div><label className="text-xs text-[#6b5d52] block">Deposit ₹</label><input type="number" value={cdDeposit} onChange={e => setCdDeposit(e.target.value)} placeholder="0.00" className={`${AC_INPUT} mt-1 w-28 tabular-nums`} /></div>
+                  <div><label className="text-xs text-[#6b5d52] block">Deposit to</label><select value={cdDepositTo} onChange={e => setCdDepositTo(e.target.value)} className={`${AC_INPUT} mt-1`}><option value="BANK">Bank</option><option value="SAFE">Safe</option><option value="MANAGER">Manager</option></select></div>
+                  <div className="text-xs text-[#6b5d52]">Retained float: <span className="font-semibold tabular-nums">{fmtAmt(cdCountedTotal - (parseFloat(cdDeposit) || 0))}</span></div>
+                </div>
+                <div className="flex gap-2 justify-end pt-2">
+                  <button onClick={() => setClosingDrawer(null)} className="px-3 py-1.5 text-sm text-[#6b5d52] rounded hover:bg-[#f5f0e8]">Cancel</button>
+                  <button onClick={submitClose} disabled={cdCountedTotal <= 0} className={AC_BTN}>Submit for approval</button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

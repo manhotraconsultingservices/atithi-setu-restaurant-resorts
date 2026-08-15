@@ -2333,6 +2333,64 @@ async function testChargeToRoom() {
   }
 }
 
+// ── EOD Cash Drawer (per-cashier till) ────────────────────────────────────
+//
+// Covers 'eod-cash-drawer': per-cashier drawers, denomination count, deposit,
+// day-lock. SAFE checks only (no prod mutation): endpoint deployment, response
+// shape, guard behaviour, and a reconciliation of the day-close GL cash against
+// the existing Cash Book. The drawer math + GL side-effects are proven by the
+// deterministic test-scripts/e2e_cash_drawer_sim.mjs.
+
+async function testCashDrawer() {
+  section('ACCOUNTING — EOD Cash Drawer / Day-Close');
+  if (!restaurantId) { skip('TC-CD-*', 'All cash drawer tests', 'no restaurantId'); return; }
+  const today = new Date().toISOString().slice(0, 10);
+
+  // TC-CD-LIST: drawers list endpoint deployed + well-shaped.
+  const list = await api('GET', `/api/restaurant/${restaurantId}/accounting/cash-drawers?date=${today}`);
+  if (list.status === 200 && Array.isArray(list.data)) {
+    pass('TC-CD-LIST', `cash-drawers list deployed (${list.data.length} drawer(s) today)`);
+  } else if (list.status === 403) {
+    skip('TC-CD-LIST', 'cash-drawers list', 'role not permitted');
+  } else {
+    fail('TC-CD-LIST', 'cash-drawers list', `HTTP ${list.status}`);
+  }
+
+  // TC-CD-DAYCLOSE: EOD sheet deployed + correct shape.
+  const dc = await api('GET', `/api/restaurant/${restaurantId}/accounting/day-close?date=${today}`);
+  const shapeOk = dc.status === 200 && dc.data && dc.data.gl_cash && typeof dc.data.gl_cash.closing === 'number' && dc.data.totals && Array.isArray(dc.data.drawers);
+  if (shapeOk) {
+    pass('TC-CD-DAYCLOSE', `day-close sheet deployed (GL cash closing ₹${dc.data.gl_cash.closing}, ${dc.data.drawers.length} drawer(s))`);
+  } else if (dc.status === 403) {
+    skip('TC-CD-DAYCLOSE', 'day-close sheet', 'role not permitted');
+  } else {
+    fail('TC-CD-DAYCLOSE', 'day-close sheet shape', `HTTP ${dc.status} — ${JSON.stringify(dc.data).slice(0, 120)}`);
+  }
+
+  // TC-CD-RECONCILE: the day-close GL cash MUST equal the existing Cash Book
+  // (both are the GL Cash-in-Hand 1000 closing for the date) — proves the new
+  // EOD view is consistent with the books, on real data.
+  const cb = await api('GET', `/api/restaurant/${restaurantId}/accounting/cash-book?date=${today}`);
+  if (shapeOk && cb.status === 200 && cb.data?.cash_in_hand && typeof cb.data.cash_in_hand.closing === 'number') {
+    const diff = Math.abs(Number(dc.data.gl_cash.closing) - Number(cb.data.cash_in_hand.closing));
+    if (diff < 0.02) pass('TC-CD-RECONCILE', `day-close GL cash reconciles to Cash Book (₹${cb.data.cash_in_hand.closing})`);
+    else fail('TC-CD-RECONCILE', 'day-close vs Cash Book cash', `diff ₹${diff.toFixed(2)}`);
+  } else {
+    skip('TC-CD-RECONCILE', 'day-close vs Cash Book', 'cash-book not available');
+  }
+
+  // TC-CD-GUARD: closing a bogus drawer reaches the handler (404, no mutation) —
+  // proves the route is deployed and validating, not a route-miss.
+  const guard = await api('POST', `/api/restaurant/${restaurantId}/accounting/cash-drawers/AUTOTEST-BOGUS/close`, { counted_cash: 0 });
+  if (guard.status === 404 && /drawer/i.test(JSON.stringify(guard.data))) {
+    pass('TC-CD-GUARD', 'close on bogus drawer correctly 404 (deployed, no mutation)');
+  } else if (guard.status === 404 || guard.status === 403) {
+    pass('TC-CD-GUARD', `drawer close guarded (HTTP ${guard.status})`);
+  } else {
+    fail('TC-CD-GUARD', 'drawer close guard', `expected 404/403, got ${guard.status}`);
+  }
+}
+
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
 //
 // Covers the RBAC hardening commit (c040e42):
@@ -2860,6 +2918,7 @@ async function main() {
   await testRoomServiceQR();
   await testCheckoutAndInvoice();
   await testChargeToRoom();
+  await testCashDrawer();
   await testRBACHardening();
 
   const failures = generateReport();

@@ -2626,12 +2626,63 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       gl_entry_id TEXT NOT NULL,
       PRIMARY KEY (rec_id, gl_entry_id)
     );
+
+    -- Per-cashier EOD cash drawer: one till per cashier per shift. Lifecycle
+    -- OPEN -> PENDING_APPROVAL -> APPROVED | REJECTED. Expected cash is derived
+    -- from the net GL Cash-in-Hand (1000) movement during the drawer's open
+    -- window plus the declared opening float — so NO settlement path changes.
+    CREATE TABLE IF NOT EXISTS cash_drawers (
+      id                   TEXT PRIMARY KEY,
+      restaurant_id        TEXT NOT NULL,
+      business_date        TEXT NOT NULL,
+      shift_label          TEXT,
+      cashier_id           TEXT,
+      cashier_name         TEXT,
+      status               TEXT NOT NULL DEFAULT 'OPEN',
+      opening_float        REAL NOT NULL DEFAULT 0,
+      opened_at            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      opened_by            TEXT,
+      expected_cash        REAL DEFAULT 0,
+      counted_cash         REAL DEFAULT 0,
+      denominations        TEXT,
+      variance             REAL DEFAULT 0,
+      deposit_amount       REAL DEFAULT 0,
+      deposit_to           TEXT,
+      retained_float       REAL DEFAULT 0,
+      closed_at            TEXT,
+      closed_by            TEXT,
+      approved_by          TEXT,
+      approved_at          TEXT,
+      approval_note        TEXT,
+      reject_reason        TEXT,
+      note                 TEXT,
+      close_journal_ref    TEXT,
+      deposit_journal_ref  TEXT,
+      variance_journal_ref TEXT,
+      created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_cashdrawer_res_date ON cash_drawers (restaurant_id, business_date);
+    CREATE INDEX IF NOT EXISTS idx_cashdrawer_cashier  ON cash_drawers (restaurant_id, cashier_id, status);
+
+    -- Hard end-of-day lock: a locked business_date blocks opening/editing drawers
+    -- for that day (distinct from the soft month-level accounting_periods close).
+    CREATE TABLE IF NOT EXISTS cash_day_locks (
+      id            TEXT PRIMARY KEY,
+      restaurant_id TEXT NOT NULL,
+      business_date TEXT NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'LOCKED',
+      locked_by     TEXT,
+      locked_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      note          TEXT,
+      UNIQUE (restaurant_id, business_date)
+    );
   `).catch(() => {});
 
   // Seed standard chart of accounts — Indian hotel/restaurant context.
   // INSERT OR IGNORE is safe for re-init; existing customisations are preserved.
   const _coaSeed: [string, string, string, number][] = [
     ['1000','Cash in Hand','ASSET',0],
+    ['1005','Cash in Transit','ASSET',5],
     ['1010','Bank — Main Account','ASSET',10],
     ['1020','Bank — OTA Receivable','ASSET',20],
     ['1100','Accounts Receivable — Guests','ASSET',30],
