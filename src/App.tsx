@@ -8153,39 +8153,101 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   // so the owner sees Restaurant vs Hotel cash without reading raw codes.
   const SOURCE_LABEL: Record<string, string> = {
     FNB_ORDER: 'Restaurant (F&B)',
-    FOLIO_SETTLEMENT: 'Hotel / Spa / Events — folio',
+    FOLIO_SETTLEMENT: 'Hotel — folio settlement',
     FOLIO_ADVANCE: 'Hotel — advance',
     FOLIO_PAYMENT: 'Hotel — interim payment',
+    SPA_SETTLEMENT: 'Spa — settlement',
+    SPA_SALE: 'Spa — retail sale',
+    SPA_INTERIM: 'Spa — interim payment',
+    SPA_INTERIM_REVERSAL: 'Spa — interim void',
+    EVENT_SETTLEMENT: 'Events — settlement',
     EVENT_ADVANCE: 'Events — advance',
-    EVENT_PAYMENT: 'Events — payment',
+    EVENT_CANCEL_REVERSAL: 'Events — cancellation',
+    EVENT_ADVANCE_REVERSAL: 'Events — advance void',
     PETTY_CASH: 'Petty cash',
     CASH_DRAWER_DEPOSIT: 'Cash drawer — deposit (out)',
     CASH_DRAWER_VARIANCE: 'Cash drawer — over/short',
     CASH_COUNT: 'Cash count — variance',
+    SUPPLIER_INVOICE: 'Supplier invoice',
     SUPPLIER_PAYMENT: 'Supplier payment (out)',
     STAFF_ADVANCE: 'Staff advance (out)',
+    STAFF_PAYROLL: 'Payroll (operational)',
+    PAYROLL_RUN: 'Payroll (HR run)',
+    EXPENSE_CLAIM: 'Expense claim',
     EXPENSE_PAYMENT: 'Expense / payment (out)',
     LOAN: 'Loan',
+    CREDIT_NOTE: 'Credit note',
+    BOOKING_CANCEL: 'Booking cancellation',
     MANUAL_JOURNAL: 'Manual journal',
   };
   const srcLabel = (s: string) => SOURCE_LABEL[s] || String(s || '').replace(/_/g, ' ');
-  const renderCashBySource = (rows: any[]) => (Array.isArray(rows) && rows.length > 0) ? (
+  // Roll every GL source_type up to the business module that produced it, so the
+  // owner can read the Day Book / Cash Book by Restaurant / Hotel / Spa / Events /
+  // Overheads instead of a long list of raw source codes.
+  const SOURCE_MODULE: Record<string, string> = {
+    FNB_ORDER: 'Restaurant',
+    FOLIO_SETTLEMENT: 'Hotel', FOLIO_ADVANCE: 'Hotel', FOLIO_PAYMENT: 'Hotel', BOOKING_CANCEL: 'Hotel',
+    SPA_SETTLEMENT: 'Spa', SPA_SALE: 'Spa', SPA_INTERIM: 'Spa', SPA_INTERIM_REVERSAL: 'Spa',
+    EVENT_SETTLEMENT: 'Events', EVENT_ADVANCE: 'Events', EVENT_CANCEL_REVERSAL: 'Events', EVENT_ADVANCE_REVERSAL: 'Events',
+    SUPPLIER_INVOICE: 'Purchases', SUPPLIER_PAYMENT: 'Purchases', SUPPLIER_INVOICE_REVERSAL: 'Purchases', SUPPLIER_PAYMENT_REVERSAL: 'Purchases',
+    STAFF_ADVANCE: 'Payroll', STAFF_PAYROLL: 'Payroll', PAYROLL_RUN: 'Payroll', STAFF_ADVANCE_REVERSAL: 'Payroll',
+    PETTY_CASH: 'Overheads', EXPENSE_PAYMENT: 'Overheads', EXPENSE_CLAIM: 'Overheads', LOAN: 'Overheads',
+    CASH_DRAWER_DEPOSIT: 'Cash control', CASH_DRAWER_VARIANCE: 'Cash control', CASH_COUNT: 'Cash control',
+    CREDIT_NOTE: 'Adjustments', FOLIO_REVISED: 'Adjustments', MANUAL_JOURNAL: 'Adjustments',
+  };
+  const MODULE_ORDER = ['Restaurant', 'Hotel', 'Spa', 'Events', 'Purchases', 'Payroll', 'Overheads', 'Cash control', 'Adjustments', 'Other'];
+  const srcModule = (s: string) => SOURCE_MODULE[s] || 'Other';
+  // Group any [{source_type, in, out}] rows into per-module {in,out} subtotals.
+  const rollupByModule = (rows: any[]) => {
+    const acc: Record<string, { in: number; out: number }> = {};
+    for (const r of (rows || [])) {
+      const m = srcModule(r.source_type);
+      if (!acc[m]) acc[m] = { in: 0, out: 0 };
+      acc[m].in += Number(r.in || 0); acc[m].out += Number(r.out || 0);
+    }
+    return MODULE_ORDER.filter(m => acc[m]).map(m => ({ module: m, in: acc[m].in, out: acc[m].out }));
+  };
+  const renderCashBySource = (rows: any[]) => {
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const byModule = rollupByModule(rows);
+    return (
     <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
-      <p className="text-xs text-[#6b5d52] uppercase tracking-wide font-semibold mb-2">💰 Cash by source (today)</p>
-      <div className="overflow-x-auto">
+      <p className="text-xs text-[#6b5d52] uppercase tracking-wide font-semibold mb-2">💰 Cash by module (today)</p>
+      <div className="overflow-x-auto mb-3">
         <table className="w-full text-sm">
-          <thead><tr className="text-left text-[#9c8e85]"><th className="py-1 font-medium">Source</th><th className="py-1 text-right font-medium">Received</th><th className="py-1 text-right font-medium">Paid / out</th></tr></thead>
-          <tbody>{rows.map((r: any) => (
-            <tr key={r.source_type} className="border-t border-[#f0e8d8]">
-              <td className="py-1.5">{srcLabel(r.source_type)}</td>
+          <thead><tr className="text-left text-[#9c8e85]"><th className="py-1 font-medium">Module</th><th className="py-1 text-right font-medium">Received</th><th className="py-1 text-right font-medium">Paid / out</th></tr></thead>
+          <tbody>{byModule.map((r: any) => (
+            <tr key={r.module} className="border-t border-[#f0e8d8]">
+              <td className="py-1.5 font-medium text-[#5a4a3a]">{r.module}</td>
               <td className="py-1.5 text-right tabular-nums text-emerald-700">{Number(r.in) > 0 ? fmtAmt(r.in) : '—'}</td>
               <td className="py-1.5 text-right tabular-nums text-rose-700">{Number(r.out) > 0 ? fmtAmt(r.out) : '—'}</td>
             </tr>
           ))}</tbody>
+          <tfoot><tr className="border-t-2 border-[#e0d4c0] font-semibold text-[#5a4a3a]">
+            <td className="py-1.5">All modules</td>
+            <td className="py-1.5 text-right tabular-nums text-emerald-800">{fmtAmt(byModule.reduce((s, r) => s + Number(r.in || 0), 0))}</td>
+            <td className="py-1.5 text-right tabular-nums text-rose-800">{fmtAmt(byModule.reduce((s, r) => s + Number(r.out || 0), 0))}</td>
+          </tr></tfoot>
         </table>
       </div>
+      <details>
+        <summary className="text-[11px] text-[#9c8e85] cursor-pointer select-none">Break down by source</summary>
+        <div className="overflow-x-auto mt-2">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[#9c8e85]"><th className="py-1 font-medium">Source</th><th className="py-1 text-right font-medium">Received</th><th className="py-1 text-right font-medium">Paid / out</th></tr></thead>
+            <tbody>{rows.map((r: any) => (
+              <tr key={r.source_type} className="border-t border-[#f0e8d8]">
+                <td className="py-1.5">{srcLabel(r.source_type)}</td>
+                <td className="py-1.5 text-right tabular-nums text-emerald-700">{Number(r.in) > 0 ? fmtAmt(r.in) : '—'}</td>
+                <td className="py-1.5 text-right tabular-nums text-rose-700">{Number(r.out) > 0 ? fmtAmt(r.out) : '—'}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </details>
     </div>
-  ) : null;
+    );
+  };
 
   const typeGroups: Record<string, any[]> = {};
   for (const row of trialBalance) {
@@ -9061,8 +9123,44 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
             for (const e of sorted) { const k = e.journal_ref || e.id; if (!groups[k]) { groups[k] = []; order.push(k); } groups[k].push(e); }
             const totalDr = dayBook.reduce((s: number, e: any) => s + Number(e.dr_amount || 0), 0);
             const totalCr = dayBook.reduce((s: number, e: any) => s + Number(e.cr_amount || 0), 0);
+            // Per-module rollup for the day: revenue recognised (net Cr on 4xxx
+            // revenue accounts) and cash/bank movement (net Dr on 1000/1010/1020),
+            // attributed to the module that raised each journal.
+            const modAgg: Record<string, { rev: number; cash: number }> = {};
+            for (const e of dayBook) {
+              const m = srcModule(e.source_type);
+              if (!modAgg[m]) modAgg[m] = { rev: 0, cash: 0 };
+              const code = String(e.account_code || '');
+              const dr = Number(e.dr_amount || 0), cr = Number(e.cr_amount || 0);
+              if (code.startsWith('4')) modAgg[m].rev += (cr - dr);
+              if (code === '1000' || code === '1010' || code === '1020') modAgg[m].cash += (dr - cr);
+            }
+            const modRows = MODULE_ORDER.filter(m => modAgg[m] && (Math.abs(modAgg[m].rev) > 0.005 || Math.abs(modAgg[m].cash) > 0.005)).map(m => ({ module: m, ...modAgg[m] }));
             return (
               <>
+                {modRows.length > 0 && (
+                  <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                    <p className="text-xs text-[#6b5d52] uppercase tracking-wide font-semibold mb-2">📊 By module (this day)</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead><tr className="text-left text-[#9c8e85]"><th className="py-1 font-medium">Module</th><th className="py-1 text-right font-medium">Revenue recognised</th><th className="py-1 text-right font-medium">Cash / bank in</th></tr></thead>
+                        <tbody>{modRows.map((r: any) => (
+                          <tr key={r.module} className="border-t border-[#f0e8d8]">
+                            <td className="py-1.5 font-medium text-[#5a4a3a]">{r.module}</td>
+                            <td className="py-1.5 text-right tabular-nums text-[#1a1208]">{Math.abs(r.rev) > 0.005 ? fmtAmt(r.rev) : '—'}</td>
+                            <td className="py-1.5 text-right tabular-nums text-emerald-700">{Math.abs(r.cash) > 0.005 ? fmtAmt(r.cash) : '—'}</td>
+                          </tr>
+                        ))}</tbody>
+                        <tfoot><tr className="border-t-2 border-[#e0d4c0] font-semibold text-[#5a4a3a]">
+                          <td className="py-1.5">All modules</td>
+                          <td className="py-1.5 text-right tabular-nums">{fmtAmt(modRows.reduce((s, r) => s + Number(r.rev || 0), 0))}</td>
+                          <td className="py-1.5 text-right tabular-nums text-emerald-800">{fmtAmt(modRows.reduce((s, r) => s + Number(r.cash || 0), 0))}</td>
+                        </tr></tfoot>
+                      </table>
+                    </div>
+                    <p className="text-[11px] text-[#9c8e85] mt-2">Revenue = net credit to revenue accounts (Restaurant F&amp;B, Hotel, Spa, Events…). Cash / bank in = net money into Cash-in-Hand &amp; Bank that day.</p>
+                  </div>
+                )}
                 <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
                   <table className="w-full text-sm border-collapse">
                     <thead><tr className="bg-[#f5f0e8] text-left">
@@ -9106,8 +9204,20 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
             <input placeholder="Account code" value={glAccount} onChange={e => setGlAccount(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white w-28" />
             <select value={glSource} onChange={e => setGlSource(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
               <option value="">All sources</option>
-              {['FNB_ORDER','FOLIO_SETTLEMENT','FOLIO_ADVANCE','EVENT_ADVANCE','EVENT_PAYMENT','FOLIO_PAYMENT','PETTY_CASH','EXPENSE_PAYMENT','LOAN','CASH_DRAWER_DEPOSIT','CASH_DRAWER_VARIANCE','CASH_COUNT','EXPENSE_CLAIM','SUPPLIER_INVOICE','SUPPLIER_PAYMENT','STAFF_ADVANCE','STAFF_PAYROLL','PAYROLL_RUN','CREDIT_NOTE','BOOKING_CANCEL','MANUAL_JOURNAL'].map(s => (
-                <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+              {[
+                { g: 'Restaurant', s: ['FNB_ORDER'] },
+                { g: 'Hotel', s: ['FOLIO_SETTLEMENT', 'FOLIO_ADVANCE', 'FOLIO_PAYMENT', 'BOOKING_CANCEL'] },
+                { g: 'Spa & Wellness', s: ['SPA_SETTLEMENT', 'SPA_SALE', 'SPA_INTERIM', 'SPA_INTERIM_REVERSAL'] },
+                { g: 'Events & Convention', s: ['EVENT_SETTLEMENT', 'EVENT_ADVANCE', 'EVENT_CANCEL_REVERSAL', 'EVENT_ADVANCE_REVERSAL'] },
+                { g: 'Purchases', s: ['SUPPLIER_INVOICE', 'SUPPLIER_PAYMENT'] },
+                { g: 'Payroll', s: ['STAFF_ADVANCE', 'STAFF_PAYROLL', 'PAYROLL_RUN'] },
+                { g: 'Overheads', s: ['PETTY_CASH', 'EXPENSE_PAYMENT', 'EXPENSE_CLAIM', 'LOAN'] },
+                { g: 'Cash control', s: ['CASH_DRAWER_DEPOSIT', 'CASH_DRAWER_VARIANCE', 'CASH_COUNT'] },
+                { g: 'Adjustments', s: ['CREDIT_NOTE', 'MANUAL_JOURNAL'] },
+              ].map(grp => (
+                <optgroup key={grp.g} label={grp.g}>
+                  {grp.s.map(s => (<option key={s} value={s}>{srcLabel(s)}</option>))}
+                </optgroup>
               ))}
             </select>
             <button onClick={loadGl} className={AC_BTN}>Apply</button>

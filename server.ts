@@ -27027,18 +27027,39 @@ ${data.tenant.name}`;
       const b = req.body || {};
       const amount = round2(b.amount);
       if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be > 0" });
-      if (amount > out0.outstanding + 0.01 && (b.payment_type || 'FINAL') !== 'REFUND') {
+      const method = b.payment_method || 'CASH';
+      const reqType = String(b.payment_type || 'FINAL').toUpperCase();
+      if (amount > out0.outstanding + 0.01 && reqType !== 'REFUND') {
         return res.status(400).json({ error: `Payment ₹${amount} exceeds outstanding ₹${out0.outstanding}` });
       }
-      await recordFolioPayment(db, {
-        folioId: req.params.fid, amount, method: b.payment_method || 'CASH',
-        type: (b.payment_type || 'FINAL'), reference: b.reference || null,
+      // Same-day cash visibility (parity with the hotel folio path): a receipt that
+      // does NOT clear the folio is cash in the drawer NOW, not at final settlement.
+      // Record it as INTERIM and post it to the GL immediately (Dr Cash/Bank, Cr 2100
+      // Advances) so it lands in today's Day Book / Cash Book. Settlement (_postFolioGl)
+      // applies ADVANCE+INTERIM against AR, so the cash is never double-counted and each
+      // GL sub-block stays balanced. A receipt that fully clears the bill stays FINAL.
+      const settlesNow = reqType !== 'REFUND' && amount >= out0.outstanding - 0.01;
+      const recordType: 'INTERIM' | 'FINAL' | 'REFUND' = reqType === 'REFUND' ? 'REFUND' : (settlesNow ? 'FINAL' : 'INTERIM');
+      const payment = await recordFolioPayment(db, {
+        folioId: req.params.fid, amount, method,
+        type: recordType, reference: b.reference || null,
         recordedBy: req.user?.email || req.user?.id || null, notes: b.notes || null,
       });
+      if (recordType === 'INTERIM') {
+        try {
+          const cashAcct = _glAccountForPaymentMethod(method);
+          const today = new Date().toISOString().slice(0, 10);
+          await _postGlEntries(db, req.params.id, `INTPAY-${(payment as any).id}`, today,
+            'SPA_INTERIM', (payment as any).id, [
+              { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Spa interim: folio ${req.params.fid}` },
+              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Spa interim: folio ${req.params.fid}` },
+            ], req.user?.email || req.user?.id || null);
+        } catch (glErr) { console.error('[GL] spa interim payment error:', glErr); }
+      }
       const out = await getFolioOutstanding(db, req.params.fid);
       if (out && out.is_fully_paid) {
         await db.run("UPDATE folios SET status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
-          [b.payment_method || 'CASH', req.params.fid]);
+          [method, req.params.fid]);
         // Phase 3.1 — capture spa appointment revenue to the GL on full settlement.
         await _postFolioGl(db, req.params.id, req.params.fid, {
           revenueCode: '4040', revenueName: 'Spa Revenue',
@@ -27059,6 +27080,20 @@ ${data.tenant.name}`;
       if (!pay) return res.status(404).json({ error: "Payment not found" });
       await db.run("UPDATE folio_payments SET is_voided = 1, voided_at = CURRENT_TIMESTAMP, voided_by = ?, voided_reason = ? WHERE id = ?",
         [req.user?.email || req.user?.id || null, req.body?.reason || null, req.params.pid]);
+      // If this payment posted an interim cash journal (Dr Cash / Cr 2100 at receipt)
+      // and the folio has NOT yet been settled to the GL, reverse it so the voided
+      // cash leaves the Day Book / Cash Book too. Once the folio is settled, the
+      // interim is already absorbed into FOLIO-<fid>, so we leave it untouched.
+      try {
+        const hadIntpay = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [`INTPAY-${req.params.pid}`]);
+        const settled = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [`FOLIO-${req.params.fid}`]);
+        if (hadIntpay && !settled) {
+          await _reverseJournal(db, req.params.id, `INTPAY-${req.params.pid}`, {
+            reversalRef: `INTPAY-VOID-${req.params.pid}`, sourceType: 'SPA_INTERIM_REVERSAL', sourceId: req.params.pid,
+            reason: req.body?.reason || 'Interim payment voided', postedBy: req.user?.email || req.user?.id || null,
+          });
+        }
+      } catch (revErr) { console.error('[GL] spa interim void reversal error:', revErr); }
       const out = await getFolioOutstanding(db, req.params.fid);
       if (out && !out.is_fully_paid) {
         await db.run("UPDATE folios SET status = 'open', settled_at = NULL WHERE id = ?", [req.params.fid]);
@@ -47885,8 +47920,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'expenses-payments-loans',
+    commit_marker: 'spa-events-daybook-integration',
     code_features: [
+      'spa-events-daybook-integration',             // Integrate Spa & Wellness and Events & Convention into the Accounting module + Day Book (parity with Hotel/Restaurant). Spa & Events already posted GL at settlement (SPA_SETTLEMENT→4040 Spa Revenue, SPA_SALE, EVENT_SETTLEMENT→4050 Banquet & Events Revenue, EVENT_ADVANCE Dr Cash/Cr 2100) so the journals reached the Day Book — but they were illegible and spa deposits were invisible until final settlement. Three changes: (1) LEGIBILITY — the frontend SOURCE_LABEL map + GL Ledger source dropdown were missing SPA_SETTLEMENT / SPA_SALE / SPA_INTERIM / EVENT_SETTLEMENT (rendered as raw "SPA SETTLEMENT"), FOLIO_SETTLEMENT was mislabeled "Hotel / Spa / Events" (it is hotel-only), and a phantom EVENT_PAYMENT filter matched nothing. Now every spa/event/reversal source has a friendly label, FOLIO_SETTLEMENT = "Hotel — folio settlement", and the GL Ledger Source dropdown is module-grouped (Restaurant / Hotel / Spa & Wellness / Events & Convention / Purchases / Payroll / Overheads / Cash control / Adjustments) with the phantom removed. (2) PER-MODULE ROLLUP — a new SOURCE_MODULE map rolls every source_type up to its business module; the Cash-by-source card (Cash Book + EOD Day-Close) now leads with a "Cash by module (today)" table (Restaurant/Hotel/Spa/Events/…) with the raw per-source list collapsed under a details toggle, and the Day Book gains a "By module (this day)" summary — revenue recognised (net Cr on 4xxx) + cash/bank in (net Dr on 1000/1010/1020) attributed to the module that raised each journal. (3) SPA DEPOSIT CASH TIMING — a spa folio receipt that does NOT clear the bill is now recorded as INTERIM and posted to the GL AT RECEIPT (Dr Cash/Bank, Cr 2100 Advances; journal INTPAY-<pid>, source SPA_INTERIM) so it lands in the same day's Day Book / Cash Book — exactly the fix already shipped for hotel folios (_postFolioGl applies ADVANCE+INTERIM against AR at settlement, so cash is never double-counted and every sub-block stays balanced). Voiding a not-yet-settled spa interim reverses INTPAY (SPA_INTERIM_REVERSAL); once the folio is settled the interim is absorbed and left untouched. Additive only — no existing GL/settlement/cash-drawer path changed. Verified: deterministic offline sim (test-scripts/e2e_spa_events_daybook_sim.mjs — spa same-day full pay, spa multi-day deposit shows day-1 cash + no double count at settlement, spa interim void, event advance+settlement, module rollup attribution, trial balance Dr=Cr) + live suite TC-ACCT-SPA-EVT-DAYBOOK. tsc + vite build clean.
       'expenses-payments-loans',                    // New: a single "Expenses & Payments" screen + "Loans / EMI" tracker in Accounting → "Expenses & Loans" group — so the owner can record rent, electricity, water, internet, salary, staff advance, EMI, repairs, marketing, office, professional, misc, paid by Cash / Bank / UPI / Cheque, WITHOUT touching Dr/Cr (the old Expense Journal was cash-only and had no Rent/EMI). Backend (owner-only): POST/GET /accounting/expense-payments auto-posts the correct double-entry — Dr the mapped expense account (RENT→new 5250, ELECTRICITY→5400, SALARY→5100, INTEREST→5460, …) or Dr 1210 Advances to Staff (staff advance = recoverable asset) or, for EMI, Dr 2700 Loan Payable (principal) + Dr 5460 Interest on Loans (interest); Cr Cash 1000 or Bank 1010 by method (source_type EXPENSE_PAYMENT). POST/GET /accounting/loans — a loan master with running outstanding; create posts Dr Cash/Bank (or Dr 3200 Opening Balance Equity for a pre-existing balance) / Cr 2700 Loan Payable; each EMI decrements outstanding by principal and auto-CLOSES at zero. New COA: 2700 Loan Payable, 3200 Opening Balance Equity, 5250 Rent, 5460 Interest on Loans. New tables loans + expense_payments. Expense-category mapper gains RENT/LEASE→5250, INTEREST→5460. GL Ledger source dropdown + cash-by-source labels gain EXPENSE_PAYMENT + LOAN. Verified: deterministic offline sim 12/12 (test-scripts/e2e_expense_payment_sim.mjs — every category balanced, cash-vs-bank routing, EMI principal/interest split, loan outstanding decrement + close, trial balance Dr=Cr) + live suite TC-ACCT-EXPPAY/LOANS/EXPVAL. tsc + vite build clean.
       'daybook-open-tables-ar',                     // Accounting review follow-ups (a) + (b). (a) DAY BOOK — new "Day Book" sub-tab under Accounting → Ledger: a single day's journal entries listed chronologically and grouped by journal_ref (sales / purchases / payments received / manual), each with its Dr/Cr lines, source label, and a day-total footer that flags balanced ✓ vs OUT OF BALANCE. Frontend-only — reuses GET /accounting/gl-entries?from=date&to=date (no backend/GL change). (b) OPEN TABLES — UNINVOICED F&B RECEIVABLE — new owner-only GET /accounting/open-tables-receivable returns the running value of dine-in table_sessions still OPEN/BILL_REQUESTED (Σ non-cancelled orders per session) as {total,count,tables[]}; surfaced as an amber card on the Cash Book so credit dine-in is visible BEFORE it settles. This is a DERIVED snapshot only — deliberately NOT posted to the GL (restaurant revenue is recognised at settlement), so it never affects the trial balance; the card copy says so. Verified: tsc + vite build clean; suite checks TC-ACCT-OPENTBL (endpoint 200 + shape) + TC-ACCT-CASHSRC (cash-book carries cash_by_source); endpoints deployed 401/404; Day Book + Open-tables UI in the live bundle.
       'cash-visibility-timing',                     // Accounting review follow-ups (hotel + restaurant cash visibility). Three changes: (1) CASH-BY-SOURCE — the Cash Book and the EOD Day-Close sheet now show a "Cash by source (today)" breakdown (Restaurant / Hotel-Spa-Events folio / advances / petty cash / drawer deposits …), grouped from gl_entries.source_type on account 1000, so restaurant vs hotel cash is visible without opening the GL ledger. Backend adds `cash_by_source` to GET /accounting/cash-book and /accounting/day-close (managers only for day-close); frontend renders a shared breakdown table + a friendly SOURCE_LABEL map. (2) GL LEDGER FILTER — the Source dropdown was missing FNB_ORDER (restaurant) and the newer sources; now lists FNB_ORDER, FOLIO_SETTLEMENT/ADVANCE/PAYMENT, EVENT_ADVANCE/PAYMENT, PETTY_CASH, CASH_DRAWER_DEPOSIT/VARIANCE, CASH_COUNT, SUPPLIER_*, STAFF_ADVANCE, STAFF_PAYROLL, PAYROLL_RUN, CREDIT_NOTE, BOOKING_CANCEL, MANUAL_JOURNAL — so restaurant cash is one-click filterable. (3) HOTEL-CASH TIMING — an INTERIM (mid-stay) folio receipt previously only hit the GL at checkout; it now posts at receipt time as Dr Cash/Bank, Cr 2100 Advances (journal INTPAY-<pid>, source FOLIO_PAYMENT), and all THREE settlement copies (settleFolioForBooking, _postFolioGl for spa/events, group checkout) now apply ADVANCE+INTERIM against AR and drop INTERIM from the cash-leg loop — so interim cash shows in the Cash Book on the day received and is never double-counted; each GL sub-block stays internally balanced. Known limitation (unchanged/pre-existing): voiding a folio payment does not reverse its GL (same as advances today). Verified: deterministic offline sim 11/11 (test-scripts/e2e_folio_cash_timing_sim.mjs — interim posts at receipt, no double count, AR+2100 net to zero, trial balance Dr=Cr) + the existing cash-drawer sim 14/14 unaffected + read-only diagnostic test-scripts/cash_review.mjs (cash grouped by source). tsc + vite build clean.

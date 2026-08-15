@@ -2426,6 +2426,19 @@ async function testCashDrawer() {
   if (ev.status === 400) pass('TC-ACCT-EXPVAL', 'expense-payment validates (400 on missing category)');
   else if (ev.status === 403) skip('TC-ACCT-EXPVAL', 'expense-payment validation', 'not owner');
   else fail('TC-ACCT-EXPVAL', 'expense-payment validation', `expected 400, got ${ev.status}`);
+
+  // TC-ACCT-SPA-EVT-DAYBOOK: Spa & Events are integrated into the Day Book — the GL
+  // Ledger source filter accepts the spa/event source types (200 + array, even if the
+  // tenant has no spa/event data yet), so their journals are one-click filterable.
+  const spaGl = await api('GET', `/api/restaurant/${restaurantId}/accounting/gl-entries?source_type=SPA_SETTLEMENT`);
+  const evtGl = await api('GET', `/api/restaurant/${restaurantId}/accounting/gl-entries?source_type=EVENT_SETTLEMENT`);
+  if (spaGl.status === 200 && Array.isArray(spaGl.data) && evtGl.status === 200 && Array.isArray(evtGl.data)) {
+    pass('TC-ACCT-SPA-EVT-DAYBOOK', `GL Ledger filters SPA_SETTLEMENT (${spaGl.data.length}) + EVENT_SETTLEMENT (${evtGl.data.length})`);
+  } else if (spaGl.status === 403 || evtGl.status === 403) {
+    skip('TC-ACCT-SPA-EVT-DAYBOOK', 'spa/event Day Book filter', 'not owner');
+  } else {
+    fail('TC-ACCT-SPA-EVT-DAYBOOK', 'spa/event Day Book filter', `HTTP spa=${spaGl.status} evt=${evtGl.status}`);
+  }
 }
 
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
