@@ -5168,10 +5168,12 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
         // for these tabs is now handled per-role in requireTabAction, which
         // grandfathers only the module's built-in operational roles for a tab
         // that isn't in the saved matrix — the matrix stays authoritative for
-        // custom / restricted roles. EVENTS_CHECKLISTS stays defaulted because
-        // the frontend matrix pre-fills it identically (owner-only config tab).
-        'EVENTS_CHECKLISTS',
-        'CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
+        // custom / restricted roles. CHECKLISTS / EVENTS_CHECKLISTS are NOT
+        // defaulted here: they are now permission-aware (visible to the owner OR
+        // any role the owner explicitly grants "Checklist Templates" in Staff
+        // Access). Auto-defaulting them to Full would leak the config tab into
+        // every built-in staff role's nav the moment it stopped being owner-only.
+        'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
         // Spa & Wellness — operational tabs; module-gated, so harmless on non-spa
         // tenants and prevents locking spa staff out on tenants that pre-configured
         // Staff Access before Spa shipped. (SPA_BILLING / SPA_SETTINGS stay out —
@@ -22185,6 +22187,14 @@ ${data.tenant.name}`;
   };
   const HK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const hkStaff = requireRole(['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'HOUSEKEEPING', 'MAINTENANCE', 'EVENTS_MANAGER']);
+  // Read gate for the Checklist Templates CONFIG endpoints (categories / templates
+  // / assignments). PERMISSION-AWARE (mirrors hotelStaff), so "Checklist Templates"
+  // granted in Staff Access is honored: owner/platform admin + the same built-in
+  // ops roles hkStaff allowed, PLUS any CUSTOM role the owner granted CHECKLISTS or
+  // EVENTS_CHECKLISTS (≥View). Replaces the old fixed requireRole() allowlist that
+  // 403'd every granted custom role. Template CREATE/EDIT/DELETE stay owner-only
+  // (requireOwnerOrAdmin inside each write handler) — granted roles VIEW, not edit.
+  const checklistViewStaff = requireModuleAccess(['CHECKLISTS', 'EVENTS_CHECKLISTS'], ['MANAGER', 'FRONT_DESK', 'CONCIERGE', 'HOUSEKEEPING', 'MAINTENANCE', 'EVENTS_MANAGER'], 'Checklists');
 
   const ensureHousekeepingTables = async (db: any) => {
     await db.exec(`CREATE TABLE IF NOT EXISTS housekeeping_tasks (
@@ -22733,7 +22743,7 @@ ${data.tenant.name}`;
   const CHK_FTYPES = ['ROOM', 'EVENT', 'GENERIC'];
 
   // ── Categories ───────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/checklists/categories", authenticate, hkStaff, requireTabAccess('CHECKLISTS'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/checklists/categories", authenticate, checklistViewStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -22783,7 +22793,7 @@ ${data.tenant.name}`;
   });
 
   // ── Templates (+ steps) ──────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/checklists/templates", authenticate, hkStaff, requireTabAccess('CHECKLISTS'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/checklists/templates", authenticate, checklistViewStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -22802,7 +22812,7 @@ ${data.tenant.name}`;
       res.json(rows);
     } catch (err: any) { res.status(500).json({ error: "Failed to load templates" }); }
   });
-  app.get("/api/restaurant/:id/checklists/templates/:tid", authenticate, hkStaff, requireTabAccess('CHECKLISTS'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/checklists/templates/:tid", authenticate, checklistViewStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const tpl = await db.get("SELECT * FROM checklist_templates WHERE id = ?", [req.params.tid]);
@@ -22918,7 +22928,7 @@ ${data.tenant.name}`;
   });
 
   // ── Assignments (per-entity overrides) ───────────────────────────────────
-  app.get("/api/restaurant/:id/checklists/assignments", authenticate, hkStaff, requireTabAccess('CHECKLISTS'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/checklists/assignments", authenticate, checklistViewStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -47690,8 +47700,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'service-requests-permission-aware-gate',
+    commit_marker: 'checklist-templates-honor-grant',
     code_features: [
+      'checklist-templates-honor-grant',             // Enhancement (owner-approved): "Checklist Templates" (PMS `CHECKLISTS` + Events `EVENTS_CHECKLISTS`) were hard-gated to Owner-only in the nav (`isOwnerOrAdmin`), even though the Staff Access matrix advertised them as grantable — so granting had no effect. Now permission-aware end-to-end: (1) frontend nav array always includes the tabs and `isVisible` returns `isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs)` — owner always, plus any role the owner grants the tab; (2) both tabs REMOVED from backend `RBAC_NEWLY_ADDED` so they're no longer auto-injected at Full for built-in roles (which would leak the config tab into every built-in staff nav once it stopped being owner-only) — the grant is now authoritative; (3) new `checklistViewStaff = requireModuleAccess(['CHECKLISTS','EVENTS_CHECKLISTS'], [MANAGER/FRONT_DESK/CONCIERGE/HOUSEKEEPING/MAINTENANCE/EVENTS_MANAGER], 'Checklists')` replaces the fixed `hkStaff` allowlist on the 4 config READ endpoints (categories/templates/template-detail/assignments GET), so a granted custom role can VIEW templates without a 403; (4) Staff Access matrix descriptions updated (no longer say "Owner-only"). Template CREATE/EDIT/DELETE stay owner-only (`requireOwnerOrAdmin` in each write handler) — granted roles VIEW, not edit. Nav and API now agree (a nav-visible checklist tab is never API-403). Verified: offline sim 21/21 (owner in; granted custom role in [nav+API]; ungranted out; built-in WAITER no longer leaks; unrestricted MANAGER in; EVENTS_CHECKLISTS honors isEventsEnabled; nav-visible⇒API-allows invariant) + live regression TC-RBAC-CHK-GRANT. NOTE: the reported "owner can't see these" was an oversight — the owner always saw them; this ships the owner-approved "honor the grant" for delegated roles. tsc + vite build clean.
       'service-requests-permission-aware-gate',      // Fix (root cause): "Service Catalogue unauthorized error for every Custom Role (PMS → Service Catalogue)." The hotel service-requests endpoints (GET /hotel/service-requests + PATCH .../status) were gated by `serviceRequestStaff = requireRole([...HOTEL_OPERATIONAL_ROLES, HOUSEKEEPING, MAINTENANCE])` — a FIXED allowlist that ignores the custom role's assigned permissions and 403s with "Your role (X) is not authorized for this action." That error is stored in the SHARED `hotelError` banner state, which the PMS Service Catalogue (SERVICES tab) also renders (App.tsx ~20916) — so even though the catalogue's own /services call (permission-aware hotelStaff) loads fine and the Add/Edit/Delete buttons render (static JSX), the unrelated service-requests 403 bled onto the page. Two-part fix: (1) BACKEND — `serviceRequestStaff` is now `requireModuleAccess(['SERVICE_REQUESTS'], [...HOTEL_OPERATIONAL_ROLES, HOUSEKEEPING, MAINTENANCE], 'Service Requests')`, mirroring hotelStaff: built-in ops roles pass, PLUS any custom role the owner granted the SERVICE_REQUESTS tab (≥View); the status-PATCH still layers requireTabAccess('SERVICE_REQUESTS') for the exact write level. Built-in roles + seedless guest/partner roles unchanged (no fail-open). (2) FRONTEND — `fetchHotelServices`/`fetchHotelRequests` now clear `hotelError` on success, so a failure from one loader can't linger on an unrelated tab's shared banner. Verified: offline gate sim 13/13 (custom granted SERVICE_REQUESTS admitted [old requireRole denied]; ungranted denied; FRONT_DESK/CONCIERGE/HOUSEKEEPING/MAINTENANCE/MANAGER/OWNER admitted; WAITER/CHEF/OTA/CUSTOMER denied) + live regression TC-RBAC-SVCREQ-ALLOW (custom role granted SERVICE_REQUESTS GETs /hotel/service-requests without 403). Same residual class still open: `restaurantStaff` (97 routes) + `spaStaff` (36 routes, incl. Spa Service Catalogue SPA_CATALOG) remain fixed requireRole allowlists — flagged, not converted here (blast radius).
       'rbac-content-guard-consistency',              // Fix (root cause): "PCC Security role permissions do not match portal access" — two symptoms. (1) "Payables & Procurement visible despite no permission": already resolved by `custom-role-strict-permissions` (PROCUREMENT was a legacy grandfather; strict enforcement hides it for custom roles — verified). (2) "Cleaning Checklist visible but shows Access Restricted": a NAV-vs-CONTENT mismatch. The sidebar `isVisible('EVENTS_HOUSEKEEPING')` gates on the HOUSEKEEPING permission (Events cleaning reuses HOUSEKEEPING-keyed endpoints) and `isVisible('MY_CHECKLIST')` is always true — but the content-pane guard used a bare `isTabVisible(activeTab, allowedTabs)` keyed on the tab's OWN id, so a tab could show in the nav yet render "Access Restricted". The strict-permissions marker made this bite MY_CHECKLIST too (always in nav; its id absent from a custom role's complete list). Fix: new module-level `isContentAccessible(activeTab, allowedTabs)` that mirrors isVisible — aliases EVENTS_HOUSEKEEPING→HOUSEKEEPING and treats HOME/MY_CHECKLIST as always reachable; content guard now calls it instead of the bare isTabVisible. Sidebar and content pane are now guaranteed to agree (a nav-visible tab is never content-restricted). Verified: offline nav/content consistency sim 24/24 (every tab: nav-visible ⇒ not content-restricted) + regression TC-RBAC-CONTENT-GUARD (source-asserts the guard uses isContentAccessible with the EVENTS_HOUSEKEEPING alias + MY_CHECKLIST always-allowed). tsc + vite build clean.
       'custom-role-strict-permissions',              // Fix (root cause): "Custom Role permissions not enforced — unassigned modules still visible/accessible across ALL custom roles." Two GRANDFATHER layers (built for legacy migration) were over-granting fresh custom roles: (1) backend getTabPermissionsForRole injected RBAC_NEWLY_ADDED (Procurement, Expense Journal, Housekeeping, Checklists, Status Board, all Spa tabs, Hotel Inventory) at Full(3) for ANY absent key; (2) frontend isTabVisible grandfathered ALWAYS_VISIBLE_TABS (Inventory, Delivery, Loyalty, Roster, Timesheet, Staff Payroll, Hotel Reports, Channel Manager, Public Booking, Restaurant Reports, HR Payroll, Procurement, All Reports) for markerless lists. So a custom role assigned only e.g. Events still SAW + could act on ~30 unassigned modules. A custom role is created FRESH via the modern Staff Access UI = deliberate, COMPLETE set → no grandfathering. Fix: (a) getTabPermissionsForRole injects RBAC_NEWLY_ADDED ONLY for built-in roles (`_SYSTEM_ROLE_SET`) — a custom role's perms = exactly what's saved, so requireTabAction/Access denies every unassigned tab (no Full(3) leak = actions restricted too); (b) /my-permissions appends a new `__perm_complete__` marker for custom roles; (c) App.tsx isTabVisible: when that marker is present, grandfather NOTHING (tab visible only if explicitly granted). Built-in roles + owner/manager keep legacy grandfathering UNCHANGED (no marker, injection still applies). Verified: offline full-flow sim 34/34 (custom role assigned 1 tab → all 21 previously-leaking tabs hidden, no Full-level injected; built-in WAITER + OWNER unchanged); regression TC-RBAC-CUSTOM-STRICT (/my-permissions returns only granted tabs + complete marker, 0 leaks). tsc + vite build clean.

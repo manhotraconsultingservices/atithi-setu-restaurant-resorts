@@ -14105,7 +14105,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FRONT_OFFICE_REPORTS', label: 'Hotel Reports' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
               { id: 'HOUSEKEEPING',         label: 'Housekeeping' },
-              ...(isOwnerOrAdmin ? [{ id: 'CHECKLISTS', label: 'Checklist Templates' } as NavTab] : []),
+              { id: 'CHECKLISTS',           label: 'Checklist Templates' },
               { id: 'SERVICES',             label: 'Service Catalogue' },
               { id: 'FOLIOS',               label: 'Guest Bills' },
               { id: 'COMPLIANCE',           label: 'Guest Compliance' },
@@ -14153,7 +14153,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_CATERING',   label: 'Catering Menus' },
               { id: 'EVENTS_QUOTATIONS', label: 'Quotations' },
               { id: 'EVENTS_HOUSEKEEPING', label: 'Cleaning Checklist' },
-              ...(isOwnerOrAdmin ? [{ id: 'EVENTS_CHECKLISTS', label: 'Checklist Templates' } as NavTab] : []),
+              { id: 'EVENTS_CHECKLISTS', label: 'Checklist Templates' },
               { id: 'EVENTS_REPORTS',    label: 'Events Reports' },
               ...(isOwnerOrAdmin ? [{ id: 'EVENTS_MIGRATION', label: 'Data Migration' } as NavTab] : []),
               { id: 'EVENTS_SETTINGS',   label: 'Public Page Settings' },
@@ -14254,10 +14254,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // Room Setup is owner-only (room CRUD + types + tariff). Mirror the
           // STAFF_ACCESS gate: owners always see it; everyone else never does.
           if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
-          // Checklist Templates is owner config (define/assign checklists). Owner-only.
-          if (id === 'CHECKLISTS') return isOwnerOrAdmin;
-          // Event checklist config — owner-only, and only when Events is enabled.
-          if (id === 'EVENTS_CHECKLISTS') return isOwnerOrAdmin && isEventsEnabled;
+          // Checklist Templates: owner/admin always, PLUS any role the owner grants
+          // "Checklist Templates" in Staff Access (honor the grant). Editing stays
+          // owner-only server-side (write endpoints are requireOwnerOrAdmin) — a
+          // granted role VIEWS templates. Built-in staff no longer see it by default
+          // (CHECKLISTS was removed from RBAC_NEWLY_ADDED so the grant is authoritative).
+          if (id === 'CHECKLISTS') return isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs);
+          // Event checklist config — owner OR a granted role; only when Events is enabled.
+          if (id === 'EVENTS_CHECKLISTS') return (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs)) && isEventsEnabled;
           if (id === 'EVENTS_MIGRATION') return isOwnerOrAdmin && isEventsEnabled;
           // My Checklist is the personal work queue — visible to every staff member.
           if (id === 'MY_CHECKLIST') return true;
@@ -25808,7 +25812,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'SERVICES',          label: 'Hotel Services',          description: 'Configure room-service offerings (Extra towels, AC repair, etc.) and pricing.', hotelOnly: true },
               { id: 'SERVICE_REQUESTS',  label: 'Service Requests',        description: 'Live queue of guest requests — housekeeping / maintenance acknowledge here.', hotelOnly: true },
               { id: 'HOUSEKEEPING',      label: 'Housekeeping',            description: 'Cleaning checklists, the cleaning worklist (tick tasks + release rooms/venues), and the cleaning log. Configure the checklist as owner/manager.', hotelOnly: true },
-              { id: 'CHECKLISTS',        label: 'Checklist Templates',     description: 'Owner config: build reusable checklist templates by category, set their trigger (check-in / check-out / daily / mid-stay / inspection), and assign them to all or specific rooms / halls. Owner-only.', hotelOnly: true },
+              { id: 'CHECKLISTS',        label: 'Checklist Templates',     description: 'Build reusable checklist templates by category, set their trigger (check-in / check-out / daily / mid-stay / inspection), and assign them to all or specific rooms / halls. Grant to let a role VIEW the templates in the PMS nav; creating / editing / deleting stays owner-only.', hotelOnly: true },
               { id: 'FOLIOS',            label: 'Guest Bills',             description: 'View / settle guest bills, add F&B charges, apply promos, credit notes.', hotelOnly: true },
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
@@ -25831,7 +25835,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_QUOTATIONS', label: 'Event Quotations',   description: 'Generate, view and email event quotations (BEO).', eventsOnly: true },
               { id: 'EVENTS_REPORTS',    label: 'Event Reports',      description: 'Events reporting hub — revenue, venue utilization, upcoming events, CSV export.', eventsOnly: true },
               { id: 'EVENTS_SETTINGS',   label: 'Events Page Settings', description: 'Public events page config — hero, tagline, gallery photos.', eventsOnly: true },
-              { id: 'EVENTS_CHECKLISTS', label: 'Event Checklist Templates', description: 'Owner config: build event-hall checklist templates (setup / daily / post-event), set triggers, and assign to all or specific venues. Owner-only.', eventsOnly: true },
+              { id: 'EVENTS_CHECKLISTS', label: 'Event Checklist Templates', description: 'Build event-hall checklist templates (setup / daily / post-event), set triggers, and assign to all or specific venues. Grant to let a role VIEW the templates in the Events nav; creating / editing / deleting stays owner-only.', eventsOnly: true },
               { id: 'EVENTS_MIGRATION',  label: 'Event Data Migration', description: 'Owner-only CSV import for bookings, sales invoices, rental inventory and add-on services — validate + dedup + editable fix-it grid.', eventsOnly: true },
               // Spa & Wellness tabs (only shown when the Spa module is enabled).
               { id: 'SPA_CALENDAR',     label: 'Spa Calendar',       description: 'Therapist × time appointment calendar — book, reschedule, view the day.', spaOnly: true },

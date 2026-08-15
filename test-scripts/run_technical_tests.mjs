@@ -2479,7 +2479,7 @@ async function testRBACHardening() {
       // Grant the custom role EVENTS_BOOKINGS (Edit) + HR_PAYROLL (View).
       const cur = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
       const map = (cur.data && typeof cur.data === 'object' && !Array.isArray(cur.data)) ? { ...cur.data } : {};
-      map[role] = { EVENTS_BOOKINGS: 2, HR_PAYROLL: 1, SERVICE_REQUESTS: 1 };
+      map[role] = { EVENTS_BOOKINGS: 2, HR_PAYROLL: 1, SERVICE_REQUESTS: 1, CHECKLISTS: 1 };
       await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, map);
 
       // F2b — the GRANTED custom role can now READ events bookings. This is the
@@ -2511,6 +2511,16 @@ async function testRBACHardening() {
       else if (srAfter.status === 403) fail('TC-RBAC-SVCREQ-ALLOW', 'Custom role granted SERVICE_REQUESTS must not be 403 on /hotel/service-requests', 'got 403 — serviceRequestStaff still a fixed allowlist that ignores custom-role grants');
       else skip('TC-RBAC-SVCREQ-ALLOW', 'Custom-role service-requests access', `status ${srAfter.status} (hotel not fully enabled on this tenant)`);
 
+      // Checklist Templates — "honor the grant": a custom role granted CHECKLISTS
+      // can now GET /checklists/templates (was blocked by the fixed hkStaff
+      // allowlist). The config READ endpoints are now permission-aware
+      // (checklistViewStaff); template create/edit/delete stay owner-only. 403 =
+      // regression; 200 = fixed; other = skip (checklists not set up on this tenant).
+      const chkAfter = await api('GET', `/api/restaurant/${restaurantId}/checklists/templates`, null, tok);
+      if (chkAfter.status === 200) pass('TC-RBAC-CHK-GRANT', 'Custom role granted CHECKLISTS CAN GET /checklists/templates (honor the grant)', '200 after grant');
+      else if (chkAfter.status === 403) fail('TC-RBAC-CHK-GRANT', 'Custom role granted CHECKLISTS must not be 403 on /checklists/templates', 'got 403 — checklist read gate still ignores the custom-role grant');
+      else skip('TC-RBAC-CHK-GRANT', 'Custom-role checklist view access', `status ${chkAfter.status} (checklists not available on this tenant)`);
+
       // STRICT ENFORCEMENT — the custom role was granted ONLY { EVENTS_BOOKINGS,
       // HR_PAYROLL }. Its /my-permissions allowed_tabs must contain exactly those
       // (plus the '__perm_complete__' marker) and MUST NOT contain any unassigned
@@ -2520,7 +2530,9 @@ async function testRBACHardening() {
       const at = Array.isArray(mp.data?.allowed_tabs) ? mp.data.allowed_tabs : [];
       const hasComplete = at.includes('__perm_complete__');
       const hasGranted  = at.includes('EVENTS_BOOKINGS') && at.includes('HR_PAYROLL');
-      const leaked = ['PROCUREMENT', 'EXPENSE_JOURNAL', 'HOUSEKEEPING', 'CHECKLISTS', 'STATUS_BOARD', 'HOTEL_INVENTORY', 'SPA_CALENDAR', 'INVENTORY', 'LOYALTY', 'DELIVERY', 'ROSTER', 'TIMESHEET'].filter(t => at.includes(t));
+      // (CHECKLISTS is intentionally granted to this role now — see the grant map
+      // above — so it is NOT a leak; it's covered by TC-RBAC-CHK-GRANT below.)
+      const leaked = ['PROCUREMENT', 'EXPENSE_JOURNAL', 'HOUSEKEEPING', 'STATUS_BOARD', 'HOTEL_INVENTORY', 'SPA_CALENDAR', 'INVENTORY', 'LOYALTY', 'DELIVERY', 'ROSTER', 'TIMESHEET'].filter(t => at.includes(t));
       if (hasComplete && hasGranted && leaked.length === 0) {
         pass('TC-RBAC-CUSTOM-STRICT', 'Custom-role /my-permissions returns ONLY granted tabs (+ complete marker) — no grandfather leak', `${at.length} tabs, 0 leaks`);
       } else {
