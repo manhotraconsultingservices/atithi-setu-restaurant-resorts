@@ -4305,9 +4305,9 @@ async function settleFolioForBooking(
         const sgst = gstAmt - cgst;
         const payments: any[] = await tenantDb.query(
           "SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0", [folio.id]);
-        const advances = payments.filter((p: any) => p.payment_type === 'ADVANCE');
+        const advances = payments.filter((p: any) => p.payment_type === 'ADVANCE' || p.payment_type === 'INTERIM');
         const advTotal  = advances.reduce((s: number, p: any) => s + Number(p.amount), 0);
-        const nonAdv    = payments.filter((p: any) => p.payment_type !== 'ADVANCE');
+        const nonAdv    = payments.filter((p: any) => p.payment_type !== 'ADVANCE' && p.payment_type !== 'INTERIM');
         const glLines: GlLine[] = [];
         if (subtotal + gstAmt > 0) {
           glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: subtotal + gstAmt - discount, cr_amount: 0, narration: `Guest bill ${folio.id}` });
@@ -4622,9 +4622,9 @@ async function _postFolioGl(
     const sgst = +(gstAmt - cgst).toFixed(2);
     const entryDate = (folio.settled_at || folio.created_at || new Date().toISOString()).toString().slice(0, 10);
     const payments: any[] = await db.query("SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0", [folioId]).catch(() => []);
-    const advances = (payments || []).filter((p: any) => p.payment_type === 'ADVANCE');
+    const advances = (payments || []).filter((p: any) => p.payment_type === 'ADVANCE' || p.payment_type === 'INTERIM');
     const advTotal = advances.reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
-    const nonAdv = (payments || []).filter((p: any) => p.payment_type !== 'ADVANCE');
+    const nonAdv = (payments || []).filter((p: any) => p.payment_type !== 'ADVANCE' && p.payment_type !== 'INTERIM');
     const lines: GlLine[] = [];
     if (subtotal + gstAmt > 0) {
       lines.push({ account_code: arCode, account_name: arName, dr_amount: +(subtotal + gstAmt - discount).toFixed(2), cr_amount: 0, narration: `Bill ${folioId}` });
@@ -40323,6 +40323,23 @@ ${data.tenant.name}`;
             ], req.user?.id || req.user?.email || null);
         } catch (glErr) { console.error('[GL] advance payment error:', glErr); }
       }
+      // GL timing fix: an INTERIM (mid-stay) receipt is cash in the drawer NOW,
+      // not at checkout. Post it immediately as Dr Cash/Bank, Cr 2100 Advances
+      // from Guests — an advance in substance — so it appears in the Cash Book on
+      // the day it was received. Settlement applies ADVANCE+INTERIM against AR
+      // (see settleFolioForBooking / _postFolioGl), so cash is never
+      // double-counted and each GL sub-block stays internally balanced.
+      else if (type === 'INTERIM') {
+        try {
+          const cashAcct = _glAccountForPaymentMethod(method);
+          const today = new Date().toISOString().slice(0, 10);
+          await _postGlEntries(tenantDb, req.params.id, `INTPAY-${(payment as any).id}`, today,
+            'FOLIO_PAYMENT', (payment as any).id, [
+              { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Interim payment: folio ${req.params.folioId}` },
+              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Interim payment: folio ${req.params.folioId}` },
+            ], req.user?.id || req.user?.email || null);
+        } catch (glErr) { console.error('[GL] interim payment error:', glErr); }
+      }
       // Return the updated outstanding so the UI can update without
       // a second round-trip.
       const outstanding = await getFolioOutstanding(tenantDb, req.params.folioId);
@@ -41444,9 +41461,9 @@ ${data.tenant.name}`;
           const payments2: any[] = await tenantDb.query(
             "SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0", [folio.id]
           );
-          const advances = payments2.filter((p: any) => p.payment_type === 'ADVANCE');
+          const advances = payments2.filter((p: any) => p.payment_type === 'ADVANCE' || p.payment_type === 'INTERIM');
           const advTotal  = advances.reduce((s: number, p: any) => s + Number(p.amount), 0);
-          const nonAdv    = payments2.filter((p: any) => p.payment_type !== 'ADVANCE');
+          const nonAdv    = payments2.filter((p: any) => p.payment_type !== 'ADVANCE' && p.payment_type !== 'INTERIM');
           const glLines: GlLine[] = [];
           if (subtotal + gstAmt > 0) {
             glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: subtotal + gstAmt - disc, cr_amount: 0, narration: `Guest bill ${folio.id}` });
@@ -47866,8 +47883,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'eod-cash-drawer',
+    commit_marker: 'cash-visibility-timing',
     code_features: [
+      'cash-visibility-timing',                     // Accounting review follow-ups (hotel + restaurant cash visibility). Three changes: (1) CASH-BY-SOURCE — the Cash Book and the EOD Day-Close sheet now show a "Cash by source (today)" breakdown (Restaurant / Hotel-Spa-Events folio / advances / petty cash / drawer deposits …), grouped from gl_entries.source_type on account 1000, so restaurant vs hotel cash is visible without opening the GL ledger. Backend adds `cash_by_source` to GET /accounting/cash-book and /accounting/day-close (managers only for day-close); frontend renders a shared breakdown table + a friendly SOURCE_LABEL map. (2) GL LEDGER FILTER — the Source dropdown was missing FNB_ORDER (restaurant) and the newer sources; now lists FNB_ORDER, FOLIO_SETTLEMENT/ADVANCE/PAYMENT, EVENT_ADVANCE/PAYMENT, PETTY_CASH, CASH_DRAWER_DEPOSIT/VARIANCE, CASH_COUNT, SUPPLIER_*, STAFF_ADVANCE, STAFF_PAYROLL, PAYROLL_RUN, CREDIT_NOTE, BOOKING_CANCEL, MANUAL_JOURNAL — so restaurant cash is one-click filterable. (3) HOTEL-CASH TIMING — an INTERIM (mid-stay) folio receipt previously only hit the GL at checkout; it now posts at receipt time as Dr Cash/Bank, Cr 2100 Advances (journal INTPAY-<pid>, source FOLIO_PAYMENT), and all THREE settlement copies (settleFolioForBooking, _postFolioGl for spa/events, group checkout) now apply ADVANCE+INTERIM against AR and drop INTERIM from the cash-leg loop — so interim cash shows in the Cash Book on the day received and is never double-counted; each GL sub-block stays internally balanced. Known limitation (unchanged/pre-existing): voiding a folio payment does not reverse its GL (same as advances today). Verified: deterministic offline sim 11/11 (test-scripts/e2e_folio_cash_timing_sim.mjs — interim posts at receipt, no double count, AR+2100 net to zero, trial balance Dr=Cr) + the existing cash-drawer sim 14/14 unaffected + read-only diagnostic test-scripts/cash_review.mjs (cash grouped by source). tsc + vite build clean.
       'eod-cash-drawer',                            // Enhancement (client demo gap): "how to handle cash collected during the day" → a per-cashier EOD Cash Drawer / Day-Close, added to Accounting (Controls → "Cash Drawers"). Additive over the existing Cash Book / Cash Count / Petty Cash / GL — NO settlement path is touched. New tenant tables `cash_drawers` (lifecycle OPEN→PENDING_APPROVAL→APPROVED|REJECTED) + `cash_day_locks`, and COA account `1005 Cash in Transit`. Model: a drawer = one cashier's till for a shift; **expected cash = opening float + net GL Cash-in-Hand (1000) movement during the drawer's open window** (standard POS drawer math; reconciles to the same GL account the Cash Book already trusts — the window uses a column-to-column timestamp compare dr.opened_at↔gl.created_at so it is timezone-safe). Endpoints (all under /api/restaurant/:id/accounting, gated: cashiers manage their OWN drawer via ownership, managers oversee, unlock owner-only): GET/POST cash-drawers (list/open), GET cash-drawers/:id (detail + live expected, revealed to managers or after close so a cashier counts blind), POST …/close (denomination-grid count → expected snapshot + variance → PENDING_APPROVAL), POST …/approve (posts the deposit journal Cr 1000 → Dr 1010 Bank / 1005 Transit, and optional variance journal 1000↔6010 Cash Over/Short), POST …/reject, GET day-close (EOD sheet: drawers + totals + GL cash position + manager tender breakdown from payment rows + cash expenses + lock state), POST day-close/lock (requires every drawer APPROVED) + /unlock. Frontend: Accounting → Controls → "Cash Drawers" — open-drawer form, per-cashier drawers table with Close&count (denomination modal, auto-total, deposit + retained float) / Approve / Reject, EOD summary cards, GL cash position, tender breakdown, Lock day. NOTE (documented limitation): per-cashier attribution is exact for sequential shifts; concurrent same-day cashiers share the GL-net window and the manager reconciles at the EOD sheet (a hard per-payment drawer stamp is the follow-up for shared-login concurrency). Verified: deterministic offline sim 14/14 (test-scripts/e2e_cash_drawer_sim.mjs — expected math, denomination count, deposit GL, shortage true-up to 6010, sequential-shift attribution, lock gate) + live suite checks TC-CD-LIST/DAYCLOSE/RECONCILE(day-close GL cash == Cash Book)/GUARD + endpoints deployed (401/404). tsc + vite build clean.
       'restaurant-bill-charge-to-room',              // Enhancement: a restaurant DINE-IN / walk-in guest who is a checked-in hotel guest can now push their whole table bill onto their room folio instead of paying immediately — and it clears with the room in one settlement at check-out. Additive only; the CASH/CARD/UPI close path, the order-POST CHARGE_TO_ROOM path, `postOrderToFolio`, and the checkout/settle flow are all UNCHANGED. New: (1) the Table Bill modal (`PostpaidInvoiceModal`) gains a 4th settlement option "🏨 Charge to Hotel Room" (only rendered when the property has in-house guests) with a searchable room/guest picker; (2) `GET /api/restaurant/:id/hotel/in-house-rooms` (restaurantStaff) returns the minimal CHECKED_IN room+guest+open_folio list for the picker — tolerant, returns [] for restaurant-only tenants so the option stays hidden; (3) `POST /api/restaurant/:id/sessions/:token/charge-to-room {booking_id, room_id}` (restaurantStaff) validates the room is CHECKED_IN in-tenant, posts each non-cancelled session order to the guest's open folio via the SAME idempotent `postOrderToFolio` choke point (subtype RESTAURANT, itemised at the hotel F&B GST slab — no per-item rate passed), tags the orders CHARGE_TO_ROOM + DELIVERED (NOT paid — no cash GL; F&B revenue is recognised at folio settlement like every other charge-to-room order), then closes the session as CHARGE_TO_ROOM and frees the table. At check-out the existing folio flow sweeps + totals room+F&B, takes one FINAL payment, and marks the invoice settled/paid — so "clear restaurant + hotel in one go" needs no new checkout code. Idempotent (already-posted orders skipped; a re-submit on an already-charged session returns success). Verified: deterministic offline billing simulation (item→folio mapping, hotel-slab GST, folio total, no-double-post idempotency, orders-not-marked-paid, one-payment checkout → outstanding 0 → settled) [PASS]; live suite checks TC-CTR-INHOUSE (in-house-rooms 200 + array shape) + TC-CTR-GUARD (charge-to-room validates with structured 4xx, not a route-404/500) + a best-effort self-cleaning full-chain TC-CTR-E2E that SKIPs unless a checked-in guest + open table session are discoverable; deployed endpoints probed 401/400-not-404. Final in-app confirmation with a real checked-in guest recommended. tsc + vite build clean.
       'checklist-templates-honor-grant',             // Enhancement (owner-approved): "Checklist Templates" (PMS `CHECKLISTS` + Events `EVENTS_CHECKLISTS`) were hard-gated to Owner-only in the nav (`isOwnerOrAdmin`), even though the Staff Access matrix advertised them as grantable — so granting had no effect. Now permission-aware end-to-end: (1) frontend nav array always includes the tabs and `isVisible` returns `isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs)` — owner always, plus any role the owner grants the tab; (2) both tabs REMOVED from backend `RBAC_NEWLY_ADDED` so they're no longer auto-injected at Full for built-in roles (which would leak the config tab into every built-in staff nav once it stopped being owner-only) — the grant is now authoritative; (3) new `checklistViewStaff = requireModuleAccess(['CHECKLISTS','EVENTS_CHECKLISTS'], [MANAGER/FRONT_DESK/CONCIERGE/HOUSEKEEPING/MAINTENANCE/EVENTS_MANAGER], 'Checklists')` replaces the fixed `hkStaff` allowlist on the 4 config READ endpoints (categories/templates/template-detail/assignments GET), so a granted custom role can VIEW templates without a 403; (4) Staff Access matrix descriptions updated (no longer say "Owner-only"). Template CREATE/EDIT/DELETE stay owner-only (`requireOwnerOrAdmin` in each write handler) — granted roles VIEW, not edit. Nav and API now agree (a nav-visible checklist tab is never API-403). Verified: offline sim 21/21 (owner in; granted custom role in [nav+API]; ungranted out; built-in WAITER no longer leaks; unrestricted MANAGER in; EVENTS_CHECKLISTS honors isEventsEnabled; nav-visible⇒API-allows invariant) + live regression TC-RBAC-CHK-GRANT. NOTE: the reported "owner can't see these" was an oversight — the owner always saw them; this ships the owner-approved "honor the grant" for delegated roles. tsc + vite build clean.
@@ -48188,6 +48206,18 @@ ${data.tenant.name}`;
       const cash_in_hand = await bucket(CASH);
       const bank = await bucket(BANK);
 
+      // Cash received/paid today split by WHERE it came from (Restaurant vs Hotel
+      // vs petty cash vs drawer deposit …) — the same GL Cash-in-Hand (1000)
+      // movements, grouped by source_type. Lets the owner see restaurant vs hotel
+      // cash without opening the GL ledger.
+      const cbsRows: any[] = await db.query(
+        `SELECT source_type, COALESCE(SUM(dr_amount),0) AS din, COALESCE(SUM(cr_amount),0) AS dout
+           FROM gl_entries WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = '1000' AND entry_date = ?
+          GROUP BY source_type HAVING COALESCE(SUM(dr_amount),0) <> 0 OR COALESCE(SUM(cr_amount),0) <> 0
+          ORDER BY COALESCE(SUM(dr_amount),0) DESC`,
+        [req.params.id, date]).catch(() => []);
+      const cash_by_source = cbsRows.map(r => ({ source_type: r.source_type || 'UNKNOWN', in: round(Number(r.din || 0)), out: round(Number(r.dout || 0)) }));
+
       // the day's expenses, grouped by account (dr−cr on EXPENSE accounts).
       const expRows: any[] = await db.query(
         `SELECT g.account_code, g.account_name, COALESCE(SUM(g.dr_amount - g.cr_amount),0) AS amount
@@ -48205,6 +48235,7 @@ ${data.tenant.name}`;
         date,
         cash_in_hand,
         bank,
+        cash_by_source,
         total_cash_position: round(cash_in_hand.closing + bank.closing),
         expenses,
         total_expense,
@@ -48925,6 +48956,17 @@ ${data.tenant.name}`;
         tender = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, _acctRound(v)]));
         cashExpense = await g(`SELECT COALESCE(SUM(amount),0) AS v FROM petty_cash WHERE UPPER(COALESCE(direction,''))='OUT' AND entry_date = ?`, [date]);
       }
+      // Cash today split by source (Restaurant vs Hotel vs …) — managers only.
+      let cashBySource: any[] = [];
+      if (isMgr) {
+        const rows: any[] = await db.query(
+          `SELECT source_type, COALESCE(SUM(dr_amount),0) AS din, COALESCE(SUM(cr_amount),0) AS dout
+             FROM gl_entries WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = '1000' AND entry_date = ?
+            GROUP BY source_type HAVING COALESCE(SUM(dr_amount),0) <> 0 OR COALESCE(SUM(cr_amount),0) <> 0
+            ORDER BY COALESCE(SUM(dr_amount),0) DESC`,
+          [req.params.id, date]).catch(() => []);
+        cashBySource = (rows || []).map(r => ({ source_type: r.source_type || 'UNKNOWN', in: _acctRound(r.din), out: _acctRound(r.dout) }));
+      }
       const lockRow: any = await db.get("SELECT * FROM cash_day_locks WHERE restaurant_id=? AND business_date=?", [req.params.id, date]).catch(() => null);
       res.json({
         date,
@@ -48934,6 +48976,7 @@ ${data.tenant.name}`;
         totals,
         gl_cash: { opening: cashOpening, in: cashIn, out: cashOut, closing: _acctRound(cashOpening + cashIn - cashOut) },
         tender,
+        cash_by_source: cashBySource,
         cash_expense: cashExpense,
         can_lock: isMgr,
       });

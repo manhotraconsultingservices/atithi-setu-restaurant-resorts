@@ -8104,6 +8104,42 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   const fmtAmt = (n: number | null | undefined) =>
     n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+  // Friendly labels for GL source_type — used by the "cash by source" breakdown
+  // so the owner sees Restaurant vs Hotel cash without reading raw codes.
+  const SOURCE_LABEL: Record<string, string> = {
+    FNB_ORDER: 'Restaurant (F&B)',
+    FOLIO_SETTLEMENT: 'Hotel / Spa / Events — folio',
+    FOLIO_ADVANCE: 'Hotel — advance',
+    FOLIO_PAYMENT: 'Hotel — interim payment',
+    EVENT_ADVANCE: 'Events — advance',
+    EVENT_PAYMENT: 'Events — payment',
+    PETTY_CASH: 'Petty cash',
+    CASH_DRAWER_DEPOSIT: 'Cash drawer — deposit (out)',
+    CASH_DRAWER_VARIANCE: 'Cash drawer — over/short',
+    CASH_COUNT: 'Cash count — variance',
+    SUPPLIER_PAYMENT: 'Supplier payment (out)',
+    STAFF_ADVANCE: 'Staff advance (out)',
+    MANUAL_JOURNAL: 'Manual journal',
+  };
+  const srcLabel = (s: string) => SOURCE_LABEL[s] || String(s || '').replace(/_/g, ' ');
+  const renderCashBySource = (rows: any[]) => (Array.isArray(rows) && rows.length > 0) ? (
+    <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+      <p className="text-xs text-[#6b5d52] uppercase tracking-wide font-semibold mb-2">💰 Cash by source (today)</p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[#9c8e85]"><th className="py-1 font-medium">Source</th><th className="py-1 text-right font-medium">Received</th><th className="py-1 text-right font-medium">Paid / out</th></tr></thead>
+          <tbody>{rows.map((r: any) => (
+            <tr key={r.source_type} className="border-t border-[#f0e8d8]">
+              <td className="py-1.5">{srcLabel(r.source_type)}</td>
+              <td className="py-1.5 text-right tabular-nums text-emerald-700">{Number(r.in) > 0 ? fmtAmt(r.in) : '—'}</td>
+              <td className="py-1.5 text-right tabular-nums text-rose-700">{Number(r.out) > 0 ? fmtAmt(r.out) : '—'}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
+  ) : null;
+
   const typeGroups: Record<string, any[]> = {};
   for (const row of trialBalance) {
     const t = String(row.account_type || 'UNKNOWN');
@@ -8336,6 +8372,7 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
                   </div>
                 </div>
               </div>
+              {renderCashBySource(cashBook.cash_by_source)}
               <div className="grid sm:grid-cols-2 gap-3">
                 <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4">
                   <p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Total cash position (Hand + Bank)</p>
@@ -8758,6 +8795,8 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
             </div>
           )}
 
+          {dayClose && renderCashBySource(dayClose.cash_by_source)}
+
           {dayClose && (dayClose.drawers || []).length > 0 ? (
             <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
               <table className="w-full text-sm border-collapse">
@@ -8828,7 +8867,7 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
             <input placeholder="Account code" value={glAccount} onChange={e => setGlAccount(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white w-28" />
             <select value={glSource} onChange={e => setGlSource(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
               <option value="">All sources</option>
-              {['FOLIO_SETTLEMENT','FOLIO_ADVANCE','PETTY_CASH','EXPENSE_CLAIM','SUPPLIER_INVOICE','SUPPLIER_PAYMENT','MANUAL_JOURNAL'].map(s => (
+              {['FNB_ORDER','FOLIO_SETTLEMENT','FOLIO_ADVANCE','EVENT_ADVANCE','EVENT_PAYMENT','FOLIO_PAYMENT','PETTY_CASH','CASH_DRAWER_DEPOSIT','CASH_DRAWER_VARIANCE','CASH_COUNT','EXPENSE_CLAIM','SUPPLIER_INVOICE','SUPPLIER_PAYMENT','STAFF_ADVANCE','STAFF_PAYROLL','PAYROLL_RUN','CREDIT_NOTE','BOOKING_CANCEL','MANUAL_JOURNAL'].map(s => (
                 <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
               ))}
             </select>
