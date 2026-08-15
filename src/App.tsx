@@ -7892,7 +7892,7 @@ function SettlementUploadForm({
 function AccountingView({ restaurantId, token }: { restaurantId: string; token: string }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
     | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
-    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER';
+    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK';
   const [acctTab, setAcctTab] = useState<SubTab>('TRIAL');
   const [coa, setCoa] = useState<any[]>([]);
   const [glEntries, setGlEntries] = useState<any[]>([]);
@@ -8061,6 +8061,15 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   const lockDay = async () => { const res = await acctApi('/accounting/day-close/lock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: 'Day locked' }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Lock failed' }); };
   const unlockDay = async () => { const res = await acctApi('/accounting/day-close/unlock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) loadDayClose(); else setCdMsg({ type: 'err', text: res?.error || 'Unlock failed' }); };
 
+  // Day Book — a single day's journal entries in chronological order (reuses the
+  // GL ledger endpoint, filtered from=to=date).
+  const [dbookDate, setDbookDate] = useState(todayStr);
+  const [dayBook, setDayBook] = useState<any[]>([]);
+  const loadDayBook = useCallback(() => { setLoading(true); acctApi(`/accounting/gl-entries?from=${dbookDate}&to=${dbookDate}`).then(d => { if (Array.isArray(d)) setDayBook(d); }).finally(() => setLoading(false)); }, [acctApi, dbookDate]);
+  // Open tables — uninvoiced F&B receivable (credit dine-in not yet settled).
+  const [openTablesAr, setOpenTablesAr] = useState<any>(null);
+  const loadOpenTablesAr = useCallback(() => { acctApi('/accounting/open-tables-receivable').then(d => { if (d && !d.error) setOpenTablesAr(d); }).catch(() => {}); }, [acctApi]);
+
   useEffect(() => { if (acctTab === 'PNL') loadPnl(); }, [acctTab, loadPnl]);
   useEffect(() => { if (acctTab === 'BALANCESHEET') loadBalanceSheet(); }, [acctTab, loadBalanceSheet]);
   useEffect(() => { if (acctTab === 'CASHFLOW') loadCashFlowGl(); }, [acctTab, loadCashFlowGl]);
@@ -8072,6 +8081,8 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   useEffect(() => { if (acctTab === 'PERIODS') loadPeriods(); }, [acctTab, loadPeriods]);
   useEffect(() => { if (acctTab === 'CASHCOUNT') loadCashCount(); }, [acctTab, loadCashCount]);
   useEffect(() => { if (acctTab === 'CASHDRAWER') loadDayClose(); }, [acctTab, loadDayClose]);
+  useEffect(() => { if (acctTab === 'DAYBOOK') loadDayBook(); }, [acctTab, loadDayBook]);
+  useEffect(() => { if (acctTab === 'CASHBOOK') loadOpenTablesAr(); }, [acctTab, loadOpenTablesAr]);
 
   const closePeriod = async () => {
     if (!pcKey || !pcFrom || !pcTo) return;
@@ -8174,14 +8185,14 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
 
   // Two-tier accounting nav: a group row + the active group's sub-tabs.
   const TAB_LABEL: Record<SubTab, string> = {
-    TRIAL: 'Trial Balance', GL: 'GL Ledger', JOURNAL: 'Manual Entry',
+    TRIAL: 'Trial Balance', GL: 'GL Ledger', DAYBOOK: 'Day Book', JOURNAL: 'Manual Entry',
     PNL: 'Profit & Loss', BALANCESHEET: 'Balance Sheet', CASHFLOW: 'Cash Flow',
     GST: 'GST Outstanding', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
     CASHBOOK: 'Cash Book', AGING_AR: 'AR Aging', AGING_AP: 'AP Aging', BANKREC: 'Bank Reconciliation',
     TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
   };
   const ACCT_GROUPS: { key: string; label: string; tabs: SubTab[] }[] = [
-    { key: 'LEDGER', label: 'Ledger', tabs: ['TRIAL', 'GL', 'JOURNAL'] },
+    { key: 'LEDGER', label: 'Ledger', tabs: ['TRIAL', 'GL', 'DAYBOOK', 'JOURNAL'] },
     { key: 'STATEMENTS', label: 'Statements', tabs: ['PNL', 'BALANCESHEET', 'CASHFLOW'] },
     { key: 'GST', label: 'GST', tabs: ['GST', 'GSTR1', 'GSTR3B'] },
     { key: 'WORKING', label: 'Working Capital', tabs: ['CASHBOOK', 'AGING_AR', 'AGING_AP', 'BANKREC'] },
@@ -8373,6 +8384,31 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
                 </div>
               </div>
               {renderCashBySource(cashBook.cash_by_source)}
+              {openTablesAr && openTablesAr.count > 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-amber-800 uppercase tracking-wide font-semibold">🍽️ Open tables — uninvoiced F&amp;B</p>
+                      <p className="text-[11px] text-amber-700 mt-0.5">Credit dine-in still running ({openTablesAr.count} {openTablesAr.count === 1 ? 'table' : 'tables'}) · booked to revenue only when the table is settled — not yet in the ledger</p>
+                    </div>
+                    <p className="text-2xl font-bold text-amber-900 tabular-nums whitespace-nowrap">{fmtAmt(openTablesAr.total)}</p>
+                  </div>
+                  {openTablesAr.tables?.length > 0 && (
+                    <div className="mt-2 overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead><tr className="text-left text-amber-700"><th className="py-1 font-medium">Table</th><th className="py-1 font-medium">Status</th><th className="py-1 text-right font-medium">Amount</th></tr></thead>
+                        <tbody>{openTablesAr.tables.map((t: any) => (
+                          <tr key={t.session_token} className="border-t border-amber-200/60">
+                            <td className="py-1">{t.table_name || '—'}{t.customer_name ? ` · ${t.customer_name}` : ''}</td>
+                            <td className="py-1 text-amber-700">{String(t.status).replace(/_/g, ' ')}</td>
+                            <td className="py-1 text-right tabular-nums">{fmtAmt(t.amount)}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="grid sm:grid-cols-2 gap-3">
                 <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4">
                   <p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Total cash position (Hand + Bank)</p>
@@ -8855,6 +8891,59 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {acctTab === 'DAYBOOK' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">Date</label>
+            <input type="date" value={dbookDate} onChange={e => setDbookDate(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadDayBook} className={AC_BTN}>Load</button>
+            <span className="text-xs text-[#9c8e85]">Every journal posted on this day — sales, purchases, payments, manual entries.</span>
+          </div>
+          {dayBook.length === 0 && !loading ? (
+            <p className="text-sm text-[#6b5d52] italic">No journal entries posted on this day.</p>
+          ) : (() => {
+            const sorted = [...dayBook].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+            const groups: Record<string, any[]> = {};
+            const order: string[] = [];
+            for (const e of sorted) { const k = e.journal_ref || e.id; if (!groups[k]) { groups[k] = []; order.push(k); } groups[k].push(e); }
+            const totalDr = dayBook.reduce((s: number, e: any) => s + Number(e.dr_amount || 0), 0);
+            const totalCr = dayBook.reduce((s: number, e: any) => s + Number(e.cr_amount || 0), 0);
+            return (
+              <>
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left">
+                      <th className="px-3 py-2 font-semibold text-[#1a1208]">Journal / Source</th>
+                      <th className="px-3 py-2 font-semibold text-[#1a1208]">Account</th>
+                      <th className="px-3 py-2 font-semibold text-[#1a1208]">Narration</th>
+                      <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr</th>
+                      <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr</th>
+                    </tr></thead>
+                    <tbody>
+                      {order.map(k => groups[k].map((e: any, i: number) => (
+                        <tr key={e.id} className={`border-t ${i === 0 ? 'border-[#e8ded0]' : 'border-[#f7f1e7]'}`}>
+                          <td className="px-3 py-1.5 align-top whitespace-nowrap">{i === 0 ? (<><span className="font-mono text-xs text-[#6b5d52]">{k}</span><span className="ml-1.5 text-[10px] bg-[#f0e8d8] text-[#6b5d52] rounded px-1.5 py-0.5">{srcLabel(e.source_type)}</span></>) : ''}</td>
+                          <td className="px-3 py-1.5"><span className="font-mono text-xs text-[#9c8e85]">{e.account_code}</span> <span>{e.account_name}</span></td>
+                          <td className="px-3 py-1.5 text-xs text-[#6b5d52] max-w-[14rem] truncate">{e.narration || '—'}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{Number(e.dr_amount) > 0 ? fmtAmt(e.dr_amount) : ''}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{Number(e.cr_amount) > 0 ? fmtAmt(e.cr_amount) : ''}</td>
+                        </tr>
+                      )))}
+                    </tbody>
+                    <tfoot><tr className="bg-[#faf7f2] border-t-2 border-[#a0522d]/30 font-bold text-[#1a1208]">
+                      <td className="px-3 py-2" colSpan={3}>Day total ({order.length} {order.length === 1 ? 'entry' : 'entries'}) {Math.abs(totalDr - totalCr) < 0.02 ? '· balanced ✓' : '· ⚠ OUT OF BALANCE'}</td>
+                      <td className="px-3 py-2 text-right font-mono">{fmtAmt(totalDr)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{fmtAmt(totalCr)}</td>
+                    </tr></tfoot>
+                  </table>
+                </div>
+                <p className="text-[11px] text-[#9c8e85]">The Day Book lists every posted journal for the date. Total Dr must equal total Cr — if it ever shows OUT OF BALANCE, check Ledger → GL exceptions.</p>
+              </>
+            );
+          })()}
         </div>
       )}
 

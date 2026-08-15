@@ -2389,6 +2389,26 @@ async function testCashDrawer() {
   } else {
     fail('TC-CD-GUARD', 'drawer close guard', `expected 404/403, got ${guard.status}`);
   }
+
+  // TC-ACCT-OPENTBL: open-tables (uninvoiced F&B) receivable — deployed + shape.
+  const otr = await api('GET', `/api/restaurant/${restaurantId}/accounting/open-tables-receivable`);
+  if (otr.status === 200 && typeof otr.data?.total === 'number' && Array.isArray(otr.data?.tables)) {
+    pass('TC-ACCT-OPENTBL', `open-tables receivable deployed (${otr.data.count} open, ₹${otr.data.total})`);
+  } else if (otr.status === 403) {
+    skip('TC-ACCT-OPENTBL', 'open-tables receivable', 'not owner');
+  } else {
+    fail('TC-ACCT-OPENTBL', 'open-tables receivable', `HTTP ${otr.status}`);
+  }
+
+  // TC-ACCT-CASHSRC: Cash Book now carries a cash-by-source breakdown.
+  const cbx = await api('GET', `/api/restaurant/${restaurantId}/accounting/cash-book?date=${today}`);
+  if (cbx.status === 200 && Array.isArray(cbx.data?.cash_by_source)) {
+    pass('TC-ACCT-CASHSRC', `Cash Book returns cash_by_source (${cbx.data.cash_by_source.length} source(s))`);
+  } else if (cbx.status === 403) {
+    skip('TC-ACCT-CASHSRC', 'cash_by_source', 'not owner');
+  } else {
+    fail('TC-ACCT-CASHSRC', 'cash_by_source present', `HTTP ${cbx.status}`);
+  }
 }
 
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
