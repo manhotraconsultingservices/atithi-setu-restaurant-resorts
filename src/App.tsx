@@ -55043,8 +55043,15 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const [saveDone, setSaveDone]       = useState(false);
   const [closing, setClosing]         = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
-  const [payMethod, setPayMethod]     = useState<'CASH' | 'CARD' | 'UPI'>('CASH');
+  const [payMethod, setPayMethod]     = useState<'CASH' | 'CARD' | 'UPI' | 'CHARGE_TO_ROOM'>('CASH');
   const [expanded, setExpanded]       = useState<Record<number, boolean>>({});
+
+  // Charge-to-Room: a walk-in diner who is a checked-in hotel guest can push the
+  // whole bill onto their room folio instead of paying now — settled at check-out.
+  const [inHouseRooms, setInHouseRooms] = useState<any[]>([]);
+  const [roomSearch, setRoomSearch]     = useState('');
+  const [selectedRoom, setSelectedRoom] = useState<any>(null);
+  const [charging, setCharging]         = useState(false);
 
   // Phase L1 fix — loyalty tier auto-apply for postpaid sessions.
   // When the bill is requested for a session whose customer_phone matches
@@ -55079,7 +55086,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
           setSvcPct(sessSvc > 0 ? sessSvc : restSvc);
           setGstPct(Number(rest?.is_gst_enabled ? (sess.gst_percent != null ? sess.gst_percent : (rest?.gst_percentage ?? 0)) : 0));
           setApplyGst(Boolean(rest?.is_gst_enabled) && (sess.apply_gst != null ? Number(sess.apply_gst) === 1 : true));
-          if (sess.payment_method) setPayMethod(sess.payment_method as 'CASH' | 'CARD' | 'UPI');
+          if (sess.payment_method && ['CASH', 'CARD', 'UPI'].includes(sess.payment_method)) setPayMethod(sess.payment_method as 'CASH' | 'CARD' | 'UPI');
           // All rounds expanded by default
           const exp: Record<number, boolean> = {};
           (sess.orders || []).forEach((_: any, i: number) => { exp[i] = true; });
@@ -55089,6 +55096,17 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       })
       .catch(() => { setFetchErr('Failed to load session data'); setLoading(false); });
   }, [table.id]);
+
+  // Load checked-in rooms once. Empty for restaurant-only tenants (the endpoint
+  // returns []), so the "Charge to Room" option only appears at hotel properties.
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/hotel/in-house-rooms`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => (r.ok ? r.json() : { rooms: [] }))
+      .then(d => setInHouseRooms(Array.isArray(d?.rooms) ? d.rooms : []))
+      .catch(() => setInHouseRooms([]));
+  }, [restaurantId, token]);
 
   // ── Derived totals (computed live from actual item prices) ─────────────────
   // Cancelled orders are shown in the rounds list but excluded from all financial totals
@@ -55212,6 +55230,13 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     : Number((taxable + gstAmt).toFixed(2));
   const totalRounds   = activeOrders.length;
   const totalItems    = activeOrders.reduce((n: number, o: any) => n + (Array.isArray(o.items) ? o.items.reduce((s: number, it: any) => s + Number(it.quantity || 1), 0) : 0), 0);
+  const filteredRooms = inHouseRooms.filter((r: any) => {
+    const q = roomSearch.trim().toLowerCase();
+    if (!q) return true;
+    return String(r.room_number || '').toLowerCase().includes(q)
+      || String(r.room_name || '').toLowerCase().includes(q)
+      || String(r.guest_name || '').toLowerCase().includes(q);
+  });
 
   // ── API helpers ────────────────────────────────────────────────────────────
   const persistAdjustments = async () => {
@@ -55304,6 +55329,29 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     } catch (err) {
       setClosing(false);
       setFetchErr('Failed to close session — please try again.');
+    }
+  };
+
+  // Charge the whole table bill to a checked-in guest's room folio. No cash is
+  // collected — the bill rides on the folio and is settled with the room at
+  // check-out. The table is freed by the server.
+  const handleChargeToRoom = async () => {
+    if (!session || !selectedRoom || charging) return;
+    setCharging(true); setFetchErr('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/charge-to-room`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ booking_id: selectedRoom.booking_id, room_id: selectedRoom.room_id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Failed to charge to room');
+      const roomLbl = selectedRoom.room_number || selectedRoom.room_name || 'room';
+      toast.success(`Charged to Room ${roomLbl} — settled at the guest's check-out.`);
+      onClose();
+    } catch (err: any) {
+      setCharging(false);
+      setFetchErr(err?.message || 'Failed to charge to room — please try again.');
     }
   };
 
@@ -55743,6 +55791,60 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                   </button>
                 ))}
               </div>
+
+              {/* Charge-to-Room — only for hotel properties with in-house guests */}
+              {inHouseRooms.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setPayMethod('CHARGE_TO_ROOM')}
+                    className={cn(
+                      "mt-2 w-full py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all border flex items-center justify-center gap-1.5",
+                      payMethod === 'CHARGE_TO_ROOM'
+                        ? 'bg-[#cc5a16] text-white border-[#cc5a16] shadow-sm'
+                        : 'bg-white border-[#cc5a16]/15 text-[#6b5d52] hover:border-[#cc5a16]/30 hover:text-[#3d3128]'
+                    )}
+                  >
+                    🏨 Charge to Hotel Room
+                  </button>
+                  {payMethod === 'CHARGE_TO_ROOM' && (
+                    <div className="mt-2 rounded-xl border border-[#cc5a16]/15 bg-white p-2 space-y-2">
+                      <input
+                        value={roomSearch}
+                        onChange={e => setRoomSearch(e.target.value)}
+                        placeholder="Search room no. or guest name…"
+                        className="w-full px-3 py-2 rounded-lg border border-[#cc5a16]/15 text-sm focus:outline-none focus:border-[#cc5a16]/40"
+                      />
+                      <div className="max-h-44 overflow-y-auto space-y-1">
+                        {filteredRooms.length === 0 ? (
+                          <p className="text-xs text-[#9c8e85] text-center py-3">No matching in-house guest.</p>
+                        ) : filteredRooms.map((r: any) => {
+                          const active = selectedRoom?.booking_id === r.booking_id;
+                          return (
+                            <button
+                              key={r.booking_id}
+                              type="button"
+                              onClick={() => setSelectedRoom(r)}
+                              className={cn(
+                                "w-full text-left px-3 py-2 rounded-lg text-sm transition-all border flex items-center justify-between gap-2",
+                                active
+                                  ? 'bg-[#cc5a16]/10 border-[#cc5a16]/40 text-[#3d3128]'
+                                  : 'bg-[#faf7f2] border-transparent hover:border-[#cc5a16]/20 text-[#6b5d52]'
+                              )}
+                            >
+                              <span className="font-semibold">Room {r.room_number || r.room_name || '—'}</span>
+                              <span className="text-xs text-[#9c8e85] truncate">{r.guest_name || 'Guest'}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[10px] text-[#9c8e85] leading-snug px-1">
+                        Bill posts to the room folio (hotel F&amp;B GST) and is settled with the room at check-out.
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             {/* Print + Close buttons */}
@@ -55755,7 +55857,15 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                 Print
               </button>
 
-              {!confirmClose ? (
+              {payMethod === 'CHARGE_TO_ROOM' ? (
+                <button
+                  onClick={handleChargeToRoom}
+                  disabled={!selectedRoom || charging}
+                  className="flex-1 py-3 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] disabled:opacity-50 active:scale-[0.98] transition-all shadow-sm"
+                >
+                  {charging ? '…Charging' : selectedRoom ? `🏨 Charge Bill to Room ${selectedRoom.room_number || selectedRoom.room_name || ''}` : 'Select a room above'}
+                </button>
+              ) : !confirmClose ? (
                 <button
                   onClick={() => setConfirmClose(true)}
                   className="flex-1 py-3 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] active:scale-[0.98] transition-all shadow-sm"

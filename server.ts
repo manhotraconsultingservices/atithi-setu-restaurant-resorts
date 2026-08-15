@@ -42621,6 +42621,172 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── CHARGE-TO-ROOM (restaurant walk-in → hotel folio) ───────────────────
+  // In-house rooms lookup for the "Charge to Room" picker in the dine-in bill
+  // modal. Gated by restaurantStaff (same authority that settles the bill) so a
+  // cashier/manager running the POS at a hotel can see who is checked in without
+  // needing the hotelStaff role. Returns the MINIMAL fields the picker needs
+  // (room + guest + open folio). Tolerant: a restaurant-only tenant has no hotel
+  // tables → returns an empty list (the option simply doesn't appear).
+  app.get("/api/restaurant/:id/hotel/in-house-rooms", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT b.id AS booking_id, b.room_id, b.guest_name,
+                r.room_number, r.name AS room_name,
+                (SELECT f.id FROM folios f
+                   WHERE f.booking_id = b.id AND f.status = 'open'
+                   ORDER BY f.created_at DESC LIMIT 1) AS open_folio_id
+           FROM room_bookings b
+      LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE UPPER(COALESCE(b.status,'')) = 'CHECKED_IN'
+       ORDER BY r.room_number`,
+        []
+      );
+      res.json({ rooms: Array.isArray(rows) ? rows : [] });
+    } catch (err) {
+      // No hotel module / tables for this tenant — the picker just stays hidden.
+      res.json({ rooms: [] });
+    }
+  });
+
+  // Charge an entire dine-in table session to a checked-in guest's room folio.
+  // This is the "Charge to Room" settlement option in the Table Bill modal — the
+  // sibling of the CASH/CARD/UPI close. It does NOT collect cash and does NOT
+  // mark the orders PAID: each order's F&B is posted onto the guest's open folio
+  // (via the same idempotent postOrderToFolio choke point every room-service
+  // charge already flows through), the table is freed, and the whole bill is then
+  // settled together with the room at hotel check-out (existing folio flow, no GL
+  // here — F&B revenue is recognised at folio settlement, exactly like every other
+  // charge-to-room order). Itemised at the hotel's F&B GST slab (no per-item rate
+  // passed) per the product decision.
+  app.post("/api/restaurant/:id/sessions/:token/charge-to-room", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bodyBookingId = req.body?.booking_id ? String(req.body.booking_id) : null;
+      const bodyRoomId    = req.body?.room_id ? String(req.body.room_id) : null;
+      if (!bodyBookingId && !bodyRoomId) {
+        return res.status(400).json({ error: 'Select the guest room to charge this bill to.' });
+      }
+
+      // Session must exist and still be open (idempotent on a re-submit).
+      const session: any = await db.get(
+        "SELECT id, table_id, status, payment_method FROM table_sessions WHERE session_token = ?",
+        [req.params.token]
+      );
+      if (!session) return res.status(404).json({ error: 'Table session not found.' });
+      if (String(session.status || '').toLowerCase() === 'closed') {
+        if (String(session.payment_method || '').toUpperCase() === 'CHARGE_TO_ROOM') {
+          return res.json({ success: true, already_charged: true });
+        }
+        return res.status(409).json({ error: 'This table bill has already been settled.' });
+      }
+
+      // Resolve + validate the target booking. Must be CHECKED_IN in THIS tenant
+      // (tenant isolation is by database, so a foreign booking id cannot resolve).
+      let booking: any = null;
+      if (bodyBookingId) {
+        booking = await db.get(
+          "SELECT id, room_id, guest_name, status FROM room_bookings WHERE id = ?",
+          [bodyBookingId]
+        ).catch(() => null);
+      }
+      if (!booking && bodyRoomId) {
+        booking = await db.get(
+          "SELECT id, room_id, guest_name, status FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' ORDER BY actual_checkin_at DESC LIMIT 1",
+          [bodyRoomId]
+        ).catch(() => null);
+      }
+      if (!booking) return res.status(404).json({ error: 'No checked-in guest found for that room.' });
+      if (String(booking.status || '').toUpperCase() !== 'CHECKED_IN') {
+        return res.status(409).json({ error: 'That room is not currently checked in.' });
+      }
+      const targetRoomId = booking.room_id || bodyRoomId;
+      const roomRow: any = await db.get("SELECT room_number, name FROM rooms WHERE id = ?", [targetRoomId]).catch(() => null);
+
+      // The bill = every non-cancelled order on this session.
+      const sessOrders: any[] = await db.query(
+        "SELECT * FROM orders WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'",
+        [session.id]
+      );
+      if (!sessOrders || sessOrders.length === 0) {
+        return res.status(400).json({ error: 'This table has no items to charge.' });
+      }
+
+      let postedCount = 0;
+      let resolvedFolioId: string | null = null;
+      const orderIds: string[] = [];
+      for (const o of sessOrders) {
+        orderIds.push(o.id);
+        // Tag as charge-to-room + link to the stay first, so classification/
+        // reports/sweep are correct even if the post is retried later.
+        await db.run(
+          "UPDATE orders SET payment_method = 'CHARGE_TO_ROOM', status = 'DELIVERED', room_id = COALESCE(room_id, ?), booking_id = COALESCE(booking_id, ?) WHERE id = ?",
+          [targetRoomId, booking.id, o.id]
+        ).catch(() => {});
+        // Already posted? postOrderToFolio is idempotent (returns ok + folio_id).
+        let parsedItems: any[] = [];
+        try { parsedItems = typeof o.items === 'string' ? JSON.parse(o.items) : (Array.isArray(o.items) ? o.items : []); } catch { parsedItems = []; }
+        // Itemised at the hotel's F&B GST slab — deliberately NOT passing a
+        // per-item gstRate so postOrderToFolio applies the hotel rate.
+        const folioItems: FolioOrderItem[] = (Array.isArray(parsedItems) ? parsedItems : []).map((it: any) => ({
+          name: it.name || it.menuName || 'Item',
+          quantity: Number(it.quantity || it.qty || 1),
+          unitPrice: Number(it.price ?? it.unitPrice ?? it.unit_price ?? 0),
+        }));
+        const posted: any = await postOrderToFolio(req.params.id, {
+          id: o.id, room_id: targetRoomId, booking_id: booking.id,
+          items: folioItems, subtype: 'RESTAURANT',
+          posted_by: req.user?.email || req.user?.id || 'RESTAURANT_BILL',
+        }).catch((e: any) => ({ ok: false, reason: e?.message || 'post-error' }));
+        if (posted?.ok) {
+          resolvedFolioId = resolvedFolioId || posted.folio_id || null;
+          await db.run("UPDATE orders SET folio_post_status = 'POSTED' WHERE id = ?", [o.id]).catch(() => {});
+          postedCount++;
+        }
+      }
+
+      if (postedCount === 0) {
+        return res.status(409).json({ error: 'Could not post this bill to the room — the room may not have an open folio. Check the guest in first, or settle by cash/card.' });
+      }
+
+      // Close the table session as charged-to-room (NOT cash-paid) and free the
+      // physical table. Orders stay unpaid on the folio until check-out settles
+      // the room + F&B together in one payment.
+      await db.run(
+        "UPDATE table_sessions SET status = 'closed', payment_method = 'CHARGE_TO_ROOM', closed_at = CURRENT_TIMESTAMP WHERE session_token = ?",
+        [req.params.token]
+      );
+      await freeTableForSession(db, { session_id: session.id, reason: 'charge-to-room' });
+
+      // Actual amount that landed on the folio (hotel-GST inclusive) for the toast.
+      let postedTotal = 0;
+      try {
+        if (orderIds.length > 0) {
+          const placeholders = orderIds.map(() => '?').join(',');
+          const sumRow: any = await db.get(
+            `SELECT COALESCE(SUM(amount),0) + COALESCE(SUM(gst_amount),0) AS t FROM folio_entries WHERE reference_number IN (${placeholders})`,
+            orderIds
+          );
+          postedTotal = Number(sumRow?.t || 0);
+        }
+      } catch { /* best-effort */ }
+
+      res.json({
+        success: true,
+        folio_id: resolvedFolioId,
+        room_number: roomRow?.room_number || null,
+        room_name: roomRow?.name || null,
+        guest_name: booking.guest_name || null,
+        posted_count: postedCount,
+        posted_total: postedTotal,
+      });
+    } catch (err) {
+      console.error('[charge-to-room] failed:', err);
+      res.status(500).json({ error: 'Failed to charge the bill to the room.' });
+    }
+  });
+
   // ── S4 (17 Jun 2026): CUSTOMER-side cancel before preparation ───────────
   // A diner can cancel their own round from the QR / E-Menu while it is still
   // QUEUED (status CONFIRMED/PENDING) and unpaid. PUBLIC + token-owned: the
@@ -47700,8 +47866,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-templates-honor-grant',
+    commit_marker: 'restaurant-bill-charge-to-room',
     code_features: [
+      'restaurant-bill-charge-to-room',              // Enhancement: a restaurant DINE-IN / walk-in guest who is a checked-in hotel guest can now push their whole table bill onto their room folio instead of paying immediately — and it clears with the room in one settlement at check-out. Additive only; the CASH/CARD/UPI close path, the order-POST CHARGE_TO_ROOM path, `postOrderToFolio`, and the checkout/settle flow are all UNCHANGED. New: (1) the Table Bill modal (`PostpaidInvoiceModal`) gains a 4th settlement option "🏨 Charge to Hotel Room" (only rendered when the property has in-house guests) with a searchable room/guest picker; (2) `GET /api/restaurant/:id/hotel/in-house-rooms` (restaurantStaff) returns the minimal CHECKED_IN room+guest+open_folio list for the picker — tolerant, returns [] for restaurant-only tenants so the option stays hidden; (3) `POST /api/restaurant/:id/sessions/:token/charge-to-room {booking_id, room_id}` (restaurantStaff) validates the room is CHECKED_IN in-tenant, posts each non-cancelled session order to the guest's open folio via the SAME idempotent `postOrderToFolio` choke point (subtype RESTAURANT, itemised at the hotel F&B GST slab — no per-item rate passed), tags the orders CHARGE_TO_ROOM + DELIVERED (NOT paid — no cash GL; F&B revenue is recognised at folio settlement like every other charge-to-room order), then closes the session as CHARGE_TO_ROOM and frees the table. At check-out the existing folio flow sweeps + totals room+F&B, takes one FINAL payment, and marks the invoice settled/paid — so "clear restaurant + hotel in one go" needs no new checkout code. Idempotent (already-posted orders skipped; a re-submit on an already-charged session returns success). Verified: deterministic offline billing simulation (item→folio mapping, hotel-slab GST, folio total, no-double-post idempotency, orders-not-marked-paid, one-payment checkout → outstanding 0 → settled) [PASS]; live suite checks TC-CTR-INHOUSE (in-house-rooms 200 + array shape) + TC-CTR-GUARD (charge-to-room validates with structured 4xx, not a route-404/500) + a best-effort self-cleaning full-chain TC-CTR-E2E that SKIPs unless a checked-in guest + open table session are discoverable; deployed endpoints probed 401/400-not-404. Final in-app confirmation with a real checked-in guest recommended. tsc + vite build clean.
       'checklist-templates-honor-grant',             // Enhancement (owner-approved): "Checklist Templates" (PMS `CHECKLISTS` + Events `EVENTS_CHECKLISTS`) were hard-gated to Owner-only in the nav (`isOwnerOrAdmin`), even though the Staff Access matrix advertised them as grantable — so granting had no effect. Now permission-aware end-to-end: (1) frontend nav array always includes the tabs and `isVisible` returns `isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs)` — owner always, plus any role the owner grants the tab; (2) both tabs REMOVED from backend `RBAC_NEWLY_ADDED` so they're no longer auto-injected at Full for built-in roles (which would leak the config tab into every built-in staff nav once it stopped being owner-only) — the grant is now authoritative; (3) new `checklistViewStaff = requireModuleAccess(['CHECKLISTS','EVENTS_CHECKLISTS'], [MANAGER/FRONT_DESK/CONCIERGE/HOUSEKEEPING/MAINTENANCE/EVENTS_MANAGER], 'Checklists')` replaces the fixed `hkStaff` allowlist on the 4 config READ endpoints (categories/templates/template-detail/assignments GET), so a granted custom role can VIEW templates without a 403; (4) Staff Access matrix descriptions updated (no longer say "Owner-only"). Template CREATE/EDIT/DELETE stay owner-only (`requireOwnerOrAdmin` in each write handler) — granted roles VIEW, not edit. Nav and API now agree (a nav-visible checklist tab is never API-403). Verified: offline sim 21/21 (owner in; granted custom role in [nav+API]; ungranted out; built-in WAITER no longer leaks; unrestricted MANAGER in; EVENTS_CHECKLISTS honors isEventsEnabled; nav-visible⇒API-allows invariant) + live regression TC-RBAC-CHK-GRANT. NOTE: the reported "owner can't see these" was an oversight — the owner always saw them; this ships the owner-approved "honor the grant" for delegated roles. tsc + vite build clean.
       'service-requests-permission-aware-gate',      // Fix (root cause): "Service Catalogue unauthorized error for every Custom Role (PMS → Service Catalogue)." The hotel service-requests endpoints (GET /hotel/service-requests + PATCH .../status) were gated by `serviceRequestStaff = requireRole([...HOTEL_OPERATIONAL_ROLES, HOUSEKEEPING, MAINTENANCE])` — a FIXED allowlist that ignores the custom role's assigned permissions and 403s with "Your role (X) is not authorized for this action." That error is stored in the SHARED `hotelError` banner state, which the PMS Service Catalogue (SERVICES tab) also renders (App.tsx ~20916) — so even though the catalogue's own /services call (permission-aware hotelStaff) loads fine and the Add/Edit/Delete buttons render (static JSX), the unrelated service-requests 403 bled onto the page. Two-part fix: (1) BACKEND — `serviceRequestStaff` is now `requireModuleAccess(['SERVICE_REQUESTS'], [...HOTEL_OPERATIONAL_ROLES, HOUSEKEEPING, MAINTENANCE], 'Service Requests')`, mirroring hotelStaff: built-in ops roles pass, PLUS any custom role the owner granted the SERVICE_REQUESTS tab (≥View); the status-PATCH still layers requireTabAccess('SERVICE_REQUESTS') for the exact write level. Built-in roles + seedless guest/partner roles unchanged (no fail-open). (2) FRONTEND — `fetchHotelServices`/`fetchHotelRequests` now clear `hotelError` on success, so a failure from one loader can't linger on an unrelated tab's shared banner. Verified: offline gate sim 13/13 (custom granted SERVICE_REQUESTS admitted [old requireRole denied]; ungranted denied; FRONT_DESK/CONCIERGE/HOUSEKEEPING/MAINTENANCE/MANAGER/OWNER admitted; WAITER/CHEF/OTA/CUSTOMER denied) + live regression TC-RBAC-SVCREQ-ALLOW (custom role granted SERVICE_REQUESTS GETs /hotel/service-requests without 403). Same residual class still open: `restaurantStaff` (97 routes) + `spaStaff` (36 routes, incl. Spa Service Catalogue SPA_CATALOG) remain fixed requireRole allowlists — flagged, not converted here (blast radius).
       'rbac-content-guard-consistency',              // Fix (root cause): "PCC Security role permissions do not match portal access" — two symptoms. (1) "Payables & Procurement visible despite no permission": already resolved by `custom-role-strict-permissions` (PROCUREMENT was a legacy grandfather; strict enforcement hides it for custom roles — verified). (2) "Cleaning Checklist visible but shows Access Restricted": a NAV-vs-CONTENT mismatch. The sidebar `isVisible('EVENTS_HOUSEKEEPING')` gates on the HOUSEKEEPING permission (Events cleaning reuses HOUSEKEEPING-keyed endpoints) and `isVisible('MY_CHECKLIST')` is always true — but the content-pane guard used a bare `isTabVisible(activeTab, allowedTabs)` keyed on the tab's OWN id, so a tab could show in the nav yet render "Access Restricted". The strict-permissions marker made this bite MY_CHECKLIST too (always in nav; its id absent from a custom role's complete list). Fix: new module-level `isContentAccessible(activeTab, allowedTabs)` that mirrors isVisible — aliases EVENTS_HOUSEKEEPING→HOUSEKEEPING and treats HOME/MY_CHECKLIST as always reachable; content guard now calls it instead of the bare isTabVisible. Sidebar and content pane are now guaranteed to agree (a nav-visible tab is never content-restricted). Verified: offline nav/content consistency sim 24/24 (every tab: nav-visible ⇒ not content-restricted) + regression TC-RBAC-CONTENT-GUARD (source-asserts the guard uses isContentAccessible with the EVENTS_HOUSEKEEPING alias + MY_CHECKLIST always-allowed). tsc + vite build clean.

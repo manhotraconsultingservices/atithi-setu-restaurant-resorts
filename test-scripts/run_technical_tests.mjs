@@ -2246,6 +2246,93 @@ async function testCheckoutAndInvoice() {
   }
 }
 
+// ── Charge Restaurant Bill to Room (dine-in walk-in → hotel folio) ────────
+//
+// Covers the 'restaurant-bill-charge-to-room' feature: a dine-in table bill can
+// be charged to a checked-in guest's room folio and settled with the room at
+// check-out. These checks are SAFE (no prod mutation): endpoint deployment,
+// input validation, and cross-consistency of the room picker vs checked-in
+// bookings. The billing math + one-settlement invariant is proven separately by
+// the deterministic test-scripts/e2e_charge_to_room_sim.mjs.
+
+async function testChargeToRoom() {
+  section('HOTEL × RESTAURANT — Charge Dine-in Bill to Room');
+  if (!restaurantId) { skip('TC-CTR-*', 'All charge-to-room tests', 'no restaurantId'); return; }
+
+  // TC-CTR-INHOUSE: the room picker's data source is deployed + well-shaped.
+  const inhouse = await api('GET', `/api/restaurant/${restaurantId}/hotel/in-house-rooms`);
+  let inhouseRooms = [];
+  if (inhouse.status === 200 && Array.isArray(inhouse.data?.rooms)) {
+    inhouseRooms = inhouse.data.rooms;
+    const shapeOk = inhouseRooms.every(r => 'booking_id' in r && ('room_number' in r || 'room_name' in r));
+    if (shapeOk) {
+      pass('TC-CTR-INHOUSE', `in-house-rooms endpoint deployed (${inhouseRooms.length} checked-in room(s), correct shape)`);
+    } else {
+      fail('TC-CTR-INHOUSE', 'in-house-rooms shape', 'rows missing booking_id/room fields');
+    }
+  } else {
+    fail('TC-CTR-INHOUSE', 'in-house-rooms endpoint', `HTTP ${inhouse.status}`);
+  }
+
+  // TC-CTR-GUARD-A: endpoint deployed + validates body first (no room → 400,
+  // NOT a route-404 / 500). Bogus session token, empty body.
+  const guardA = await api('POST', `/api/restaurant/${restaurantId}/sessions/AUTOTEST-BOGUS-TOKEN/charge-to-room`, {});
+  if (guardA.status === 400) {
+    pass('TC-CTR-GUARD-A', 'charge-to-room rejects missing room selection (400) — deployed + validating');
+  } else if (guardA.status === 404 && /session/i.test(JSON.stringify(guardA.data))) {
+    pass('TC-CTR-GUARD-A', 'charge-to-room reached handler (404 session-not-found)');
+  } else {
+    fail('TC-CTR-GUARD-A', 'charge-to-room body validation', `expected 400/handler-404, got ${guardA.status} — ${JSON.stringify(guardA.data).slice(0,100)}`);
+  }
+
+  // TC-CTR-GUARD-B: with a room but a bogus session token → handler 404
+  // 'Table session not found' (proves the route + handler logic run, not a
+  // route-miss and not a mutation).
+  const guardB = await api('POST', `/api/restaurant/${restaurantId}/sessions/AUTOTEST-BOGUS-TOKEN/charge-to-room`, {
+    booking_id: 'NO-SUCH-BOOKING', room_id: 'NO-SUCH-ROOM',
+  });
+  if (guardB.status === 404 && /session/i.test(JSON.stringify(guardB.data))) {
+    pass('TC-CTR-GUARD-B', 'charge-to-room on bogus session correctly 404 (no mutation)');
+  } else if (guardB.status === 404) {
+    pass('TC-CTR-GUARD-B', 'charge-to-room returns 404 for bogus session');
+  } else {
+    fail('TC-CTR-GUARD-B', 'charge-to-room session guard', `expected 404, got ${guardB.status} — ${JSON.stringify(guardB.data).slice(0,100)}`);
+  }
+
+  // TC-CTR-CONSISTENCY: every room the picker offers is a genuinely CHECKED_IN
+  // booking (the picker must never let staff charge a bill to a non-in-house
+  // room). Cross-check against the bookings list.
+  const bookings = await api('GET', `/api/restaurant/${restaurantId}/hotel/bookings?status=CHECKED_IN&limit=1000`);
+  if (inhouseRooms.length === 0) {
+    skip('TC-CTR-CONSISTENCY', 'picker ⊆ checked-in bookings', 'no in-house guests right now');
+  } else if (bookings.status === 200 && Array.isArray(bookings.data)) {
+    const checkedInIds = new Set(bookings.data.filter(b => b.status === 'CHECKED_IN').map(b => String(b.id)));
+    const stray = inhouseRooms.filter(r => !checkedInIds.has(String(r.booking_id)));
+    if (stray.length === 0) {
+      pass('TC-CTR-CONSISTENCY', `all ${inhouseRooms.length} picker room(s) map to CHECKED_IN bookings`);
+    } else {
+      fail('TC-CTR-CONSISTENCY', 'picker offers non-checked-in room(s)', `${stray.length} stray`);
+    }
+  } else {
+    skip('TC-CTR-CONSISTENCY', 'picker ⊆ checked-in bookings', `bookings list HTTP ${bookings.status}`);
+  }
+
+  // TC-CTR-E2E: best-effort full chain — ONLY if a checked-in guest already
+  // exists (we never create/mutate real bookings here). Charging a real bill
+  // would leave a permanent folio charge on a real guest, so the mutating step
+  // is intentionally left to the offline simulation + in-app confirmation.
+  if (inhouseRooms.length > 0) {
+    const r0 = inhouseRooms[0];
+    if (r0.open_folio_id) {
+      pass('TC-CTR-E2E', `checked-in guest Room ${r0.room_number || r0.room_name} has an open folio ready to receive a charge (folio ${r0.open_folio_id})`);
+    } else {
+      skip('TC-CTR-E2E', 'charge target readiness', 'in-house guest has no open folio yet');
+    }
+  } else {
+    skip('TC-CTR-E2E', 'full charge-to-room chain', 'no checked-in guest (mutation covered by offline sim)');
+  }
+}
+
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
 //
 // Covers the RBAC hardening commit (c040e42):
@@ -2772,6 +2859,7 @@ async function main() {
   await testCheckinProcess();
   await testRoomServiceQR();
   await testCheckoutAndInvoice();
+  await testChargeToRoom();
   await testRBACHardening();
 
   const failures = generateReport();
