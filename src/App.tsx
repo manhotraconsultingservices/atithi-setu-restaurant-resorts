@@ -7892,7 +7892,7 @@ function SettlementUploadForm({
 function AccountingView({ restaurantId, token }: { restaurantId: string; token: string }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
     | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
-    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK';
+    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
   const [acctTab, setAcctTab] = useState<SubTab>('TRIAL');
   const [coa, setCoa] = useState<any[]>([]);
   const [glEntries, setGlEntries] = useState<any[]>([]);
@@ -8070,6 +8070,38 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   const [openTablesAr, setOpenTablesAr] = useState<any>(null);
   const loadOpenTablesAr = useCallback(() => { acctApi('/accounting/open-tables-receivable').then(d => { if (d && !d.error) setOpenTablesAr(d); }).catch(() => {}); }, [acctApi]);
 
+  // Expenses & Payments + Loans / EMI
+  const EXP_CATS: { key: string; label: string }[] = [
+    { key: 'RENT', label: 'Rent' }, { key: 'ELECTRICITY', label: 'Electricity & Power' }, { key: 'WATER', label: 'Water & Utilities' },
+    { key: 'INTERNET', label: 'Internet & Telecom' }, { key: 'SALARY', label: 'Salary / Wages' }, { key: 'STAFF_ADVANCE', label: 'Staff Advance' },
+    { key: 'EMI', label: 'EMI / Loan repayment' }, { key: 'REPAIRS', label: 'Repairs & Maintenance' }, { key: 'MARKETING', label: 'Marketing' },
+    { key: 'OFFICE', label: 'Office / Admin' }, { key: 'PROFESSIONAL', label: 'Professional fees' }, { key: 'INTEREST', label: 'Interest' }, { key: 'MISC', label: 'Miscellaneous' },
+  ];
+  const catLabel = (k: string) => EXP_CATS.find(c => c.key === k)?.label || String(k || '').replace(/_/g, ' ');
+  const [expForm, setExpForm] = useState<any>({ category: 'RENT', payment_method: 'CASH', amount: '', party: '', notes: '', entry_date: todayStr, loan_id: '', principal_amount: '', interest_amount: '' });
+  const [expList, setExpList] = useState<any[]>([]);
+  const [expMsg, setExpMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [loans, setLoans] = useState<any[]>([]);
+  const [loanForm, setLoanForm] = useState<any>({ name: '', lender: '', principal: '', funding: 'OPENING', interest_rate: '', emi_amount: '', start_date: todayStr, notes: '' });
+  const [loanMsg, setLoanMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const loadExpenses = useCallback(() => { setLoading(true); acctApi(`/accounting/expense-payments?from=${monthStart}&to=${todayStr}`).then(d => { if (Array.isArray(d)) setExpList(d); }).finally(() => setLoading(false)); }, [acctApi]);
+  const loadLoans = useCallback(() => { acctApi('/accounting/loans').then(d => { if (Array.isArray(d)) setLoans(d); }).catch(() => {}); }, [acctApi]);
+  const submitExpense = async () => {
+    setExpMsg(null);
+    const body: any = { category: expForm.category, payment_method: expForm.payment_method, entry_date: expForm.entry_date, party: expForm.party, notes: expForm.notes };
+    if (expForm.category === 'EMI') { body.loan_id = expForm.loan_id; body.principal_amount = parseFloat(expForm.principal_amount) || 0; body.interest_amount = parseFloat(expForm.interest_amount) || 0; }
+    else { body.amount = parseFloat(expForm.amount) || 0; }
+    const res = await acctApi('/accounting/expense-payments', { method: 'POST', body: JSON.stringify(body) });
+    if (res && !res.error) { setExpMsg({ type: 'ok', text: `Recorded ${fmtAmt(res.amount)}` }); setExpForm({ ...expForm, amount: '', party: '', notes: '', principal_amount: '', interest_amount: '' }); loadExpenses(); loadLoans(); }
+    else setExpMsg({ type: 'err', text: res?.error || 'Failed to record' });
+  };
+  const submitLoan = async () => {
+    setLoanMsg(null);
+    const res = await acctApi('/accounting/loans', { method: 'POST', body: JSON.stringify({ name: loanForm.name, lender: loanForm.lender, principal: parseFloat(loanForm.principal) || 0, funding: loanForm.funding, interest_rate: loanForm.interest_rate ? parseFloat(loanForm.interest_rate) : null, emi_amount: loanForm.emi_amount ? parseFloat(loanForm.emi_amount) : null, start_date: loanForm.start_date, notes: loanForm.notes }) });
+    if (res && !res.error) { setLoanMsg({ type: 'ok', text: `Loan "${res.name}" added` }); setLoanForm({ name: '', lender: '', principal: '', funding: 'OPENING', interest_rate: '', emi_amount: '', start_date: todayStr, notes: '' }); loadLoans(); }
+    else setLoanMsg({ type: 'err', text: res?.error || 'Failed to add loan' });
+  };
+
   useEffect(() => { if (acctTab === 'PNL') loadPnl(); }, [acctTab, loadPnl]);
   useEffect(() => { if (acctTab === 'BALANCESHEET') loadBalanceSheet(); }, [acctTab, loadBalanceSheet]);
   useEffect(() => { if (acctTab === 'CASHFLOW') loadCashFlowGl(); }, [acctTab, loadCashFlowGl]);
@@ -8083,6 +8115,8 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
   useEffect(() => { if (acctTab === 'CASHDRAWER') loadDayClose(); }, [acctTab, loadDayClose]);
   useEffect(() => { if (acctTab === 'DAYBOOK') loadDayBook(); }, [acctTab, loadDayBook]);
   useEffect(() => { if (acctTab === 'CASHBOOK') loadOpenTablesAr(); }, [acctTab, loadOpenTablesAr]);
+  useEffect(() => { if (acctTab === 'EXPENSES') { loadExpenses(); loadLoans(); } }, [acctTab, loadExpenses, loadLoans]);
+  useEffect(() => { if (acctTab === 'LOANS') loadLoans(); }, [acctTab, loadLoans]);
 
   const closePeriod = async () => {
     if (!pcKey || !pcFrom || !pcTo) return;
@@ -8130,6 +8164,8 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
     CASH_COUNT: 'Cash count — variance',
     SUPPLIER_PAYMENT: 'Supplier payment (out)',
     STAFF_ADVANCE: 'Staff advance (out)',
+    EXPENSE_PAYMENT: 'Expense / payment (out)',
+    LOAN: 'Loan',
     MANUAL_JOURNAL: 'Manual journal',
   };
   const srcLabel = (s: string) => SOURCE_LABEL[s] || String(s || '').replace(/_/g, ' ');
@@ -8190,12 +8226,14 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
     GST: 'GST Outstanding', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
     CASHBOOK: 'Cash Book', AGING_AR: 'AR Aging', AGING_AP: 'AP Aging', BANKREC: 'Bank Reconciliation',
     TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
+    EXPENSES: 'Expenses & Payments', LOANS: 'Loans / EMI',
   };
   const ACCT_GROUPS: { key: string; label: string; tabs: SubTab[] }[] = [
     { key: 'LEDGER', label: 'Ledger', tabs: ['TRIAL', 'GL', 'DAYBOOK', 'JOURNAL'] },
     { key: 'STATEMENTS', label: 'Statements', tabs: ['PNL', 'BALANCESHEET', 'CASHFLOW'] },
     { key: 'GST', label: 'GST', tabs: ['GST', 'GSTR1', 'GSTR3B'] },
     { key: 'WORKING', label: 'Working Capital', tabs: ['CASHBOOK', 'AGING_AR', 'AGING_AP', 'BANKREC'] },
+    { key: 'SPEND', label: 'Expenses & Loans', tabs: ['EXPENSES', 'LOANS'] },
     { key: 'CONTROLS', label: 'Controls', tabs: ['CASHDRAWER', 'CASHCOUNT', 'PERIODS', 'TDS'] },
   ];
   const activeGroup = ACCT_GROUPS.find(g => g.tabs.includes(acctTab)) || ACCT_GROUPS[0];
@@ -8894,6 +8932,118 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
         </div>
       )}
 
+      {acctTab === 'EXPENSES' && (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-[#e8ded0] bg-white p-4 space-y-3">
+            <p className="text-sm font-semibold text-[#1a1208]">Record an expense / payment</p>
+            <div className="grid sm:grid-cols-3 gap-3">
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Category</label>
+                <select value={expForm.category} onChange={e => setExpForm({ ...expForm, category: e.target.value })} className={`${AC_INPUT} w-full`}>
+                  {EXP_CATS.map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
+                </select></div>
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Paid by</label>
+                <select value={expForm.payment_method} onChange={e => setExpForm({ ...expForm, payment_method: e.target.value })} className={`${AC_INPUT} w-full`}>
+                  {['CASH', 'BANK', 'UPI', 'CHEQUE'].map(m => <option key={m} value={m}>{m === 'CASH' ? '💵 Cash' : m === 'BANK' ? '🏦 Bank' : m === 'UPI' ? '📱 UPI' : '🧾 Cheque'}</option>)}
+                </select></div>
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Date</label>
+                <input type="date" value={expForm.entry_date} onChange={e => setExpForm({ ...expForm, entry_date: e.target.value })} className={`${AC_INPUT} w-full`} /></div>
+            </div>
+            {expForm.category === 'EMI' ? (
+              <>
+                <div className="grid sm:grid-cols-3 gap-3">
+                  <div><label className="text-xs text-[#6b5d52] block mb-1">Loan</label>
+                    <select value={expForm.loan_id} onChange={e => setExpForm({ ...expForm, loan_id: e.target.value })} className={`${AC_INPUT} w-full`}>
+                      <option value="">Select loan…</option>
+                      {loans.filter((l: any) => l.status === 'ACTIVE').map((l: any) => <option key={l.id} value={l.id}>{l.name} — outstanding {fmtAmt(l.outstanding)}</option>)}
+                    </select></div>
+                  <div><label className="text-xs text-[#6b5d52] block mb-1">Principal ₹</label><input type="number" value={expForm.principal_amount} onChange={e => setExpForm({ ...expForm, principal_amount: e.target.value })} placeholder="0.00" className={`${AC_INPUT} w-full tabular-nums`} /></div>
+                  <div><label className="text-xs text-[#6b5d52] block mb-1">Interest ₹</label><input type="number" value={expForm.interest_amount} onChange={e => setExpForm({ ...expForm, interest_amount: e.target.value })} placeholder="0.00" className={`${AC_INPUT} w-full tabular-nums`} /></div>
+                </div>
+                <p className="text-sm text-[#6b5d52]">Total EMI: <span className="font-bold tabular-nums text-[#1a1208]">{fmtAmt((parseFloat(expForm.principal_amount) || 0) + (parseFloat(expForm.interest_amount) || 0))}</span> · principal reduces the loan, interest is an expense</p>
+              </>
+            ) : (
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div><label className="text-xs text-[#6b5d52] block mb-1">Amount ₹</label><input type="number" value={expForm.amount} onChange={e => setExpForm({ ...expForm, amount: e.target.value })} placeholder="0.00" className={`${AC_INPUT} w-full tabular-nums`} /></div>
+                <div><label className="text-xs text-[#6b5d52] block mb-1">{expForm.category === 'STAFF_ADVANCE' ? 'Staff name' : 'Paid to (party)'}</label><input value={expForm.party} onChange={e => setExpForm({ ...expForm, party: e.target.value })} placeholder="Landlord / vendor / staff" className={`${AC_INPUT} w-full`} /></div>
+                <div><label className="text-xs text-[#6b5d52] block mb-1">Notes</label><input value={expForm.notes} onChange={e => setExpForm({ ...expForm, notes: e.target.value })} className={`${AC_INPUT} w-full`} /></div>
+              </div>
+            )}
+            {expForm.category === 'EMI' && (
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Paid to (lender)</label><input value={expForm.party} onChange={e => setExpForm({ ...expForm, party: e.target.value })} className={`${AC_INPUT} w-full sm:w-1/3`} /></div>
+            )}
+            <div className="flex items-center gap-3">
+              <button onClick={submitExpense} className={AC_BTN}>Record payment</button>
+              {expMsg && <span className={`text-sm ${expMsg.type === 'ok' ? 'text-emerald-700' : 'text-rose-700'}`}>{expMsg.text}</span>}
+            </div>
+            <p className="text-[11px] text-[#9c8e85]">Posts the journal automatically — Dr the expense / advance / loan account, Cr Cash or Bank by method. Appears in Day Book, Cash Book and the GL.</p>
+          </div>
+          {expList.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left">{['Date', 'Category', 'Paid to', 'Method', 'Amount'].map(h => <th key={h} className="px-3 py-2 font-semibold text-[#1a1208]">{h}</th>)}</tr></thead>
+                <tbody>{expList.map((r: any) => (
+                  <tr key={r.id} className="border-t border-[#f0e8d8]">
+                    <td className="px-3 py-2 whitespace-nowrap text-[#6b5d52]">{r.entry_date}</td>
+                    <td className="px-3 py-2">{catLabel(r.category)}</td>
+                    <td className="px-3 py-2 text-[#6b5d52]">{r.party || '—'}</td>
+                    <td className="px-3 py-2 text-[#6b5d52]">{r.payment_method}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.amount)}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {acctTab === 'LOANS' && (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-[#e8ded0] bg-white p-4 space-y-3">
+            <p className="text-sm font-semibold text-[#1a1208]">Add a loan</p>
+            <div className="grid sm:grid-cols-3 gap-3">
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Name / purpose</label><input value={loanForm.name} onChange={e => setLoanForm({ ...loanForm, name: e.target.value })} placeholder="Vehicle loan, working capital…" className={`${AC_INPUT} w-full`} /></div>
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Lender</label><input value={loanForm.lender} onChange={e => setLoanForm({ ...loanForm, lender: e.target.value })} placeholder="Bank / NBFC" className={`${AC_INPUT} w-full`} /></div>
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Principal ₹</label><input type="number" value={loanForm.principal} onChange={e => setLoanForm({ ...loanForm, principal: e.target.value })} placeholder="0.00" className={`${AC_INPUT} w-full tabular-nums`} /></div>
+            </div>
+            <div className="grid sm:grid-cols-4 gap-3">
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Booking</label>
+                <select value={loanForm.funding} onChange={e => setLoanForm({ ...loanForm, funding: e.target.value })} className={`${AC_INPUT} w-full`}>
+                  <option value="OPENING">Opening balance (existing)</option>
+                  <option value="BANK">Just received — Bank</option>
+                  <option value="CASH">Just received — Cash</option>
+                  <option value="UPI">Just received — UPI</option>
+                </select></div>
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Interest %/yr</label><input type="number" value={loanForm.interest_rate} onChange={e => setLoanForm({ ...loanForm, interest_rate: e.target.value })} className={`${AC_INPUT} w-full tabular-nums`} /></div>
+              <div><label className="text-xs text-[#6b5d52] block mb-1">EMI ₹</label><input type="number" value={loanForm.emi_amount} onChange={e => setLoanForm({ ...loanForm, emi_amount: e.target.value })} className={`${AC_INPUT} w-full tabular-nums`} /></div>
+              <div><label className="text-xs text-[#6b5d52] block mb-1">Start date</label><input type="date" value={loanForm.start_date} onChange={e => setLoanForm({ ...loanForm, start_date: e.target.value })} className={`${AC_INPUT} w-full`} /></div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button onClick={submitLoan} className={AC_BTN}>Add loan</button>
+              {loanMsg && <span className={`text-sm ${loanMsg.type === 'ok' ? 'text-emerald-700' : 'text-rose-700'}`}>{loanMsg.text}</span>}
+            </div>
+            <p className="text-[11px] text-[#9c8e85]">Record EMIs in Expenses &amp; Payments → category "EMI / Loan repayment": the principal reduces the outstanding below, interest posts to Interest on Loans.</p>
+          </div>
+          {loans.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left">{['Loan', 'Lender', 'Principal', 'Outstanding', 'EMI', 'Rate', 'Status'].map(h => <th key={h} className="px-3 py-2 font-semibold text-[#1a1208]">{h}</th>)}</tr></thead>
+                <tbody>{loans.map((l: any) => (
+                  <tr key={l.id} className="border-t border-[#f0e8d8]">
+                    <td className="px-3 py-2">{l.name}</td>
+                    <td className="px-3 py-2 text-[#6b5d52]">{l.lender || '—'}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(l.principal)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmtAmt(l.outstanding)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{l.emi_amount ? fmtAmt(l.emi_amount) : '—'}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{l.interest_rate != null ? `${l.interest_rate}%` : '—'}</td>
+                    <td className="px-3 py-2"><span className={`text-xs rounded-full px-2 py-0.5 ${l.status === 'CLOSED' ? 'bg-emerald-100 text-emerald-800' : 'bg-sky-100 text-sky-800'}`}>{l.status}</span></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {acctTab === 'DAYBOOK' && (
         <div className="space-y-4">
           <div className="flex items-center gap-2 flex-wrap">
@@ -8956,7 +9106,7 @@ function AccountingView({ restaurantId, token }: { restaurantId: string; token: 
             <input placeholder="Account code" value={glAccount} onChange={e => setGlAccount(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white w-28" />
             <select value={glSource} onChange={e => setGlSource(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
               <option value="">All sources</option>
-              {['FNB_ORDER','FOLIO_SETTLEMENT','FOLIO_ADVANCE','EVENT_ADVANCE','EVENT_PAYMENT','FOLIO_PAYMENT','PETTY_CASH','CASH_DRAWER_DEPOSIT','CASH_DRAWER_VARIANCE','CASH_COUNT','EXPENSE_CLAIM','SUPPLIER_INVOICE','SUPPLIER_PAYMENT','STAFF_ADVANCE','STAFF_PAYROLL','PAYROLL_RUN','CREDIT_NOTE','BOOKING_CANCEL','MANUAL_JOURNAL'].map(s => (
+              {['FNB_ORDER','FOLIO_SETTLEMENT','FOLIO_ADVANCE','EVENT_ADVANCE','EVENT_PAYMENT','FOLIO_PAYMENT','PETTY_CASH','EXPENSE_PAYMENT','LOAN','CASH_DRAWER_DEPOSIT','CASH_DRAWER_VARIANCE','CASH_COUNT','EXPENSE_CLAIM','SUPPLIER_INVOICE','SUPPLIER_PAYMENT','STAFF_ADVANCE','STAFF_PAYROLL','PAYROLL_RUN','CREDIT_NOTE','BOOKING_CANCEL','MANUAL_JOURNAL'].map(s => (
                 <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
               ))}
             </select>

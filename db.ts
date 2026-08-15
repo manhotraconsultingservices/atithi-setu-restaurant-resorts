@@ -2676,6 +2676,46 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       note          TEXT,
       UNIQUE (restaurant_id, business_date)
     );
+
+    -- Loans / EMI: liability master with a running outstanding balance. Each EMI
+    -- (recorded via expense_payments) splits principal (reduces this) + interest.
+    CREATE TABLE IF NOT EXISTS loans (
+      id            TEXT PRIMARY KEY,
+      restaurant_id TEXT NOT NULL,
+      name          TEXT NOT NULL,
+      lender        TEXT,
+      principal     REAL NOT NULL DEFAULT 0,
+      outstanding   REAL NOT NULL DEFAULT 0,
+      interest_rate REAL,
+      emi_amount    REAL,
+      start_date    TEXT,
+      notes         TEXT,
+      status        TEXT NOT NULL DEFAULT 'ACTIVE',
+      disburse_journal_ref TEXT,
+      created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_loans_res ON loans (restaurant_id, status);
+
+    -- Expenses & Payments voucher register (rent, electricity, salary, staff
+    -- advance, EMI, …). Logs the payment + the GL journal it posted.
+    CREATE TABLE IF NOT EXISTS expense_payments (
+      id             TEXT PRIMARY KEY,
+      restaurant_id  TEXT NOT NULL,
+      entry_date     TEXT NOT NULL,
+      category       TEXT NOT NULL,
+      account_code   TEXT,
+      amount         REAL NOT NULL DEFAULT 0,
+      payment_method TEXT NOT NULL DEFAULT 'CASH',
+      party          TEXT,
+      notes          TEXT,
+      loan_id        TEXT,
+      principal_amount REAL,
+      interest_amount  REAL,
+      gl_ref         TEXT,
+      recorded_by    TEXT,
+      created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_exppay_res_date ON expense_payments (restaurant_id, entry_date);
   `).catch(() => {});
 
   // Seed standard chart of accounts — Indian hotel/restaurant context.
@@ -2711,6 +2751,10 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['2600','OTA Commissions Payable','LIABILITY',320],
     ['3000','Owner Capital','EQUITY',400],
     ['3100','Retained Earnings','EQUITY',410],
+    ['3200','Opening Balance Equity','EQUITY',420],
+    ['2700','Loan Payable','LIABILITY',330],
+    ['5250','Rent','EXPENSE',645],
+    ['5460','Interest on Loans','EXPENSE',665],
     ['4000','Room Revenue','REVENUE',500],
     ['4010','F&B Revenue','REVENUE',510],
     ['4020','Service Charge Revenue','REVENUE',520],

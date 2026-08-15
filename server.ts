@@ -4394,6 +4394,8 @@ function _glAccountForExpenseCategory(category: string): { code: string; name: s
   if (/OFFICE|STATIONAR|ADMIN/.test(c))                     return { code: '5700', name: 'Administrative & Office Expenses' };
   if (/PROFESSIONAL|CONSULTANT|AUDIT/.test(c))              return { code: '5900', name: 'Professional Fees' };
   if (/LEGAL/.test(c))                                      return { code: '5910', name: 'Legal & Compliance Fees' };
+  if (/RENT|LEASE/.test(c))                                 return { code: '5250', name: 'Rent' };
+  if (/INTEREST/.test(c))                                   return { code: '5460', name: 'Interest on Loans' };
   return { code: '5800', name: 'Petty Cash Expenses' };
 }
 
@@ -47883,8 +47885,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'daybook-open-tables-ar',
+    commit_marker: 'expenses-payments-loans',
     code_features: [
+      'expenses-payments-loans',                    // New: a single "Expenses & Payments" screen + "Loans / EMI" tracker in Accounting → "Expenses & Loans" group — so the owner can record rent, electricity, water, internet, salary, staff advance, EMI, repairs, marketing, office, professional, misc, paid by Cash / Bank / UPI / Cheque, WITHOUT touching Dr/Cr (the old Expense Journal was cash-only and had no Rent/EMI). Backend (owner-only): POST/GET /accounting/expense-payments auto-posts the correct double-entry — Dr the mapped expense account (RENT→new 5250, ELECTRICITY→5400, SALARY→5100, INTEREST→5460, …) or Dr 1210 Advances to Staff (staff advance = recoverable asset) or, for EMI, Dr 2700 Loan Payable (principal) + Dr 5460 Interest on Loans (interest); Cr Cash 1000 or Bank 1010 by method (source_type EXPENSE_PAYMENT). POST/GET /accounting/loans — a loan master with running outstanding; create posts Dr Cash/Bank (or Dr 3200 Opening Balance Equity for a pre-existing balance) / Cr 2700 Loan Payable; each EMI decrements outstanding by principal and auto-CLOSES at zero. New COA: 2700 Loan Payable, 3200 Opening Balance Equity, 5250 Rent, 5460 Interest on Loans. New tables loans + expense_payments. Expense-category mapper gains RENT/LEASE→5250, INTEREST→5460. GL Ledger source dropdown + cash-by-source labels gain EXPENSE_PAYMENT + LOAN. Verified: deterministic offline sim 12/12 (test-scripts/e2e_expense_payment_sim.mjs — every category balanced, cash-vs-bank routing, EMI principal/interest split, loan outstanding decrement + close, trial balance Dr=Cr) + live suite TC-ACCT-EXPPAY/LOANS/EXPVAL. tsc + vite build clean.
       'daybook-open-tables-ar',                     // Accounting review follow-ups (a) + (b). (a) DAY BOOK — new "Day Book" sub-tab under Accounting → Ledger: a single day's journal entries listed chronologically and grouped by journal_ref (sales / purchases / payments received / manual), each with its Dr/Cr lines, source label, and a day-total footer that flags balanced ✓ vs OUT OF BALANCE. Frontend-only — reuses GET /accounting/gl-entries?from=date&to=date (no backend/GL change). (b) OPEN TABLES — UNINVOICED F&B RECEIVABLE — new owner-only GET /accounting/open-tables-receivable returns the running value of dine-in table_sessions still OPEN/BILL_REQUESTED (Σ non-cancelled orders per session) as {total,count,tables[]}; surfaced as an amber card on the Cash Book so credit dine-in is visible BEFORE it settles. This is a DERIVED snapshot only — deliberately NOT posted to the GL (restaurant revenue is recognised at settlement), so it never affects the trial balance; the card copy says so. Verified: tsc + vite build clean; suite checks TC-ACCT-OPENTBL (endpoint 200 + shape) + TC-ACCT-CASHSRC (cash-book carries cash_by_source); endpoints deployed 401/404; Day Book + Open-tables UI in the live bundle.
       'cash-visibility-timing',                     // Accounting review follow-ups (hotel + restaurant cash visibility). Three changes: (1) CASH-BY-SOURCE — the Cash Book and the EOD Day-Close sheet now show a "Cash by source (today)" breakdown (Restaurant / Hotel-Spa-Events folio / advances / petty cash / drawer deposits …), grouped from gl_entries.source_type on account 1000, so restaurant vs hotel cash is visible without opening the GL ledger. Backend adds `cash_by_source` to GET /accounting/cash-book and /accounting/day-close (managers only for day-close); frontend renders a shared breakdown table + a friendly SOURCE_LABEL map. (2) GL LEDGER FILTER — the Source dropdown was missing FNB_ORDER (restaurant) and the newer sources; now lists FNB_ORDER, FOLIO_SETTLEMENT/ADVANCE/PAYMENT, EVENT_ADVANCE/PAYMENT, PETTY_CASH, CASH_DRAWER_DEPOSIT/VARIANCE, CASH_COUNT, SUPPLIER_*, STAFF_ADVANCE, STAFF_PAYROLL, PAYROLL_RUN, CREDIT_NOTE, BOOKING_CANCEL, MANUAL_JOURNAL — so restaurant cash is one-click filterable. (3) HOTEL-CASH TIMING — an INTERIM (mid-stay) folio receipt previously only hit the GL at checkout; it now posts at receipt time as Dr Cash/Bank, Cr 2100 Advances (journal INTPAY-<pid>, source FOLIO_PAYMENT), and all THREE settlement copies (settleFolioForBooking, _postFolioGl for spa/events, group checkout) now apply ADVANCE+INTERIM against AR and drop INTERIM from the cash-leg loop — so interim cash shows in the Cash Book on the day received and is never double-counted; each GL sub-block stays internally balanced. Known limitation (unchanged/pre-existing): voiding a folio payment does not reverse its GL (same as advances today). Verified: deterministic offline sim 11/11 (test-scripts/e2e_folio_cash_timing_sim.mjs — interim posts at receipt, no double count, AR+2100 net to zero, trial balance Dr=Cr) + the existing cash-drawer sim 14/14 unaffected + read-only diagnostic test-scripts/cash_review.mjs (cash grouped by source). tsc + vite build clean.
       'eod-cash-drawer',                            // Enhancement (client demo gap): "how to handle cash collected during the day" → a per-cashier EOD Cash Drawer / Day-Close, added to Accounting (Controls → "Cash Drawers"). Additive over the existing Cash Book / Cash Count / Petty Cash / GL — NO settlement path is touched. New tenant tables `cash_drawers` (lifecycle OPEN→PENDING_APPROVAL→APPROVED|REJECTED) + `cash_day_locks`, and COA account `1005 Cash in Transit`. Model: a drawer = one cashier's till for a shift; **expected cash = opening float + net GL Cash-in-Hand (1000) movement during the drawer's open window** (standard POS drawer math; reconciles to the same GL account the Cash Book already trusts — the window uses a column-to-column timestamp compare dr.opened_at↔gl.created_at so it is timezone-safe). Endpoints (all under /api/restaurant/:id/accounting, gated: cashiers manage their OWN drawer via ownership, managers oversee, unlock owner-only): GET/POST cash-drawers (list/open), GET cash-drawers/:id (detail + live expected, revealed to managers or after close so a cashier counts blind), POST …/close (denomination-grid count → expected snapshot + variance → PENDING_APPROVAL), POST …/approve (posts the deposit journal Cr 1000 → Dr 1010 Bank / 1005 Transit, and optional variance journal 1000↔6010 Cash Over/Short), POST …/reject, GET day-close (EOD sheet: drawers + totals + GL cash position + manager tender breakdown from payment rows + cash expenses + lock state), POST day-close/lock (requires every drawer APPROVED) + /unlock. Frontend: Accounting → Controls → "Cash Drawers" — open-drawer form, per-cashier drawers table with Close&count (denomination modal, auto-total, deposit + retained float) / Approve / Reject, EOD summary cards, GL cash position, tender breakdown, Lock day. NOTE (documented limitation): per-cashier attribution is exact for sequential shifts; concurrent same-day cashiers share the GL-net window and the manager reconciles at the EOD sheet (a hard per-payment drawer stamp is the follow-up for shared-login concurrency). Verified: deterministic offline sim 14/14 (test-scripts/e2e_cash_drawer_sim.mjs — expected math, denomination count, deposit GL, shortage true-up to 6010, sequential-shift attribution, lock gate) + live suite checks TC-CD-LIST/DAYCLOSE/RECONCILE(day-close GL cash == Cash Book)/GUARD + endpoints deployed (401/404). tsc + vite build clean.
@@ -48272,6 +48275,140 @@ ${data.tenant.name}`;
       }));
       const total = round(tables.reduce((s, t) => s + t.amount, 0));
       res.json({ total, count: tables.length, tables });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── Loans / EMI (full loan tracking) ───────────────────────────────────────
+  app.get("/api/restaurant/:id/accounting/loans", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM loans WHERE restaurant_id = ? ORDER BY status, created_at DESC", [req.params.id]).catch(() => []);
+      res.json(Array.isArray(rows) ? rows : []);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Create a loan. funding = CASH/BANK/UPI (money received now → Dr Cash/Bank,
+  // Cr Loan Payable) or OPENING (pre-existing balance → Dr Opening Balance
+  // Equity, Cr Loan Payable). outstanding starts = principal.
+  app.post("/api/restaurant/:id/accounting/loans", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const b = req.body || {};
+      const principal = round(b.principal);
+      if (!b.name || principal <= 0) return res.status(400).json({ error: 'Loan name and a principal amount are required.' });
+      const id = `LOAN-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const date = String(b.start_date || new Date().toISOString().slice(0, 10));
+      const by = (req.user as any)?.id || (req.user as any)?.email || null;
+      const funding = String(b.funding || 'OPENING').toUpperCase();
+      let ref: string;
+      if (funding === 'OPENING') {
+        ref = `LOAN-OB-${id}`;
+        await _postGlEntries(db, req.params.id, ref, date, 'LOAN', id, [
+          { account_code: '3200', account_name: 'Opening Balance Equity', dr_amount: principal, cr_amount: 0, narration: `Loan opening balance: ${b.name}` },
+          { account_code: '2700', account_name: 'Loan Payable', dr_amount: 0, cr_amount: principal, narration: `Loan opening balance: ${b.name}` },
+        ], by);
+      } else {
+        const acct = _glAccountForPaymentMethod(funding);
+        ref = `LOAN-DR-${id}`;
+        await _postGlEntries(db, req.params.id, ref, date, 'LOAN', id, [
+          { account_code: acct.code, account_name: acct.name, dr_amount: principal, cr_amount: 0, narration: `Loan disbursed: ${b.name}` },
+          { account_code: '2700', account_name: 'Loan Payable', dr_amount: 0, cr_amount: principal, narration: `Loan disbursed: ${b.name}` },
+        ], by);
+      }
+      await db.run(
+        `INSERT INTO loans (id, restaurant_id, name, lender, principal, outstanding, interest_rate, emi_amount, start_date, notes, status, disburse_journal_ref)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
+        [id, req.params.id, String(b.name), b.lender || null, principal, principal,
+         b.interest_rate != null ? Number(b.interest_rate) : null, b.emi_amount != null ? round(b.emi_amount) : null,
+         date, b.notes || null, ref]
+      );
+      const row = await db.get("SELECT * FROM loans WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── Expenses & Payments (rent, electricity, salary, staff advance, EMI, …) ──
+  app.get("/api/restaurant/:id/accounting/expense-payments", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as Record<string, string>;
+      const clauses = ['restaurant_id = ?']; const params: any[] = [req.params.id];
+      if (from) { clauses.push('entry_date >= ?'); params.push(from); }
+      if (to)   { clauses.push('entry_date <= ?'); params.push(to); }
+      const rows = await db.query(`SELECT * FROM expense_payments WHERE ${clauses.join(' AND ')} ORDER BY entry_date DESC, created_at DESC LIMIT 500`, params).catch(() => []);
+      res.json(Array.isArray(rows) ? rows : []);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Record an expense/payment. Auto-posts the correct double-entry: Dr the
+  // expense/advance/loan account(s), Cr Cash (1000) or Bank (1010) by method.
+  app.post("/api/restaurant/:id/accounting/expense-payments", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const b = req.body || {};
+      const category = String(b.category || '').trim().toUpperCase();
+      if (!category) return res.status(400).json({ error: 'Category is required.' });
+      const method = String(b.payment_method || 'CASH').toUpperCase();
+      const cashAcct = _glAccountForPaymentMethod(method);
+      const date = String(b.entry_date || new Date().toISOString().slice(0, 10));
+      const by = (req.user as any)?.id || (req.user as any)?.email || null;
+      const id = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const party = b.party || null;
+      const notes = b.notes || null;
+
+      let amount = round(b.amount);
+      const debitLines: GlLine[] = [];
+      let accountCode: string | null = null;
+      let loanId: string | null = null;
+      let principalAmt: number | null = null;
+      let interestAmt: number | null = null;
+
+      if (category === 'EMI' || category === 'LOAN') {
+        loanId = b.loan_id ? String(b.loan_id) : null;
+        principalAmt = round(b.principal_amount);
+        interestAmt = round(b.interest_amount);
+        if (!loanId) return res.status(400).json({ error: 'Select the loan this EMI is for.' });
+        if (principalAmt + interestAmt <= 0) return res.status(400).json({ error: 'Enter the principal and/or interest amount.' });
+        const loan: any = await db.get("SELECT * FROM loans WHERE id = ? AND restaurant_id = ?", [loanId, req.params.id]);
+        if (!loan) return res.status(404).json({ error: 'Loan not found.' });
+        amount = round(principalAmt + interestAmt);
+        accountCode = '2700';
+        if (principalAmt > 0) debitLines.push({ account_code: '2700', account_name: 'Loan Payable', dr_amount: principalAmt, cr_amount: 0, narration: `EMI principal: ${loan.name}` });
+        if (interestAmt > 0) debitLines.push({ account_code: '5460', account_name: 'Interest on Loans', dr_amount: interestAmt, cr_amount: 0, narration: `EMI interest: ${loan.name}` });
+      } else if (category === 'STAFF_ADVANCE' || category === 'STAFF ADVANCE') {
+        if (amount <= 0) return res.status(400).json({ error: 'Enter the advance amount.' });
+        accountCode = '1210';
+        debitLines.push({ account_code: '1210', account_name: 'Advances to Staff', dr_amount: amount, cr_amount: 0, narration: `Staff advance${party ? ' — ' + party : ''}` });
+      } else {
+        if (amount <= 0) return res.status(400).json({ error: 'Enter the amount.' });
+        const exp = b.account_code ? { code: String(b.account_code), name: String(b.account_name || category) } : _glAccountForExpenseCategory(category);
+        accountCode = exp.code;
+        debitLines.push({ account_code: exp.code, account_name: exp.name, dr_amount: amount, cr_amount: 0, narration: `${category}${party ? ' — ' + party : ''}` });
+      }
+
+      const ref = `PAY-${id}`;
+      const lines: GlLine[] = [...debitLines, { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: amount, narration: `${category} paid via ${method}` }];
+      const posted = await _postGlEntries(db, req.params.id, ref, date, 'EXPENSE_PAYMENT', id, lines, by);
+      if (!posted?.ok) return res.status(422).json({ error: 'Could not post the journal (amounts do not balance).' });
+
+      if ((category === 'EMI' || category === 'LOAN') && loanId && (principalAmt || 0) > 0) {
+        await db.run("UPDATE loans SET outstanding = GREATEST(0, outstanding - ?) WHERE id = ?", [principalAmt, loanId]).catch(() => {});
+        await db.run("UPDATE loans SET status = 'CLOSED' WHERE id = ? AND outstanding <= 0.01", [loanId]).catch(() => {});
+      }
+
+      await db.run(
+        `INSERT INTO expense_payments (id, restaurant_id, entry_date, category, account_code, amount, payment_method, party, notes, loan_id, principal_amount, interest_amount, gl_ref, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, req.params.id, date, category, accountCode, amount, method, party, notes, loanId, principalAmt, interestAmt, ref, by]
+      );
+      const row = await db.get("SELECT * FROM expense_payments WHERE id = ?", [id]);
+      res.status(201).json(row);
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 

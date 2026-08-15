@@ -2409,6 +2409,23 @@ async function testCashDrawer() {
   } else {
     fail('TC-ACCT-CASHSRC', 'cash_by_source present', `HTTP ${cbx.status}`);
   }
+
+  // TC-ACCT-EXPPAY / TC-ACCT-LOANS: Expenses & Payments + Loans endpoints deployed.
+  const ep = await api('GET', `/api/restaurant/${restaurantId}/accounting/expense-payments`);
+  if (ep.status === 200 && Array.isArray(ep.data)) pass('TC-ACCT-EXPPAY', `expense-payments list deployed (${ep.data.length})`);
+  else if (ep.status === 403) skip('TC-ACCT-EXPPAY', 'expense-payments', 'not owner');
+  else fail('TC-ACCT-EXPPAY', 'expense-payments list', `HTTP ${ep.status}`);
+
+  const ln = await api('GET', `/api/restaurant/${restaurantId}/accounting/loans`);
+  if (ln.status === 200 && Array.isArray(ln.data)) pass('TC-ACCT-LOANS', `loans list deployed (${ln.data.length})`);
+  else if (ln.status === 403) skip('TC-ACCT-LOANS', 'loans', 'not owner');
+  else fail('TC-ACCT-LOANS', 'loans list', `HTTP ${ln.status}`);
+
+  // TC-ACCT-EXPVAL: expense-payment rejects a missing category (deployed + validating).
+  const ev = await api('POST', `/api/restaurant/${restaurantId}/accounting/expense-payments`, { amount: 0 });
+  if (ev.status === 400) pass('TC-ACCT-EXPVAL', 'expense-payment validates (400 on missing category)');
+  else if (ev.status === 403) skip('TC-ACCT-EXPVAL', 'expense-payment validation', 'not owner');
+  else fail('TC-ACCT-EXPVAL', 'expense-payment validation', `expected 400, got ${ev.status}`);
 }
 
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
