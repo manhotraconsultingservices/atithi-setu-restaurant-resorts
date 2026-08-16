@@ -10409,6 +10409,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [checkoutPayment, setCheckoutPayment] = useState<'CASH'|'CARD'|'UPI'|'BANK'>('CASH');
   const [checkoutDiscount, setCheckoutDiscount] = useState(0);
   const [viewFolio, setViewFolio] = useState<any>(null);
+  const [folioTree, setFolioTree] = useState<any>(null); // invoice tree menu (Audit log / Where-Used) overlay
   const [revisionHistory, setRevisionHistory] = useState<any[] | null>(null);
   const [revisionHistoryLoading, setRevisionHistoryLoading] = useState(false);
   const [addChargeOpen, setAddChargeOpen] = useState(false);
@@ -34637,6 +34638,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       )}
 
+      {/* ═════════ Invoice tree menu (Audit log / Where Used) ═════════ */}
+      {folioTree && (
+        <div className="fixed inset-0 z-[60] bg-black/40 overflow-y-auto p-4 sm:p-8" onClick={() => setFolioTree(null)}>
+          <div className="max-w-3xl mx-auto bg-[#faf7f2] rounded-2xl shadow-2xl p-5" onClick={e => e.stopPropagation()}>
+            <ObjectDetail
+              token={token!}
+              title={folioTree.invoice_number || folioTree.id}
+              subtitle={[folioTree.doc_type, folioTree.status, folioTree.guest_name].filter(Boolean).join(' · ')}
+              overviewLabel="Invoice"
+              onBack={() => setFolioTree(null)}
+              backLabel="Close"
+              auditUrl={`/api/restaurant/${restaurantId}/hotel/folios/${folioTree.id}/audit`}
+              whereUsedUrl={`/api/restaurant/${restaurantId}/hotel/folios/${folioTree.id}/where-used`}
+              resolveLink={buildObjectResolver(restaurantId, token!)}
+              overview={
+                <div className="bg-white rounded-2xl border border-[#e8dccf] p-5">
+                  <div className="grid grid-cols-2 gap-3 text-[12px]">
+                    {([['Invoice #', folioTree.invoice_number], ['Status', folioTree.status], ['Doc type', folioTree.doc_type], ['Guest', folioTree.guest_name], ['Room', folioTree.room_name || folioTree.room_id], ['Grand total', folioTree.grand_total != null ? `₹${Number(folioTree.grand_total).toLocaleString('en-IN')}` : null]] as [string, any][]).map(([k, v], i) => (
+                      <div key={i}><span className="text-[#9c8e85]">{k}</span><div className="font-semibold text-[#14110c] break-words">{v == null || v === '' ? '—' : String(v)}</div></div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-[#9c8e85] mt-3">Open the <b>Audit log</b> tab for the full money-action history (settle, credit note, revise, payments, F&amp;B charges, discounts, GST), or <b>Where Used</b> to jump to the booking, room, payments and related invoices.</p>
+                </div>
+              }
+            />
+          </div>
+        </div>
+      )}
+
       {/* ═════════ Folio viewer modal ═════════ */}
       {(viewFolio || folioSlideBooking) && (
         <div className="fixed inset-0 z-50" onClick={() => { setViewFolio(null); setFolioSlideBooking(null); setRevisionHistory(null); }}>
@@ -34668,7 +34698,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </p>
                   )}
                 </div>
-                <button onClick={() => { setViewFolio(null); setRevisionHistory(null); }} className="flex-none p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] mt-0.5"><X size={18} /></button>
+                <div className="flex-none flex items-center gap-1.5 mt-0.5">
+                  <button onClick={() => setFolioTree(viewFolio)} title="Audit log & related objects" className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] hover:bg-[#f0e9df]">🕘 History</button>
+                  <button onClick={() => { setViewFolio(null); setRevisionHistory(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+                </div>
               </div>
               {/* Inline action strip */}
               <div className="flex gap-2 mt-4 flex-wrap">

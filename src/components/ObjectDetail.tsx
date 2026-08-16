@@ -278,8 +278,23 @@ export function buildObjectResolver(restaurantId: string, token: string) {
           whereUsedUrl: `${base}/events/quotations/${objectId}/where-used`,
           overview: facts('Quotation', objectId),
         });
+      case 'FOLIO': {
+        let f: any = {};
+        try { const r = await fetch(`${base}/hotel/folios/${objectId}/outstanding`, auth); if (r.ok) { const j = await r.json(); f = j?.folio || j || {}; } } catch { /* best-effort */ }
+        return mk({
+          title: f.invoice_number || hint?.label || objectId,
+          subtitle: hint?.subtitle || [f.doc_type, f.status].filter(Boolean).join(' · ') || 'Invoice / Folio',
+          auditUrl: `${base}/hotel/folios/${objectId}/audit`,
+          whereUsedUrl: `${base}/hotel/folios/${objectId}/where-used`,
+          overview: facts('Invoice / Folio', objectId, [
+            ['Invoice #', f.invoice_number], ['Status', f.status], ['Doc type', f.doc_type],
+            ['Grand total', f.grand_total != null ? `₹${Number(f.grand_total).toLocaleString('en-IN')}` : null],
+            ['Outstanding', f.outstanding != null ? `₹${Number(f.outstanding).toLocaleString('en-IN')}` : null],
+          ]),
+        });
+      }
       default:
-        return null; // FOLIO & unknowns → shell falls back to onOpenObject
+        return null; // unknown types → shell falls back to onOpenObject
     }
   };
 }

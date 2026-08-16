@@ -35636,6 +35636,7 @@ ${data.tenant.name}`;
       if (!result.ok) {
         return res.status(409).json({ error: result.reason || 'Failed to post charge' });
       }
+      await writeObjectAudit(await getTenantDb(req.params.id), req, { objectType: 'FOLIO', objectId: req.params.folioId, action: 'FNB_CHARGED', summary: `F&B charged: ${items.length} item(s)`, after: { order_id: syntheticOrderId, entry_ids: result.entry_ids } }).catch(() => {});
       res.status(201).json({
         success: true,
         folio_id: result.folio_id,
@@ -35659,6 +35660,7 @@ ${data.tenant.name}`;
         req.params.id, req.params.orderId, reason, req.user?.id || null
       );
       if (!result.ok) return res.status(404).json({ error: "No postings found for this order" });
+      await writeObjectAudit(await getTenantDb(req.params.id), req, { objectType: 'FOLIO', objectId: req.params.folioId, action: 'FNB_REVERSED', summary: `F&B charge reversed for order ${req.params.orderId}: ${reason}`, before: { order_id: req.params.orderId } }).catch(() => {});
       res.json(result);
     } catch (err: any) {
       console.error('reverse-charge error:', err);
@@ -35739,6 +35741,7 @@ ${data.tenant.name}`;
       );
       await recomputeFolioTotals(tenantDb, folio.id);
       const updated = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: folio.id, action: 'DISCOUNT_APPLIED', summary: `Promo ${code} applied — discount ₹${Number(discount).toLocaleString('en-IN')}`, after: { code, discount } }).catch(() => {});
       res.json({
         success: true,
         promo: { code, label: promo.label, percent: promo.discount_percent, amount: promo.discount_amount },
@@ -35780,6 +35783,7 @@ ${data.tenant.name}`;
       // Audit trail: who/why is captured on the folio (gst_exempt_reason) +
       // a server log line. (The reason column is the durable record.)
       console.log(`[gst-toggle] folio ${folio.id} GST ${exempt ? 'WAIVED' : 'APPLIED'} by ${req.user?.id || req.user?.email || 'staff'}${reason ? ` — ${reason}` : ''}`);
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: folio.id, action: 'GST_CHANGED', summary: `GST ${exempt ? 'waived' : 'applied'}${reason ? ` — ${reason}` : ''}`, after: { gst_exempt: exempt, reason } }).catch(() => {});
       res.json({
         success: true,
         gst_exempt: exempt,
@@ -38897,6 +38901,48 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
   });
 
+  // ── Hotel folio / invoice — ObjectDetail nodes (Audit log / Where-Used) ──────
+  // Powers the invoice tree menu: the money-action trail (settle, credit note,
+  // revise, payments, F&B charges, discounts, GST changes) and cross-references
+  // to the booking, room, F&B orders, payments and related invoices.
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/audit", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'FOLIO', req.params.folioId));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit log" }); }
+  });
+
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/where-used", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const fid = req.params.folioId;
+      const f: any = await db.get("SELECT * FROM folios WHERE id = ?", [fid]);
+      if (!f) return res.status(404).json({ error: "Folio not found" });
+      const groups: any[] = [];
+      if (f.booking_id) {
+        const bk: any = await db.get("SELECT id, guest_name, status, check_in_date, check_out_date FROM room_bookings WHERE id = ?", [f.booking_id]).catch(() => null);
+        if (bk) groups.push({ group: 'Booking', items: [{ type: 'Booking', id: bk.id, label: bk.guest_name || bk.id, sublabel: `${bk.status || ''} · ${String(bk.check_in_date || '').slice(0, 10)}→${String(bk.check_out_date || '').slice(0, 10)}`, link: { objectType: 'ROOM_BOOKING', objectId: bk.id } }] });
+      }
+      if (f.room_id) {
+        const rm: any = await db.get("SELECT id, name, room_number, status FROM rooms WHERE id = ?", [f.room_id]).catch(() => null);
+        if (rm) groups.push({ group: 'Room', items: [{ type: 'Room', id: rm.id, label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), sublabel: rm.status || '', link: { objectType: 'ROOM', objectId: rm.id } }] });
+      }
+      const pays: any[] = await db.query("SELECT id, amount, payment_method, payment_type, is_voided, created_at FROM folio_payments WHERE folio_id = ? ORDER BY created_at DESC", [fid]).catch(() => []);
+      if (pays.length) groups.push({ group: 'Payments', items: pays.map((p: any) => ({ type: 'Payment', id: p.id, label: `₹${Number(p.amount || 0).toLocaleString('en-IN')} · ${p.payment_method || ''}`, sublabel: `${p.payment_type || ''}${Number(p.is_voided) === 1 ? ' · VOIDED' : ''}`, link: null })) });
+      const orders: any[] = await db.query("SELECT id, total_amount, status FROM orders WHERE folio_id = ? ORDER BY created_at DESC", [fid]).catch(() => []);
+      if (orders.length) groups.push({ group: 'F&B Orders', items: orders.map((o: any) => ({ type: 'Order', id: o.id, label: o.id, sublabel: `${o.status || ''} · ₹${Number(o.total_amount || 0).toLocaleString('en-IN')}`, link: null })) });
+      if (f.booking_id) {
+        const rel: any[] = await db.query("SELECT id, invoice_number, doc_type, grand_total, status FROM folios WHERE booking_id = ? AND id <> ? ORDER BY created_at DESC", [f.booking_id, fid]).catch(() => []);
+        if (rel.length) groups.push({ group: 'Related invoices', items: rel.map((r: any) => ({ type: r.doc_type || 'Folio', id: r.id, label: r.invoice_number || r.id, sublabel: `${r.status || ''} · ₹${Number(r.grand_total || 0).toLocaleString('en-IN')}`, link: { objectType: 'FOLIO', objectId: r.id } })) });
+      }
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
+  });
+
   // ─── CHANNEL MANAGER RE-SYNC LOG (Phase H1 scaffold) ─────────────────────
   // Today: log-only. The actual OTA push (Booking.com, MakeMyTrip, etc.)
   // is a follow-up commit that will read the 'queued' rows and forward.
@@ -40380,6 +40426,7 @@ ${data.tenant.name}`;
       // Return the updated outstanding so the UI can update without
       // a second round-trip.
       const outstanding = await getFolioOutstanding(tenantDb, req.params.folioId);
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: req.params.folioId, action: 'PAYMENT', summary: `${type} payment ₹${amount.toLocaleString('en-IN')} via ${method}`, after: { payment_id: (payment as any).id, amount, method, type } }).catch(() => {});
       res.status(201).json({ payment, outstanding });
     } catch (err: any) {
       console.error('folio payment record error:', err);
@@ -40406,6 +40453,7 @@ ${data.tenant.name}`;
         [now, req.user?.id || req.user?.email || null, reason, req.params.paymentId]
       );
       const outstanding = await getFolioOutstanding(tenantDb, payment.folio_id);
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: payment.folio_id, action: 'PAYMENT_VOIDED', summary: `Payment ₹${Number(payment.amount || 0).toLocaleString('en-IN')} (${payment.payment_method || ''}) voided: ${reason}`, before: { payment_id: payment.id, amount: payment.amount } }).catch(() => {});
       res.json({ ok: true, outstanding });
     } catch (err: any) {
       console.error('folio payment void error:', err);
@@ -41211,6 +41259,7 @@ ${data.tenant.name}`;
         reversalRef: `FOLIO-${cnId}`, sourceType: 'CREDIT_NOTE', sourceId: cnId,
         reason: reason || 'Credit note', postedBy: req.user?.email || req.user?.id || null,
       });
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: parent.id, action: 'CREDIT_NOTE', summary: `Credit note ${cn?.invoice_number || cnId} issued (${reason || 'Refund / cancellation'})`, after: { credit_note_id: cnId, grand_total: parent.grand_total } }).catch(() => {});
       res.status(201).json(cn);
     } catch (err: any) {
       console.error("Credit note error:", err);
@@ -41299,6 +41348,7 @@ ${data.tenant.name}`;
         sourceType: 'FOLIO_REVISED', sourceId: newId,
         reason: `Superseded by revision ${newId}`, postedBy: revisedBy,
       });
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: original.id, action: 'REVISED', summary: `Invoice revised → ${newId} (rev ${newRevNum}): ${reason}`, after: { revision_id: newId, revision_number: newRevNum } }).catch(() => {});
 
       res.status(201).json({ id: newId, revision_number: newRevNum, parent_folio_id: original.id });
     } catch (err: any) {
@@ -41383,6 +41433,7 @@ ${data.tenant.name}`;
       );
       await recomputeFolioTotals(tenantDb, folio.id);
       const updated: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: folio.id, action: 'LINE_ADDED', summary: `Line added: ${String(description).trim()} × ${qty} = ₹${(amt * qty).toFixed(2)}`, after: { entry_id: eid, amount: +(amt * qty).toFixed(2), gst_amount } }).catch(() => {});
       res.status(201).json({ entry_id: eid, subtotal: updated.subtotal, gst_amount: updated.gst_amount, grand_total: updated.grand_total });
     } catch (err: any) {
       console.error("Folio entry add error:", err);
@@ -41423,6 +41474,7 @@ ${data.tenant.name}`;
       );
       await recomputeFolioTotals(tenantDb, folio.id);
       const updated: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: folio.id, action: 'LINE_REVERSED', summary: `Line reversed: ${entry.description} (−₹${Number(entry.amount || 0).toFixed(2)})`, before: { entry_id: entry.id, amount: entry.amount }, after: { reversal_id: rid } }).catch(() => {});
       res.json({ reversal_id: rid, subtotal: updated.subtotal, gst_amount: updated.gst_amount, grand_total: updated.grand_total });
     } catch (err: any) {
       console.error("Folio entry reverse error:", err);
@@ -41527,6 +41579,7 @@ ${data.tenant.name}`;
         console.error('[GL] standalone settle error:', glErr);
       }
 
+      await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: folio.id, action: 'SETTLED', summary: `Invoice ${invNum} settled — ${payment_method}${effectiveDiscount > 0 ? `, discount ₹${effectiveDiscount}` : ''} · ₹${Number(refreshed.grand_total || 0).toLocaleString('en-IN')}`, after: { invoice_number: invNum, payment_method, grand_total: refreshed.grand_total } }).catch(() => {});
       res.json({ ok: true, invoice_number: invNum, settled_at: now, grand_total: refreshed.grand_total });
     } catch (err: any) {
       console.error("Standalone settle error:", err);
@@ -47920,8 +47973,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ical-sync-interval-config',
+    commit_marker: 'hotel-invoice-audit-tree',
     code_features: [
+      'hotel-invoice-audit-tree',                   // Tree menu + audit log for the hotel Invoice/Folio (extends the existing ObjectDetail pattern already on Booking/Room). Hotel folios previously had NO audit trail (only event invoices did). Now: (1) AUDIT WRITES — writeObjectAudit(objectType 'FOLIO') added to 11 folio money-actions: settle, credit-note, revise, record-payment, void-payment, manual line add, line reverse, F&B charge, F&B reverse, apply-promo/discount, GST waive/apply — so who-did-what-when is on record from deploy forward. (2) ENDPOINTS — GET /hotel/folios/:id/audit (readObjectAudit FOLIO) + /hotel/folios/:id/where-used (booking, room, payments, F&B orders, related invoices) mirroring the booking endpoints. (3) RESOLVER — buildObjectResolver gains a FOLIO case so Booking/Room "Where Used" folio links drill into the folio's own tree in-frame (was falling back to the legacy folio open). (4) FRONTEND — the Guest Bill (folio) viewer header gains a "🕘 History" button opening the invoice's ObjectDetail overlay (Overview facts + Audit log smart-table + Where-Used drill-in). Additive; no folio compute/GL/settlement path changed. NOTE: audit only records events after deploy; pre-existing invoice history is not backfilled. Deferred (same recipe): post-to-folio + master-folio audit writes, and Guest/ID-docs / Tariff / OTA objects. tsc + vite build clean.
       'ical-sync-interval-config',                  // iCal import cron is now configurable via ICAL_SYNC_INTERVAL_MIN env (clamped [5,59] min; default 30 = unchanged) + an overlap guard (`_icalSweepRunning`) that skips a tick if the previous sweep is still running (matters at short intervals). Set the env var on the VPS to speed sync — but 30 min stays the SAFE default: OTAs rate-limit iCal exports (often ≤2/hr) and their feeds rarely refresh faster, so 5–15 min risks the OTA throttling/blocking the feed (worse than 30), and the OTA→us return leg polls our feed on its own slow schedule regardless. Recommended 10–15 min if speeding up; use the manual "Sync now" for instant one-offs; true real-time needs the connectivity-provider/API path, not a tighter cron. Server-only cron change; no schema/GL/UI impact.
       'cash-drawer-toplevel-nav',                   // Discoverability (frontend-only): surfaced the Cash Drawer + Shift Handover panel as its own top-level "Cash" module in the sidebar, out of the owner-only Accounts → "Ledger & Books" → Controls → Cash Drawers path (which was 4 clicks deep and hidden from cashiers). New nav module `CASH` (label "Cash") with a single `CASH_DRAWER` tab that renders AccountingView in a locked `cashierMode` (opens straight on the Cash Drawers panel, hides the owner-only ledger sub-nav, heading "Cash Drawer & Shift Handover"). Visible to owner/admin + MANAGER + CASHIER + FRONT_DESK (the cash-handling roles) plus anyone the owner grants CASH_DRAWER in Staff Access — the underlying cash-drawer/handover endpoints were already cashier-accessible (_acctStaff), so no backend change. CASH_DRAWER added to CONTENT_ALWAYS_ALLOWED so the content pane agrees with the nav (no false "Access Restricted" for restricted staff). Bonus hardening: the drawer Approve/Reject actions are now gated on day-close `can_lock` (managers only) — a cashier sees "awaiting manager approval" instead of buttons that would 403 (segregation of duties intact). No server/GL/schema change; marker bumped only as a deploy signal. tsc + vite build clean.
       'shift-handover',                             // Cash Shift Handover — a joint denomination count with DUAL sign-off, added as an ADDITIVE layer over the EOD Cash Drawer engine (nothing on the existing open/close/approve path changes). Answers "how does one cashier hand the till to the next on shift change." Flow: the OUTGOING cashier initiates a handover on their OPEN drawer (POST /accounting/cash-drawers/:drawerId/handover) with a joint count + the split into carry-over float (stays in the till) vs deposit (submitted up); that is the FIRST signature (status PENDING_ACCEPT). The INCOMING cashier (or a manager) ACCEPTS (POST /accounting/cash-handovers/:id/accept) — the SECOND signature — which atomically: (1) trues up any over/short to 6010 Cash Over/Short, (2) posts the deposit through Cr 1000 Cash in Hand → Dr 1005 Cash in Transit (or 1010 Bank) [source CASH_DRAWER_DEPOSIT, ref CD-<yr>-<seq>], (3) closes the outgoing drawer as APPROVED (the two signatures ARE the dual control — so the existing day-lock "all drawers approved" gate works unchanged), and (4) opens the incoming cashier's drawer with opening_float = carry-over float. GET /accounting/cash-handovers lists them (cashiers see only their own; managers all); POST …/cancel disputes/withdraws a pending one (outgoing drawer stays OPEN to recount). New tenant table `cash_handovers` (dual signatures from_signed_by/at + to_signed_by/at, counted/expected/variance, carry_over_float, deposit_amount, deposit_to, gl refs). Day-Close sheet now returns `handovers[]` and the frontend Cash Drawers tab gains a "Hand over" action + a joint-count modal + a "Shift handovers" section (accept/cancel). RBAC: initiate = drawer owner or manager (_acctStaff); accept = incoming cashier or manager, and the outgoing signer cannot also accept unless a manager. Reconciles to GL: after accept, book Cash 1000 = carry-over float (deposit removed, variance trued up) = the incoming drawer's opening float. Verified: deterministic offline sim (test-scripts/e2e_shift_handover_sim.mjs — carry-over + deposit = counted, deposit routes to 1005/1010, variance to 6010, book cash after handover == carry-over == next opening float, dual-signature guard, trial balance Dr=Cr) + live suite TC-CD-HANDOVER. tsc + vite build clean.

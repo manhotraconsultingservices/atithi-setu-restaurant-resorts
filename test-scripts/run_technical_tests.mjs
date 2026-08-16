@@ -2422,6 +2422,20 @@ async function testCashDrawer() {
     fail('TC-ACCT-CASHSRC', 'cash_by_source present', `HTTP ${cbx.status}`);
   }
 
+  // TC-FOLIO-AUDIT: hotel invoice/folio tree-menu endpoints deployed. Audit on a
+  // bogus id returns an empty array (readObjectAudit); where-used 404s (folio not found).
+  const faud = await api('GET', `/api/restaurant/${restaurantId}/hotel/folios/AUTOTEST-BOGUS/audit`);
+  const fwu = await api('GET', `/api/restaurant/${restaurantId}/hotel/folios/AUTOTEST-BOGUS/where-used`);
+  if (faud.status === 200 && Array.isArray(faud.data) && (fwu.status === 404 || fwu.status === 200)) {
+    pass('TC-FOLIO-AUDIT', `folio audit/where-used endpoints deployed (audit ${faud.status}, where-used ${fwu.status})`);
+  } else if (faud.status === 403 || fwu.status === 403) {
+    skip('TC-FOLIO-AUDIT', 'folio audit/where-used', 'no FOLIOS access');
+  } else if (faud.status === 404 && /hotel/i.test(JSON.stringify(faud.data))) {
+    skip('TC-FOLIO-AUDIT', 'folio audit/where-used', 'hotel module not enabled');
+  } else {
+    fail('TC-FOLIO-AUDIT', 'folio audit/where-used', `audit ${faud.status}, where-used ${fwu.status}`);
+  }
+
   // TC-ACCT-EXPPAY / TC-ACCT-LOANS: Expenses & Payments + Loans endpoints deployed.
   const ep = await api('GET', `/api/restaurant/${restaurantId}/accounting/expense-payments`);
   if (ep.status === 200 && Array.isArray(ep.data)) pass('TC-ACCT-EXPPAY', `expense-payments list deployed (${ep.data.length})`);
