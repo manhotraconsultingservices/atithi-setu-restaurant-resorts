@@ -26589,7 +26589,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // Safety valve: a role that already has a configured grant stays
             // visible even if currently unassigned — so the screen can never
             // hide (and thereby strand) access that is actually in effect.
-            type RoleDesc = { id: string; label: string; hint: string; kind: 'custom' | 'builtin'; affinity: string; scope: string; count?: number };
+            type RoleDesc = { id: string; label: string; hint: string; kind: 'custom' | 'builtin'; affinity: string; scope: string; count?: number; locked?: boolean };
             const visibleTabSet = new Set(visibleTabs.map(t => t.id));
             const roleMap = new Map<string, RoleDesc>();
             for (const cr of customRoles) {
@@ -26644,6 +26644,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               return r.affinity === 'ALL' || r.affinity === mk;    // built-in affinity
             });
             const moduleRoles = activeModule ? rolesForModule(activeModule.key, moduleTabs) : [];
+            // The property OWNER (Business Owner) is ALWAYS shown as the first,
+            // locked, always-Full column in every module — visible for clarity
+            // but never editable or revocable (the server ignores OWNER in any
+            // save and it always has full access), so the no-lockout guarantee
+            // is preserved. It is intentionally NOT part of `moduleRoles`, so the
+            // bulk grant helpers never touch it. `cols` = what actually renders.
+            const OWNER_ROLE: RoleDesc = { id: '__OWNER__', label: 'Business Owner', hint: 'Property owner — always has full access to everything. Cannot be edited or revoked.', kind: 'builtin', affinity: 'ALL', scope: 'BOTH', locked: true };
+            const cols: RoleDesc[] = [OWNER_ROLE, ...moduleRoles];
 
             // RBAC-6: level colors
             const LEVEL_CLS: Record<number, string> = {
@@ -26777,120 +26785,135 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   })}
                 </div>
 
-                {allVisibleRoles.length === 0 ? (
-                  <div className="mt-6 bg-[#faf7f2] border border-[#cc5a16]/10 rounded-2xl p-8 text-center">
-                    <Shield size={28} className="mx-auto text-[#cc5a16]/40" />
-                    <h4 className="mt-3 text-sm font-bold text-[#1a1208]">No staff roles to configure yet</h4>
-                    <p className="mt-1 text-xs text-[#6b5d52] max-w-md mx-auto">
-                      Staff Access only lists roles that exist in your database — your custom roles, plus any role you've assigned to a team member.
-                      Assign a role to someone in <strong>Staff Directory</strong>, or create a <strong>Custom Role</strong>, then come back here to set their access.
-                    </p>
+                {moduleRoles.length === 0 && (
+                  <div className="mt-4 flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2 text-xs">
+                    <Lock size={13} className="mt-0.5 shrink-0" />
+                    <span>
+                      Only the <strong>Business Owner</strong> is set up for {activeModule?.label} so far. Assign a role to a team member in <strong>Staff Directory</strong>, or create a <strong>Custom Role</strong>, to configure access for others — the Business Owner always has full access and cannot be changed.
+                    </span>
                   </div>
-                ) : moduleRoles.length === 0 ? (
-                  <div className="mt-6 bg-[#faf7f2] border border-[#cc5a16]/10 rounded-2xl p-8 text-center">
-                    <h4 className="text-sm font-bold text-[#1a1208]">No roles mapped to “{activeModule?.label}” yet</h4>
-                    <p className="mt-1 text-xs text-[#6b5d52] max-w-md mx-auto">
-                      None of your current roles are associated with this module. Assign a relevant role to a staff member (or create a custom role) to configure access to these pages.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="mt-4 overflow-x-auto">
-                    <table className="w-full text-xs border-collapse">
-                      <thead className="bg-white">
-                        <tr className="border-b-2 border-[#cc5a16]/15">
-                          <th className="text-left py-3 px-3 sticky left-0 bg-white z-10 min-w-[220px] align-bottom">
-                            <span className="font-bold text-[10px] uppercase tracking-widest text-[#6b5d52]">{activeModule?.label} · Pages</span>
-                          </th>
-                          {moduleRoles.map(r => {
-                            const perms = staffAccess[r.id] || {};
-                            const noRestriction = Object.keys(perms).length === 0;
-                            const grantedCount = moduleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 1).length;
-                            const fullCount = moduleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 3).length;
+                )}
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full text-xs border-collapse">
+                    <thead className="bg-white">
+                      <tr className="border-b-2 border-[#cc5a16]/15">
+                        <th className="text-left py-3 px-3 sticky left-0 bg-white z-10 min-w-[220px] align-bottom">
+                          <span className="font-bold text-[10px] uppercase tracking-widest text-[#6b5d52]">{activeModule?.label} · Pages</span>
+                        </th>
+                        {cols.map(r => {
+                          if (r.locked) {
                             return (
-                              <th
-                                key={r.id}
-                                className="px-2 py-3 text-center align-bottom min-w-[96px]"
-                                title={r.hint}
-                              >
+                              <th key={r.id} className="px-2 py-3 text-center align-bottom min-w-[96px]" title={r.hint}>
                                 <div className="flex flex-col items-center gap-1">
                                   <span className="font-bold text-[11px] text-[#1a1208] leading-tight">{r.label}</span>
-                                  {r.kind === 'custom' && (
-                                    <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 leading-none">Custom</span>
-                                  )}
-                                  {noRestriction ? (
-                                    <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 leading-none whitespace-nowrap">Unrestricted</span>
-                                  ) : (
-                                    <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 leading-none whitespace-nowrap">{grantedCount}/{moduleTabs.length} · {fullCount} full</span>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => grantAllForRole(r.id)}
-                                    className="text-[9px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest leading-none"
-                                    title={`Set every ${activeModule?.label} page to Full (or clear) for ${r.label}`}
-                                  >{fullCount < moduleTabs.length ? 'All Full' : 'Clear all'}</button>
+                                  <span className="inline-flex items-center gap-0.5 text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-[#cc5a16]/10 text-[#cc5a16] leading-none whitespace-nowrap">
+                                    <Lock size={8} /> Owner · Full
+                                  </span>
                                 </div>
                               </th>
                             );
-                          })}
-                          <th className="px-2 py-3 text-center align-bottom min-w-[60px]">
-                            <span className="font-bold text-[10px] uppercase tracking-widest text-[#9c8e85]">Row</span>
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {moduleTabs.map((t, ti) => {
-                          const everyRoleFull = moduleRoles.every(r => ((staffAccess[r.id]?.[t.id] ?? 0) as number) >= 3);
+                          }
+                          const perms = staffAccess[r.id] || {};
+                          const noRestriction = Object.keys(perms).length === 0;
+                          const grantedCount = moduleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 1).length;
+                          const fullCount = moduleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 3).length;
                           return (
-                            <tr
-                              key={t.id}
-                              className={cn(
-                                'border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/60 transition-colors',
-                                ti % 2 === 1 && 'bg-[#faf7f2]/30'
-                              )}
+                            <th
+                              key={r.id}
+                              className="px-2 py-3 text-center align-bottom min-w-[96px]"
+                              title={r.hint}
                             >
-                              <td className="py-2 px-3 sticky left-0 bg-inherit z-10 align-middle">
-                                <div className="font-bold text-[#1a1208] text-[12px] leading-tight">{t.label}</div>
-                                <div
-                                  className="text-[10px] text-[#9c8e85] mt-0.5 leading-tight line-clamp-2"
-                                  title={t.description}
-                                >{t.description}</div>
-                              </td>
-                              {moduleRoles.map(r => {
-                                const level = (staffAccess[r.id]?.[t.id] ?? 0) as number;
+                              <div className="flex flex-col items-center gap-1">
+                                <span className="font-bold text-[11px] text-[#1a1208] leading-tight">{r.label}</span>
+                                {r.kind === 'custom' && (
+                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 leading-none">Custom</span>
+                                )}
+                                {noRestriction ? (
+                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 leading-none whitespace-nowrap">Unrestricted</span>
+                                ) : (
+                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 leading-none whitespace-nowrap">{grantedCount}/{moduleTabs.length} · {fullCount} full</span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => grantAllForRole(r.id)}
+                                  className="text-[9px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest leading-none"
+                                  title={`Set every ${activeModule?.label} page to Full (or clear) for ${r.label}`}
+                                >{fullCount < moduleTabs.length ? 'All Full' : 'Clear all'}</button>
+                              </div>
+                            </th>
+                          );
+                        })}
+                        <th className="px-2 py-3 text-center align-bottom min-w-[60px]">
+                          <span className="font-bold text-[10px] uppercase tracking-widest text-[#9c8e85]">Row</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {moduleTabs.map((t, ti) => {
+                        const everyRoleFull = moduleRoles.length > 0 && moduleRoles.every(r => ((staffAccess[r.id]?.[t.id] ?? 0) as number) >= 3);
+                        return (
+                          <tr
+                            key={t.id}
+                            className={cn(
+                              'border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/60 transition-colors',
+                              ti % 2 === 1 && 'bg-[#faf7f2]/30'
+                            )}
+                          >
+                            <td className="py-2 px-3 sticky left-0 bg-inherit z-10 align-middle">
+                              <div className="font-bold text-[#1a1208] text-[12px] leading-tight">{t.label}</div>
+                              <div
+                                className="text-[10px] text-[#9c8e85] mt-0.5 leading-tight line-clamp-2"
+                                title={t.description}
+                              >{t.description}</div>
+                            </td>
+                            {cols.map(r => {
+                              if (r.locked) {
                                 return (
                                   <td key={r.id} className="px-1 py-2 text-center align-middle">
-                                    <select
-                                      value={level}
-                                      onChange={e => setTabLevel(r.id, t.id, Number(e.target.value))}
-                                      className={cn(
-                                        'text-[10px] font-bold rounded-lg px-1.5 py-1 border-none outline-none cursor-pointer w-full',
-                                        LEVEL_CLS[level] || LEVEL_CLS[0]
-                                      )}
-                                      aria-label={`${r.label} access to ${t.label}`}
-                                    >
-                                      <option value={0}>—</option>
-                                      <option value={1}>View</option>
-                                      <option value={2}>Edit</option>
-                                      <option value={3}>Full</option>
-                                    </select>
+                                    <span className="inline-flex items-center justify-center gap-0.5 text-[10px] font-bold rounded-lg px-1.5 py-1 w-full bg-emerald-100 text-emerald-700 cursor-not-allowed" title="The Business Owner always has full access.">
+                                      <Lock size={9} /> Full
+                                    </span>
                                   </td>
                                 );
-                              })}
-                              <td className="px-2 py-2 text-center align-middle">
+                              }
+                              const level = (staffAccess[r.id]?.[t.id] ?? 0) as number;
+                              return (
+                                <td key={r.id} className="px-1 py-2 text-center align-middle">
+                                  <select
+                                    value={level}
+                                    onChange={e => setTabLevel(r.id, t.id, Number(e.target.value))}
+                                    className={cn(
+                                      'text-[10px] font-bold rounded-lg px-1.5 py-1 border-none outline-none cursor-pointer w-full',
+                                      LEVEL_CLS[level] || LEVEL_CLS[0]
+                                    )}
+                                    aria-label={`${r.label} access to ${t.label}`}
+                                  >
+                                    <option value={0}>—</option>
+                                    <option value={1}>View</option>
+                                    <option value={2}>Edit</option>
+                                    <option value={3}>Full</option>
+                                  </select>
+                                </td>
+                              );
+                            })}
+                            <td className="px-2 py-2 text-center align-middle">
+                              {moduleRoles.length > 0 ? (
                                 <button
                                   type="button"
                                   onClick={() => grantAllForTab(t.id)}
                                   className="text-[10px] font-bold text-[#cc5a16] hover:underline whitespace-nowrap"
                                   title={`Set ${t.label} to Full for every role in this module, or clear`}
                                 >{everyRoleFull ? 'Clear' : 'Full'}</button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                              ) : (
+                                <span className="text-[10px] text-[#c9bdb2]">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
 
                 <p className="text-[10px] text-[#9c8e85] italic mt-3 leading-relaxed">
                   Server enforces this on top of the UI: a CHEF who somehow loads a hidden tab via direct URL still gets 403 from the API.
