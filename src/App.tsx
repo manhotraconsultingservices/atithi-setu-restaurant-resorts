@@ -10954,6 +10954,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // RBAC-5d — list of tenants the owner can copy permissions from
   const [manageableTenants, setManageableTenants] = useState<any[]>([]);
   const [copyFromTenant, setCopyFromTenant] = useState<string>('');
+  // RBAC-7 — redesigned (module-scoped) Staff Access. `rolesInUse` holds the
+  // roles actually assigned to LOGIN staff (from /role-permissions/roles-in-use)
+  // — the "only roles in the database" source for built-in roles. `staffAccessModule`
+  // is the currently selected module sub-tab.
+  const [rolesInUse, setRolesInUse] = useState<{ role: string; count: number }[]>([]);
+  const [staffAccessModule, setStaffAccessModule] = useState<string>('');
   const [hotelSettingsSaving, setHotelSettingsSaving] = useState(false);
   // Sprint P2-H — Yield rules CRUD state.
   const [yieldRules, setYieldRules] = useState<any[]>([]);
@@ -13483,6 +13489,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
     } catch {/* swallow — non-blocking */}
   };
+  // RBAC-7 — roles actually assigned to LOGIN staff (the "only roles in the
+  // database" source for the redesigned, module-scoped Staff Access page).
+  const fetchRolesInUse = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/role-permissions/roles-in-use`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const d = await res.json();
+        setRolesInUse(Array.isArray(d?.roles) ? d.roles : []);
+      }
+    } catch {/* swallow — non-blocking */}
+  };
   const saveStaffAccess = async () => {
     if (!restaurantId) return;
     setStaffAccessSaving(true);
@@ -14080,7 +14100,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
     if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchTariff(); }
     if (activeTab === 'PUBLIC_BOOKING_PAGE') { fetchPropertyProfile(); fetchPropertyGallery(); fetchAmenityLibrary(); fetchHotelRooms(); }
-    if (activeTab === 'STAFF_ACCESS') { fetchStaffAccess(); fetchPermAuditLog(); fetchManageableTenants(); }
+    if (activeTab === 'STAFF_ACCESS') { fetchStaffAccess(); fetchPermAuditLog(); fetchManageableTenants(); fetchRolesInUse(); fetchCustomRoles(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
 
@@ -26497,37 +26517,135 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               (!t.spaOnly        || isSpaEnabled)
             );
 
-            // Roles to manage. OWNER + SUPER_ADMIN/CTO are excluded —
-            // they always see everything (server enforces this too).
-            // Module-aware: hotel-only roles are hidden for restaurant-only
-            // tenants; restaurant-only roles are hidden for hotel-only tenants.
-            const ALL_MANAGED_ROLES: { id: string; label: string; hint: string; hotelOnly?: boolean; restaurantOnly?: boolean; spaOnly?: boolean }[] = [
-              { id: 'MANAGER',      label: 'Manager',      hint: 'Senior staff — typically full operational access' },
-              { id: 'FRONT_DESK',   label: 'PMS',          hint: 'Receptionist — bookings, guest bills, guest services',  hotelOnly: true },
-              { id: 'CONCIERGE',    label: 'Concierge',    hint: 'Guest service coordinator',                         hotelOnly: true },
-              { id: 'CASHIER',      label: 'Cashier',      hint: 'Orders + invoices, no settings',                    restaurantOnly: true },
-              { id: 'WAITER',       label: 'Waiter',       hint: 'Table orders, KOT',                                 restaurantOnly: true },
-              { id: 'CHEF',         label: 'Chef / KDS',   hint: 'Kitchen display, recipes',                          restaurantOnly: true },
-              { id: 'HOUSEKEEPING', label: 'Housekeep.',   hint: 'Service requests + room status',                    hotelOnly: true },
-              { id: 'MAINTENANCE',  label: 'Maintenance',  hint: 'Service requests, room status',                     hotelOnly: true },
-              { id: 'THERAPIST',    label: 'Therapist',    hint: 'Spa therapist — appointments, clients',             spaOnly: true },
-              // Owner-defined custom roles — scope-filtered at render time
-              ...customRoles.map(cr => ({
-                id: cr.id,
-                label: `${cr.emoji} ${cr.name}`,
-                hint: 'Custom role',
-                hotelOnly: cr.scope === 'HOTEL' ? true : undefined,
-                restaurantOnly: cr.scope === 'RESTAURANT' ? true : undefined,
-              })),
-            ];
-            const MANAGED_ROLES = ALL_MANAGED_ROLES.filter(r =>
-              (!r.hotelOnly      || isHotelEnabled) &&
-              (!r.restaurantOnly || isRestaurantEnabled) &&
-              (!r.spaOnly        || isSpaEnabled)
-            );
+            // ── RBAC-7 (2026-08-17) — module-scoped Staff Access ─────────
+            // The old one-giant-matrix (all pages × all roles) was
+            // unmanageable once a tenant had several modules and many roles.
+            // We now slice it into per-module sub-tabs: each shows only that
+            // module's pages, against only the roles relevant to that module,
+            // and only roles that actually exist in the DB (custom roles +
+            // roles assigned to LOGIN staff). The stored model
+            // (role → { tabId: level }) and the save payload are UNCHANGED —
+            // this is a pure presentation layer over `staffAccess`.
 
-            // RBAC-6: level labels + colors
-            const LEVEL_LABEL: Record<number, string> = { 0: '—', 1: 'View', 2: 'Edit', 3: 'Full' };
+            // Which page belongs to which module. Every PERMISSIBLE_TABS id is
+            // mapped; anything unmapped falls into an 'OTHER' catch-all so a
+            // page can never become silently un-configurable.
+            const TAB_MODULE: Record<string, string> = {
+              MONITOR: 'OVERVIEW', INVOICES: 'OVERVIEW',
+              ROOMS: 'FRONTDESK', HOTEL_BOOKINGS: 'FRONTDESK', SERVICES: 'FRONTDESK', SERVICE_REQUESTS: 'FRONTDESK', HOUSEKEEPING: 'FRONTDESK', CHECKLISTS: 'FRONTDESK', FOLIOS: 'FRONTDESK', COMPLIANCE: 'FRONTDESK', CONCIERGE_FAQ: 'FRONTDESK', FRONT_OFFICE_REPORTS: 'FRONTDESK',
+              ORDERS: 'RESTAURANT', MENU: 'RESTAURANT', DELIVERY: 'RESTAURANT', QR: 'RESTAURANT', BOOKINGS: 'RESTAURANT', RESTAURANT_REPORTS: 'RESTAURANT',
+              SPA_CALENDAR: 'SPA', SPA_APPOINTMENTS: 'SPA', SPA_CATALOG: 'SPA', SPA_RESOURCES: 'SPA', SPA_CLIENTS: 'SPA', SPA_PACKAGES: 'SPA', SPA_REPORTS: 'SPA', SPA_BILLING: 'SPA', SPA_SETTINGS: 'SPA',
+              EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
+              EXPENSE_JOURNAL: 'ACCOUNTS', PROCUREMENT: 'ACCOUNTS', RECEIVABLES: 'ACCOUNTS',
+              LOYALTY: 'SALES', FEEDBACK: 'SALES', CHANNEL_MANAGER: 'SALES', PUBLIC_BOOKING_PAGE: 'SALES',
+              INVENTORY: 'INVENTORY', HOTEL_INVENTORY: 'INVENTORY', SPA_INVENTORY: 'INVENTORY',
+              ALL_REPORTS: 'REPORTS',
+              STAFF: 'WORKFORCE', ROSTER: 'WORKFORCE', TIMESHEET: 'WORKFORCE', ATTENDANCE: 'WORKFORCE', HR_PAYROLL: 'WORKFORCE', STAFF_PAYROLL: 'WORKFORCE',
+              NOTIFICATIONS: 'ADMIN', SUBSCRIPTION: 'ADMIN', SETTINGS: 'ADMIN',
+            };
+            const moduleOf = (id: string) => TAB_MODULE[id] || 'OTHER';
+
+            // OPERATIONAL modules filter their role columns by affinity;
+            // cross-cutting modules show every visible role (any role may need
+            // a report, a setting, an invoice, etc).
+            const OPERATIONAL_MODULES = new Set(['FRONTDESK', 'RESTAURANT', 'SPA', 'EVENTS']);
+            const MODULE_DEFS: { key: string; label: string }[] = [
+              { key: 'OVERVIEW',   label: 'Overview' },
+              { key: 'FRONTDESK',  label: 'Hotel / Front Desk' },
+              { key: 'RESTAURANT', label: 'Restaurant' },
+              { key: 'SPA',        label: 'Spa & Wellness' },
+              { key: 'EVENTS',     label: 'Events' },
+              { key: 'ACCOUNTS',   label: 'Finance & Accounts' },
+              { key: 'SALES',      label: 'Sales & Marketing' },
+              { key: 'INVENTORY',  label: 'Inventory' },
+              { key: 'REPORTS',    label: 'Reports' },
+              { key: 'WORKFORCE',  label: 'Staff & Payroll' },
+              { key: 'ADMIN',      label: 'Settings & Admin' },
+              { key: 'OTHER',      label: 'Other' },
+            ];
+
+            // Built-in role metadata + per-module affinity. OWNER/SUPER_ADMIN/CTO
+            // are never managed here. affinity 'ALL' = a cross-module role
+            // (Manager) that belongs in every operational module.
+            const BUILTIN_ROLE_META: Record<string, { label: string; hint: string; affinity: string }> = {
+              MANAGER:        { label: 'Manager',        hint: 'Senior staff — typically full operational access', affinity: 'ALL' },
+              FRONT_DESK:     { label: 'Front Desk',     hint: 'Receptionist — bookings, guest bills, guest services', affinity: 'FRONTDESK' },
+              CONCIERGE:      { label: 'Concierge',      hint: 'Guest service coordinator', affinity: 'FRONTDESK' },
+              HOUSEKEEPING:   { label: 'Housekeeping',   hint: 'Service requests + room status', affinity: 'FRONTDESK' },
+              MAINTENANCE:    { label: 'Maintenance',    hint: 'Service requests, room status', affinity: 'FRONTDESK' },
+              CASHIER:        { label: 'Cashier',        hint: 'Orders + invoices, no settings', affinity: 'RESTAURANT' },
+              WAITER:         { label: 'Waiter',         hint: 'Table orders, KOT', affinity: 'RESTAURANT' },
+              CHEF:           { label: 'Chef / KDS',     hint: 'Kitchen display, recipes', affinity: 'RESTAURANT' },
+              THERAPIST:      { label: 'Therapist',      hint: 'Spa therapist — appointments, clients', affinity: 'SPA' },
+              EVENTS_MANAGER: { label: 'Events Manager', hint: 'Events & convention operations', affinity: 'EVENTS' },
+            };
+            const PRIVILEGED_ROLES = new Set(['OWNER', 'SUPER_ADMIN', 'CTO']);
+            const ROLE_ORDER = ['MANAGER', 'FRONT_DESK', 'CONCIERGE', 'HOUSEKEEPING', 'MAINTENANCE', 'CASHIER', 'WAITER', 'CHEF', 'THERAPIST', 'EVENTS_MANAGER'];
+            const prettifyRole = (k: string) => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+            // Build the set of roles that ACTUALLY EXIST for this tenant.
+            // Strict "only roles in the database": every active custom role,
+            // plus every built-in role assigned to a LOGIN staff member.
+            // Safety valve: a role that already has a configured grant stays
+            // visible even if currently unassigned — so the screen can never
+            // hide (and thereby strand) access that is actually in effect.
+            type RoleDesc = { id: string; label: string; hint: string; kind: 'custom' | 'builtin'; affinity: string; scope: string; count?: number };
+            const visibleTabSet = new Set(visibleTabs.map(t => t.id));
+            const roleMap = new Map<string, RoleDesc>();
+            for (const cr of customRoles) {
+              const id = String(cr.id).toUpperCase();
+              if (PRIVILEGED_ROLES.has(id)) continue;
+              roleMap.set(id, { id, label: `${cr.emoji || '👤'} ${cr.name}`, hint: 'Custom role', kind: 'custom', affinity: 'CUSTOM', scope: String(cr.scope || 'BOTH').toUpperCase() });
+            }
+            for (const ru of rolesInUse) {
+              const id = String(ru.role || '').toUpperCase();
+              if (!id || PRIVILEGED_ROLES.has(id) || roleMap.has(id)) continue;
+              const meta = BUILTIN_ROLE_META[id];
+              roleMap.set(id, meta
+                ? { id, label: meta.label, hint: meta.hint, kind: 'builtin', affinity: meta.affinity, scope: 'BOTH', count: ru.count }
+                : { id, label: prettifyRole(id), hint: 'Role assigned to staff', kind: 'builtin', affinity: 'ALL', scope: 'BOTH', count: ru.count });
+            }
+            for (const key of Object.keys(staffAccess)) {
+              const id = key.toUpperCase();
+              if (PRIVILEGED_ROLES.has(id) || roleMap.has(id)) continue;
+              const perms = staffAccess[key] || {};
+              // only resurrect if it has a live grant on a page this tenant can still see
+              if (!Object.entries(perms).some(([tab, v]) => (v as number) > 0 && visibleTabSet.has(tab))) continue;
+              const meta = BUILTIN_ROLE_META[id];
+              roleMap.set(id, meta
+                ? { id, label: meta.label, hint: meta.hint, kind: 'builtin', affinity: meta.affinity, scope: 'BOTH' }
+                : { id, label: prettifyRole(id), hint: 'Configured role', kind: 'builtin', affinity: 'ALL', scope: 'BOTH' });
+            }
+            const allVisibleRoles = Array.from(roleMap.values()).sort((a, b) => {
+              const ia = ROLE_ORDER.indexOf(a.id), ib = ROLE_ORDER.indexOf(b.id);
+              if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+              if (a.kind !== b.kind) return a.kind === 'builtin' ? -1 : 1;
+              return a.label.localeCompare(b.label);
+            });
+
+            // Modules that actually have a visible page for this tenant.
+            const availableModules = MODULE_DEFS
+              .map(m => ({ ...m, tabs: visibleTabs.filter(t => moduleOf(t.id) === m.key) }))
+              .filter(m => m.tabs.length > 0);
+            const activeModuleKey = availableModules.some(m => m.key === staffAccessModule)
+              ? staffAccessModule
+              : (availableModules[0]?.key || '');
+            const activeModule = availableModules.find(m => m.key === activeModuleKey) || null;
+            const moduleTabs = activeModule ? activeModule.tabs : [];
+
+            const roleHasGrantInModule = (roleId: string, tabs: { id: string }[]) =>
+              tabs.some(t => ((staffAccess[roleId]?.[t.id] ?? 0) as number) > 0);
+            const customScopeMatchesModule = (scope: string, mk: string) =>
+              mk === 'RESTAURANT' ? (scope === 'RESTAURANT' || scope === 'BOTH') : (scope === 'HOTEL' || scope === 'BOTH');
+            const rolesForModule = (mk: string, tabs: { id: string }[]): RoleDesc[] => allVisibleRoles.filter(r => {
+              if (roleHasGrantInModule(r.id, tabs)) return true;   // never hide configured access
+              if (!OPERATIONAL_MODULES.has(mk)) return true;       // cross-cutting → every role
+              if (r.kind === 'custom') return customScopeMatchesModule(r.scope, mk);
+              return r.affinity === 'ALL' || r.affinity === mk;    // built-in affinity
+            });
+            const moduleRoles = activeModule ? rolesForModule(activeModule.key, moduleTabs) : [];
+
+            // RBAC-6: level colors
             const LEVEL_CLS: Record<number, string> = {
               0: 'bg-gray-100 text-gray-400',
               1: 'bg-blue-100 text-blue-700',
@@ -26535,23 +26653,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               3: 'bg-emerald-100 text-emerald-700',
             };
 
+            // Bulk helpers — scoped to the ACTIVE module's pages / roles, and
+            // merge into (never replace) a role's other-module grants.
             const grantAllForTab = (tabId: string) => {
-              const everyRoleFull = MANAGED_ROLES.every(r => ((staffAccess[r.id]?.[tabId] ?? 0) as number) >= 3);
+              const everyRoleFull = moduleRoles.every(r => ((staffAccess[r.id]?.[tabId] ?? 0) as number) >= 3);
               setStaffAccess(prev => {
                 const next = { ...prev };
-                for (const r of MANAGED_ROLES) {
-                  next[r.id] = { ...(next[r.id] || {}), [tabId]: everyRoleFull ? 0 : 3 };
-                }
+                for (const r of moduleRoles) next[r.id] = { ...(next[r.id] || {}), [tabId]: everyRoleFull ? 0 : 3 };
                 return next;
               });
             };
             const grantAllForRole = (roleId: string) => {
+              const hasAll = moduleTabs.every(t => ((staffAccess[roleId]?.[t.id] ?? 0) as number) >= 3);
               setStaffAccess(prev => {
-                const cur = prev[roleId] || {};
-                const hasAll = visibleTabs.every(t => ((cur[t.id] ?? 0) as number) >= 3);
-                const next: Record<string, number> = {};
-                for (const t of visibleTabs) next[t.id] = hasAll ? 0 : 3;
-                return { ...prev, [roleId]: next };
+                const cur = { ...(prev[roleId] || {}) };
+                for (const t of moduleTabs) cur[t.id] = hasAll ? 0 : 3;
+                return { ...prev, [roleId]: cur };
               });
             };
 
@@ -26565,8 +26682,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <div>
                       <h3 className="text-2xl font-bold font-serif">Staff Access</h3>
                       <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
-                        Each row is one section. Each column is one staff role. Set a level per cell — <strong className="text-blue-700">View</strong> (read-only), <strong className="text-amber-700">Edit</strong> (create + modify), <strong className="text-emerald-700">Full</strong> (including delete), or <strong className="text-gray-400">—</strong> (no access). Leave a column entirely empty to give the role <strong>no restriction</strong>.
-                        Owners + platform admins always have Full access regardless.
+                        Pick a <strong>module tab</strong> below, then set each role's access to that module's pages — <strong className="text-blue-700">View</strong> (read-only), <strong className="text-amber-700">Edit</strong> (create + modify), <strong className="text-emerald-700">Full</strong> (including delete), or <strong className="text-gray-400">—</strong> (no access). A role with an entirely empty column has <strong>no restriction</strong>. Only roles that exist in your database — your custom roles and roles assigned to staff — are shown. Owners + platform admins always have Full access regardless.
                       </p>
                     </div>
                   </div>
@@ -26592,7 +26708,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       className="bg-white border border-[#cc5a16]/20 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                     >
                       <option value="">— None (own view) —</option>
-                      {MANAGED_ROLES.map(r => (
+                      {allVisibleRoles.map(r => (
                         <option key={r.id} value={r.id}>{r.label}</option>
                       ))}
                     </select>
@@ -26633,107 +26749,148 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 {previewRole && (
                   <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2 text-xs flex items-center gap-2">
                     <Eye size={14} />
-                    <span>Currently previewing as <strong>{MANAGED_ROLES.find(r => r.id === previewRole)?.label || previewRole}</strong>. Nav and tabs in this session now reflect that role's matrix. Click <strong>Exit preview</strong> above to return to your own view.</span>
+                    <span>Currently previewing as <strong>{allVisibleRoles.find(r => r.id === previewRole)?.label || previewRole}</strong>. Nav and tabs in this session now reflect that role's matrix. Click <strong>Exit preview</strong> above to return to your own view.</span>
                   </div>
                 )}
 
-                {/* ── TRANSPOSED MATRIX ─────────────────────────────────
-                    Rows = tabs (menu items), Columns = roles. The
-                    underlying state shape (staffAccess: Record<role,
-                    tab[]>) is unchanged — only the rendering inverts.   */}
-                <div className="mt-5 overflow-x-auto">
-                  <table className="w-full text-xs border-collapse">
-                    <thead className="bg-white">
-                      <tr className="border-b-2 border-[#cc5a16]/15">
-                        <th className="text-left py-3 px-3 sticky left-0 bg-white z-10 min-w-[220px] align-bottom">
-                          <span className="font-bold text-[10px] uppercase tracking-widest text-[#6b5d52]">Menu / Tab</span>
-                        </th>
-                        {MANAGED_ROLES.map(r => {
-                          const perms = staffAccess[r.id] || {};
-                          const noRestriction = Object.keys(perms).length === 0;
-                          const grantedCount = visibleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 1).length;
-                          const fullCount = visibleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 3).length;
+                {/* ── RBAC-7 — module sub-tabs + per-module matrix ──────
+                    One sub-tab per module the tenant actually has. Each
+                    shows only that module's pages (rows) against only the
+                    roles relevant to it (columns). Stored shape unchanged. */}
+                <div className="mt-5 flex flex-wrap items-center gap-1.5 border-b border-[#cc5a16]/10 pb-3">
+                  {availableModules.map(m => {
+                    const active = m.key === activeModuleKey;
+                    return (
+                      <button
+                        key={m.key}
+                        type="button"
+                        onClick={() => setStaffAccessModule(m.key)}
+                        className={cn(
+                          'px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide transition-colors',
+                          active ? 'bg-[#cc5a16] text-white shadow-sm' : 'bg-[#faf7f2] text-[#6b5d52] hover:bg-[#f0e6d6]'
+                        )}
+                      >
+                        {m.label}
+                        <span className={cn('ml-1.5 font-mono', active ? 'text-white/70' : 'text-[#b3a79c]')}>{m.tabs.length}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {allVisibleRoles.length === 0 ? (
+                  <div className="mt-6 bg-[#faf7f2] border border-[#cc5a16]/10 rounded-2xl p-8 text-center">
+                    <Shield size={28} className="mx-auto text-[#cc5a16]/40" />
+                    <h4 className="mt-3 text-sm font-bold text-[#1a1208]">No staff roles to configure yet</h4>
+                    <p className="mt-1 text-xs text-[#6b5d52] max-w-md mx-auto">
+                      Staff Access only lists roles that exist in your database — your custom roles, plus any role you've assigned to a team member.
+                      Assign a role to someone in <strong>Staff Directory</strong>, or create a <strong>Custom Role</strong>, then come back here to set their access.
+                    </p>
+                  </div>
+                ) : moduleRoles.length === 0 ? (
+                  <div className="mt-6 bg-[#faf7f2] border border-[#cc5a16]/10 rounded-2xl p-8 text-center">
+                    <h4 className="text-sm font-bold text-[#1a1208]">No roles mapped to “{activeModule?.label}” yet</h4>
+                    <p className="mt-1 text-xs text-[#6b5d52] max-w-md mx-auto">
+                      None of your current roles are associated with this module. Assign a relevant role to a staff member (or create a custom role) to configure access to these pages.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="mt-4 overflow-x-auto">
+                    <table className="w-full text-xs border-collapse">
+                      <thead className="bg-white">
+                        <tr className="border-b-2 border-[#cc5a16]/15">
+                          <th className="text-left py-3 px-3 sticky left-0 bg-white z-10 min-w-[220px] align-bottom">
+                            <span className="font-bold text-[10px] uppercase tracking-widest text-[#6b5d52]">{activeModule?.label} · Pages</span>
+                          </th>
+                          {moduleRoles.map(r => {
+                            const perms = staffAccess[r.id] || {};
+                            const noRestriction = Object.keys(perms).length === 0;
+                            const grantedCount = moduleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 1).length;
+                            const fullCount = moduleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 3).length;
+                            return (
+                              <th
+                                key={r.id}
+                                className="px-2 py-3 text-center align-bottom min-w-[96px]"
+                                title={r.hint}
+                              >
+                                <div className="flex flex-col items-center gap-1">
+                                  <span className="font-bold text-[11px] text-[#1a1208] leading-tight">{r.label}</span>
+                                  {r.kind === 'custom' && (
+                                    <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 leading-none">Custom</span>
+                                  )}
+                                  {noRestriction ? (
+                                    <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 leading-none whitespace-nowrap">Unrestricted</span>
+                                  ) : (
+                                    <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 leading-none whitespace-nowrap">{grantedCount}/{moduleTabs.length} · {fullCount} full</span>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => grantAllForRole(r.id)}
+                                    className="text-[9px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest leading-none"
+                                    title={`Set every ${activeModule?.label} page to Full (or clear) for ${r.label}`}
+                                  >{fullCount < moduleTabs.length ? 'All Full' : 'Clear all'}</button>
+                                </div>
+                              </th>
+                            );
+                          })}
+                          <th className="px-2 py-3 text-center align-bottom min-w-[60px]">
+                            <span className="font-bold text-[10px] uppercase tracking-widest text-[#9c8e85]">Row</span>
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {moduleTabs.map((t, ti) => {
+                          const everyRoleFull = moduleRoles.every(r => ((staffAccess[r.id]?.[t.id] ?? 0) as number) >= 3);
                           return (
-                            <th
-                              key={r.id}
-                              className="px-2 py-3 text-center align-bottom min-w-[96px]"
-                              title={r.hint}
+                            <tr
+                              key={t.id}
+                              className={cn(
+                                'border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/60 transition-colors',
+                                ti % 2 === 1 && 'bg-[#faf7f2]/30'
+                              )}
                             >
-                              <div className="flex flex-col items-center gap-1">
-                                <span className="font-bold text-[11px] text-[#1a1208] leading-tight">{r.label}</span>
-                                {noRestriction ? (
-                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 leading-none whitespace-nowrap">Unrestricted</span>
-                                ) : (
-                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 leading-none whitespace-nowrap">{grantedCount} tabs · {fullCount} full</span>
-                                )}
+                              <td className="py-2 px-3 sticky left-0 bg-inherit z-10 align-middle">
+                                <div className="font-bold text-[#1a1208] text-[12px] leading-tight">{t.label}</div>
+                                <div
+                                  className="text-[10px] text-[#9c8e85] mt-0.5 leading-tight line-clamp-2"
+                                  title={t.description}
+                                >{t.description}</div>
+                              </td>
+                              {moduleRoles.map(r => {
+                                const level = (staffAccess[r.id]?.[t.id] ?? 0) as number;
+                                return (
+                                  <td key={r.id} className="px-1 py-2 text-center align-middle">
+                                    <select
+                                      value={level}
+                                      onChange={e => setTabLevel(r.id, t.id, Number(e.target.value))}
+                                      className={cn(
+                                        'text-[10px] font-bold rounded-lg px-1.5 py-1 border-none outline-none cursor-pointer w-full',
+                                        LEVEL_CLS[level] || LEVEL_CLS[0]
+                                      )}
+                                      aria-label={`${r.label} access to ${t.label}`}
+                                    >
+                                      <option value={0}>—</option>
+                                      <option value={1}>View</option>
+                                      <option value={2}>Edit</option>
+                                      <option value={3}>Full</option>
+                                    </select>
+                                  </td>
+                                );
+                              })}
+                              <td className="px-2 py-2 text-center align-middle">
                                 <button
                                   type="button"
-                                  onClick={() => grantAllForRole(r.id)}
-                                  className="text-[9px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest leading-none"
-                                  title={`Set all tabs to Full or clear for ${r.label}`}
-                                >{noRestriction || fullCount < visibleTabs.length ? 'All Full' : 'Clear all'}</button>
-                              </div>
-                            </th>
+                                  onClick={() => grantAllForTab(t.id)}
+                                  className="text-[10px] font-bold text-[#cc5a16] hover:underline whitespace-nowrap"
+                                  title={`Set ${t.label} to Full for every role in this module, or clear`}
+                                >{everyRoleFull ? 'Clear' : 'Full'}</button>
+                              </td>
+                            </tr>
                           );
                         })}
-                        <th className="px-2 py-3 text-center align-bottom min-w-[60px]">
-                          <span className="font-bold text-[10px] uppercase tracking-widest text-[#9c8e85]">Row</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleTabs.map((t, ti) => {
-                        const everyRoleFull = MANAGED_ROLES.every(r => ((staffAccess[r.id]?.[t.id] ?? 0) as number) >= 3);
-                        return (
-                          <tr
-                            key={t.id}
-                            className={cn(
-                              'border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/60 transition-colors',
-                              ti % 2 === 1 && 'bg-[#faf7f2]/30'
-                            )}
-                          >
-                            <td className="py-2 px-3 sticky left-0 bg-inherit z-10 align-middle">
-                              <div className="font-bold text-[#1a1208] text-[12px] leading-tight">{t.label}</div>
-                              <div
-                                className="text-[10px] text-[#9c8e85] mt-0.5 leading-tight line-clamp-2"
-                                title={t.description}
-                              >{t.description}</div>
-                            </td>
-                            {MANAGED_ROLES.map(r => {
-                              const level = (staffAccess[r.id]?.[t.id] ?? 0) as number;
-                              return (
-                                <td key={r.id} className="px-1 py-2 text-center align-middle">
-                                  <select
-                                    value={level}
-                                    onChange={e => setTabLevel(r.id, t.id, Number(e.target.value))}
-                                    className={cn(
-                                      'text-[10px] font-bold rounded-lg px-1.5 py-1 border-none outline-none cursor-pointer w-full',
-                                      LEVEL_CLS[level] || LEVEL_CLS[0]
-                                    )}
-                                    aria-label={`${r.label} access to ${t.label}`}
-                                  >
-                                    <option value={0}>—</option>
-                                    <option value={1}>View</option>
-                                    <option value={2}>Edit</option>
-                                    <option value={3}>Full</option>
-                                  </select>
-                                </td>
-                              );
-                            })}
-                            <td className="px-2 py-2 text-center align-middle">
-                              <button
-                                type="button"
-                                onClick={() => grantAllForTab(t.id)}
-                                className="text-[10px] font-bold text-[#cc5a16] hover:underline whitespace-nowrap"
-                                title={`Set ${t.label} to Full for every role, or clear`}
-                              >{everyRoleFull ? 'Clear' : 'Full'}</button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                      </tbody>
+                    </table>
+                  </div>
+                )}
 
                 <p className="text-[10px] text-[#9c8e85] italic mt-3 leading-relaxed">
                   Server enforces this on top of the UI: a CHEF who somehow loads a hidden tab via direct URL still gets 403 from the API.

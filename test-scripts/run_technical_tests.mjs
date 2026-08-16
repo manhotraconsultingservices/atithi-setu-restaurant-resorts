@@ -2436,6 +2436,20 @@ async function testCashDrawer() {
     fail('TC-FOLIO-AUDIT', 'folio audit/where-used', `audit ${faud.status}, where-used ${fwu.status}`);
   }
 
+  // TC-RBAC-ROLES-IN-USE: the redesigned (module-scoped) Staff Access page's
+  // "only roles in the database" source endpoint is deployed and owner-gated.
+  // Returns { roles: [{role, count}] } for owner/admin; 403 otherwise.
+  const riu = await api('GET', `/api/restaurant/${restaurantId}/role-permissions/roles-in-use`);
+  if (riu.status === 200 && Array.isArray(riu.data?.roles)) {
+    const shapeOk = riu.data.roles.every(r => typeof r.role === 'string' && typeof r.count === 'number');
+    if (shapeOk) pass('TC-RBAC-ROLES-IN-USE', `roles-in-use deployed (${riu.data.roles.length} distinct assigned role(s))`);
+    else fail('TC-RBAC-ROLES-IN-USE', 'roles-in-use shape', `unexpected row shape: ${JSON.stringify(riu.data.roles.slice(0, 2))}`);
+  } else if (riu.status === 403) {
+    skip('TC-RBAC-ROLES-IN-USE', 'roles-in-use', 'not owner/admin');
+  } else {
+    fail('TC-RBAC-ROLES-IN-USE', 'roles-in-use', `HTTP ${riu.status}`);
+  }
+
   // TC-ACCT-EXPPAY / TC-ACCT-LOANS: Expenses & Payments + Loans endpoints deployed.
   const ep = await api('GET', `/api/restaurant/${restaurantId}/accounting/expense-payments`);
   if (ep.status === 200 && Array.isArray(ep.data)) pass('TC-ACCT-EXPPAY', `expense-payments list deployed (${ep.data.length})`);

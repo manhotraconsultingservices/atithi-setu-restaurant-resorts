@@ -7313,6 +7313,28 @@ async function startServer() {
   // and every LOGIN staff member's stored role + how many tabs it resolves to.
   // Read-only; no PII beyond name/login_id/role. Runs the custom-role self-heal
   // first, so opening this also fixes any zero-access custom role.
+  // RBAC-7 — the set of roles that ACTUALLY EXIST for this tenant, so the
+  // redesigned Staff Access page can show "only roles in the database".
+  // Built-in roles live in code (not a table), so "in the database" for them
+  // can only mean "assigned to a LOGIN staff member". Custom roles come from
+  // the tenant's own custom_roles table (the frontend already fetches those).
+  app.get("/api/restaurant/:id/role-permissions/roles-in-use", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const tdb = await getTenantDb(req.params.id);
+      const rows: any[] = await tdb.query(
+        `SELECT UPPER(TRIM(role)) AS role, COUNT(*) AS count
+           FROM attendance_staff
+          WHERE employee_type = 'LOGIN' AND is_active = 1
+            AND role IS NOT NULL AND TRIM(role) <> ''
+          GROUP BY UPPER(TRIM(role))`
+      ).catch(() => []);
+      res.json({ roles: rows.map(r => ({ role: String(r.role), count: Number(r.count) || 0 })) });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to list roles in use" });
+    }
+  });
+
   app.get("/api/restaurant/:id/rbac-diagnostics", authenticate, async (req: AuthRequest, res: Response) => {
     if (!requireOwnerOrAdmin(req, res)) return;
     try {
@@ -47973,8 +47995,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-invoice-audit-tree',
+    commit_marker: 'staff-access-module-tabs',
     code_features: [
+      'staff-access-module-tabs',                   // Staff Access (RBAC matrix) redesign — the one-giant-matrix (≈50 pages × up to ~13 roles on a single screen) is replaced by per-MODULE sub-tabs. The stored model (role → { tabId: level }) and the GET/POST /role-permissions save contract are UNCHANGED — this is a pure presentation layer over `staffAccess`, so enforcement (getTabPermissionsForRole / isTabVisible / my-permissions), preview-as-role, copy-across-locations, and the audit log all keep working untouched. UX: a segmented control shows one sub-tab per module the TENANT actually has (Overview / Hotel-Front-Desk / Restaurant / Spa / Events / Finance / Sales / Inventory / Reports / Staff & Payroll / Settings; a module renders only if it has ≥1 visible page, so disabled-module pages drop out for free — plus an 'Other' catch-all so no page is ever silently un-configurable). Each sub-tab shows ONLY that module's pages (rows) against ONLY the roles relevant to it (columns): OPERATIONAL modules (Hotel/Restaurant/Spa/Events) filter columns by role affinity (Manager everywhere; Front-Desk/Concierge/Housekeeping/Maintenance→Hotel; Cashier/Waiter/Chef→Restaurant; Therapist→Spa; Events-Manager→Events; custom roles by scope), while cross-cutting modules show every visible role. STRICT "only roles in the database": columns are built from the tenant's active custom_roles PLUS built-in roles actually assigned to LOGIN staff — NEW owner-only endpoint GET /api/restaurant/:id/role-permissions/roles-in-use returns the distinct assigned roles+counts (built-in roles live in code, not a table, so "in the DB" for them = assigned to a staff member). Safety valve: a role that already has a live grant on a still-visible page stays shown even if currently unassigned, so the screen can never hide (and thereby strand) access that is actually in effect. Frontend also adds `rolesInUse`/`staffAccessModule` state + `fetchRolesInUse` (fetched on tab open alongside custom roles), and the preview-as-role dropdown now lists the full DB-role set. No schema/GL change; new endpoint is additive. tsc + vite build clean.
       'hotel-invoice-audit-tree',                   // Tree menu + audit log for the hotel Invoice/Folio (extends the existing ObjectDetail pattern already on Booking/Room). Hotel folios previously had NO audit trail (only event invoices did). Now: (1) AUDIT WRITES — writeObjectAudit(objectType 'FOLIO') added to 11 folio money-actions: settle, credit-note, revise, record-payment, void-payment, manual line add, line reverse, F&B charge, F&B reverse, apply-promo/discount, GST waive/apply — so who-did-what-when is on record from deploy forward. (2) ENDPOINTS — GET /hotel/folios/:id/audit (readObjectAudit FOLIO) + /hotel/folios/:id/where-used (booking, room, payments, F&B orders, related invoices) mirroring the booking endpoints. (3) RESOLVER — buildObjectResolver gains a FOLIO case so Booking/Room "Where Used" folio links drill into the folio's own tree in-frame (was falling back to the legacy folio open). (4) FRONTEND — the Guest Bill (folio) viewer header gains a "🕘 History" button opening the invoice's ObjectDetail overlay (Overview facts + Audit log smart-table + Where-Used drill-in). Additive; no folio compute/GL/settlement path changed. NOTE: audit only records events after deploy; pre-existing invoice history is not backfilled. Deferred (same recipe): post-to-folio + master-folio audit writes, and Guest/ID-docs / Tariff / OTA objects. tsc + vite build clean.
       'ical-sync-interval-config',                  // iCal import cron is now configurable via ICAL_SYNC_INTERVAL_MIN env (clamped [5,59] min; default 30 = unchanged) + an overlap guard (`_icalSweepRunning`) that skips a tick if the previous sweep is still running (matters at short intervals). Set the env var on the VPS to speed sync — but 30 min stays the SAFE default: OTAs rate-limit iCal exports (often ≤2/hr) and their feeds rarely refresh faster, so 5–15 min risks the OTA throttling/blocking the feed (worse than 30), and the OTA→us return leg polls our feed on its own slow schedule regardless. Recommended 10–15 min if speeding up; use the manual "Sync now" for instant one-offs; true real-time needs the connectivity-provider/API path, not a tighter cron. Server-only cron change; no schema/GL/UI impact.
       'cash-drawer-toplevel-nav',                   // Discoverability (frontend-only): surfaced the Cash Drawer + Shift Handover panel as its own top-level "Cash" module in the sidebar, out of the owner-only Accounts → "Ledger & Books" → Controls → Cash Drawers path (which was 4 clicks deep and hidden from cashiers). New nav module `CASH` (label "Cash") with a single `CASH_DRAWER` tab that renders AccountingView in a locked `cashierMode` (opens straight on the Cash Drawers panel, hides the owner-only ledger sub-nav, heading "Cash Drawer & Shift Handover"). Visible to owner/admin + MANAGER + CASHIER + FRONT_DESK (the cash-handling roles) plus anyone the owner grants CASH_DRAWER in Staff Access — the underlying cash-drawer/handover endpoints were already cashier-accessible (_acctStaff), so no backend change. CASH_DRAWER added to CONTENT_ALWAYS_ALLOWED so the content pane agrees with the nav (no false "Access Restricted" for restricted staff). Bonus hardening: the drawer Approve/Reject actions are now gated on day-close `can_lock` (managers only) — a cashier sees "awaiting manager approval" instead of buttons that would 403 (segregation of duties intact). No server/GL/schema change; marker bumped only as a deploy signal. tsc + vite build clean.
