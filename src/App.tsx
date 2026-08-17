@@ -9040,7 +9040,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                 </div>
                 <div className="flex gap-2 justify-end pt-2">
                   <button onClick={() => setClosingDrawer(null)} className="px-3 py-1.5 text-sm text-[#6b5d52] rounded hover:bg-[#f5f0e8]">Cancel</button>
-                  <button onClick={submitClose} disabled={cdCountedTotal <= 0} className={AC_BTN}>Submit for approval</button>
+                  <button onClick={submitClose} disabled={(parseFloat(cdDeposit) || 0) < 0 || (parseFloat(cdDeposit) || 0) > cdCountedTotal} title={(parseFloat(cdDeposit) || 0) > cdCountedTotal ? 'Deposit cannot exceed the counted total' : 'Send this drawer count for approval'} className={AC_BTN}>Submit for approval</button>
                 </div>
               </div>
             </div>
