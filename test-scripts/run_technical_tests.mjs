@@ -2331,6 +2331,24 @@ async function testChargeToRoom() {
   } else {
     skip('TC-CTR-E2E', 'full charge-to-room chain', 'no checked-in guest (mutation covered by offline sim)');
   }
+
+  // TC-CTR-ROOMCHARGE: the request/approve + public charge-session-to-room
+  // paths must be DEPLOYED and answer with a STRUCTURED 4xx — never a 500 from
+  // a SQL crash. These paths used SQLite-era columns (items_json, session_token,
+  // restaurant_id, table_id) + datetime('now') that do NOT exist on Postgres,
+  // so every real call 500'd and the approved F&B never hit the folio. A bogus
+  // approve now resolves to a clean 404 (request not found), NOT a 500.
+  const rcApprove = await api('POST', `/api/restaurant/${restaurantId}/hotel/room-charge-request/AUTOTEST-BOGUS/approve`, {});
+  const rcSession = await api('POST', `/api/restaurant/${restaurantId}/hotel/charge-session-to-room`, {});
+  const approveOk = [400, 401, 403, 404].includes(rcApprove.status);       // structured, not 500
+  const sessionOk = [400, 401, 403, 404].includes(rcSession.status);       // structured, not 500
+  if (approveOk && sessionOk) {
+    pass('TC-CTR-ROOMCHARGE', `room-charge approve + charge-session endpoints deployed and structured (approve ${rcApprove.status}, session ${rcSession.status}, no SQL 500)`);
+  } else if (rcApprove.status === 500 || rcSession.status === 500) {
+    fail('TC-CTR-ROOMCHARGE', 'room-charge endpoints crash (SQL/dialect regression?)', `approve ${rcApprove.status}, session ${rcSession.status}`);
+  } else {
+    fail('TC-CTR-ROOMCHARGE', 'room-charge endpoints', `approve ${rcApprove.status}, session ${rcSession.status}`);
+  }
 }
 
 // ── EOD Cash Drawer (per-cashier till) ────────────────────────────────────

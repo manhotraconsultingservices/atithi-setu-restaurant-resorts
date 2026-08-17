@@ -29417,26 +29417,38 @@ ${data.tenant.name}`;
         [booking_id, room_id]
       );
       if (!booking) return res.status(400).json({ ok: false, error: "Booking is no longer active. Please ask the front desk." });
+      // orders link to a session by session_id (there is NO session_token column
+      // on orders, and no items_json column — the column is `items`). Resolve the
+      // token → id up front and ensure the room-service bridge columns the filter
+      // relies on exist, so this never throws on Postgres.
+      await ensureOrderRsColumns(tenantDb, req.params.id);
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS session_id TEXT").catch(() => {});
+      let sessId: string | null = session_id || null;
+      if (!sessId && session_token) {
+        const st: any = await tenantDb.get("SELECT id FROM table_sessions WHERE session_token = ?", [session_token]).catch(() => null);
+        sessId = st?.id || null;
+      }
+      if (!sessId) return res.status(404).json({ ok: false, error: "Session not found." });
       // Get all unposted orders in this session
       const orders: any[] = await tenantDb.query(
-        `SELECT o.id, o.total_amount, o.items_json FROM orders o
-         WHERE (o.session_token = ? OR o.session_id = ?)
-           AND o.status NOT IN ('CANCELLED')
+        `SELECT o.id, o.total_amount, o.items FROM orders o
+         WHERE o.session_id = ?
+           AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
            AND (o.posted_to_folio_at IS NULL OR o.folio_id IS NULL)`,
-        [session_token || '', session_id || '']
+        [sessId]
       );
       if (orders.length === 0) return res.json({ ok: true, posted_count: 0, folio_id: null, message: "All orders already posted." });
       let lastFolioId: string | null = null;
       let postedCount = 0;
       for (const ord of orders) {
-        // Parse items from the stored JSON
+        // Parse items from the stored JSON (column is `items`, TEXT/JSON).
         let items: any[] = [];
-        try { items = JSON.parse(ord.items_json || '[]'); } catch { items = []; }
+        try { items = typeof ord.items === 'string' ? JSON.parse(ord.items || '[]') : (Array.isArray(ord.items) ? ord.items : []); } catch { items = []; }
         const folioItems = items.map((it: any) => ({
           id: it.id || it.menuItemId || '',
           name: it.name || 'Item',
-          quantity: Number(it.quantity || it.qty || 1),
-          unitPrice: Number(it.price || it.unit_price || 0),
+          quantity: Number(it.quantity ?? it.qty ?? 1),
+          unitPrice: Number(it.price ?? it.unitPrice ?? it.unit_price ?? 0),
         }));
         const result = await postOrderToFolio(req.params.id, {
           id: ord.id, room_id, booking_id,
@@ -29482,7 +29494,7 @@ ${data.tenant.name}`;
         declined_reason  TEXT,
         order_id         TEXT,
         folio_id         TEXT,
-        created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
     `);
   }
@@ -29567,6 +29579,11 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await ensureRoomChargeRequestsTable(tenantDb);
+      // orders is schema-isolated (no restaurant_id); make sure the room-service
+      // bridge columns exist before we insert/post so this never throws on an
+      // older tenant that predates them.
+      await ensureOrderRsColumns(tenantDb, req.params.id);
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS session_id TEXT").catch(() => {});
       const rcr: any = await tenantDb.get(
         `SELECT * FROM room_charge_requests WHERE id = ? AND restaurant_id = ? AND status = 'PENDING'`,
         [req.params.reqId, req.params.id]
@@ -29583,64 +29600,94 @@ ${data.tenant.name}`;
       let items: any[] = [];
       try { items = JSON.parse(rcr.cart_json || '[]'); } catch { items = []; }
 
+      // Map a stored cart item to the folio-line shape. Defensive on key names
+      // (name / price|unitPrice|unit_price / quantity|qty) so a differently
+      // shaped cart still bills correctly.
+      const toFolioItems = (arr: any[]): FolioOrderItem[] => (Array.isArray(arr) ? arr : []).map((it: any) => ({
+        name: it.name || it.menuName || 'Item',
+        quantity: Number(it.quantity ?? it.qty ?? 1),
+        unitPrice: Number(it.price ?? it.unitPrice ?? it.unit_price ?? 0),
+      }));
+
+      // The orders on a session are linked by session_id (there is no
+      // session_token column on orders). Resolve it from the request.
+      let sessId: string | null = rcr.session_id || null;
+      if (!sessId && rcr.session_token) {
+        const st: any = await tenantDb.get(
+          "SELECT id FROM table_sessions WHERE session_token = ?", [rcr.session_token]
+        ).catch(() => null);
+        sessId = st?.id || null;
+      }
+
       if (rcr.purpose === 'ORDER') {
         orderId = `ORD-${Date.now()}`;
+        // NB: orders is schema-isolated — it has NO restaurant_id / table_id /
+        // session_token / items_json columns. Use the real columns only, and
+        // CURRENT_TIMESTAMP (Postgres has no datetime() function).
         await tenantDb.run(
-          `INSERT INTO orders (id, restaurant_id, table_number, table_id, customer_name, customer_phone,
-             items_json, total_amount, payment_method, payment_status, status,
-             session_token, session_id, room_id, booking_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CHARGE_TO_ROOM', 'PENDING', 'PENDING', ?, ?, ?, ?, datetime('now'))`,
-          [orderId, req.params.id,
-           rcr.table_number || `Room ${rcr.room_name}`, rcr.table_id || null,
+          `INSERT INTO orders
+             (id, table_number, customer_name, customer_phone, items, total_amount,
+              payment_method, payment_status, status, session_id, room_id, booking_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'CHARGE_TO_ROOM', 'PENDING', 'PENDING', ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [orderId,
+           rcr.table_number || (rcr.room_name ? `Room ${rcr.room_name}` : null),
            rcr.customer_name || rcr.guest_name, rcr.customer_phone || null,
            rcr.cart_json, rcr.amount,
-           rcr.session_token || null, rcr.session_id || null,
-           rcr.room_id, rcr.booking_id]
+           sessId, rcr.room_id, rcr.booking_id]
         );
-        const folioResult = await postOrderToFolio(req.params.id, {
+        const folioResult: any = await postOrderToFolio(req.params.id, {
           id: orderId, room_id: rcr.room_id, booking_id: rcr.booking_id,
-          items: items.map((it: any) => ({
-            name: it.name || 'Item',
-            quantity: Number(it.quantity || 1),
-            unitPrice: Number(it.price || it.unitPrice || 0),
-          })),
+          items: toFolioItems(items),
           subtype: 'RESTAURANT',
           posted_by: `ROOM_CHARGE_APPROVED:${(req as any).user?.id || 'staff'}`,
-        }).catch(() => ({ ok: false as const, folio_id: undefined }));
-        folioId = folioResult.folio_id || null;
+        }).catch((e: any) => ({ ok: false, folio_id: undefined, reason: e?.message }));
+        folioId = folioResult?.folio_id || null;
+        if (folioResult?.ok && folioId) {
+          await tenantDb.run("UPDATE orders SET folio_post_status = 'POSTED' WHERE id = ?", [orderId]).catch(() => {});
+        }
         // Notify KDS so kitchen sees the new order
         const newOrder = await tenantDb.get('SELECT * FROM orders WHERE id = ?', [orderId]).catch(() => null);
         if (newOrder) broadcastWs('NEW_ORDER', newOrder, req.params.id);
       } else {
-        // SESSION — post all unposted session orders to folio
-        const sessionOrders: any[] = await tenantDb.query(
-          `SELECT id, total_amount, items_json FROM orders
-           WHERE (session_token = ? OR session_id = ?)
-             AND status NOT IN ('CANCELLED')
-             AND (posted_to_folio_at IS NULL OR folio_id IS NULL)`,
-          [rcr.session_token || '', rcr.session_id || '']
-        );
+        // SESSION — post every unposted session order to the folio.
+        const sessionOrders: any[] = sessId ? await tenantDb.query(
+          `SELECT id, total_amount, items FROM orders
+            WHERE session_id = ?
+              AND UPPER(COALESCE(status,'')) <> 'CANCELLED'
+              AND (posted_to_folio_at IS NULL OR folio_id IS NULL)`,
+          [sessId]
+        ).catch(() => []) : [];
         for (const ord of sessionOrders) {
           let oItems: any[] = [];
-          try { oItems = JSON.parse(ord.items_json || '[]'); } catch { oItems = []; }
-          const result = await postOrderToFolio(req.params.id, {
+          try { oItems = typeof ord.items === 'string' ? JSON.parse(ord.items || '[]') : (Array.isArray(ord.items) ? ord.items : []); } catch { oItems = []; }
+          const result: any = await postOrderToFolio(req.params.id, {
             id: ord.id, room_id: rcr.room_id, booking_id: rcr.booking_id,
-            items: oItems.map((it: any) => ({
-              name: it.name || 'Item',
-              quantity: Number(it.quantity || 1),
-              unitPrice: Number(it.price || it.unitPrice || 0),
-            })),
+            items: toFolioItems(oItems),
             subtype: 'RESTAURANT',
             posted_by: `ROOM_CHARGE_APPROVED:${(req as any).user?.id || 'staff'}`,
-          }).catch(() => ({ ok: false as const, folio_id: undefined }));
-          if (result.folio_id) folioId = result.folio_id;
+          }).catch(() => ({ ok: false, folio_id: undefined }));
+          if (result?.folio_id) {
+            folioId = result.folio_id;
+            await tenantDb.run("UPDATE orders SET folio_post_status = 'POSTED' WHERE id = ?", [ord.id]).catch(() => {});
+          }
         }
+      }
+
+      // HARDENING (revenue integrity): if nothing actually landed on a folio,
+      // do NOT mark the request APPROVED — that would strand the charge (the
+      // old code marked APPROVED with folio_id=null, so the F&B silently
+      // vanished). Surface a clear error so staff can retry / settle by cash.
+      if (!folioId) {
+        return res.status(409).json({
+          ok: false,
+          error: 'Could not post this charge to the guest folio — the room may not have an open folio. Check the guest in first, or settle by cash / card.',
+        });
       }
 
       const staffName = (req as any).user?.name || (req as any).user?.email || 'Staff';
       await tenantDb.run(
         `UPDATE room_charge_requests SET status = 'APPROVED', approved_by = ?, approved_by_name = ?,
-         approved_at = datetime('now'), order_id = ?, folio_id = ? WHERE id = ?`,
+         approved_at = CURRENT_TIMESTAMP, order_id = ?, folio_id = ? WHERE id = ?`,
         [(req as any).user?.id || null, staffName, orderId, folioId, req.params.reqId]
       );
       broadcastWs('ROOM_CHARGE_UPDATE', {
@@ -47995,8 +48042,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'staff-access-owner-column',
+    commit_marker: 'charge-to-room-folio-fix',
     code_features: [
+      'charge-to-room-folio-fix',                   // BUGFIX (revenue integrity): "Restaurant charges marked Charge-to-Room not reflected in the guest folio." Root cause — the room-charge-request/approve flow and the public /hotel/charge-session-to-room endpoint were written in SQLite dialect against a schema that no longer exists on the current PostgreSQL deployment: they referenced orders columns that don't exist (restaurant_id, table_id, items_json, session_token — the real column is `items`, and orders is schema-isolated so has no restaurant_id) and used SQLite `datetime('now')` (Postgres has no datetime() function), including in the room_charge_requests table-create DEFAULT. Every call therefore threw and the handler 500'd, so the approved F&B never posted to the folio (proven on Postgres 16: the old INSERT errors `column "restaurant_id" ... does not exist`, the old default errors `function datetime(unknown) does not exist`; the corrected SQL inserts cleanly). Fixes: (1) ensureRoomChargeRequestsTable default `datetime('now')` → CURRENT_TIMESTAMP; (2) the approve handler rewritten to INSERT only real orders columns (id, table_number, customer_name, customer_phone, items, total_amount, payment_method, payment_status, status, session_id, room_id, booking_id, created_at) with CURRENT_TIMESTAMP, resolve session_token→session_id (orders link by session_id), and defensive ensureOrderRsColumns + `ADD COLUMN IF NOT EXISTS session_id` before the insert; (3) /hotel/charge-session-to-room rewritten the same way (items not items_json, session_id match, column-ensure). HARDENING: approve now REFUSES to mark a request APPROVED when nothing actually posted to a folio (returns 409 instead of the old silent APPROVED-with-folio_id=null that stranded the charge), and stamps folio_post_status='POSTED' on posted orders. The already-correct immediate table-bill path (/sessions/:token/charge-to-room) is unchanged. Verified: tsc clean + empirical Postgres old-fails/new-works proof; self-seeding e2e_charge_to_room.mjs added for the full chain.
       'staff-access-owner-column',                  // Follow-up to staff-access-module-tabs: the property OWNER (labelled "Business Owner") is now ALWAYS shown in Staff Access as the first, locked, always-Full column in every module sub-tab — visible for clarity but never editable or revocable (rendered as a static "Full" pill with a lock, not a select; excluded from the bulk grant helpers and never part of the save payload; the server already ignores OWNER on save and OWNER always has full access, so the no-lockout guarantee is preserved). Because the owner column always renders, the old "No staff roles to configure yet" full-page empty state is gone — the matrix always shows at least the Business Owner column, and when no other DB roles exist yet a slim amber hint tells the owner to assign a role in Staff Directory or create a Custom Role. This is what the user meant by "Business Owner role should exist by default" — surfacing the existing account owner, NOT seeding a new role at tenant creation (no provisioning/schema/DB change). Frontend-only. tsc + vite build clean.
       'staff-access-module-tabs',                   // Staff Access (RBAC matrix) redesign — the one-giant-matrix (≈50 pages × up to ~13 roles on a single screen) is replaced by per-MODULE sub-tabs. The stored model (role → { tabId: level }) and the GET/POST /role-permissions save contract are UNCHANGED — this is a pure presentation layer over `staffAccess`, so enforcement (getTabPermissionsForRole / isTabVisible / my-permissions), preview-as-role, copy-across-locations, and the audit log all keep working untouched. UX: a segmented control shows one sub-tab per module the TENANT actually has (Overview / Hotel-Front-Desk / Restaurant / Spa / Events / Finance / Sales / Inventory / Reports / Staff & Payroll / Settings; a module renders only if it has ≥1 visible page, so disabled-module pages drop out for free — plus an 'Other' catch-all so no page is ever silently un-configurable). Each sub-tab shows ONLY that module's pages (rows) against ONLY the roles relevant to it (columns): OPERATIONAL modules (Hotel/Restaurant/Spa/Events) filter columns by role affinity (Manager everywhere; Front-Desk/Concierge/Housekeeping/Maintenance→Hotel; Cashier/Waiter/Chef→Restaurant; Therapist→Spa; Events-Manager→Events; custom roles by scope), while cross-cutting modules show every visible role. STRICT "only roles in the database": columns are built from the tenant's active custom_roles PLUS built-in roles actually assigned to LOGIN staff — NEW owner-only endpoint GET /api/restaurant/:id/role-permissions/roles-in-use returns the distinct assigned roles+counts (built-in roles live in code, not a table, so "in the DB" for them = assigned to a staff member). Safety valve: a role that already has a live grant on a still-visible page stays shown even if currently unassigned, so the screen can never hide (and thereby strand) access that is actually in effect. Frontend also adds `rolesInUse`/`staffAccessModule` state + `fetchRolesInUse` (fetched on tab open alongside custom roles), and the preview-as-role dropdown now lists the full DB-role set. No schema/GL change; new endpoint is additive. tsc + vite build clean.
       'hotel-invoice-audit-tree',                   // Tree menu + audit log for the hotel Invoice/Folio (extends the existing ObjectDetail pattern already on Booking/Room). Hotel folios previously had NO audit trail (only event invoices did). Now: (1) AUDIT WRITES — writeObjectAudit(objectType 'FOLIO') added to 11 folio money-actions: settle, credit-note, revise, record-payment, void-payment, manual line add, line reverse, F&B charge, F&B reverse, apply-promo/discount, GST waive/apply — so who-did-what-when is on record from deploy forward. (2) ENDPOINTS — GET /hotel/folios/:id/audit (readObjectAudit FOLIO) + /hotel/folios/:id/where-used (booking, room, payments, F&B orders, related invoices) mirroring the booking endpoints. (3) RESOLVER — buildObjectResolver gains a FOLIO case so Booking/Room "Where Used" folio links drill into the folio's own tree in-frame (was falling back to the legacy folio open). (4) FRONTEND — the Guest Bill (folio) viewer header gains a "🕘 History" button opening the invoice's ObjectDetail overlay (Overview facts + Audit log smart-table + Where-Used drill-in). Additive; no folio compute/GL/settlement path changed. NOTE: audit only records events after deploy; pre-existing invoice history is not backfilled. Deferred (same recipe): post-to-folio + master-folio audit writes, and Guest/ID-docs / Tariff / OTA objects. tsc + vite build clean.
