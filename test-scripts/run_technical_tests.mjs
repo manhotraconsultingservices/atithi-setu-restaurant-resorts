@@ -1995,6 +1995,23 @@ async function testRoomServiceQR() {
     fail('TC-BIZ-RS-001', 'QR menu endpoint accessible', `HTTP ${menuRes.status}`);
   }
 
+  // TC-FNB-PICKER: the folio "Add F&B" menu picker depends on /menu returning
+  // items with a numeric price (name + price ?? price_full). Without priced
+  // items the picker is empty and staff hand-type — the original bug where the
+  // price stayed blank and the subtotal was ₹0. Confirms the data contract.
+  if (menuRes.status === 200 && Array.isArray(menuRes.data)) {
+    const priced = menuRes.data.filter(m => m && m.name && Number(m.price ?? m.price_full ?? 0) > 0);
+    if (priced.length > 0) {
+      pass('TC-FNB-PICKER', `menu exposes ${priced.length} priced item(s) for the Add-F&B picker (auto-fills price)`);
+    } else if (menuRes.data.length === 0) {
+      skip('TC-FNB-PICKER', 'Add-F&B menu picker data', 'no menu items on this tenant');
+    } else {
+      fail('TC-FNB-PICKER', 'Add-F&B menu picker data', `menu has ${menuRes.data.length} item(s) but none carry a usable price`);
+    }
+  } else {
+    skip('TC-FNB-PICKER', 'Add-F&B menu picker data', `menu endpoint HTTP ${menuRes.status}`);
+  }
+
   // TC-BIZ-RS-002: Room service order with CHARGE_TO_ROOM — missing items (validation)
   // Tests endpoint reachability without creating real orders
   const rmList = await api('GET', `/api/restaurant/${restaurantId}/hotel/rooms`);

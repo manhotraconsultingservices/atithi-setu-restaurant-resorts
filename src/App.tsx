@@ -35229,6 +35229,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           folio={fnbChargeFolio}
           restaurantId={restaurantId}
           token={token}
+          fnbGstRate={hotelRooms.some((r: any) => Number(r.base_rate) > Number(hotelSettings?.gst_slab2_max ?? 7500)) ? 18 : 5}
           onClose={() => setFnbChargeFolio(null)}
           onPosted={async () => {
             await fetchHotelFolios();
@@ -42088,9 +42089,10 @@ const FnbChargeModal: React.FC<{
   folio: any;
   restaurantId: string;
   token: string;
+  fnbGstRate?: number;
   onClose: () => void;
   onPosted: () => void | Promise<void>;
-}> = ({ folio, restaurantId, token, onClose, onPosted }) => {
+}> = ({ folio, restaurantId, token, fnbGstRate, onClose, onPosted }) => {
   const [subtype, setSubtype] = useState<'IRD' | 'RESTAURANT' | 'BAR' | 'MINIBAR' | 'BANQUET'>('IRD');
   const [items, setItems] = useState<Array<{ name: string; quantity: number; unit_price: number; gst_rate: string }>>([
     { name: '', quantity: 1, unit_price: 0, gst_rate: '' },
@@ -42099,13 +42101,55 @@ const FnbChargeModal: React.FC<{
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  // RS-3 fix — pull the restaurant menu so staff pick real items (name + price
+  // auto-filled) instead of hand-typing, which left the price blank and the
+  // subtotal at ₹0. The menu GET is the same public list the QR e-menu uses.
+  const [menu, setMenu] = useState<Array<{ id?: string; name: string; price: number; category?: string }>>([]);
+  const [menuQuery, setMenuQuery] = useState('');
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch(`/api/restaurant/${restaurantId}/menu`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!r.ok) return;
+        const rows = await r.json();
+        if (!alive || !Array.isArray(rows)) return;
+        const norm = rows
+          .map((m: any) => ({ id: m.id, name: m.name, price: Number(m.price ?? m.price_full ?? 0), category: m.category, available: m.available !== false && Number(m.is_available ?? 1) !== 0 }))
+          .filter((m: any) => m.name && m.price > 0 && m.available);
+        setMenu(norm);
+      } catch { /* menu picker is a convenience; manual entry still works */ }
+    })();
+    return () => { alive = false; };
+  }, [restaurantId, token]);
+
   const subtotal = items.reduce((s, it) => s + (Number(it.quantity || 0) * Number(it.unit_price || 0)), 0);
-  const valid = items.some(it => it.name.trim() && Number(it.quantity) > 0 && Number(it.unit_price) > 0);
+  // GST preview (display only — the folio applies the authoritative F&B rate at
+  // post; a per-row GST% override wins over the property default shown here).
+  const gstEstimate = items.reduce((s, it) => {
+    const rate = it.gst_rate.trim() !== '' ? Number(it.gst_rate) : (Number(fnbGstRate) || 0);
+    return s + (Number(it.quantity || 0) * Number(it.unit_price || 0)) * (isNaN(rate) ? 0 : rate) / 100;
+  }, 0);
+  const totalEstimate = subtotal + gstEstimate;
+  const valid = subtotal > 0 && items.some(it => it.name.trim() && Number(it.quantity) > 0 && Number(it.unit_price) > 0);
 
   const updateItem = (idx: number, patch: Partial<typeof items[0]>) =>
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, ...patch } : it));
   const addRow = () => setItems(prev => [...prev, { name: '', quantity: 1, unit_price: 0, gst_rate: '' }]);
   const removeRow = (idx: number) => setItems(prev => prev.filter((_, i) => i !== idx));
+  // Add a menu item — fill the first blank row, else append a new one.
+  const addMenuItem = (m: { name: string; price: number }) => {
+    setItems(prev => {
+      const blankIdx = prev.findIndex(it => !it.name.trim() && !(Number(it.unit_price) > 0));
+      const row = { name: m.name, quantity: 1, unit_price: Number(m.price) || 0, gst_rate: '' };
+      if (blankIdx >= 0) return prev.map((it, i) => i === blankIdx ? row : it);
+      return [...prev, row];
+    });
+    setMenuQuery('');
+  };
+  const menuMatches = menuQuery.trim()
+    ? menu.filter(m => m.name.toLowerCase().includes(menuQuery.trim().toLowerCase())).slice(0, 8)
+    : [];
 
   const submit = async () => {
     setError('');
@@ -42167,6 +42211,30 @@ const FnbChargeModal: React.FC<{
           {/* Item rows */}
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Items</label>
+            {menu.length > 0 && (
+              <div className="mb-2 relative">
+                <input
+                  value={menuQuery}
+                  onChange={e => setMenuQuery(e.target.value)}
+                  placeholder="🔍 Search the menu to add an item (auto-fills the price)…"
+                  className="w-full bg-white border border-[#cc5a16]/25 rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+                {menuMatches.length > 0 && (
+                  <div className="absolute z-20 mt-1 w-full bg-white border border-[#cc5a16]/15 rounded-xl shadow-lg max-h-52 overflow-y-auto">
+                    {menuMatches.map((m, i) => (
+                      <button
+                        key={m.id || i} type="button"
+                        onClick={() => addMenuItem(m)}
+                        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-xs hover:bg-[#faf7f2] text-left border-b border-[#faf7f2] last:border-b-0"
+                      >
+                        <span className="truncate text-[#1a1208]">{m.name}{m.category ? <span className="text-[#9c8e85]"> · {m.category}</span> : null}</span>
+                        <span className="font-mono font-bold text-[#1a1208] whitespace-nowrap">₹{Number(m.price).toLocaleString('en-IN')}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="space-y-2">
               {items.map((it, idx) => (
                 <div key={idx} className="grid grid-cols-12 gap-2 items-center">
@@ -42224,24 +42292,36 @@ const FnbChargeModal: React.FC<{
             />
           </div>
 
-          <div className="flex items-center justify-between bg-[#faf7f2] rounded-2xl px-4 py-3">
-            <span className="text-xs text-[#6b5d52] font-bold uppercase tracking-widest">Subtotal</span>
-            <span className="font-mono text-base font-bold text-[#1a1208]">
-              ₹{subtotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </span>
+          <div className="bg-[#faf7f2] rounded-2xl px-4 py-3 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[#6b5d52] font-bold uppercase tracking-widest">Subtotal</span>
+              <span className="font-mono text-sm font-bold text-[#1a1208]">₹{subtotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] text-[#6b5d52]">GST {fnbGstRate ? `(≈${fnbGstRate}% F&B)` : '(applied at post)'}</span>
+              <span className="font-mono text-xs text-[#6b5d52]">₹{gstEstimate.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+            </div>
+            <div className="flex items-center justify-between pt-1.5 border-t border-[#cc5a16]/10">
+              <span className="text-xs text-[#1a1208] font-bold uppercase tracking-widest">Total</span>
+              <span className="font-mono text-base font-bold text-[#1a1208]">₹{totalEstimate.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+            </div>
           </div>
           <p className="text-[10px] text-[#9c8e85] italic">
-            Taxes are calculated automatically by the folio (5% non-specified or 18% specified-premises F&amp;B GST, or your per-item override).
+            GST is finalised by the folio at post (5% non-specified or 18% specified-premises F&amp;B, or your per-item override); the figure above is an estimate.
           </p>
 
           {error && <p className="text-xs text-[#c13b3b] bg-[#fdf0f0] rounded-xl px-3 py-2">{error}</p>}
+          {!valid && !error && (
+            <p className="text-[10px] text-[#9c8e85]">Pick a menu item (or enter a price above ₹0) to enable posting — a ₹0 charge cannot be posted.</p>
+          )}
 
           <div className="flex gap-2 pt-2">
             <button onClick={onClose} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
             <button
               onClick={submit}
               disabled={!valid || submitting}
-              className="flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50"
+              title={!valid ? 'Add at least one item with a price above ₹0' : 'Post this F&B charge to the folio'}
+              className="flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >{submitting ? 'Posting…' : 'Post to Folio'}</button>
           </div>
         </div>
