@@ -47323,6 +47323,17 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
     return { ...c, [id]: next };
   });
 
+  // Auto-dismiss the order confirmation so it doesn't sit on the screen while
+  // the guest keeps browsing/ordering (reported: the "Charged to your room"
+  // message persisted continuously). The manual ✕ still works; a genuine
+  // failure lingers a little longer so it isn't missed.
+  useEffect(() => {
+    if (!foodOrderConfirm) return;
+    const ms = foodOrderConfirm.placed ? 5000 : 9000;
+    const t = setTimeout(() => setFoodOrderConfirm(null), ms);
+    return () => clearTimeout(t);
+  }, [foodOrderConfirm]);
+
   const placeRoomServiceOrder = async () => {
     if (cartLines.length === 0 || placingFoodOrder) return;
     setPlacingFoodOrder(true);
