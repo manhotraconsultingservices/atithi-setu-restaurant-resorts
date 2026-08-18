@@ -60448,6 +60448,35 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
             <div className="space-y-5">
               <p className="text-[11px] text-[#9c8e85]">Period <b className="text-[#6b5d52]">{rpData.period?.from} → {rpData.period?.to}</b> · {rpData.summary.count} booking(s) · deltas vs the prior {rpData.period?.days}-day window</p>
 
+              {/* ── OTA contribution to the property (occupancy / RevPAR / ADR) ── */}
+              {rpData.kpi && (
+                <div className="border border-[#e8dccf] rounded-2xl p-4 bg-[#faf7f2]">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-3">OTA contribution to your property</p>
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">OTA occupancy</p>
+                      <p className="text-2xl font-bold text-[#1a1208] tabular-nums">{rpData.kpi.ota_occupancy_pct}%</p>
+                      <p className="text-[10px] text-[#9c8e85] flex items-center gap-1 flex-wrap">{rpData.kpi.ota_room_nights}/{rpData.kpi.available_room_nights} rm-nts {renderDelta(rpData.deltas?.ota_occupancy_pct, 'up')}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">OTA RevPAR (net)</p>
+                      <p className="text-2xl font-bold text-[#1a1208] tabular-nums">₹{Math.round(rpData.kpi.ota_revpar).toLocaleString('en-IN')}</p>
+                      <p className="text-[10px] text-[#9c8e85]">net / available room-night</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Gross ADR</p>
+                      <p className="text-2xl font-bold text-[#1a1208] tabular-nums">₹{Math.round(rpData.kpi.gross_adr).toLocaleString('en-IN')}</p>
+                      <p className="text-[10px] text-[#9c8e85]">before commission</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Net ADR</p>
+                      <p className="text-2xl font-bold text-emerald-700 tabular-nums">₹{Math.round(rpData.kpi.net_adr).toLocaleString('en-IN')}</p>
+                      <p className="text-[10px] text-red-500">−₹{Math.round(rpData.kpi.adr_commission_drag).toLocaleString('en-IN')} commission/nt</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* ── decision tiles with MoM deltas ── */}
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
                 <div className="bg-[#f5f0ea] rounded-2xl p-3">

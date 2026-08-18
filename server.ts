@@ -32838,6 +32838,10 @@ ${data.tenant.name}`;
            FROM room_bookings WHERE booking_source LIKE 'AIOSELL:%' AND check_in_date >= ? AND check_in_date <= ?`,
         [priorFrom, priorTo]
       ).catch(() => []);
+      // Sellable room count → available room-nights, for the OTA contribution KPIs.
+      const roomsRow: any = await tenantDb.get("SELECT COUNT(*) AS n FROM rooms WHERE status NOT IN ('MAINTENANCE','BLOCKED')").catch(() => ({ n: 0 }));
+      const sellableRooms = Number(roomsRow?.n || 0);
+      const availableRoomNights = sellableRooms * lenDays;
 
       const aioCur = curAll.filter((b: any) => isAio(b.booking_source));
       const metrics = (rows: any[]) => {
@@ -32858,6 +32862,19 @@ ${data.tenant.name}`;
       };
       const cur = metrics(aioCur);
       const prev = metrics(priorAio);
+
+      // OTA contribution to the property (channel lens, not property-wide occupancy).
+      const kpi = {
+        sellable_rooms: sellableRooms,
+        available_room_nights: availableRoomNights,
+        ota_room_nights: cur.room_nights,
+        ota_occupancy_pct: availableRoomNights > 0 ? round(cur.room_nights / availableRoomNights * 100) : 0,
+        ota_revpar: availableRoomNights > 0 ? round(cur.net / availableRoomNights) : 0,     // net RevPAR contribution
+        gross_adr: cur.room_nights > 0 ? round(cur.gross / cur.room_nights) : 0,
+        net_adr: cur.net_adr,
+        adr_commission_drag: cur.room_nights > 0 ? round((cur.gross - cur.net) / cur.room_nights) : 0,
+      };
+      const priorOccPct = availableRoomNights > 0 ? round(prev.room_nights / availableRoomNights * 100) : 0;
 
       const byPacc: any = {};
       for (const b of aioCur) {
@@ -32898,6 +32915,7 @@ ${data.tenant.name}`;
         effective_commission_pct: { current: cur.effective_commission_pct, prior: prev.effective_commission_pct, delta: round(cur.effective_commission_pct - prev.effective_commission_pct), pct: null },
         net_adr: mk(cur.net_adr, prev.net_adr),
         cancellation_rate: { current: cur.cancellation_rate, prior: prev.cancellation_rate, delta: round(cur.cancellation_rate - prev.cancellation_rate), pct: null },
+        ota_occupancy_pct: { current: kpi.ota_occupancy_pct, prior: priorOccPct, delta: round(kpi.ota_occupancy_pct - priorOccPct), pct: null },
       };
 
       const bookings = aioCur.map((b: any) => {
@@ -32919,7 +32937,7 @@ ${data.tenant.name}`;
       res.json({
         period: { from, to, prior_from: priorFrom, prior_to: priorTo, days: lenDays },
         summary: { ...cur, by_platform: byP },
-        deltas, channel_mix, bookings,
+        kpi, deltas, channel_mix, bookings,
       });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -48672,8 +48690,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-cockpit-quality-recon',
+    commit_marker: 'aiosell-cockpit-kpis',
     code_features: [
+      'aiosell-cockpit-kpis',                       // FEATURE (BCG-review Phase-3 on the OTA cockpit — OTA-contribution KPIs): report now computes available room-nights (sellable rooms × period days) and returns a `kpi` block = OTA occupancy contribution % (OTA room-nights / available, with MoM delta), OTA net RevPAR (net / available room-night), gross ADR, net ADR, and the ADR commission drag (gross−net per night). This is the CHANNEL lens (what the OTAs contribute to occupancy/RevPAR), deliberately distinct from the property-wide occupancy report elsewhere — no >100% risk since OTA is a subset of capacity. UI adds a top "OTA contribution to your property" strip (occupancy / RevPAR / gross ADR / net ADR + drag) above the money tiles. Data we already hold; no new columns. tsc + vite build clean. (Still deferred: property-wide ADR/RevPAR/occupancy already exist in Hotel Reports; payout expected-vs-received, forward pace, alerts, scheduled digest.)
       'aiosell-cockpit-quality-recon',              // FEATURE (BCG-review Phase-2 on the OTA cockpit): (1) CANCELLATION QUALITY — ingest + report now track cancellations; report returns overall cancellation_rate (+ cancelled/bookings_total) with a MoM delta, and per-channel cancellation_pct in the channel-profitability table (>=15% flagged red). Owner can see "which OTA cancels most" — a channel-quality signal. (2) TRUE-NET RECONCILIATION (India leakage, review gap #4) — ingest captures the Aiosell amount block's tcs/tds/tax onto new room_bookings cols channel_tcs/channel_tds/channel_tax; report computes tax_withheld (TDS+TCS) and true_net (net − TDS − TCS) overall + per booking; UI shows an "OTA remits (after TDS/TCS)" chip ONLY when withholdings are present, so it's invisible until the feed carries them. Frontend adds a quality+reconciliation strip under the tiles and a Cancel% column. tsc + vite build clean. (Deferred: ADR/RevPAR/occupancy KPIs, payout expected-vs-received, forward pace, alerts, scheduled digest.)
       'aiosell-report-cockpit',                     // FEATURE (BCG-review quick wins on the Channel Bookings report → OTA profit & cash cockpit): GET /hotel/aiosell/bookings is now PERIOD-BASED (defaults to month-to-date) with a prior equal-length window for MoM deltas. Adds the decision metrics an owner needs: (a) effective commission % and NET ADR overall and per channel; (b) channel profitability table ranked by net (bookings, room-nights, gross, comm%, net, net ADR — cheapest/most-profitable starred, comm≥20% flagged red); (c) OTA-vs-DIRECT channel mix computed across ALL bookings in the window (not just Aiosell) + a dependency flag (high if OTA share ≥60% or single-channel ≥40%) with a "grow direct" nudge; (d) MoM delta pills on every tile (green/red by whether up is good — commission↑=bad, revenue/ADR↑=good); (e) CSV export of the booking lines. Frontend Step 6 rebuilt into tiles (gross/commission+eff%/net/net-ADR/to-collect) + mix bar + profitability table + detail table, all period-scoped. Response now returns {period, summary(+by_platform enriched, effective_commission_pct, net_adr, room_nights), deltas, channel_mix, bookings}. Verified: tsc + vite build clean.
       'aiosell-status-and-report',                  // FEATURE (Aiosell Phase C + owner reporting): (1) ROOM STATUS / STOP-SELL — new POST /hotel/aiosell/restrictions endpoint (room-level, or rate-plan-level if rate_plan_code given) wired to aiosellPushInventoryRestrictions/aiosellPushRateRestrictions (validated against the sandbox); new "🚦 Step 5 · Room status & stop-sell" card in the Aiosell panel — pick a mapped room, Open/Stop-sell for a date range, min-stay + CTA/CTD, target channels, one click. Retires the old `void` Phase-C placeholder. (2) CHANNEL BOOKINGS REPORT — answers "which OTA + how much to collect": ingest now stores `room_bookings.channel_prepaid` (from the Aiosell `pah` flag: prepaid=OTA collected, pay-at-hotel=you collect); new GET /hotel/aiosell/bookings returns AIOSELL-sourced bookings with platform (from booking_source AIOSELL:<channel>), OTA booking id, gross/commission/net, and collect_from_guest (= 0 if prepaid, else the amount) + an owner summary (count, gross, commission, net, to-collect, by-platform). New "📊 Step 6 · Channel bookings & collection" card: 5 summary tiles + per-platform chips + a table (platform, guest, room, stay, gross, commission, net, Collect/Prepaid badge, status). Cancelled excluded from money totals. Verified: tsc + vite build clean; restrictions push proven end-to-end on the live sandbox (sample-pms / sandbox-pms).
