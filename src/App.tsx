@@ -59833,9 +59833,9 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   const [stChannels, setStChannels] = useState('booking.com,agoda,gommt');
   const [stBusy, setStBusy] = useState(false);
 
-  // Channel bookings report (which OTA + what to collect)
-  const [rpFrom, setRpFrom] = useState('');
-  const [rpTo, setRpTo] = useState('');
+  // Channel bookings report (which OTA + what to collect) — defaults to month-to-date
+  const [rpFrom, setRpFrom] = useState(() => `${new Date().toISOString().slice(0, 7)}-01`);
+  const [rpTo, setRpTo] = useState(() => new Date().toISOString().slice(0, 10));
   const [rpData, setRpData] = useState<any>(null);
   const [rpLoading, setRpLoading] = useState(false);
 
@@ -60033,6 +60033,32 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
       setRpData(r);
     } catch (e: any) { setErr(e.message || 'Failed to load channel bookings.'); }
     finally { setRpLoading(false); }
+  };
+
+  // Small MoM delta pill. `good` = which direction is favourable (up for revenue,
+  // down for commission, neutral for cash-to-collect).
+  const renderDelta = (d: any, good: 'up' | 'down' | 'neutral' = 'up') => {
+    if (!d || d.prior == null) return null;
+    const hasPct = typeof d.pct === 'number';
+    const flat = hasPct ? d.pct === 0 : Math.abs(d.delta || 0) < 0.005;
+    const up = (d.delta || 0) > 0;
+    const mag = hasPct ? `${Math.abs(d.pct)}%` : `₹${Math.round(Math.abs(d.delta)).toLocaleString('en-IN')}`;
+    const positive = good === 'neutral' ? null : (good === 'up' ? up : !up);
+    const cls = flat ? 'bg-[#f0e8de] text-[#9c8e85]' : positive ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600';
+    return <span className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded-full whitespace-nowrap', cls)}>{flat ? '±0' : `${up ? '▲' : '▼'} ${mag}`} <span className="opacity-50 font-normal">vs prev</span></span>;
+  };
+
+  const exportReportCsv = () => {
+    const rows = rpData?.bookings || [];
+    if (!rows.length) return;
+    const head = ['Platform', 'OTA Booking Id', 'Guest', 'Phone', 'Room', 'Check-in', 'Check-out', 'Nights', 'Gross', 'Commission', 'Commission %', 'Net', 'Pay type', 'Collect', 'Status'];
+    const esc = (c: any) => { const s = String(c ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const body = rows.map((b: any) => [b.platform, b.ota_booking_id || '', b.guest_name || '', b.guest_phone || '', b.room || '', b.check_in, b.check_out, b.nights, b.total, b.commission, b.commission_pct, b.net, b.prepaid === true ? 'Prepaid' : (b.prepaid === false ? 'Pay-at-hotel' : 'Unknown'), b.collect_from_guest, b.status].map(esc).join(','));
+    const csv = [head.join(','), ...body].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = `aiosell-channel-bookings-${rpData.period?.from || ''}_${rpData.period?.to || ''}.csv`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   };
 
   const copyWebhook = () => {
@@ -60408,46 +60434,107 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
             <button onClick={loadReport} disabled={rpLoading} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors">
               {rpLoading ? 'Loading…' : rpData ? '↻ Refresh' : 'Load report'}
             </button>
+            {rpData?.bookings?.length > 0 && (
+              <button onClick={exportReportCsv} className="px-3 py-2 rounded-xl border border-[#e8e0d8] text-[#1a1208] text-sm font-bold hover:bg-[#f5f0ea] transition-colors" title="Export bookings to CSV">⭳ CSV</button>
+            )}
           </div>
         </div>
         <div className="p-5">
           {!rpData ? (
-            <p className="text-sm text-[#9c8e85] italic">Click <b>Load report</b> to list OTA bookings received through Aiosell.</p>
+            <p className="text-sm text-[#9c8e85] italic">Click <b>Load report</b> for the OTA profit &amp; collection view (defaults to this month).</p>
           ) : rpData.bookings.length === 0 ? (
-            <p className="text-sm text-[#9c8e85] italic">No channel bookings yet{(rpFrom || rpTo) ? ' for this date range' : ''}. They appear here automatically as OTA reservations arrive.</p>
+            <p className="text-sm text-[#9c8e85] italic">No channel bookings for {rpData.period?.from} → {rpData.period?.to}. They appear here automatically as OTA reservations arrive.</p>
           ) : (
-            <div className="space-y-4">
-              {/* summary tiles */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="space-y-5">
+              <p className="text-[11px] text-[#9c8e85]">Period <b className="text-[#6b5d52]">{rpData.period?.from} → {rpData.period?.to}</b> · {rpData.summary.count} booking(s) · deltas vs the prior {rpData.period?.days}-day window</p>
+
+              {/* ── decision tiles with MoM deltas ── */}
+              <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
                 <div className="bg-[#f5f0ea] rounded-2xl p-3">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Bookings</p>
-                  <p className="text-xl font-bold text-[#1a1208] mt-1">{rpData.summary.count}</p>
-                </div>
-                <div className="bg-[#f5f0ea] rounded-2xl p-3">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Gross</p>
-                  <p className="text-xl font-bold text-[#1a1208] mt-1">₹{Math.round(rpData.summary.gross).toLocaleString('en-IN')}</p>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Gross OTA rev</p>
+                  <p className="text-lg font-bold text-[#1a1208] mt-1 tabular-nums">₹{Math.round(rpData.summary.gross).toLocaleString('en-IN')}</p>
+                  <div className="mt-1">{renderDelta(rpData.deltas?.gross, 'up')}</div>
                 </div>
                 <div className="bg-red-50 rounded-2xl p-3 border border-red-100">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-red-400">OTA commission</p>
-                  <p className="text-xl font-bold text-red-700 mt-1">₹{Math.round(rpData.summary.commission).toLocaleString('en-IN')}</p>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-red-400">Commission</p>
+                  <p className="text-lg font-bold text-red-700 mt-1 tabular-nums">₹{Math.round(rpData.summary.commission).toLocaleString('en-IN')}</p>
+                  <p className="text-[11px] text-red-500 font-semibold">{rpData.summary.effective_commission_pct}% effective</p>
+                  <div className="mt-0.5">{renderDelta(rpData.deltas?.effective_commission_pct, 'down')}</div>
                 </div>
                 <div className="bg-emerald-50 rounded-2xl p-3 border border-emerald-100">
                   <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-500">Net payout</p>
-                  <p className="text-xl font-bold text-emerald-700 mt-1">₹{Math.round(rpData.summary.net).toLocaleString('en-IN')}</p>
+                  <p className="text-lg font-bold text-emerald-700 mt-1 tabular-nums">₹{Math.round(rpData.summary.net).toLocaleString('en-IN')}</p>
+                  <div className="mt-1">{renderDelta(rpData.deltas?.net, 'up')}</div>
+                </div>
+                <div className="bg-[#f5f0ea] rounded-2xl p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Net ADR</p>
+                  <p className="text-lg font-bold text-[#1a1208] mt-1 tabular-nums">₹{Math.round(rpData.summary.net_adr).toLocaleString('en-IN')}</p>
+                  <p className="text-[10px] text-[#9c8e85]">{rpData.summary.room_nights} room-nights</p>
+                  <div className="mt-0.5">{renderDelta(rpData.deltas?.net_adr, 'up')}</div>
                 </div>
                 <div className="bg-amber-50 rounded-2xl p-3 border border-amber-200">
                   <p className="text-[10px] font-bold uppercase tracking-widest text-amber-500">To collect at hotel</p>
-                  <p className="text-xl font-bold text-amber-700 mt-1">₹{Math.round(rpData.summary.to_collect).toLocaleString('en-IN')}</p>
+                  <p className="text-lg font-bold text-amber-700 mt-1 tabular-nums">₹{Math.round(rpData.summary.to_collect).toLocaleString('en-IN')}</p>
+                  <div className="mt-1">{renderDelta(rpData.deltas?.to_collect, 'neutral')}</div>
                 </div>
               </div>
+
+              {/* ── channel mix + dependency ── */}
+              {rpData.channel_mix && rpData.channel_mix.total_gross > 0 && (() => {
+                const m = rpData.channel_mix;
+                const depCls = m.dependency === 'high' ? 'bg-red-50 text-red-700 border-red-200' : m.dependency === 'moderate' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                return (
+                  <div className="bg-white border border-[#e8dccf] rounded-2xl p-4">
+                    <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Channel mix — OTA vs direct</p>
+                      <span className={cn('text-[11px] font-bold px-2.5 py-0.5 rounded-full border capitalize', depCls)}>{m.dependency} OTA dependency</span>
+                    </div>
+                    <div className="flex h-3.5 rounded-full overflow-hidden border border-[#e8dccf]">
+                      <div style={{ width: `${m.ota_share_pct}%` }} className="bg-[#cc5a16]" />
+                      <div style={{ width: `${m.direct_share_pct}%` }} className="bg-emerald-500" />
+                    </div>
+                    <div className="flex flex-wrap gap-x-5 gap-y-1 mt-2 text-[12px]">
+                      <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#cc5a16] inline-block" /> OTA <b className="text-[#1a1208]">{m.ota_share_pct}%</b> <span className="text-[#9c8e85]">₹{Math.round(m.ota_gross).toLocaleString('en-IN')}</span></span>
+                      <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" /> Direct &amp; other <b className="text-[#1a1208]">{m.direct_share_pct}%</b> <span className="text-[#9c8e85]">₹{Math.round(m.direct_gross).toLocaleString('en-IN')}</span></span>
+                      {m.top_platform && <span className="text-[#6b5d52]">Top channel <b className="text-[#1a1208]">{m.top_platform}</b> ({m.top_platform_share_pct}% of revenue)</span>}
+                    </div>
+                    {m.dependency === 'high' && <p className="text-[11px] text-red-600 mt-2">⚠ High OTA / single-channel dependency — grow direct bookings and diversify channels to protect margin and pricing power.</p>}
+                  </div>
+                );
+              })()}
+
+              {/* ── channel profitability (ranked) ── */}
               {rpData.summary.by_platform?.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {rpData.summary.by_platform.map((p: any) => (
-                    <span key={p.platform} className="inline-flex items-center gap-2 bg-[#faf7f2] border border-[#e8dccf] rounded-full px-3 py-1 text-[12px]">
-                      <span className="font-bold text-[#1a1208]">{p.platform}</span>
-                      <span className="text-[#9c8e85]">{p.count} · ₹{Math.round(p.net).toLocaleString('en-IN')} net</span>
-                    </span>
-                  ))}
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Channel profitability — ranked by net</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] border-b border-[#f0e8de]">
+                          <th className="py-2 pr-3">Channel</th>
+                          <th className="py-2 pr-3 text-right">Bookings</th>
+                          <th className="py-2 pr-3 text-right">Rm-nts</th>
+                          <th className="py-2 pr-3 text-right">Gross</th>
+                          <th className="py-2 pr-3 text-right">Comm %</th>
+                          <th className="py-2 pr-3 text-right">Net</th>
+                          <th className="py-2 pr-3 text-right">Net ADR</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rpData.summary.by_platform.map((p: any, i: number) => (
+                          <tr key={p.platform} className="border-b border-[#f7f2ec] last:border-0">
+                            <td className="py-2 pr-3 font-semibold text-[#1a1208]">{i === 0 && <span className="text-emerald-600 mr-1" title="Most net revenue">★</span>}{p.platform}</td>
+                            <td className="py-2 pr-3 text-right tabular-nums">{p.count}</td>
+                            <td className="py-2 pr-3 text-right tabular-nums">{p.room_nights}</td>
+                            <td className="py-2 pr-3 text-right tabular-nums">₹{Math.round(p.gross).toLocaleString('en-IN')}</td>
+                            <td className={cn('py-2 pr-3 text-right tabular-nums font-semibold', p.commission_pct >= 20 ? 'text-red-600' : 'text-[#6b5d52]')}>{p.commission_pct}%</td>
+                            <td className="py-2 pr-3 text-right tabular-nums text-emerald-700 font-semibold">₹{Math.round(p.net).toLocaleString('en-IN')}</td>
+                            <td className="py-2 pr-3 text-right tabular-nums">₹{Math.round(p.net_adr).toLocaleString('en-IN')}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
               <div className="overflow-x-auto">

@@ -32789,61 +32789,119 @@ ${data.tenant.name}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  // Channel-bookings report: OTA reservations that arrived via Aiosell, with the
-  // source platform, commission, net payout, and how much to collect from the
-  // guest (prepaid → nothing; pay-at-hotel → the amount). Optional date filter on
-  // check-in. Powers the owner-facing "which OTA + what to collect" report.
+  // Channel bookings & OTA profit report. Period-based (defaults to month-to-date),
+  // with prior equal-length window for MoM deltas. Answers the owner's decisions:
+  // which OTA makes money (effective commission % + net ADR per channel), how
+  // dependent am I on OTAs vs direct (channel mix + dependency flag), and how much
+  // cash to collect from guests (prepaid vs pay-at-hotel). Money totals exclude
+  // cancelled bookings.
   app.get("/api/restaurant/:id/hotel/aiosell/bookings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await aiosellEnsureBookingCol(tenantDb, req.params.id);
-      const from = String((req.query.from as string) || '').trim();
-      const to = String((req.query.to as string) || '').trim();
-      const params: any[] = [];
-      let where = "booking_source LIKE 'AIOSELL:%'";
-      if (/^\d{4}-\d{2}-\d{2}$/.test(from)) { where += " AND check_in_date >= ?"; params.push(from); }
-      if (/^\d{4}-\d{2}-\d{2}$/.test(to))   { where += " AND check_in_date <= ?"; params.push(to); }
-      const rows: any[] = await tenantDb.query(
+      const dayMs = 86400000;
+      const isoOf = (d: Date) => d.toISOString().slice(0, 10);
+      const today = isoOf(new Date());
+      const rxDate = (v: any) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+      let from = rxDate(req.query.from) ? String(req.query.from) : `${today.slice(0, 7)}-01`; // month-to-date default
+      let to = rxDate(req.query.to) ? String(req.query.to) : today;
+      if (from > to) { const t = from; from = to; to = t; }
+      const lenDays = Math.round((new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime()) / dayMs) + 1;
+      const priorTo = isoOf(new Date(new Date(`${from}T00:00:00Z`).getTime() - dayMs));
+      const priorFrom = isoOf(new Date(new Date(`${priorTo}T00:00:00Z`).getTime() - (lenDays - 1) * dayMs));
+
+      const round = (x: number) => Math.round(x * 100) / 100;
+      const nights = (ci: string, co: string) => Math.max(1, Math.round((new Date(`${co}T00:00:00Z`).getTime() - new Date(`${ci}T00:00:00Z`).getTime()) / dayMs) || 1);
+      const isAio = (s: any) => /^AIOSELL:/i.test(String(s || ''));
+      const isLive = (s: any) => String(s).toUpperCase() !== 'CANCELLED';
+
+      // Current period: ALL bookings (for OTA-vs-direct mix + the AIOSELL list).
+      const curAll: any[] = await tenantDb.query(
         `SELECT b.id, b.guest_name, b.guest_phone, b.booking_source, b.channel_ref, b.status,
                 b.check_in_date, b.check_out_date, b.total_amount, b.commission_pct, b.commission_amount,
                 b.net_amount, b.channel_prepaid, r.room_number, r.name AS room_name
            FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
-          WHERE ${where}
-          ORDER BY b.check_in_date DESC, b.id DESC
-          LIMIT 500`, params
+          WHERE b.check_in_date >= ? AND b.check_in_date <= ?
+          ORDER BY b.check_in_date DESC, b.id DESC LIMIT 2000`, [from, to]
       ).catch(() => []);
-      const bookings = rows.map((b: any) => {
+      // Prior period: AIOSELL bookings only (metrics for deltas).
+      const priorAio: any[] = await tenantDb.query(
+        `SELECT status, total_amount, commission_amount, net_amount, channel_prepaid, check_in_date, check_out_date
+           FROM room_bookings WHERE booking_source LIKE 'AIOSELL:%' AND check_in_date >= ? AND check_in_date <= ?`,
+        [priorFrom, priorTo]
+      ).catch(() => []);
+
+      const aioCur = curAll.filter((b: any) => isAio(b.booking_source));
+      const metrics = (rows: any[]) => {
+        const live = rows.filter((b: any) => isLive(b.status));
+        let gross = 0, commission = 0, net = 0, collect = 0, rn = 0;
+        for (const b of live) {
+          const total = Number(b.total_amount || 0);
+          gross += total; commission += Number(b.commission_amount || 0); net += Number(b.net_amount || 0);
+          rn += nights(b.check_in_date, b.check_out_date);
+          collect += (b.channel_prepaid != null && Number(b.channel_prepaid) === 1) ? 0 : total;
+        }
+        return { count: live.length, gross: round(gross), commission: round(commission), net: round(net), to_collect: round(collect),
+          room_nights: rn, effective_commission_pct: gross > 0 ? round(commission / gross * 100) : 0, net_adr: rn > 0 ? round(net / rn) : 0 };
+      };
+      const cur = metrics(aioCur);
+      const prev = metrics(priorAio);
+
+      const byP = Object.values(aioCur.filter((b: any) => isLive(b.status)).reduce((acc: any, b: any) => {
+        const k = String(b.booking_source || '').replace(/^AIOSELL:/i, '') || 'OTA';
+        (acc[k] ||= { platform: k, count: 0, gross: 0, commission: 0, net: 0, room_nights: 0 });
+        const total = Number(b.total_amount || 0);
+        acc[k].count++; acc[k].gross += total; acc[k].commission += Number(b.commission_amount || 0);
+        acc[k].net += Number(b.net_amount || 0); acc[k].room_nights += nights(b.check_in_date, b.check_out_date);
+        return acc;
+      }, {})).map((p: any) => ({
+        platform: p.platform, count: p.count, gross: round(p.gross), commission: round(p.commission), net: round(p.net), room_nights: p.room_nights,
+        commission_pct: p.gross > 0 ? round(p.commission / p.gross * 100) : 0, net_adr: p.room_nights > 0 ? round(p.net / p.room_nights) : 0,
+      })).sort((a: any, b: any) => b.net - a.net);
+
+      // Channel mix (OTA vs direct) + dependency, over ALL live bookings this period.
+      const liveAll = curAll.filter((b: any) => isLive(b.status));
+      const otaGross = liveAll.filter((b: any) => isAio(b.booking_source)).reduce((s: number, b: any) => s + Number(b.total_amount || 0), 0);
+      const totalGross = liveAll.reduce((s: number, b: any) => s + Number(b.total_amount || 0), 0);
+      const directGross = totalGross - otaGross;
+      const otaShare = totalGross > 0 ? round(otaGross / totalGross * 100) : 0;
+      const topByGross = [...byP].sort((a: any, b: any) => b.gross - a.gross)[0];
+      const topShare = topByGross && totalGross > 0 ? round(topByGross.gross / totalGross * 100) : 0;
+      const dependency = (otaShare >= 60 || topShare >= 40) ? 'high' : (otaShare >= 40 ? 'moderate' : 'low');
+      const channel_mix = {
+        ota_gross: round(otaGross), direct_gross: round(directGross), total_gross: round(totalGross),
+        ota_share_pct: otaShare, direct_share_pct: totalGross > 0 ? round(directGross / totalGross * 100) : 0,
+        top_platform: topByGross?.platform || null, top_platform_share_pct: topShare, dependency,
+      };
+
+      const mk = (c: number, p: number) => ({ current: c, prior: p, delta: round(c - p), pct: p > 0 ? round((c - p) / p * 100) : null });
+      const deltas = {
+        gross: mk(cur.gross, prev.gross), net: mk(cur.net, prev.net), commission: mk(cur.commission, prev.commission),
+        to_collect: mk(cur.to_collect, prev.to_collect), count: mk(cur.count, prev.count),
+        effective_commission_pct: { current: cur.effective_commission_pct, prior: prev.effective_commission_pct, delta: round(cur.effective_commission_pct - prev.effective_commission_pct), pct: null },
+        net_adr: mk(cur.net_adr, prev.net_adr),
+      };
+
+      const bookings = aioCur.map((b: any) => {
         const total = Number(b.total_amount || 0);
         const prepaid = b.channel_prepaid == null ? null : Number(b.channel_prepaid) === 1;
-        // Platform name from "AIOSELL:<Channel>"; OTA booking id from "AIOSELL:<id>".
-        const platform = String(b.booking_source || '').replace(/^AIOSELL:/i, '') || 'OTA';
-        const otaBookingId = String(b.channel_ref || '').replace(/^AIOSELL:/i, '') || null;
         return {
           id: b.id, guest_name: b.guest_name, guest_phone: b.guest_phone, status: b.status,
-          platform, ota_booking_id: otaBookingId,
+          platform: String(b.booking_source || '').replace(/^AIOSELL:/i, '') || 'OTA',
+          ota_booking_id: String(b.channel_ref || '').replace(/^AIOSELL:/i, '') || null,
           room: b.room_number || b.room_name || null,
-          check_in: b.check_in_date, check_out: b.check_out_date,
-          total, commission_pct: Number(b.commission_pct || 0), commission: Number(b.commission_amount || 0),
-          net: Number(b.net_amount || 0),
-          prepaid,                                   // true = OTA collected, false = pay-at-hotel, null = unknown
-          collect_from_guest: prepaid === true ? 0 : total,  // if not prepaid (or unknown), you collect the amount
+          check_in: b.check_in_date, check_out: b.check_out_date, nights: nights(b.check_in_date, b.check_out_date),
+          total, commission_pct: Number(b.commission_pct || 0), commission: Number(b.commission_amount || 0), net: Number(b.net_amount || 0),
+          prepaid, collect_from_guest: prepaid === true ? 0 : total,
         };
       });
-      // Owner summary across the returned set (exclude cancelled from money totals).
-      const live = bookings.filter((x: any) => String(x.status).toUpperCase() !== 'CANCELLED');
-      const summary = {
-        count: bookings.length,
-        gross: Math.round(live.reduce((s: number, x: any) => s + x.total, 0) * 100) / 100,
-        commission: Math.round(live.reduce((s: number, x: any) => s + x.commission, 0) * 100) / 100,
-        net: Math.round(live.reduce((s: number, x: any) => s + x.net, 0) * 100) / 100,
-        to_collect: Math.round(live.reduce((s: number, x: any) => s + x.collect_from_guest, 0) * 100) / 100,
-        by_platform: Object.values(live.reduce((acc: any, x: any) => {
-          const k = x.platform; (acc[k] ||= { platform: k, count: 0, gross: 0, net: 0 });
-          acc[k].count++; acc[k].gross += x.total; acc[k].net += x.net; return acc;
-        }, {})).map((p: any) => ({ ...p, gross: Math.round(p.gross * 100) / 100, net: Math.round(p.net * 100) / 100 })),
-      };
-      res.json({ summary, bookings });
+
+      res.json({
+        period: { from, to, prior_from: priorFrom, prior_to: priorTo, days: lenDays },
+        summary: { ...cur, by_platform: byP },
+        deltas, channel_mix, bookings,
+      });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
@@ -48595,8 +48653,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-status-and-report',
+    commit_marker: 'aiosell-report-cockpit',
     code_features: [
+      'aiosell-report-cockpit',                     // FEATURE (BCG-review quick wins on the Channel Bookings report → OTA profit & cash cockpit): GET /hotel/aiosell/bookings is now PERIOD-BASED (defaults to month-to-date) with a prior equal-length window for MoM deltas. Adds the decision metrics an owner needs: (a) effective commission % and NET ADR overall and per channel; (b) channel profitability table ranked by net (bookings, room-nights, gross, comm%, net, net ADR — cheapest/most-profitable starred, comm≥20% flagged red); (c) OTA-vs-DIRECT channel mix computed across ALL bookings in the window (not just Aiosell) + a dependency flag (high if OTA share ≥60% or single-channel ≥40%) with a "grow direct" nudge; (d) MoM delta pills on every tile (green/red by whether up is good — commission↑=bad, revenue/ADR↑=good); (e) CSV export of the booking lines. Frontend Step 6 rebuilt into tiles (gross/commission+eff%/net/net-ADR/to-collect) + mix bar + profitability table + detail table, all period-scoped. Response now returns {period, summary(+by_platform enriched, effective_commission_pct, net_adr, room_nights), deltas, channel_mix, bookings}. Verified: tsc + vite build clean.
       'aiosell-status-and-report',                  // FEATURE (Aiosell Phase C + owner reporting): (1) ROOM STATUS / STOP-SELL — new POST /hotel/aiosell/restrictions endpoint (room-level, or rate-plan-level if rate_plan_code given) wired to aiosellPushInventoryRestrictions/aiosellPushRateRestrictions (validated against the sandbox); new "🚦 Step 5 · Room status & stop-sell" card in the Aiosell panel — pick a mapped room, Open/Stop-sell for a date range, min-stay + CTA/CTD, target channels, one click. Retires the old `void` Phase-C placeholder. (2) CHANNEL BOOKINGS REPORT — answers "which OTA + how much to collect": ingest now stores `room_bookings.channel_prepaid` (from the Aiosell `pah` flag: prepaid=OTA collected, pay-at-hotel=you collect); new GET /hotel/aiosell/bookings returns AIOSELL-sourced bookings with platform (from booking_source AIOSELL:<channel>), OTA booking id, gross/commission/net, and collect_from_guest (= 0 if prepaid, else the amount) + an owner summary (count, gross, commission, net, to-collect, by-platform). New "📊 Step 6 · Channel bookings & collection" card: 5 summary tiles + per-platform chips + a table (platform, guest, room, stay, gross, commission, net, Collect/Prepaid badge, status). Cancelled excluded from money totals. Verified: tsc + vite build clean; restrictions push proven end-to-end on the live sandbox (sample-pms / sandbox-pms).
       'aiosell-webhook-authfirst',                  // HARDENING (follow-up to aiosell-per-tenant-creds): the inbound reservation webhook is now AUTH-FIRST. Because per-tenant creds require resolving the tenant from the body hotelCode before we know which creds to check, the previous cut did the tenant lookup (a DB round-trip) and could return 404 "no property for hotelCode" BEFORE authenticating — leaking hotelCode registration state to anonymous callers and allowing pre-auth DB work (DoS amplification). Now: a missing/malformed Basic header is rejected with 401 before ANY body parse or DB access; a shared env account authenticates without a tenant lookup; the tenant lookup + per-tenant cred check runs only for a well-formed header; and the 404 "no property registered" is returned ONLY after the caller is authenticated. Wrong creds for a registered hotel → 401 (unchanged). Server-only; no schema/UI change.
       'aiosell-per-tenant-creds',                   // FEATURE (multi-tenant fix for aiosell-integration): the Aiosell partner credentials are no longer env-only/restart-required. Each property now stores its OWN Aiosell partner id + username (plaintext) + password (AES-256-GCM encrypted at rest via encryptSecret, on channel_credentials.api_secret) through Channel Manager → 🔌 Aiosell → Step 1. New decryptSecret helper (inverse of the existing encryptSecret; tamper-fails-closed → null; legacy-plaintext passthrough) recovers the password at call time. Resolution order per tenant: this property's stored creds, else the platform AIOSELL_* env vars (so an operator can still set one shared account for everyone). Every /hotel/aiosell/* endpoint + the inbound webhook now build the AiosellConfig via aiosellCfgForTenant(tenantDb) instead of aiosellConfigFromEnv(); the webhook verifies Basic Auth against the RESOLVED tenant's creds (verifyBasicAuthCredentials) with an env fallback. Saving credentials takes effect immediately — NO app restart — and touches only that tenant (other properties unaffected). Two new plaintext cols aiosell_partner_id/aiosell_username added to channel_credentials (shared DDL + lazy aiosellEnsureCredCols for existing tenants). /aiosell/status now returns creds_source (tenant|env|none) + has_password (boolean, never the value); /aiosell/config accepts partner_id/username/password (blank = keep existing, COALESCE upsert) and never echoes the password. UI Step 1 gains Partner ID / Username / Password fields (password shows "•••• (saved)" when set) + a creds-source chip; the old "operator must set env vars and restart" card is gone. Verified: tsc + vite build clean; AES-GCM round-trip unit-checked (colons-in-password, empty, idempotent, legacy, tamper-fails-closed).
