@@ -59822,6 +59822,23 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   const [noShowCh, setNoShowCh] = useState('booking.com');
   const [busyOp, setBusyOp] = useState('');
 
+  // Room status / stop-sell (O-3)
+  const [stRoom, setStRoom] = useState('');
+  const [stFrom, setStFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [stTo, setStTo] = useState(() => new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10));
+  const [stStop, setStStop] = useState(false);          // false = Open, true = Stop-sell
+  const [stMinStay, setStMinStay] = useState('');
+  const [stCoa, setStCoa] = useState(false);
+  const [stCod, setStCod] = useState(false);
+  const [stChannels, setStChannels] = useState('booking.com,agoda,gommt');
+  const [stBusy, setStBusy] = useState(false);
+
+  // Channel bookings report (which OTA + what to collect)
+  const [rpFrom, setRpFrom] = useState('');
+  const [rpTo, setRpTo] = useState('');
+  const [rpData, setRpData] = useState<any>(null);
+  const [rpLoading, setRpLoading] = useState(false);
+
   const api = useCallback(async (path: string, init?: RequestInit) => {
     const res = await fetch(`/api/restaurant/${restaurantId}/hotel${path}`, {
       ...init,
@@ -59987,6 +60004,35 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
       setNoShowId('');
     } catch (e: any) { setErr(e.message || 'Failed to mark no-show.'); }
     finally { setBusyOp(''); }
+  };
+
+  const applyStatus = async () => {
+    if (!stRoom) { setErr('Pick a room to open/close.'); return; }
+    const channels = stChannels.split(',').map(s => s.trim()).filter(Boolean);
+    if (channels.length === 0) { setErr('Enter at least one channel for the status update.'); return; }
+    if (stFrom > stTo) { setErr('Status: from date must be on or before the to date.'); return; }
+    setStBusy(true); setErr('');
+    try {
+      const r = await api('/aiosell/restrictions', { method: 'POST', body: JSON.stringify({
+        room_code: stRoom, startDate: stFrom, endDate: stTo, channels,
+        stopSell: stStop,
+        minimumStay: stMinStay === '' ? undefined : Number(stMinStay),
+        closeOnArrival: stCoa, closeOnDeparture: stCod,
+      }) });
+      toast.success(r.message || `Room ${stStop ? 'closed (stop-sell)' : 'opened'} on Aiosell.`);
+    } catch (e: any) { setErr(e.message || 'Failed to send room status.'); }
+    finally { setStBusy(false); }
+  };
+
+  const loadReport = async () => {
+    setRpLoading(true); setErr('');
+    try {
+      const qs = new URLSearchParams();
+      if (rpFrom) qs.set('from', rpFrom); if (rpTo) qs.set('to', rpTo);
+      const r = await api(`/aiosell/bookings${qs.toString() ? `?${qs.toString()}` : ''}`);
+      setRpData(r);
+    } catch (e: any) { setErr(e.message || 'Failed to load channel bookings.'); }
+    finally { setRpLoading(false); }
   };
 
   const copyWebhook = () => {
@@ -60281,6 +60327,172 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
               <p className="text-[11px] text-[#9c8e85] mt-1">Only Booking.com and GoMMT support automated no-show reporting.</p>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ── STEP 5 · ROOM STATUS / STOP-SELL (O-3) ── */}
+      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+        <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
+          <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">🚦 Step 5 · Room status &amp; stop-sell</h4>
+          <p className="text-xs text-[#6b5d52] mt-0.5">Open or close a mapped room on the OTAs for a date range, and set a minimum stay. Pushes a restriction to the chosen channels.</p>
+        </div>
+        <div className="p-5 space-y-4">
+          {mappings.length === 0 ? (
+            <p className="text-sm text-[#9c8e85] italic">Map a room in Step 2 first — the status control needs a mapped Aiosell room code.</p>
+          ) : (() => {
+            const roomOpts = Array.from(new Map(mappings.map((m: any) => [m.external_room_code, m.local_room_type_name || m.local_room_type_id || m.external_room_code])).entries());
+            return (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Room</label>
+                    <select value={stRoom} onChange={e => setStRoom(e.target.value)} className={cn(fieldCls, 'w-full')}>
+                      <option value="">— pick a room —</option>
+                      {roomOpts.map(([code, name]) => <option key={code} value={code}>{name} ({code})</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Status</label>
+                    <select value={stStop ? '1' : '0'} onChange={e => setStStop(e.target.value === '1')} className={cn(fieldCls, 'w-full')}>
+                      <option value="0">🟢 Open (sellable)</option>
+                      <option value="1">🔴 Stop-sell (closed)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label>
+                    <input type="date" value={stFrom} onChange={e => setStFrom(e.target.value)} className={cn(fieldCls, 'w-full')} />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label>
+                    <input type="date" value={stTo} onChange={e => setStTo(e.target.value)} className={cn(fieldCls, 'w-full')} />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-end gap-4">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Min stay (nights)</label>
+                    <input type="number" min={1} value={stMinStay} onChange={e => setStMinStay(e.target.value)} placeholder="none" className={cn(fieldCls, 'w-28')} />
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-[#1a1208] pb-2 cursor-pointer">
+                    <input type="checkbox" checked={stCoa} onChange={e => setStCoa(e.target.checked)} className="w-4 h-4 accent-[#cc5a16]" /> Close on arrival
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-[#1a1208] pb-2 cursor-pointer">
+                    <input type="checkbox" checked={stCod} onChange={e => setStCod(e.target.checked)} className="w-4 h-4 accent-[#cc5a16]" /> Close on departure
+                  </label>
+                  <div className="flex-1 min-w-[180px]">
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Channels</label>
+                    <input value={stChannels} onChange={e => setStChannels(e.target.value)} placeholder="booking.com,agoda,gommt" className={cn(fieldCls, 'w-full')} />
+                  </div>
+                  <button onClick={applyStatus} disabled={stBusy || !enabled || !stRoom}
+                    className={cn('px-4 py-2 rounded-xl text-white text-sm font-bold disabled:opacity-50 transition-colors', stStop ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700')}>
+                    {stBusy ? 'Sending…' : stStop ? 'Close room' : 'Open room'}
+                  </button>
+                </div>
+                {!enabled && <p className="text-[11px] text-amber-700">Enable sync in Step 1 to send status updates.</p>}
+              </>
+            );
+          })()}
+        </div>
+      </div>
+
+      {/* ── STEP 6 · CHANNEL BOOKINGS REPORT (which OTA + what to collect) ── */}
+      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+        <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da] flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">📊 Step 6 · Channel bookings &amp; collection</h4>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Every OTA booking that arrived via Aiosell — which platform, commission, net payout, and how much to collect from the guest.</p>
+          </div>
+          <div className="flex items-end gap-2 flex-wrap">
+            <input type="date" value={rpFrom} onChange={e => setRpFrom(e.target.value)} className={fieldCls} title="Check-in from" />
+            <span className="text-[#9c8e85] pb-2">→</span>
+            <input type="date" value={rpTo} onChange={e => setRpTo(e.target.value)} className={fieldCls} title="Check-in to" />
+            <button onClick={loadReport} disabled={rpLoading} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors">
+              {rpLoading ? 'Loading…' : rpData ? '↻ Refresh' : 'Load report'}
+            </button>
+          </div>
+        </div>
+        <div className="p-5">
+          {!rpData ? (
+            <p className="text-sm text-[#9c8e85] italic">Click <b>Load report</b> to list OTA bookings received through Aiosell.</p>
+          ) : rpData.bookings.length === 0 ? (
+            <p className="text-sm text-[#9c8e85] italic">No channel bookings yet{(rpFrom || rpTo) ? ' for this date range' : ''}. They appear here automatically as OTA reservations arrive.</p>
+          ) : (
+            <div className="space-y-4">
+              {/* summary tiles */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                <div className="bg-[#f5f0ea] rounded-2xl p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Bookings</p>
+                  <p className="text-xl font-bold text-[#1a1208] mt-1">{rpData.summary.count}</p>
+                </div>
+                <div className="bg-[#f5f0ea] rounded-2xl p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Gross</p>
+                  <p className="text-xl font-bold text-[#1a1208] mt-1">₹{Math.round(rpData.summary.gross).toLocaleString('en-IN')}</p>
+                </div>
+                <div className="bg-red-50 rounded-2xl p-3 border border-red-100">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-red-400">OTA commission</p>
+                  <p className="text-xl font-bold text-red-700 mt-1">₹{Math.round(rpData.summary.commission).toLocaleString('en-IN')}</p>
+                </div>
+                <div className="bg-emerald-50 rounded-2xl p-3 border border-emerald-100">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-500">Net payout</p>
+                  <p className="text-xl font-bold text-emerald-700 mt-1">₹{Math.round(rpData.summary.net).toLocaleString('en-IN')}</p>
+                </div>
+                <div className="bg-amber-50 rounded-2xl p-3 border border-amber-200">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-amber-500">To collect at hotel</p>
+                  <p className="text-xl font-bold text-amber-700 mt-1">₹{Math.round(rpData.summary.to_collect).toLocaleString('en-IN')}</p>
+                </div>
+              </div>
+              {rpData.summary.by_platform?.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {rpData.summary.by_platform.map((p: any) => (
+                    <span key={p.platform} className="inline-flex items-center gap-2 bg-[#faf7f2] border border-[#e8dccf] rounded-full px-3 py-1 text-[12px]">
+                      <span className="font-bold text-[#1a1208]">{p.platform}</span>
+                      <span className="text-[#9c8e85]">{p.count} · ₹{Math.round(p.net).toLocaleString('en-IN')} net</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] border-b border-[#f0e8de]">
+                      <th className="py-2 pr-3">Platform</th>
+                      <th className="py-2 pr-3">Guest</th>
+                      <th className="py-2 pr-3">Room</th>
+                      <th className="py-2 pr-3">Stay</th>
+                      <th className="py-2 pr-3 text-right">Gross</th>
+                      <th className="py-2 pr-3 text-right">Commission</th>
+                      <th className="py-2 pr-3 text-right">Net</th>
+                      <th className="py-2 pr-3 text-right">Collect</th>
+                      <th className="py-2 pr-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rpData.bookings.map((b: any) => (
+                      <tr key={b.id} className={cn('border-b border-[#f7f2ec] last:border-0', String(b.status).toUpperCase() === 'CANCELLED' && 'opacity-50')}>
+                        <td className="py-2 pr-3">
+                          <div className="font-semibold text-[#1a1208]">{b.platform}</div>
+                          {b.ota_booking_id && <div className="text-[10px] text-[#9c8e85] font-mono">{b.ota_booking_id}</div>}
+                        </td>
+                        <td className="py-2 pr-3">{b.guest_name || '—'}{b.guest_phone && <div className="text-[10px] text-[#9c8e85]">{b.guest_phone}</div>}</td>
+                        <td className="py-2 pr-3 whitespace-nowrap">{b.room || '—'}</td>
+                        <td className="py-2 pr-3 whitespace-nowrap text-[12px]">{b.check_in} → {b.check_out}</td>
+                        <td className="py-2 pr-3 text-right tabular-nums">₹{Math.round(b.total).toLocaleString('en-IN')}</td>
+                        <td className="py-2 pr-3 text-right tabular-nums text-red-600">₹{Math.round(b.commission).toLocaleString('en-IN')}{b.commission_pct ? <span className="text-[10px] text-[#9c8e85]"> ({b.commission_pct}%)</span> : null}</td>
+                        <td className="py-2 pr-3 text-right tabular-nums text-emerald-700 font-semibold">₹{Math.round(b.net).toLocaleString('en-IN')}</td>
+                        <td className="py-2 pr-3 text-right whitespace-nowrap">
+                          {b.prepaid === true
+                            ? <span className="inline-block px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 text-[11px] font-semibold border border-blue-200">Prepaid</span>
+                            : <span className="tabular-nums font-bold text-amber-700">₹{Math.round(b.collect_from_guest).toLocaleString('en-IN')}</span>}
+                          {b.prepaid == null && <div className="text-[9px] text-[#b9aa9c]">verify pay type</div>}
+                        </td>
+                        <td className="py-2 pr-3"><span className={cn('text-[11px] font-semibold', String(b.status).toUpperCase() === 'CANCELLED' ? 'text-red-500' : 'text-[#6b5d52]')}>{b.status}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[11px] text-[#9c8e85] italic">“Collect” = amount to take from the guest at the hotel. <b>Prepaid</b> means the OTA already collected it (you receive the net payout from the OTA); a ₹ amount means pay-at-hotel. Cancelled rows are excluded from the totals above.</p>
+            </div>
+          )}
         </div>
       </div>
     </div>

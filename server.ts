@@ -32396,7 +32396,7 @@ ${data.tenant.name}`;
   const _aiosellBookingColDone = new Set<string>();
   async function aiosellEnsureBookingCol(tenantDb: any, restaurantId: string): Promise<void> {
     if (_aiosellBookingColDone.has(restaurantId)) return;
-    try { await tenantDb.exec("ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_ref TEXT"); _aiosellBookingColDone.add(restaurantId); } catch { /* best-effort */ }
+    try { await tenantDb.exec("ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_ref TEXT; ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_prepaid INT"); _aiosellBookingColDone.add(restaurantId); } catch { /* best-effort */ }
   }
 
   // Ingest one Aiosell reservation (book / modify / cancel) into room_bookings.
@@ -32459,14 +32459,16 @@ ${data.tenant.name}`;
     if (planId) { const p: any = await tenantDb.get("SELECT code,name FROM rate_plans WHERE id=?", [planId]).catch(() => null); if (p) planSnap = `${p.code} · ${p.name}`; }
     const notes = [r.specialRequests, `Aiosell ${otaName} · ${bookingId}${r.cmBookingId ? ` / ${r.cmBookingId}` : ''}${r.pah === false ? ' · prepaid' : (r.pah === true ? ' · pay-at-hotel' : '')}`].filter(Boolean).join(' — ');
     const commissionPct = total > 0 ? Math.round((commission / total) * 10000) / 100 : 0;
+    // pah = pay-at-hotel: true → collect at hotel (not prepaid); false → prepaid (OTA collected).
+    const channelPrepaid = r.pah === false ? 1 : (r.pah === true ? 0 : null);
 
     if (action === 'modify' && existingIds.length) {
       const keepId = existingIds[0];
       await tenantDb.run(
         `UPDATE room_bookings SET room_id=?, guest_name=?, guest_phone=?, guest_email=?, num_guests=?,
            check_in_date=?, check_out_date=?, status='BOOKED', room_rate=?, total_amount=?, special_requests=?,
-           commission_pct=?, commission_amount=?, net_amount=?, rate_plan_id=?, rate_plan_snapshot=? WHERE id=?`,
-        [roomId, guestName, r.guest?.phone || null, r.guest?.email || null, numGuests, ci, co, rate, total, notes, commissionPct, commission, net, planId, planSnap, keepId]
+           commission_pct=?, commission_amount=?, net_amount=?, rate_plan_id=?, rate_plan_snapshot=?, channel_prepaid=? WHERE id=?`,
+        [roomId, guestName, r.guest?.phone || null, r.guest?.email || null, numGuests, ci, co, rate, total, notes, commissionPct, commission, net, planId, planSnap, channelPrepaid, keepId]
       ).catch(() => {});
       for (const extra of existingIds.slice(1)) await tenantDb.run("UPDATE room_bookings SET status='CANCELLED' WHERE id=?", [extra]).catch(() => {});
       return { ok: true, status: 200, booking_id: keepId };
@@ -32486,10 +32488,10 @@ ${data.tenant.name}`;
       `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email, num_guests, check_in_date, check_out_date,
           status, booking_source, room_rate, total_amount, special_requests, booking_type,
-          commission_pct, commission_amount, net_amount, rate_plan_id, rate_plan_snapshot, channel_ref)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT', ?, ?, ?, ?, ?, ?)`,
+          commission_pct, commission_amount, net_amount, rate_plan_id, rate_plan_snapshot, channel_ref, channel_prepaid)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT', ?, ?, ?, ?, ?, ?, ?)`,
       [localId, roomId, guestName, r.guest?.phone || null, r.guest?.email || null, numGuests, ci, co,
-       `AIOSELL:${otaName}`, rate, total, notes, commissionPct, commission, net, planId, planSnap, ref]
+       `AIOSELL:${otaName}`, rate, total, notes, commissionPct, commission, net, planId, planSnap, ref, channelPrepaid]
     );
     return { ok: true, status: 200, booking_id: localId };
   }
@@ -32752,7 +32754,98 @@ ${data.tenant.name}`;
       res.status(r.ok ? 200 : 502).json({ success: r.ok, message: r.message });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  void aiosellPushInventoryRestrictions; void aiosellPushRateRestrictions; void aiosellRestrictions; // Phase C (restriction UI)
+  // Room status / restrictions push (stop-sell, min/max stay, CTA/CTD) to chosen
+  // channels. Room-level by default; if rate_plan_code is given, scoped to that
+  // (room, rate plan). Unset restriction keys are sent as null (per the contract).
+  app.post("/api/restaurant/:id/hotel/aiosell/restrictions", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      const cfg = await aiosellCfgForTenant(tenantDb); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Enter the Aiosell credentials for this property first.' });
+      const t = await aiosellTenantConfig(tenantDb); if (!t.hotelCode) return res.status(400).json({ error: 'Hotel code not set.' });
+      const roomCode = String(req.body?.room_code || '').trim();
+      const ratePlanCode = String(req.body?.rate_plan_code || '').trim();
+      const startDate = String(req.body?.startDate || '').trim();
+      const endDate = String(req.body?.endDate || '').trim();
+      if (!roomCode) return res.status(400).json({ error: 'room_code is required.' });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return res.status(400).json({ error: 'startDate and endDate (YYYY-MM-DD) required.' });
+      if (startDate > endDate) return res.status(400).json({ error: 'startDate must be on or before endDate.' });
+      const channels = Array.isArray(req.body?.channels) ? req.body.channels.map((c: any) => String(c).toLowerCase().trim()).filter(Boolean) : [];
+      if (channels.length === 0) return res.status(400).json({ error: 'At least one channel is required.' });
+      const numOrNull = (v: any) => (v == null || v === '' ? null : Number(v));
+      const boolOrNull = (v: any) => (typeof v === 'boolean' ? v : null);
+      const restr = aiosellRestrictions({
+        stopSell: boolOrNull(req.body?.stopSell),
+        minimumStay: numOrNull(req.body?.minimumStay),
+        maximumStay: numOrNull(req.body?.maximumStay),
+        closeOnArrival: boolOrNull(req.body?.closeOnArrival),
+        closeOnDeparture: boolOrNull(req.body?.closeOnDeparture),
+      });
+      const r = ratePlanCode
+        ? await aiosellPushRateRestrictions(cfg, t.hotelCode, channels, [{ startDate, endDate, rates: [{ roomCode, rateplanCode: ratePlanCode, restrictions: restr }] }])
+        : await aiosellPushInventoryRestrictions(cfg, t.hotelCode, channels, [{ startDate, endDate, rooms: [{ roomCode, restrictions: restr }] }]);
+      res.status(r.ok ? 200 : 502).json({ success: r.ok, message: r.message });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // Channel-bookings report: OTA reservations that arrived via Aiosell, with the
+  // source platform, commission, net payout, and how much to collect from the
+  // guest (prepaid → nothing; pay-at-hotel → the amount). Optional date filter on
+  // check-in. Powers the owner-facing "which OTA + what to collect" report.
+  app.get("/api/restaurant/:id/hotel/aiosell/bookings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureBookingCol(tenantDb, req.params.id);
+      const from = String((req.query.from as string) || '').trim();
+      const to = String((req.query.to as string) || '').trim();
+      const params: any[] = [];
+      let where = "booking_source LIKE 'AIOSELL:%'";
+      if (/^\d{4}-\d{2}-\d{2}$/.test(from)) { where += " AND check_in_date >= ?"; params.push(from); }
+      if (/^\d{4}-\d{2}-\d{2}$/.test(to))   { where += " AND check_in_date <= ?"; params.push(to); }
+      const rows: any[] = await tenantDb.query(
+        `SELECT b.id, b.guest_name, b.guest_phone, b.booking_source, b.channel_ref, b.status,
+                b.check_in_date, b.check_out_date, b.total_amount, b.commission_pct, b.commission_amount,
+                b.net_amount, b.channel_prepaid, r.room_number, r.name AS room_name
+           FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE ${where}
+          ORDER BY b.check_in_date DESC, b.id DESC
+          LIMIT 500`, params
+      ).catch(() => []);
+      const bookings = rows.map((b: any) => {
+        const total = Number(b.total_amount || 0);
+        const prepaid = b.channel_prepaid == null ? null : Number(b.channel_prepaid) === 1;
+        // Platform name from "AIOSELL:<Channel>"; OTA booking id from "AIOSELL:<id>".
+        const platform = String(b.booking_source || '').replace(/^AIOSELL:/i, '') || 'OTA';
+        const otaBookingId = String(b.channel_ref || '').replace(/^AIOSELL:/i, '') || null;
+        return {
+          id: b.id, guest_name: b.guest_name, guest_phone: b.guest_phone, status: b.status,
+          platform, ota_booking_id: otaBookingId,
+          room: b.room_number || b.room_name || null,
+          check_in: b.check_in_date, check_out: b.check_out_date,
+          total, commission_pct: Number(b.commission_pct || 0), commission: Number(b.commission_amount || 0),
+          net: Number(b.net_amount || 0),
+          prepaid,                                   // true = OTA collected, false = pay-at-hotel, null = unknown
+          collect_from_guest: prepaid === true ? 0 : total,  // if not prepaid (or unknown), you collect the amount
+        };
+      });
+      // Owner summary across the returned set (exclude cancelled from money totals).
+      const live = bookings.filter((x: any) => String(x.status).toUpperCase() !== 'CANCELLED');
+      const summary = {
+        count: bookings.length,
+        gross: Math.round(live.reduce((s: number, x: any) => s + x.total, 0) * 100) / 100,
+        commission: Math.round(live.reduce((s: number, x: any) => s + x.commission, 0) * 100) / 100,
+        net: Math.round(live.reduce((s: number, x: any) => s + x.net, 0) * 100) / 100,
+        to_collect: Math.round(live.reduce((s: number, x: any) => s + x.collect_from_guest, 0) * 100) / 100,
+        by_platform: Object.values(live.reduce((acc: any, x: any) => {
+          const k = x.platform; (acc[k] ||= { platform: k, count: 0, gross: 0, net: 0 });
+          acc[k].count++; acc[k].gross += x.total; acc[k].net += x.net; return acc;
+        }, {})).map((p: any) => ({ ...p, gross: Math.round(p.gross * 100) / 100, net: Math.round(p.net * 100) / 100 })),
+      };
+      res.json({ summary, bookings });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
 
   // ════════════════════════════════════════════════════════════════════
   // ─── RATE PLANS (Gap 6) ─────────────────────────────────────────────
@@ -48502,8 +48595,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-webhook-authfirst',
+    commit_marker: 'aiosell-status-and-report',
     code_features: [
+      'aiosell-status-and-report',                  // FEATURE (Aiosell Phase C + owner reporting): (1) ROOM STATUS / STOP-SELL — new POST /hotel/aiosell/restrictions endpoint (room-level, or rate-plan-level if rate_plan_code given) wired to aiosellPushInventoryRestrictions/aiosellPushRateRestrictions (validated against the sandbox); new "🚦 Step 5 · Room status & stop-sell" card in the Aiosell panel — pick a mapped room, Open/Stop-sell for a date range, min-stay + CTA/CTD, target channels, one click. Retires the old `void` Phase-C placeholder. (2) CHANNEL BOOKINGS REPORT — answers "which OTA + how much to collect": ingest now stores `room_bookings.channel_prepaid` (from the Aiosell `pah` flag: prepaid=OTA collected, pay-at-hotel=you collect); new GET /hotel/aiosell/bookings returns AIOSELL-sourced bookings with platform (from booking_source AIOSELL:<channel>), OTA booking id, gross/commission/net, and collect_from_guest (= 0 if prepaid, else the amount) + an owner summary (count, gross, commission, net, to-collect, by-platform). New "📊 Step 6 · Channel bookings & collection" card: 5 summary tiles + per-platform chips + a table (platform, guest, room, stay, gross, commission, net, Collect/Prepaid badge, status). Cancelled excluded from money totals. Verified: tsc + vite build clean; restrictions push proven end-to-end on the live sandbox (sample-pms / sandbox-pms).
       'aiosell-webhook-authfirst',                  // HARDENING (follow-up to aiosell-per-tenant-creds): the inbound reservation webhook is now AUTH-FIRST. Because per-tenant creds require resolving the tenant from the body hotelCode before we know which creds to check, the previous cut did the tenant lookup (a DB round-trip) and could return 404 "no property for hotelCode" BEFORE authenticating — leaking hotelCode registration state to anonymous callers and allowing pre-auth DB work (DoS amplification). Now: a missing/malformed Basic header is rejected with 401 before ANY body parse or DB access; a shared env account authenticates without a tenant lookup; the tenant lookup + per-tenant cred check runs only for a well-formed header; and the 404 "no property registered" is returned ONLY after the caller is authenticated. Wrong creds for a registered hotel → 401 (unchanged). Server-only; no schema/UI change.
       'aiosell-per-tenant-creds',                   // FEATURE (multi-tenant fix for aiosell-integration): the Aiosell partner credentials are no longer env-only/restart-required. Each property now stores its OWN Aiosell partner id + username (plaintext) + password (AES-256-GCM encrypted at rest via encryptSecret, on channel_credentials.api_secret) through Channel Manager → 🔌 Aiosell → Step 1. New decryptSecret helper (inverse of the existing encryptSecret; tamper-fails-closed → null; legacy-plaintext passthrough) recovers the password at call time. Resolution order per tenant: this property's stored creds, else the platform AIOSELL_* env vars (so an operator can still set one shared account for everyone). Every /hotel/aiosell/* endpoint + the inbound webhook now build the AiosellConfig via aiosellCfgForTenant(tenantDb) instead of aiosellConfigFromEnv(); the webhook verifies Basic Auth against the RESOLVED tenant's creds (verifyBasicAuthCredentials) with an env fallback. Saving credentials takes effect immediately — NO app restart — and touches only that tenant (other properties unaffected). Two new plaintext cols aiosell_partner_id/aiosell_username added to channel_credentials (shared DDL + lazy aiosellEnsureCredCols for existing tenants). /aiosell/status now returns creds_source (tenant|env|none) + has_password (boolean, never the value); /aiosell/config accepts partner_id/username/password (blank = keep existing, COALESCE upsert) and never echoes the password. UI Step 1 gains Partner ID / Username / Password fields (password shows "•••• (saved)" when set) + a creds-source chip; the old "operator must set env vars and restart" card is gone. Verified: tsc + vite build clean; AES-GCM round-trip unit-checked (colons-in-password, empty, idempotent, legacy, tamper-fails-closed).
       'aiosell-integration',                        // FEATURE: full Aiosell channel-manager integration (apidocs.aiosell.com /api/v2/cm). Atithi-Setu (PMS) is source of truth; we push ARI to Aiosell → OTAs and receive OTA reservations back via a single partner webhook. NEW module aiosellClient.ts (typed client: Basic-Auth, property_details, inventory/rate push, restrictions, marknoshow, /data fetch, channel_multiplier, constant-time inbound Basic-Auth verify). Partner id + credentials are PLATFORM env config (AIOSELL_PARTNER_ID / AIOSELL_USERNAME / AIOSELL_PASSWORD / AIOSELL_BASE_URL — never per-tenant, never entered in the UI); only the per-property hotelCode + code mappings + enable live in the tenant. BACKEND (server.ts): central `aiosell_hotels(hotel_code→restaurant_id)` registry so the single webhook routes to the right tenant; `aiosellIngestReservation` maps an OTA reservation onto room_bookings (book/modify/cancel, idempotent + modify=replace via new `room_bookings.channel_ref="AIOSELL:<bookingId>"`, resolves room via AIOSELL channel_room_mappings exact→type-level pick-first-available, commission/net snapshot, folio JIT at check-in as usual); `aiosellSyncTenant` computes per-date room-type availability + per-(room,rateplan) rates (base_rate × rate-plan discount) and pushes; public webhook POST /api/public/aiosell/reservation[/:restaurantId] (Basic Auth via verifyAiosellBasicAuth); authenticated ops endpoints /hotel/aiosell/{status,config,test,property,push,fetch-reservations,marknoshow,multiplier}. channel-room-mappings POST now also persists rate_plan_id (additive; other channels omit it). FRONTEND (App.tsx): new "🔌 Aiosell" sub-tab in Channel Manager & RMS → best-in-class AiosellPanel — Step 1 connect (hotel code + enable + Test connection + copyable inbound webhook URL + platform-not-configured guidance), Step 2 mapping wizard (Fetch from Aiosell → per-room/rate-plan rows mapped to local room type + optional rate plan, saved-mapping chips w/ delete, N/M mapped counter), Step 3 push ARI (days) + channel multiplier, Step 4 fetch reservations (date range + optional ingest) + report no-show (Booking.com/GoMMT). Sandbox-testable (hotelCode "sandbox-pms", partnerId "sample-pms"). tsc + vite build clean.
