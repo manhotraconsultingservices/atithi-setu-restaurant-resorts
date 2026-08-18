@@ -32396,7 +32396,7 @@ ${data.tenant.name}`;
   const _aiosellBookingColDone = new Set<string>();
   async function aiosellEnsureBookingCol(tenantDb: any, restaurantId: string): Promise<void> {
     if (_aiosellBookingColDone.has(restaurantId)) return;
-    try { await tenantDb.exec("ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_ref TEXT; ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_prepaid INT"); _aiosellBookingColDone.add(restaurantId); } catch { /* best-effort */ }
+    try { await tenantDb.exec("ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_ref TEXT; ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_prepaid INT; ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_tcs DOUBLE PRECISION; ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_tds DOUBLE PRECISION; ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_tax DOUBLE PRECISION"); _aiosellBookingColDone.add(restaurantId); } catch { /* best-effort */ }
   }
 
   // Ingest one Aiosell reservation (book / modify / cancel) into room_bookings.
@@ -32461,14 +32461,20 @@ ${data.tenant.name}`;
     const commissionPct = total > 0 ? Math.round((commission / total) * 10000) / 100 : 0;
     // pah = pay-at-hotel: true → collect at hotel (not prepaid); false → prepaid (OTA collected).
     const channelPrepaid = r.pah === false ? 1 : (r.pah === true ? 0 : null);
+    // India OTA withholdings + tax (from the Aiosell amount block) — captured for the
+    // true-net / payout reconciliation. Null when the feed doesn't carry them.
+    const chTcs = r.amount?.tcs != null ? Number(r.amount.tcs) : null;
+    const chTds = r.amount?.tds != null ? Number(r.amount.tds) : null;
+    const chTax = r.amount?.tax != null ? Number(r.amount.tax) : null;
 
     if (action === 'modify' && existingIds.length) {
       const keepId = existingIds[0];
       await tenantDb.run(
         `UPDATE room_bookings SET room_id=?, guest_name=?, guest_phone=?, guest_email=?, num_guests=?,
            check_in_date=?, check_out_date=?, status='BOOKED', room_rate=?, total_amount=?, special_requests=?,
-           commission_pct=?, commission_amount=?, net_amount=?, rate_plan_id=?, rate_plan_snapshot=?, channel_prepaid=? WHERE id=?`,
-        [roomId, guestName, r.guest?.phone || null, r.guest?.email || null, numGuests, ci, co, rate, total, notes, commissionPct, commission, net, planId, planSnap, channelPrepaid, keepId]
+           commission_pct=?, commission_amount=?, net_amount=?, rate_plan_id=?, rate_plan_snapshot=?, channel_prepaid=?,
+           channel_tcs=?, channel_tds=?, channel_tax=? WHERE id=?`,
+        [roomId, guestName, r.guest?.phone || null, r.guest?.email || null, numGuests, ci, co, rate, total, notes, commissionPct, commission, net, planId, planSnap, channelPrepaid, chTcs, chTds, chTax, keepId]
       ).catch(() => {});
       for (const extra of existingIds.slice(1)) await tenantDb.run("UPDATE room_bookings SET status='CANCELLED' WHERE id=?", [extra]).catch(() => {});
       return { ok: true, status: 200, booking_id: keepId };
@@ -32488,10 +32494,11 @@ ${data.tenant.name}`;
       `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email, num_guests, check_in_date, check_out_date,
           status, booking_source, room_rate, total_amount, special_requests, booking_type,
-          commission_pct, commission_amount, net_amount, rate_plan_id, rate_plan_snapshot, channel_ref, channel_prepaid)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT', ?, ?, ?, ?, ?, ?, ?)`,
+          commission_pct, commission_amount, net_amount, rate_plan_id, rate_plan_snapshot, channel_ref, channel_prepaid,
+          channel_tcs, channel_tds, channel_tax)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [localId, roomId, guestName, r.guest?.phone || null, r.guest?.email || null, numGuests, ci, co,
-       `AIOSELL:${otaName}`, rate, total, notes, commissionPct, commission, net, planId, planSnap, ref, channelPrepaid]
+       `AIOSELL:${otaName}`, rate, total, notes, commissionPct, commission, net, planId, planSnap, ref, channelPrepaid, chTcs, chTds, chTax]
     );
     return { ok: true, status: 200, booking_id: localId };
   }
@@ -32820,7 +32827,7 @@ ${data.tenant.name}`;
       const curAll: any[] = await tenantDb.query(
         `SELECT b.id, b.guest_name, b.guest_phone, b.booking_source, b.channel_ref, b.status,
                 b.check_in_date, b.check_out_date, b.total_amount, b.commission_pct, b.commission_amount,
-                b.net_amount, b.channel_prepaid, r.room_number, r.name AS room_name
+                b.net_amount, b.channel_prepaid, b.channel_tcs, b.channel_tds, b.channel_tax, r.room_number, r.name AS room_name
            FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
           WHERE b.check_in_date >= ? AND b.check_in_date <= ?
           ORDER BY b.check_in_date DESC, b.id DESC LIMIT 2000`, [from, to]
@@ -32835,28 +32842,37 @@ ${data.tenant.name}`;
       const aioCur = curAll.filter((b: any) => isAio(b.booking_source));
       const metrics = (rows: any[]) => {
         const live = rows.filter((b: any) => isLive(b.status));
-        let gross = 0, commission = 0, net = 0, collect = 0, rn = 0;
+        let gross = 0, commission = 0, net = 0, collect = 0, rn = 0, tds = 0, tcs = 0, tax = 0;
         for (const b of live) {
           const total = Number(b.total_amount || 0);
           gross += total; commission += Number(b.commission_amount || 0); net += Number(b.net_amount || 0);
           rn += nights(b.check_in_date, b.check_out_date);
           collect += (b.channel_prepaid != null && Number(b.channel_prepaid) === 1) ? 0 : total;
+          tds += Number(b.channel_tds || 0); tcs += Number(b.channel_tcs || 0); tax += Number(b.channel_tax || 0);
         }
+        const cancelled = rows.length - live.length;
         return { count: live.length, gross: round(gross), commission: round(commission), net: round(net), to_collect: round(collect),
-          room_nights: rn, effective_commission_pct: gross > 0 ? round(commission / gross * 100) : 0, net_adr: rn > 0 ? round(net / rn) : 0 };
+          room_nights: rn, effective_commission_pct: gross > 0 ? round(commission / gross * 100) : 0, net_adr: rn > 0 ? round(net / rn) : 0,
+          tds: round(tds), tcs: round(tcs), tax: round(tax), tax_withheld: round(tds + tcs), true_net: round(net - tds - tcs),
+          bookings_total: rows.length, cancelled, cancellation_rate: rows.length > 0 ? round(cancelled / rows.length * 100) : 0 };
       };
       const cur = metrics(aioCur);
       const prev = metrics(priorAio);
 
-      const byP = Object.values(aioCur.filter((b: any) => isLive(b.status)).reduce((acc: any, b: any) => {
+      const byPacc: any = {};
+      for (const b of aioCur) {
         const k = String(b.booking_source || '').replace(/^AIOSELL:/i, '') || 'OTA';
-        (acc[k] ||= { platform: k, count: 0, gross: 0, commission: 0, net: 0, room_nights: 0 });
+        (byPacc[k] ||= { platform: k, count: 0, cancelled: 0, bookings_total: 0, gross: 0, commission: 0, net: 0, room_nights: 0 });
+        byPacc[k].bookings_total++;
+        if (!isLive(b.status)) { byPacc[k].cancelled++; continue; }
         const total = Number(b.total_amount || 0);
-        acc[k].count++; acc[k].gross += total; acc[k].commission += Number(b.commission_amount || 0);
-        acc[k].net += Number(b.net_amount || 0); acc[k].room_nights += nights(b.check_in_date, b.check_out_date);
-        return acc;
-      }, {})).map((p: any) => ({
-        platform: p.platform, count: p.count, gross: round(p.gross), commission: round(p.commission), net: round(p.net), room_nights: p.room_nights,
+        byPacc[k].count++; byPacc[k].gross += total; byPacc[k].commission += Number(b.commission_amount || 0);
+        byPacc[k].net += Number(b.net_amount || 0); byPacc[k].room_nights += nights(b.check_in_date, b.check_out_date);
+      }
+      const byP = Object.values(byPacc).map((p: any) => ({
+        platform: p.platform, count: p.count, bookings_total: p.bookings_total, cancelled: p.cancelled,
+        cancellation_pct: p.bookings_total > 0 ? round(p.cancelled / p.bookings_total * 100) : 0,
+        gross: round(p.gross), commission: round(p.commission), net: round(p.net), room_nights: p.room_nights,
         commission_pct: p.gross > 0 ? round(p.commission / p.gross * 100) : 0, net_adr: p.room_nights > 0 ? round(p.net / p.room_nights) : 0,
       })).sort((a: any, b: any) => b.net - a.net);
 
@@ -32881,6 +32897,7 @@ ${data.tenant.name}`;
         to_collect: mk(cur.to_collect, prev.to_collect), count: mk(cur.count, prev.count),
         effective_commission_pct: { current: cur.effective_commission_pct, prior: prev.effective_commission_pct, delta: round(cur.effective_commission_pct - prev.effective_commission_pct), pct: null },
         net_adr: mk(cur.net_adr, prev.net_adr),
+        cancellation_rate: { current: cur.cancellation_rate, prior: prev.cancellation_rate, delta: round(cur.cancellation_rate - prev.cancellation_rate), pct: null },
       };
 
       const bookings = aioCur.map((b: any) => {
@@ -32893,6 +32910,8 @@ ${data.tenant.name}`;
           room: b.room_number || b.room_name || null,
           check_in: b.check_in_date, check_out: b.check_out_date, nights: nights(b.check_in_date, b.check_out_date),
           total, commission_pct: Number(b.commission_pct || 0), commission: Number(b.commission_amount || 0), net: Number(b.net_amount || 0),
+          tds: Number(b.channel_tds || 0), tcs: Number(b.channel_tcs || 0), tax: Number(b.channel_tax || 0),
+          true_net: round(Number(b.net_amount || 0) - Number(b.channel_tds || 0) - Number(b.channel_tcs || 0)),
           prepaid, collect_from_guest: prepaid === true ? 0 : total,
         };
       });
@@ -48653,8 +48672,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-report-cockpit',
+    commit_marker: 'aiosell-cockpit-quality-recon',
     code_features: [
+      'aiosell-cockpit-quality-recon',              // FEATURE (BCG-review Phase-2 on the OTA cockpit): (1) CANCELLATION QUALITY — ingest + report now track cancellations; report returns overall cancellation_rate (+ cancelled/bookings_total) with a MoM delta, and per-channel cancellation_pct in the channel-profitability table (>=15% flagged red). Owner can see "which OTA cancels most" — a channel-quality signal. (2) TRUE-NET RECONCILIATION (India leakage, review gap #4) — ingest captures the Aiosell amount block's tcs/tds/tax onto new room_bookings cols channel_tcs/channel_tds/channel_tax; report computes tax_withheld (TDS+TCS) and true_net (net − TDS − TCS) overall + per booking; UI shows an "OTA remits (after TDS/TCS)" chip ONLY when withholdings are present, so it's invisible until the feed carries them. Frontend adds a quality+reconciliation strip under the tiles and a Cancel% column. tsc + vite build clean. (Deferred: ADR/RevPAR/occupancy KPIs, payout expected-vs-received, forward pace, alerts, scheduled digest.)
       'aiosell-report-cockpit',                     // FEATURE (BCG-review quick wins on the Channel Bookings report → OTA profit & cash cockpit): GET /hotel/aiosell/bookings is now PERIOD-BASED (defaults to month-to-date) with a prior equal-length window for MoM deltas. Adds the decision metrics an owner needs: (a) effective commission % and NET ADR overall and per channel; (b) channel profitability table ranked by net (bookings, room-nights, gross, comm%, net, net ADR — cheapest/most-profitable starred, comm≥20% flagged red); (c) OTA-vs-DIRECT channel mix computed across ALL bookings in the window (not just Aiosell) + a dependency flag (high if OTA share ≥60% or single-channel ≥40%) with a "grow direct" nudge; (d) MoM delta pills on every tile (green/red by whether up is good — commission↑=bad, revenue/ADR↑=good); (e) CSV export of the booking lines. Frontend Step 6 rebuilt into tiles (gross/commission+eff%/net/net-ADR/to-collect) + mix bar + profitability table + detail table, all period-scoped. Response now returns {period, summary(+by_platform enriched, effective_commission_pct, net_adr, room_nights), deltas, channel_mix, bookings}. Verified: tsc + vite build clean.
       'aiosell-status-and-report',                  // FEATURE (Aiosell Phase C + owner reporting): (1) ROOM STATUS / STOP-SELL — new POST /hotel/aiosell/restrictions endpoint (room-level, or rate-plan-level if rate_plan_code given) wired to aiosellPushInventoryRestrictions/aiosellPushRateRestrictions (validated against the sandbox); new "🚦 Step 5 · Room status & stop-sell" card in the Aiosell panel — pick a mapped room, Open/Stop-sell for a date range, min-stay + CTA/CTD, target channels, one click. Retires the old `void` Phase-C placeholder. (2) CHANNEL BOOKINGS REPORT — answers "which OTA + how much to collect": ingest now stores `room_bookings.channel_prepaid` (from the Aiosell `pah` flag: prepaid=OTA collected, pay-at-hotel=you collect); new GET /hotel/aiosell/bookings returns AIOSELL-sourced bookings with platform (from booking_source AIOSELL:<channel>), OTA booking id, gross/commission/net, and collect_from_guest (= 0 if prepaid, else the amount) + an owner summary (count, gross, commission, net, to-collect, by-platform). New "📊 Step 6 · Channel bookings & collection" card: 5 summary tiles + per-platform chips + a table (platform, guest, room, stay, gross, commission, net, Collect/Prepaid badge, status). Cancelled excluded from money totals. Verified: tsc + vite build clean; restrictions push proven end-to-end on the live sandbox (sample-pms / sandbox-pms).
       'aiosell-webhook-authfirst',                  // HARDENING (follow-up to aiosell-per-tenant-creds): the inbound reservation webhook is now AUTH-FIRST. Because per-tenant creds require resolving the tenant from the body hotelCode before we know which creds to check, the previous cut did the tenant lookup (a DB round-trip) and could return 404 "no property for hotelCode" BEFORE authenticating — leaking hotelCode registration state to anonymous callers and allowing pre-auth DB work (DoS amplification). Now: a missing/malformed Basic header is rejected with 401 before ANY body parse or DB access; a shared env account authenticates without a tenant lookup; the tenant lookup + per-tenant cred check runs only for a well-formed header; and the 404 "no property registered" is returned ONLY after the caller is authenticated. Wrong creds for a registered hotel → 401 (unchanged). Server-only; no schema/UI change.

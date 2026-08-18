@@ -60479,6 +60479,23 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                 </div>
               </div>
 
+              {/* ── quality (cancellations) + reconciliation (true net after TDS/TCS) ── */}
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="inline-flex items-center gap-2 bg-white border border-[#e8dccf] rounded-xl px-3 py-2">
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Cancellation rate</span>
+                  <span className={cn('text-sm font-bold', rpData.summary.cancellation_rate >= 20 ? 'text-red-600' : 'text-[#1a1208]')}>{rpData.summary.cancellation_rate}%</span>
+                  <span className="text-[11px] text-[#9c8e85]">({rpData.summary.cancelled}/{rpData.summary.bookings_total})</span>
+                  {renderDelta(rpData.deltas?.cancellation_rate, 'down')}
+                </div>
+                {rpData.summary.tax_withheld > 0 && (
+                  <div className="inline-flex items-center gap-2 bg-white border border-[#e8dccf] rounded-xl px-3 py-2">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">OTA remits (after TDS/TCS)</span>
+                    <span className="text-sm font-bold text-emerald-700 tabular-nums">₹{Math.round(rpData.summary.true_net).toLocaleString('en-IN')}</span>
+                    <span className="text-[11px] text-[#9c8e85]">TDS ₹{Math.round(rpData.summary.tds).toLocaleString('en-IN')} · TCS ₹{Math.round(rpData.summary.tcs).toLocaleString('en-IN')}</span>
+                  </div>
+                )}
+              </div>
+
               {/* ── channel mix + dependency ── */}
               {rpData.channel_mix && rpData.channel_mix.total_gross > 0 && (() => {
                 const m = rpData.channel_mix;
@@ -60518,6 +60535,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                           <th className="py-2 pr-3 text-right">Comm %</th>
                           <th className="py-2 pr-3 text-right">Net</th>
                           <th className="py-2 pr-3 text-right">Net ADR</th>
+                          <th className="py-2 pr-3 text-right">Cancel %</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -60530,6 +60548,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                             <td className={cn('py-2 pr-3 text-right tabular-nums font-semibold', p.commission_pct >= 20 ? 'text-red-600' : 'text-[#6b5d52]')}>{p.commission_pct}%</td>
                             <td className="py-2 pr-3 text-right tabular-nums text-emerald-700 font-semibold">₹{Math.round(p.net).toLocaleString('en-IN')}</td>
                             <td className="py-2 pr-3 text-right tabular-nums">₹{Math.round(p.net_adr).toLocaleString('en-IN')}</td>
+                            <td className={cn('py-2 pr-3 text-right tabular-nums', p.cancellation_pct >= 15 ? 'text-red-600 font-semibold' : 'text-[#6b5d52]')}>{p.cancellation_pct}%</td>
                           </tr>
                         ))}
                       </tbody>
