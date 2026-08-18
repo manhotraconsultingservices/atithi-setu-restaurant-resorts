@@ -10982,7 +10982,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
 
   // Aiosell-style Rates & Inventory tab — active CM sub-tab + rate grid data.
-  const [activeCmTab, setActiveCmTab] = useState<'rates'|'rooms'|'bulk'|'live'|'mappings'>('rates');
+  const [activeCmTab, setActiveCmTab] = useState<'rates'|'rooms'|'bulk'|'live'|'mappings'|'aiosell'>('rates');
   const [rateGrid, setRateGrid] = useState<{ dates: string[]; meta: Record<string,any>; room_types: any[] } | null>(null);
   const [rateGridLoading, setRateGridLoading] = useState(false);
   const [rateGridDirty, setRateGridDirty] = useState<Record<string,Record<string,number>>>({}); // {roomTypeId: {date: rate}}
@@ -24063,6 +24063,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'bulk',     label: 'Bulk Update' },
               { id: 'live',     label: 'Live Bookings' },
               { id: 'mappings', label: 'Mappings' },
+              { id: 'aiosell',  label: '🔌 Aiosell' },
             ] as const).map(t => (
               <button
                 key={t.id}
@@ -24631,6 +24632,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               (credentials, iCal, webhook, sync queue, rate plans,
               yield rules, IP allowlist, reconciliation, partner logins)
               ══════════════════════════════════════════════════════════ */}
+          {activeCmTab === 'aiosell' && (
+            <AiosellPanel restaurantId={restaurantId} token={token!} />
+          )}
+
           {activeCmTab === 'mappings' && (<div className="space-y-5">
 
           {/* ── HOW IT WORKS — 3-step explainer ────────────────────────
@@ -59763,6 +59768,489 @@ function PartnerPortal({ restaurantId, token, restaurantName }: { restaurantId: 
       <p className="text-[11px] text-[#9c8e85] text-center pb-4 flex items-center justify-center gap-1">
         <Info size={12} /> All prices include your {commissionPct}% {partnerType === 'OTA' ? 'commission (grossed-up)' : 'markup'}. Rates &amp; availability are live and may change. Read-only view — to confirm a booking, contact the property.
       </p>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// AiosellPanel — PMS ↔ Aiosell channel-manager integration console
+// ════════════════════════════════════════════════════════════════════
+// Atithi-Setu is the source of truth for rates/inventory; we push ARI to
+// Aiosell (which fans out to the OTAs) and receive OTA reservations back
+// via the inbound webhook. Partner credentials + the {pms} id are PLATFORM
+// config (env vars, set by the operator) — here the property owner only
+// wires the hotel code, maps room/rate-plan codes, and drives sync.
+function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: string; }) {
+  const toast = useToast();
+  const showConfirm = useConfirm();
+  const [status, setStatus] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+
+  // Connection form
+  const [hotelCode, setHotelCode] = useState('');
+  const [enabled, setEnabled] = useState(false);
+  const [savingCfg, setSavingCfg] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<any>(null);
+
+  // Mapping wizard
+  const [property, setProperty] = useState<any>(null);
+  const [loadingProp, setLoadingProp] = useState(false);
+  const [roomTypes, setRoomTypes] = useState<any[]>([]);
+  const [ratePlans, setRatePlans] = useState<any[]>([]);
+  const [mappings, setMappings] = useState<any[]>([]);
+  const [mapDraft, setMapDraft] = useState<Record<string, { rt: string; rp: string }>>({});
+  const [savingMap, setSavingMap] = useState<string>('');
+
+  // Ops
+  const [pushDays, setPushDays] = useState('90');
+  const [pushing, setPushing] = useState(false);
+  const [pushResult, setPushResult] = useState<any>(null);
+  const [mult, setMult] = useState('1.0');
+  const [multChannels, setMultChannels] = useState<string>('booking.com,gommt');
+  const [fetchFrom, setFetchFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [fetchTo, setFetchTo] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
+  const [fetchIngest, setFetchIngest] = useState(true);
+  const [fetchResult, setFetchResult] = useState<any>(null);
+  const [fetching, setFetching] = useState(false);
+  const [noShowId, setNoShowId] = useState('');
+  const [noShowCh, setNoShowCh] = useState('booking.com');
+  const [busyOp, setBusyOp] = useState('');
+
+  const api = useCallback(async (path: string, init?: RequestInit) => {
+    const res = await fetch(`/api/restaurant/${restaurantId}/hotel${path}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init?.headers || {}) },
+      credentials: 'include',
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || j.message || `Request failed (${res.status})`);
+    return j;
+  }, [restaurantId, token]);
+
+  const loadStatus = useCallback(async () => {
+    setLoading(true); setErr('');
+    try {
+      const s = await api('/aiosell/status');
+      setStatus(s);
+      setHotelCode(s.hotel_code || '');
+      setEnabled(!!s.enabled);
+    } catch (e: any) { setErr(e.message || 'Failed to load Aiosell status.'); }
+    finally { setLoading(false); }
+  }, [api]);
+
+  useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  const AIOSELL = 'AIOSELL';
+  const aiosellMaps = useCallback((all: any[]) => all.filter((m: any) => String(m.channel).toUpperCase() === AIOSELL), []);
+
+  const loadMappingData = useCallback(async () => {
+    try {
+      const [rt, rp, mp] = await Promise.all([
+        api('/room-types').catch(() => []),
+        api('/rate-plans').catch(() => []),
+        api('/channel-room-mappings').catch(() => []),
+      ]);
+      setRoomTypes(Array.isArray(rt) ? rt : []);
+      setRatePlans(Array.isArray(rp) ? rp : []);
+      setMappings(aiosellMaps(Array.isArray(mp) ? mp : []));
+    } catch { /* non-fatal */ }
+  }, [api, aiosellMaps]);
+
+  const fetchProperty = useCallback(async () => {
+    setLoadingProp(true); setErr('');
+    try {
+      const [p] = await Promise.all([api(`/aiosell/property${hotelCode ? `?hotel_code=${encodeURIComponent(hotelCode)}` : ''}`), loadMappingData()]);
+      setProperty(p);
+    } catch (e: any) { setErr(e.message || 'Failed to fetch property from Aiosell.'); }
+    finally { setLoadingProp(false); }
+  }, [api, hotelCode, loadMappingData]);
+
+  // Seed the mapping draft from existing saved mappings whenever property/mappings change.
+  useEffect(() => {
+    if (!property?.rooms) return;
+    const draft: Record<string, { rt: string; rp: string }> = {};
+    for (const room of property.rooms) {
+      for (const rpn of (room.rateplans || [])) {
+        const key = `${room.room_id}|${rpn.rateplan_id}`;
+        const existing = mappings.find((m: any) => m.external_room_code === room.room_id && (m.external_rate_plan_code || '') === rpn.rateplan_id);
+        draft[key] = { rt: existing?.local_room_type_id || '', rp: existing?.rate_plan_id || '' };
+      }
+    }
+    setMapDraft(draft);
+  }, [property, mappings]);
+
+  const saveConfig = async () => {
+    if (!hotelCode.trim()) { setErr('Enter the Aiosell hotel code first.'); return; }
+    setSavingCfg(true); setErr('');
+    try {
+      await api('/aiosell/config', { method: 'POST', body: JSON.stringify({ hotel_code: hotelCode.trim(), is_enabled: enabled }) });
+      toast.success('Aiosell connection saved.');
+      await loadStatus();
+    } catch (e: any) { setErr(e.message || 'Failed to save.'); }
+    finally { setSavingCfg(false); }
+  };
+
+  const testConnection = async () => {
+    setTesting(true); setErr(''); setTestResult(null);
+    try {
+      const r = await api('/aiosell/test', { method: 'POST', body: JSON.stringify({ hotel_code: hotelCode.trim() || undefined }) });
+      setTestResult(r);
+      if (r.ok) toast.success(`Connected to "${r.hotel_name}" (${r.rooms} room types).`);
+      else toast.error(r.error || 'Connection test failed.');
+    } catch (e: any) { setErr(e.message || 'Test failed.'); }
+    finally { setTesting(false); }
+  };
+
+  const saveMapping = async (room: any, rpn: any) => {
+    const key = `${room.room_id}|${rpn.rateplan_id}`;
+    const d = mapDraft[key];
+    if (!d?.rt) { setErr('Pick a local room type for this rate plan.'); return; }
+    setSavingMap(key); setErr('');
+    try {
+      await api('/channel-room-mappings', { method: 'POST', body: JSON.stringify({
+        channel: AIOSELL,
+        external_room_code: room.room_id,
+        external_rate_plan_code: rpn.rateplan_id,
+        local_room_type_id: d.rt,
+        rate_plan_id: d.rp || null,
+        label: `${room.room_name} · ${rpn.rateplan_name} (Aiosell)`,
+        is_active: 1,
+      }) });
+      toast.success('Mapping saved.');
+      await loadMappingData();
+      await loadStatus();
+    } catch (e: any) { setErr(e.message || 'Failed to save mapping.'); }
+    finally { setSavingMap(''); }
+  };
+
+  const deleteMapping = async (m: any) => {
+    if (!await showConfirm({ title: 'Remove this mapping?', body: `${m.external_room_code}${m.external_rate_plan_code ? ` / ${m.external_rate_plan_code}` : ''} → ${m.local_room_type_name || m.local_room_type_id}` })) return;
+    try { await api(`/channel-room-mappings/${m.id}`, { method: 'DELETE' }); await loadMappingData(); await loadStatus(); }
+    catch (e: any) { setErr(e.message || 'Failed to remove.'); }
+  };
+
+  const pushARI = async () => {
+    setPushing(true); setErr(''); setPushResult(null);
+    try {
+      const r = await api('/aiosell/push', { method: 'POST', body: JSON.stringify({ days: Number(pushDays) || 90 }) });
+      setPushResult(r);
+      toast.success(`Pushed ${pushDays} days of inventory + rates to Aiosell.`);
+      await loadStatus();
+    } catch (e: any) { setErr(e.message || 'Push failed.'); toast.error(e.message || 'Push failed.'); }
+    finally { setPushing(false); }
+  };
+
+  const applyMultiplier = async () => {
+    const channels = multChannels.split(',').map(s => s.trim()).filter(Boolean);
+    if (!(Number(mult) > 0) || channels.length === 0) { setErr('Enter a multiplier > 0 and at least one channel.'); return; }
+    setBusyOp('mult'); setErr('');
+    try {
+      const r = await api('/aiosell/multiplier', { method: 'POST', body: JSON.stringify({ multiplier: Number(mult), channels }) });
+      toast.success(r.message || `Multiplier ${mult}× applied.`);
+    } catch (e: any) { setErr(e.message || 'Failed to apply multiplier.'); }
+    finally { setBusyOp(''); }
+  };
+
+  const fetchReservations = async () => {
+    setFetching(true); setErr(''); setFetchResult(null);
+    try {
+      const r = await api('/aiosell/fetch-reservations', { method: 'POST', body: JSON.stringify({ startDate: fetchFrom, endDate: fetchTo, ingest: fetchIngest }) });
+      setFetchResult(r);
+      toast.success(`Fetched ${r.count} reservation(s)${fetchIngest ? `, imported ${r.ingested}` : ''}.`);
+    } catch (e: any) { setErr(e.message || 'Fetch failed.'); }
+    finally { setFetching(false); }
+  };
+
+  const markNoShow = async () => {
+    if (!noShowId.trim()) { setErr('Enter the OTA booking id to mark no-show.'); return; }
+    setBusyOp('noshow'); setErr('');
+    try {
+      const r = await api('/aiosell/marknoshow', { method: 'POST', body: JSON.stringify({ bookingId: noShowId.trim(), channel: noShowCh }) });
+      toast.success(r.message || 'No-show reported to Aiosell.');
+      setNoShowId('');
+    } catch (e: any) { setErr(e.message || 'Failed to mark no-show.'); }
+    finally { setBusyOp(''); }
+  };
+
+  const copyWebhook = () => {
+    if (status?.webhook_url) { navigator.clipboard?.writeText(status.webhook_url).then(() => toast.success('Webhook URL copied.'), () => {}); }
+  };
+
+  const platformReady = !!status?.platform_configured;
+  const mappedCount = mappings.filter((m: any) => m.local_room_type_id).length;
+  const totalPairs = (property?.rooms || []).reduce((s: number, r: any) => s + (r.rateplans || []).length, 0);
+
+  const fieldCls = 'border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30';
+
+  if (loading) return <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] p-8 text-center text-[#9c8e85]">Loading Aiosell integration…</div>;
+
+  return (
+    <div className="space-y-5">
+      {/* ── HEADER ── */}
+      <div className="bg-gradient-to-br from-[#1a1208] to-[#3a2a18] text-white rounded-[32px] p-6 sm:p-8 shadow-sm">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-amber-300/90">Channel Manager Integration</p>
+            <h3 className="text-2xl sm:text-3xl font-bold font-serif mt-1 flex items-center gap-2">🔌 Aiosell</h3>
+            <p className="text-sm text-white/70 mt-2 max-w-2xl">
+              Your PMS is the single source of truth. Push live rates &amp; availability to Aiosell — it distributes to Booking.com, MakeMyTrip, Goibibo, Agoda and more — and OTA bookings flow straight back into your calendar.
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <span className={cn('px-3 py-1.5 rounded-full text-xs font-bold', enabled && platformReady ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30' : 'bg-white/10 text-white/70 border border-white/20')}>
+              {enabled && platformReady ? '● Live' : platformReady ? '○ Configured, off' : '○ Not connected'}
+            </span>
+            {status?.last_synced && <span className="text-[11px] text-white/50">Last sync {new Date(status.last_synced).toLocaleString()}</span>}
+          </div>
+        </div>
+      </div>
+
+      {err && <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2.5 text-sm flex items-center gap-2"><AlertCircle size={15} /> {err}</div>}
+
+      {/* ── PLATFORM STATUS ── */}
+      {!platformReady && (
+        <div className="bg-amber-50 border-2 border-amber-200 rounded-[24px] p-5">
+          <p className="text-sm font-bold text-amber-900 flex items-center gap-2"><AlertCircle size={16} /> Aiosell platform credentials not configured</p>
+          <p className="text-[13px] text-amber-800 mt-2">
+            Your system operator must set the partner credentials on the server before this property can connect. Set these environment variables and restart:
+          </p>
+          <div className="mt-3 bg-white/70 rounded-xl p-3 font-mono text-[12px] text-amber-900 space-y-0.5 border border-amber-200">
+            <div>AIOSELL_PARTNER_ID=<span className="text-amber-600">sample-pms</span></div>
+            <div>AIOSELL_USERNAME=<span className="text-amber-600">&lt;partner user&gt;</span></div>
+            <div>AIOSELL_PASSWORD=<span className="text-amber-600">&lt;partner pass&gt;</span></div>
+            <div className="text-amber-500"># optional — defaults to live.aiosell.com</div>
+            <div>AIOSELL_BASE_URL=<span className="text-amber-600">https://live.aiosell.com/api/v2/cm</span></div>
+          </div>
+          <p className="text-[11px] text-amber-700 mt-2">These are shared across all properties and are never entered here for security.</p>
+        </div>
+      )}
+
+      {/* ── STEP 1 · CONNECTION ── */}
+      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+        <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
+          <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2"><Globe size={17} /> Step 1 · Connect your property</h4>
+          <p className="text-xs text-[#6b5d52] mt-0.5">Enter the hotel code Aiosell assigned you, then test the link.</p>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-4 items-end">
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Aiosell Hotel Code</label>
+              <input value={hotelCode} onChange={e => setHotelCode(e.target.value)} placeholder="e.g. sandbox-pms" className={cn(fieldCls, 'w-full')} />
+              {status?.partner_id && <p className="text-[11px] text-[#9c8e85] mt-1">Partner id <span className="font-mono text-[#6b5d52]">{status.partner_id}</span> · {status.base_url}</p>}
+            </div>
+            <label className="flex items-center gap-2 text-sm font-semibold text-[#1a1208] pb-2 cursor-pointer">
+              <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} className="w-4 h-4 accent-[#cc5a16]" />
+              Enable sync
+            </label>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={saveConfig} disabled={savingCfg} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50 transition-colors">
+              {savingCfg ? 'Saving…' : 'Save connection'}
+            </button>
+            <button onClick={testConnection} disabled={testing || !platformReady} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-[#1a1208] text-sm font-bold hover:bg-[#f5f0ea] disabled:opacity-50 transition-colors">
+              {testing ? 'Testing…' : 'Test connection'}
+            </button>
+          </div>
+          {testResult && (
+            <div className={cn('rounded-xl px-4 py-3 text-sm border', testResult.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-700')}>
+              {testResult.ok
+                ? <span className="flex items-center gap-2"><CheckCircle2 size={15} /> Connected to <b>{testResult.hotel_name}</b> — {testResult.rooms} room type(s), {testResult.currency}.</span>
+                : <span className="flex items-center gap-2"><AlertCircle size={15} /> {testResult.error}</span>}
+            </div>
+          )}
+          {/* Webhook URL for inbound OTA bookings */}
+          <div className="bg-[#f5f0ea] rounded-xl p-3">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Inbound reservation webhook</p>
+            <p className="text-[12px] text-[#6b5d52] mb-2">Give this URL to Aiosell so OTA bookings post back into your PMS (Basic Auth, partner credentials).</p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 bg-white border border-[#e8e0d8] rounded-lg px-3 py-2 text-[12px] text-[#1a1208] font-mono truncate">{status?.webhook_url || '—'}</code>
+              <button onClick={copyWebhook} className="px-3 py-2 rounded-lg border border-[#e8e0d8] text-xs font-bold hover:bg-white transition-colors shrink-0">Copy</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── STEP 2 · MAPPING WIZARD ── */}
+      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+        <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da] flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">🧩 Step 2 · Map rooms &amp; rate plans</h4>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Match each Aiosell room + rate plan to one of your local room types. Bookings and rate pushes use these links.</p>
+          </div>
+          <button onClick={fetchProperty} disabled={loadingProp || !platformReady} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors shrink-0">
+            {loadingProp ? 'Fetching…' : property ? '↻ Refresh from Aiosell' : 'Fetch from Aiosell'}
+          </button>
+        </div>
+        <div className="p-5">
+          {!property ? (
+            <p className="text-sm text-[#9c8e85] italic">Click <b>Fetch from Aiosell</b> to load your room &amp; rate-plan codes, then map each to a local room type.</p>
+          ) : (
+            <div className="space-y-5">
+              <div className="flex items-center gap-2 text-[12px] text-[#6b5d52]">
+                <span className="px-2.5 py-1 rounded-full bg-[#f5f0ea] font-semibold">{property.hotel_name}</span>
+                <span className={cn('px-2.5 py-1 rounded-full font-semibold', mappedCount >= totalPairs && totalPairs > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700')}>
+                  {mappings.length} / {totalPairs} pairs mapped
+                </span>
+              </div>
+              {(property.rooms || []).map((room: any) => (
+                <div key={room.room_id} className="border border-[#efe6da] rounded-2xl overflow-hidden">
+                  <div className="px-4 py-2.5 bg-[#faf7f2] flex items-center justify-between gap-2">
+                    <span className="text-sm font-bold text-[#1a1208]">{room.room_name} <span className="text-[#9c8e85] font-mono text-[11px]">({room.room_id})</span></span>
+                    <span className="text-[11px] text-[#9c8e85]">{room.count != null ? `${room.count} rooms` : ''}{room.max_occ ? ` · max ${room.max_occ}` : ''}</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] border-b border-[#f0e8de]">
+                          <th className="py-2 px-3">Aiosell rate plan</th>
+                          <th className="py-2 px-3">→ Local room type</th>
+                          <th className="py-2 px-3">Local rate plan (optional)</th>
+                          <th className="py-2 px-3 text-right">Save</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(room.rateplans || []).map((rpn: any) => {
+                          const key = `${room.room_id}|${rpn.rateplan_id}`;
+                          const d = mapDraft[key] || { rt: '', rp: '' };
+                          const saved = mappings.find((m: any) => m.external_room_code === room.room_id && (m.external_rate_plan_code || '') === rpn.rateplan_id);
+                          return (
+                            <tr key={key} className="border-b border-[#f7f2ec] last:border-0">
+                              <td className="py-2 px-3">
+                                <div className="font-semibold text-[#1a1208]">{rpn.rateplan_name}</div>
+                                <div className="text-[11px] text-[#9c8e85] font-mono">{rpn.rateplan_id}{rpn.occupancy ? ` · occ ${rpn.occupancy}` : ''}</div>
+                              </td>
+                              <td className="py-2 px-3">
+                                <select value={d.rt} onChange={e => setMapDraft(p => ({ ...p, [key]: { ...d, rt: e.target.value } }))} className={cn(fieldCls, 'w-full min-w-[150px]')}>
+                                  <option value="">— unmapped —</option>
+                                  {roomTypes.map((rt: any) => <option key={rt.id} value={rt.id}>{rt.name}</option>)}
+                                </select>
+                              </td>
+                              <td className="py-2 px-3">
+                                <select value={d.rp} onChange={e => setMapDraft(p => ({ ...p, [key]: { ...d, rp: e.target.value } }))} className={cn(fieldCls, 'w-full min-w-[140px]')}>
+                                  <option value="">Base rate</option>
+                                  {ratePlans.map((rp: any) => <option key={rp.id} value={rp.id}>{rp.name}{rp.discount_pct ? ` (−${rp.discount_pct}%)` : ''}</option>)}
+                                </select>
+                              </td>
+                              <td className="py-2 px-3 text-right whitespace-nowrap">
+                                {saved && <CheckCircle2 size={15} className="inline text-emerald-600 mr-2" />}
+                                <button onClick={() => saveMapping(room, rpn)} disabled={savingMap === key || !d.rt}
+                                  className="px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] disabled:opacity-40 transition-colors">
+                                  {savingMap === key ? '…' : saved ? 'Update' : 'Map'}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
+              {mappings.length > 0 && (
+                <div className="pt-2">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Saved mappings</p>
+                  <div className="flex flex-wrap gap-2">
+                    {mappings.map((m: any) => (
+                      <span key={m.id} className="inline-flex items-center gap-2 bg-[#f5f0ea] rounded-full pl-3 pr-1.5 py-1 text-[12px] text-[#1a1208]">
+                        <span className="font-mono text-[11px]">{m.external_room_code}{m.external_rate_plan_code ? `/${m.external_rate_plan_code}` : ''}</span>
+                        <span className="text-[#9c8e85]">→</span>
+                        <span className="font-semibold">{m.local_room_type_name || m.local_room_type_id || '—'}</span>
+                        <button onClick={() => deleteMapping(m)} className="p-1 rounded-full hover:bg-red-100 text-red-500"><Trash2 size={12} /></button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── STEP 3 · SYNC & DISTRIBUTION ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+          <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
+            <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">📤 Step 3 · Push rates &amp; availability</h4>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Send inventory + rates for the next N days to Aiosell → all OTAs.</p>
+          </div>
+          <div className="p-5 space-y-3">
+            <div className="flex items-end gap-2">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Days ahead</label>
+                <input type="number" min={1} max={365} value={pushDays} onChange={e => setPushDays(e.target.value)} className={cn(fieldCls, 'w-24')} />
+              </div>
+              <button onClick={pushARI} disabled={pushing || !enabled || mappings.length === 0}
+                className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50 transition-colors">
+                {pushing ? 'Pushing…' : 'Push now'}
+              </button>
+            </div>
+            {mappings.length === 0 && <p className="text-[11px] text-amber-700">Map at least one room before pushing.</p>}
+            {!enabled && <p className="text-[11px] text-amber-700">Enable sync in Step 1 to push.</p>}
+            {pushResult && (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2 text-[12px] text-emerald-800">
+                Inventory: {pushResult.inventory} · Rates: {pushResult.rates} · {pushResult.pushed_types} room type(s), {pushResult.days} days.
+              </div>
+            )}
+            <div className="border-t border-[#f0e8de] pt-3">
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Channel rate multiplier</label>
+              <p className="text-[11px] text-[#9c8e85] mb-2">Scale rates for specific channels (e.g. 1.10 = +10% on Booking.com).</p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input type="number" step="0.01" min="0.1" value={mult} onChange={e => setMult(e.target.value)} className={cn(fieldCls, 'w-24')} />
+                <input value={multChannels} onChange={e => setMultChannels(e.target.value)} placeholder="booking.com,gommt" className={cn(fieldCls, 'flex-1 min-w-[140px]')} />
+                <button onClick={applyMultiplier} disabled={busyOp === 'mult' || !enabled} className="px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold hover:bg-[#f5f0ea] disabled:opacity-50 transition-colors">
+                  {busyOp === 'mult' ? '…' : 'Apply'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── STEP 4 · RESERVATIONS & OPS ── */}
+        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+          <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
+            <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">📥 Step 4 · Reservations &amp; ops</h4>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Bookings arrive automatically via webhook. Pull on demand or report a no-show.</p>
+          </div>
+          <div className="p-5 space-y-3">
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Fetch reservations</label>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input type="date" value={fetchFrom} onChange={e => setFetchFrom(e.target.value)} className={fieldCls} />
+                <span className="text-[#9c8e85]">→</span>
+                <input type="date" value={fetchTo} onChange={e => setFetchTo(e.target.value)} className={fieldCls} />
+              </div>
+              <label className="flex items-center gap-2 text-[12px] text-[#6b5d52] mt-2 cursor-pointer">
+                <input type="checkbox" checked={fetchIngest} onChange={e => setFetchIngest(e.target.checked)} className="w-3.5 h-3.5 accent-[#cc5a16]" />
+                Import fetched bookings into the calendar
+              </label>
+              <button onClick={fetchReservations} disabled={fetching || !enabled} className="mt-2 px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors">
+                {fetching ? 'Fetching…' : 'Fetch now'}
+              </button>
+              {fetchResult && (
+                <div className="mt-2 bg-[#f5f0ea] rounded-xl px-3 py-2 text-[12px] text-[#6b5d52]">
+                  {fetchResult.count} reservation(s) found{fetchIngest ? `, ${fetchResult.ingested} imported` : ' (not imported)'}.
+                </div>
+              )}
+            </div>
+            <div className="border-t border-[#f0e8de] pt-3">
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Report a no-show</label>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input value={noShowId} onChange={e => setNoShowId(e.target.value)} placeholder="OTA booking id" className={cn(fieldCls, 'flex-1 min-w-[130px]')} />
+                <select value={noShowCh} onChange={e => setNoShowCh(e.target.value)} className={fieldCls}>
+                  <option value="booking.com">Booking.com</option>
+                  <option value="gommt">GoMMT (MMT/Goibibo)</option>
+                </select>
+                <button onClick={markNoShow} disabled={busyOp === 'noshow' || !enabled} className="px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold hover:bg-[#f5f0ea] disabled:opacity-50 transition-colors">
+                  {busyOp === 'noshow' ? '…' : 'Report'}
+                </button>
+              </div>
+              <p className="text-[11px] text-[#9c8e85] mt-1">Only Booking.com and GoMMT support automated no-show reporting.</p>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

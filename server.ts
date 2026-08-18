@@ -54,6 +54,13 @@ import {
 } from "./offerLetterService.ts";
 import { provisionTenantSubdomain, deprovisionTenantSubdomain, cloudflareIsConfigured } from "./cloudflareService.ts";
 import { downloadFromDrive } from "./googleDriveService.ts";
+import {
+  aiosellConfigFromEnv, aiosellConfigured, verifyAiosellBasicAuth,
+  aiosellGetProperty, aiosellPushInventory, aiosellPushRates,
+  aiosellPushInventoryRestrictions, aiosellPushRateRestrictions, aiosellRestrictions,
+  aiosellMarkNoShow, aiosellFetchData, aiosellChannelMultiplier,
+  type AiosellReservation, type AiosellInventoryUpdate, type AiosellRateUpdate,
+} from "./aiosellClient.ts";
 import multer from "multer";
 import cron from "node-cron";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
@@ -32256,18 +32263,19 @@ ${data.tenant.name}`;
       const id = b.id || `CRM-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
       await tenantDb.run(
         `INSERT INTO channel_room_mappings
-           (id, channel, external_room_code, external_rate_plan_code, local_room_id, local_room_type_id, label, is_active, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, channel, external_room_code, external_rate_plan_code, local_room_id, local_room_type_id, rate_plan_id, label, is_active, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (channel, external_room_code, COALESCE(external_rate_plan_code, ''))
          DO UPDATE SET
            local_room_id = EXCLUDED.local_room_id,
            local_room_type_id = EXCLUDED.local_room_type_id,
+           rate_plan_id = EXCLUDED.rate_plan_id,
            label = EXCLUDED.label,
            is_active = EXCLUDED.is_active,
            notes = EXCLUDED.notes,
            updated_at = CURRENT_TIMESTAMP`,
         [id, channel, code, b.external_rate_plan_code || null,
-         b.local_room_id || null, b.local_room_type_id || null,
+         b.local_room_id || null, b.local_room_type_id || null, b.rate_plan_id || null,
          b.label || null, b.is_active === 0 ? 0 : 1, b.notes || null]
       );
       const saved: any = await tenantDb.get(
@@ -32293,6 +32301,357 @@ ${data.tenant.name}`;
       res.status(500).json({ error: err?.message || 'Failed to delete mapping' });
     }
   });
+
+  // ════════════════════════════════════════════════════════════════════
+  // ─── AIOSELL CHANNEL MANAGER (apidocs.aiosell.com /api/v2/cm) ────────
+  // Atithi-Setu (PMS, source of truth) ↔ Aiosell (CM) ↔ OTAs.
+  //  • Outbound: push room-type inventory + (room,rateplan) rates + restrictions.
+  //    Basic Auth; the partner id + credentials are PLATFORM env config
+  //    (AIOSELL_PARTNER_ID / AIOSELL_USERNAME / AIOSELL_PASSWORD / AIOSELL_BASE_URL);
+  //    only the hotelCode + enable + code mappings are per-tenant.
+  //  • Inbound: Aiosell POSTs OTA reservations (book/modify/cancel) to a single
+  //    partner webhook; we route to the tenant by hotelCode (central registry).
+  // Reuses channel_credentials (AIOSELL row = hotelCode+enable) + channel_room_mappings.
+  // ════════════════════════════════════════════════════════════════════
+
+  // Central registry so the single partner webhook resolves hotelCode → tenant.
+  let _aiosellCentralReady = false;
+  async function ensureAiosellCentral(): Promise<void> {
+    if (_aiosellCentralReady) return;
+    try {
+      await centralDb.run(`CREATE TABLE IF NOT EXISTS aiosell_hotels (
+        hotel_code TEXT PRIMARY KEY,
+        restaurant_id TEXT NOT NULL,
+        is_enabled INT NOT NULL DEFAULT 1,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`);
+      _aiosellCentralReady = true;
+    } catch (e: any) { console.warn('[aiosell] central table ensure failed:', e?.message || e); }
+  }
+  async function aiosellTenantConfig(tenantDb: any): Promise<{ hotelCode: string | null; enabled: boolean; lastSynced: string | null }> {
+    const row: any = await tenantDb.get("SELECT property_id, is_enabled, last_synced FROM channel_credentials WHERE channel = 'AIOSELL'").catch(() => null);
+    return { hotelCode: row?.property_id || null, enabled: Number(row?.is_enabled) === 1, lastSynced: row?.last_synced || null };
+  }
+  async function aiosellResolveTenant(hotelCode: string): Promise<string | null> {
+    await ensureAiosellCentral();
+    const row: any = await centralDb.get("SELECT restaurant_id FROM aiosell_hotels WHERE hotel_code = ? AND is_enabled = 1", [hotelCode]).catch(() => null);
+    return row?.restaurant_id || null;
+  }
+  const _aiosellBookingColDone = new Set<string>();
+  async function aiosellEnsureBookingCol(tenantDb: any, restaurantId: string): Promise<void> {
+    if (_aiosellBookingColDone.has(restaurantId)) return;
+    try { await tenantDb.exec("ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS channel_ref TEXT"); _aiosellBookingColDone.add(restaurantId); } catch { /* best-effort */ }
+  }
+
+  // Ingest one Aiosell reservation (book / modify / cancel) into room_bookings.
+  // Idempotent + modify=full-replace via the channel_ref = "AIOSELL:<bookingId>" tag.
+  // NOTE (v1): single-room bookings; multi-room OTA bookings use the first room.
+  async function aiosellIngestReservation(restaurantId: string, r: AiosellReservation): Promise<{ ok: boolean; status: number; booking_id?: string | null; reason?: string; duplicate?: boolean }> {
+    const tenantDb = await getTenantDb(restaurantId);
+    await aiosellEnsureBookingCol(tenantDb, restaurantId);
+    const action = String(r.action || '').toLowerCase();
+    const bookingId = String(r.bookingId || '').trim();
+    if (!bookingId) return { ok: false, status: 400, reason: 'missing bookingId' };
+    const ref = `AIOSELL:${bookingId}`;
+    const otaName = String(r.channel || 'OTA');
+
+    if (action === 'cancel') {
+      const rows: any[] = await tenantDb.query("SELECT id, status FROM room_bookings WHERE channel_ref = ?", [ref]).catch(() => []);
+      if (rows.length === 0) return { ok: true, status: 200, reason: 'no matching booking', duplicate: true };
+      for (const b of rows) if (String(b.status).toUpperCase() !== 'CANCELLED') await tenantDb.run("UPDATE room_bookings SET status='CANCELLED' WHERE id=?", [b.id]).catch(() => {});
+      return { ok: true, status: 200, booking_id: rows[0].id };
+    }
+
+    const ci = normaliseDateIso(r.checkin || ''); const co = normaliseDateIso(r.checkout || '');
+    if (!ci || !co) return { ok: false, status: 400, reason: 'missing/invalid checkin/checkout' };
+    const room0 = (r.rooms && r.rooms[0]) || null;
+    if (!room0 || !room0.roomCode) return { ok: false, status: 400, reason: 'missing rooms[].roomCode' };
+    const map: any = await tenantDb.get(
+      `SELECT local_room_id, local_room_type_id, rate_plan_id FROM channel_room_mappings
+        WHERE channel='AIOSELL' AND external_room_code=?
+          AND (external_rate_plan_code=? OR external_rate_plan_code IS NULL) AND is_active=1
+        ORDER BY CASE WHEN external_rate_plan_code IS NULL THEN 2 ELSE 1 END LIMIT 1`,
+      [room0.roomCode, room0.rateplanCode || null]
+    ).catch(() => null);
+    if (!map) return { ok: false, status: 400, reason: `No Aiosell room mapping for roomCode "${room0.roomCode}"${room0.rateplanCode ? ` rate ${room0.rateplanCode}` : ''}. Map it in Channel Manager → Aiosell.` };
+
+    const existing: any[] = await tenantDb.query("SELECT id FROM room_bookings WHERE channel_ref = ?", [ref]).catch(() => []);
+    const existingIds: string[] = existing.map((x: any) => x.id);
+    let roomId: string | null = map.local_room_id || null;
+    if (!roomId && map.local_room_type_id) {
+      const notIn = existingIds.length ? ` AND b.id NOT IN (${existingIds.map(() => '?').join(',')})` : '';
+      const cand: any = await tenantDb.get(
+        `SELECT r.id FROM rooms r WHERE r.type_id=? AND r.status NOT IN ('MAINTENANCE','BLOCKED')
+           AND NOT EXISTS (SELECT 1 FROM room_bookings b WHERE b.room_id=r.id AND b.status NOT IN ('CANCELLED','CHECKED_OUT')
+             AND NOT (b.check_out_date<=? OR b.check_in_date>=?)${notIn})
+           ORDER BY r.id ASC LIMIT 1`,
+        [map.local_room_type_id, ci, co, ...existingIds]
+      ).catch(() => null);
+      roomId = cand?.id || null;
+    }
+    if (!roomId) return { ok: false, status: 409, reason: `No available room of the mapped type for ${ci} → ${co}` };
+
+    const nights = Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / 86400000));
+    const total = Number(r.amount?.amountAfterTax ?? (room0.prices || []).reduce((s: number, p: any) => s + Number(p.sellRate || 0), 0));
+    const rate = nights > 0 ? Math.round((total / nights) * 100) / 100 : total;
+    const guestName = [r.guest?.firstName, r.guest?.lastName].filter(Boolean).join(' ').trim() || room0.guestName || `${otaName} Guest`;
+    const numGuests = Math.max(1, Number(room0.occupancy?.adults || 1) + Number(room0.occupancy?.children || 0));
+    const commission = r.amount?.commission != null ? Number(r.amount.commission) : 0;
+    const net = Math.round((total - commission) * 100) / 100;
+    const planId = map.rate_plan_id || null;
+    let planSnap: string | null = null;
+    if (planId) { const p: any = await tenantDb.get("SELECT code,name FROM rate_plans WHERE id=?", [planId]).catch(() => null); if (p) planSnap = `${p.code} · ${p.name}`; }
+    const notes = [r.specialRequests, `Aiosell ${otaName} · ${bookingId}${r.cmBookingId ? ` / ${r.cmBookingId}` : ''}${r.pah === false ? ' · prepaid' : (r.pah === true ? ' · pay-at-hotel' : '')}`].filter(Boolean).join(' — ');
+    const commissionPct = total > 0 ? Math.round((commission / total) * 10000) / 100 : 0;
+
+    if (action === 'modify' && existingIds.length) {
+      const keepId = existingIds[0];
+      await tenantDb.run(
+        `UPDATE room_bookings SET room_id=?, guest_name=?, guest_phone=?, guest_email=?, num_guests=?,
+           check_in_date=?, check_out_date=?, status='BOOKED', room_rate=?, total_amount=?, special_requests=?,
+           commission_pct=?, commission_amount=?, net_amount=?, rate_plan_id=?, rate_plan_snapshot=? WHERE id=?`,
+        [roomId, guestName, r.guest?.phone || null, r.guest?.email || null, numGuests, ci, co, rate, total, notes, commissionPct, commission, net, planId, planSnap, keepId]
+      ).catch(() => {});
+      for (const extra of existingIds.slice(1)) await tenantDb.run("UPDATE room_bookings SET status='CANCELLED' WHERE id=?", [extra]).catch(() => {});
+      return { ok: true, status: 200, booking_id: keepId };
+    }
+    // book — idempotency: a live booking already tagged with this ref → duplicate
+    if (existingIds.length) {
+      const live: any = await tenantDb.get("SELECT id FROM room_bookings WHERE channel_ref=? AND status <> 'CANCELLED' LIMIT 1", [ref]).catch(() => null);
+      if (live?.id) return { ok: true, status: 200, booking_id: live.id, duplicate: true };
+    }
+    const conflict: any = await tenantDb.get(
+      `SELECT id FROM room_bookings WHERE room_id=? AND status NOT IN ('CANCELLED','CHECKED_OUT') AND NOT (check_out_date<=? OR check_in_date>=?) LIMIT 1`,
+      [roomId, ci, co]
+    ).catch(() => null);
+    if (conflict) return { ok: false, status: 409, reason: `room not available for ${ci} → ${co}` };
+    const localId = `BK-AIO-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    await tenantDb.run(
+      `INSERT INTO room_bookings
+         (id, room_id, guest_name, guest_phone, guest_email, num_guests, check_in_date, check_out_date,
+          status, booking_source, room_rate, total_amount, special_requests, booking_type,
+          commission_pct, commission_amount, net_amount, rate_plan_id, rate_plan_snapshot, channel_ref)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT', ?, ?, ?, ?, ?, ?)`,
+      [localId, roomId, guestName, r.guest?.phone || null, r.guest?.email || null, numGuests, ci, co,
+       `AIOSELL:${otaName}`, rate, total, notes, commissionPct, commission, net, planId, planSnap, ref]
+    );
+    return { ok: true, status: 200, booking_id: localId };
+  }
+
+  // Compute + push room-type inventory and (room,rateplan) rates for the next N days.
+  // v1 rate = room_type.base_rate × (1 − rate_plan.discount_pct/100) — refined later.
+  async function aiosellSyncTenant(restaurantId: string, days: number): Promise<{ ok: boolean; inventory?: string; rates?: string; error?: string; pushed_types?: number }> {
+    const cfg = aiosellConfigFromEnv();
+    if (!aiosellConfigured(cfg)) return { ok: false, error: 'Aiosell platform credentials not configured (set AIOSELL_* env vars).' };
+    const tenantDb = await getTenantDb(restaurantId);
+    const t = await aiosellTenantConfig(tenantDb);
+    if (!t.hotelCode) return { ok: false, error: 'Hotel code not set.' };
+    if (!t.enabled) return { ok: false, error: 'Aiosell sync is disabled for this property.' };
+    const maps: any[] = await tenantDb.query(
+      "SELECT external_room_code, external_rate_plan_code, local_room_type_id, rate_plan_id FROM channel_room_mappings WHERE channel='AIOSELL' AND is_active=1 AND local_room_type_id IS NOT NULL AND external_room_code IS NOT NULL"
+    ).catch(() => []);
+    if (maps.length === 0) return { ok: false, error: 'No Aiosell room/rate-plan mappings configured.' };
+    const typeCodeByType = new Map<string, string>();
+    for (const m of maps) if (m.local_room_type_id && m.external_room_code) typeCodeByType.set(m.local_room_type_id, m.external_room_code);
+    const typeIds = [...typeCodeByType.keys()];
+    const typeInfo = new Map<string, { total: number; base: number }>();
+    for (const tid of typeIds) {
+      const totRow: any = await tenantDb.get("SELECT COUNT(*) AS n FROM rooms WHERE type_id=? AND status NOT IN ('MAINTENANCE','BLOCKED')", [tid]).catch(() => ({ n: 0 }));
+      const baseRow: any = await tenantDb.get("SELECT base_rate FROM room_types WHERE id=?", [tid]).catch(() => ({ base_rate: 0 }));
+      typeInfo.set(tid, { total: Number(totRow?.n || 0), base: Number(baseRow?.base_rate || 0) });
+    }
+    const planDisc = new Map<string, number>();
+    for (const m of maps) if (m.rate_plan_id && !planDisc.has(m.rate_plan_id)) {
+      const p: any = await tenantDb.get("SELECT discount_pct FROM rate_plans WHERE id=?", [m.rate_plan_id]).catch(() => null);
+      planDisc.set(m.rate_plan_id, Number(p?.discount_pct || 0));
+    }
+    const now = Date.now();
+    const invUpdates: AiosellInventoryUpdate[] = [];
+    const rateUpdates: AiosellRateUpdate[] = [];
+    for (let i = 0; i < days; i++) {
+      const iso = new Date(now + i * 86400000).toISOString().slice(0, 10);
+      const rooms: Array<{ roomCode: string; available: number }> = [];
+      for (const tid of typeIds) {
+        const info = typeInfo.get(tid)!;
+        const occRow: any = await tenantDb.get(
+          `SELECT COUNT(*) AS n FROM room_bookings b JOIN rooms r ON r.id=b.room_id
+            WHERE r.type_id=? AND b.status NOT IN ('CANCELLED','CHECKED_OUT') AND b.check_in_date <= ? AND b.check_out_date > ?`,
+          [tid, iso, iso]
+        ).catch(() => ({ n: 0 }));
+        rooms.push({ roomCode: typeCodeByType.get(tid)!, available: Math.max(0, info.total - Number(occRow?.n || 0)) });
+      }
+      invUpdates.push({ startDate: iso, endDate: iso, rooms });
+      const rates: Array<{ roomCode: string; rateplanCode: string; rate: number }> = [];
+      for (const m of maps) {
+        if (!m.external_rate_plan_code) continue;
+        const info = typeInfo.get(m.local_room_type_id); if (!info) continue;
+        const disc = m.rate_plan_id ? (planDisc.get(m.rate_plan_id) || 0) : 0;
+        const rate = Math.round(info.base * (1 - disc / 100));
+        if (rate > 0) rates.push({ roomCode: m.external_room_code, rateplanCode: m.external_rate_plan_code, rate });
+      }
+      if (rates.length) rateUpdates.push({ startDate: iso, endDate: iso, rates });
+    }
+    let invMsg = 'skipped', rateMsg = 'skipped';
+    if (invUpdates.length) {
+      const r = await aiosellPushInventory(cfg, t.hotelCode, invUpdates);
+      invMsg = r.ok ? r.message : `ERR: ${r.message}`;
+      if (!r.ok) return { ok: false, error: `Inventory push failed: ${r.message}`, inventory: invMsg };
+    }
+    if (rateUpdates.length) {
+      const r = await aiosellPushRates(cfg, t.hotelCode, rateUpdates);
+      rateMsg = r.ok ? r.message : `ERR: ${r.message}`;
+      if (!r.ok) return { ok: false, error: `Rate push failed: ${r.message}`, inventory: invMsg, rates: rateMsg };
+    }
+    await tenantDb.run("UPDATE channel_credentials SET last_synced = CURRENT_TIMESTAMP WHERE channel='AIOSELL'").catch(() => {});
+    return { ok: true, inventory: invMsg, rates: rateMsg, pushed_types: typeIds.length };
+  }
+
+  // ── Inbound reservation webhook (Aiosell → PMS). Single partner URL; tenant
+  //    resolved by hotelCode (or an explicit :restaurantId path). Basic Auth. ──
+  const aiosellWebhookHandler = async (req: Request, res: Response) => {
+    if (!verifyAiosellBasicAuth(req.headers['authorization'])) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    const body: AiosellReservation = (req.body || {}) as AiosellReservation;
+    const action = String(body.action || '').toLowerCase();
+    const hotelCode = String(body.hotelCode || '');
+    if (!action || !hotelCode) return res.status(400).json({ success: false, message: 'action and hotelCode are required' });
+    let restaurantId: string | null = (req.params as any).restaurantId || null;
+    if (!restaurantId) restaurantId = await aiosellResolveTenant(hotelCode);
+    if (!restaurantId) return res.status(404).json({ success: false, message: `No property registered for hotelCode ${hotelCode}` });
+    try {
+      const out = await aiosellIngestReservation(restaurantId, body);
+      if (!out.ok) return res.status(out.status || 400).json({ success: false, message: out.reason || 'Failed' });
+      return res.json({ success: true, message: `Reservation ${action} processed`, booking_id: out.booking_id, duplicate: out.duplicate || false });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, message: e?.message || 'Server error' });
+    }
+  };
+  app.post("/api/public/aiosell/reservation", express.json({ limit: '256kb' }), aiosellWebhookHandler);
+  app.post("/api/public/aiosell/reservation/:restaurantId", express.json({ limit: '256kb' }), aiosellWebhookHandler);
+
+  // ── Per-tenant Aiosell control endpoints ──
+  app.get("/api/restaurant/:id/hotel/aiosell/status", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const cfg = aiosellConfigFromEnv();
+      const tenantDb = await getTenantDb(req.params.id);
+      const t = await aiosellTenantConfig(tenantDb);
+      const mapRow: any = await tenantDb.get("SELECT COUNT(*) AS n FROM channel_room_mappings WHERE channel='AIOSELL' AND is_active=1").catch(() => ({ n: 0 }));
+      res.json({
+        platform_configured: aiosellConfigured(cfg),
+        partner_id: cfg.partnerId || null,
+        base_url: cfg.baseUrl,
+        hotel_code: t.hotelCode,
+        enabled: t.enabled,
+        last_synced: t.lastSynced,
+        mapping_count: Number(mapRow?.n || 0),
+        webhook_url: `https://${req.get('host')}/api/public/aiosell/reservation`,
+      });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/restaurant/:id/hotel/aiosell/config", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const hotelCode = String(req.body?.hotel_code || '').trim();
+      const enabled = req.body?.is_enabled ? 1 : 0;
+      if (!hotelCode) return res.status(400).json({ error: 'hotel_code is required' });
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run(
+        `INSERT INTO channel_credentials (id, channel, property_id, is_enabled, updated_at)
+         VALUES ('CC-AIOSELL', 'AIOSELL', ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (channel) DO UPDATE SET property_id = EXCLUDED.property_id, is_enabled = EXCLUDED.is_enabled, updated_at = CURRENT_TIMESTAMP`,
+        [hotelCode, enabled]
+      );
+      await ensureAiosellCentral();
+      await centralDb.run(
+        `INSERT INTO aiosell_hotels (hotel_code, restaurant_id, is_enabled, updated_at)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (hotel_code) DO UPDATE SET restaurant_id = EXCLUDED.restaurant_id, is_enabled = EXCLUDED.is_enabled, updated_at = CURRENT_TIMESTAMP`,
+        [hotelCode, req.params.id, enabled]
+      );
+      res.json({ success: true, hotel_code: hotelCode, enabled: !!enabled });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/restaurant/:id/hotel/aiosell/test", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const cfg = aiosellConfigFromEnv();
+      if (!aiosellConfigured(cfg)) return res.status(400).json({ ok: false, error: 'Aiosell platform credentials are not configured (set the AIOSELL_* env vars).' });
+      const tenantDb = await getTenantDb(req.params.id);
+      const t = await aiosellTenantConfig(tenantDb);
+      const hotelCode = String(req.body?.hotel_code || t.hotelCode || '').trim();
+      if (!hotelCode) return res.status(400).json({ ok: false, error: 'Set the hotel code first.' });
+      const r = await aiosellGetProperty(cfg, hotelCode);
+      if (!r.ok) return res.json({ ok: false, error: r.message, http_status: r.status });
+      const d = r.data || {};
+      res.json({ ok: true, hotel_name: d.hotel_name, hotel_id: d.hotel_id, currency: d.currency, rooms: Array.isArray(d.rooms) ? d.rooms.length : 0 });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e?.message }); }
+  });
+  app.get("/api/restaurant/:id/hotel/aiosell/property", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const cfg = aiosellConfigFromEnv();
+      if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Aiosell platform credentials not configured.' });
+      const tenantDb = await getTenantDb(req.params.id);
+      const t = await aiosellTenantConfig(tenantDb);
+      const hotelCode = String((req.query.hotel_code as string) || t.hotelCode || '').trim();
+      if (!hotelCode) return res.status(400).json({ error: 'Set the hotel code first.' });
+      const r = await aiosellGetProperty(cfg, hotelCode);
+      if (!r.ok) return res.status(502).json({ error: r.message });
+      res.json(r.data);
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/restaurant/:id/hotel/aiosell/push", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const days = Math.min(365, Math.max(1, Number(req.body?.days) || 90));
+      const out = await aiosellSyncTenant(req.params.id, days);
+      if (!out.ok) return res.status(400).json(out);
+      res.json({ success: true, ...out, days });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/restaurant/:id/hotel/aiosell/fetch-reservations", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const cfg = aiosellConfigFromEnv(); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Aiosell not configured.' });
+      const tenantDb = await getTenantDb(req.params.id);
+      const t = await aiosellTenantConfig(tenantDb); if (!t.hotelCode) return res.status(400).json({ error: 'Hotel code not set.' });
+      const startDate = String(req.body?.startDate || '').trim();
+      const endDate = String(req.body?.endDate || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return res.status(400).json({ error: 'startDate and endDate (YYYY-MM-DD) required.' });
+      const r = await aiosellFetchData(cfg, t.hotelCode, 'reservation', startDate, endDate);
+      if (!r.ok) return res.status(502).json({ error: r.message });
+      const list: AiosellReservation[] = Array.isArray(r.data) ? r.data : (Array.isArray(r.data?.reservations) ? r.data.reservations : []);
+      let ingested = 0;
+      if (req.body?.ingest) for (const rv of list) { const out = await aiosellIngestReservation(req.params.id, rv).catch(() => ({ ok: false } as any)); if (out.ok) ingested++; }
+      res.json({ success: true, count: list.length, ingested, reservations: list });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/restaurant/:id/hotel/aiosell/marknoshow", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const cfg = aiosellConfigFromEnv(); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Aiosell not configured.' });
+      const tenantDb = await getTenantDb(req.params.id); const t = await aiosellTenantConfig(tenantDb);
+      const bookingId = String(req.body?.bookingId || '').trim(); const channel = String(req.body?.channel || '').trim().toLowerCase();
+      if (!t.hotelCode || !bookingId || !channel) return res.status(400).json({ error: 'hotel code, bookingId and channel required.' });
+      if (!['booking.com', 'gommt'].includes(channel)) return res.status(400).json({ error: 'channel must be booking.com or gommt.' });
+      const r = await aiosellMarkNoShow(cfg, t.hotelCode, bookingId, channel);
+      res.status(r.ok ? 200 : 502).json({ success: r.ok, message: r.message });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/restaurant/:id/hotel/aiosell/multiplier", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const cfg = aiosellConfigFromEnv(); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Aiosell not configured.' });
+      const tenantDb = await getTenantDb(req.params.id); const t = await aiosellTenantConfig(tenantDb);
+      const multiplier = Number(req.body?.multiplier);
+      const channels = Array.isArray(req.body?.channels) ? req.body.channels.map((c: any) => String(c).toLowerCase()) : [];
+      if (!t.hotelCode) return res.status(400).json({ error: 'Hotel code not set.' });
+      if (!(multiplier > 0) || channels.length === 0) return res.status(400).json({ error: 'multiplier (>0) and non-empty channels[] required.' });
+      const r = await aiosellChannelMultiplier(cfg, t.hotelCode, multiplier, channels);
+      res.status(r.ok ? 200 : 502).json({ success: r.ok, message: r.message });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  void aiosellPushInventoryRestrictions; void aiosellPushRateRestrictions; void aiosellRestrictions; // Phase C (restriction UI)
 
   // ════════════════════════════════════════════════════════════════════
   // ─── RATE PLANS (Gap 6) ─────────────────────────────────────────────
@@ -48042,8 +48401,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'cashdrawer-zero-close-fix',
+    commit_marker: 'aiosell-integration',
     code_features: [
+      'aiosell-integration',                        // FEATURE: full Aiosell channel-manager integration (apidocs.aiosell.com /api/v2/cm). Atithi-Setu (PMS) is source of truth; we push ARI to Aiosell → OTAs and receive OTA reservations back via a single partner webhook. NEW module aiosellClient.ts (typed client: Basic-Auth, property_details, inventory/rate push, restrictions, marknoshow, /data fetch, channel_multiplier, constant-time inbound Basic-Auth verify). Partner id + credentials are PLATFORM env config (AIOSELL_PARTNER_ID / AIOSELL_USERNAME / AIOSELL_PASSWORD / AIOSELL_BASE_URL — never per-tenant, never entered in the UI); only the per-property hotelCode + code mappings + enable live in the tenant. BACKEND (server.ts): central `aiosell_hotels(hotel_code→restaurant_id)` registry so the single webhook routes to the right tenant; `aiosellIngestReservation` maps an OTA reservation onto room_bookings (book/modify/cancel, idempotent + modify=replace via new `room_bookings.channel_ref="AIOSELL:<bookingId>"`, resolves room via AIOSELL channel_room_mappings exact→type-level pick-first-available, commission/net snapshot, folio JIT at check-in as usual); `aiosellSyncTenant` computes per-date room-type availability + per-(room,rateplan) rates (base_rate × rate-plan discount) and pushes; public webhook POST /api/public/aiosell/reservation[/:restaurantId] (Basic Auth via verifyAiosellBasicAuth); authenticated ops endpoints /hotel/aiosell/{status,config,test,property,push,fetch-reservations,marknoshow,multiplier}. channel-room-mappings POST now also persists rate_plan_id (additive; other channels omit it). FRONTEND (App.tsx): new "🔌 Aiosell" sub-tab in Channel Manager & RMS → best-in-class AiosellPanel — Step 1 connect (hotel code + enable + Test connection + copyable inbound webhook URL + platform-not-configured guidance), Step 2 mapping wizard (Fetch from Aiosell → per-room/rate-plan rows mapped to local room type + optional rate plan, saved-mapping chips w/ delete, N/M mapped counter), Step 3 push ARI (days) + channel multiplier, Step 4 fetch reservations (date range + optional ingest) + report no-show (Booking.com/GoMMT). Sandbox-testable (hotelCode "sandbox-pms", partnerId "sample-pms"). tsc + vite build clean.
       'cashdrawer-zero-close-fix',                  // BUGFIX (frontend): the cash-drawer "Close drawer → Submit for approval" button was disabled whenever the counted total was ₹0 (`disabled={cdCountedTotal <= 0}`), so an incoming cashier whose drawer was opened by an accepted shift handover with a ₹0 carry-over float (and no cash movement) could never close it — the drawer stayed OPEN and the day could not be locked. A ₹0 count is a legitimate close (also covers a genuine total shortage where the cashier honestly counts ₹0). Fix: the button now enables on a ₹0 count and only stays disabled for an INVALID deposit — deposit < 0 or deposit > counted total (with a tooltip explaining the latter). The backend was already correct (POST /accounting/cash-drawers/:id/close accepts counted_cash=0 → PENDING_APPROVAL with variance = counted − expected; approve only posts a deposit journal when deposit > 0.009 and a variance journal only when variance ≠ 0), so a ₹0 drawer now closes, approves with no spurious journals, and lets the day lock. Frontend-only; no backend/schema change. tsc + vite build clean.
       'fnb-order-confirm-autodismiss',              // BUGFIX (frontend UX): on the in-room guest QR ordering screen, the "Charged to your room / Added to your room bill" confirmation toast (foodOrderConfirm) had a manual ✕ but NO auto-dismiss, so after placing a charge-to-room food order it sat on screen indefinitely while the guest kept browsing/ordering (only cleared when they tapped ✕ or started another order). Added a useEffect timer that auto-clears foodOrderConfirm — 5s for a successful/sent-to-kitchen order, 9s for a genuine failure (so an error is not missed) — with cleanup on change/unmount; the manual ✕ still works. Pure client-side; no endpoint/schema change. tsc + vite build clean.
       'fnb-charge-menu-picker',                     // BUGFIX (frontend, billing integrity): the folio "Add F&B Charge" modal (FnbChargeModal) was a manual free-text form — no way to pull a real item price — so staff could add a Restaurant item with a blank price, leaving the subtotal at ₹0. Fix: the modal now fetches the restaurant menu (GET /menu, the same public list the QR e-menu uses) and shows a search picker; picking an item auto-fills its name + unit price (first blank row, else appended). Added a live GST + Total preview (per-row GST% override wins; otherwise the resolved property F&B rate — 5% non-specified / 18% specified-premises, passed in as fnbGstRate from hotelRooms vs gst_slab2_max — is used for the estimate; the folio still applies the authoritative GST at post). The zero-price guard was already present (Post to Folio is disabled unless some row has qty>0 AND unit_price>0, and submit filters blank rows); tightened `valid` to also require subtotal>0 and added a visible reason ("Pick a menu item or enter a price above ₹0…") so staff understand why posting is blocked. Manual entry still works for off-menu items. No backend/schema/charge-fnb change. Verified: tsc + vite build clean; test-scripts TC-FNB-PICKER asserts /menu exposes priced items (the picker's data contract).

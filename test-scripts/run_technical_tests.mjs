@@ -1611,6 +1611,33 @@ async function testChannelManager() {
   } else {
     fail('TC-CHAN-002', 'Webhook log endpoint responds', `HTTP ${wl.status}`);
   }
+
+  // ── Aiosell integration ────────────────────────────────────────────────
+  // TC-AIOSELL-STATUS: per-tenant status endpoint responds with the connection
+  // shape (platform_configured flag + the inbound webhook URL the owner shares).
+  const as = await api('GET', `/api/restaurant/${restaurantId}/hotel/aiosell/status`);
+  if (as.status === 200 && typeof as.data === 'object' && 'platform_configured' in as.data && as.data.webhook_url) {
+    pass('TC-AIOSELL-STATUS', 'Aiosell status endpoint responds', `platform_configured=${as.data.platform_configured}, ${as.data.mapping_count} mapping(s)`);
+  } else if (as.status === 403 || as.status === 404) {
+    skip('TC-AIOSELL-STATUS', 'Aiosell status', `HTTP ${as.status}`);
+  } else {
+    fail('TC-AIOSELL-STATUS', 'Aiosell status endpoint responds', `HTTP ${as.status}, keys=${Object.keys(as.data || {}).join(',')}`);
+  }
+
+  // TC-AIOSELL-WEBHOOK-AUTH: the public inbound reservation webhook MUST reject an
+  // unauthenticated call with 401 (Basic Auth) — never 404 (route missing) or 200
+  // (open endpoint that would let anyone inject bookings).
+  const wh = await fetch(`${BASE_URL}/api/public/aiosell/reservation`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'book', hotelCode: 'nope', bookingId: 'TEST' }),
+  });
+  if (wh.status === 401) {
+    pass('TC-AIOSELL-WEBHOOK-AUTH', 'Inbound reservation webhook rejects unauthenticated POST (401)');
+  } else if (wh.status === 404) {
+    fail('TC-AIOSELL-WEBHOOK-AUTH', 'Inbound reservation webhook present', 'HTTP 404 — route not deployed');
+  } else {
+    fail('TC-AIOSELL-WEBHOOK-AUTH', 'Inbound reservation webhook requires auth', `expected 401, got HTTP ${wh.status}`);
+  }
 }
 
 // ── Reports tests ──────────────────────────────────────────────────────────
