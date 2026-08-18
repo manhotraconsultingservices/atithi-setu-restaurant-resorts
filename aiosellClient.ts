@@ -63,11 +63,12 @@ function authHeader(cfg: AiosellConfig): string {
   return 'Basic ' + Buffer.from(`${cfg.username}:${cfg.password}`).toString('base64');
 }
 
-// Constant-time validation of an inbound Basic Auth header against our stored creds.
-export function verifyAiosellBasicAuth(headerValue: string | undefined | null): boolean {
+// Constant-time validation of an inbound Basic Auth header against an EXPLICIT
+// username/password pair — used by the webhook once the tenant (and hence its
+// stored credentials) has been resolved from the request's hotelCode.
+export function verifyBasicAuthCredentials(expectedUser: string | null | undefined, expectedPass: string | null | undefined, headerValue: string | undefined | null): boolean {
   try {
-    const creds = aiosellWebhookCreds();
-    if (!creds.username || !creds.password) return false; // not configured → reject
+    if (!expectedUser || !expectedPass) return false; // not configured → reject
     const m = /^Basic\s+(.+)$/i.exec(String(headerValue || ''));
     if (!m) return false;
     const decoded = Buffer.from(m[1], 'base64').toString('utf8');
@@ -75,7 +76,7 @@ export function verifyAiosellBasicAuth(headerValue: string | undefined | null): 
     if (idx < 0) return false;
     const user = decoded.slice(0, idx);
     const pass = decoded.slice(idx + 1);
-    const expected = `${creds.username}:${creds.password}`;
+    const expected = `${expectedUser}:${expectedPass}`;
     const got = `${user}:${pass}`;
     // Length-safe constant-time compare.
     const a = Buffer.from(expected);
@@ -83,6 +84,14 @@ export function verifyAiosellBasicAuth(headerValue: string | undefined | null): 
     if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
     return crypto.timingSafeEqual(a, b);
   } catch { return false; }
+}
+
+// Constant-time validation of an inbound Basic Auth header against the platform
+// (env) webhook creds. Kept for env-only deployments; the per-tenant path uses
+// verifyBasicAuthCredentials with the tenant's stored creds instead.
+export function verifyAiosellBasicAuth(headerValue: string | undefined | null): boolean {
+  const creds = aiosellWebhookCreds();
+  return verifyBasicAuthCredentials(creds.username, creds.password, headerValue);
 }
 
 // ── Low-level call ───────────────────────────────────────────────────────────

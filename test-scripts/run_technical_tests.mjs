@@ -1616,8 +1616,10 @@ async function testChannelManager() {
   // TC-AIOSELL-STATUS: per-tenant status endpoint responds with the connection
   // shape (platform_configured flag + the inbound webhook URL the owner shares).
   const as = await api('GET', `/api/restaurant/${restaurantId}/hotel/aiosell/status`);
-  if (as.status === 200 && typeof as.data === 'object' && 'platform_configured' in as.data && as.data.webhook_url) {
-    pass('TC-AIOSELL-STATUS', 'Aiosell status endpoint responds', `platform_configured=${as.data.platform_configured}, ${as.data.mapping_count} mapping(s)`);
+  if (as.status === 200 && typeof as.data === 'object' && 'platform_configured' in as.data && as.data.webhook_url
+      && 'creds_source' in as.data && typeof as.data.has_password === 'boolean') {
+    // has_password must be a boolean flag — the raw password must never be returned.
+    pass('TC-AIOSELL-STATUS', 'Aiosell status endpoint responds (per-tenant cred shape)', `configured=${as.data.platform_configured}, creds=${as.data.creds_source}, ${as.data.mapping_count} mapping(s)`);
   } else if (as.status === 403 || as.status === 404) {
     skip('TC-AIOSELL-STATUS', 'Aiosell status', `HTTP ${as.status}`);
   } else {

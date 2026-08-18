@@ -55,7 +55,7 @@ import {
 import { provisionTenantSubdomain, deprovisionTenantSubdomain, cloudflareIsConfigured } from "./cloudflareService.ts";
 import { downloadFromDrive } from "./googleDriveService.ts";
 import {
-  aiosellConfigFromEnv, aiosellConfigured, verifyAiosellBasicAuth,
+  aiosellConfigFromEnv, aiosellConfigured, verifyAiosellBasicAuth, verifyBasicAuthCredentials,
   aiosellGetProperty, aiosellPushInventory, aiosellPushRates,
   aiosellPushInventoryRestrictions, aiosellPushRateRestrictions, aiosellRestrictions,
   aiosellMarkNoShow, aiosellFetchData, aiosellChannelMultiplier,
@@ -856,6 +856,16 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- Without this, the owner's P&L overstates revenue by 15-25%. Default
     -- 0 means LEGACY-tenant behaviour (no commission deduction).
     ALTER TABLE channel_credentials ADD COLUMN IF NOT EXISTS commission_pct DOUBLE PRECISION DEFAULT 0;
+
+    -- Aiosell (18 Aug 2026) — per-tenant channel-manager credentials so a
+    -- property can connect WITHOUT a server restart or a shared env var. The
+    -- Aiosell partner id + username live plaintext (they are login identifiers,
+    -- not secrets); the password is stored in api_secret ENCRYPTED at rest via
+    -- encryptSecret. When these are NULL the integration falls back to the
+    -- platform AIOSELL_* env vars (so an operator can still set one shared
+    -- account for every tenant). property_id holds the Aiosell hotelCode.
+    ALTER TABLE channel_credentials ADD COLUMN IF NOT EXISTS aiosell_partner_id TEXT;
+    ALTER TABLE channel_credentials ADD COLUMN IF NOT EXISTS aiosell_username   TEXT;
 
     -- Gap 5 — commission columns on bookings. Captured at booking time
     -- so the audit trail reflects the % active when the OTA confirmed,
@@ -31908,9 +31918,24 @@ ${data.tenant.name}`;
     const tag = cipher.getAuthTag();
     return `v1:${iv.toString('hex')}:${tag.toString('hex')}:${ct.toString('hex')}`;
   };
-  // (decryptSecret intentionally not exposed here — the eventual OTA
-  // push worker imports it via a tiny dedicated helper; the admin UI
-  // only ever sees the masked '••••••••' from the GET endpoint.)
+  // Inverse of encryptSecret. Returns null for empty input; returns the value
+  // unchanged if it lacks the "v1:" prefix (back-compat for any plaintext stored
+  // before encryption shipped). Used by the Aiosell integration to recover the
+  // per-tenant partner password at call time (the admin UI never sees it — the
+  // GET endpoints only ever return a masked '••••••••' / a boolean "is set").
+  const decryptSecret = (stored: string | null | undefined): string | null => {
+    if (!stored) return null;
+    const s = String(stored);
+    if (!s.startsWith('v1:')) return s; // plaintext (legacy) — return as-is
+    try {
+      const [, ivHex, tagHex, ctHex] = s.split(':');
+      if (!ivHex || !tagHex || !ctHex) return null;
+      const decipher = createDecipheriv('aes-256-gcm', channelCredKey, Buffer.from(ivHex, 'hex'));
+      decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+      const pt = Buffer.concat([decipher.update(Buffer.from(ctHex, 'hex')), decipher.final()]);
+      return pt.toString('utf8');
+    } catch { return null; }
+  };
 
   // ─── CHANNEL CREDENTIALS — Sprint D2 (stub) ────────────────────────
   // CRUD for OTA API credentials. Real push to Booking.com / MMT /
@@ -32328,9 +32353,40 @@ ${data.tenant.name}`;
       _aiosellCentralReady = true;
     } catch (e: any) { console.warn('[aiosell] central table ensure failed:', e?.message || e); }
   }
-  async function aiosellTenantConfig(tenantDb: any): Promise<{ hotelCode: string | null; enabled: boolean; lastSynced: string | null }> {
-    const row: any = await tenantDb.get("SELECT property_id, is_enabled, last_synced FROM channel_credentials WHERE channel = 'AIOSELL'").catch(() => null);
-    return { hotelCode: row?.property_id || null, enabled: Number(row?.is_enabled) === 1, lastSynced: row?.last_synced || null };
+  const _aiosellCredColDone = new Set<string>();
+  async function aiosellEnsureCredCols(tenantDb: any, restaurantId: string): Promise<void> {
+    if (_aiosellCredColDone.has(restaurantId)) return;
+    try {
+      await tenantDb.exec("ALTER TABLE channel_credentials ADD COLUMN IF NOT EXISTS aiosell_partner_id TEXT; ALTER TABLE channel_credentials ADD COLUMN IF NOT EXISTS aiosell_username TEXT");
+      _aiosellCredColDone.add(restaurantId);
+    } catch { /* best-effort */ }
+  }
+  async function aiosellTenantConfig(tenantDb: any): Promise<{ hotelCode: string | null; enabled: boolean; lastSynced: string | null; partnerId: string | null; username: string | null; hasPassword: boolean }> {
+    const row: any = await tenantDb.get("SELECT property_id, is_enabled, last_synced, aiosell_partner_id, aiosell_username, api_secret FROM channel_credentials WHERE channel = 'AIOSELL'").catch(() => null);
+    return {
+      hotelCode: row?.property_id || null,
+      enabled: Number(row?.is_enabled) === 1,
+      lastSynced: row?.last_synced || null,
+      partnerId: row?.aiosell_partner_id || null,
+      username: row?.aiosell_username || null,
+      hasPassword: !!row?.api_secret,
+    };
+  }
+  // Resolve the AiosellConfig for a tenant: prefer this property's own stored
+  // credentials (partner id + username plaintext, password decrypted from
+  // api_secret), and fall back to the platform AIOSELL_* env vars for any field
+  // not set on the tenant. This is what makes onboarding one property a pure
+  // DB write — no env change, no restart, no impact on other tenants.
+  async function aiosellCfgForTenant(tenantDb: any): Promise<import("./aiosellClient.ts").AiosellConfig> {
+    const env = aiosellConfigFromEnv();
+    const row: any = await tenantDb.get("SELECT aiosell_partner_id, aiosell_username, api_secret FROM channel_credentials WHERE channel = 'AIOSELL'").catch(() => null);
+    const password = row?.api_secret ? (decryptSecret(row.api_secret) || '') : env.password;
+    return {
+      baseUrl: env.baseUrl,
+      partnerId: row?.aiosell_partner_id || env.partnerId,
+      username: row?.aiosell_username || env.username,
+      password,
+    };
   }
   async function aiosellResolveTenant(hotelCode: string): Promise<string | null> {
     await ensureAiosellCentral();
@@ -32441,9 +32497,9 @@ ${data.tenant.name}`;
   // Compute + push room-type inventory and (room,rateplan) rates for the next N days.
   // v1 rate = room_type.base_rate × (1 − rate_plan.discount_pct/100) — refined later.
   async function aiosellSyncTenant(restaurantId: string, days: number): Promise<{ ok: boolean; inventory?: string; rates?: string; error?: string; pushed_types?: number }> {
-    const cfg = aiosellConfigFromEnv();
-    if (!aiosellConfigured(cfg)) return { ok: false, error: 'Aiosell platform credentials not configured (set AIOSELL_* env vars).' };
     const tenantDb = await getTenantDb(restaurantId);
+    const cfg = await aiosellCfgForTenant(tenantDb);
+    if (!aiosellConfigured(cfg)) return { ok: false, error: 'Aiosell credentials not set for this property (add them in Channel Manager → Aiosell, or set the AIOSELL_* env vars).' };
     const t = await aiosellTenantConfig(tenantDb);
     if (!t.hotelCode) return { ok: false, error: 'Hotel code not set.' };
     if (!t.enabled) return { ok: false, error: 'Aiosell sync is disabled for this property.' };
@@ -32509,7 +32565,6 @@ ${data.tenant.name}`;
   // ── Inbound reservation webhook (Aiosell → PMS). Single partner URL; tenant
   //    resolved by hotelCode (or an explicit :restaurantId path). Basic Auth. ──
   const aiosellWebhookHandler = async (req: Request, res: Response) => {
-    if (!verifyAiosellBasicAuth(req.headers['authorization'])) return res.status(401).json({ success: false, message: 'Unauthorized' });
     const body: AiosellReservation = (req.body || {}) as AiosellReservation;
     const action = String(body.action || '').toLowerCase();
     const hotelCode = String(body.hotelCode || '');
@@ -32517,6 +32572,13 @@ ${data.tenant.name}`;
     let restaurantId: string | null = (req.params as any).restaurantId || null;
     if (!restaurantId) restaurantId = await aiosellResolveTenant(hotelCode);
     if (!restaurantId) return res.status(404).json({ success: false, message: `No property registered for hotelCode ${hotelCode}` });
+    // Verify Basic Auth against THIS tenant's stored credentials (webhook override
+    // if set, else the partner username/password), falling back to the platform
+    // env creds for env-only deployments.
+    const auth = req.headers['authorization'];
+    const tCfg = await aiosellCfgForTenant(await getTenantDb(restaurantId));
+    const tenantOk = verifyBasicAuthCredentials(process.env.AIOSELL_WEBHOOK_USERNAME || tCfg.username, process.env.AIOSELL_WEBHOOK_PASSWORD || tCfg.password, auth);
+    if (!tenantOk && !verifyAiosellBasicAuth(auth)) return res.status(401).json({ success: false, message: 'Unauthorized' });
     try {
       const out = await aiosellIngestReservation(restaurantId, body);
       if (!out.ok) return res.status(out.status || 400).json({ success: false, message: out.reason || 'Failed' });
@@ -32532,13 +32594,20 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/aiosell/status", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const cfg = aiosellConfigFromEnv();
       const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      const env = aiosellConfigFromEnv();
+      const cfg = await aiosellCfgForTenant(tenantDb);
       const t = await aiosellTenantConfig(tenantDb);
       const mapRow: any = await tenantDb.get("SELECT COUNT(*) AS n FROM channel_room_mappings WHERE channel='AIOSELL' AND is_active=1").catch(() => ({ n: 0 }));
       res.json({
+        // "configured" now means: this property has usable creds (its own, or inherited from env)
         platform_configured: aiosellConfigured(cfg),
+        creds_source: (t.partnerId || t.username || t.hasPassword) ? 'tenant' : (aiosellConfigured(env) ? 'env' : 'none'),
+        env_available: aiosellConfigured(env),
         partner_id: cfg.partnerId || null,
+        username: cfg.username || null,          // login id, not a secret
+        has_password: !!cfg.password,            // boolean only — never the value
         base_url: cfg.baseUrl,
         hotel_code: t.hotelCode,
         enabled: t.enabled,
@@ -32555,11 +32624,26 @@ ${data.tenant.name}`;
       const enabled = req.body?.is_enabled ? 1 : 0;
       if (!hotelCode) return res.status(400).json({ error: 'hotel_code is required' });
       const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      // Per-tenant credentials (optional). partner id + username are stored
+      // plaintext; the password is encrypted at rest. A blank field means
+      // "keep whatever is already stored" (so re-saving the hotel code alone
+      // never wipes the password). Sending an explicit empty via `clear_*`
+      // is not supported here — the owner just retypes to change.
+      const partnerId = req.body?.partner_id != null && String(req.body.partner_id).trim() !== '' ? String(req.body.partner_id).trim() : null;
+      const username  = req.body?.username   != null && String(req.body.username).trim()   !== '' ? String(req.body.username).trim()   : null;
+      const encPass   = req.body?.password   != null && String(req.body.password)          !== '' ? encryptSecret(String(req.body.password)) : null;
       await tenantDb.run(
-        `INSERT INTO channel_credentials (id, channel, property_id, is_enabled, updated_at)
-         VALUES ('CC-AIOSELL', 'AIOSELL', ?, ?, CURRENT_TIMESTAMP)
-         ON CONFLICT (channel) DO UPDATE SET property_id = EXCLUDED.property_id, is_enabled = EXCLUDED.is_enabled, updated_at = CURRENT_TIMESTAMP`,
-        [hotelCode, enabled]
+        `INSERT INTO channel_credentials (id, channel, property_id, is_enabled, aiosell_partner_id, aiosell_username, api_secret, updated_at)
+         VALUES ('CC-AIOSELL', 'AIOSELL', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (channel) DO UPDATE SET
+           property_id        = EXCLUDED.property_id,
+           is_enabled         = EXCLUDED.is_enabled,
+           aiosell_partner_id = COALESCE(EXCLUDED.aiosell_partner_id, channel_credentials.aiosell_partner_id),
+           aiosell_username   = COALESCE(EXCLUDED.aiosell_username, channel_credentials.aiosell_username),
+           api_secret         = COALESCE(EXCLUDED.api_secret, channel_credentials.api_secret),
+           updated_at         = CURRENT_TIMESTAMP`,
+        [hotelCode, enabled, partnerId, username, encPass]
       );
       await ensureAiosellCentral();
       await centralDb.run(
@@ -32574,9 +32658,10 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/hotel/aiosell/test", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const cfg = aiosellConfigFromEnv();
-      if (!aiosellConfigured(cfg)) return res.status(400).json({ ok: false, error: 'Aiosell platform credentials are not configured (set the AIOSELL_* env vars).' });
       const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      const cfg = await aiosellCfgForTenant(tenantDb);
+      if (!aiosellConfigured(cfg)) return res.status(400).json({ ok: false, error: 'Enter the Aiosell partner id, username and password for this property first.' });
       const t = await aiosellTenantConfig(tenantDb);
       const hotelCode = String(req.body?.hotel_code || t.hotelCode || '').trim();
       if (!hotelCode) return res.status(400).json({ ok: false, error: 'Set the hotel code first.' });
@@ -32589,9 +32674,10 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/aiosell/property", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const cfg = aiosellConfigFromEnv();
-      if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Aiosell platform credentials not configured.' });
       const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      const cfg = await aiosellCfgForTenant(tenantDb);
+      if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Enter the Aiosell credentials for this property first.' });
       const t = await aiosellTenantConfig(tenantDb);
       const hotelCode = String((req.query.hotel_code as string) || t.hotelCode || '').trim();
       if (!hotelCode) return res.status(400).json({ error: 'Set the hotel code first.' });
@@ -32612,8 +32698,9 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/hotel/aiosell/fetch-reservations", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const cfg = aiosellConfigFromEnv(); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Aiosell not configured.' });
       const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      const cfg = await aiosellCfgForTenant(tenantDb); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Enter the Aiosell credentials for this property first.' });
       const t = await aiosellTenantConfig(tenantDb); if (!t.hotelCode) return res.status(400).json({ error: 'Hotel code not set.' });
       const startDate = String(req.body?.startDate || '').trim();
       const endDate = String(req.body?.endDate || '').trim();
@@ -32629,8 +32716,10 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/hotel/aiosell/marknoshow", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const cfg = aiosellConfigFromEnv(); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Aiosell not configured.' });
-      const tenantDb = await getTenantDb(req.params.id); const t = await aiosellTenantConfig(tenantDb);
+      const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      const cfg = await aiosellCfgForTenant(tenantDb); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Enter the Aiosell credentials for this property first.' });
+      const t = await aiosellTenantConfig(tenantDb);
       const bookingId = String(req.body?.bookingId || '').trim(); const channel = String(req.body?.channel || '').trim().toLowerCase();
       if (!t.hotelCode || !bookingId || !channel) return res.status(400).json({ error: 'hotel code, bookingId and channel required.' });
       if (!['booking.com', 'gommt'].includes(channel)) return res.status(400).json({ error: 'channel must be booking.com or gommt.' });
@@ -32641,8 +32730,10 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/hotel/aiosell/multiplier", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const cfg = aiosellConfigFromEnv(); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Aiosell not configured.' });
-      const tenantDb = await getTenantDb(req.params.id); const t = await aiosellTenantConfig(tenantDb);
+      const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      const cfg = await aiosellCfgForTenant(tenantDb); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Enter the Aiosell credentials for this property first.' });
+      const t = await aiosellTenantConfig(tenantDb);
       const multiplier = Number(req.body?.multiplier);
       const channels = Array.isArray(req.body?.channels) ? req.body.channels.map((c: any) => String(c).toLowerCase()) : [];
       if (!t.hotelCode) return res.status(400).json({ error: 'Hotel code not set.' });
@@ -48401,8 +48492,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-integration',
+    commit_marker: 'aiosell-per-tenant-creds',
     code_features: [
+      'aiosell-per-tenant-creds',                   // FEATURE (multi-tenant fix for aiosell-integration): the Aiosell partner credentials are no longer env-only/restart-required. Each property now stores its OWN Aiosell partner id + username (plaintext) + password (AES-256-GCM encrypted at rest via encryptSecret, on channel_credentials.api_secret) through Channel Manager → 🔌 Aiosell → Step 1. New decryptSecret helper (inverse of the existing encryptSecret; tamper-fails-closed → null; legacy-plaintext passthrough) recovers the password at call time. Resolution order per tenant: this property's stored creds, else the platform AIOSELL_* env vars (so an operator can still set one shared account for everyone). Every /hotel/aiosell/* endpoint + the inbound webhook now build the AiosellConfig via aiosellCfgForTenant(tenantDb) instead of aiosellConfigFromEnv(); the webhook verifies Basic Auth against the RESOLVED tenant's creds (verifyBasicAuthCredentials) with an env fallback. Saving credentials takes effect immediately — NO app restart — and touches only that tenant (other properties unaffected). Two new plaintext cols aiosell_partner_id/aiosell_username added to channel_credentials (shared DDL + lazy aiosellEnsureCredCols for existing tenants). /aiosell/status now returns creds_source (tenant|env|none) + has_password (boolean, never the value); /aiosell/config accepts partner_id/username/password (blank = keep existing, COALESCE upsert) and never echoes the password. UI Step 1 gains Partner ID / Username / Password fields (password shows "•••• (saved)" when set) + a creds-source chip; the old "operator must set env vars and restart" card is gone. Verified: tsc + vite build clean; AES-GCM round-trip unit-checked (colons-in-password, empty, idempotent, legacy, tamper-fails-closed).
       'aiosell-integration',                        // FEATURE: full Aiosell channel-manager integration (apidocs.aiosell.com /api/v2/cm). Atithi-Setu (PMS) is source of truth; we push ARI to Aiosell → OTAs and receive OTA reservations back via a single partner webhook. NEW module aiosellClient.ts (typed client: Basic-Auth, property_details, inventory/rate push, restrictions, marknoshow, /data fetch, channel_multiplier, constant-time inbound Basic-Auth verify). Partner id + credentials are PLATFORM env config (AIOSELL_PARTNER_ID / AIOSELL_USERNAME / AIOSELL_PASSWORD / AIOSELL_BASE_URL — never per-tenant, never entered in the UI); only the per-property hotelCode + code mappings + enable live in the tenant. BACKEND (server.ts): central `aiosell_hotels(hotel_code→restaurant_id)` registry so the single webhook routes to the right tenant; `aiosellIngestReservation` maps an OTA reservation onto room_bookings (book/modify/cancel, idempotent + modify=replace via new `room_bookings.channel_ref="AIOSELL:<bookingId>"`, resolves room via AIOSELL channel_room_mappings exact→type-level pick-first-available, commission/net snapshot, folio JIT at check-in as usual); `aiosellSyncTenant` computes per-date room-type availability + per-(room,rateplan) rates (base_rate × rate-plan discount) and pushes; public webhook POST /api/public/aiosell/reservation[/:restaurantId] (Basic Auth via verifyAiosellBasicAuth); authenticated ops endpoints /hotel/aiosell/{status,config,test,property,push,fetch-reservations,marknoshow,multiplier}. channel-room-mappings POST now also persists rate_plan_id (additive; other channels omit it). FRONTEND (App.tsx): new "🔌 Aiosell" sub-tab in Channel Manager & RMS → best-in-class AiosellPanel — Step 1 connect (hotel code + enable + Test connection + copyable inbound webhook URL + platform-not-configured guidance), Step 2 mapping wizard (Fetch from Aiosell → per-room/rate-plan rows mapped to local room type + optional rate plan, saved-mapping chips w/ delete, N/M mapped counter), Step 3 push ARI (days) + channel multiplier, Step 4 fetch reservations (date range + optional ingest) + report no-show (Booking.com/GoMMT). Sandbox-testable (hotelCode "sandbox-pms", partnerId "sample-pms"). tsc + vite build clean.
       'cashdrawer-zero-close-fix',                  // BUGFIX (frontend): the cash-drawer "Close drawer → Submit for approval" button was disabled whenever the counted total was ₹0 (`disabled={cdCountedTotal <= 0}`), so an incoming cashier whose drawer was opened by an accepted shift handover with a ₹0 carry-over float (and no cash movement) could never close it — the drawer stayed OPEN and the day could not be locked. A ₹0 count is a legitimate close (also covers a genuine total shortage where the cashier honestly counts ₹0). Fix: the button now enables on a ₹0 count and only stays disabled for an INVALID deposit — deposit < 0 or deposit > counted total (with a tooltip explaining the latter). The backend was already correct (POST /accounting/cash-drawers/:id/close accepts counted_cash=0 → PENDING_APPROVAL with variance = counted − expected; approve only posts a deposit journal when deposit > 0.009 and a variance journal only when variance ≠ 0), so a ₹0 drawer now closes, approves with no spurious journals, and lets the day lock. Frontend-only; no backend/schema change. tsc + vite build clean.
       'fnb-order-confirm-autodismiss',              // BUGFIX (frontend UX): on the in-room guest QR ordering screen, the "Charged to your room / Added to your room bill" confirmation toast (foodOrderConfirm) had a manual ✕ but NO auto-dismiss, so after placing a charge-to-room food order it sat on screen indefinitely while the guest kept browsing/ordering (only cleared when they tapped ✕ or started another order). Added a useEffect timer that auto-clears foodOrderConfirm — 5s for a successful/sent-to-kitchen order, 9s for a genuine failure (so an error is not missed) — with cleanup on change/unmount; the manual ✕ still works. Pure client-side; no endpoint/schema change. tsc + vite build clean.

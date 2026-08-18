@@ -59790,6 +59790,10 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   // Connection form
   const [hotelCode, setHotelCode] = useState('');
   const [enabled, setEnabled] = useState(false);
+  const [partnerId, setPartnerId] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');       // blank = keep existing (never fetched back)
+  const [pwFocused, setPwFocused] = useState(false);
   const [savingCfg, setSavingCfg] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
@@ -59836,6 +59840,9 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
       setStatus(s);
       setHotelCode(s.hotel_code || '');
       setEnabled(!!s.enabled);
+      setPartnerId(s.partner_id || '');
+      setUsername(s.username || '');
+      setPassword('');   // never round-trip the secret; blank keeps it
     } catch (e: any) { setErr(e.message || 'Failed to load Aiosell status.'); }
     finally { setLoading(false); }
   }, [api]);
@@ -59885,8 +59892,16 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
     if (!hotelCode.trim()) { setErr('Enter the Aiosell hotel code first.'); return; }
     setSavingCfg(true); setErr('');
     try {
-      await api('/aiosell/config', { method: 'POST', body: JSON.stringify({ hotel_code: hotelCode.trim(), is_enabled: enabled }) });
+      await api('/aiosell/config', { method: 'POST', body: JSON.stringify({
+        hotel_code: hotelCode.trim(),
+        is_enabled: enabled,
+        // Only send credential fields that were touched — blank means "keep existing".
+        partner_id: partnerId.trim() || undefined,
+        username: username.trim() || undefined,
+        password: password ? password : undefined,
+      }) });
       toast.success('Aiosell connection saved.');
+      setPassword('');
       await loadStatus();
     } catch (e: any) { setErr(e.message || 'Failed to save.'); }
     finally { setSavingCfg(false); }
@@ -60009,29 +60024,11 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
 
       {err && <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2.5 text-sm flex items-center gap-2"><AlertCircle size={15} /> {err}</div>}
 
-      {/* ── PLATFORM STATUS ── */}
-      {!platformReady && (
-        <div className="bg-amber-50 border-2 border-amber-200 rounded-[24px] p-5">
-          <p className="text-sm font-bold text-amber-900 flex items-center gap-2"><AlertCircle size={16} /> Aiosell platform credentials not configured</p>
-          <p className="text-[13px] text-amber-800 mt-2">
-            Your system operator must set the partner credentials on the server before this property can connect. Set these environment variables and restart:
-          </p>
-          <div className="mt-3 bg-white/70 rounded-xl p-3 font-mono text-[12px] text-amber-900 space-y-0.5 border border-amber-200">
-            <div>AIOSELL_PARTNER_ID=<span className="text-amber-600">sample-pms</span></div>
-            <div>AIOSELL_USERNAME=<span className="text-amber-600">&lt;partner user&gt;</span></div>
-            <div>AIOSELL_PASSWORD=<span className="text-amber-600">&lt;partner pass&gt;</span></div>
-            <div className="text-amber-500"># optional — defaults to live.aiosell.com</div>
-            <div>AIOSELL_BASE_URL=<span className="text-amber-600">https://live.aiosell.com/api/v2/cm</span></div>
-          </div>
-          <p className="text-[11px] text-amber-700 mt-2">These are shared across all properties and are never entered here for security.</p>
-        </div>
-      )}
-
       {/* ── STEP 1 · CONNECTION ── */}
       <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
         <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
           <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2"><Globe size={17} /> Step 1 · Connect your property</h4>
-          <p className="text-xs text-[#6b5d52] mt-0.5">Enter the hotel code Aiosell assigned you, then test the link.</p>
+          <p className="text-xs text-[#6b5d52] mt-0.5">Enter your Aiosell hotel code and partner credentials, save, then test the link. Changes apply instantly for this property only.</p>
         </div>
         <div className="p-5 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-4 items-end">
@@ -60045,6 +60042,41 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
               Enable sync
             </label>
           </div>
+
+          {/* ── Aiosell partner credentials (per-property; no server restart) ── */}
+          <div className="border border-[#efe6da] rounded-2xl p-4 bg-[#fdfbf8]">
+            <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Aiosell partner credentials</p>
+              {status?.creds_source === 'env' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">Using shared platform account</span>}
+              {status?.creds_source === 'tenant' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">This property's own account</span>}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-[#6b5d52] mb-1">Partner ID <span className="text-[#b9aa9c]">({'{pms}'})</span></label>
+                <input value={partnerId} onChange={e => setPartnerId(e.target.value)} placeholder="e.g. sample-pms" className={cn(fieldCls, 'w-full')} />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-[#6b5d52] mb-1">Username</label>
+                <input value={username} onChange={e => setUsername(e.target.value)} autoComplete="off" placeholder="partner username" className={cn(fieldCls, 'w-full')} />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-[#6b5d52] mb-1">Password</label>
+                <input
+                  type="password" value={password} autoComplete="new-password"
+                  onFocus={() => setPwFocused(true)} onBlur={() => setPwFocused(false)}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder={status?.has_password && !pwFocused && !password ? '•••••••• (saved)' : 'partner password'}
+                  className={cn(fieldCls, 'w-full')} />
+              </div>
+            </div>
+            <p className="text-[11px] text-[#9c8e85] mt-2">
+              {status?.env_available
+                ? 'Leave blank to keep using the shared platform account, or enter this property’s own Aiosell credentials to override it. '
+                : 'Enter the credentials Aiosell issued for this property. '}
+              Stored encrypted; saving takes effect immediately — no restart, and other properties are unaffected.
+            </p>
+          </div>
+
           <div className="flex gap-2 flex-wrap">
             <button onClick={saveConfig} disabled={savingCfg} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50 transition-colors">
               {savingCfg ? 'Saving…' : 'Save connection'}
@@ -60063,7 +60095,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
           {/* Webhook URL for inbound OTA bookings */}
           <div className="bg-[#f5f0ea] rounded-xl p-3">
             <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Inbound reservation webhook</p>
-            <p className="text-[12px] text-[#6b5d52] mb-2">Give this URL to Aiosell so OTA bookings post back into your PMS (Basic Auth, partner credentials).</p>
+            <p className="text-[12px] text-[#6b5d52] mb-2">Give this URL to Aiosell so OTA bookings post back into your PMS (Basic Auth, this property’s Aiosell credentials).</p>
             <div className="flex items-center gap-2">
               <code className="flex-1 bg-white border border-[#e8e0d8] rounded-lg px-3 py-2 text-[12px] text-[#1a1208] font-mono truncate">{status?.webhook_url || '—'}</code>
               <button onClick={copyWebhook} className="px-3 py-2 rounded-lg border border-[#e8e0d8] text-xs font-bold hover:bg-white transition-colors shrink-0">Copy</button>
