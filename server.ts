@@ -32565,20 +32565,30 @@ ${data.tenant.name}`;
   // ── Inbound reservation webhook (Aiosell → PMS). Single partner URL; tenant
   //    resolved by hotelCode (or an explicit :restaurantId path). Basic Auth. ──
   const aiosellWebhookHandler = async (req: Request, res: Response) => {
+    // Auth-FIRST: reject anything without a well-formed Basic header before doing
+    // ANY body parsing or DB work (no tenant-existence probing, no DoS amplification).
+    const auth = req.headers['authorization'];
+    if (!/^Basic\s+.+/i.test(String(auth || ''))) return res.status(401).json({ success: false, message: 'Unauthorized' });
     const body: AiosellReservation = (req.body || {}) as AiosellReservation;
     const action = String(body.action || '').toLowerCase();
     const hotelCode = String(body.hotelCode || '');
     if (!action || !hotelCode) return res.status(400).json({ success: false, message: 'action and hotelCode are required' });
+    // Resolve the tenant (the hotelCode in the body is not a secret), then verify
+    // the presented credentials against that tenant's stored creds (webhook
+    // override if set, else the partner username/password), with the platform env
+    // creds as a fallback. A shared account (env) authenticates before we need a
+    // tenant lookup.
     let restaurantId: string | null = (req.params as any).restaurantId || null;
     if (!restaurantId) restaurantId = await aiosellResolveTenant(hotelCode);
+    const envOk = verifyAiosellBasicAuth(auth);
+    let tenantOk = false;
+    if (restaurantId && !envOk) {
+      const tCfg = await aiosellCfgForTenant(await getTenantDb(restaurantId));
+      tenantOk = verifyBasicAuthCredentials(process.env.AIOSELL_WEBHOOK_USERNAME || tCfg.username, process.env.AIOSELL_WEBHOOK_PASSWORD || tCfg.password, auth);
+    }
+    if (!envOk && !tenantOk) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    // Authenticated — only now is it safe to reveal that no property is registered.
     if (!restaurantId) return res.status(404).json({ success: false, message: `No property registered for hotelCode ${hotelCode}` });
-    // Verify Basic Auth against THIS tenant's stored credentials (webhook override
-    // if set, else the partner username/password), falling back to the platform
-    // env creds for env-only deployments.
-    const auth = req.headers['authorization'];
-    const tCfg = await aiosellCfgForTenant(await getTenantDb(restaurantId));
-    const tenantOk = verifyBasicAuthCredentials(process.env.AIOSELL_WEBHOOK_USERNAME || tCfg.username, process.env.AIOSELL_WEBHOOK_PASSWORD || tCfg.password, auth);
-    if (!tenantOk && !verifyAiosellBasicAuth(auth)) return res.status(401).json({ success: false, message: 'Unauthorized' });
     try {
       const out = await aiosellIngestReservation(restaurantId, body);
       if (!out.ok) return res.status(out.status || 400).json({ success: false, message: out.reason || 'Failed' });
@@ -48492,8 +48502,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-per-tenant-creds',
+    commit_marker: 'aiosell-webhook-authfirst',
     code_features: [
+      'aiosell-webhook-authfirst',                  // HARDENING (follow-up to aiosell-per-tenant-creds): the inbound reservation webhook is now AUTH-FIRST. Because per-tenant creds require resolving the tenant from the body hotelCode before we know which creds to check, the previous cut did the tenant lookup (a DB round-trip) and could return 404 "no property for hotelCode" BEFORE authenticating — leaking hotelCode registration state to anonymous callers and allowing pre-auth DB work (DoS amplification). Now: a missing/malformed Basic header is rejected with 401 before ANY body parse or DB access; a shared env account authenticates without a tenant lookup; the tenant lookup + per-tenant cred check runs only for a well-formed header; and the 404 "no property registered" is returned ONLY after the caller is authenticated. Wrong creds for a registered hotel → 401 (unchanged). Server-only; no schema/UI change.
       'aiosell-per-tenant-creds',                   // FEATURE (multi-tenant fix for aiosell-integration): the Aiosell partner credentials are no longer env-only/restart-required. Each property now stores its OWN Aiosell partner id + username (plaintext) + password (AES-256-GCM encrypted at rest via encryptSecret, on channel_credentials.api_secret) through Channel Manager → 🔌 Aiosell → Step 1. New decryptSecret helper (inverse of the existing encryptSecret; tamper-fails-closed → null; legacy-plaintext passthrough) recovers the password at call time. Resolution order per tenant: this property's stored creds, else the platform AIOSELL_* env vars (so an operator can still set one shared account for everyone). Every /hotel/aiosell/* endpoint + the inbound webhook now build the AiosellConfig via aiosellCfgForTenant(tenantDb) instead of aiosellConfigFromEnv(); the webhook verifies Basic Auth against the RESOLVED tenant's creds (verifyBasicAuthCredentials) with an env fallback. Saving credentials takes effect immediately — NO app restart — and touches only that tenant (other properties unaffected). Two new plaintext cols aiosell_partner_id/aiosell_username added to channel_credentials (shared DDL + lazy aiosellEnsureCredCols for existing tenants). /aiosell/status now returns creds_source (tenant|env|none) + has_password (boolean, never the value); /aiosell/config accepts partner_id/username/password (blank = keep existing, COALESCE upsert) and never echoes the password. UI Step 1 gains Partner ID / Username / Password fields (password shows "•••• (saved)" when set) + a creds-source chip; the old "operator must set env vars and restart" card is gone. Verified: tsc + vite build clean; AES-GCM round-trip unit-checked (colons-in-password, empty, idempotent, legacy, tamper-fails-closed).
       'aiosell-integration',                        // FEATURE: full Aiosell channel-manager integration (apidocs.aiosell.com /api/v2/cm). Atithi-Setu (PMS) is source of truth; we push ARI to Aiosell → OTAs and receive OTA reservations back via a single partner webhook. NEW module aiosellClient.ts (typed client: Basic-Auth, property_details, inventory/rate push, restrictions, marknoshow, /data fetch, channel_multiplier, constant-time inbound Basic-Auth verify). Partner id + credentials are PLATFORM env config (AIOSELL_PARTNER_ID / AIOSELL_USERNAME / AIOSELL_PASSWORD / AIOSELL_BASE_URL — never per-tenant, never entered in the UI); only the per-property hotelCode + code mappings + enable live in the tenant. BACKEND (server.ts): central `aiosell_hotels(hotel_code→restaurant_id)` registry so the single webhook routes to the right tenant; `aiosellIngestReservation` maps an OTA reservation onto room_bookings (book/modify/cancel, idempotent + modify=replace via new `room_bookings.channel_ref="AIOSELL:<bookingId>"`, resolves room via AIOSELL channel_room_mappings exact→type-level pick-first-available, commission/net snapshot, folio JIT at check-in as usual); `aiosellSyncTenant` computes per-date room-type availability + per-(room,rateplan) rates (base_rate × rate-plan discount) and pushes; public webhook POST /api/public/aiosell/reservation[/:restaurantId] (Basic Auth via verifyAiosellBasicAuth); authenticated ops endpoints /hotel/aiosell/{status,config,test,property,push,fetch-reservations,marknoshow,multiplier}. channel-room-mappings POST now also persists rate_plan_id (additive; other channels omit it). FRONTEND (App.tsx): new "🔌 Aiosell" sub-tab in Channel Manager & RMS → best-in-class AiosellPanel — Step 1 connect (hotel code + enable + Test connection + copyable inbound webhook URL + platform-not-configured guidance), Step 2 mapping wizard (Fetch from Aiosell → per-room/rate-plan rows mapped to local room type + optional rate plan, saved-mapping chips w/ delete, N/M mapped counter), Step 3 push ARI (days) + channel multiplier, Step 4 fetch reservations (date range + optional ingest) + report no-show (Booking.com/GoMMT). Sandbox-testable (hotelCode "sandbox-pms", partnerId "sample-pms"). tsc + vite build clean.
       'cashdrawer-zero-close-fix',                  // BUGFIX (frontend): the cash-drawer "Close drawer → Submit for approval" button was disabled whenever the counted total was ₹0 (`disabled={cdCountedTotal <= 0}`), so an incoming cashier whose drawer was opened by an accepted shift handover with a ₹0 carry-over float (and no cash movement) could never close it — the drawer stayed OPEN and the day could not be locked. A ₹0 count is a legitimate close (also covers a genuine total shortage where the cashier honestly counts ₹0). Fix: the button now enables on a ₹0 count and only stays disabled for an INVALID deposit — deposit < 0 or deposit > counted total (with a tooltip explaining the latter). The backend was already correct (POST /accounting/cash-drawers/:id/close accepts counted_cash=0 → PENDING_APPROVAL with variance = counted − expected; approve only posts a deposit journal when deposit > 0.009 and a variance journal only when variance ≠ 0), so a ₹0 drawer now closes, approves with no spurious journals, and lets the day lock. Frontend-only; no backend/schema change. tsc + vite build clean.
