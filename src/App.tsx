@@ -60288,6 +60288,100 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
     catch (e: any) { setErr(e.message || 'Failed to remove.'); }
   };
 
+  // ── Auto-suggest mapping (name + occupancy match) ────────────────────────
+  // Suggests the closest local room type for each Aiosell room so a new room
+  // maps in one click instead of hunting the dropdown. Score = token-set
+  // Jaccard on the names (+ substring bonus) with an occupancy tie-breaker;
+  // only reasonably-confident matches are offered.
+  const _norm = (s: any) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const _stop = new Set(['room', 'rooms', 'the', 'a', 'an', 'with', 'and', 'plan', 'rate', 'non', 'refundable']);
+  const _toks = (s: any) => new Set(_norm(s).split(' ').filter((w: string) => w && !_stop.has(w)));
+  const _nameScore = (a: any, b: any): number => {
+    const A = _toks(a), B = _toks(b);
+    if (!A.size || !B.size) return 0;
+    let inter = 0; A.forEach((w: string) => { if (B.has(w)) inter++; });
+    const union = new Set([...Array.from(A), ...Array.from(B)]).size;
+    let s = union ? inter / union : 0;
+    const na = _norm(a), nb = _norm(b);
+    if (na && nb && (na.includes(nb) || nb.includes(na))) s = Math.max(s, 0.6);
+    return s;
+  };
+  const _occ = (o: any) => Number(o?.max_occ ?? o?.max_occupancy ?? o?.occupancy ?? o?.capacity ?? o?.base_capacity ?? o?.base_occupancy ?? 0);
+  const suggestRoomType = useCallback((room: any): { id: string; name: string; score: number } | null => {
+    let best: any = null, bestScore = 0;
+    for (const rt of roomTypes) {
+      let sc = _nameScore(room?.room_name, rt?.name);
+      const ao = _occ(room), lo = _occ(rt);
+      if (ao && lo) sc += ao === lo ? 0.15 : (Math.abs(ao - lo) === 1 ? 0.05 : 0);
+      if (sc > bestScore) { bestScore = sc; best = rt; }
+    }
+    return best && bestScore >= 0.34 ? { id: best.id, name: best.name, score: Math.min(1, bestScore) } : null;
+  }, [roomTypes]);
+  const suggestRatePlan = useCallback((rpn: any): { id: string; name: string } | null => {
+    let best: any = null, bestScore = 0;
+    for (const rp of ratePlans) {
+      const sc = _nameScore(rpn?.rateplan_name, rp?.name);
+      if (sc > bestScore) { bestScore = sc; best = rp; }
+    }
+    return best && bestScore >= 0.5 ? { id: best.id, name: best.name } : null;
+  }, [ratePlans]);
+
+  // Fill the draft for every UNMAPPED (room × rate-plan) pair with its best
+  // guess — never overwrites a saved mapping or a value the user already picked.
+  const autoSuggestMappings = () => {
+    if (!property?.rooms) return;
+    const next: Record<string, { rt: string; rp: string }> = { ...mapDraft };
+    let filled = 0;
+    for (const room of property.rooms) {
+      const rtSug = suggestRoomType(room);
+      for (const rpn of (room.rateplans || [])) {
+        const key = `${room.room_id}|${rpn.rateplan_id}`;
+        const saved = mappings.find((m: any) => m.external_room_code === room.room_id && (m.external_rate_plan_code || '') === rpn.rateplan_id);
+        if (saved || next[key]?.rt) continue;
+        if (rtSug) { const rpSug = suggestRatePlan(rpn); next[key] = { rt: rtSug.id, rp: rpSug?.id || '' }; filled++; }
+      }
+    }
+    setMapDraft(next);
+    if (filled > 0) toast.success(`Suggested ${filled} mapping${filled === 1 ? '' : 's'} — review, then “Save all mapped”.`);
+    else toast.info('No confident matches — map manually from the dropdowns.');
+  };
+
+  // Bulk-save every row that has a local room type selected but isn't yet saved
+  // (or whose selection changed). One upsert per pair, then one reload.
+  const saveAllMappings = async () => {
+    if (!property?.rooms) return;
+    const toSave: Array<{ room: any; rpn: any; d: { rt: string; rp: string } }> = [];
+    for (const room of property.rooms) {
+      for (const rpn of (room.rateplans || [])) {
+        const key = `${room.room_id}|${rpn.rateplan_id}`;
+        const d = mapDraft[key];
+        if (!d?.rt) continue;
+        const saved = mappings.find((m: any) => m.external_room_code === room.room_id && (m.external_rate_plan_code || '') === rpn.rateplan_id);
+        const changed = !saved || saved.local_room_type_id !== d.rt || String(saved.rate_plan_id || '') !== String(d.rp || '');
+        if (changed) toSave.push({ room, rpn, d });
+      }
+    }
+    if (!toSave.length) { toast.info('Nothing new to save — every picked row is already mapped.'); return; }
+    setSavingMap('__all__'); setErr('');
+    let ok = 0;
+    try {
+      for (const { room, rpn, d } of toSave) {
+        await api('/channel-room-mappings', { method: 'POST', body: JSON.stringify({
+          channel: AIOSELL, external_room_code: room.room_id, external_rate_plan_code: rpn.rateplan_id,
+          local_room_type_id: d.rt, rate_plan_id: d.rp || null,
+          label: `${room.room_name} · ${rpn.rateplan_name} (Aiosell)`, is_active: 1,
+        }) });
+        ok++;
+      }
+      toast.success(`Saved ${ok} mapping${ok === 1 ? '' : 's'}.`);
+      await loadMappingData(); await loadStatus();
+    } catch (e: any) {
+      setErr(e.message || 'Bulk save failed.');
+      toast.error(ok > 0 ? `Saved ${ok}, then failed: ${e.message || ''}` : (e.message || 'Bulk save failed.'));
+      if (ok > 0) { await loadMappingData(); await loadStatus(); }
+    } finally { setSavingMap(''); }
+  };
+
   const pushARI = async () => {
     setPushing(true); setErr(''); setPushResult(null);
     try {
@@ -60508,9 +60602,25 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
             <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">🧩 Step 2 · Map rooms &amp; rate plans</h4>
             <p className="text-xs text-[#6b5d52] mt-0.5">Match each Aiosell room + rate plan to one of your local room types. Bookings and rate pushes use these links.</p>
           </div>
-          <button onClick={fetchProperty} disabled={loadingProp || !platformReady} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors shrink-0">
-            {loadingProp ? 'Fetching…' : property ? '↻ Refresh from Aiosell' : 'Fetch from Aiosell'}
-          </button>
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+            {property && (
+              <>
+                <button onClick={autoSuggestMappings} disabled={loadingProp || roomTypes.length === 0}
+                  title="Auto-fill the closest local room type for every unmapped Aiosell room (matched by name + occupancy). Nothing is saved until you review and click Save all mapped."
+                  className="px-3 py-2 rounded-xl bg-[#f5f0ea] border border-[#e8e0d8] text-[#1a1208] text-sm font-bold hover:bg-[#efe6da] disabled:opacity-50 transition-colors">
+                  ✨ Auto-suggest
+                </button>
+                <button onClick={saveAllMappings} disabled={savingMap === '__all__'}
+                  title="Save every row that has a local room type selected"
+                  className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50 transition-colors">
+                  {savingMap === '__all__' ? 'Saving…' : 'Save all mapped'}
+                </button>
+              </>
+            )}
+            <button onClick={fetchProperty} disabled={loadingProp || !platformReady} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors shrink-0">
+              {loadingProp ? 'Fetching…' : property ? '↻ Refresh from Aiosell' : 'Fetch from Aiosell'}
+            </button>
+          </div>
         </div>
         <div className="p-5">
           {!property ? (
@@ -60555,6 +60665,16 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                                   <option value="">— unmapped —</option>
                                   {roomTypes.map((rt: any) => <option key={rt.id} value={rt.id}>{rt.name}</option>)}
                                 </select>
+                                {!d.rt && (() => {
+                                  const sug = suggestRoomType(room);
+                                  return sug ? (
+                                    <button type="button" onClick={() => setMapDraft(p => ({ ...p, [key]: { ...(p[key] || { rt: '', rp: '' }), rt: sug.id } }))}
+                                      title={`Suggested match (${Math.round(sug.score * 100)}%). Click to use.`}
+                                      className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-[#cc5a16] hover:underline">
+                                      ✨ Use “{sug.name}”
+                                    </button>
+                                  ) : null;
+                                })()}
                               </td>
                               <td className="py-2 px-3">
                                 <select value={d.rp} onChange={e => setMapDraft(p => ({ ...p, [key]: { ...d, rp: e.target.value } }))} className={cn(fieldCls, 'w-full min-w-[140px]')}>
