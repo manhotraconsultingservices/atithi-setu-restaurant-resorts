@@ -26742,6 +26742,53 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch appointment" }); }
   });
 
+  // ── Spa appointment audit trail + where-used (ObjectDetail "History") ─────
+  app.get("/api/restaurant/:id/spa/appointments/:aid/audit", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'SPA_APPOINTMENT', req.params.aid));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit log" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/appointments/:aid/where-used", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const a: any = await db.get("SELECT id, client_id, client_name, folio_id, therapist_id, resource_id FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      if (!a) return res.status(404).json({ error: "Appointment not found" });
+      const groups: any[] = [];
+      if (a.folio_id) {
+        const f: any = await db.get("SELECT id, invoice_number, grand_total, status FROM folios WHERE id = ?", [a.folio_id]).catch(() => null);
+        if (f) groups.push({ group: 'Invoice / Folio', items: [{ type: 'Folio', id: f.id, label: f.invoice_number || f.id, sublabel: `${f.status || ''} · ₹${Number(f.grand_total || 0).toLocaleString('en-IN')}`, link: { objectType: 'SPA_FOLIO', objectId: f.id } }] });
+      }
+      if (a.client_id || a.client_name) {
+        const c: any = a.client_id ? await db.get("SELECT id, name, phone FROM spa_clients WHERE id = ?", [a.client_id]).catch(() => null) : null;
+        groups.push({ group: 'Client', items: [{ type: 'Client', id: a.client_id || a.client_name, label: c?.name || a.client_name || 'Guest', sublabel: c?.phone || '', link: null }] });
+      }
+      if (a.therapist_id) {
+        const t: any = await db.get("SELECT id, display_name FROM spa_therapists WHERE id = ?", [a.therapist_id]).catch(() => null);
+        if (t) groups.push({ group: 'Therapist', items: [{ type: 'Therapist', id: t.id, label: t.display_name || t.id, sublabel: '', link: null }] });
+      }
+      if (a.resource_id) {
+        const r: any = await db.get("SELECT id, name FROM spa_resources WHERE id = ?", [a.resource_id]).catch(() => null);
+        if (r) groups.push({ group: 'Cabin', items: [{ type: 'Cabin', id: r.id, label: r.name || r.id, sublabel: '', link: null }] });
+      }
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/folios/:fid/audit", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'SPA_FOLIO', req.params.fid));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit log" }); }
+  });
+
   // Book — dual-resource conflict guard (therapist + cabin) → 409 on overlap.
   app.post("/api/restaurant/:id/spa/appointments", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
@@ -26812,6 +26859,11 @@ ${data.tenant.name}`;
          win.startAt, win.endAt, price, gstPct, Number(b.deposit_amount || 0),
          b.booking_source || 'STAFF', b.notes || null]
       );
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_APPOINTMENT', objectId: id, action: 'CREATED',
+        summary: `Appointment booked — "${service.name}"${b.client_name ? ` · ${b.client_name}` : ''} @ ${win.startAt} (₹${price})`,
+        after: { service_name: service.name, client_name: b.client_name || null, client_phone: b.client_phone || null, therapist_id: b.therapist_id || null, resource_id: b.resource_id || null, start_at: win.startAt, end_at: win.endAt, price_snapshot: price },
+      }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [id]));
     } catch (err: any) { console.error("spa book error:", err); res.status(500).json({ error: err?.message || "Failed to book appointment" }); }
   });
@@ -26844,6 +26896,12 @@ ${data.tenant.name}`;
         "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
         [therapistId || null, resourceId || null, win.startAt, win.endAt, appt.id]
       );
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'RESCHEDULED',
+        summary: `Appointment "${appt.service_name || 'service'}" rescheduled${appt.start_at !== win.startAt ? ` — ${appt.start_at} → ${win.startAt}` : ''}`,
+        before: { therapist_id: appt.therapist_id, resource_id: appt.resource_id, start_at: appt.start_at, end_at: appt.end_at },
+        after: { therapist_id: therapistId || null, resource_id: resourceId || null, start_at: win.startAt, end_at: win.endAt },
+      }).catch(() => {});
       res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to reschedule" }); }
   });
@@ -26856,6 +26914,11 @@ ${data.tenant.name}`;
     const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
     if (!appt) return res.status(404).json({ error: "Appointment not found" });
     await db.run(`UPDATE spa_appointments SET status = ?${extraSet ? ', ' + extraSet : ''} WHERE id = ?`, [target, appt.id]);
+    writeObjectAudit(db, req, {
+      objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'STATUS_CHANGED',
+      summary: `Appointment "${appt.service_name || 'service'}"${appt.client_name ? ` · ${appt.client_name}` : ''} — ${appt.status} → ${target}`,
+      before: { status: appt.status }, after: { status: target },
+    }).catch(() => {});
     return db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]);
   };
 
@@ -26872,8 +26935,14 @@ ${data.tenant.name}`;
       const check = await ensureSpaEnabled(req.params.id);
       if (!check.ok) return res.status(check.status).json({ error: check.error });
       const db = await getTenantDb(req.params.id);
+      const before: any = await db.get("SELECT status, service_name, client_name FROM spa_appointments WHERE id = ?", [req.params.aid]).catch(() => null);
       await db.run("UPDATE spa_appointments SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancellation_reason = ? WHERE id = ?",
         [req.body?.reason || null, req.params.aid]);
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_APPOINTMENT', objectId: req.params.aid, action: 'CANCELLED',
+        summary: `Appointment "${before?.service_name || 'service'}"${before?.client_name ? ` · ${before.client_name}` : ''} cancelled${req.body?.reason ? ` — ${req.body.reason}` : ''}`,
+        before: { status: before?.status }, after: { status: 'CANCELLED', reason: req.body?.reason || null },
+      }).catch(() => {});
       res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel" }); }
   });
@@ -26882,7 +26951,13 @@ ${data.tenant.name}`;
       const check = await ensureSpaEnabled(req.params.id);
       if (!check.ok) return res.status(check.status).json({ error: check.error });
       const db = await getTenantDb(req.params.id);
+      const before: any = await db.get("SELECT status, service_name, client_name FROM spa_appointments WHERE id = ?", [req.params.aid]).catch(() => null);
       await db.run("UPDATE spa_appointments SET status = 'NO_SHOW', no_show_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.aid]);
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_APPOINTMENT', objectId: req.params.aid, action: 'NO_SHOW',
+        summary: `Appointment "${before?.service_name || 'service'}"${before?.client_name ? ` · ${before.client_name}` : ''} marked no-show`,
+        before: { status: before?.status }, after: { status: 'NO_SHOW' },
+      }).catch(() => {});
       res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
     } catch (err: any) { res.status(500).json({ error: "Failed to mark no-show" }); }
   });
@@ -26914,6 +26989,11 @@ ${data.tenant.name}`;
         ).catch(() => {});
       }
       await db.run("UPDATE spa_appointments SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP WHERE id = ?", [appt.id]);
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'COMPLETED',
+        summary: `Appointment "${appt.service_name || 'service'}"${appt.client_name ? ` · ${appt.client_name}` : ''} completed`,
+        before: { status: appt.status }, after: { status: 'COMPLETED' },
+      }).catch(() => {});
       res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]));
     } catch (err: any) { console.error("spa complete error:", err); res.status(500).json({ error: "Failed to complete appointment" }); }
   });
@@ -27015,6 +27095,15 @@ ${data.tenant.name}`;
       await db.run("UPDATE spa_appointments SET folio_id = ? WHERE id = ?", [folioId, appt.id]);
 
       const out = await getFolioOutstanding(db, folioId);
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_FOLIO', objectId: folioId, action: 'CREATED',
+        summary: `Spa invoice ${invNum} raised for "${appt.service_name || 'service'}"${appt.client_name ? ` · ${appt.client_name}` : ''} (₹${Number(out?.folio?.grand_total || 0).toFixed(2)})`,
+        after: { invoice_number: invNum, appointment_id: appt.id, service_name: appt.service_name, client_name: appt.client_name, redeemed, discount, grand_total: out?.folio?.grand_total },
+      }).catch(() => {});
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'CHECKED_OUT',
+        summary: `Checked out → spa invoice ${invNum}`, after: { folio_id: folioId, invoice_number: invNum },
+      }).catch(() => {});
       res.status(201).json({ folio: out?.folio, outstanding: out?.outstanding, invoice_number: invNum });
     } catch (err: any) { console.error("spa checkout error:", err); res.status(500).json({ error: err?.message || "Failed to checkout" }); }
   });
@@ -27105,6 +27194,11 @@ ${data.tenant.name}`;
           sourceType: 'SPA_SETTLEMENT', postedBy: req.user?.email || req.user?.id || null,
         });
       }
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_FOLIO', objectId: req.params.fid, action: 'PAYMENT',
+        summary: `Payment ₹${amount.toFixed(2)} via ${method} (${recordType})${out?.is_fully_paid ? ' — settled' : ''}`,
+        after: { amount, method, payment_type: recordType, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid },
+      }).catch(() => {});
       res.status(201).json({ success: true, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid });
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to record payment" }); }
   });
@@ -27137,6 +27231,12 @@ ${data.tenant.name}`;
       if (out && !out.is_fully_paid) {
         await db.run("UPDATE folios SET status = 'open', settled_at = NULL WHERE id = ?", [req.params.fid]);
       }
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_FOLIO', objectId: req.params.fid, action: 'PAYMENT_VOIDED',
+        summary: `Payment ₹${Number(pay.amount || 0).toFixed(2)} voided${req.body?.reason ? ` — ${req.body.reason}` : ''}`,
+        before: { amount: pay.amount, method: pay.payment_method, payment_type: pay.payment_type },
+        after: { is_voided: 1, outstanding: out?.outstanding },
+      }).catch(() => {});
       res.json({ success: true, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid });
     } catch (err: any) { res.status(500).json({ error: "Failed to void payment" }); }
   });
@@ -27186,6 +27286,11 @@ ${data.tenant.name}`;
         [promo.id, code, clientPhone, folio.id, discount]).catch(() => {});
       await recomputeFolioTotals(db, folio.id);
       const out = await getFolioOutstanding(db, folio.id);
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_FOLIO', objectId: folio.id, action: 'DISCOUNT_APPLIED',
+        summary: `Promo ${code} applied — discount ₹${Number(discount).toFixed(2)}`,
+        before: { discount: Number(folio.discount || 0) }, after: { promo_code: code, discount },
+      }).catch(() => {});
       res.json({ success: true, promo: { code, label: promo.label, percent: promo.discount_percent, amount: promo.discount_amount }, discount, folio: out?.folio, outstanding: out?.outstanding });
     } catch (err: any) {
       console.error("spa apply-promo error:", err);
@@ -29181,6 +29286,12 @@ ${data.tenant.name}`;
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [id, room_id, start_date, end_date, kindUpper, reason || null, req.user?.id || null]
       );
+      // Audit under the ROOM so the hold shows in the room's History tree.
+      writeObjectAudit(tenantDb, req, {
+        objectType: 'ROOM', objectId: String(room_id), action: 'HELD',
+        summary: `Room blocked (${kindUpper}) ${start_date} → ${end_date}${reason ? ` — ${reason}` : ''}`,
+        after: { hold_id: id, start_date, end_date, kind: kindUpper, reason: reason || null },
+      }).catch(() => {});
       res.status(201).json(await tenantDb.get("SELECT * FROM room_holds WHERE id = ?", [id]));
     } catch (err) {
       console.error("create room-hold error:", err);
@@ -29193,7 +29304,15 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
+      const hold: any = await tenantDb.get("SELECT id, room_id, start_date, end_date, kind FROM room_holds WHERE id = ?", [req.params.holdId]).catch(() => null);
       await tenantDb.run("DELETE FROM room_holds WHERE id = ?", [req.params.holdId]);
+      if (hold?.room_id) {
+        writeObjectAudit(tenantDb, req, {
+          objectType: 'ROOM', objectId: String(hold.room_id), action: 'HOLD_RELEASED',
+          summary: `Room block removed (${hold.kind || 'HOLD'}) ${String(hold.start_date || '').slice(0, 10)} → ${String(hold.end_date || '').slice(0, 10)}`,
+          before: { hold_id: hold.id, start_date: hold.start_date, end_date: hold.end_date, kind: hold.kind },
+        }).catch(() => {});
+      }
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to remove hold" });
@@ -32982,6 +33101,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const list: any[] = Array.isArray(req.body?.rate_plans) ? req.body.rate_plans : [];
     const tenantDb = await getTenantDb(req.params.id);
+    const beforePlans: any[] = await tenantDb.query("SELECT id, code, name, discount_pct, is_active FROM rate_plans").catch(() => []);
     let saved = 0;
     for (const p of list) {
       if (!p?.id || !p?.code || !p?.name) continue;
@@ -33007,6 +33127,12 @@ ${data.tenant.name}`;
       }
     }
     const persisted = await tenantDb.query("SELECT * FROM rate_plans ORDER BY display_order, code").catch(() => []);
+    writeObjectAudit(tenantDb, req, {
+      objectType: 'TARIFF', objectId: 'RATE_PLANS', action: 'UPDATED',
+      summary: `Rate plans updated (${saved} saved)`,
+      before: beforePlans.map((p: any) => ({ id: p.id, code: p.code, name: p.name, discount_pct: p.discount_pct, is_active: p.is_active })),
+      after: (persisted as any[]).map((p: any) => ({ id: p.id, code: p.code, name: p.name, discount_pct: p.discount_pct, is_active: p.is_active })),
+    }).catch(() => {});
     res.json({ ok: true, count: saved, rate_plans: persisted });
     triggerAllRoomRatePush(req.params.id).catch(() => {});
   });
@@ -33016,8 +33142,14 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
+      const rp: any = await tenantDb.get("SELECT id, code, name FROM rate_plans WHERE id = ?", [req.params.planId]).catch(() => null);
       // Soft delete — set is_active=0 instead of DELETE since bookings reference rate_plan_id.
       await tenantDb.run("UPDATE rate_plans SET is_active = 0 WHERE id = ?", [req.params.planId]);
+      writeObjectAudit(tenantDb, req, {
+        objectType: 'TARIFF', objectId: 'RATE_PLANS', action: 'RATE_PLAN_DEACTIVATED',
+        summary: `Rate plan ${rp?.code || req.params.planId}${rp?.name ? ` (${rp.name})` : ''} deactivated`,
+        before: rp ? { id: rp.id, code: rp.code, name: rp.name, is_active: 1 } : { id: req.params.planId }, after: { is_active: 0 },
+      }).catch(() => {});
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to deactivate rate plan' });
@@ -39932,6 +40064,7 @@ ${data.tenant.name}`;
         return res.status(400).json({ error: "tariff_model must be 'LEGACY' or 'MATRIX'" });
       }
       await centralDb.run("UPDATE restaurants SET tariff_model = ? WHERE id = ?", [m, req.params.id]);
+      try { const _td = await getTenantDb(req.params.id); writeObjectAudit(_td, req, { objectType: 'TARIFF', objectId: 'MODEL', action: 'MODEL_CHANGED', summary: `Tariff model set to ${m}`, after: { tariff_model: m } }).catch(() => {}); } catch { /* audit best-effort */ }
       res.json({ ok: true, tariff_model: m });
     }
   );
@@ -39959,6 +40092,7 @@ ${data.tenant.name}`;
            s.is_active === 0 || s.is_active === false ? 0 : 1]
         );
       }
+      writeObjectAudit(tenantDb, req, { objectType: 'TARIFF', objectId: 'SEASONS', action: 'UPDATED', summary: `Seasons updated (${list.length})`, after: list.map((s: any) => ({ id: s.id, name: s.name, is_active: s.is_active })) }).catch(() => {});
       res.json({ ok: true, count: list.length });
     }
   );
@@ -39987,6 +40121,7 @@ ${data.tenant.name}`;
           [id, String(p.season_id), String(p.start_date), String(p.end_date), p.label || null]
         );
       }
+      writeObjectAudit(tenantDb, req, { objectType: 'TARIFF', objectId: 'SEASON_PERIODS', action: 'UPDATED', summary: `Season date ranges updated (${list.length})`, after: list.map((p: any) => ({ season_id: p.season_id, start_date: p.start_date, end_date: p.end_date })) }).catch(() => {});
       res.json({ ok: true, count: list.length });
     }
   );
@@ -40044,6 +40179,7 @@ ${data.tenant.name}`;
         "SELECT * FROM meal_plans ORDER BY display_order, name"
       ).catch(() => []);
       console.log(`[meal-plans PUT] tenant ${req.params.id}: saved=${saved} skipped=${skipped.length} errors=${errors.length}; ${persisted.length} total rows now stored`);
+      writeObjectAudit(tenantDb, req, { objectType: 'TARIFF', objectId: 'MEAL_PLANS', action: 'UPDATED', summary: `Meal plans updated (${saved} saved)`, after: (persisted as any[]).map((m: any) => ({ id: m.id, code: m.code, name: m.name, is_active: m.is_active })) }).catch(() => {});
       res.json({ ok: errors.length === 0, count: saved, skipped, errors, meal_plans: persisted });
     }
   );
@@ -40072,6 +40208,7 @@ ${data.tenant.name}`;
         const bookingCount = Number(used?.n || 0);
         if (bookingCount > 0) {
           await tenantDb.run("UPDATE meal_plans SET is_active = 0 WHERE id = ?", [mpId]);
+          writeObjectAudit(tenantDb, req, { objectType: 'TARIFF', objectId: 'MEAL_PLANS', action: 'MEAL_PLAN_ARCHIVED', summary: `Meal plan ${mp.code} · ${mp.name} archived (used by ${bookingCount} booking(s))`, before: { id: mp.id, code: mp.code, name: mp.name, is_active: 1 }, after: { is_active: 0 } }).catch(() => {});
           return res.status(409).json({
             error: `"${mp.code} · ${mp.name}" is used by ${bookingCount} booking(s), so it can't be permanently deleted without breaking their invoices. It has been archived instead — hidden from new bookings and the tariff matrix.`,
             archived: true,
@@ -40083,6 +40220,7 @@ ${data.tenant.name}`;
         await tenantDb.run("DELETE FROM room_tariffs WHERE meal_plan_id = ?", [mpId]).catch(() => {});
         await tenantDb.run("DELETE FROM extra_person_charges WHERE meal_plan_id = ?", [mpId]).catch(() => {});
         await tenantDb.run("DELETE FROM meal_plans WHERE id = ?", [mpId]);
+        writeObjectAudit(tenantDb, req, { objectType: 'TARIFF', objectId: 'MEAL_PLANS', action: 'MEAL_PLAN_DELETED', summary: `Meal plan ${mp.code} · ${mp.name} deleted`, before: { id: mp.id, code: mp.code, name: mp.name } }).catch(() => {});
         res.json({ ok: true, deleted: mpId });
       } catch (err: any) {
         console.error("delete meal-plan error:", err);
@@ -40112,6 +40250,13 @@ ${data.tenant.name}`;
           [id, t.room_type_id, t.season_id, t.meal_plan_id, rate, override]
         );
       }
+      // Rates are the highest-impact tariff config — capture the full submitted
+      // matrix so an accidental rate change shows who set what, and to what.
+      writeObjectAudit(tenantDb, req, {
+        objectType: 'TARIFF', objectId: 'ROOM_TARIFFS', action: 'RATES_UPDATED',
+        summary: `Room tariff rates updated (${list.length} cell${list.length === 1 ? '' : 's'})`,
+        after: list.filter((t: any) => t?.room_type_id).map((t: any) => ({ room_type_id: t.room_type_id, season_id: t.season_id, meal_plan_id: t.meal_plan_id, room_id_override: t.room_id_override || null, rate: Number(t.rate) })),
+      }).catch(() => {});
       res.json({ ok: true, count: list.length });
     }
   );
@@ -40140,9 +40285,27 @@ ${data.tenant.name}`;
            charge]
         );
       }
+      writeObjectAudit(tenantDb, req, { objectType: 'TARIFF', objectId: 'EXTRA_PERSON_CHARGES', action: 'RATES_UPDATED', summary: `Extra-person charges updated (${list.length})`, after: list.filter((e: any) => e?.person_type).map((e: any) => ({ person_type: e.person_type, season_id: e.season_id, meal_plan_id: e.meal_plan_id, charge: Number(e.charge) })) }).catch(() => {});
       res.json({ ok: true, count: list.length });
     }
   );
+
+  // Combined tariff + rate-plan + room-hold change log (owner audit of every
+  // rate/tariff/hold edit — so an accidental rate change is traceable).
+  app.get("/api/restaurant/:id/hotel/tariff/audit", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT id, action, actor_email, actor_role, summary, before_json, after_json, created_at
+           FROM object_audit_log
+          WHERE object_type = 'TARIFF' OR (object_type = 'ROOM' AND action IN ('HELD','HOLD_RELEASED'))
+          ORDER BY created_at DESC, id DESC LIMIT 500`
+      ).catch(() => []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to load tariff change log" }); }
+  });
 
   // Per-tenant overrides for Phase H1 rules. All fields are optional;
   // leaving a column NULL means "use the platform default" (no constraint
@@ -49122,9 +49285,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-audit-history',
+    commit_marker: 'spa-hotel-audit-history',
     code_features: [
-      'invoice-audit-history',                      // FEATURE (owner-requested — "add audit logs for Invoice so an accidental update is traceable"), Phase 1 of a 3-phase audit rollout (Invoice → Spa → Hotel). Restaurant invoices previously wrote NO object_audit_log rows on edit/create/charge-to-room (only hard-deletes hit the separate invoice_deletion_audit). Now every high-impact invoice mutation records a `writeObjectAudit(objectType:'INVOICE')` row with field-level before/after: PATCH /orders/:id/invoice (EDITED, before+after incl items/discount/service/GST/total), PATCH /sessions/:token/invoice (EDITED, keyed by session id), POST /invoices/manual (CREATED, or CHARGED_TO_ROOM when pushed to a folio), and POST /orders/:id/charge-to-room (CHARGED_TO_ROOM). New read endpoints GET /orders/:id/audit + /where-used and GET /sessions/:token/invoice-audit mirror the folio audit endpoints. FRONTEND: the Edit-Invoice modal header gains a "🕘 History" button opening the reusable ObjectDetail overlay (Overview + Audit-log smart table showing who/when/what-changed with before→after diff; Where-Used for order invoices → booking/folio/room). ObjectDetail now treats `whereUsedUrl` as optional (session invoices have no where-used) and buildObjectResolver gains an INVOICE case. writeObjectAudit is fire-and-forget (never breaks the business action). NOTE: audit only records events AFTER deploy — no backfill. tsc + vite build clean.
+      'spa-hotel-audit-history',                    // FEATURE (owner-requested audit rollout, Phases 2+3 of 3; extends `invoice-audit-history`). "Add audit logs for high-impact records across Hotel + Spa so an accidental update is traceable." SPA (was 0% audited): every appointment mutation now writes `writeObjectAudit(objectType:'SPA_APPOINTMENT')` — create/reschedule/status(confirm+check-in via spaSetStatus)/cancel/no-show/complete/checkout, with before/after; spa folio mutations write `objectType:'SPA_FOLIO'` — checkout(CREATED)/payment/void/apply-promo. New GET /spa/appointments/:aid/audit + /where-used and GET /spa/folios/:fid/audit. SpaViews gains a "History" button on each appointment row + each invoice row → ObjectDetail overlay (audit log with who/when/before→after). HOTEL: booking EDITS were already audited with before/after (unchanged) + already had the History tree; this adds the SILENT config gaps — rate plans (PUT/DELETE → objectType 'TARIFF' RATE_PLANS with before/after), tariff model/seasons/season-periods/meal-plans(+delete/archive)/room-tariffs(RATES_UPDATED)/extra-person-charges (objectType 'TARIFF'), and room holds (create/release → audited under the ROOM so they show in the room's History tree). New combined GET /hotel/tariff/audit (all TARIFF + room-hold rows) + a "🕘 History" button on the Tariff Configuration settings screen → "Rate & Tariff change history" ObjectDetail overlay. buildObjectResolver gains SPA_APPOINTMENT / SPA_FOLIO / INVOICE cases. All writes fire-and-forget (never break the business action); audit records events AFTER deploy only (no backfill). tsc + vite build clean. (Deferred: group-booking lifecycle audit + full before/after on single-booking check-in/checkout transitions — single-booking EDITS already carry before/after.)
+      'invoice-audit-history',                    // FEATURE (owner-requested — "add audit logs for Invoice so an accidental update is traceable"), Phase 1 of a 3-phase audit rollout (Invoice → Spa → Hotel). Restaurant invoices previously wrote NO object_audit_log rows on edit/create/charge-to-room (only hard-deletes hit the separate invoice_deletion_audit). Now every high-impact invoice mutation records a `writeObjectAudit(objectType:'INVOICE')` row with field-level before/after: PATCH /orders/:id/invoice (EDITED, before+after incl items/discount/service/GST/total), PATCH /sessions/:token/invoice (EDITED, keyed by session id), POST /invoices/manual (CREATED, or CHARGED_TO_ROOM when pushed to a folio), and POST /orders/:id/charge-to-room (CHARGED_TO_ROOM). New read endpoints GET /orders/:id/audit + /where-used and GET /sessions/:token/invoice-audit mirror the folio audit endpoints. FRONTEND: the Edit-Invoice modal header gains a "🕘 History" button opening the reusable ObjectDetail overlay (Overview + Audit-log smart table showing who/when/what-changed with before→after diff; Where-Used for order invoices → booking/folio/room). ObjectDetail now treats `whereUsedUrl` as optional (session invoices have no where-used) and buildObjectResolver gains an INVOICE case. writeObjectAudit is fire-and-forget (never breaks the business action). NOTE: audit only records events AFTER deploy — no backfill. tsc + vite build clean.
       'edit-invoice-charge-to-room',              // FEATURE (owner follow-up to manual-invoice-charge-to-room): "while editing an invoice the Charge-to-Room option was missing." The Edit-Invoice modal only offered CASH/CARD/UPI + Mark-as-Paid, so an EXISTING unpaid invoice could not be pushed to a guest room. Now the Edit-Invoice modal shows a "Charge to Hotel Room" payment option (only when GET /hotel/in-house-rooms returns checked-in rooms) with a searchable room/guest picker + an inline note; picking it swaps the "Mark as Paid" action for "Charge to Room <n>" (disabled until a room is chosen). BACKEND: new POST /orders/:orderId/charge-to-room settles a SINGLE existing order (e.g. a MAN- manual invoice) — resolves+validates the CHECKED_IN booking, refuses a CANCELLED (409) / already-PAID (409) / itemless (400) order, is idempotent for an already-charged+POSTED order, then posts its items to the guest folio at the hotel F&B slab via the SAME idempotent postOrderToFolio choke point, tags it CHARGE_TO_ROOM, and leaves it unpaid (settled at check-out). SESSION-type invoices reuse the existing /sessions/:token/charge-to-room. Verified: tsc + vite build clean; e2e_charge_to_room_sim.mjs extended to 30 assertions (existing invoice posts raw at hotel slab, idempotent re-charge no double-post, PAID/CANCELLED refused with 409).
       'manual-invoice-charge-to-room',            // FEATURE (owner-requested, end-to-end): the manual restaurant invoice (the "New Invoice" on-demand POS modal) can now be CHARGED TO A GUEST ROOM instead of collected now — the sibling of the Table-Bill charge-to-room, flowing through the SAME idempotent postOrderToFolio choke point. BACKEND (POST /invoices/manual): accepts payment_method=CHARGE_TO_ROOM + room_id/booking_id; resolves + validates the target CHECKED_IN booking BEFORE creating the invoice (by booking_id, else the newest CHECKED_IN booking for room_id) so an invalid room never strands a MAN- row — naturally hotel-only since a restaurant-only tenant has no CHECKED_IN booking; forces the restaurant discount/service/GST/loyalty OFF (the folio bills the raw items at the hotel F&B slab and is the single source of truth, settled at check-out); tags the MAN- order CHARGE_TO_ROOM + room_id + booking_id and posts its items to the folio (subtype RESTAURANT, no per-item gstRate so the hotel slab applies). ATOMIC: if the folio post fails (no open folio) the just-created invoice is hard-deleted and a 409 returned, so we never leave an invoice claiming charged-to-room with no matching folio line; on success folio_post_status=POSTED; the loyalty spend hook is skipped (revenue recognised at folio settlement — avoids double count). FRONTEND (On-Demand modal): a "Charge to a guest room" panel (shown only when GET /hotel/in-house-rooms returns checked-in rooms) with a searchable room/guest picker; selecting it hides the Discount/Service/GST inputs (folio owns the tax), zeroes those in the live preview + submit payload, sends payment_method/room_id/booking_id, blocks Generate until a room is picked, and relabels the action "Charge to Room". Verified: tsc + vite build clean; e2e_charge_to_room_sim.mjs extended 13 to 25 assertions (manual invoice posts raw items at hotel slab, cashier discount NOT applied, invoice tagged+POSTED, 409 + hard-delete atomicity when the folio is not open).
       'smart-alerts-engine',                      // FEATURE (best-in-class notification engine — proactive metric alerts): the existing engine fires on TRANSACTIONS (booking/checkout via triggerNotification/notifyBilling → email/WhatsApp/SMS/Telegram + delivery log). NEW layer fires on owner-defined BUSINESS THRESHOLDS. Per-tenant `alert_rules` table (metric, operator, threshold, severity, cooldown, is_active, last_fired/last_value). A metric CATALOG (5 hotel metrics: tonight's occupancy %, arrivals today, in-house departures today, cash-to-collect today, unassigned bookings) each with a compute(db)+fmt+hint. evaluateAlertRules(tenant, force) computes, compares (`< <= > >=`), and on breach (respecting per-rule cooldown) fires notifyBilling('ALERT_TRIGGERED', …) → reuses the SAME multi-channel pipeline (nothing duplicated). A background cron (setInterval 2h, guarded by globalThis flag) sweeps all active tenants; tenants with no rules short-circuit cheaply — safe to await sends (not an HTTP handler → no CF-502). New ALERT_TRIGGERED template in notificationService.ts. Owner endpoints /api/owner/alert-rules (GET list+catalog, POST upsert, DELETE :id, POST /evaluate = dry-run preview that never sends). Frontend: SmartAlertsPanel mounted atop NotificationSettings (Notifications tab) — pick-metric→auto-fill default op/threshold/hint, severity, re-alert cooldown, live "Check now" preview with breached badges, per-rule active toggle/edit/delete. tsc + vite build clean.

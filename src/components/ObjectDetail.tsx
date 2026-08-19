@@ -294,6 +294,26 @@ export function buildObjectResolver(restaurantId: string, token: string) {
           ]),
         });
       }
+      case 'SPA_APPOINTMENT': {
+        let a: any = {};
+        try { const r = await fetch(`${base}/spa/appointments/${objectId}`, auth); if (r.ok) a = await r.json() || {}; } catch { /* best-effort */ }
+        return mk({
+          title: a.service_name || hint?.label || objectId,
+          subtitle: hint?.subtitle || [a.status, a.client_name].filter(Boolean).join(' · ') || 'Spa appointment',
+          auditUrl: `${base}/spa/appointments/${objectId}/audit`,
+          whereUsedUrl: `${base}/spa/appointments/${objectId}/where-used`,
+          overview: facts('Spa appointment', objectId, [
+            ['Service', a.service_name], ['Status', a.status], ['Client', a.client_name],
+            ['Start', String(a.start_at || '').slice(0, 16)], ['Price', a.price_snapshot != null ? `₹${Number(a.price_snapshot).toLocaleString('en-IN')}` : null],
+          ]),
+        });
+      }
+      case 'SPA_FOLIO':
+        return mk({
+          title: hint?.label || objectId, subtitle: hint?.subtitle || 'Spa invoice / folio',
+          auditUrl: `${base}/spa/folios/${objectId}/audit`,
+          overview: facts('Spa invoice / folio', objectId),
+        } as any);
       case 'INVOICE': {
         // Restaurant order-invoice (individual order incl. MAN- manual invoice).
         let o: any = {};

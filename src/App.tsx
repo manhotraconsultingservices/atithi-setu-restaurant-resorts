@@ -10411,6 +10411,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [viewFolio, setViewFolio] = useState<any>(null);
   const [folioTree, setFolioTree] = useState<any>(null); // invoice tree menu (Audit log / Where-Used) overlay
   const [invoiceTree, setInvoiceTree] = useState<any>(null); // restaurant-invoice History (Audit log) overlay
+  const [tariffTree, setTariffTree] = useState(false); // rate & tariff change-history overlay
   const [revisionHistory, setRevisionHistory] = useState<any[] | null>(null);
   const [revisionHistoryLoading, setRevisionHistoryLoading] = useState(false);
   const [addChargeOpen, setAddChargeOpen] = useState(false);
@@ -20838,6 +20839,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         title="Reload tariff data from server"
                         className="text-[10px] font-bold uppercase tracking-widest px-2 py-1.5 rounded-lg bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#6b5d52] border border-[#cc5a16]/15 disabled:opacity-50"
                       >{tariffLoading ? 'Loading…' : '↻ Reload'}</button>
+                      <button
+                        type="button"
+                        onClick={() => setTariffTree(true)}
+                        title="Rate & tariff change history — who changed rates/plans/holds and when"
+                        className="text-[10px] font-bold uppercase tracking-widest px-2 py-1.5 rounded-lg bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#6b5d52] border border-[#cc5a16]/15"
+                      >🕘 History</button>
                     </div>
                   </div>
 
@@ -34967,6 +34974,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         );
       })()}
+
+      {/* ═════════ Rate & tariff change-history overlay ═════════ */}
+      {tariffTree && (
+        <div className="fixed inset-0 z-[60] bg-black/40 overflow-y-auto p-4 sm:p-8" onClick={() => setTariffTree(false)}>
+          <div className="max-w-3xl mx-auto bg-[#faf7f2] rounded-2xl shadow-2xl p-5" onClick={e => e.stopPropagation()}>
+            <ObjectDetail
+              token={token!}
+              title="Rate & Tariff change history"
+              subtitle="Rate plans · tariff rates · seasons · meal plans · room blocks"
+              overviewLabel="About"
+              onBack={() => setTariffTree(false)}
+              backLabel="Close"
+              auditUrl={`/api/restaurant/${restaurantId}/hotel/tariff/audit`}
+              overview={
+                <div className="bg-white rounded-2xl border border-[#e8dccf] p-5">
+                  <p className="text-[12px] text-[#3d3128]">Open the <b>Audit log</b> tab for the full change history — who edited rate plans, tariff rates, seasons, meal plans, extra-person charges, and room blocks, with before → after values. An accidental rate change is easy to spot and trace here.</p>
+                </div>
+              }
+            />
+          </div>
+        </div>
+      )}
 
       {/* ═════════ Folio viewer modal ═════════ */}
       {(viewFolio || folioSlideBooking) && (

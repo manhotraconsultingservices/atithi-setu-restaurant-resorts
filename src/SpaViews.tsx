@@ -5,10 +5,46 @@
 // ════════════════════════════════════════════════════════════════════════
 import React, { useState, useEffect } from 'react';
 import { DataTable } from './components/DataTable';
+import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import {
   Calendar, Clock, Plus, Trash2, Check, X, User, Package, Award,
-  TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText,
+  TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText, History,
 } from 'lucide-react';
+
+// ── Spa History overlay — audit log (who changed what) for an appointment or
+// folio, via the reusable ObjectDetail shell. Opened by a "History" button. ──
+function SpaHistoryOverlay({ kind, id, meta, onClose, restaurantId, token }: {
+  kind: 'SPA_APPOINTMENT' | 'SPA_FOLIO'; id: string; meta?: any; onClose: () => void; restaurantId: string; token: string;
+}) {
+  const isAppt = kind === 'SPA_APPOINTMENT';
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/40 overflow-y-auto p-4 sm:p-8" onClick={onClose}>
+      <div className="max-w-3xl mx-auto bg-[#faf7f2] rounded-2xl shadow-2xl p-5" onClick={e => e.stopPropagation()}>
+        <ObjectDetail
+          token={token}
+          title={meta?.title || id}
+          subtitle={meta?.subtitle || (isAppt ? 'Spa appointment' : 'Spa invoice')}
+          overviewLabel={isAppt ? 'Appointment' : 'Invoice'}
+          onBack={onClose}
+          backLabel="Close"
+          auditUrl={`/api/restaurant/${restaurantId}/spa/${isAppt ? 'appointments' : 'folios'}/${id}/audit`}
+          whereUsedUrl={isAppt ? `/api/restaurant/${restaurantId}/spa/appointments/${id}/where-used` : undefined}
+          resolveLink={buildObjectResolver(restaurantId, token)}
+          overview={
+            <div className="bg-white rounded-2xl border border-[#e8dccf] p-5">
+              <div className="grid grid-cols-2 gap-3 text-[12px]">
+                {(meta?.facts || []).map(([k, v]: [string, any], i: number) => (
+                  <div key={i}><span className="text-[#9c8e85]">{k}</span><div className="font-semibold text-[#14110c] break-words">{v == null || v === '' ? '—' : String(v)}</div></div>
+                ))}
+              </div>
+              <p className="text-[11px] text-[#9c8e85] mt-3">Open the <b>Audit log</b> tab to see who changed this {isAppt ? 'appointment' : 'invoice'} and what changed (before → after) — so an accidental edit is easy to spot.</p>
+            </div>
+          }
+        />
+      </div>
+    </div>
+  );
+}
 
 // ── shared fetch helper ─────────────────────────────────────────────────────
 function makeApi(restaurantId: string, token: string) {
@@ -289,6 +325,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   const [coAppt, setCoAppt] = useState<any>(null);
   const [coState, setCoState] = useState<any>({ use_package: false, apply_membership: false, tip_amount: '', payment_method: 'CASH' });
   const [coResult, setCoResult] = useState<any>(null);
+  const [history, setHistory] = useState<any>(null); // appointment History (audit log) overlay
 
   const load = async (q?: string) => {
     setLoading(true);
@@ -407,12 +444,15 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                   {r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH' }); }}>Checkout</button>}
                   {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={12} /> Invoice</button>}
                   {!['COMPLETED', 'CANCELLED', 'NO_SHOW'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
+                  <button className={BTN_GHOST} title="Audit log — who changed this appointment" onClick={() => setHistory({ id: r.id, meta: { title: r.service_name || r.id, subtitle: [r.status, r.client_name].filter(Boolean).join(' · '), facts: [['Service', r.service_name], ['Status', r.status], ['Client', r.client_name], ['Time', `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}`], ['Therapist', r.therapist_name], ['Cabin', r.resource_name]] } })}><History size={12} /></button>
                 </div>
               ) },
             ]}
           />
         </div>
       )}
+
+      {history && <SpaHistoryOverlay kind="SPA_APPOINTMENT" id={history.id} meta={history.meta} onClose={() => setHistory(null)} restaurantId={restaurantId} token={token} />}
 
       {/* Booking modal */}
       {showBook && (
@@ -879,6 +919,7 @@ function SpaFolios({ restaurantId, token }: Props) {
   const [busy, setBusy] = useState(false);
   const [payForm, setPayForm] = useState({ amount: '', method: 'CASH' });
   const [promoCode, setPromoCode] = useState('');
+  const [history, setHistory] = useState<any>(null); // folio History (audit log) overlay
 
   const load = async () => {
     setLoading(true);
@@ -982,6 +1023,7 @@ function SpaFolios({ restaurantId, token }: Props) {
                         {open && <button className={BTN_PRIMARY} onClick={() => openPay(f)}><IndianRupee size={12} /> Payment</button>}
                         {open && <button className={BTN_GHOST} onClick={() => openPromo(f)}><Tag size={12} /> Promo</button>}
                         <button className={BTN_GHOST} onClick={() => downloadPdf(f)}><FileText size={12} /> Invoice</button>
+                        <button className={BTN_GHOST} title="Audit log — who changed this invoice" onClick={() => setHistory({ id: f.id, meta: { title: f.invoice_number || f.id, subtitle: [statusOf(f), f.client_name].filter(Boolean).join(' · '), facts: [['Invoice #', f.invoice_number], ['Client', f.client_name], ['Service', f.service_name], ['Total', money(f.grand_total)], ['Paid', money(f.paid_amount)], ['Outstanding', open ? money(outOf(f)) : '—']] } })}><History size={12} /></button>
                       </div>
                     </td>
                   </tr>
@@ -991,6 +1033,8 @@ function SpaFolios({ restaurantId, token }: Props) {
           </table>
         )}
       </div>
+
+      {history && <SpaHistoryOverlay kind="SPA_FOLIO" id={history.id} meta={history.meta} onClose={() => setHistory(null)} restaurantId={restaurantId} token={token} />}
 
       {/* Record payment */}
       {payFor && (
