@@ -20326,6 +20326,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               >
                                 <Printer size={11} /> Print
                               </button>
+                              {/* History — audit log (who changed this invoice), available
+                                  straight from the list without opening Edit; works for
+                                  paid + unpaid invoices. Opens the same ObjectDetail overlay. */}
+                              <button
+                                onClick={() => setInvoiceTree(inv)}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#1a1208] transition-all whitespace-nowrap flex items-center gap-1"
+                                title="Audit log — who created/edited this invoice and what changed"
+                              >
+                                <History size={11} /> History
+                              </button>
                               {/* Mark Paid */}
                               {!isPaid && (
                                 <button
@@ -34962,7 +34972,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 overview={
                   <div className="bg-white rounded-2xl border border-[#e8dccf] p-5">
                     <div className="grid grid-cols-2 gap-3 text-[12px]">
-                      {([['Invoice #', num], ['Type', isSess ? 'Table bill' : 'Manual / order'], ['Customer', invoiceTree.customerName || invoiceTree.customer_name], ['Status', invoiceTree.status], ['Total', invoiceTree.total_amount != null ? `₹${Number(invoiceTree.total_amount).toLocaleString('en-IN')}` : (invoiceTree.grand_total != null ? `₹${Number(invoiceTree.grand_total).toLocaleString('en-IN')}` : null)]] as [string, any][]).map(([k, v], i) => (
+                      {([['Invoice #', num], ['Type', isSess ? 'Table bill' : 'Manual / order'], ['Customer', invoiceTree.customerName || invoiceTree.customer_name], ['Status', invoiceTree.status], ['Total', (() => { const t = invoiceTree.total_amount ?? invoiceTree.totalAmount ?? invoiceTree.grand_total; return t != null ? `₹${Number(t).toLocaleString('en-IN')}` : null; })()]] as [string, any][]).map(([k, v], i) => (
                         <div key={i}><span className="text-[#9c8e85]">{k}</span><div className="font-semibold text-[#14110c] break-words">{v == null || v === '' ? '—' : String(v)}</div></div>
                       ))}
                     </div>
