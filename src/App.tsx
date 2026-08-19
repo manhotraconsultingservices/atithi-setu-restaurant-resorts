@@ -10410,6 +10410,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [checkoutDiscount, setCheckoutDiscount] = useState(0);
   const [viewFolio, setViewFolio] = useState<any>(null);
   const [folioTree, setFolioTree] = useState<any>(null); // invoice tree menu (Audit log / Where-Used) overlay
+  const [invoiceTree, setInvoiceTree] = useState<any>(null); // restaurant-invoice History (Audit log) overlay
   const [revisionHistory, setRevisionHistory] = useState<any[] | null>(null);
   const [revisionHistoryLoading, setRevisionHistoryLoading] = useState(false);
   const [addChargeOpen, setAddChargeOpen] = useState(false);
@@ -34930,6 +34931,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       )}
 
+      {/* ═════════ Restaurant-invoice History overlay ═════════ */}
+      {invoiceTree && (() => {
+        const isSess = invoiceTree.invoice_type === 'SESSION';
+        const auditUrl = isSess
+          ? `/api/restaurant/${restaurantId}/sessions/${invoiceTree.session_token}/invoice-audit`
+          : `/api/restaurant/${restaurantId}/orders/${invoiceTree.id}/audit`;
+        const whereUsedUrl = isSess ? undefined : `/api/restaurant/${restaurantId}/orders/${invoiceTree.id}/where-used`;
+        const num = invoiceTree.invoice_number || invoiceTree.display_number || `#${String(invoiceTree.id || '').slice(-8).toUpperCase()}`;
+        return (
+          <div className="fixed inset-0 z-[60] bg-black/40 overflow-y-auto p-4 sm:p-8" onClick={() => setInvoiceTree(null)}>
+            <div className="max-w-3xl mx-auto bg-[#faf7f2] rounded-2xl shadow-2xl p-5" onClick={e => e.stopPropagation()}>
+              <ObjectDetail
+                token={token!}
+                title={num}
+                subtitle={[isSess ? 'Table bill' : 'Invoice', invoiceTree.customerName || invoiceTree.customer_name, invoiceTree.status].filter(Boolean).join(' · ')}
+                overviewLabel="Invoice"
+                onBack={() => setInvoiceTree(null)}
+                backLabel="Close"
+                auditUrl={auditUrl}
+                whereUsedUrl={whereUsedUrl}
+                resolveLink={buildObjectResolver(restaurantId, token!)}
+                overview={
+                  <div className="bg-white rounded-2xl border border-[#e8dccf] p-5">
+                    <div className="grid grid-cols-2 gap-3 text-[12px]">
+                      {([['Invoice #', num], ['Type', isSess ? 'Table bill' : 'Manual / order'], ['Customer', invoiceTree.customerName || invoiceTree.customer_name], ['Status', invoiceTree.status], ['Total', invoiceTree.total_amount != null ? `₹${Number(invoiceTree.total_amount).toLocaleString('en-IN')}` : (invoiceTree.grand_total != null ? `₹${Number(invoiceTree.grand_total).toLocaleString('en-IN')}` : null)]] as [string, any][]).map(([k, v], i) => (
+                        <div key={i}><span className="text-[#9c8e85]">{k}</span><div className="font-semibold text-[#14110c] break-words">{v == null || v === '' ? '—' : String(v)}</div></div>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-[#9c8e85] mt-3">Open the <b>Audit log</b> tab to see who edited this invoice and what changed (before → after), so an accidental edit is easy to spot.</p>
+                  </div>
+                }
+              />
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ═════════ Folio viewer modal ═════════ */}
       {(viewFolio || folioSlideBooking) && (
         <div className="fixed inset-0 z-50" onClick={() => { setViewFolio(null); setFolioSlideBooking(null); setRevisionHistory(null); }}>
@@ -36094,7 +36132,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </p>
                     </div>
                   </div>
-                  <button onClick={() => setInvoiceEditTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] shrink-0 self-end sm:self-auto" aria-label="Close"><X size={16} /></button>
+                  <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-auto">
+                    <button
+                      onClick={() => setInvoiceTree(inv)}
+                      title="Audit log — who edited this invoice and what changed"
+                      className="px-2.5 py-1.5 rounded-xl text-[11px] font-bold bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] hover:bg-[#f0e9df] whitespace-nowrap"
+                    >🕘 History</button>
+                    <button onClick={() => setInvoiceEditTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]" aria-label="Close"><X size={16} /></button>
+                  </div>
                 </div>
 
                 {/* Body — ORDER = 3-col tile UI; SESSION = read-only items list */}

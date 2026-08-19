@@ -43089,6 +43089,12 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const { discount_amount = 0, service_charge_percent = 0, gst_percent = 0, apply_gst = 1, final_amount } = req.body;
 
+      // Snapshot pre-edit adjustments so the audit trail records what changed.
+      const beforeSess: any = await db.get(
+        "SELECT id, invoice_number, discount_amount, service_charge_percent, gst_percent, apply_gst, final_amount FROM table_sessions WHERE session_token = ?",
+        [req.params.sessionToken]
+      ).catch(() => null);
+
       const hasFinal = final_amount !== undefined;
       await db.run(
         `UPDATE table_sessions
@@ -43101,6 +43107,14 @@ ${data.tenant.name}`;
           : [Number(discount_amount), Number(service_charge_percent), Number(gst_percent), apply_gst ? 1 : 0,
              req.params.sessionToken]
       );
+      if (beforeSess?.id) {
+        writeObjectAudit(db, req, {
+          objectType: 'INVOICE', objectId: String(beforeSess.id), action: 'EDITED',
+          summary: `Table-bill invoice ${beforeSess.invoice_number || ''} adjustments edited${hasFinal ? ` — total ₹${Number(beforeSess.final_amount || 0).toFixed(2)} → ₹${Number(final_amount).toFixed(2)}` : ''}`.trim(),
+          before: { discount_amount: Number(beforeSess.discount_amount || 0), service_charge_percent: Number(beforeSess.service_charge_percent || 0), gst_percent: Number(beforeSess.gst_percent || 0), apply_gst: Number(beforeSess.apply_gst || 0), final_amount: Number(beforeSess.final_amount || 0) },
+          after: { discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, ...(hasFinal ? { final_amount: Number(final_amount) } : {}) },
+        }).catch(() => {});
+      }
       res.json({ success: true });
     } catch (err) {
       console.error("Session invoice PATCH error:", err);
@@ -43691,6 +43705,11 @@ ${data.tenant.name}`;
       await db.run("UPDATE orders SET folio_post_status = 'POSTED' WHERE id = ?", [order.id]).catch(() => {});
 
       const roomRow: any = await db.get("SELECT room_number, name FROM rooms WHERE id = ?", [targetRoomId]).catch(() => null);
+      writeObjectAudit(db, req, {
+        objectType: 'INVOICE', objectId: order.id, action: 'CHARGED_TO_ROOM',
+        summary: `Invoice ${order.invoice_number || `#${String(order.id).slice(-8).toUpperCase()}`} charged to Room ${roomRow?.room_number || roomRow?.name || ''}${booking.guest_name ? ` · ${booking.guest_name}` : ''}`.trim(),
+        after: { payment_method: 'CHARGE_TO_ROOM', room_id: targetRoomId, booking_id: booking.id, folio_id: posted.folio_id || null },
+      }).catch(() => {});
       res.json({
         success: true,
         folio_id: posted.folio_id || null,
@@ -44269,6 +44288,20 @@ ${data.tenant.name}`;
           discountPercent: _discountPctOfTotal,
         }).catch(err => console.error('[loyalty] manual-invoice hook error:', err));
       }
+
+      // Audit trail — records the invoice's creation (and, when charged to a
+      // room, the room it was pushed to) so the action is traceable later.
+      writeObjectAudit(db, req, {
+        objectType: 'INVOICE', objectId: id, action: isChargeToRoom ? 'CHARGED_TO_ROOM' : 'CREATED',
+        summary: isChargeToRoom
+          ? `Manual invoice ${invoiceNumber || display_number} created & charged to room (₹${Number(totals.grandTotal).toFixed(2)})`
+          : `Manual invoice ${invoiceNumber || display_number} created (₹${Number(totals.grandTotal).toFixed(2)})`,
+        after: {
+          invoice_number: invoiceNumber, customer_name: customer_name || '', customer_phone: customer_phone || '',
+          items: itemArr, grand_total: totals.grandTotal, total_discount: totals.totalDiscount,
+          ...(isChargeToRoom ? { payment_method: 'CHARGE_TO_ROOM', room_id: ctrRoomId, booking_id: ctrBooking?.id || null } : {}),
+        },
+      }).catch(() => {});
 
       res.json({
         success: true,
@@ -47531,6 +47564,12 @@ ${data.tenant.name}`;
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge_percent FLOAT DEFAULT 0").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0").catch(() => {});
       const { items, discount_amount = 0, service_charge_percent = 0, gst_percent = 0, apply_gst = 0 } = req.body;
+      // Snapshot the pre-edit state so the audit trail shows what changed (an
+      // accidental edit to a money field is then visible + reversible).
+      const beforeRow: any = await db.get(
+        "SELECT items, discount_amount, service_charge_percent, gst_percent, apply_gst, total_amount, invoice_number FROM orders WHERE id = ?",
+        [req.params.orderId]
+      ).catch(() => null);
       const rawSubtotal   = (items as any[]).reduce((s, it) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
       const afterDiscount = Math.max(0, rawSubtotal - Number(discount_amount));
       const svcAmt        = afterDiscount * Number(service_charge_percent) / 100;
@@ -47542,11 +47581,62 @@ ${data.tenant.name}`;
         "UPDATE orders SET items = ?, discount_amount = ?, service_charge_percent = ?, gst_percent = ?, apply_gst = ?, total_amount = ?, gst_amount = ? WHERE id = ?",
         [JSON.stringify(items), Number(discount_amount), Number(service_charge_percent), Number(gst_percent), apply_gst ? 1 : 0, total, gstAmount, req.params.orderId]
       );
+      let beforeItems: any = beforeRow?.items;
+      try { beforeItems = typeof beforeItems === 'string' ? JSON.parse(beforeItems) : beforeItems; } catch { /* keep raw */ }
+      writeObjectAudit(db, req, {
+        objectType: 'INVOICE', objectId: req.params.orderId, action: 'EDITED',
+        summary: `Invoice ${beforeRow?.invoice_number || `#${String(req.params.orderId).slice(-8).toUpperCase()}`} edited${beforeRow ? ` — total ₹${Number(beforeRow.total_amount || 0).toFixed(2)} → ₹${Number(total).toFixed(2)}` : ''}`,
+        before: beforeRow ? { items: beforeItems, discount_amount: Number(beforeRow.discount_amount || 0), service_charge_percent: Number(beforeRow.service_charge_percent || 0), gst_percent: Number(beforeRow.gst_percent || 0), apply_gst: Number(beforeRow.apply_gst || 0), total_amount: Number(beforeRow.total_amount || 0) } : undefined,
+        after: { items, discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, total_amount: total },
+      }).catch(() => {});
       res.json({ success: true, subtotal: afterDiscount, discount_amount: Number(discount_amount), service_charge_amount: svcAmt, gst_amount: gstAmount, total });
     } catch (err: any) {
       console.error("Invoice update error:", err);
       res.status(500).json({ error: "Failed to update invoice" });
     }
+  });
+
+  // ── Invoice audit trail (ObjectDetail "History") ─────────────────────────
+  // Order-type invoice (individual order incl. MAN- manual invoice): audit is
+  // keyed by the order id. Mirrors the folio audit/where-used endpoints.
+  app.get("/api/restaurant/:id/orders/:orderId/audit", authenticate, restaurantStaff, requireTabAccess('INVOICES'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'INVOICE', req.params.orderId));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit log" }); }
+  });
+
+  app.get("/api/restaurant/:id/orders/:orderId/where-used", authenticate, restaurantStaff, requireTabAccess('INVOICES'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const o: any = await db.get("SELECT id, session_id, room_id, booking_id, folio_id, invoice_number, total_amount, status FROM orders WHERE id = ?", [req.params.orderId]);
+      if (!o) return res.status(404).json({ error: "Invoice not found" });
+      const groups: any[] = [];
+      if (o.booking_id) {
+        const bk: any = await db.get("SELECT id, guest_name, status FROM room_bookings WHERE id = ?", [o.booking_id]).catch(() => null);
+        if (bk) groups.push({ group: 'Charged to booking', items: [{ type: 'Booking', id: bk.id, label: bk.guest_name || bk.id, sublabel: bk.status || '', link: { objectType: 'ROOM_BOOKING', objectId: bk.id } }] });
+      }
+      if (o.folio_id) {
+        const f: any = await db.get("SELECT id, invoice_number, grand_total, status FROM folios WHERE id = ?", [o.folio_id]).catch(() => null);
+        if (f) groups.push({ group: 'Posted to folio', items: [{ type: 'Folio', id: f.id, label: f.invoice_number || f.id, sublabel: `${f.status || ''} · ₹${Number(f.grand_total || 0).toLocaleString('en-IN')}`, link: { objectType: 'FOLIO', objectId: f.id } }] });
+      }
+      if (o.room_id) {
+        const rm: any = await db.get("SELECT id, name, room_number, status FROM rooms WHERE id = ?", [o.room_id]).catch(() => null);
+        if (rm) groups.push({ group: 'Room', items: [{ type: 'Room', id: rm.id, label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), sublabel: rm.status || '', link: { objectType: 'ROOM', objectId: rm.id } }] });
+      }
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
+  });
+
+  // Session (table-bill) invoice: audit is keyed by the session id (resolved
+  // from the token so the client can pass either).
+  app.get("/api/restaurant/:id/sessions/:sessionToken/invoice-audit", authenticate, restaurantStaff, requireTabAccess('INVOICES'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const s: any = await db.get("SELECT id FROM table_sessions WHERE session_token = ?", [req.params.sessionToken]).catch(() => null);
+      if (!s?.id) return res.json([]);
+      res.json(await readObjectAudit(db, 'INVOICE', String(s.id)));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit log" }); }
   });
 
   // Owner: Get Bookings
@@ -49032,9 +49122,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'edit-invoice-charge-to-room',
+    commit_marker: 'invoice-audit-history',
     code_features: [
-      'edit-invoice-charge-to-room',                // FEATURE (owner follow-up to manual-invoice-charge-to-room): "while editing an invoice the Charge-to-Room option was missing." The Edit-Invoice modal only offered CASH/CARD/UPI + Mark-as-Paid, so an EXISTING unpaid invoice could not be pushed to a guest room. Now the Edit-Invoice modal shows a "Charge to Hotel Room" payment option (only when GET /hotel/in-house-rooms returns checked-in rooms) with a searchable room/guest picker + an inline note; picking it swaps the "Mark as Paid" action for "Charge to Room <n>" (disabled until a room is chosen). BACKEND: new POST /orders/:orderId/charge-to-room settles a SINGLE existing order (e.g. a MAN- manual invoice) — resolves+validates the CHECKED_IN booking, refuses a CANCELLED (409) / already-PAID (409) / itemless (400) order, is idempotent for an already-charged+POSTED order, then posts its items to the guest folio at the hotel F&B slab via the SAME idempotent postOrderToFolio choke point, tags it CHARGE_TO_ROOM, and leaves it unpaid (settled at check-out). SESSION-type invoices reuse the existing /sessions/:token/charge-to-room. Verified: tsc + vite build clean; e2e_charge_to_room_sim.mjs extended to 30 assertions (existing invoice posts raw at hotel slab, idempotent re-charge no double-post, PAID/CANCELLED refused with 409).
+      'invoice-audit-history',                      // FEATURE (owner-requested — "add audit logs for Invoice so an accidental update is traceable"), Phase 1 of a 3-phase audit rollout (Invoice → Spa → Hotel). Restaurant invoices previously wrote NO object_audit_log rows on edit/create/charge-to-room (only hard-deletes hit the separate invoice_deletion_audit). Now every high-impact invoice mutation records a `writeObjectAudit(objectType:'INVOICE')` row with field-level before/after: PATCH /orders/:id/invoice (EDITED, before+after incl items/discount/service/GST/total), PATCH /sessions/:token/invoice (EDITED, keyed by session id), POST /invoices/manual (CREATED, or CHARGED_TO_ROOM when pushed to a folio), and POST /orders/:id/charge-to-room (CHARGED_TO_ROOM). New read endpoints GET /orders/:id/audit + /where-used and GET /sessions/:token/invoice-audit mirror the folio audit endpoints. FRONTEND: the Edit-Invoice modal header gains a "🕘 History" button opening the reusable ObjectDetail overlay (Overview + Audit-log smart table showing who/when/what-changed with before→after diff; Where-Used for order invoices → booking/folio/room). ObjectDetail now treats `whereUsedUrl` as optional (session invoices have no where-used) and buildObjectResolver gains an INVOICE case. writeObjectAudit is fire-and-forget (never breaks the business action). NOTE: audit only records events AFTER deploy — no backfill. tsc + vite build clean.
+      'edit-invoice-charge-to-room',              // FEATURE (owner follow-up to manual-invoice-charge-to-room): "while editing an invoice the Charge-to-Room option was missing." The Edit-Invoice modal only offered CASH/CARD/UPI + Mark-as-Paid, so an EXISTING unpaid invoice could not be pushed to a guest room. Now the Edit-Invoice modal shows a "Charge to Hotel Room" payment option (only when GET /hotel/in-house-rooms returns checked-in rooms) with a searchable room/guest picker + an inline note; picking it swaps the "Mark as Paid" action for "Charge to Room <n>" (disabled until a room is chosen). BACKEND: new POST /orders/:orderId/charge-to-room settles a SINGLE existing order (e.g. a MAN- manual invoice) — resolves+validates the CHECKED_IN booking, refuses a CANCELLED (409) / already-PAID (409) / itemless (400) order, is idempotent for an already-charged+POSTED order, then posts its items to the guest folio at the hotel F&B slab via the SAME idempotent postOrderToFolio choke point, tags it CHARGE_TO_ROOM, and leaves it unpaid (settled at check-out). SESSION-type invoices reuse the existing /sessions/:token/charge-to-room. Verified: tsc + vite build clean; e2e_charge_to_room_sim.mjs extended to 30 assertions (existing invoice posts raw at hotel slab, idempotent re-charge no double-post, PAID/CANCELLED refused with 409).
       'manual-invoice-charge-to-room',            // FEATURE (owner-requested, end-to-end): the manual restaurant invoice (the "New Invoice" on-demand POS modal) can now be CHARGED TO A GUEST ROOM instead of collected now — the sibling of the Table-Bill charge-to-room, flowing through the SAME idempotent postOrderToFolio choke point. BACKEND (POST /invoices/manual): accepts payment_method=CHARGE_TO_ROOM + room_id/booking_id; resolves + validates the target CHECKED_IN booking BEFORE creating the invoice (by booking_id, else the newest CHECKED_IN booking for room_id) so an invalid room never strands a MAN- row — naturally hotel-only since a restaurant-only tenant has no CHECKED_IN booking; forces the restaurant discount/service/GST/loyalty OFF (the folio bills the raw items at the hotel F&B slab and is the single source of truth, settled at check-out); tags the MAN- order CHARGE_TO_ROOM + room_id + booking_id and posts its items to the folio (subtype RESTAURANT, no per-item gstRate so the hotel slab applies). ATOMIC: if the folio post fails (no open folio) the just-created invoice is hard-deleted and a 409 returned, so we never leave an invoice claiming charged-to-room with no matching folio line; on success folio_post_status=POSTED; the loyalty spend hook is skipped (revenue recognised at folio settlement — avoids double count). FRONTEND (On-Demand modal): a "Charge to a guest room" panel (shown only when GET /hotel/in-house-rooms returns checked-in rooms) with a searchable room/guest picker; selecting it hides the Discount/Service/GST inputs (folio owns the tax), zeroes those in the live preview + submit payload, sends payment_method/room_id/booking_id, blocks Generate until a room is picked, and relabels the action "Charge to Room". Verified: tsc + vite build clean; e2e_charge_to_room_sim.mjs extended 13 to 25 assertions (manual invoice posts raw items at hotel slab, cashier discount NOT applied, invoice tagged+POSTED, 409 + hard-delete atomicity when the folio is not open).
       'smart-alerts-engine',                      // FEATURE (best-in-class notification engine — proactive metric alerts): the existing engine fires on TRANSACTIONS (booking/checkout via triggerNotification/notifyBilling → email/WhatsApp/SMS/Telegram + delivery log). NEW layer fires on owner-defined BUSINESS THRESHOLDS. Per-tenant `alert_rules` table (metric, operator, threshold, severity, cooldown, is_active, last_fired/last_value). A metric CATALOG (5 hotel metrics: tonight's occupancy %, arrivals today, in-house departures today, cash-to-collect today, unassigned bookings) each with a compute(db)+fmt+hint. evaluateAlertRules(tenant, force) computes, compares (`< <= > >=`), and on breach (respecting per-rule cooldown) fires notifyBilling('ALERT_TRIGGERED', …) → reuses the SAME multi-channel pipeline (nothing duplicated). A background cron (setInterval 2h, guarded by globalThis flag) sweeps all active tenants; tenants with no rules short-circuit cheaply — safe to await sends (not an HTTP handler → no CF-502). New ALERT_TRIGGERED template in notificationService.ts. Owner endpoints /api/owner/alert-rules (GET list+catalog, POST upsert, DELETE :id, POST /evaluate = dry-run preview that never sends). Frontend: SmartAlertsPanel mounted atop NotificationSettings (Notifications tab) — pick-metric→auto-fill default op/threshold/hint, severity, re-alert cooldown, live "Check now" preview with breached badges, per-rule active toggle/edit/delete. tsc + vite build clean.
       'aiosell-cockpit-kpis',                       // FEATURE (BCG-review Phase-3 on the OTA cockpit — OTA-contribution KPIs): report now computes available room-nights (sellable rooms × period days) and returns a `kpi` block = OTA occupancy contribution % (OTA room-nights / available, with MoM delta), OTA net RevPAR (net / available room-night), gross ADR, net ADR, and the ADR commission drag (gross−net per night). This is the CHANNEL lens (what the OTAs contribute to occupancy/RevPAR), deliberately distinct from the property-wide occupancy report elsewhere — no >100% risk since OTA is a subset of capacity. UI adds a top "OTA contribution to your property" strip (occupancy / RevPAR / gross ADR / net ADR + drag) above the money tiles. Data we already hold; no new columns. tsc + vite build clean. (Still deferred: property-wide ADR/RevPAR/occupancy already exist in Hotel Reports; payout expected-vs-received, forward pace, alerts, scheduled digest.)

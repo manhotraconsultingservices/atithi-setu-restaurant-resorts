@@ -40,7 +40,8 @@ export interface ObjectDetailProps {
   token: string;
   /** Full API paths (relative to origin) returning the audit array / where-used groups. */
   auditUrl: string;
-  whereUsedUrl: string;
+  /** Optional: when omitted, the Where-Used rail node is hidden (e.g. session invoices). */
+  whereUsedUrl?: string;
   /** Optional: full API path returning { jobs: [...] } — enables the Checklist node. */
   checklistUrl?: string;
   /** Legacy: called when a Where-Used item with a link is clicked and no `resolveLink` is set. */
@@ -293,6 +294,21 @@ export function buildObjectResolver(restaurantId: string, token: string) {
           ]),
         });
       }
+      case 'INVOICE': {
+        // Restaurant order-invoice (individual order incl. MAN- manual invoice).
+        let o: any = {};
+        try { const r = await fetch(`${base}/orders/${objectId}`, auth); if (r.ok) { const j = await r.json(); o = j?.order || j || {}; } } catch { /* best-effort */ }
+        return mk({
+          title: o.invoice_number || hint?.label || objectId,
+          subtitle: hint?.subtitle || [o.status, o.customer_name].filter(Boolean).join(' · ') || 'Invoice',
+          auditUrl: `${base}/orders/${objectId}/audit`,
+          whereUsedUrl: `${base}/orders/${objectId}/where-used`,
+          overview: facts('Invoice', objectId, [
+            ['Invoice #', o.invoice_number], ['Status', o.status], ['Customer', o.customer_name],
+            ['Total', o.total_amount != null ? `₹${Number(o.total_amount).toLocaleString('en-IN')}` : null],
+          ]),
+        });
+      }
       default:
         return null; // unknown types → shell falls back to onOpenObject
     }
@@ -359,7 +375,7 @@ export function ObjectDetail(rootProps: ObjectDetailProps) {
           {railItem('OVERVIEW', <FileText size={15} />, cur.overviewLabel || 'Overview')}
           {railItem('AUDIT', <History size={15} />, 'Audit log')}
           {cur.checklistUrl && railItem('CHECKLIST', <ListChecks size={15} />, 'Checklist')}
-          {railItem('WHERE_USED', <Link2 size={15} />, 'Where Used')}
+          {cur.whereUsedUrl && railItem('WHERE_USED', <Link2 size={15} />, 'Where Used')}
         </nav>
 
         {/* Node content */}
@@ -367,7 +383,7 @@ export function ObjectDetail(rootProps: ObjectDetailProps) {
           {node === 'OVERVIEW' && cur.overview}
           {node === 'AUDIT' && <AuditView url={cur.auditUrl} token={cur.token} nonce={cur.refreshNonce} />}
           {node === 'CHECKLIST' && cur.checklistUrl && <ChecklistView url={cur.checklistUrl} token={cur.token} nonce={cur.refreshNonce} />}
-          {node === 'WHERE_USED' && <WhereUsedView url={cur.whereUsedUrl} token={cur.token} onOpen={openLink} nonce={cur.refreshNonce} />}
+          {node === 'WHERE_USED' && cur.whereUsedUrl && <WhereUsedView url={cur.whereUsedUrl} token={cur.token} onOpen={openLink} nonce={cur.refreshNonce} />}
         </div>
       </div>
     </div>
