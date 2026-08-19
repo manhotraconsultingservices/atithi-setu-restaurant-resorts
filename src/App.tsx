@@ -11556,8 +11556,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [invEdit, setInvEdit] = useState<{
     items: {name:string; quantity:number; price:number}[];
     discount: number; svcPct: number; gstPct: number; applyGst: boolean;
-    payMethod: 'CASH'|'CARD'|'UPI'; saving: boolean; markingPaid: boolean;
+    payMethod: 'CASH'|'CARD'|'UPI'|'CHARGE_TO_ROOM'; saving: boolean; markingPaid: boolean;
   }>({ items:[], discount:0, svcPct:0, gstPct:0, applyGst:false, payMethod:'CASH', saving:false, markingPaid:false });
+  // ── Edit Invoice · Charge-to-room (hotel tenants only) ─────────────────
+  // Lets staff settle an EXISTING invoice against a checked-in guest folio
+  // (sibling of the New-Invoice charge-to-room). `invEditInHouseRooms` is
+  // empty for restaurant-only tenants, so the option auto-hides there.
+  const [invEditInHouseRooms, setInvEditInHouseRooms] = useState<any[]>([]);
+  const [invEditCtrRoom, setInvEditCtrRoom]           = useState<any | null>(null);
+  const [invEditRoomSearch, setInvEditRoomSearch]     = useState('');
+  const [invEditError, setInvEditError]               = useState('');
   // Server-computed preview for the Edit Invoice modal — surfaces the
   // loyalty discount banner (when the invoice's customer phone matches
   // a loyalty member) and uses the SAME computeInvoiceTotals path as
@@ -11611,6 +11619,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // Fetch the active tax lines (same store the New Invoice modal uses)
     // so the Edit modal lays out correctly the moment it opens.
     fetchActiveTaxLines();
+    // Charge-to-room resets + load checked-in rooms ([] for restaurant-only
+    // tenants → the option stays hidden).
+    setInvEditCtrRoom(null);
+    setInvEditRoomSearch('');
+    setInvEditError('');
+    fetch(`/api/restaurant/${restaurantId}/hotel/in-house-rooms`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => (r.ok ? r.json() : { rooms: [] }))
+      .then(d => setInvEditInHouseRooms(Array.isArray(d?.rooms) ? d.rooms : []))
+      .catch(() => setInvEditInHouseRooms([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invoiceEditTarget]);
   useEffect(() => {
@@ -12533,6 +12552,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       fetchLiveTables(); // refresh Command Center so closed table clears immediately
     } catch (err) { console.error('Mark paid error', err); }
     finally { setInvEdit(p => ({ ...p, markingPaid: false })); }
+  };
+
+  // Charge an EXISTING invoice to a checked-in guest room from the Edit modal.
+  // SESSION invoices reuse the session charge-to-room endpoint; individual
+  // orders (e.g. MAN- manual invoices) use the order-level endpoint. On success
+  // the invoice is posted to the guest folio (settled at check-out, not now).
+  const chargeInvoiceToRoom = async (inv: any) => {
+    if (!invEditCtrRoom) { setInvEditError('Select the guest room to charge this invoice to.'); return; }
+    setInvEditError('');
+    setInvEdit(p => ({ ...p, markingPaid: true }));
+    try {
+      const isSession = inv.invoice_type === 'SESSION';
+      const url = isSession
+        ? `/api/restaurant/${restaurantId}/sessions/${inv.session_token}/charge-to-room`
+        : `/api/restaurant/${restaurantId}/orders/${inv.id}/charge-to-room`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ room_id: invEditCtrRoom.room_id, booking_id: invEditCtrRoom.booking_id }),
+      });
+      if (res.ok) {
+        setInvoiceEditTarget(null);
+        fetchInvoices();
+        fetchLiveTables();
+        return;
+      }
+      let msg = `Server returned ${res.status} ${res.statusText || ''}`.trim();
+      try { const b = await res.json(); if (b?.error) msg = String(b.error); else if (b?.message) msg = String(b.message); } catch { /* non-JSON */ }
+      if (res.status === 401) msg = 'Session expired — please log in again.';
+      if (res.status === 403) msg = 'You do not have permission to charge invoices to a room.';
+      setInvEditError(msg);
+    } catch (err: any) {
+      setInvEditError(`Could not reach the server — ${err?.message || String(err)}. Check your connection and try again.`);
+    } finally {
+      setInvEdit(p => ({ ...p, markingPaid: false }));
+    }
   };
 
   const fetchLiveTables = async () => {
@@ -36436,13 +36491,70 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1.5">Payment Method</p>
                         <div className="flex gap-1.5">
                           {(['CASH','CARD','UPI'] as const).map(m => (
-                            <button key={m} onClick={() => setInvEdit(p => ({ ...p, payMethod: m }))}
+                            <button key={m} onClick={() => { setInvEdit(p => ({ ...p, payMethod: m })); setInvEditError(''); }}
                               className={cn("flex-1 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all",
                                 invEdit.payMethod === m ? "bg-[#cc5a16] text-white" : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10")}>
                               {m}
                             </button>
                           ))}
                         </div>
+                        {/* Charge to Room — only when the property has in-house guests.
+                            Settles this existing invoice against the guest folio at the
+                            hotel F&B slab (sibling of the New-Invoice charge-to-room). */}
+                        {invEditInHouseRooms.length > 0 && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => { setInvEdit(p => ({ ...p, payMethod: 'CHARGE_TO_ROOM' })); setInvEditError(''); }}
+                              className={cn(
+                                "mt-1.5 w-full py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all border flex items-center justify-center gap-1.5",
+                                invEdit.payMethod === 'CHARGE_TO_ROOM'
+                                  ? 'bg-[#1e3a5f] text-white border-[#1e3a5f]'
+                                  : 'bg-white border-[#1e3a5f]/20 text-[#1e3a5f] hover:bg-[#1e3a5f]/5'
+                              )}
+                            >
+                              <BedDouble size={13} /> Charge to Hotel Room
+                            </button>
+                            {invEdit.payMethod === 'CHARGE_TO_ROOM' && (
+                              <div className="mt-2 rounded-xl border border-[#1e3a5f]/20 bg-white p-2 space-y-2">
+                                <input
+                                  value={invEditRoomSearch}
+                                  onChange={e => setInvEditRoomSearch(e.target.value)}
+                                  placeholder="Search room no. or guest name…"
+                                  className="w-full px-2.5 py-1.5 rounded-lg border border-[#1e3a5f]/20 text-sm outline-none focus:ring-2 ring-[#1e3a5f]/20"
+                                />
+                                <div className="max-h-40 overflow-y-auto space-y-1">
+                                  {(() => {
+                                    const rq = invEditRoomSearch.trim().toLowerCase();
+                                    const shown = invEditInHouseRooms.filter((r: any) => !rq
+                                      || String(r.room_number || r.room_name || '').toLowerCase().includes(rq)
+                                      || String(r.guest_name || '').toLowerCase().includes(rq));
+                                    if (shown.length === 0) return <p className="text-xs text-[#9c8e85] text-center py-3">No matching in-house guest.</p>;
+                                    return shown.map((r: any) => {
+                                      const active = invEditCtrRoom?.booking_id === r.booking_id;
+                                      return (
+                                        <button key={r.booking_id || r.room_id} type="button" onClick={() => { setInvEditCtrRoom(r); setInvEditError(''); }}
+                                          className={cn(
+                                            "w-full text-left px-2.5 py-2 rounded-lg text-sm transition-all border flex items-center justify-between gap-2",
+                                            active ? 'bg-[#1e3a5f]/10 border-[#1e3a5f]/40 text-[#3d3128]' : 'bg-[#faf7f2] border-transparent hover:border-[#1e3a5f]/20 text-[#6b5d52]'
+                                          )}>
+                                          <span className="font-semibold">Room {r.room_number || r.room_name || '—'}</span>
+                                          <span className="text-xs text-[#9c8e85] truncate">{r.guest_name || 'Guest'}</span>
+                                        </button>
+                                      );
+                                    });
+                                  })()}
+                                </div>
+                                <p className="text-[10px] text-[#9c8e85] leading-snug px-0.5">
+                                  Posts to the guest folio at the hotel F&amp;B tax slab and settles at check-out. Restaurant discount / GST don't apply.
+                                </p>
+                              </div>
+                            )}
+                          </>
+                        )}
+                        {invEditError && (
+                          <p className="mt-2 text-[11px] text-red-600 leading-snug">{invEditError}</p>
+                        )}
                       </div>
                     </div>
                   </aside>
@@ -36468,15 +36580,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   >
                     {invEdit.saving ? <><RefreshCw size={14} className="animate-spin"/>Saving…</> : <><Save size={14}/>Save Changes</>}
                   </button>
-                  <button
-                    onClick={() => markInvoicePaid(inv, invEdit.payMethod)}
-                    disabled={invEdit.markingPaid}
-                    className="flex-1 py-3 rounded-2xl bg-green-600 text-white font-bold text-sm hover:bg-green-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-                  >
-                    {invEdit.markingPaid
-                      ? <><RefreshCw size={14} className="animate-spin"/>Processing…</>
-                      : <><CheckCircle2 size={14}/>Mark as Paid</>}
-                  </button>
+                  {invEdit.payMethod === 'CHARGE_TO_ROOM' ? (
+                    <button
+                      onClick={() => chargeInvoiceToRoom(inv)}
+                      disabled={invEdit.markingPaid || !invEditCtrRoom}
+                      title={!invEditCtrRoom ? 'Select the guest room to charge this invoice to.' : undefined}
+                      className="flex-1 py-3 rounded-2xl bg-[#1e3a5f] text-white font-bold text-sm hover:bg-[#16283f] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {invEdit.markingPaid
+                        ? <><RefreshCw size={14} className="animate-spin"/>Charging…</>
+                        : <><BedDouble size={14}/>Charge to Room{invEditCtrRoom ? ` ${invEditCtrRoom.room_number || invEditCtrRoom.room_name || ''}` : ''}</>}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => markInvoicePaid(inv, invEdit.payMethod)}
+                      disabled={invEdit.markingPaid}
+                      className="flex-1 py-3 rounded-2xl bg-green-600 text-white font-bold text-sm hover:bg-green-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {invEdit.markingPaid
+                        ? <><RefreshCw size={14} className="animate-spin"/>Processing…</>
+                        : <><CheckCircle2 size={14}/>Mark as Paid</>}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

@@ -242,6 +242,57 @@ ok('Folio not open → charge fails with 409', ares.ok === false && ares.http ==
 ok('Atomicity: the just-created MAN- invoice is hard-deleted (not persisted)', orphan.persisted === false);
 ok('No orphan F&B line left on the folio', !settledFolio.entries.some(e => e.reference_number === orphan.id));
 
+// ── Edit-Invoice → charge an EXISTING order to a room (POST /orders/:id/charge-to-room) ──
+console.log('\n── Existing invoice charged to room from Edit modal — offline simulation ──\n');
+
+// Mirror of the order-level endpoint guards: an already-created order (e.g. a
+// MAN- invoice a cashier saved earlier as unpaid) is settled to a room later.
+function chargeExistingOrderToRoom(order, folio) {
+  if (String(order.status || '').toUpperCase() === 'CANCELLED') return { ok: false, http: 409, error: 'cancelled' };
+  if (String(order.payment_status || '').toUpperCase() === 'PAID') return { ok: false, http: 409, error: 'already-paid' };
+  // Idempotent: already charged + posted → succeed without double-posting.
+  if (String(order.payment_method || '').toUpperCase() === 'CHARGE_TO_ROOM'
+      && String(order.folio_post_status || '').toUpperCase() === 'POSTED') return { ok: true, already_charged: true };
+  const items = Array.isArray(order.items) ? order.items : [];
+  if (items.length === 0) return { ok: false, http: 400, error: 'no-items' };
+  order.payment_method = 'CHARGE_TO_ROOM';
+  order.room_id = order.room_id || (folio && folio.room_id) || null;
+  order.booking_id = order.booking_id || (folio && folio.booking_id) || null;
+  const r = (folio && String(folio.status) === 'open')
+    ? postOrderToFolio(folio, { id: order.id, status: order.status, items })
+    : { ok: false };
+  if (!r.ok) return { ok: false, http: 409, error: 'no-open-folio' };
+  order.folio_post_status = 'POSTED';
+  recompute(folio);
+  return { ok: true };
+}
+
+const folio4 = {
+  id: 'FOL4', booking_id: 'BKG4', room_id: 'RM404', status: 'open', discount: 0, gst_exempt: 0,
+  entries: [{ entry_type: 'ROOM_CHARGE', reference_number: 'RM4-NIGHT-1', amount: 3000, gst_amount: 360 }],
+  payments: [],
+};
+recompute(folio4);
+const existingInv = {
+  id: 'MAN-1700000000002-EF56', status: 'CONFIRMED', payment_status: 'PENDING',
+  items: [{ name: 'Thali', quantity: 2, price: 200 }],
+};
+const invPreTax = 2 * 200; // 400
+const eres = chargeExistingOrderToRoom(existingInv, folio4);
+ok('Existing unpaid invoice charges to the room', eres.ok === true && existingInv.folio_post_status === 'POSTED');
+const invFnb = folio4.entries.filter(e => e.entry_type === 'F_AND_B' && e.reference_number === existingInv.id);
+ok('Existing invoice F&B posts raw at hotel slab', round2(invFnb.reduce((s, e) => s + e.amount, 0)) === invPreTax && round2(invFnb.reduce((s, e) => s + e.gst_amount, 0)) === round2(invPreTax * HOTEL_FNB_GST / 100));
+// Idempotent re-charge does not double-post.
+const entriesBefore = folio4.entries.length;
+const eres2 = chargeExistingOrderToRoom(existingInv, folio4);
+ok('Re-charging an already-charged invoice is idempotent (no double-post)', eres2.ok === true && folio4.entries.length === entriesBefore);
+// A PAID invoice cannot be charged to a room.
+const paidInv = { id: 'MAN-PAID', status: 'CONFIRMED', payment_status: 'PAID', items: [{ name: 'Coffee', quantity: 1, price: 60 }] };
+ok('A PAID invoice is refused with 409', chargeExistingOrderToRoom(paidInv, folio4).http === 409);
+// A CANCELLED invoice cannot be charged to a room.
+const cancelledInv = { id: 'MAN-CANX', status: 'CANCELLED', payment_status: 'PENDING', items: [{ name: 'Tea', quantity: 1, price: 30 }] };
+ok('A CANCELLED invoice is refused with 409', chargeExistingOrderToRoom(cancelledInv, folio4).http === 409);
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(52)}`);
 console.log(`  ${failed === 0 ? '✅ ALL PASS' : '❌ FAILURES'} — ${passed} passed, ${failed} failed`);

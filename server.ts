@@ -43611,6 +43611,99 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Charge a SINGLE existing order/invoice to a room ─────────────────────
+  // The Edit-Invoice modal settlement path for an individual order (e.g. a
+  // MAN- manual invoice or a standalone order) — the sibling of the session
+  // charge-to-room above. Posts THIS order's items to a checked-in guest's
+  // open folio at the hotel F&B slab (same idempotent postOrderToFolio choke
+  // point), tags it CHARGE_TO_ROOM, and leaves it unpaid (settled with the
+  // room at check-out). Hotel-only in effect: a restaurant-only tenant has no
+  // CHECKED_IN booking to resolve, so it 404s cleanly.
+  app.post("/api/restaurant/:id/orders/:orderId/charge-to-room", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bodyBookingId = req.body?.booking_id ? String(req.body.booking_id) : null;
+      const bodyRoomId    = req.body?.room_id ? String(req.body.room_id) : null;
+      if (!bodyBookingId && !bodyRoomId) {
+        return res.status(400).json({ error: 'Select the guest room to charge this invoice to.' });
+      }
+
+      const order: any = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.orderId]);
+      if (!order) return res.status(404).json({ error: 'Invoice not found.' });
+      if (String(order.status || '').toUpperCase() === 'CANCELLED') {
+        return res.status(409).json({ error: 'This invoice is cancelled.' });
+      }
+      if (String(order.payment_status || '').toUpperCase() === 'PAID') {
+        return res.status(409).json({ error: 'This invoice is already paid — it cannot be charged to a room.' });
+      }
+      // Idempotent: already charged + posted → succeed without double-posting.
+      if (String(order.payment_method || '').toUpperCase() === 'CHARGE_TO_ROOM'
+          && String(order.folio_post_status || '').toUpperCase() === 'POSTED') {
+        return res.json({ success: true, already_charged: true });
+      }
+
+      // Resolve + validate the target CHECKED_IN booking (mirrors the session path).
+      let booking: any = null;
+      if (bodyBookingId) {
+        booking = await db.get(
+          "SELECT id, room_id, guest_name, status FROM room_bookings WHERE id = ?",
+          [bodyBookingId]
+        ).catch(() => null);
+      }
+      if (!booking && bodyRoomId) {
+        booking = await db.get(
+          "SELECT id, room_id, guest_name, status FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' ORDER BY actual_checkin_at DESC LIMIT 1",
+          [bodyRoomId]
+        ).catch(() => null);
+      }
+      if (!booking) return res.status(404).json({ error: 'No checked-in guest found for that room.' });
+      if (String(booking.status || '').toUpperCase() !== 'CHECKED_IN') {
+        return res.status(409).json({ error: 'That room is not currently checked in.' });
+      }
+      const targetRoomId = booking.room_id || bodyRoomId;
+
+      // Tag first so classification/reports are correct even if a post is retried.
+      await db.run(
+        "UPDATE orders SET payment_method = 'CHARGE_TO_ROOM', room_id = COALESCE(room_id, ?), booking_id = COALESCE(booking_id, ?) WHERE id = ?",
+        [targetRoomId, booking.id, order.id]
+      ).catch(() => {});
+
+      let parsedItems: any[] = [];
+      try { parsedItems = typeof order.items === 'string' ? JSON.parse(order.items) : (Array.isArray(order.items) ? order.items : []); } catch { parsedItems = []; }
+      // Itemised at the hotel's F&B GST slab — deliberately NOT passing a
+      // per-item gstRate so postOrderToFolio applies the hotel rate.
+      const folioItems: FolioOrderItem[] = (Array.isArray(parsedItems) ? parsedItems : []).map((it: any) => ({
+        name: it.name || it.menuName || 'Item',
+        quantity: Number(it.quantity || it.qty || 1),
+        unitPrice: Number(it.price ?? it.unitPrice ?? it.unit_price ?? 0),
+      }));
+      if (folioItems.length === 0) {
+        return res.status(400).json({ error: 'This invoice has no items to charge.' });
+      }
+      const posted: any = await postOrderToFolio(req.params.id, {
+        id: order.id, room_id: targetRoomId, booking_id: booking.id,
+        items: folioItems, subtype: 'RESTAURANT',
+        posted_by: req.user?.email || req.user?.id || 'MANUAL_INVOICE',
+      }).catch((e: any) => ({ ok: false, reason: e?.message || 'post-error' }));
+      if (!posted?.ok) {
+        return res.status(409).json({ error: 'Could not post this invoice to the room — the room may not have an open folio. Check the guest in first, or settle by cash/card.' });
+      }
+      await db.run("UPDATE orders SET folio_post_status = 'POSTED' WHERE id = ?", [order.id]).catch(() => {});
+
+      const roomRow: any = await db.get("SELECT room_number, name FROM rooms WHERE id = ?", [targetRoomId]).catch(() => null);
+      res.json({
+        success: true,
+        folio_id: posted.folio_id || null,
+        room_number: roomRow?.room_number || null,
+        room_name: roomRow?.name || null,
+        guest_name: booking.guest_name || null,
+      });
+    } catch (err) {
+      console.error('[order charge-to-room] failed:', err);
+      res.status(500).json({ error: 'Failed to charge the invoice to the room.' });
+    }
+  });
+
   // ── S4 (17 Jun 2026): CUSTOMER-side cancel before preparation ───────────
   // A diner can cancel their own round from the QR / E-Menu while it is still
   // QUEUED (status CONFIRMED/PENDING) and unpaid. PUBLIC + token-owned: the
@@ -48939,9 +49032,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'manual-invoice-charge-to-room',
+    commit_marker: 'edit-invoice-charge-to-room',
     code_features: [
-      'manual-invoice-charge-to-room',              // FEATURE (owner-requested, end-to-end): the manual restaurant invoice (the "New Invoice" on-demand POS modal) can now be CHARGED TO A GUEST ROOM instead of collected now — the sibling of the Table-Bill charge-to-room, flowing through the SAME idempotent postOrderToFolio choke point. BACKEND (POST /invoices/manual): accepts payment_method=CHARGE_TO_ROOM + room_id/booking_id; resolves + validates the target CHECKED_IN booking BEFORE creating the invoice (by booking_id, else the newest CHECKED_IN booking for room_id) so an invalid room never strands a MAN- row — naturally hotel-only since a restaurant-only tenant has no CHECKED_IN booking; forces the restaurant discount/service/GST/loyalty OFF (the folio bills the raw items at the hotel F&B slab and is the single source of truth, settled at check-out); tags the MAN- order CHARGE_TO_ROOM + room_id + booking_id and posts its items to the folio (subtype RESTAURANT, no per-item gstRate so the hotel slab applies). ATOMIC: if the folio post fails (no open folio) the just-created invoice is hard-deleted and a 409 returned, so we never leave an invoice claiming charged-to-room with no matching folio line; on success folio_post_status=POSTED; the loyalty spend hook is skipped (revenue recognised at folio settlement — avoids double count). FRONTEND (On-Demand modal): a "Charge to a guest room" panel (shown only when GET /hotel/in-house-rooms returns checked-in rooms) with a searchable room/guest picker; selecting it hides the Discount/Service/GST inputs (folio owns the tax), zeroes those in the live preview + submit payload, sends payment_method/room_id/booking_id, blocks Generate until a room is picked, and relabels the action "Charge to Room". Verified: tsc + vite build clean; e2e_charge_to_room_sim.mjs extended 13 to 25 assertions (manual invoice posts raw items at hotel slab, cashier discount NOT applied, invoice tagged+POSTED, 409 + hard-delete atomicity when the folio is not open).
+      'edit-invoice-charge-to-room',                // FEATURE (owner follow-up to manual-invoice-charge-to-room): "while editing an invoice the Charge-to-Room option was missing." The Edit-Invoice modal only offered CASH/CARD/UPI + Mark-as-Paid, so an EXISTING unpaid invoice could not be pushed to a guest room. Now the Edit-Invoice modal shows a "Charge to Hotel Room" payment option (only when GET /hotel/in-house-rooms returns checked-in rooms) with a searchable room/guest picker + an inline note; picking it swaps the "Mark as Paid" action for "Charge to Room <n>" (disabled until a room is chosen). BACKEND: new POST /orders/:orderId/charge-to-room settles a SINGLE existing order (e.g. a MAN- manual invoice) — resolves+validates the CHECKED_IN booking, refuses a CANCELLED (409) / already-PAID (409) / itemless (400) order, is idempotent for an already-charged+POSTED order, then posts its items to the guest folio at the hotel F&B slab via the SAME idempotent postOrderToFolio choke point, tags it CHARGE_TO_ROOM, and leaves it unpaid (settled at check-out). SESSION-type invoices reuse the existing /sessions/:token/charge-to-room. Verified: tsc + vite build clean; e2e_charge_to_room_sim.mjs extended to 30 assertions (existing invoice posts raw at hotel slab, idempotent re-charge no double-post, PAID/CANCELLED refused with 409).
+      'manual-invoice-charge-to-room',            // FEATURE (owner-requested, end-to-end): the manual restaurant invoice (the "New Invoice" on-demand POS modal) can now be CHARGED TO A GUEST ROOM instead of collected now — the sibling of the Table-Bill charge-to-room, flowing through the SAME idempotent postOrderToFolio choke point. BACKEND (POST /invoices/manual): accepts payment_method=CHARGE_TO_ROOM + room_id/booking_id; resolves + validates the target CHECKED_IN booking BEFORE creating the invoice (by booking_id, else the newest CHECKED_IN booking for room_id) so an invalid room never strands a MAN- row — naturally hotel-only since a restaurant-only tenant has no CHECKED_IN booking; forces the restaurant discount/service/GST/loyalty OFF (the folio bills the raw items at the hotel F&B slab and is the single source of truth, settled at check-out); tags the MAN- order CHARGE_TO_ROOM + room_id + booking_id and posts its items to the folio (subtype RESTAURANT, no per-item gstRate so the hotel slab applies). ATOMIC: if the folio post fails (no open folio) the just-created invoice is hard-deleted and a 409 returned, so we never leave an invoice claiming charged-to-room with no matching folio line; on success folio_post_status=POSTED; the loyalty spend hook is skipped (revenue recognised at folio settlement — avoids double count). FRONTEND (On-Demand modal): a "Charge to a guest room" panel (shown only when GET /hotel/in-house-rooms returns checked-in rooms) with a searchable room/guest picker; selecting it hides the Discount/Service/GST inputs (folio owns the tax), zeroes those in the live preview + submit payload, sends payment_method/room_id/booking_id, blocks Generate until a room is picked, and relabels the action "Charge to Room". Verified: tsc + vite build clean; e2e_charge_to_room_sim.mjs extended 13 to 25 assertions (manual invoice posts raw items at hotel slab, cashier discount NOT applied, invoice tagged+POSTED, 409 + hard-delete atomicity when the folio is not open).
       'smart-alerts-engine',                      // FEATURE (best-in-class notification engine — proactive metric alerts): the existing engine fires on TRANSACTIONS (booking/checkout via triggerNotification/notifyBilling → email/WhatsApp/SMS/Telegram + delivery log). NEW layer fires on owner-defined BUSINESS THRESHOLDS. Per-tenant `alert_rules` table (metric, operator, threshold, severity, cooldown, is_active, last_fired/last_value). A metric CATALOG (5 hotel metrics: tonight's occupancy %, arrivals today, in-house departures today, cash-to-collect today, unassigned bookings) each with a compute(db)+fmt+hint. evaluateAlertRules(tenant, force) computes, compares (`< <= > >=`), and on breach (respecting per-rule cooldown) fires notifyBilling('ALERT_TRIGGERED', …) → reuses the SAME multi-channel pipeline (nothing duplicated). A background cron (setInterval 2h, guarded by globalThis flag) sweeps all active tenants; tenants with no rules short-circuit cheaply — safe to await sends (not an HTTP handler → no CF-502). New ALERT_TRIGGERED template in notificationService.ts. Owner endpoints /api/owner/alert-rules (GET list+catalog, POST upsert, DELETE :id, POST /evaluate = dry-run preview that never sends). Frontend: SmartAlertsPanel mounted atop NotificationSettings (Notifications tab) — pick-metric→auto-fill default op/threshold/hint, severity, re-alert cooldown, live "Check now" preview with breached badges, per-rule active toggle/edit/delete. tsc + vite build clean.
       'aiosell-cockpit-kpis',                       // FEATURE (BCG-review Phase-3 on the OTA cockpit — OTA-contribution KPIs): report now computes available room-nights (sellable rooms × period days) and returns a `kpi` block = OTA occupancy contribution % (OTA room-nights / available, with MoM delta), OTA net RevPAR (net / available room-night), gross ADR, net ADR, and the ADR commission drag (gross−net per night). This is the CHANNEL lens (what the OTAs contribute to occupancy/RevPAR), deliberately distinct from the property-wide occupancy report elsewhere — no >100% risk since OTA is a subset of capacity. UI adds a top "OTA contribution to your property" strip (occupancy / RevPAR / gross ADR / net ADR + drag) above the money tiles. Data we already hold; no new columns. tsc + vite build clean. (Still deferred: property-wide ADR/RevPAR/occupancy already exist in Hotel Reports; payout expected-vs-received, forward pace, alerts, scheduled digest.)
       'aiosell-cockpit-quality-recon',              // FEATURE (BCG-review Phase-2 on the OTA cockpit): (1) CANCELLATION QUALITY — ingest + report now track cancellations; report returns overall cancellation_rate (+ cancelled/bookings_total) with a MoM delta, and per-channel cancellation_pct in the channel-profitability table (>=15% flagged red). Owner can see "which OTA cancels most" — a channel-quality signal. (2) TRUE-NET RECONCILIATION (India leakage, review gap #4) — ingest captures the Aiosell amount block's tcs/tds/tax onto new room_bookings cols channel_tcs/channel_tds/channel_tax; report computes tax_withheld (TDS+TCS) and true_net (net − TDS − TCS) overall + per booking; UI shows an "OTA remits (after TDS/TCS)" chip ONLY when withholdings are present, so it's invisible until the feed carries them. Frontend adds a quality+reconciliation strip under the tiles and a Cancel% column. tsc + vite build clean. (Deferred: ADR/RevPAR/occupancy KPIs, payout expected-vs-received, forward pace, alerts, scheduled digest.)
