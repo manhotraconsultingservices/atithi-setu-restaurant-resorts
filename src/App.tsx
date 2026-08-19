@@ -11402,6 +11402,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // owner clicks "Generate Invoice". This keeps the live preview honest.
   const [odPreview, setOdPreview]             = useState<any | null>(null);
   const [odPreviewLoading, setOdPreviewLoading] = useState(false);
+  // ── On-Demand invoice · Charge-to-room (hotel tenants only) ────────────
+  // Mirrors the Table-Bill "Charge to Room" path. `odInHouseRooms` is empty for
+  // pure-restaurant tenants (the /hotel/in-house-rooms endpoint returns []), so
+  // the option auto-hides. When on, the invoice is posted to the guest's open
+  // folio at the hotel F&B slab and the restaurant discount / service / GST do
+  // NOT apply — the folio is the single source of truth, settled at check-out.
+  const [odChargeToRoom, setOdChargeToRoom]   = useState(false);
+  const [odCtrRoom, setOdCtrRoom]             = useState<any | null>(null);
+  const [odInHouseRooms, setOdInHouseRooms]   = useState<any[]>([]);
+  const [odRoomSearch, setOdRoomSearch]       = useState('');
 
   // ── Tenant tax_config snapshot (shared by New Invoice + Edit Invoice) ──
   // Fetched ONCE per modal open via /api/restaurant/:id/tax-config. We use
@@ -11459,12 +11469,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       try {
         const qs = new URLSearchParams({
           subtotal: String(subtotalLocal),
-          discount: String(odDiscount || 0),
-          service_charge_percent: String(odSvcPct || 0),
-          gst_percent: String(odGstPct || 0),
-          apply_gst: odApplyGst ? '1' : '0',
+          // Charge-to-room posts raw items to the folio (hotel slab) — zero the
+          // restaurant adjustments so the live preview matches what will post.
+          discount: String(odChargeToRoom ? 0 : (odDiscount || 0)),
+          service_charge_percent: String(odChargeToRoom ? 0 : (odSvcPct || 0)),
+          gst_percent: String(odChargeToRoom ? 0 : (odGstPct || 0)),
+          apply_gst: (odChargeToRoom ? false : odApplyGst) ? '1' : '0',
         });
-        if (odCustomer.phone) qs.set('customer_phone', odCustomer.phone);
+        if (!odChargeToRoom && odCustomer.phone) qs.set('customer_phone', odCustomer.phone);
         const res = await fetch(
           `/api/restaurant/${restaurantId}/invoices/preview-totals?${qs.toString()}`,
           { headers: { 'Authorization': `Bearer ${token}` } }
@@ -11499,6 +11511,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // whether the tenant is on tax_config (auto-applied taxes card) or
     // on the legacy single-GST flow (three editable inputs).
     fetchActiveTaxLines();
+    // Charge-to-room resets + load checked-in rooms. The endpoint returns []
+    // for restaurant-only tenants, so the option stays hidden there.
+    setOdChargeToRoom(false);
+    setOdCtrRoom(null);
+    setOdRoomSearch('');
+    fetch(`/api/restaurant/${restaurantId}/hotel/in-house-rooms`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => (r.ok ? r.json() : { rooms: [] }))
+      .then(d => setOdInHouseRooms(Array.isArray(d?.rooms) ? d.rooms : []))
+      .catch(() => setOdInHouseRooms([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showOnDemandModal]);
 
@@ -37086,7 +37109,79 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                          which comes from a separate /tax-config fetch on
                          modal open — that way the layout is correct even
                          with an empty cart (preview hasn't run yet). */}
-                      {isTaxCfgDrivenTenant ? (
+
+                      {/* ── Charge to Room (hotel tenants only) ────────────
+                          Sibling of the Table-Bill "Charge to Room". Only
+                          rendered when the /hotel/in-house-rooms endpoint
+                          returned checked-in rooms. When ON, the invoice
+                          posts to the guest folio at the hotel F&B slab and
+                          the restaurant Discount / Service / GST are hidden
+                          (the folio is the single source of truth). */}
+                      {odInHouseRooms.length > 0 && (
+                        <div className={cn(
+                          "rounded-xl border px-2.5 py-2",
+                          odChargeToRoom ? "bg-[#1e3a5f]/5 border-[#1e3a5f]/25" : "bg-white border-[#cc5a16]/15"
+                        )}>
+                          <label className="flex items-center gap-2 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={odChargeToRoom}
+                              onChange={e => { setOdChargeToRoom(e.target.checked); if (!e.target.checked) setOdCtrRoom(null); }}
+                              className="w-4 h-4 accent-[#1e3a5f]"
+                            />
+                            <span className="text-xs font-bold text-[#1a1208] flex items-center gap-1.5">
+                              <BedDouble size={13} className="text-[#1e3a5f]" /> Charge to a guest room
+                            </span>
+                          </label>
+                          {odChargeToRoom && (
+                            <div className="mt-2 space-y-1.5">
+                              <input
+                                value={odRoomSearch}
+                                onChange={e => setOdRoomSearch(e.target.value)}
+                                placeholder="Search room no. or guest name…"
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-[#1e3a5f]/20 text-sm outline-none focus:ring-2 ring-[#1e3a5f]/20"
+                              />
+                              <div className="max-h-40 overflow-y-auto space-y-1">
+                                {(() => {
+                                  const rq = odRoomSearch.trim().toLowerCase();
+                                  const shown = odInHouseRooms.filter((r: any) => !rq
+                                    || String(r.room_number || r.room_name || '').toLowerCase().includes(rq)
+                                    || String(r.guest_name || '').toLowerCase().includes(rq));
+                                  if (shown.length === 0) {
+                                    return <p className="text-xs text-[#9c8e85] text-center py-3">No matching in-house guest.</p>;
+                                  }
+                                  return shown.map((r: any) => {
+                                    const active = odCtrRoom?.booking_id === r.booking_id;
+                                    return (
+                                      <button
+                                        key={r.booking_id || r.room_id}
+                                        type="button"
+                                        onClick={() => setOdCtrRoom(r)}
+                                        className={cn(
+                                          "w-full text-left px-2.5 py-2 rounded-lg text-sm transition-all border flex items-center justify-between gap-2",
+                                          active
+                                            ? 'bg-[#1e3a5f]/10 border-[#1e3a5f]/40 text-[#3d3128]'
+                                            : 'bg-[#faf7f2] border-transparent hover:border-[#1e3a5f]/20 text-[#6b5d52]'
+                                        )}
+                                      >
+                                        <span className="font-semibold">Room {r.room_number || r.room_name || '—'}</span>
+                                        <span className="text-xs text-[#9c8e85] truncate">{r.guest_name || 'Guest'}</span>
+                                      </button>
+                                    );
+                                  });
+                                })()}
+                              </div>
+                              <p className="text-[10px] text-[#9c8e85] leading-snug px-0.5">
+                                Items post to the guest folio at the hotel F&amp;B tax slab and settle at check-out.
+                                Restaurant discount / service charge / GST don't apply.
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Adjustments are hidden while charging to a room — the folio owns the tax. */}
+                      {!odChargeToRoom && (isTaxCfgDrivenTenant ? (
                         /* Tax Lines drive the GST/tax math, but Service
                            Charge is always editable per-invoice (staff
                            can negotiate it down when the customer pushes
@@ -37176,7 +37271,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             </div>
                           </div>
                         </div>
-                      )}
+                      ))}
 
                       {/* Loyalty banner — surfaces ANY recognised member
                           (including 0%-discount welcome tiers like Bronze)
@@ -37205,8 +37300,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </div>
                         </div>
                       )}
-                      {/* Phone entered but not recognised — quiet hint */}
-                      {p && !p.loyalty && odCustomer.phone && odCustomer.phone.trim().length >= 10 && (
+                      {/* Phone entered but not recognised — quiet hint (loyalty N/A while charging to a room) */}
+                      {!odChargeToRoom && p && !p.loyalty && odCustomer.phone && odCustomer.phone.trim().length >= 10 && (
                         <p className="text-[10px] text-[#9c8e85] italic px-1">
                           Phone {odCustomer.phone} — not enrolled in loyalty.
                         </p>
@@ -37258,10 +37353,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               </div>
                             ) : null}
                             <div className="flex justify-between font-bold text-[#1a1208] pt-1 border-t border-[#cc5a16]/10 text-sm">
-                              <span>Grand Total</span>
+                              <span>{odChargeToRoom ? 'Items total' : 'Grand Total'}</span>
                               <span className="font-mono text-[#cc5a16] text-base">₹{Number(p.grandTotal || 0).toFixed(2)}</span>
                             </div>
-                            {p.usedLegacyGst && (
+                            {odChargeToRoom && (
+                              <p className="text-[10px] text-[#1e3a5f] font-semibold pt-1 flex items-start gap-1 leading-snug">
+                                <BedDouble size={11} className="shrink-0 mt-0.5" />
+                                <span>Posts to {odCtrRoom ? `Room ${odCtrRoom.room_number || odCtrRoom.room_name || ''}${odCtrRoom.guest_name ? ` · ${odCtrRoom.guest_name}` : ''}` : 'a guest room'} — hotel F&amp;B tax is added on the folio.</span>
+                              </p>
+                            )}
+                            {!odChargeToRoom && p.usedLegacyGst && (
                               <p className="text-[9px] text-[#9c8e85] italic pt-1">
                                 No tax_config rows configured — using single GST % from this form.
                               </p>
@@ -37344,12 +37445,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       // (Special items where the cashier hasn't typed the
                       // billing-time price yet). Server-side validation also
                       // catches this but the UI gate is what staff sees.
-                      odInvoiceItems.some(it => it.name.trim() && (!it.price || it.price <= 0))
+                      odInvoiceItems.some(it => it.name.trim() && (!it.price || it.price <= 0)) ||
+                      // Charge-to-room requires a target room to be picked.
+                      (odChargeToRoom && !odCtrRoom)
                     }
                     title={
-                      odInvoiceItems.some(it => it.name.trim() && (!it.price || it.price <= 0))
-                        ? `Set a price for: ${odInvoiceItems.filter(it => it.name.trim() && (!it.price || it.price <= 0)).map(it => it.name).join(', ')}`
-                        : undefined
+                      odChargeToRoom && !odCtrRoom
+                        ? 'Select the guest room to charge this invoice to.'
+                        : odInvoiceItems.some(it => it.name.trim() && (!it.price || it.price <= 0))
+                          ? `Set a price for: ${odInvoiceItems.filter(it => it.name.trim() && (!it.price || it.price <= 0)).map(it => it.name).join(', ')}`
+                          : undefined
                     }
                     onClick={async () => {
                       const validItems = odInvoiceItems.filter(it => it.name.trim());
@@ -37364,8 +37469,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             customer_name: odCustomer.name, customer_phone: odCustomer.phone,
                             reference: odCustomer.reference,
                             items: validItems.map(it => ({ name: it.name, quantity: it.qty, price: it.price })),
-                            discount_amount: odDiscount, service_charge_percent: odSvcPct,
-                            gst_percent: odGstPct, apply_gst: odApplyGst,
+                            // Charge-to-room zeroes the restaurant adjustments (the folio owns
+                            // the tax). The backend enforces this too; we keep the payload honest.
+                            discount_amount: odChargeToRoom ? 0 : odDiscount,
+                            service_charge_percent: odChargeToRoom ? 0 : odSvcPct,
+                            gst_percent: odChargeToRoom ? 0 : odGstPct,
+                            apply_gst: odChargeToRoom ? false : odApplyGst,
+                            ...(odChargeToRoom && odCtrRoom ? {
+                              payment_method: 'CHARGE_TO_ROOM',
+                              room_id: odCtrRoom.room_id,
+                              booking_id: odCtrRoom.booking_id,
+                            } : {}),
                           }),
                         });
                         if (res.ok) {
@@ -37402,8 +37516,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     className="flex-[2] py-3 rounded-2xl bg-[#cc5a16] text-white font-bold text-sm hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                   >
                     {odSaving
-                      ? <><RefreshCw size={15} className="animate-spin" /> Saving…</>
-                      : <><Receipt size={15} /> Generate Invoice{p?.grandTotal ? ` · ₹${Number(p.grandTotal).toFixed(2)}` : ''}</>
+                      ? <><RefreshCw size={15} className="animate-spin" /> {odChargeToRoom ? 'Charging…' : 'Saving…'}</>
+                      : odChargeToRoom
+                        ? <><BedDouble size={15} /> Charge to Room{odCtrRoom ? ` ${odCtrRoom.room_number || odCtrRoom.room_name || ''}` : ''}{p?.grandTotal ? ` · ₹${Number(p.grandTotal).toFixed(2)}` : ''}</>
+                        : <><Receipt size={15} /> Generate Invoice{p?.grandTotal ? ` · ₹${Number(p.grandTotal).toFixed(2)}` : ''}</>
                     }
                   </button>
                 </div>

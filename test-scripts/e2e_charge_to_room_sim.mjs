@@ -84,6 +84,38 @@ function chargeSessionToRoom(session, folio, actor = 'RESTAURANT_BILL') {
   return { ok: true, postedCount };
 }
 
+// ── Manual-invoice charge-to-room (POST /invoices/manual) ────────────────────
+// Mirrors the new branch: the MAN- invoice row is created first, then posted to
+// the folio at the hotel F&B slab. The cashier's restaurant discount / service /
+// GST are FORCED OFF (the folio owns the tax), and the whole thing is ATOMIC —
+// if the folio post fails, the just-created invoice is hard-deleted and a 409 is
+// returned so we never strand an invoice that claims charged-to-room with no
+// matching folio line.
+function chargeManualInvoiceToRoom(invoice, folio) {
+  // The backend INSERTs the MAN- row before attempting the post.
+  invoice.persisted = true;
+  // Restaurant adjustments do not apply under charge-to-room.
+  invoice.discount_amount = 0;
+  invoice.service_charge_percent = 0;
+  invoice.gst_percent = 0;
+  invoice.apply_gst = false;
+  invoice.payment_method = 'CHARGE_TO_ROOM';
+  invoice.room_id = invoice.room_id || (folio && folio.room_id) || null;
+  invoice.booking_id = invoice.booking_id || (folio && folio.booking_id) || null;
+  const order = { id: invoice.id, status: 'CONFIRMED', items: invoice.items };
+  // postOrderToFolio needs an OPEN folio for a checked-in guest.
+  const r = (folio && String(folio.status) === 'open')
+    ? postOrderToFolio(folio, order)
+    : { ok: false, reason: 'no-open-folio' };
+  if (!r.ok) {
+    invoice.persisted = false;   // atomic hard-delete of the MAN- row
+    return { ok: false, http: 409, error: 'could-not-post-to-room' };
+  }
+  invoice.folio_post_status = 'POSTED';
+  recompute(folio);
+  return { ok: true };
+}
+
 // ── Scenario ────────────────────────────────────────────────────────────────
 console.log('\n── Charge Restaurant Bill to Room — offline simulation ──\n');
 
@@ -157,6 +189,58 @@ const noFolio = { id: 'FOLX', booking_id: null, room_id: null, status: 'open', d
 const emptySession = { token: 'S2', status: 'open', orders: [{ id: 'Z1', status: 'CANCELLED', items: [] }] };
 const guard = chargeSessionToRoom(emptySession, noFolio);
 ok('No postable orders → charge fails, session stays open (cash fallback intact)', !guard.ok && emptySession.status === 'open');
+
+// ── Manual invoice → charge to room (NEW: POST /invoices/manual) ─────────────
+console.log('\n── Manual invoice charged to room — offline simulation ──\n');
+
+// Fresh checked-in folio (2 room-nights + ₹1000 advance) for a different guest.
+const folio2 = {
+  id: 'FOL2', booking_id: 'BKG2', room_id: 'RM202', status: 'open', discount: 0, gst_exempt: 0,
+  entries: [
+    { entry_type: 'ROOM_CHARGE', reference_number: 'RM2-NIGHT-1', amount: 2000, gst_amount: 240 },
+    { entry_type: 'ROOM_CHARGE', reference_number: 'RM2-NIGHT-2', amount: 2000, gst_amount: 240 },
+  ],
+  payments: [{ type: 'ADVANCE', method: 'CARD', amount: 1000, voided: false }],
+};
+recompute(folio2);
+
+// The cashier builds a manual invoice AND types a ₹100 discount — which must be
+// ignored on the folio (the folio bills the raw items at the hotel slab).
+const manInvoice = {
+  id: 'MAN-1700000000000-AB12',
+  items: [{ name: 'Club Sandwich', quantity: 2, price: 150 }, { name: 'Cold Coffee', quantity: 3, price: 80 }],
+  discount_amount: 100, service_charge_percent: 10, gst_percent: 18, apply_gst: true,
+  room_id: 'RM202',
+};
+const manPreTax = 2 * 150 + 3 * 80; // 300 + 240 = 540
+
+const roomBefore = round2(4000 + 480); // room + room GST only
+const mres = chargeManualInvoiceToRoom(manInvoice, folio2);
+ok('Manual invoice posts to the room', mres.ok === true);
+ok('Invoice tagged CHARGE_TO_ROOM + POSTED + persisted',
+  manInvoice.payment_method === 'CHARGE_TO_ROOM' && manInvoice.folio_post_status === 'POSTED' && manInvoice.persisted === true);
+ok('Restaurant discount / service / GST forced off on the invoice row',
+  manInvoice.discount_amount === 0 && manInvoice.service_charge_percent === 0 && manInvoice.gst_percent === 0 && manInvoice.apply_gst === false);
+
+const manFnb = folio2.entries.filter(e => e.entry_type === 'F_AND_B' && e.reference_number === manInvoice.id);
+const manFnbAmount = round2(manFnb.reduce((s, e) => s + e.amount, 0));
+const manFnbGst = round2(manFnb.reduce((s, e) => s + e.gst_amount, 0));
+ok('Manual F&B itemised on folio (2 lines)', manFnb.length === 2, `lines=${manFnb.length}`);
+ok('Folio bills RAW item price — cashier ₹100 discount NOT applied', manFnbAmount === manPreTax, `folio=${manFnbAmount} raw=${manPreTax}`);
+ok('Manual F&B taxed at the hotel slab (5%), NOT the form 18%', manFnbGst === round2(manPreTax * HOTEL_FNB_GST / 100), `gst=${manFnbGst}`);
+ok('Folio grand = room + manual F&B (hotel slab)', folio2.grand_total === round2(roomBefore + manPreTax + manPreTax * 0.05), `grand=${folio2.grand_total}`);
+
+// ── Atomicity guard: no open folio → invoice must NOT persist, 409 returned ───
+const settledFolio = { id: 'FOL3', booking_id: 'BKG3', room_id: 'RM303', status: 'settled', discount: 0, entries: [], payments: [] };
+const orphan = {
+  id: 'MAN-1700000000001-CD34',
+  items: [{ name: 'Masala Dosa', quantity: 1, price: 120 }],
+  discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: false,
+};
+const ares = chargeManualInvoiceToRoom(orphan, settledFolio);
+ok('Folio not open → charge fails with 409', ares.ok === false && ares.http === 409);
+ok('Atomicity: the just-created MAN- invoice is hard-deleted (not persisted)', orphan.persisted === false);
+ok('No orphan F&B line left on the folio', !settledFolio.entries.some(e => e.reference_number === orphan.id));
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(52)}`);
