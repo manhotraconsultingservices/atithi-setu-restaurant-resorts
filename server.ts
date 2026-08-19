@@ -47819,6 +47819,180 @@ ${data.tenant.name}`;
     return { sent, failed };
   }
 
+  // ════════════════════════════════════════════════════════════════════
+  // SMART ALERTS — proactive, metric-driven notifications
+  // ════════════════════════════════════════════════════════════════════
+  // The event engine above fires on TRANSACTIONS (a booking, a checkout). This
+  // layer fires on BUSINESS THRESHOLDS the owner defines ("tell me when tonight's
+  // occupancy drops below 40%"). Rules are per-tenant; a cron evaluates them and
+  // delivers breaches through the SAME multi-channel pipeline (notifyBilling →
+  // email/WhatsApp/SMS + the per-tenant settings path), so nothing is duplicated.
+  const _istToday = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  // Metric catalog — each entry knows how to compute itself from the tenant DB,
+  // format its value, and suggest a default rule. All hotel-side, cheap queries.
+  const ALERT_METRICS: Array<{
+    key: string; label: string; kind: 'pct' | 'count' | 'money'; default_op: string; default_threshold: number; hint: string;
+    fmt: (v: number) => string; compute: (db: any, ctx: { today: string }) => Promise<number | null>;
+  }> = [
+    {
+      key: 'occupancy_tonight_pct', label: "Tonight's occupancy", kind: 'pct', default_op: '<', default_threshold: 40,
+      hint: 'Push a flash rate or nudge the OTAs to fill rooms tonight.',
+      fmt: (v) => `${Math.round(v)}%`,
+      compute: async (db, ctx) => {
+        const s: any = await db.get("SELECT COUNT(*) AS n FROM rooms WHERE status NOT IN ('MAINTENANCE','BLOCKED')");
+        const o: any = await db.get("SELECT COUNT(DISTINCT room_id) AS n FROM room_bookings WHERE status IN ('BOOKED','CHECKED_IN') AND check_in_date <= ? AND check_out_date > ?", [ctx.today, ctx.today]);
+        const sell = Number(s?.n || 0); return sell > 0 ? Math.round(Number(o?.n || 0) / sell * 10000) / 100 : 0;
+      },
+    },
+    {
+      key: 'arrivals_today', label: 'Arrivals today', kind: 'count', default_op: '>=', default_threshold: 10,
+      hint: 'Heavy arrivals day — make sure the front desk is staffed.',
+      fmt: (v) => `${Math.round(v)}`,
+      compute: async (db, ctx) => { const r: any = await db.get("SELECT COUNT(*) AS n FROM room_bookings WHERE check_in_date = ? AND status NOT IN ('CANCELLED','CHECKED_OUT')", [ctx.today]); return Number(r?.n || 0); },
+    },
+    {
+      key: 'pending_departures_today', label: 'Departures still in-house', kind: 'count', default_op: '>=', default_threshold: 5,
+      hint: 'Guests due out today — chase folios and free the rooms.',
+      fmt: (v) => `${Math.round(v)}`,
+      compute: async (db, ctx) => { const r: any = await db.get("SELECT COUNT(*) AS n FROM room_bookings WHERE check_out_date = ? AND status = 'CHECKED_IN'", [ctx.today]); return Number(r?.n || 0); },
+    },
+    {
+      key: 'cash_to_collect_today', label: 'Cash to collect today', kind: 'money', default_op: '>=', default_threshold: 20000,
+      hint: 'Pay-at-hotel arrivals — brief the desk to collect on arrival.',
+      fmt: (v) => `₹${Math.round(v).toLocaleString('en-IN')}`,
+      compute: async (db, ctx) => { const r: any = await db.get("SELECT COALESCE(SUM(total_amount),0) AS s FROM room_bookings WHERE check_in_date = ? AND status NOT IN ('CANCELLED') AND (channel_prepaid IS NULL OR channel_prepaid <> 1)", [ctx.today]).catch(() => ({ s: 0 })); return Math.round(Number(r?.s || 0)); },
+    },
+    {
+      key: 'unassigned_bookings', label: 'Unassigned bookings', kind: 'count', default_op: '>=', default_threshold: 1,
+      hint: 'Bookings with no room assigned — allocate before arrival.',
+      fmt: (v) => `${Math.round(v)}`,
+      compute: async (db) => { const r: any = await db.get("SELECT COUNT(*) AS n FROM room_bookings WHERE status='BOOKED' AND (room_id IS NULL OR room_id = '')").catch(() => ({ n: 0 })); return Number(r?.n || 0); },
+    },
+  ];
+  const _alertBreached = (v: number, op: string, t: number) =>
+    op === '<' ? v < t : op === '<=' ? v <= t : op === '>' ? v > t : op === '>=' ? v >= t : op === '==' ? v === t : false;
+  const _alertRulesReady = new Set<string>();
+  async function ensureAlertRules(db: any, rid: string): Promise<void> {
+    if (_alertRulesReady.has(rid)) return;
+    try {
+      await db.exec(`CREATE TABLE IF NOT EXISTS alert_rules (
+        id TEXT PRIMARY KEY, name TEXT, metric TEXT NOT NULL, operator TEXT NOT NULL,
+        threshold DOUBLE PRECISION NOT NULL, severity TEXT DEFAULT 'warning', cooldown_hours INT DEFAULT 12,
+        is_active INT DEFAULT 1, last_fired_at TIMESTAMP, last_value DOUBLE PRECISION,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+      _alertRulesReady.add(rid);
+    } catch { /* best-effort */ }
+  }
+  // Evaluate a tenant's active rules. force=true → dry-run (compute + report, no send),
+  // used by the "Test now" button. force=false → the cron path: fire breaches (respecting
+  // per-rule cooldown) through notifyBilling.
+  async function evaluateAlertRules(rid: string, force = false): Promise<{ evaluated: number; fired: number; results: any[] }> {
+    const db = await getTenantDb(rid);
+    await ensureAlertRules(db, rid);
+    const rules: any[] = await db.query("SELECT * FROM alert_rules WHERE is_active = 1").catch(() => []);
+    if (!rules.length) return { evaluated: 0, fired: 0, results: [] };
+    const ctx = { today: _istToday() };
+    const cache: Record<string, number | null> = {};
+    const results: any[] = []; let fired = 0;
+    for (const rule of rules) {
+      const m = ALERT_METRICS.find((x) => x.key === rule.metric);
+      if (!m) continue;
+      if (!(rule.metric in cache)) { try { cache[rule.metric] = await m.compute(db, ctx); } catch { cache[rule.metric] = null; } }
+      const value = cache[rule.metric];
+      if (value == null) { results.push({ id: rule.id, name: rule.name, metric: rule.metric, label: m.label, value: null, skipped: true }); continue; }
+      const breached = _alertBreached(value, rule.operator, Number(rule.threshold));
+      let didFire = false;
+      if (breached && !force) {
+        const cd = Number(rule.cooldown_hours || 12) * 3600 * 1000;
+        const last = rule.last_fired_at ? new Date(rule.last_fired_at).getTime() : 0;
+        if (Date.now() - last >= cd) {
+          notifyBilling(rid, 'ALERT_TRIGGERED', {
+            alertName: rule.name || m.label, metricLabel: m.label, value, valueDisplay: m.fmt(value),
+            operator: rule.operator, threshold: rule.threshold, thresholdDisplay: m.fmt(Number(rule.threshold)),
+            severity: rule.severity || 'warning', hint: m.hint,
+          }).catch(() => {});
+          await db.run("UPDATE alert_rules SET last_fired_at = CURRENT_TIMESTAMP, last_value = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [value, rule.id]).catch(() => {});
+          didFire = true; fired++;
+        }
+      } else {
+        await db.run("UPDATE alert_rules SET last_value = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [value, rule.id]).catch(() => {});
+      }
+      results.push({ id: rule.id, name: rule.name, metric: rule.metric, label: m.label, value, value_display: m.fmt(value), operator: rule.operator, threshold: rule.threshold, breached, fired: didFire, severity: rule.severity });
+    }
+    return { evaluated: rules.length, fired, results };
+  }
+
+  // Owner API — Smart Alert rules CRUD + test-evaluate.
+  app.get("/api/owner/alert-rules", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await ensureAlertRules(db, req.user!.restaurantId);
+      const rules = await db.query("SELECT * FROM alert_rules ORDER BY created_at DESC").catch(() => []);
+      res.json({
+        rules,
+        catalog: ALERT_METRICS.map((m) => ({ key: m.key, label: m.label, kind: m.kind, default_op: m.default_op, default_threshold: m.default_threshold, hint: m.hint })),
+      });
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to load alert rules' }); }
+  });
+  app.post("/api/owner/alert-rules", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await ensureAlertRules(db, req.user!.restaurantId);
+      const b = req.body || {};
+      const metric = String(b.metric || '').trim();
+      const m = ALERT_METRICS.find((x) => x.key === metric);
+      if (!m) return res.status(400).json({ error: 'Unknown metric.' });
+      const op = String(b.operator || m.default_op);
+      if (!['<', '<=', '>', '>=', '=='].includes(op)) return res.status(400).json({ error: 'Invalid operator.' });
+      const threshold = Number(b.threshold);
+      if (!isFinite(threshold)) return res.status(400).json({ error: 'threshold must be a number.' });
+      const id = b.id || `AR-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      const name = String(b.name || m.label).slice(0, 120);
+      const severity = ['info', 'warning', 'critical'].includes(String(b.severity)) ? b.severity : 'warning';
+      const cooldown = Math.max(1, Math.min(168, Number(b.cooldown_hours) || 12));
+      const active = b.is_active === 0 || b.is_active === false ? 0 : 1;
+      await db.run(
+        `INSERT INTO alert_rules (id, name, metric, operator, threshold, severity, cooldown_hours, is_active, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, metric=EXCLUDED.metric, operator=EXCLUDED.operator,
+           threshold=EXCLUDED.threshold, severity=EXCLUDED.severity, cooldown_hours=EXCLUDED.cooldown_hours,
+           is_active=EXCLUDED.is_active, updated_at=CURRENT_TIMESTAMP`,
+        [id, name, metric, op, threshold, severity, cooldown, active]
+      );
+      const saved = await db.get("SELECT * FROM alert_rules WHERE id = ?", [id]);
+      res.json({ success: true, rule: saved });
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to save alert rule' }); }
+  });
+  app.delete("/api/owner/alert-rules/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await db.run("DELETE FROM alert_rules WHERE id = ?", [req.params.id]).catch(() => {});
+      res.json({ success: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/owner/alert-rules/evaluate", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const out = await evaluateAlertRules(req.user!.restaurantId, true); // dry-run: report breaches, don't send
+      res.json(out);
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // Cron — evaluate every active tenant's alert rules on an interval and deliver
+  // breaches. Runs in the background (never an HTTP handler), so awaiting the
+  // multi-channel sends here is safe (no Cloudflare 502 risk). Tenants with no
+  // active rules short-circuit cheaply.
+  if (!(globalThis as any).__alertCronStarted) {
+    (globalThis as any).__alertCronStarted = true;
+    const runAlertSweep = async () => {
+      try {
+        const tenants: any[] = await centralDb.query("SELECT id FROM restaurants WHERE is_active = 1 AND (access_revoked IS NULL OR access_revoked = 0)").catch(() => []);
+        for (const t of tenants) { try { await evaluateAlertRules(t.id, false); } catch { /* per-tenant isolation */ } }
+      } catch (e: any) { console.error('[alert-cron] sweep failed:', e?.message || e); }
+    };
+    setInterval(runAlertSweep, 2 * 60 * 60 * 1000); // every 2 hours
+    console.log('[alert-cron] Smart-alerts sweep scheduled (every 2h)');
+  }
+
   // Admin: revoke a tenant's access (move to read-only mode).
   // Body: { reason?: string }
   app.post("/api/admin/tenants/:id/revoke-access", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
@@ -48690,8 +48864,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-cockpit-kpis',
+    commit_marker: 'smart-alerts-engine',
     code_features: [
+      'smart-alerts-engine',                        // FEATURE (best-in-class notification engine — proactive metric alerts): the existing engine fires on TRANSACTIONS (booking/checkout via triggerNotification/notifyBilling → email/WhatsApp/SMS/Telegram + delivery log). NEW layer fires on owner-defined BUSINESS THRESHOLDS. Per-tenant `alert_rules` table (metric, operator, threshold, severity, cooldown, is_active, last_fired/last_value). A metric CATALOG (5 hotel metrics: tonight's occupancy %, arrivals today, in-house departures today, cash-to-collect today, unassigned bookings) each with a compute(db)+fmt+hint. evaluateAlertRules(tenant, force) computes, compares (`< <= > >=`), and on breach (respecting per-rule cooldown) fires notifyBilling('ALERT_TRIGGERED', …) → reuses the SAME multi-channel pipeline (nothing duplicated). A background cron (setInterval 2h, guarded by globalThis flag) sweeps all active tenants; tenants with no rules short-circuit cheaply — safe to await sends (not an HTTP handler → no CF-502). New ALERT_TRIGGERED template in notificationService.ts. Owner endpoints /api/owner/alert-rules (GET list+catalog, POST upsert, DELETE :id, POST /evaluate = dry-run preview that never sends). Frontend: SmartAlertsPanel mounted atop NotificationSettings (Notifications tab) — pick-metric→auto-fill default op/threshold/hint, severity, re-alert cooldown, live "Check now" preview with breached badges, per-rule active toggle/edit/delete. tsc + vite build clean.
       'aiosell-cockpit-kpis',                       // FEATURE (BCG-review Phase-3 on the OTA cockpit — OTA-contribution KPIs): report now computes available room-nights (sellable rooms × period days) and returns a `kpi` block = OTA occupancy contribution % (OTA room-nights / available, with MoM delta), OTA net RevPAR (net / available room-night), gross ADR, net ADR, and the ADR commission drag (gross−net per night). This is the CHANNEL lens (what the OTAs contribute to occupancy/RevPAR), deliberately distinct from the property-wide occupancy report elsewhere — no >100% risk since OTA is a subset of capacity. UI adds a top "OTA contribution to your property" strip (occupancy / RevPAR / gross ADR / net ADR + drag) above the money tiles. Data we already hold; no new columns. tsc + vite build clean. (Still deferred: property-wide ADR/RevPAR/occupancy already exist in Hotel Reports; payout expected-vs-received, forward pace, alerts, scheduled digest.)
       'aiosell-cockpit-quality-recon',              // FEATURE (BCG-review Phase-2 on the OTA cockpit): (1) CANCELLATION QUALITY — ingest + report now track cancellations; report returns overall cancellation_rate (+ cancelled/bookings_total) with a MoM delta, and per-channel cancellation_pct in the channel-profitability table (>=15% flagged red). Owner can see "which OTA cancels most" — a channel-quality signal. (2) TRUE-NET RECONCILIATION (India leakage, review gap #4) — ingest captures the Aiosell amount block's tcs/tds/tax onto new room_bookings cols channel_tcs/channel_tds/channel_tax; report computes tax_withheld (TDS+TCS) and true_net (net − TDS − TCS) overall + per booking; UI shows an "OTA remits (after TDS/TCS)" chip ONLY when withholdings are present, so it's invisible until the feed carries them. Frontend adds a quality+reconciliation strip under the tiles and a Cancel% column. tsc + vite build clean. (Deferred: ADR/RevPAR/occupancy KPIs, payout expected-vs-received, forward pace, alerts, scheduled digest.)
       'aiosell-report-cockpit',                     // FEATURE (BCG-review quick wins on the Channel Bookings report → OTA profit & cash cockpit): GET /hotel/aiosell/bookings is now PERIOD-BASED (defaults to month-to-date) with a prior equal-length window for MoM deltas. Adds the decision metrics an owner needs: (a) effective commission % and NET ADR overall and per channel; (b) channel profitability table ranked by net (bookings, room-nights, gross, comm%, net, net ADR — cheapest/most-profitable starred, comm≥20% flagged red); (c) OTA-vs-DIRECT channel mix computed across ALL bookings in the window (not just Aiosell) + a dependency flag (high if OTA share ≥60% or single-channel ≥40%) with a "grow direct" nudge; (d) MoM delta pills on every tile (green/red by whether up is good — commission↑=bad, revenue/ADR↑=good); (e) CSV export of the booking lines. Frontend Step 6 rebuilt into tiles (gross/commission+eff%/net/net-ADR/to-collect) + mix bar + profitability table + detail table, all period-scoped. Response now returns {period, summary(+by_platform enriched, effective_commission_pct, net_adr, room_nights), deltas, channel_mix, bookings}. Verified: tsc + vite build clean.

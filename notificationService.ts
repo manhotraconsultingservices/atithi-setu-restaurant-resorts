@@ -410,6 +410,33 @@ export function buildNotificationContent(
       };
     }
 
+    /* ── Smart Alerts (owner-defined metric thresholds) ───────────────── */
+
+    case 'ALERT_TRIGGERED': {
+      const sev = String(data.severity || 'warning').toLowerCase();
+      const icon = sev === 'critical' ? '🔴' : sev === 'warning' ? '🟠' : '🔔';
+      const colour = sev === 'critical' ? '#dc2626' : sev === 'warning' ? '#d97706' : '#0E7490';
+      const cmp = (data.operator === '<' || data.operator === '<=') ? 'dropped to' : 'reached';
+      const valueDisplay = data.valueDisplay ?? data.value;
+      const thresholdDisplay = data.thresholdDisplay ?? data.threshold;
+      return {
+        subject: `${icon} Alert: ${data.alertName || data.metricLabel} — ${r}`,
+        text:
+          `${icon} *Business alert — ${r}*\n` +
+          `${data.alertName || data.metricLabel}\n` +
+          `${data.metricLabel}: *${valueDisplay}* (${cmp} ${data.operator} ${thresholdDisplay})` +
+          (data.hint ? `\n\n💡 ${data.hint}` : ''),
+        html:
+          `<h2 style="color:${colour}">${icon} Business alert</h2>` +
+          `<p style="font-size:15px;margin:0 0 10px"><strong>${data.alertName || data.metricLabel}</strong></p>` +
+          `<table cellpadding="6" style="border-collapse:collapse;font-size:14px">` +
+          `<tr><td style="color:#6b5d52">${data.metricLabel}</td><td><strong style="color:${colour}">${valueDisplay}</strong></td></tr>` +
+          `<tr><td style="color:#6b5d52">Rule</td><td>${cmp} ${data.operator} ${thresholdDisplay}</td></tr>` +
+          `</table>` +
+          (data.hint ? `<p style="color:#6b5d52;margin-top:10px">💡 ${data.hint}</p>` : ''),
+      };
+    }
+
     /* ── Staff Attendance ─────────────────────────────────────────────── */
 
     case 'STAFF_ATTENDANCE':

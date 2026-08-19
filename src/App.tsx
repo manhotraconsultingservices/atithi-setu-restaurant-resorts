@@ -65979,6 +65979,143 @@ const NOTIFICATION_CHANNELS = [
   { id: 'telegram_enabled', label: 'Telegram',  icon: MessageCircle },
 ];
 
+// ════════════════════════════════════════════════════════════════════
+// SmartAlertsPanel — owner-defined, metric-driven business alerts.
+// ════════════════════════════════════════════════════════════════════
+// Sits atop the notification settings. Rules ("tonight's occupancy < 40%")
+// are evaluated by a server cron every 2h and delivered on the same channels
+// (email/WhatsApp/SMS). "Check now" is a live preview that never sends.
+function SmartAlertsPanel({ token }: { token: string }) {
+  const toast = useToast();
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [evalRes, setEvalRes] = useState<any>(null);
+  const [evaluating, setEvaluating] = useState(false);
+  const blank = { id: '', metric: '', name: '', operator: '<', threshold: '', severity: 'warning', cooldown_hours: 12 };
+  const [form, setForm] = useState<any>(blank);
+  const authHdr = { Authorization: `Bearer ${token}` };
+  const fieldCls2 = 'border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30';
+
+  const load = async () => {
+    setLoading(true);
+    try { const r = await fetch('/api/owner/alert-rules', { headers: authHdr }); if (r.ok) setData(await r.json()); }
+    catch { /* ignore */ } finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const catalog: any[] = data?.catalog || [];
+  const rules: any[] = data?.rules || [];
+  const metricMeta = (k: string) => catalog.find((m: any) => m.key === k);
+  const fmtVal = (metric: string, v: any) => {
+    if (v == null || v === '') return '—';
+    const m = metricMeta(metric);
+    return m?.kind === 'pct' ? `${Math.round(v)}%` : m?.kind === 'money' ? `₹${Math.round(v).toLocaleString('en-IN')}` : `${Math.round(v)}`;
+  };
+  const opLabel = (op: string) => op === '<' ? 'below' : op === '<=' ? 'at or below' : op === '>' ? 'above' : op === '>=' ? 'at or above' : '=';
+  const sevCls = (s: string) => s === 'critical' ? 'bg-red-50 text-red-700 border-red-200' : s === 'info' ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-amber-50 text-amber-700 border-amber-200';
+
+  const pickMetric = (k: string) => { const m = metricMeta(k); setForm((f: any) => ({ ...f, metric: k, name: m?.label || '', operator: m?.default_op || '<', threshold: m?.default_threshold ?? '' })); };
+  const save = async () => {
+    if (!form.metric) { toast.error('Pick a metric.'); return; }
+    if (form.threshold === '' || isNaN(Number(form.threshold))) { toast.error('Enter a threshold number.'); return; }
+    setSaving(true);
+    try {
+      const r = await fetch('/api/owner/alert-rules', { method: 'POST', headers: { ...authHdr, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...form, threshold: Number(form.threshold), cooldown_hours: Number(form.cooldown_hours) || 12 }) });
+      if (r.ok) { toast.success(form.id ? 'Alert updated.' : 'Alert created.'); setForm(blank); load(); }
+      else { const j = await r.json().catch(() => ({})); toast.error(j.error || 'Failed to save.'); }
+    } catch { toast.error('Failed to save.'); } finally { setSaving(false); }
+  };
+  const editRule = (rule: any) => setForm({ id: rule.id, metric: rule.metric, name: rule.name || '', operator: rule.operator, threshold: rule.threshold, severity: rule.severity || 'warning', cooldown_hours: rule.cooldown_hours || 12 });
+  const del = async (id: string) => { try { await fetch(`/api/owner/alert-rules/${id}`, { method: 'DELETE', headers: authHdr }); load(); } catch { /* ignore */ } };
+  const toggleActive = async (rule: any) => { try { await fetch('/api/owner/alert-rules', { method: 'POST', headers: { ...authHdr, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...rule, is_active: rule.is_active ? 0 : 1 }) }); load(); } catch { /* ignore */ } };
+  const runNow = async () => { setEvaluating(true); setEvalRes(null); try { const r = await fetch('/api/owner/alert-rules/evaluate', { method: 'POST', headers: authHdr }); if (r.ok) setEvalRes(await r.json()); } catch { /* ignore */ } finally { setEvaluating(false); } };
+
+  return (
+    <div className="bg-white rounded-[28px] border-2 border-[#e8dccf] overflow-hidden">
+      <div className="px-6 py-5 bg-gradient-to-r from-[#1a1208] to-[#3a2a18] text-white flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-xl font-bold font-serif flex items-center gap-2">🔔 Smart Alerts</h3>
+          <p className="text-sm text-white/70 mt-0.5 max-w-2xl">Get pinged the moment a business number crosses a line you set — delivered on the same channels below. Checked automatically every 2 hours.</p>
+        </div>
+        <button onClick={runNow} disabled={evaluating || rules.length === 0} className="px-4 py-2 rounded-xl bg-white/10 border border-white/20 text-sm font-bold hover:bg-white/20 disabled:opacity-40 transition-colors shrink-0">{evaluating ? 'Checking…' : 'Check now'}</button>
+      </div>
+      <div className="p-6 space-y-5">
+        {loading ? <p className="text-sm text-[#9c8e85] italic">Loading…</p> : <>
+          <div className="border border-[#efe6da] rounded-2xl p-4 bg-[#faf7f2]">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-3">{form.id ? 'Edit alert' : 'New alert'}</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="lg:col-span-2">
+                <label className="block text-[11px] font-semibold text-[#6b5d52] mb-1">When this metric…</label>
+                <select value={form.metric} onChange={e => pickMetric(e.target.value)} className={cn(fieldCls2, 'w-full')}>
+                  <option value="">— pick a metric —</option>
+                  {catalog.map((m: any) => <option key={m.key} value={m.key}>{m.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-[#6b5d52] mb-1">is</label>
+                <select value={form.operator} onChange={e => setForm((f: any) => ({ ...f, operator: e.target.value }))} className={cn(fieldCls2, 'w-full')}>
+                  <option value="<">below</option><option value="<=">at or below</option>
+                  <option value=">">above</option><option value=">=">at or above</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-[#6b5d52] mb-1">threshold</label>
+                <input type="number" value={form.threshold} onChange={e => setForm((f: any) => ({ ...f, threshold: e.target.value }))} className={cn(fieldCls2, 'w-full')} />
+              </div>
+            </div>
+            {form.metric && metricMeta(form.metric)?.hint && <p className="text-[11px] text-[#9c8e85] mt-2">💡 {metricMeta(form.metric).hint}</p>}
+            <div className="flex items-end gap-3 mt-3 flex-wrap">
+              <div>
+                <label className="block text-[11px] font-semibold text-[#6b5d52] mb-1">Severity</label>
+                <select value={form.severity} onChange={e => setForm((f: any) => ({ ...f, severity: e.target.value }))} className={fieldCls2}>
+                  <option value="info">Info</option><option value="warning">Warning</option><option value="critical">Critical</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-[#6b5d52] mb-1">Re-alert after (hrs)</label>
+                <input type="number" min={1} max={168} value={form.cooldown_hours} onChange={e => setForm((f: any) => ({ ...f, cooldown_hours: e.target.value }))} className={cn(fieldCls2, 'w-28')} />
+              </div>
+              <button onClick={save} disabled={saving || !form.metric} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50 transition-colors">{saving ? 'Saving…' : form.id ? 'Update alert' : 'Add alert'}</button>
+              {form.id && <button onClick={() => setForm(blank)} className="px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold hover:bg-white transition-colors">Cancel</button>}
+            </div>
+          </div>
+
+          {rules.length === 0 ? (
+            <p className="text-sm text-[#9c8e85] italic">No alerts yet. Add one above — e.g. “Tonight's occupancy is below 40%”, or “Cash to collect today is at or above ₹20,000”.</p>
+          ) : (
+            <div className="space-y-2">
+              {rules.map((rule: any) => {
+                const ev = evalRes?.results?.find((x: any) => x.id === rule.id);
+                return (
+                  <div key={rule.id} className={cn('flex items-center gap-3 flex-wrap border rounded-2xl px-4 py-3', rule.is_active ? 'border-[#e8dccf] bg-white' : 'border-[#f0e8de] bg-[#faf7f2] opacity-70')}>
+                    <span className={cn('text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border capitalize', sevCls(rule.severity))}>{rule.severity}</span>
+                    <div className="flex-1 min-w-[180px]">
+                      <p className="text-sm font-semibold text-[#1a1208]">{rule.name || metricMeta(rule.metric)?.label || rule.metric}</p>
+                      <p className="text-[12px] text-[#6b5d52]">{metricMeta(rule.metric)?.label || rule.metric} <b>{opLabel(rule.operator)}</b> {fmtVal(rule.metric, rule.threshold)} · re-alert {rule.cooldown_hours}h</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[10px] text-[#9c8e85] uppercase tracking-widest">Now</p>
+                      <p className={cn('text-sm font-bold tabular-nums', ev?.breached ? 'text-red-600' : 'text-[#1a1208]')}>{ev ? fmtVal(rule.metric, ev.value) : fmtVal(rule.metric, rule.last_value)}</p>
+                    </div>
+                    {ev?.breached && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">breached</span>}
+                    <label className="flex items-center gap-1.5 text-[11px] text-[#6b5d52] cursor-pointer">
+                      <input type="checkbox" checked={!!rule.is_active} onChange={() => toggleActive(rule)} className="w-4 h-4 accent-[#cc5a16]" /> active
+                    </label>
+                    <button onClick={() => editRule(rule)} className="text-[12px] font-bold text-[#cc5a16] hover:underline">Edit</button>
+                    <button onClick={() => del(rule.id)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-500"><Trash2 size={14} /></button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {evalRes && <p className="text-[11px] text-[#9c8e85]">Checked {evalRes.evaluated} rule(s) · {evalRes.results?.filter((r: any) => r.breached).length || 0} currently breached. “Check now” is a preview — it never sends; the 2-hour sweep delivers.</p>}
+        </>}
+      </div>
+    </div>
+  );
+}
+
 function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestaurantEnabled, isSpaEnabled, isEventsEnabled }: { restaurantId: string, token: string, isHotelEnabled?: boolean, isRestaurantEnabled?: boolean, isSpaEnabled?: boolean, isEventsEnabled?: boolean }) {
   const toast = useToast();
   const [settings, setSettings] = useState<any[]>([]);
@@ -66120,6 +66257,9 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
           Save Changes
         </button>
       </div>
+
+      {/* Smart Alerts — proactive, metric-driven business alerts */}
+      <SmartAlertsPanel token={token} />
 
       {/* ── Delivery Log — proof the engine is working, per channel, with failures ── */}
       <div className="bg-white border border-[#cc5a16]/10 rounded-2xl p-5">
