@@ -32872,24 +32872,38 @@ ${data.tenant.name}`;
       await aiosellEnsureCredCols(tenantDb, req.params.id);
       const cfg = await aiosellCfgForTenant(tenantDb); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Enter the Aiosell credentials for this property first.' });
       const t = await aiosellTenantConfig(tenantDb);
-      const multiplier = Number(req.body?.multiplier);
-      const channels = Array.isArray(req.body?.channels) ? req.body.channels.map((c: any) => String(c).toLowerCase()) : [];
       if (!t.hotelCode) return res.status(400).json({ error: 'Hotel code not set.' });
-      if (!(multiplier > 0) || channels.length === 0) return res.status(400).json({ error: 'multiplier (>0) and non-empty channels[] required.' });
-      const r = await aiosellChannelMultiplier(cfg, t.hotelCode, multiplier, channels);
-      if (!r.ok) {
-        // A channel multiplier only applies to OTA channels Aiosell has actually
-        // CONNECTED to the property. When Aiosell replies "add mapping / not
-        // updated", the channel isn't connected on their side — surface that as an
-        // actionable step instead of Aiosell's terse text (keep the raw for ref).
-        const raw = String(r.message || '');
-        const needsChannel = /add mapping|not updated|mapping|not connected|no channel/i.test(raw);
-        const friendly = needsChannel
-          ? `Aiosell hasn't connected these OTA channel(s) to your property yet: ${channels.join(', ')}. Connect them in the Aiosell dashboard (Channels / OTA connections) for hotel code "${t.hotelCode}", then retry — a rate multiplier only applies to channels Aiosell has connected. (Aiosell: ${raw})`
-          : raw;
-        return res.status(502).json({ success: false, message: friendly, aiosell_message: raw, needs_channel_connection: needsChannel });
+      // Accept EITHER a per-channel list (preferred) — multipliers:[{channel,multiplier}]
+      // so a DIFFERENT factor can go to each aggregator — or the legacy single
+      // { multiplier, channels[] }. Aiosell's channel_multiplier scales one factor
+      // across a channel list per call, so per-channel means one call per channel.
+      let list: Array<{ channel: string; multiplier: number }> = [];
+      if (Array.isArray(req.body?.multipliers)) {
+        list = req.body.multipliers
+          .map((x: any) => ({ channel: String(x?.channel || '').toLowerCase().trim(), multiplier: Number(x?.multiplier) }))
+          .filter((x: { channel: string; multiplier: number }) => x.channel && x.multiplier > 0);
+      } else {
+        const multiplier = Number(req.body?.multiplier);
+        const channels = Array.isArray(req.body?.channels) ? req.body.channels.map((c: any) => String(c).toLowerCase().trim()) : [];
+        if (multiplier > 0) list = channels.filter(Boolean).map((c: string) => ({ channel: c, multiplier }));
       }
-      res.status(200).json({ success: true, message: r.message });
+      if (list.length === 0) return res.status(400).json({ error: 'Provide multipliers:[{channel,multiplier}] (each multiplier > 0), or multiplier + channels[].' });
+      // One call per channel so each gets its own factor. Partial success is fine —
+      // we return 200 with a per-channel result so the UI shows which applied.
+      const results: Array<{ channel: string; multiplier: number; ok: boolean; message: string }> = [];
+      for (const { channel, multiplier } of list) {
+        const r = await aiosellChannelMultiplier(cfg, t.hotelCode, multiplier, [channel]);
+        const raw = String(r.message || '');
+        const needsChannel = !r.ok && /add mapping|not updated|mapping|not connected|no channel/i.test(raw);
+        results.push({
+          channel, multiplier, ok: !!r.ok,
+          message: r.ok ? (raw || 'Applied')
+            : needsChannel ? `Not connected in Aiosell — connect "${channel}" in the Aiosell dashboard (Channels / OTA connections), then retry.`
+            : (raw || 'Failed'),
+        });
+      }
+      const applied = results.filter(x => x.ok).length;
+      res.status(200).json({ success: applied > 0, applied, failed: results.length - applied, results });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   // Room status / restrictions push (stop-sell, min/max stay, CTA/CTD) to chosen
@@ -49317,9 +49331,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'crm-mapping-upsert-typefix',
+    commit_marker: 'aiosell-per-channel-multipliers',
     code_features: [
-      'crm-mapping-upsert-typefix',                 // BUGFIX (QA: "Unable to update Room/Rate Plan Mapping — could not determine data type of parameter $4"). The channel_room_mappings unique index is on an EXPRESSION — COALESCE(external_rate_plan_code, '') — and external_rate_plan_code is the 4th INSERT param ($4). During ON CONFLICT arbiter inference Postgres must resolve $4's type inside that COALESCE; a bare/NULL parameter has no type context → the whole upsert fails at PLAN time and no mapping saves. Fix (server /hotel/channel-room-mappings POST): cast the nullable text params in the VALUES clause (…?::text…) so Postgres can determine their types; also cast the readback SELECT's `?::text IS NULL` branch (same issue when the code is null). No schema change; affects every mapping save incl. the Aiosell Step-2 "Update" button. Guard: test-scripts/pg_channel_mapping_upsert_check.mjs (real-Postgres throwaway schema — OLD uncast upsert must FAIL to type $4, NEW ::text insert + conflict-update must succeed). tsc + vite build clean.
+      'aiosell-per-channel-multipliers',            // FEATURE (owner request): "1 line per aggregator (MMT, Booking.com …) so a different price can go to each platform." The Channel Rate Multiplier was a single factor + a comma channel list (same factor to all). Now Step 3 shows ONE ROW PER CHANNEL — editable label + Aiosell channel code + its own multiplier — pre-seeded with Booking.com / Agoda / MakeMyTrip·Goibibo (GoMMT); + Add channel / remove-row / "Apply all". Backend /hotel/aiosell/multiplier now accepts multipliers:[{channel,multiplier}] (legacy {multiplier,channels[]} still works) and calls Aiosell's channel_multiplier ONCE PER CHANNEL (their API scales one factor per call), returning a per-channel result {channel,ok,message} at 200 so partial success is visible; each failed channel gets the actionable "connect this channel in Aiosell" hint. UI renders per-row ✓ applied / ⚠ not applied + a results panel. tsc + vite build clean.
+      'crm-mapping-upsert-typefix',               // BUGFIX (QA: "Unable to update Room/Rate Plan Mapping — could not determine data type of parameter $4"). The channel_room_mappings unique index is on an EXPRESSION — COALESCE(external_rate_plan_code, '') — and external_rate_plan_code is the 4th INSERT param ($4). During ON CONFLICT arbiter inference Postgres must resolve $4's type inside that COALESCE; a bare/NULL parameter has no type context → the whole upsert fails at PLAN time and no mapping saves. Fix (server /hotel/channel-room-mappings POST): cast the nullable text params in the VALUES clause (…?::text…) so Postgres can determine their types; also cast the readback SELECT's `?::text IS NULL` branch (same issue when the code is null). No schema change; affects every mapping save incl. the Aiosell Step-2 "Update" button. Guard: test-scripts/pg_channel_mapping_upsert_check.mjs (real-Postgres throwaway schema — OLD uncast upsert must FAIL to type $4, NEW ::text insert + conflict-update must succeed). tsc + vite build clean.
       'aiosell-multiplier-channel-hint',          // UX/diagnosis (QA O-4 "Channel Rate Multiplier FAILED"): applying a 1.10 multiplier to booking.com/gommt returned Aiosell's terse "Multiplier not updated, please add mapping for: [...]" which read like a bug. ROOT CAUSE is Aiosell-side, not ours: a channel multiplier only applies to OTA channels Aiosell has actually CONNECTED to the property (on the sandbox those channels usually aren't connected). Our code sends the correct channel identifiers and faithfully relays Aiosell's reply. Fix (server /hotel/aiosell/multiplier): when Aiosell rejects with an "add mapping / not updated / not connected" message we now surface an ACTIONABLE error — names the channels + tells the user to connect them in the Aiosell dashboard (Channels/OTA connections) for their hotel code, then retry — while keeping Aiosell's raw text (aiosell_message) + a needs_channel_connection flag. No behavior change to the push itself; the multiplier works once channels are connected. tsc + vite build clean.
       'aiosell-map-autosuggest',                  // UX (owner request): make Aiosell Step 2 (Map rooms & rate plans) one-click for a new room instead of hunting the dropdown. AiosellPanel now name+occupancy-matches each Aiosell room to the closest LOCAL room type (token-set Jaccard on names + substring bonus + occupancy tie-breaker; confidence-gated ≥0.34), and Aiosell rate plans to local rate plans (≥0.5). Three affordances, all frontend-only over the existing /channel-room-mappings save: (1) a header "✨ Auto-suggest" button pre-fills the mapping draft for every UNMAPPED (room × rate-plan) pair — never overwrites a saved mapping or a manual pick; (2) a "Save all mapped" button bulk-upserts every row that has a local room type selected/changed (one POST per pair, one reload); (3) a per-row "✨ Use '<RoomType>'" chip under each unmapped dropdown that applies just that row's suggestion. Nothing auto-saves — staff review then Save. NOTE: this only speeds the MAPPING; provisioning a new room type INTO Aiosell is still an Aiosell-dashboard task (their CM API has no room-create endpoint). tsc + vite build clean.
       'invoice-list-history-link',                // UX (owner request): "add a hyperlink to the Restaurant invoice so the user does not need to go to Edit to see the audit log." The invoice History was only reachable inside the Edit-Invoice modal (and Edit is hidden for PAID invoices). Now every row in the Invoices list has a "🕘 History" action button (next to Preview/Edit/Print) that opens the SAME ObjectDetail audit overlay directly — available for PAID + UNPAID invoices alike, no Edit needed. Reuses the existing `invoiceTree` state/overlay + `/orders/:id/audit` (order) or `/sessions/:token/invoice-audit` (session). The overlay's Total field now also reads the list row's `totalAmount` (camelCase) so it shows for list-opened invoices. Frontend-only; tsc + vite build clean.

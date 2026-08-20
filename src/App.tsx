@@ -60136,8 +60136,14 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   const [pushDays, setPushDays] = useState('90');
   const [pushing, setPushing] = useState(false);
   const [pushResult, setPushResult] = useState<any>(null);
-  const [mult, setMult] = useState('1.0');
-  const [multChannels, setMultChannels] = useState<string>('booking.com,gommt');
+  // Per-channel rate multipliers — one line per aggregator so a DIFFERENT factor
+  // can go to each OTA (Aiosell scales one factor per channel per call).
+  const [multRows, setMultRows] = useState<{ channel: string; label: string; mult: string }[]>([
+    { channel: 'booking.com', label: 'Booking.com', mult: '1.00' },
+    { channel: 'agoda', label: 'Agoda', mult: '1.00' },
+    { channel: 'gommt', label: 'MakeMyTrip / Goibibo (GoMMT)', mult: '1.00' },
+  ]);
+  const [multResult, setMultResult] = useState<any>(null);
   const [fetchFrom, setFetchFrom] = useState(() => new Date().toISOString().slice(0, 10));
   const [fetchTo, setFetchTo] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
   const [fetchIngest, setFetchIngest] = useState(true);
@@ -60394,13 +60400,18 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   };
 
   const applyMultiplier = async () => {
-    const channels = multChannels.split(',').map(s => s.trim()).filter(Boolean);
-    if (!(Number(mult) > 0) || channels.length === 0) { setErr('Enter a multiplier > 0 and at least one channel.'); return; }
-    setBusyOp('mult'); setErr('');
+    const rows = multRows.filter(r => r.channel.trim() && Number(r.mult) > 0);
+    if (rows.length === 0) { setErr('Add at least one channel with a multiplier > 0.'); return; }
+    setBusyOp('mult'); setErr(''); setMultResult(null);
     try {
-      const r = await api('/aiosell/multiplier', { method: 'POST', body: JSON.stringify({ multiplier: Number(mult), channels }) });
-      toast.success(r.message || `Multiplier ${mult}× applied.`);
-    } catch (e: any) { setErr(e.message || 'Failed to apply multiplier.'); }
+      const r = await api('/aiosell/multiplier', { method: 'POST', body: JSON.stringify({
+        multipliers: rows.map(x => ({ channel: x.channel.trim().toLowerCase(), multiplier: Number(x.mult) })),
+      }) });
+      setMultResult(r);
+      const applied = Number(r?.applied ?? 0), failed = Number(r?.failed ?? 0);
+      if (failed === 0) toast.success(`Applied to ${applied} channel${applied === 1 ? '' : 's'}.`);
+      else toast.error(`${applied} applied, ${failed} need attention — see below.`);
+    } catch (e: any) { setErr(e.message || 'Failed to apply multipliers.'); }
     finally { setBusyOp(''); }
   };
 
@@ -60743,15 +60754,68 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
               </div>
             )}
             <div className="border-t border-[#f0e8de] pt-3">
-              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Channel rate multiplier</label>
-              <p className="text-[11px] text-[#9c8e85] mb-2">Scale rates for specific channels (e.g. 1.10 = +10% on Booking.com).</p>
-              <div className="flex items-center gap-2 flex-wrap">
-                <input type="number" step="0.01" min="0.1" value={mult} onChange={e => setMult(e.target.value)} className={cn(fieldCls, 'w-24')} />
-                <input value={multChannels} onChange={e => setMultChannels(e.target.value)} placeholder="booking.com,gommt" className={cn(fieldCls, 'flex-1 min-w-[140px]')} />
-                <button onClick={applyMultiplier} disabled={busyOp === 'mult' || !enabled} className="px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold hover:bg-[#f5f0ea] disabled:opacity-50 transition-colors">
-                  {busyOp === 'mult' ? '…' : 'Apply'}
-                </button>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Channel rate multipliers</label>
+              <p className="text-[11px] text-[#9c8e85] mb-2">One line per OTA — send a different price to each platform (1.00 = base, 1.10 = +10%, 0.95 = −5%).</p>
+              <div className="space-y-1.5">
+                {multRows.map((row, i) => {
+                  const res = multResult?.results?.find((x: any) => String(x.channel).toLowerCase() === row.channel.trim().toLowerCase());
+                  return (
+                    <div key={i} className="flex items-center gap-2 flex-wrap">
+                      <input
+                        value={row.label}
+                        onChange={e => setMultRows(rs => rs.map((r, j) => j === i ? { ...r, label: e.target.value } : r))}
+                        placeholder="Channel name"
+                        className={cn(fieldCls, 'flex-1 min-w-[150px]')}
+                      />
+                      <input
+                        value={row.channel}
+                        onChange={e => setMultRows(rs => rs.map((r, j) => j === i ? { ...r, channel: e.target.value } : r))}
+                        placeholder="aiosell code (e.g. booking.com)"
+                        className={cn(fieldCls, 'w-40')}
+                        title="The channel identifier Aiosell uses (e.g. booking.com, agoda, gommt)"
+                      />
+                      <input
+                        type="number" step="0.01" min="0.1" value={row.mult}
+                        onChange={e => setMultRows(rs => rs.map((r, j) => j === i ? { ...r, mult: e.target.value } : r))}
+                        className={cn(fieldCls, 'w-24')}
+                      />
+                      {res && (
+                        <span className={cn('text-[11px] font-bold', res.ok ? 'text-emerald-700' : 'text-amber-700')} title={res.message}>
+                          {res.ok ? '✓ applied' : '⚠ not applied'}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setMultRows(rs => rs.filter((_, j) => j !== i))}
+                        className="p-1.5 rounded-lg text-[#c88] hover:bg-red-50" title="Remove channel"
+                      ><Trash2 size={13} /></button>
+                    </div>
+                  );
+                })}
               </div>
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setMultRows(rs => [...rs, { channel: '', label: '', mult: '1.00' }])}
+                  className="px-3 py-1.5 rounded-lg border border-[#e8e0d8] text-[12px] font-bold text-[#3d3128] hover:bg-[#f5f0ea]"
+                >+ Add channel</button>
+                <button
+                  onClick={applyMultiplier}
+                  disabled={busyOp === 'mult' || !enabled}
+                  className="px-4 py-1.5 rounded-lg bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors"
+                >{busyOp === 'mult' ? 'Applying…' : 'Apply all'}</button>
+              </div>
+              {!enabled && <p className="text-[11px] text-amber-700 mt-1">Enable sync in Step 1 to apply multipliers.</p>}
+              {multResult?.results && (
+                <div className="mt-2 rounded-xl bg-[#faf7f2] border border-[#efe6da] px-3 py-2 space-y-1">
+                  {multResult.results.map((r: any, i: number) => (
+                    <div key={i} className={cn('text-[11px] flex items-start gap-1.5', r.ok ? 'text-emerald-800' : 'text-amber-800')}>
+                      <span className="font-bold shrink-0">{r.ok ? '✓' : '⚠'}</span>
+                      <span><b>{r.channel}</b> ×{Number(r.multiplier).toFixed(2)} — {r.message}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
