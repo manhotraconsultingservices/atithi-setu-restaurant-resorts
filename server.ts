@@ -31165,45 +31165,116 @@ ${data.tenant.name}`;
     }
   });
 
-  // ── Aiosell live auto-sync ────────────────────────────────────────────────
+  // ── Aiosell live auto-sync + owner-configurable automation ────────────────
   // A channel manager only prevents overbooking if the PMS keeps it in step with
-  // EVERY booking — including the direct / walk-in / agent bookings the OTAs
-  // never see. Aiosell needs the room-TYPE availability COUNT (not guest PII),
-  // and its inventory push is an absolute upsert, so re-pushing is always safe
-  // and idempotent. On any availability-affecting booking event we schedule a
-  // DEBOUNCED resync: it coalesces a burst (e.g. a 10-room group booking) into
-  // ONE push, and runs AFTER the HTTP response is sent — so it adds no latency
-  // and the outbound Aiosell call can't cause a Cloudflare 502 (it's off the
-  // request path). aiosellSyncTenant() early-returns cheaply for any tenant not
-  // using Aiosell (no creds / disabled / no mappings), so this is a no-op there.
-  const AIOSELL_AUTO_SYNC_DAYS = 120;
+  // EVERY booking — including the direct / walk-in / agent bookings the OTAs never
+  // see. Aiosell needs the room-TYPE availability COUNT (not guest PII), and its
+  // inventory push is an ABSOLUTE upsert, so re-pushing is always safe/idempotent.
+  //
+  // What happens on each booking event is OWNER-CONFIGURABLE (see the /hotel/
+  // aiosell/automation endpoints + the "Automation & triggers" view): for each of
+  // CREATED / MODIFIED / CHECKED_IN / CHECKED_OUT / CANCELLED the owner picks an
+  // OTA action (sync availability · +rates · nothing) and whether to alert the
+  // manager, plus an interval-based scheduled sweep. The DEFAULTS reproduce the
+  // prior hard-wired behaviour, so nothing changes until the owner customises it.
+  // The push is debounced (coalesces a 10-room group booking into ONE call) and
+  // runs AFTER the HTTP response (no added latency, no Cloudflare-502 — it's off
+  // the request path). aiosellSyncTenant self-guards for non-Aiosell tenants.
+  const AIOSELL_DEFAULT_DAYS = 120;
   const AIOSELL_RESYNC_DEBOUNCE_MS = 8000;
+  type AiosellEvt = 'CREATED' | 'MODIFIED' | 'CHECKED_IN' | 'CHECKED_OUT' | 'CANCELLED';
+  const AIOSELL_EVENTS: AiosellEvt[] = ['CREATED', 'MODIFIED', 'CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'];
+  const aiosellDefaultEvent = (e: AiosellEvt) => ({ ota: e === 'CHECKED_IN' ? 'NONE' : 'SYNC_AVAIL', alert: 0 });
+  function aiosellDefaultAutomation() {
+    const events: Record<string, { ota: string; alert: number }> = {};
+    for (const e of AIOSELL_EVENTS) events[e] = aiosellDefaultEvent(e);
+    return { live_enabled: 1, events, schedule_enabled: 1, schedule_interval_minutes: 30, schedule_days_ahead: AIOSELL_DEFAULT_DAYS, schedule_push_rates: 1, last_scheduled_at: null as string | null };
+  }
+  async function aiosellEnsureAutomationTable(tenantDb: any) {
+    await tenantDb.run(`CREATE TABLE IF NOT EXISTS aiosell_automation (
+      id TEXT PRIMARY KEY, live_enabled INTEGER DEFAULT 1, events_json TEXT,
+      schedule_enabled INTEGER DEFAULT 1, schedule_interval_minutes INTEGER DEFAULT 30,
+      schedule_days_ahead INTEGER DEFAULT 120, schedule_push_rates INTEGER DEFAULT 1,
+      last_scheduled_at TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  }
+  async function aiosellAutomationConfig(tenantDb: any): Promise<ReturnType<typeof aiosellDefaultAutomation>> {
+    await aiosellEnsureAutomationTable(tenantDb);
+    const def = aiosellDefaultAutomation();
+    const row: any = await tenantDb.get("SELECT * FROM aiosell_automation WHERE id='DEFAULT'").catch(() => null);
+    if (!row) return def;
+    const events = { ...def.events };
+    try {
+      const parsed = row.events_json ? JSON.parse(row.events_json) : null;
+      if (parsed && typeof parsed === 'object') for (const e of AIOSELL_EVENTS) if (parsed[e]) events[e] = { ota: String(parsed[e].ota || def.events[e].ota), alert: parsed[e].alert ? 1 : 0 };
+    } catch { /* keep defaults on bad JSON */ }
+    return {
+      live_enabled: row.live_enabled == null ? 1 : (row.live_enabled ? 1 : 0),
+      events,
+      schedule_enabled: row.schedule_enabled == null ? 1 : (row.schedule_enabled ? 1 : 0),
+      schedule_interval_minutes: Number(row.schedule_interval_minutes || 30),
+      schedule_days_ahead: Number(row.schedule_days_ahead || AIOSELL_DEFAULT_DAYS),
+      schedule_push_rates: row.schedule_push_rates == null ? 1 : (row.schedule_push_rates ? 1 : 0),
+      last_scheduled_at: row.last_scheduled_at || null,
+    };
+  }
+
   const __aiosellResyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  function scheduleAiosellResync(restaurantId?: string | null) {
+  const __aiosellResyncRates = new Map<string, boolean>();
+  const __aiosellResyncDays = new Map<string, number>();
+  // Debounced, background full resync. Coalesces a burst into ONE push and runs
+  // off the request path. If any event in the debounce window wants rates, we push
+  // rates; the widest requested day-window wins.
+  function scheduleAiosellResync(restaurantId?: string | null, opts?: { days?: number; rates?: boolean }) {
     if (!restaurantId) return;
     const rid = String(restaurantId);
+    if (opts?.rates) __aiosellResyncRates.set(rid, true);
+    __aiosellResyncDays.set(rid, Math.max(__aiosellResyncDays.get(rid) || 0, opts?.days || AIOSELL_DEFAULT_DAYS));
     const prev = __aiosellResyncTimers.get(rid);
     if (prev) clearTimeout(prev);
     const timer = setTimeout(async () => {
       __aiosellResyncTimers.delete(rid);
+      const rates = __aiosellResyncRates.get(rid) === true;
+      const days = __aiosellResyncDays.get(rid) || AIOSELL_DEFAULT_DAYS;
+      __aiosellResyncRates.delete(rid); __aiosellResyncDays.delete(rid);
       try {
-        const out = await aiosellSyncTenant(rid, AIOSELL_AUTO_SYNC_DAYS);
-        if (out.ok) console.log(`[aiosell-auto] ${rid}: pushed availability for ${out.pushed_types} room-type(s)`);
+        const out = await aiosellSyncTenant(rid, days, { rates });
+        if (out.ok) console.log(`[aiosell-auto] ${rid}: pushed availability${rates ? ' + rates' : ''} for ${out.pushed_types} room-type(s)`);
         // out.ok===false is the normal cheap outcome for non-Aiosell tenants — stay quiet.
       } catch (e: any) { console.error('[aiosell-auto] resync failed', rid, e?.message || e); }
     }, AIOSELL_RESYNC_DEBOUNCE_MS);
     if (typeof (timer as any).unref === 'function') (timer as any).unref();
     __aiosellResyncTimers.set(rid, timer);
   }
-  // Middleware: after a 2xx booking mutation, queue a resync. Hooked on the
-  // response 'finish' event so it fires regardless of which success path returned,
-  // only on success (status 2xx), and only once the client already has its answer.
-  const aiosellResyncOnSuccess = (req: AuthRequest, res: Response, next: NextFunction) => {
-    res.on('finish', () => { try { if (res.statusCode >= 200 && res.statusCode < 300) scheduleAiosellResync((req.params as any)?.id); } catch { /* never break the request */ } });
+  // Apply the owner's configured action for one booking lifecycle event.
+  async function handleAiosellBookingEvent(restaurantId: string, evt: AiosellEvt, bookingId?: string | null) {
+    try {
+      const tenantDb = await getTenantDb(restaurantId);
+      const cfg = await aiosellAutomationConfig(tenantDb);
+      if (!cfg.live_enabled) return;
+      const ev = cfg.events[evt] || aiosellDefaultEvent(evt);
+      if (ev.ota === 'SYNC_AVAIL' || ev.ota === 'SYNC_AVAIL_RATES') {
+        scheduleAiosellResync(restaurantId, { days: cfg.schedule_days_ahead, rates: ev.ota === 'SYNC_AVAIL_RATES' });
+      }
+      if (ev.alert) {
+        const pretty = evt.toLowerCase().replace('_', ' ');
+        // Owner/manager alert via the existing multi-channel pipeline (no guest PII;
+        // fire-and-forget so it never blocks — already off the request path).
+        notifyBilling(restaurantId, 'AIOSELL_BOOKING_EVENT', {
+          event: pretty, bookingId: bookingId || '',
+          action: ev.ota === 'NONE' ? 'no OTA sync (per your settings)' : `availability${ev.ota === 'SYNC_AVAIL_RATES' ? ' + rates' : ''} re-synced to Aiosell`,
+        }).catch(() => {});
+      }
+    } catch (e: any) { console.error('[aiosell-auto] event handler failed', restaurantId, evt, e?.message || e); }
+  }
+  // Middleware factory: after a 2xx booking mutation, apply the configured action
+  // for `evt`. Hooked on the response 'finish' event so it fires regardless of
+  // which success path returned, only on 2xx, and after the client has its answer.
+  const aiosellEventHook = (evt: AiosellEvt) => (req: AuthRequest, res: Response, next: NextFunction) => {
+    res.on('finish', () => { try { if (res.statusCode >= 200 && res.statusCode < 300) handleAiosellBookingEvent(String((req.params as any)?.id), evt, (req.params as any)?.bookingId); } catch { /* never break the request */ } });
     next();
   };
 
-  app.post("/api/restaurant/:id/hotel/bookings", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'CREATE'), aiosellResyncOnSuccess, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'CREATE'), aiosellEventHook('CREATED'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -32662,7 +32733,8 @@ ${data.tenant.name}`;
 
   // Compute + push room-type inventory and (room,rateplan) rates for the next N days.
   // v1 rate = room_type.base_rate × (1 − rate_plan.discount_pct/100) — refined later.
-  async function aiosellSyncTenant(restaurantId: string, days: number): Promise<{ ok: boolean; inventory?: string; rates?: string; error?: string; pushed_types?: number }> {
+  async function aiosellSyncTenant(restaurantId: string, days: number, opts?: { rates?: boolean }): Promise<{ ok: boolean; inventory?: string; rates?: string; error?: string; pushed_types?: number }> {
+    const pushRates = opts?.rates !== false; // default: push rates too (manual push + full sync)
     const tenantDb = await getTenantDb(restaurantId);
     const cfg = await aiosellCfgForTenant(tenantDb);
     if (!aiosellConfigured(cfg)) return { ok: false, error: 'Aiosell credentials not set for this property (add them in Channel Manager → Aiosell, or set the AIOSELL_* env vars).' };
@@ -32719,7 +32791,7 @@ ${data.tenant.name}`;
       invMsg = r.ok ? r.message : `ERR: ${r.message}`;
       if (!r.ok) return { ok: false, error: `Inventory push failed: ${r.message}`, inventory: invMsg };
     }
-    if (rateUpdates.length) {
+    if (pushRates && rateUpdates.length) {
       const r = await aiosellPushRates(cfg, t.hotelCode, rateUpdates);
       rateMsg = r.ok ? r.message : `ERR: ${r.message}`;
       if (!r.ok) return { ok: false, error: `Rate push failed: ${r.message}`, inventory: invMsg, rates: rateMsg };
@@ -32758,9 +32830,12 @@ ${data.tenant.name}`;
     try {
       const out = await aiosellIngestReservation(restaurantId, body);
       if (!out.ok) return res.status(out.status || 400).json({ success: false, message: out.reason || 'Failed' });
-      // An OTA booking just consumed (or a cancel freed) a room — re-push the new
-      // absolute availability so the OTHER connected channels close/open in step.
-      if (!out.duplicate) scheduleAiosellResync(restaurantId);
+      // An OTA booking just consumed (or a cancel freed) a room — apply the owner's
+      // configured action so the OTHER connected channels close/open in step.
+      if (!out.duplicate) {
+        const evt: AiosellEvt = action === 'cancel' ? 'CANCELLED' : action === 'modify' ? 'MODIFIED' : 'CREATED';
+        handleAiosellBookingEvent(restaurantId, evt, out.booking_id || undefined);
+      }
       return res.json({ success: true, message: `Reservation ${action} processed`, booking_id: out.booking_id, duplicate: out.duplicate || false });
     } catch (e: any) {
       return res.status(500).json({ success: false, message: e?.message || 'Server error' });
@@ -32872,6 +32947,42 @@ ${data.tenant.name}`;
       const out = await aiosellSyncTenant(req.params.id, days);
       if (!out.ok) return res.status(400).json(out);
       res.json({ success: true, ...out, days });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Owner-configurable automation: what each booking event does toward Aiosell +
+  // the scheduled-sync cadence. GET returns the effective config (defaults if unset).
+  app.get("/api/restaurant/:id/hotel/aiosell/automation", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const cfg = await aiosellAutomationConfig(tenantDb);
+      res.json({ success: true, automation: cfg, event_keys: AIOSELL_EVENTS, ota_actions: ['SYNC_AVAIL', 'SYNC_AVAIL_RATES', 'NONE'], interval_choices: [15, 30, 60, 120] });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.put("/api/restaurant/:id/hotel/aiosell/automation", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureAutomationTable(tenantDb);
+      const b = req.body || {};
+      // Sanitise the per-event map to the known events + allowed OTA actions.
+      const OTA_OK = new Set(['SYNC_AVAIL', 'SYNC_AVAIL_RATES', 'NONE']);
+      const events: Record<string, { ota: string; alert: number }> = {};
+      for (const e of AIOSELL_EVENTS) {
+        const src = (b.events && b.events[e]) || {};
+        const ota = OTA_OK.has(String(src.ota)) ? String(src.ota) : aiosellDefaultEvent(e).ota;
+        events[e] = { ota, alert: src.alert ? 1 : 0 };
+      }
+      const interval = Math.min(1440, Math.max(5, Number(b.schedule_interval_minutes) || 30));
+      const days = Math.min(365, Math.max(1, Number(b.schedule_days_ahead) || AIOSELL_DEFAULT_DAYS));
+      await tenantDb.run(
+        `INSERT INTO aiosell_automation (id, live_enabled, events_json, schedule_enabled, schedule_interval_minutes, schedule_days_ahead, schedule_push_rates, updated_at)
+         VALUES ('DEFAULT', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET live_enabled=EXCLUDED.live_enabled, events_json=EXCLUDED.events_json,
+           schedule_enabled=EXCLUDED.schedule_enabled, schedule_interval_minutes=EXCLUDED.schedule_interval_minutes,
+           schedule_days_ahead=EXCLUDED.schedule_days_ahead, schedule_push_rates=EXCLUDED.schedule_push_rates, updated_at=CURRENT_TIMESTAMP`,
+        [b.live_enabled ? 1 : 0, JSON.stringify(events), b.schedule_enabled ? 1 : 0, interval, days, b.schedule_push_rates ? 1 : 0]
+      );
+      const cfg = await aiosellAutomationConfig(tenantDb);
+      res.json({ success: true, automation: cfg });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   app.post("/api/restaurant/:id/hotel/aiosell/fetch-reservations", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
@@ -38204,7 +38315,7 @@ ${data.tenant.name}`;
   });
   // ── END MASTER-BILLING ───────────────────────────────────────────────────────
 
-  app.patch("/api/restaurant/:id/hotel/bookings/:bookingId", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellResyncOnSuccess, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/bookings/:bookingId", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellEventHook('MODIFIED'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38519,7 +38630,7 @@ ${data.tenant.name}`;
   });
 
   // Check-in: mark booking CHECKED_IN, set room OCCUPIED, open a folio with initial nightly charges
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkin", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkin", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellEventHook('CHECKED_IN'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -39111,7 +39222,7 @@ ${data.tenant.name}`;
   });
 
   // Check-out: close folio if not already, set room CLEANING, mark booking CHECKED_OUT
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkout", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellResyncOnSuccess, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkout", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellEventHook('CHECKED_OUT'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -39577,7 +39688,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/cancel", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellResyncOnSuccess, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/cancel", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellEventHook('CANCELLED'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -48501,22 +48612,37 @@ ${data.tenant.name}`;
     console.log('[alert-cron] Smart-alerts sweep scheduled (every 2h)');
   }
 
-  // Aiosell reconciliation — safety net for the event-driven live auto-sync.
-  // Bookings push availability to Aiosell in real time (scheduleAiosellResync),
-  // but those debounce timers live in memory, so a process restart could drop a
-  // queued push. Every 30 min we re-push ARI for every Aiosell-enabled property
-  // so the OTAs can never silently drift out of step (idempotent absolute upsert).
-  // Only enabled hotels are swept; aiosellSyncTenant self-guards the rest.
+  // Aiosell SCHEDULED sync — the owner-configurable interval sweep, and the safety
+  // net for the event-driven live auto-sync (debounce timers live in memory, so a
+  // process restart could drop a queued push). A frequent 5-min tick checks each
+  // Aiosell-enabled property's own cadence (schedule_interval_minutes) and re-pushes
+  // ARI only when that interval has elapsed since its last scheduled run — so every
+  // property keeps its chosen freshness (15/30/60/120 min) without per-tenant timers.
+  // The push is an idempotent absolute upsert; aiosellSyncTenant self-guards the rest.
   if (!(globalThis as any).__aiosellReconcileStarted) {
     (globalThis as any).__aiosellReconcileStarted = true;
-    const runAiosellReconcile = async () => {
+    const runAiosellScheduled = async () => {
       try {
         const hotels: any[] = await centralDb.query("SELECT DISTINCT restaurant_id FROM aiosell_hotels WHERE is_enabled = 1").catch(() => []);
-        for (const h of hotels) { try { await aiosellSyncTenant(h.restaurant_id, AIOSELL_AUTO_SYNC_DAYS); } catch { /* per-tenant isolation */ } }
-      } catch (e: any) { console.error('[aiosell-reconcile] sweep failed:', e?.message || e); }
+        const nowMs = Date.now();
+        for (const h of hotels) {
+          try {
+            const tdb = await getTenantDb(h.restaurant_id);
+            const cfg = await aiosellAutomationConfig(tdb);
+            if (!cfg.schedule_enabled) continue;
+            const lastMs = cfg.last_scheduled_at ? new Date(cfg.last_scheduled_at).getTime() : 0;
+            const dueMs = Math.max(5, cfg.schedule_interval_minutes) * 60 * 1000;
+            if (nowMs - lastMs < dueMs) continue; // not due yet for this property
+            const out = await aiosellSyncTenant(h.restaurant_id, cfg.schedule_days_ahead, { rates: !!cfg.schedule_push_rates });
+            // Stamp last_scheduled_at only on a genuine push (out.ok); a no-op tenant
+            // (no creds/mappings) is skipped without churning the timestamp.
+            if (out.ok) await tdb.run("UPDATE aiosell_automation SET last_scheduled_at = CURRENT_TIMESTAMP WHERE id='DEFAULT'").catch(() => {});
+          } catch { /* per-tenant isolation */ }
+        }
+      } catch (e: any) { console.error('[aiosell-scheduled] sweep failed:', e?.message || e); }
     };
-    setInterval(runAiosellReconcile, 30 * 60 * 1000); // every 30 minutes
-    console.log('[aiosell-reconcile] ARI reconciliation scheduled (every 30m)');
+    setInterval(runAiosellScheduled, 5 * 60 * 1000); // tick every 5 minutes; per-tenant cadence decides who runs
+    console.log('[aiosell-scheduled] interval sync scheduler started (5-min tick, per-property cadence)');
   }
 
   // Admin: revoke a tenant's access (move to read-only mode).
@@ -49390,9 +49516,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-live-autosync',
+    commit_marker: 'aiosell-automation-config',
     code_features: [
-      'aiosell-live-autosync',                      // FEATURE (owner request "there will be direct booking also, how does that reach Aiosell? automate on booking status"): a channel manager only stops overbooking if the PMS keeps Aiosell in step with EVERY booking — including direct/walk-in/agent bookings the OTAs never see. Aiosell needs the room-TYPE availability COUNT (not guest PII), and its inventory push is an ABSOLUTE upsert (idempotent). NEW scheduleAiosellResync(restaurantId) — a per-tenant DEBOUNCED (8s) background resync that coalesces bursts (a 10-room group booking → ONE push) and calls the existing aiosellSyncTenant (120-day window). Wired via an aiosellResyncOnSuccess middleware hung on the response 'finish' event of the hotel booking CREATE / MODIFY(PATCH) / CHECKOUT / CANCEL routes — fires only on 2xx, AFTER the client already has its answer (zero added latency, no Cloudflare-502 risk since the outbound call is off the request path). Inbound OTA reservations also re-push so the OTHER channels close out in step. SAFETY NET: a 30-min reconcile cron re-pushes ARI for every Aiosell-enabled property (covers a process restart dropping an in-memory debounce timer). aiosellSyncTenant self-guards (no creds/disabled/no mappings → cheap no-op), so non-Aiosell tenants are unaffected. Frontend: Step 3 shows a "Live auto-sync is ON" banner (manual Push now becomes a force-refresh). tsc + vite build clean.
+      'aiosell-automation-config',                  // FEATURE (owner request "configure events per booking — owner decides what happens when a booking is created/confirmed/cancelled… + live AND schedule-based"): the hard-wired auto-sync is now OWNER-CONFIGURABLE. New "⚙️ Automation & triggers" view in the Aiosell panel + per-tenant `aiosell_automation` table (auto-created). LIVE: a master toggle + per booking event (CREATED/MODIFIED/CHECKED_IN/CHECKED_OUT/CANCELLED) an OTA action — Sync availability · Sync availability+rates · Do nothing — plus an "Alert manager" checkbox (fires notifyBilling → owner/manager email+WhatsApp via new AIOSELL_BOOKING_EVENT template; guest messaging stays in Notifications). The finish-hook middleware became a factory `aiosellEventHook(evt)`; `handleAiosellBookingEvent` reads the config and acts. Inbound OTA reservations route through the same engine (book→CREATED, cancel→CANCELLED, modify→MODIFIED). SCHEDULE: owner picks an interval (15/30/60/120 min) + days-ahead + push-rates; the sweep is now a 5-min tick that fires each property on ITS OWN cadence (schedule_interval_minutes) and stamps last_scheduled_at only on a real push. aiosellSyncTenant gained an {rates} option; scheduleAiosellResync coalesces per-tenant (widest day-window + rates-if-any-event-wants). Defaults reproduce the prior behaviour, so nothing changes until customised. GET/PUT /hotel/aiosell/automation (SETTINGS-gated, input-sanitised). New TC-AIOSELL-AUTOMATION test. tsc + vite build clean.
+      'aiosell-live-autosync',                      //FEATURE (owner request "there will be direct booking also, how does that reach Aiosell? automate on booking status"): a channel manager only stops overbooking if the PMS keeps Aiosell in step with EVERY booking — including direct/walk-in/agent bookings the OTAs never see. Aiosell needs the room-TYPE availability COUNT (not guest PII), and its inventory push is an ABSOLUTE upsert (idempotent). NEW scheduleAiosellResync(restaurantId) — a per-tenant DEBOUNCED (8s) background resync that coalesces bursts (a 10-room group booking → ONE push) and calls the existing aiosellSyncTenant (120-day window). Wired via an aiosellResyncOnSuccess middleware hung on the response 'finish' event of the hotel booking CREATE / MODIFY(PATCH) / CHECKOUT / CANCEL routes — fires only on 2xx, AFTER the client already has its answer (zero added latency, no Cloudflare-502 risk since the outbound call is off the request path). Inbound OTA reservations also re-push so the OTHER channels close out in step. SAFETY NET: a 30-min reconcile cron re-pushes ARI for every Aiosell-enabled property (covers a process restart dropping an in-memory debounce timer). aiosellSyncTenant self-guards (no creds/disabled/no mappings → cheap no-op), so non-Aiosell tenants are unaffected. Frontend: Step 3 shows a "Live auto-sync is ON" banner (manual Push now becomes a force-refresh). tsc + vite build clean.
       'aiosell-multiplier-channel-dropdown',        //UX HARDENING (owner request): the per-channel rate multiplier's channel field was FREE TEXT — a typo like "makemytrip" instead of "gommt" is accepted by the form but Aiosell silently no-ops it (the O-4 "multiplier not updated" class of failure). The channel is now a DROPDOWN of canonical Aiosell channel codes (Booking.com/GoMMT/Agoda/Expedia/Airbnb/Cleartrip/EaseMyTrip/Yatra/Hostelworld/Tripadvisor) — value sent is always the exact `code`, never a display label. Already-chosen channels are disabled in other rows (no dup lines). An "Other channel (enter code)…" option keeps a power-user escape hatch (reveals a text box) for an OTA not yet catalogued. Frontend-only; the backend multipliers:[{channel,multiplier}] contract is unchanged. tsc + vite build clean.
       'aiosell-per-channel-multipliers',            //FEATURE (owner request): "1 line per aggregator (MMT, Booking.com …) so a different price can go to each platform." The Channel Rate Multiplier was a single factor + a comma channel list (same factor to all). Now Step 3 shows ONE ROW PER CHANNEL — editable label + Aiosell channel code + its own multiplier — pre-seeded with Booking.com / Agoda / MakeMyTrip·Goibibo (GoMMT); + Add channel / remove-row / "Apply all". Backend /hotel/aiosell/multiplier now accepts multipliers:[{channel,multiplier}] (legacy {multiplier,channels[]} still works) and calls Aiosell's channel_multiplier ONCE PER CHANNEL (their API scales one factor per call), returning a per-channel result {channel,ok,message} at 200 so partial success is visible; each failed channel gets the actionable "connect this channel in Aiosell" hint. UI renders per-row ✓ applied / ⚠ not applied + a results panel. tsc + vite build clean.
       'crm-mapping-upsert-typefix',               // BUGFIX (QA: "Unable to update Room/Rate Plan Mapping — could not determine data type of parameter $4"). The channel_room_mappings unique index is on an EXPRESSION — COALESCE(external_rate_plan_code, '') — and external_rate_plan_code is the 4th INSERT param ($4). During ON CONFLICT arbiter inference Postgres must resolve $4's type inside that COALESCE; a bare/NULL parameter has no type context → the whole upsert fails at PLAN time and no mapping saves. Fix (server /hotel/channel-room-mappings POST): cast the nullable text params in the VALUES clause (…?::text…) so Postgres can determine their types; also cast the readback SELECT's `?::text IS NULL` branch (same issue when the code is null). No schema change; affects every mapping save incl. the Aiosell Step-2 "Update" button. Guard: test-scripts/pg_channel_mapping_upsert_check.mjs (real-Postgres throwaway schema — OLD uncast upsert must FAIL to type $4, NEW ::text insert + conflict-update must succeed). tsc + vite build clean.

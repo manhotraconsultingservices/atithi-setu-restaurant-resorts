@@ -437,6 +437,25 @@ export function buildNotificationContent(
       };
     }
 
+    /* ── Channel manager (Aiosell) — owner alert on a booking event ─────── */
+
+    case 'AIOSELL_BOOKING_EVENT': {
+      const ev = String(data.event || 'updated');
+      const bk = data.bookingId ? ` (${data.bookingId})` : '';
+      const act = String(data.action || 'availability re-synced to Aiosell');
+      return {
+        subject: `🔄 OTA sync — booking ${ev} — ${r}`,
+        text:
+          `🔄 *Channel manager — ${r}*\n` +
+          `A booking was *${ev}*${bk}.\n` +
+          `${act}.`,
+        html:
+          `<h2 style="color:#0E7490">🔄 Channel manager</h2>` +
+          `<p style="font-size:15px;margin:0 0 8px">A booking was <strong>${ev}</strong>${bk}.</p>` +
+          `<p style="color:#6b5d52;margin:0">${act}.</p>`,
+      };
+    }
+
     /* ── Staff Attendance ─────────────────────────────────────────────── */
 
     case 'STAFF_ATTENDANCE':

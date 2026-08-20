@@ -60189,6 +60189,10 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   const [rpData, setRpData] = useState<any>(null);
   const [rpLoading, setRpLoading] = useState(false);
 
+  // Automation & triggers — owner-configurable event→action + scheduled interval
+  const [automation, setAutomation] = useState<any>(null);
+  const [autoSaving, setAutoSaving] = useState(false);
+
   const api = useCallback(async (path: string, init?: RequestInit) => {
     const res = await fetch(`/api/restaurant/${restaurantId}/hotel${path}`, {
       ...init,
@@ -60215,6 +60219,24 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   }, [api]);
 
   useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  const loadAutomation = useCallback(async () => {
+    try { const a = await api('/aiosell/automation'); setAutomation(a.automation); } catch { /* non-fatal (403 for non-owner) */ }
+  }, [api]);
+  useEffect(() => { loadAutomation(); }, [loadAutomation]);
+
+  const setAuto = (patch: any) => setAutomation((a: any) => ({ ...a, ...patch }));
+  const setAutoEvent = (evt: string, patch: any) => setAutomation((a: any) => ({ ...a, events: { ...a.events, [evt]: { ...(a.events?.[evt] || {}), ...patch } } }));
+  const saveAutomation = async () => {
+    if (!automation) return;
+    setAutoSaving(true); setErr('');
+    try {
+      const a = await api('/aiosell/automation', { method: 'PUT', body: JSON.stringify(automation) });
+      setAutomation(a.automation);
+      toast.success('Automation saved — triggers updated.');
+    } catch (e: any) { setErr(e.message || 'Failed to save automation.'); }
+    finally { setAutoSaving(false); }
+  };
 
   const AIOSELL = 'AIOSELL';
   const aiosellMaps = useCallback((all: any[]) => all.filter((m: any) => String(m.channel).toUpperCase() === AIOSELL), []);
@@ -60865,6 +60887,86 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                 </div>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* ── AUTOMATION & TRIGGERS (owner-configurable event → action + schedule) ── */}
+        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+          <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
+            <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">⚙️ Automation &amp; triggers</h4>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Decide what Atithi-Setu sends to Aiosell on each booking event, plus a scheduled safety sweep. <b>Live</b> keeps the OTAs closed in real time; the <b>schedule</b> is the backstop.</p>
+          </div>
+          <div className="p-5 space-y-4">
+            {!automation ? (
+              <p className="text-[12px] text-[#9c8e85]">Loading… (owner / manager only)</p>
+            ) : (<>
+              <label className="flex items-center gap-2 cursor-pointer flex-wrap">
+                <input type="checkbox" checked={!!automation.live_enabled} onChange={e => setAuto({ live_enabled: e.target.checked ? 1 : 0 })} className="w-4 h-4 accent-[#1a1208]" />
+                <span className="text-sm font-bold text-[#3d3128]">Live sync on booking changes</span>
+                <span className="text-[11px] text-[#9c8e85]">— push to Aiosell the moment a booking changes</span>
+              </label>
+
+              <div className={cn('rounded-2xl border border-[#efe6da] overflow-x-auto', !automation.live_enabled && 'opacity-50 pointer-events-none')}>
+                <div className="grid grid-cols-[1fr_auto_auto] gap-2 px-3 py-2 bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] min-w-[420px]">
+                  <span>Booking event</span><span className="w-52">OTA action</span><span>Alert mgr</span>
+                </div>
+                {([
+                  ['CREATED', 'Booking created / confirmed'],
+                  ['MODIFIED', 'Booking modified (dates / room)'],
+                  ['CHECKED_IN', 'Checked in'],
+                  ['CHECKED_OUT', 'Checked out'],
+                  ['CANCELLED', 'Cancelled'],
+                ] as [string, string][]).map(([key, label]) => {
+                  const ev = automation.events?.[key] || { ota: 'NONE', alert: 0 };
+                  return (
+                    <div key={key} className="grid grid-cols-[1fr_auto_auto] gap-2 items-center px-3 py-2 border-t border-[#f0e8de] min-w-[420px]">
+                      <span className="text-[13px] text-[#3d3128] font-medium">{label}</span>
+                      <select value={ev.ota} onChange={e => setAutoEvent(key, { ota: e.target.value })} className={cn(fieldCls, 'w-52 py-1.5')}>
+                        <option value="SYNC_AVAIL">Sync availability</option>
+                        <option value="SYNC_AVAIL_RATES">Sync availability + rates</option>
+                        <option value="NONE">Do nothing</option>
+                      </select>
+                      <label className="flex items-center justify-center cursor-pointer w-16" title="Email / WhatsApp the owner & manager when this happens">
+                        <input type="checkbox" checked={!!ev.alert} onChange={e => setAutoEvent(key, { alert: e.target.checked ? 1 : 0 })} className="w-4 h-4 accent-[#1a1208]" />
+                      </label>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="rounded-2xl border border-[#efe6da] p-3 space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer flex-wrap">
+                  <input type="checkbox" checked={!!automation.schedule_enabled} onChange={e => setAuto({ schedule_enabled: e.target.checked ? 1 : 0 })} className="w-4 h-4 accent-[#1a1208]" />
+                  <span className="text-sm font-bold text-[#3d3128]">Scheduled full sync</span>
+                  <span className="text-[11px] text-[#9c8e85]">— periodic safety sweep so the OTAs never drift</span>
+                </label>
+                <div className={cn('flex flex-wrap items-end gap-3', !automation.schedule_enabled && 'opacity-50 pointer-events-none')}>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Every</label>
+                    <select value={String(automation.schedule_interval_minutes)} onChange={e => setAuto({ schedule_interval_minutes: Number(e.target.value) })} className={cn(fieldCls, 'w-32')}>
+                      <option value="15">15 minutes</option>
+                      <option value="30">30 minutes</option>
+                      <option value="60">1 hour</option>
+                      <option value="120">2 hours</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Days ahead</label>
+                    <input type="number" min={1} max={365} value={automation.schedule_days_ahead} onChange={e => setAuto({ schedule_days_ahead: Number(e.target.value) })} className={cn(fieldCls, 'w-24')} />
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer pb-2">
+                    <input type="checkbox" checked={!!automation.schedule_push_rates} onChange={e => setAuto({ schedule_push_rates: e.target.checked ? 1 : 0 })} className="w-4 h-4 accent-[#1a1208]" />
+                    <span className="text-[12px] text-[#3d3128]">Push rates too</span>
+                  </label>
+                </div>
+                {automation.last_scheduled_at && <p className="text-[11px] text-[#9c8e85]">Last scheduled push: {new Date(automation.last_scheduled_at).toLocaleString()}</p>}
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button onClick={saveAutomation} disabled={autoSaving} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors">{autoSaving ? 'Saving…' : 'Save automation'}</button>
+                <span className="text-[11px] text-[#9c8e85]">Applies to this property. Guest-facing messages stay in Settings → Notifications.</span>
+              </div>
+            </>)}
           </div>
         </div>
 

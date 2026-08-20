@@ -1655,6 +1655,19 @@ async function testChannelManager() {
   } else {
     fail('TC-AIOSELL-AUTOSYNC', 'Live auto-sync feature marker present in /api/version', `not found; marker=${ver?.commit_marker || '?'}`);
   }
+
+  // TC-AIOSELL-AUTOMATION: the owner-configurable automation endpoint returns the
+  // per-event action map + scheduled-sync cadence (defaults if never customised).
+  const auto = await api('GET', `/api/restaurant/${restaurantId}/hotel/aiosell/automation`);
+  if (auto.status === 200 && auto.data?.automation && auto.data.automation.events
+      && typeof auto.data.automation.schedule_interval_minutes === 'number') {
+    const evs = Object.keys(auto.data.automation.events || {});
+    pass('TC-AIOSELL-AUTOMATION', 'Automation config endpoint responds (per-event actions + schedule)', `${evs.length} events, every ${auto.data.automation.schedule_interval_minutes}m`);
+  } else if (auto.status === 403 || auto.status === 404) {
+    skip('TC-AIOSELL-AUTOMATION', 'Automation config', `HTTP ${auto.status}`);
+  } else {
+    fail('TC-AIOSELL-AUTOMATION', 'Automation config endpoint responds', `HTTP ${auto.status}, keys=${Object.keys(auto.data || {}).join(',')}`);
+  }
 }
 
 // ── Reports tests ──────────────────────────────────────────────────────────
