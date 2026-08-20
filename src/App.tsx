@@ -60692,9 +60692,9 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   const exportReportCsv = () => {
     const rows = rpData?.bookings || [];
     if (!rows.length) return;
-    const head = ['Platform', 'OTA Booking Id', 'Guest', 'Phone', 'Room', 'Check-in', 'Check-out', 'Nights', 'Gross', 'Commission', 'Commission %', 'Net', 'Pay type', 'Collect', 'Status'];
+    const head = ['Platform', 'OTA Booking Id', 'Guest', 'Phone', 'Category', 'Room', 'Check-in', 'Check-out', 'Nights', 'Gross', 'Commission', 'Commission %', 'Net', 'Pay type', 'Collect', 'Status'];
     const esc = (c: any) => { const s = String(c ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-    const body = rows.map((b: any) => [b.platform, b.ota_booking_id || '', b.guest_name || '', b.guest_phone || '', b.room || '', b.check_in, b.check_out, b.nights, b.total, b.commission, b.commission_pct, b.net, b.prepaid === true ? 'Prepaid' : (b.prepaid === false ? 'Pay-at-hotel' : 'Unknown'), b.collect_from_guest, b.status].map(esc).join(','));
+    const body = rows.map((b: any) => [b.platform, b.ota_booking_id || '', b.guest_name || '', b.guest_phone || '', b.category || '', b.room || '', b.check_in, b.check_out, b.nights, b.total, b.commission, b.commission_pct, b.net, b.prepaid === true ? 'Prepaid' : (b.prepaid === false ? 'Pay-at-hotel' : 'Unknown'), b.collect_from_guest, b.status].map(esc).join(','));
     const csv = [head.join(','), ...body].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a');
@@ -61479,6 +61479,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                     <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] border-b border-[#f0e8de]">
                       <th className="py-2 pr-3">Platform</th>
                       <th className="py-2 pr-3">Guest</th>
+                      <th className="py-2 pr-3">Category</th>
                       <th className="py-2 pr-3">Room</th>
                       <th className="py-2 pr-3">Stay</th>
                       <th className="py-2 pr-3 text-right">Gross</th>
@@ -61497,6 +61498,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                           {b.ota_booking_id && <div className="text-[10px] text-[#9c8e85] font-mono">{b.ota_booking_id}</div>}
                         </td>
                         <td className="py-2 pr-3">{b.guest_name || '—'}{b.guest_phone && <div className="text-[10px] text-[#9c8e85]">{b.guest_phone}</div>}</td>
+                        <td className="py-2 pr-3 whitespace-nowrap font-semibold text-[#1a1208]">{b.category || '—'}</td>
                         <td className="py-2 pr-3 whitespace-nowrap">{b.room || '—'}</td>
                         <td className="py-2 pr-3 whitespace-nowrap text-[12px]">{b.check_in} → {b.check_out}</td>
                         <td className="py-2 pr-3 text-right tabular-nums">₹{Math.round(b.total).toLocaleString('en-IN')}</td>
