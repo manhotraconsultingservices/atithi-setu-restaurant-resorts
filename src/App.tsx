@@ -60636,6 +60636,26 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
     finally { setRpLoading(false); }
   };
 
+  // One-click OTA no-show from the actual booking — the server resolves the OTA
+  // booking id + channel off the reservation and reports it to Aiosell (marknoshow),
+  // then flags the PMS booking NO_SHOW (voids folio + notifies).
+  const markBookingNoShow = async (b: any) => {
+    const ok = await showConfirm({
+      title: 'Mark this booking as a no-show?',
+      body: `${b.guest_name || 'This booking'} — ${b.platform}${b.ota_booking_id ? ` · ${b.ota_booking_id}` : ''}. This flags the reservation NO_SHOW, voids any folio, and reports the no-show to the OTA via Aiosell. It can't be undone here.`,
+      danger: true,
+    });
+    if (!ok) return;
+    setBusyOp('noshow:' + b.id); setErr('');
+    try {
+      const r = await api(`/bookings/${b.id}/mark-no-show`, { method: 'POST', body: JSON.stringify({}) });
+      if (r.ota_propagated) toast.success(`No-show reported to ${b.platform}.`);
+      else toast.info(r.ota_message || 'Booking flagged no-show.');
+      await loadReport();
+    } catch (e: any) { setErr(e.message || 'Failed to mark no-show.'); }
+    finally { setBusyOp(''); }
+  };
+
   // Small MoM delta pill. `good` = which direction is favourable (up for revenue,
   // down for commission, neutral for cash-to-collect).
   const renderDelta = (d: any, good: 'up' | 'down' | 'neutral' = 'up') => {
@@ -61396,6 +61416,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                       <th className="py-2 pr-3 text-right">Net</th>
                       <th className="py-2 pr-3 text-right">Collect</th>
                       <th className="py-2 pr-3">Status</th>
+                      <th className="py-2 pr-3">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -61417,7 +61438,16 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                             : <span className="tabular-nums font-bold text-amber-700">₹{Math.round(b.collect_from_guest).toLocaleString('en-IN')}</span>}
                           {b.prepaid == null && <div className="text-[9px] text-[#b9aa9c]">verify pay type</div>}
                         </td>
-                        <td className="py-2 pr-3"><span className={cn('text-[11px] font-semibold', String(b.status).toUpperCase() === 'CANCELLED' ? 'text-red-500' : 'text-[#6b5d52]')}>{b.status}</span></td>
+                        <td className="py-2 pr-3"><span className={cn('text-[11px] font-semibold', String(b.status).toUpperCase() === 'CANCELLED' ? 'text-red-500' : String(b.status).toUpperCase() === 'NO_SHOW' ? 'text-amber-600' : 'text-[#6b5d52]')}>{b.status}</span></td>
+                        <td className="py-2 pr-3 whitespace-nowrap">
+                          {String(b.status).toUpperCase() === 'BOOKED' ? (
+                            <button onClick={() => markBookingNoShow(b)} disabled={busyOp === 'noshow:' + b.id}
+                              title="Report this guest as a no-show to the OTA (via Aiosell) and flag the booking"
+                              className="px-2.5 py-1 rounded-lg border border-amber-300 text-amber-800 text-[11px] font-bold hover:bg-amber-50 disabled:opacity-50 transition-colors">
+                              {busyOp === 'noshow:' + b.id ? '…' : 'Mark no-show'}
+                            </button>
+                          ) : <span className="text-[11px] text-[#c9bcae]">—</span>}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

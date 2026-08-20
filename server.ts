@@ -39759,6 +39759,53 @@ ${data.tenant.name}`;
     }
   });
 
+  // Mark an OTA (Aiosell) booking NO-SHOW from the actual reservation — resolves
+  // the OTA booking id + channel off the booking itself (no manual typing),
+  // propagates to Aiosell via marknoshow, and flags the PMS booking NO_SHOW with
+  // the same semantics as the nightly no-show sweep (void folio + notify).
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/mark-no-show", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run("ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS no_show INT DEFAULT 0").catch(() => {});
+      const b: any = await tenantDb.get(
+        "SELECT id, status, actual_checkin_at, guest_name, check_in_date, channel_ref, booking_source FROM room_bookings WHERE id = ?",
+        [req.params.bookingId]
+      ).catch(() => null);
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      if (String(b.status).toUpperCase() !== 'BOOKED' || b.actual_checkin_at) {
+        return res.status(409).json({ error: `Only a booked reservation that hasn't checked in can be marked no-show (current status: ${b.status}).` });
+      }
+      // Resolve the OTA reference from the booking itself (no manual entry needed).
+      const otaBookingId = /^AIOSELL:/i.test(String(b.channel_ref || '')) ? String(b.channel_ref).replace(/^AIOSELL:/i, '') : '';
+      const channel = /^AIOSELL:/i.test(String(b.booking_source || '')) ? String(b.booking_source).replace(/^AIOSELL:/i, '').toLowerCase() : '';
+
+      // Flag the PMS booking NO_SHOW (matches the nightly sweep: void folio + notify).
+      await tenantDb.run("UPDATE room_bookings SET status = 'NO_SHOW', no_show = 1, cancellation_reason = COALESCE(cancellation_reason, ?) WHERE id = ?", [String(req.body?.reason || 'No-show'), b.id]).catch(() => {});
+      await tenantDb.run("UPDATE folios SET status = 'VOIDED' WHERE booking_id = ? AND status NOT IN ('SETTLED','CANCELLED','VOIDED')", [b.id]).catch(() => {});
+      triggerNotification(req.params.id, 'BOOKING_NO_SHOW', { bookingId: b.id, guestName: b.guest_name, checkIn: b.check_in_date }).catch(() => {});
+      writeObjectAudit(tenantDb, req, { objectType: 'BOOKING', objectId: b.id, action: 'NO_SHOW', summary: `Marked no-show${channel ? ` · OTA ${channel}` : ' · direct'}`, before: { status: b.status }, after: { status: 'NO_SHOW', no_show: 1 } }).catch(() => {});
+
+      // Propagate to the OTA via Aiosell — only channels its marknoshow supports.
+      let ota: { attempted: boolean; ok: boolean; message: string } = { attempted: false, ok: false, message: 'Direct booking — flagged no-show locally (nothing to report to an OTA).' };
+      if (otaBookingId && ['booking.com', 'gommt'].includes(channel)) {
+        const cfg = await aiosellCfgForTenant(tenantDb);
+        const t = await aiosellTenantConfig(tenantDb);
+        if (aiosellConfigured(cfg) && t.hotelCode) {
+          const r = await aiosellMarkNoShow(cfg, t.hotelCode, otaBookingId, channel).catch((e: any) => ({ ok: false, message: e?.message || 'Aiosell error' } as any));
+          ota = { attempted: true, ok: !!r.ok, message: r.ok ? (r.message || 'Reported to the OTA.') : `OTA report failed: ${r.message || 'unknown error'}` };
+          logAiosellSync(tenantDb, { direction: 'OUT', operation: 'NOSHOW', trigger: 'manual', actor: req.user?.email, status: r.ok ? 'OK' : 'FAIL', summary: `No-show → ${channel} booking ${otaBookingId} (guest ${b.guest_name || '—'})`, detail: r.message });
+        } else {
+          ota = { attempted: false, ok: false, message: 'Aiosell not configured for this property — booking flagged locally only.' };
+        }
+      } else if (otaBookingId && channel) {
+        ota = { attempted: false, ok: false, message: `OTA no-show reporting isn't available for "${channel}" (Aiosell supports Booking.com & GoMMT) — booking flagged locally.` };
+      }
+
+      res.json({ success: true, status: 'NO_SHOW', channel: channel || null, ota_booking_id: otaBookingId || null, ota_propagated: ota.attempted && ota.ok, ota_message: ota.message });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
   app.post("/api/restaurant/:id/hotel/bookings/:bookingId/cancel", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellEventHook('CANCELLED'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -49587,9 +49634,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-sync-log',
+    commit_marker: 'aiosell-ota-noshow',
     code_features: [
-      'aiosell-sync-log',                           // FEATURE (owner request "no audit logs for any hand exchange between Atithi-Setu and the OTA (Aiosell) — create user-readable logs on every sync, as a separate tab"): NEW per-tenant `aiosell_sync_log` table (auto-created, self-pruning @120 days) + `logAiosellSync()` helper writing a PLAIN-ENGLISH row for every PMS↔Aiosell exchange, fire-and-forget (never breaks a sync). Wired into: availability/rate pushes inside aiosellSyncTenant (OK/PARTIAL/FAIL, tagged with trigger live/scheduled/manual + actor), stop-sell/restrictions, channel multiplier (per-channel applied/not-applied), no-show, and INBOUND OTA reservations at the webhook (↓ "Received Booking.com booking — <guest> · <dates>"). New GET /hotel/aiosell/sync-log?limit&direction&status. FRONTEND: new "📜 Sync Log" sub-tab in Channel Manager & RMS → AiosellSyncLog component: readable table (When · Dir ↑out/↓in · Operation · Trigger+actor · What happened+detail · Status badge), direction/status filters, refresh, CSV export. New TC-AIOSELL-SYNCLOG test. tsc + vite build clean.
+      'aiosell-ota-noshow',                         // FEATURE (owner request): per-booking OTA no-show, one click from the real reservation. NEW POST /hotel/bookings/:bookingId/mark-no-show — resolves the OTA booking id + channel off the booking itself (channel_ref `AIOSELL:<id>` / booking_source `AIOSELL:<channel>`, no manual typing), calls aiosellMarkNoShow for booking.com/gommt (the channels Aiosell supports), and flags the PMS booking NO_SHOW with the SAME semantics as the nightly no-show sweep (void folio + BOOKING_NO_SHOW notify + object audit). Guarded: only a BOOKED, not-yet-checked-in reservation (409 otherwise). Logs to the Sync Log (NOSHOW). Returns {ota_propagated, ota_message}. FRONTEND: a per-row "Mark no-show" button in the Step 6 channel-bookings report (shown on BOOKED rows) with a confirm dialog; NO_SHOW rows render amber. Also updated CLAUDE.md with the Aiosell integration rules (ARI-not-names direction, 1:1 mapping, log-every-call, no-show, BOOKED=confirmed). New TC-AIOSELL-NOSHOW test. tsc + vite build clean.
+      'aiosell-sync-log',                           //FEATURE (owner request "no audit logs for any hand exchange between Atithi-Setu and the OTA (Aiosell) — create user-readable logs on every sync, as a separate tab"): NEW per-tenant `aiosell_sync_log` table (auto-created, self-pruning @120 days) + `logAiosellSync()` helper writing a PLAIN-ENGLISH row for every PMS↔Aiosell exchange, fire-and-forget (never breaks a sync). Wired into: availability/rate pushes inside aiosellSyncTenant (OK/PARTIAL/FAIL, tagged with trigger live/scheduled/manual + actor), stop-sell/restrictions, channel multiplier (per-channel applied/not-applied), no-show, and INBOUND OTA reservations at the webhook (↓ "Received Booking.com booking — <guest> · <dates>"). New GET /hotel/aiosell/sync-log?limit&direction&status. FRONTEND: new "📜 Sync Log" sub-tab in Channel Manager & RMS → AiosellSyncLog component: readable table (When · Dir ↑out/↓in · Operation · Trigger+actor · What happened+detail · Status badge), direction/status filters, refresh, CSV export. New TC-AIOSELL-SYNCLOG test. tsc + vite build clean.
       'aiosell-mapping-display-onlogin',            //BUGFIX (owner report "system is resetting on new login — I can't see what I mapped in the past"): Aiosell room mappings LOOKED wiped after every login. Not data loss — the mappings persist in channel_room_mappings; the panel just never LOADED or SHOWED them on mount. Cause: loadMappingData() (which fetches /channel-room-mappings + room-types + rate-plans) ran ONLY when the owner clicked "Fetch from Aiosell", and the entire Step-2 mapping display — including the "Saved mappings" chips — was nested inside the `property` (post-fetch) branch. Fix (App.tsx AiosellPanel): (1) call loadMappingData() in a mount useEffect so saved mappings load immediately after login; (2) hoist the "Saved mappings" list ABOVE the fetch gate so it always renders when mappings exist (shows "N mapped" + code→room-type chips + remove), with the "click Fetch from Aiosell" empty-state now shown only when there are genuinely zero mappings. Frontend-only. tsc + vite build clean.
       'aiosell-automation-config',                  //FEATURE (owner request "configure events per booking — owner decides what happens when a booking is created/confirmed/cancelled… + live AND schedule-based"): the hard-wired auto-sync is now OWNER-CONFIGURABLE. New "⚙️ Automation & triggers" view in the Aiosell panel + per-tenant `aiosell_automation` table (auto-created). LIVE: a master toggle + per booking event (CREATED/MODIFIED/CHECKED_IN/CHECKED_OUT/CANCELLED) an OTA action — Sync availability · Sync availability+rates · Do nothing — plus an "Alert manager" checkbox (fires notifyBilling → owner/manager email+WhatsApp via new AIOSELL_BOOKING_EVENT template; guest messaging stays in Notifications). The finish-hook middleware became a factory `aiosellEventHook(evt)`; `handleAiosellBookingEvent` reads the config and acts. Inbound OTA reservations route through the same engine (book→CREATED, cancel→CANCELLED, modify→MODIFIED). SCHEDULE: owner picks an interval (15/30/60/120 min) + days-ahead + push-rates; the sweep is now a 5-min tick that fires each property on ITS OWN cadence (schedule_interval_minutes) and stamps last_scheduled_at only on a real push. aiosellSyncTenant gained an {rates} option; scheduleAiosellResync coalesces per-tenant (widest day-window + rates-if-any-event-wants). Defaults reproduce the prior behaviour, so nothing changes until customised. GET/PUT /hotel/aiosell/automation (SETTINGS-gated, input-sanitised). New TC-AIOSELL-AUTOMATION test. tsc + vite build clean.
       'aiosell-live-autosync',                      //FEATURE (owner request "there will be direct booking also, how does that reach Aiosell? automate on booking status"): a channel manager only stops overbooking if the PMS keeps Aiosell in step with EVERY booking — including direct/walk-in/agent bookings the OTAs never see. Aiosell needs the room-TYPE availability COUNT (not guest PII), and its inventory push is an ABSOLUTE upsert (idempotent). NEW scheduleAiosellResync(restaurantId) — a per-tenant DEBOUNCED (8s) background resync that coalesces bursts (a 10-room group booking → ONE push) and calls the existing aiosellSyncTenant (120-day window). Wired via an aiosellResyncOnSuccess middleware hung on the response 'finish' event of the hotel booking CREATE / MODIFY(PATCH) / CHECKOUT / CANCEL routes — fires only on 2xx, AFTER the client already has its answer (zero added latency, no Cloudflare-502 risk since the outbound call is off the request path). Inbound OTA reservations also re-push so the OTHER channels close out in step. SAFETY NET: a 30-min reconcile cron re-pushes ARI for every Aiosell-enabled property (covers a process restart dropping an in-memory debounce timer). aiosellSyncTenant self-guards (no creds/disabled/no mappings → cheap no-op), so non-Aiosell tenants are unaffected. Frontend: Step 3 shows a "Live auto-sync is ON" banner (manual Push now becomes a force-refresh). tsc + vite build clean.

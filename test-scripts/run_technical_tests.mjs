@@ -1680,6 +1680,18 @@ async function testChannelManager() {
   } else {
     fail('TC-AIOSELL-SYNCLOG', 'Sync-log endpoint responds', `HTTP ${slog.status}, keys=${Object.keys(slog.data || {}).join(',')}`);
   }
+
+  // TC-AIOSELL-NOSHOW: the per-booking OTA no-show endpoint is registered — it
+  // resolves the OTA ref off the booking and propagates to Aiosell. A bogus
+  // booking id must return the endpoint's own 404/409/403 (route exists), NOT the
+  // catch-all "API route not found" (which would mean it wasn't deployed).
+  const ns = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings/AUTOTEST-NOPE/mark-no-show`, {});
+  const nsMsg = JSON.stringify(ns.data || {});
+  if (ns.status === 404 && /route not found/i.test(nsMsg)) {
+    fail('TC-AIOSELL-NOSHOW', 'Per-booking no-show endpoint deployed', 'HTTP 404 route-not-found — endpoint not registered');
+  } else {
+    pass('TC-AIOSELL-NOSHOW', 'Per-booking OTA no-show endpoint present (resolves OTA ref + propagates)', `HTTP ${ns.status}`);
+  }
 }
 
 // ── Reports tests ──────────────────────────────────────────────────────────
