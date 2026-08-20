@@ -60132,6 +60132,8 @@ function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: 
   const [err, setErr] = useState('');
   const [dir, setDir] = useState<'' | 'OUT' | 'IN'>('');
   const [st, setSt] = useState<'' | 'OK' | 'FAIL' | 'PARTIAL' | 'INFO'>('');
+  const [op, setOp] = useState('');   // operation filter (client-side)
+  const [q, setQ] = useState('');     // free-text search (client-side)
 
   const load = useCallback(async () => {
     setLoading(true); setErr('');
@@ -60161,9 +60163,22 @@ function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: 
     : s === 'PARTIAL' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600';
   const fmtTime = (t: string) => { try { return new Date(t).toLocaleString(); } catch { return t; } };
 
+  // Client-side filter over the loaded rows: operation dropdown + free-text search
+  // across everything shown (operation, trigger, actor, summary, detail, direction, status).
+  const filtered = entries.filter(e => {
+    if (op && e.operation !== op) return false;
+    const needle = q.trim().toLowerCase();
+    if (needle) {
+      const hay = [opLabel[e.operation] || e.operation, trigLabel[e.trigger] || e.trigger, e.summary, e.detail, e.actor, e.status, e.direction === 'IN' ? 'inbound' : 'outbound']
+        .filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(needle)) return false;
+    }
+    return true;
+  });
+
   const exportCsv = () => {
     const head = ['Time', 'Direction', 'Operation', 'Trigger', 'Status', 'Summary', 'Detail', 'By'];
-    const rows = entries.map(e => [fmtTime(e.created_at), e.direction === 'IN' ? 'Inbound' : 'Outbound', opLabel[e.operation] || e.operation, trigLabel[e.trigger] || e.trigger, e.status, e.summary, e.detail || '', e.actor || '']
+    const rows = filtered.map(e => [fmtTime(e.created_at), e.direction === 'IN' ? 'Inbound' : 'Outbound', opLabel[e.operation] || e.operation, trigLabel[e.trigger] || e.trigger, e.status, e.summary, e.detail || '', e.actor || '']
       .map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','));
     const csv = [head.join(','), ...rows].join('\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
@@ -60191,8 +60206,21 @@ function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: 
             <option value="FAIL">✕ Failed</option>
             <option value="INFO">• Info</option>
           </select>
+          <select value={op} onChange={e => setOp(e.target.value)} className={selCls} title="Operation">
+            <option value="">All operations</option>
+            <option value="INVENTORY">Availability</option>
+            <option value="INVENTORY+RATES">Availability + rates</option>
+            <option value="RATES">Rates</option>
+            <option value="RESTRICTIONS">Stop-sell / restriction</option>
+            <option value="MULTIPLIER">Channel multiplier</option>
+            <option value="NOSHOW">No-show</option>
+            <option value="RESERVATION">OTA reservation</option>
+            <option value="FETCH">Fetch reservations</option>
+          </select>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search guest, room type, message…" className={cn(selCls, 'w-56')} />
+          {(q || op) && <button onClick={() => { setQ(''); setOp(''); }} className="px-2.5 py-1.5 rounded-lg border border-[#e8e0d8] text-sm text-[#6b5d52] hover:bg-[#f5f0ea]" title="Clear filters">Clear</button>}
           <button onClick={load} disabled={loading} className="px-3 py-1.5 rounded-lg border border-[#e8e0d8] text-sm font-semibold text-[#1a1208] hover:bg-[#f5f0ea] disabled:opacity-50">{loading ? 'Loading…' : '↻ Refresh'}</button>
-          <button onClick={exportCsv} disabled={!entries.length} className="px-3 py-1.5 rounded-lg bg-[#1a1208] text-white text-sm font-semibold hover:bg-black disabled:opacity-40">Export CSV</button>
+          <button onClick={exportCsv} disabled={!filtered.length} className="px-3 py-1.5 rounded-lg bg-[#1a1208] text-white text-sm font-semibold hover:bg-black disabled:opacity-40">Export CSV</button>
         </div>
       </div>
 
@@ -60211,10 +60239,10 @@ function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: 
             </tr>
           </thead>
           <tbody>
-            {entries.length === 0 && !loading && (
-              <tr><td colSpan={6} className="py-8 text-center text-[#9c8e85] italic">No sync activity yet. Pushes and OTA bookings will appear here as they happen.</td></tr>
+            {filtered.length === 0 && !loading && (
+              <tr><td colSpan={6} className="py-8 text-center text-[#9c8e85] italic">{entries.length === 0 ? 'No sync activity yet. Pushes and OTA bookings will appear here as they happen.' : 'No entries match your search or filters.'}</td></tr>
             )}
-            {entries.map(e => (
+            {filtered.map(e => (
               <tr key={e.id} className="border-b border-[#f7f2ec] last:border-0 align-top">
                 <td className="py-2.5 px-3 whitespace-nowrap text-[12px] text-[#6b5d52] tabular-nums">{fmtTime(e.created_at)}</td>
                 <td className="py-2.5 px-3">
@@ -60237,7 +60265,7 @@ function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: 
           </tbody>
         </table>
       </div>
-      <p className="text-[11px] text-[#9c8e85]">Showing the {entries.length} most recent entries. Older entries are pruned after 120 days.</p>
+      <p className="text-[11px] text-[#9c8e85]">Showing {filtered.length}{filtered.length !== entries.length ? ` of ${entries.length}` : ''} entr{filtered.length === 1 ? 'y' : 'ies'} (latest 300 loaded). Older entries are pruned after 120 days.</p>
     </div>
   );
 }
