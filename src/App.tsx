@@ -60100,6 +60100,25 @@ function PartnerPortal({ restaurantId, token, restaurantName }: { restaurantId: 
 // ════════════════════════════════════════════════════════════════════
 // AiosellPanel — PMS ↔ Aiosell channel-manager integration console
 // ════════════════════════════════════════════════════════════════════
+// Canonical Aiosell OTA channel identifiers for the rate-multiplier picker.
+// Free-typed codes were the #1 cause of "multiplier not updated / channel not
+// connected" no-ops (a typo like "makemytrip" instead of "gommt" fails silently),
+// so the channel is chosen from this list instead of typed. "__custom__" keeps an
+// escape hatch for an OTA not yet catalogued here — the code that hits the Aiosell
+// API is always the `code` below, never a display label.
+const AIOSELL_CHANNELS: { code: string; label: string }[] = [
+  { code: 'booking.com', label: 'Booking.com' },
+  { code: 'gommt',       label: 'MakeMyTrip / Goibibo (GoMMT)' },
+  { code: 'agoda',       label: 'Agoda' },
+  { code: 'expedia',     label: 'Expedia' },
+  { code: 'airbnb',      label: 'Airbnb' },
+  { code: 'cleartrip',   label: 'Cleartrip' },
+  { code: 'easemytrip',  label: 'EaseMyTrip' },
+  { code: 'yatra',       label: 'Yatra' },
+  { code: 'hostelworld', label: 'Hostelworld' },
+  { code: 'tripadvisor', label: 'Tripadvisor' },
+];
+
 // Atithi-Setu is the source of truth for rates/inventory; we push ARI to
 // Aiosell (which fans out to the OTAs) and receive OTA reservations back
 // via the inbound webhook. Partner credentials + the {pms} id are PLATFORM
@@ -60138,7 +60157,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   const [pushResult, setPushResult] = useState<any>(null);
   // Per-channel rate multipliers — one line per aggregator so a DIFFERENT factor
   // can go to each OTA (Aiosell scales one factor per channel per call).
-  const [multRows, setMultRows] = useState<{ channel: string; label: string; mult: string }[]>([
+  const [multRows, setMultRows] = useState<{ channel: string; label: string; mult: string; custom?: boolean }[]>([
     { channel: 'booking.com', label: 'Booking.com', mult: '1.00' },
     { channel: 'agoda', label: 'Agoda', mult: '1.00' },
     { channel: 'gommt', label: 'MakeMyTrip / Goibibo (GoMMT)', mult: '1.00' },
@@ -60755,29 +60774,52 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
             )}
             <div className="border-t border-[#f0e8de] pt-3">
               <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Channel rate multipliers</label>
-              <p className="text-[11px] text-[#9c8e85] mb-2">One line per OTA — send a different price to each platform (1.00 = base, 1.10 = +10%, 0.95 = −5%).</p>
+              <p className="text-[11px] text-[#9c8e85] mb-2">One line per OTA — send a different price to each platform (1.00 = base, 1.10 = +10%, 0.95 = −5%). Pick the channel from the list so the exact Aiosell code is used — a typed code that Aiosell doesn&rsquo;t recognise silently fails to apply.</p>
               <div className="space-y-1.5">
                 {multRows.map((row, i) => {
-                  const res = multResult?.results?.find((x: any) => String(x.channel).toLowerCase() === row.channel.trim().toLowerCase());
+                  const code = row.channel.trim().toLowerCase();
+                  const res = multResult?.results?.find((x: any) => String(x.channel).toLowerCase() === code);
+                  const usedElsewhere = (c: string) => multRows.some((r, j) => j !== i && r.channel.trim().toLowerCase() === c);
+                  const knownCode = AIOSELL_CHANNELS.some(c => c.code === code);
+                  const selectVal = row.custom ? '__custom__' : (knownCode ? code : '');
                   return (
                     <div key={i} className="flex items-center gap-2 flex-wrap">
-                      <input
-                        value={row.label}
-                        onChange={e => setMultRows(rs => rs.map((r, j) => j === i ? { ...r, label: e.target.value } : r))}
-                        placeholder="Channel name"
-                        className={cn(fieldCls, 'flex-1 min-w-[150px]')}
-                      />
-                      <input
-                        value={row.channel}
-                        onChange={e => setMultRows(rs => rs.map((r, j) => j === i ? { ...r, channel: e.target.value } : r))}
-                        placeholder="aiosell code (e.g. booking.com)"
-                        className={cn(fieldCls, 'w-40')}
-                        title="The channel identifier Aiosell uses (e.g. booking.com, agoda, gommt)"
-                      />
+                      <select
+                        value={selectVal}
+                        onChange={e => {
+                          const v = e.target.value;
+                          setMultRows(rs => rs.map((r, j) => {
+                            if (j !== i) return r;
+                            if (v === '__custom__') return { ...r, custom: true, channel: '' };
+                            const cat = AIOSELL_CHANNELS.find(c => c.code === v);
+                            return { ...r, custom: false, channel: v, label: cat ? cat.label : r.label };
+                          }));
+                        }}
+                        className={cn(fieldCls, 'flex-1 min-w-[190px]')}
+                        title="Choose the OTA to price for"
+                      >
+                        <option value="">Select channel…</option>
+                        {AIOSELL_CHANNELS.map(c => (
+                          <option key={c.code} value={c.code} disabled={usedElsewhere(c.code)}>
+                            {c.label}{usedElsewhere(c.code) ? ' — already added' : ''}
+                          </option>
+                        ))}
+                        <option value="__custom__">Other channel (enter code)…</option>
+                      </select>
+                      {row.custom && (
+                        <input
+                          value={row.channel}
+                          onChange={e => setMultRows(rs => rs.map((r, j) => j === i ? { ...r, channel: e.target.value } : r))}
+                          placeholder="aiosell code"
+                          className={cn(fieldCls, 'w-36')}
+                          title="Exact channel identifier Aiosell uses (e.g. booking.com, agoda, gommt) — must match Aiosell exactly"
+                        />
+                      )}
                       <input
                         type="number" step="0.01" min="0.1" value={row.mult}
                         onChange={e => setMultRows(rs => rs.map((r, j) => j === i ? { ...r, mult: e.target.value } : r))}
                         className={cn(fieldCls, 'w-24')}
+                        title="Rate multiplier for this channel"
                       />
                       {res && (
                         <span className={cn('text-[11px] font-bold', res.ok ? 'text-emerald-700' : 'text-amber-700')} title={res.message}>
