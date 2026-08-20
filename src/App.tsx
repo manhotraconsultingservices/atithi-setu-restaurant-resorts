@@ -24151,31 +24151,53 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             )}
           </div>
 
-          {/* ── 5-TAB NAV (Aiosell-style) ── */}
-          <div className="flex gap-1 border-b border-[#e8e0d8] overflow-x-auto">
-            {([
-              { id: 'rates',    label: 'Rates & Inventory' },
-              { id: 'rooms',    label: 'Update Rooms' },
-              { id: 'bulk',     label: 'Bulk Update' },
-              { id: 'live',     label: 'Live Bookings' },
-              { id: 'mappings', label: 'Mappings' },
-              { id: 'aiosell',  label: '🔌 Aiosell' },
-              { id: 'aiosell-log', label: '📜 Sync Log' },
-            ] as const).map(t => (
-              <button
-                key={t.id}
-                onClick={() => { setActiveCmTab(t.id); if (t.id === 'rooms') fetchInvGrid(); if (t.id === 'rates') fetchRateGrid(); }}
-                className={cn(
-                  'px-5 py-2.5 text-sm font-semibold rounded-t-xl whitespace-nowrap transition-colors',
-                  activeCmTab === t.id
-                    ? 'bg-white border border-b-white border-[#e8e0d8] text-[#cc5a16] -mb-px'
-                    : 'text-[#6b5d52] hover:text-[#1a1208] hover:bg-[#f5f0ea]'
-                )}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
+          {/* ── GROUPED NAV: RMS workspace · Reservations · Connections ──
+              Top row = area, second row = the pages inside it. Provider-specific
+              setup/ops (Aiosell) now live under Connections as their own workspace,
+              instead of sitting flat next to the RMS grids. */}
+          {(() => {
+            const CM_GROUPS: { id: string; label: string; subs: { id: string; label: string }[] }[] = [
+              { id: 'rms', label: '📊 RMS workspace', subs: [
+                { id: 'rates', label: 'Rates & inventory' },
+                { id: 'rooms', label: 'Update rooms' },
+                { id: 'bulk', label: 'Bulk update' },
+                { id: 'mappings', label: 'Mappings' },
+              ] },
+              { id: 'reservations', label: '📥 Reservations', subs: [
+                { id: 'live', label: 'Live bookings' },
+              ] },
+              { id: 'connections', label: '🔌 Connections', subs: [
+                { id: 'aiosell', label: 'Aiosell' },
+              ] },
+            ];
+            const activeGroup = CM_GROUPS.find(g => g.subs.some(s => s.id === activeCmTab)) || CM_GROUPS[0];
+            const go = (id: string) => { setActiveCmTab(id as any); if (id === 'rooms') fetchInvGrid(); if (id === 'rates') fetchRateGrid(); };
+            return (
+              <div className="space-y-2">
+                <div className="flex gap-1.5 flex-wrap">
+                  {CM_GROUPS.map(g => (
+                    <button key={g.id} onClick={() => go(g.subs[0].id)}
+                      className={cn('px-4 py-2 text-sm font-bold rounded-xl whitespace-nowrap transition-colors border',
+                        g.id === activeGroup.id ? 'bg-[#1a1208] text-white border-[#1a1208]' : 'bg-white text-[#6b5d52] border-[#e8e0d8] hover:bg-[#f5f0ea]')}>
+                      {g.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex gap-1 border-b border-[#e8e0d8] overflow-x-auto items-center">
+                  {activeGroup.subs.map(t => (
+                    <button key={t.id} onClick={() => go(t.id)}
+                      className={cn('px-5 py-2.5 text-sm font-semibold rounded-t-xl whitespace-nowrap transition-colors',
+                        activeCmTab === t.id ? 'bg-white border border-b-white border-[#e8e0d8] text-[#cc5a16] -mb-px' : 'text-[#6b5d52] hover:text-[#1a1208] hover:bg-[#f5f0ea]')}>
+                      {t.label}
+                    </button>
+                  ))}
+                  {activeGroup.id === 'connections' && (
+                    <span className="ml-2 text-[11px] text-[#b9aa9c] whitespace-nowrap" title="More channel managers can be added here">+ Add channel manager</span>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* ══════════════════════════════════════════════════════════
               TAB: RATES & INVENTORY — Aiosell-style date grid
@@ -24731,10 +24753,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ══════════════════════════════════════════════════════════ */}
           {activeCmTab === 'aiosell' && (
             <AiosellPanel restaurantId={restaurantId} token={token!} />
-          )}
-
-          {activeCmTab === 'aiosell-log' && (
-            <AiosellSyncLog restaurantId={restaurantId} token={token!} />
           )}
 
           {activeCmTab === 'mappings' && (<div className="space-y-5">
@@ -60316,6 +60334,8 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
   // Automation & triggers — owner-configurable event→action + scheduled interval
   const [automation, setAutomation] = useState<any>(null);
   const [autoSaving, setAutoSaving] = useState(false);
+  // Provider workspace — one focused sub-page per job instead of one long scroll.
+  const [section, setSection] = useState<'overview' | 'setup' | 'mapping' | 'rates' | 'automation' | 'restrictions' | 'reservations' | 'synclog'>('overview');
 
   const api = useCallback(async (path: string, init?: RequestInit) => {
     const res = await fetch(`/api/restaurant/${restaurantId}/hotel${path}`, {
@@ -60717,8 +60737,58 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
 
       {err && <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2.5 text-sm flex items-center gap-2"><AlertCircle size={15} /> {err}</div>}
 
+      {/* ── PROVIDER WORKSPACE SUB-NAV — one focused page per job ── */}
+      <div className="flex flex-wrap gap-1 border-b border-[#e8e0d8] overflow-x-auto">
+        {([
+          ['overview', 'Overview'],
+          ['setup', 'Setup'],
+          ['mapping', 'Room mapping'],
+          ['rates', 'Rates & availability'],
+          ['automation', 'Automation'],
+          ['restrictions', 'Restrictions'],
+          ['reservations', 'Reservations'],
+          ['synclog', 'Sync log'],
+        ] as [typeof section, string][]).map(([id, label]) => (
+          <button key={id} onClick={() => setSection(id)}
+            className={cn('px-4 py-2 text-sm font-semibold rounded-t-xl whitespace-nowrap transition-colors',
+              section === id ? 'bg-white border border-b-white border-[#e8e0d8] text-[#cc5a16] -mb-px' : 'text-[#6b5d52] hover:text-[#1a1208] hover:bg-[#f5f0ea]')}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── OVERVIEW — health at a glance + the daily actions ── */}
+      {section === 'overview' && (
+        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+          <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
+            <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">📋 Overview</h4>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Health at a glance, and the actions you use most.</p>
+          </div>
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-[#faf7f2] rounded-xl p-3"><div className="text-[11px] text-[#9c8e85]">Connection</div><div className={cn('text-lg font-bold', enabled && platformReady ? 'text-emerald-700' : 'text-amber-700')}>{enabled && platformReady ? 'Live' : platformReady ? 'Configured, off' : 'Not connected'}</div></div>
+              <div className="bg-[#faf7f2] rounded-xl p-3"><div className="text-[11px] text-[#9c8e85]">Last sync</div><div className="text-sm font-bold text-[#1a1208] pt-1">{status?.last_synced ? new Date(status.last_synced).toLocaleString() : '—'}</div></div>
+              <div className="bg-[#faf7f2] rounded-xl p-3"><div className="text-[11px] text-[#9c8e85]">Rooms mapped</div><div className="text-lg font-bold text-[#1a1208]">{mappings.length}</div></div>
+              <div className="bg-[#faf7f2] rounded-xl p-3"><div className="text-[11px] text-[#9c8e85]">Auto-sync</div><div className={cn('text-lg font-bold', automation?.live_enabled ? 'text-emerald-700' : 'text-[#6b5d52]')}>{automation?.live_enabled ? 'On' : 'Off'}</div></div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={pushARI} disabled={pushing || !enabled || mappings.length === 0} className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50 transition-colors">{pushing ? 'Pushing…' : 'Push now'}</button>
+              <button onClick={() => setSection('reservations')} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold text-[#1a1208] hover:bg-[#f5f0ea]">View bookings</button>
+              <button onClick={() => setSection('mapping')} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold text-[#1a1208] hover:bg-[#f5f0ea]">Room mapping</button>
+              <button onClick={() => setSection('synclog')} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold text-[#1a1208] hover:bg-[#f5f0ea]">Sync log</button>
+            </div>
+            {pushResult && <p className="text-[12px] text-emerald-800">Pushed: {pushResult.inventory} · {pushResult.rates} · {pushResult.pushed_types} room type(s).</p>}
+            {!platformReady && <p className="text-[12px] text-amber-700">Not connected yet — open <b>Setup</b> to enter your hotel code and test the connection.</p>}
+            {platformReady && mappings.length === 0 && <p className="text-[12px] text-amber-700">No rooms mapped — open <b>Room mapping</b> so availability can sync.</p>}
+          </div>
+        </div>
+      )}
+
+      {/* ── SYNC LOG — provider sub-page ── */}
+      {section === 'synclog' && <AiosellSyncLog restaurantId={restaurantId} token={token} />}
+
       {/* ── STEP 1 · CONNECTION ── */}
-      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden" style={{ display: section === 'setup' ? undefined : 'none' }}>
         <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
           <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2"><Globe size={17} /> Step 1 · Connect your property</h4>
           <p className="text-xs text-[#6b5d52] mt-0.5">Enter your Aiosell hotel code and partner credentials, save, then test the link. Changes apply instantly for this property only.</p>
@@ -60798,7 +60868,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
       </div>
 
       {/* ── STEP 2 · MAPPING WIZARD ── */}
-      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden" style={{ display: section === 'mapping' ? undefined : 'none' }}>
         <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da] flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">🧩 Step 2 · Map rooms &amp; rate plans</h4>
@@ -60928,9 +60998,9 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
         </div>
       </div>
 
-      {/* ── STEP 3 · SYNC & DISTRIBUTION ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+      {/* ── STEP 3 · SYNC & DISTRIBUTION (flattened: each card is its own sub-page) ── */}
+      <div className="space-y-5">
+        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden" style={{ display: section === 'rates' ? undefined : 'none' }}>
           <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
             <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">📤 Step 3 · Push rates &amp; availability</h4>
             <p className="text-xs text-[#6b5d52] mt-0.5">Send inventory + rates for the next N days to Aiosell → all OTAs.</p>
@@ -61050,7 +61120,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
         </div>
 
         {/* ── AUTOMATION & TRIGGERS (owner-configurable event → action + schedule) ── */}
-        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden" style={{ display: section === 'automation' ? undefined : 'none' }}>
           <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
             <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">⚙️ Automation &amp; triggers</h4>
             <p className="text-xs text-[#6b5d52] mt-0.5">Decide what Atithi-Setu sends to Aiosell on each booking event, plus a scheduled safety sweep. <b>Live</b> keeps the OTAs closed in real time; the <b>schedule</b> is the backstop.</p>
@@ -61130,7 +61200,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
         </div>
 
         {/* ── STEP 4 · RESERVATIONS & OPS ── */}
-        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+        <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden" style={{ display: section === 'reservations' ? undefined : 'none' }}>
           <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
             <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">📥 Step 4 · Reservations &amp; ops</h4>
             <p className="text-xs text-[#6b5d52] mt-0.5">Bookings arrive automatically via webhook. Pull on demand or report a no-show.</p>
@@ -61175,7 +61245,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
       </div>
 
       {/* ── STEP 5 · ROOM STATUS / STOP-SELL (O-3) ── */}
-      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden" style={{ display: section === 'restrictions' ? undefined : 'none' }}>
         <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da]">
           <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">🚦 Step 5 · Room status &amp; stop-sell</h4>
           <p className="text-xs text-[#6b5d52] mt-0.5">Open or close a mapped room on the OTAs for a date range, and set a minimum stay. Pushes a restriction to the chosen channels.</p>
@@ -61239,7 +61309,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
       </div>
 
       {/* ── STEP 6 · CHANNEL BOOKINGS REPORT (which OTA + what to collect) ── */}
-      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+      <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden" style={{ display: section === 'reservations' ? undefined : 'none' }}>
         <div className="px-5 py-4 bg-[#faf7f2] border-b border-[#efe6da] flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h4 className="text-base font-bold font-serif text-[#1a1208] flex items-center gap-2">📊 Step 6 · Channel bookings &amp; collection</h4>
