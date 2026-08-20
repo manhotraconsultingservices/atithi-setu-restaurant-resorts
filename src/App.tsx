@@ -60254,6 +60254,12 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
     } catch { /* non-fatal */ }
   }, [api, aiosellMaps]);
 
+  // Load the SAVED mappings on mount so they show immediately after login —
+  // without waiting for the owner to click "Fetch from Aiosell" (which needs a
+  // live Aiosell round-trip). The mappings persist server-side; this only fixes
+  // the display that used to look empty ("reset") on every fresh login.
+  useEffect(() => { loadMappingData(); }, [loadMappingData]);
+
   const fetchProperty = useCallback(async () => {
     setLoadingProp(true); setErr('');
     try {
@@ -60674,9 +60680,33 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
             </button>
           </div>
         </div>
-        <div className="p-5">
+        <div className="p-5 space-y-5">
+          {/* SAVED MAPPINGS — always visible once loaded (on mount), even before
+              fetching from Aiosell, so the owner's past mappings never look "reset"
+              on a fresh login. The data lives server-side in channel_room_mappings. */}
+          {mappings.length > 0 && (
+            <div>
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Saved mappings</p>
+                <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[12px] font-semibold">{mappings.length} mapped</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {mappings.map((m: any) => (
+                  <span key={m.id} className="inline-flex items-center gap-2 bg-[#f5f0ea] rounded-full pl-3 pr-1.5 py-1 text-[12px] text-[#1a1208]">
+                    <span className="font-mono text-[11px]">{m.external_room_code}{m.external_rate_plan_code ? `/${m.external_rate_plan_code}` : ''}</span>
+                    <span className="text-[#9c8e85]">→</span>
+                    <span className="font-semibold">{m.local_room_type_name || m.local_room_type_id || '—'}</span>
+                    <button onClick={() => deleteMapping(m)} className="p-1 rounded-full hover:bg-red-100 text-red-500" title="Remove mapping"><Trash2 size={12} /></button>
+                  </span>
+                ))}
+              </div>
+              {!property && <p className="text-[11px] text-[#9c8e85] mt-2">Click <b>Fetch from Aiosell</b> above to add or change mappings.</p>}
+            </div>
+          )}
           {!property ? (
-            <p className="text-sm text-[#9c8e85] italic">Click <b>Fetch from Aiosell</b> to load your room &amp; rate-plan codes, then map each to a local room type.</p>
+            mappings.length === 0 ? (
+              <p className="text-sm text-[#9c8e85] italic">Click <b>Fetch from Aiosell</b> to load your room &amp; rate-plan codes, then map each to a local room type.</p>
+            ) : null
           ) : (
             <div className="space-y-5">
               <div className="flex items-center gap-2 text-[12px] text-[#6b5d52]">
@@ -60749,21 +60779,6 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                   </div>
                 </div>
               ))}
-              {mappings.length > 0 && (
-                <div className="pt-2">
-                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Saved mappings</p>
-                  <div className="flex flex-wrap gap-2">
-                    {mappings.map((m: any) => (
-                      <span key={m.id} className="inline-flex items-center gap-2 bg-[#f5f0ea] rounded-full pl-3 pr-1.5 py-1 text-[12px] text-[#1a1208]">
-                        <span className="font-mono text-[11px]">{m.external_room_code}{m.external_rate_plan_code ? `/${m.external_rate_plan_code}` : ''}</span>
-                        <span className="text-[#9c8e85]">→</span>
-                        <span className="font-semibold">{m.local_room_type_name || m.local_room_type_id || '—'}</span>
-                        <button onClick={() => deleteMapping(m)} className="p-1 rounded-full hover:bg-red-100 text-red-500"><Trash2 size={12} /></button>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>
