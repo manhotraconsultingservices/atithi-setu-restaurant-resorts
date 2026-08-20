@@ -10984,7 +10984,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
 
   // Aiosell-style Rates & Inventory tab — active CM sub-tab + rate grid data.
-  const [activeCmTab, setActiveCmTab] = useState<'rates'|'rooms'|'bulk'|'live'|'mappings'|'aiosell'>('rates');
+  const [activeCmTab, setActiveCmTab] = useState<'rates'|'rooms'|'bulk'|'live'|'mappings'|'aiosell'|'aiosell-log'>('rates');
   const [rateGrid, setRateGrid] = useState<{ dates: string[]; meta: Record<string,any>; room_types: any[] } | null>(null);
   const [rateGridLoading, setRateGridLoading] = useState(false);
   const [rateGridDirty, setRateGridDirty] = useState<Record<string,Record<string,number>>>({}); // {roomTypeId: {date: rate}}
@@ -24160,6 +24160,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'live',     label: 'Live Bookings' },
               { id: 'mappings', label: 'Mappings' },
               { id: 'aiosell',  label: '🔌 Aiosell' },
+              { id: 'aiosell-log', label: '📜 Sync Log' },
             ] as const).map(t => (
               <button
                 key={t.id}
@@ -24730,6 +24731,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ══════════════════════════════════════════════════════════ */}
           {activeCmTab === 'aiosell' && (
             <AiosellPanel restaurantId={restaurantId} token={token!} />
+          )}
+
+          {activeCmTab === 'aiosell-log' && (
+            <AiosellSyncLog restaurantId={restaurantId} token={token!} />
           )}
 
           {activeCmTab === 'mappings' && (<div className="space-y-5">
@@ -60100,6 +60105,125 @@ function PartnerPortal({ restaurantId, token, restaurantName }: { restaurantId: 
 // ════════════════════════════════════════════════════════════════════
 // AiosellPanel — PMS ↔ Aiosell channel-manager integration console
 // ════════════════════════════════════════════════════════════════════
+// Plain-English log of every PMS↔Aiosell exchange (own tab in Channel Manager).
+// Reads the server-side aiosell_sync_log written on each availability/rate push,
+// restriction, multiplier, no-show, and inbound OTA reservation.
+function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: string; }) {
+  const [entries, setEntries] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+  const [dir, setDir] = useState<'' | 'OUT' | 'IN'>('');
+  const [st, setSt] = useState<'' | 'OK' | 'FAIL' | 'PARTIAL' | 'INFO'>('');
+
+  const load = useCallback(async () => {
+    setLoading(true); setErr('');
+    try {
+      const q = new URLSearchParams({ limit: '300' });
+      if (dir) q.set('direction', dir);
+      if (st) q.set('status', st);
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/aiosell/sync-log?${q}`, {
+        headers: { Authorization: `Bearer ${token}` }, credentials: 'include',
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || `Failed (${res.status})`);
+      setEntries(Array.isArray(j.entries) ? j.entries : []);
+    } catch (e: any) { setErr(e.message || 'Failed to load sync log.'); }
+    finally { setLoading(false); }
+  }, [restaurantId, token, dir, st]);
+  useEffect(() => { load(); }, [load]);
+
+  const opLabel: Record<string, string> = {
+    'INVENTORY': 'Availability', 'RATES': 'Rates', 'INVENTORY+RATES': 'Availability + rates',
+    'RESTRICTIONS': 'Stop-sell / restriction', 'MULTIPLIER': 'Channel multiplier',
+    'NOSHOW': 'No-show', 'RESERVATION': 'OTA reservation', 'FETCH': 'Fetch reservations',
+  };
+  const trigLabel: Record<string, string> = { live: 'Live (booking)', scheduled: 'Scheduled', manual: 'Manual', webhook: 'OTA webhook' };
+  const statusCls = (s: string) => s === 'OK' ? 'bg-emerald-100 text-emerald-700'
+    : s === 'FAIL' ? 'bg-red-100 text-red-700'
+    : s === 'PARTIAL' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600';
+  const fmtTime = (t: string) => { try { return new Date(t).toLocaleString(); } catch { return t; } };
+
+  const exportCsv = () => {
+    const head = ['Time', 'Direction', 'Operation', 'Trigger', 'Status', 'Summary', 'Detail', 'By'];
+    const rows = entries.map(e => [fmtTime(e.created_at), e.direction === 'IN' ? 'Inbound' : 'Outbound', opLabel[e.operation] || e.operation, trigLabel[e.trigger] || e.trigger, e.status, e.summary, e.detail || '', e.actor || '']
+      .map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','));
+    const csv = [head.join(','), ...rows].join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = document.createElement('a'); a.href = url; a.download = 'aiosell-sync-log.csv'; a.click(); URL.revokeObjectURL(url);
+  };
+
+  const selCls = 'px-3 py-1.5 rounded-lg border border-[#e8e0d8] bg-white text-sm text-[#1a1208]';
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-xl font-bold font-serif text-[#1a1208] flex items-center gap-2">📜 Aiosell Sync Log</h3>
+          <p className="text-sm text-[#6b5d52] mt-0.5">Every exchange between this property and Aiosell — what we sent to the OTAs and what came back — newest first.</p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <select value={dir} onChange={e => setDir(e.target.value as any)} className={selCls} title="Direction">
+            <option value="">All directions</option>
+            <option value="OUT">↑ Outbound (to OTAs)</option>
+            <option value="IN">↓ Inbound (from OTAs)</option>
+          </select>
+          <select value={st} onChange={e => setSt(e.target.value as any)} className={selCls} title="Status">
+            <option value="">All statuses</option>
+            <option value="OK">✓ OK</option>
+            <option value="PARTIAL">⚠ Partial</option>
+            <option value="FAIL">✕ Failed</option>
+            <option value="INFO">• Info</option>
+          </select>
+          <button onClick={load} disabled={loading} className="px-3 py-1.5 rounded-lg border border-[#e8e0d8] text-sm font-semibold text-[#1a1208] hover:bg-[#f5f0ea] disabled:opacity-50">{loading ? 'Loading…' : '↻ Refresh'}</button>
+          <button onClick={exportCsv} disabled={!entries.length} className="px-3 py-1.5 rounded-lg bg-[#1a1208] text-white text-sm font-semibold hover:bg-black disabled:opacity-40">Export CSV</button>
+        </div>
+      </div>
+
+      {err && <div className="rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+      <div className="rounded-2xl border border-[#e8e0d8] overflow-x-auto">
+        <table className="w-full text-sm min-w-[720px]">
+          <thead>
+            <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] bg-[#faf7f2] border-b border-[#efe6da]">
+              <th className="py-2.5 px-3 whitespace-nowrap">When</th>
+              <th className="py-2.5 px-3">Dir</th>
+              <th className="py-2.5 px-3">Operation</th>
+              <th className="py-2.5 px-3">Trigger</th>
+              <th className="py-2.5 px-3">What happened</th>
+              <th className="py-2.5 px-3">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.length === 0 && !loading && (
+              <tr><td colSpan={6} className="py-8 text-center text-[#9c8e85] italic">No sync activity yet. Pushes and OTA bookings will appear here as they happen.</td></tr>
+            )}
+            {entries.map(e => (
+              <tr key={e.id} className="border-b border-[#f7f2ec] last:border-0 align-top">
+                <td className="py-2.5 px-3 whitespace-nowrap text-[12px] text-[#6b5d52] tabular-nums">{fmtTime(e.created_at)}</td>
+                <td className="py-2.5 px-3">
+                  <span className={cn('inline-flex items-center justify-center w-7 h-7 rounded-full text-[13px] font-bold', e.direction === 'IN' ? 'bg-sky-100 text-sky-700' : 'bg-violet-100 text-violet-700')}
+                    title={e.direction === 'IN' ? 'Inbound — from the OTAs' : 'Outbound — sent to the OTAs'}>
+                    {e.direction === 'IN' ? '↓' : '↑'}
+                  </span>
+                </td>
+                <td className="py-2.5 px-3 font-semibold text-[#1a1208] whitespace-nowrap">{opLabel[e.operation] || e.operation}</td>
+                <td className="py-2.5 px-3 text-[12px] text-[#6b5d52] whitespace-nowrap">{trigLabel[e.trigger] || e.trigger}{e.actor && e.actor !== 'system' ? ` · ${e.actor}` : ''}</td>
+                <td className="py-2.5 px-3 text-[#3d3128]">
+                  <div>{e.summary}</div>
+                  {e.detail && <div className="text-[11px] text-[#9c8e85] mt-0.5 break-words">{e.detail}</div>}
+                </td>
+                <td className="py-2.5 px-3">
+                  <span className={cn('px-2 py-0.5 rounded-full text-[11px] font-bold', statusCls(e.status))}>{e.status}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[11px] text-[#9c8e85]">Showing the {entries.length} most recent entries. Older entries are pruned after 120 days.</p>
+    </div>
+  );
+}
+
 // Canonical Aiosell OTA channel identifiers for the rate-multiplier picker.
 // Free-typed codes were the #1 cause of "multiplier not updated / channel not
 // connected" no-ops (a typo like "makemytrip" instead of "gommt" fails silently),

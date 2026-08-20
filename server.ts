@@ -31237,7 +31237,7 @@ ${data.tenant.name}`;
       const days = __aiosellResyncDays.get(rid) || AIOSELL_DEFAULT_DAYS;
       __aiosellResyncRates.delete(rid); __aiosellResyncDays.delete(rid);
       try {
-        const out = await aiosellSyncTenant(rid, days, { rates });
+        const out = await aiosellSyncTenant(rid, days, { rates, trigger: 'live' });
         if (out.ok) console.log(`[aiosell-auto] ${rid}: pushed availability${rates ? ' + rates' : ''} for ${out.pushed_types} room-type(s)`);
         // out.ok===false is the normal cheap outcome for non-Aiosell tenants — stay quiet.
       } catch (e: any) { console.error('[aiosell-auto] resync failed', rid, e?.message || e); }
@@ -32733,8 +32733,34 @@ ${data.tenant.name}`;
 
   // Compute + push room-type inventory and (room,rateplan) rates for the next N days.
   // v1 rate = room_type.base_rate × (1 − rate_plan.discount_pct/100) — refined later.
-  async function aiosellSyncTenant(restaurantId: string, days: number, opts?: { rates?: boolean }): Promise<{ ok: boolean; inventory?: string; rates?: string; error?: string; pushed_types?: number }> {
+  // ── Aiosell sync log — a plain-English record of every PMS↔OTA exchange ─────
+  // Owners couldn't see what was actually handed to/from Aiosell. This writes a
+  // human-readable row for each exchange (availability/rate push, restrictions,
+  // multiplier, no-show, and inbound OTA reservations). Fire-and-forget: a logging
+  // failure must NEVER break the sync. Auto-created + lightly self-pruning.
+  async function aiosellEnsureSyncLogTable(tenantDb: any) {
+    await tenantDb.run(`CREATE TABLE IF NOT EXISTS aiosell_sync_log (
+      id TEXT PRIMARY KEY, direction TEXT, operation TEXT, trigger TEXT, summary TEXT,
+      status TEXT, detail TEXT, actor TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+    await tenantDb.run("CREATE INDEX IF NOT EXISTS idx_aiosell_synclog_created ON aiosell_sync_log (created_at DESC)").catch(() => {});
+  }
+  async function logAiosellSync(tenantDb: any, e: { direction: 'OUT' | 'IN'; operation: string; trigger?: string; summary: string; status?: 'OK' | 'FAIL' | 'PARTIAL' | 'INFO'; detail?: string; actor?: string }) {
+    try {
+      await aiosellEnsureSyncLogTable(tenantDb);
+      const id = `ASL-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      await tenantDb.run(
+        `INSERT INTO aiosell_sync_log (id, direction, operation, trigger, summary, status, detail, actor)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, e.direction, e.operation, e.trigger || 'manual', e.summary, e.status || 'OK', (e.detail || '').slice(0, 1000), e.actor || 'system']
+      );
+      // Light self-prune (~3% of writes): keep the log from growing unbounded.
+      if (Math.random() < 0.03) await tenantDb.run("DELETE FROM aiosell_sync_log WHERE created_at < (CURRENT_TIMESTAMP - INTERVAL '120 days')").catch(() => {});
+    } catch { /* logging must never break the sync */ }
+  }
+
+  async function aiosellSyncTenant(restaurantId: string, days: number, opts?: { rates?: boolean; trigger?: string; actor?: string }): Promise<{ ok: boolean; inventory?: string; rates?: string; error?: string; pushed_types?: number }> {
     const pushRates = opts?.rates !== false; // default: push rates too (manual push + full sync)
+    const logTrig = opts?.trigger || 'manual';
     const tenantDb = await getTenantDb(restaurantId);
     const cfg = await aiosellCfgForTenant(tenantDb);
     if (!aiosellConfigured(cfg)) return { ok: false, error: 'Aiosell credentials not set for this property (add them in Channel Manager → Aiosell, or set the AIOSELL_* env vars).' };
@@ -32789,14 +32815,21 @@ ${data.tenant.name}`;
     if (invUpdates.length) {
       const r = await aiosellPushInventory(cfg, t.hotelCode, invUpdates);
       invMsg = r.ok ? r.message : `ERR: ${r.message}`;
-      if (!r.ok) return { ok: false, error: `Inventory push failed: ${r.message}`, inventory: invMsg };
+      if (!r.ok) {
+        logAiosellSync(tenantDb, { direction: 'OUT', operation: 'INVENTORY', trigger: logTrig, actor: opts?.actor, status: 'FAIL', summary: `Availability push failed — ${typeIds.length} room type(s) × ${days} days`, detail: r.message });
+        return { ok: false, error: `Inventory push failed: ${r.message}`, inventory: invMsg };
+      }
     }
     if (pushRates && rateUpdates.length) {
       const r = await aiosellPushRates(cfg, t.hotelCode, rateUpdates);
       rateMsg = r.ok ? r.message : `ERR: ${r.message}`;
-      if (!r.ok) return { ok: false, error: `Rate push failed: ${r.message}`, inventory: invMsg, rates: rateMsg };
+      if (!r.ok) {
+        logAiosellSync(tenantDb, { direction: 'OUT', operation: 'RATES', trigger: logTrig, actor: opts?.actor, status: 'PARTIAL', summary: `Availability pushed, but rate push failed — ${typeIds.length} room type(s) × ${days} days`, detail: r.message });
+        return { ok: false, error: `Rate push failed: ${r.message}`, inventory: invMsg, rates: rateMsg };
+      }
     }
     await tenantDb.run("UPDATE channel_credentials SET last_synced = CURRENT_TIMESTAMP WHERE channel='AIOSELL'").catch(() => {});
+    logAiosellSync(tenantDb, { direction: 'OUT', operation: pushRates ? 'INVENTORY+RATES' : 'INVENTORY', trigger: logTrig, actor: opts?.actor, status: 'OK', summary: `Pushed availability${pushRates ? ' + rates' : ''} — ${typeIds.length} room type(s) × ${days} days`, detail: `inventory: ${invMsg}${pushRates ? ` · rates: ${rateMsg}` : ''}` });
     return { ok: true, inventory: invMsg, rates: rateMsg, pushed_types: typeIds.length };
   }
 
@@ -32829,6 +32862,20 @@ ${data.tenant.name}`;
     if (!restaurantId) return res.status(404).json({ success: false, message: `No property registered for hotelCode ${hotelCode}` });
     try {
       const out = await aiosellIngestReservation(restaurantId, body);
+      // Log the inbound OTA hand-off in plain English (guest + channel + stay).
+      try {
+        const ch = String((body as any).channel || (body as any).ota || '').trim() || 'OTA';
+        const gname = (body as any).guest?.name || (body as any).guestName || 'Guest';
+        const stay = ((body as any).checkin || (body as any).checkIn) && ((body as any).checkout || (body as any).checkOut)
+          ? ` · ${(body as any).checkin || (body as any).checkIn}→${(body as any).checkout || (body as any).checkOut}` : '';
+        const actWord = action === 'cancel' ? 'cancellation' : action === 'modify' ? 'modification' : 'booking';
+        logAiosellSync(await getTenantDb(restaurantId), {
+          direction: 'IN', operation: 'RESERVATION', trigger: 'webhook', actor: ch,
+          status: out.ok ? (out.duplicate ? 'INFO' : 'OK') : 'FAIL',
+          summary: `Received ${ch} ${actWord} — ${gname}${stay}${out.duplicate ? ' (duplicate, ignored)' : ''}`,
+          detail: out.ok ? `booking ${(body as any).bookingId || out.booking_id || ''}` : (out.reason || 'ingest failed'),
+        });
+      } catch { /* logging never blocks the webhook */ }
       if (!out.ok) return res.status(out.status || 400).json({ success: false, message: out.reason || 'Failed' });
       // An OTA booking just consumed (or a cancel freed) a room — apply the owner's
       // configured action so the OTHER connected channels close/open in step.
@@ -32944,9 +32991,28 @@ ${data.tenant.name}`;
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const days = Math.min(365, Math.max(1, Number(req.body?.days) || 90));
-      const out = await aiosellSyncTenant(req.params.id, days);
+      const out = await aiosellSyncTenant(req.params.id, days, { trigger: 'manual', actor: req.user?.email });
       if (!out.ok) return res.status(400).json(out);
       res.json({ success: true, ...out, days });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Sync log — the plain-English record of every PMS↔Aiosell exchange.
+  app.get("/api/restaurant/:id/hotel/aiosell/sync-log", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureSyncLogTable(tenantDb);
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+      const dir = String(req.query.direction || '').toUpperCase();
+      const st = String(req.query.status || '').toUpperCase();
+      const where: string[] = []; const params: any[] = [];
+      if (dir === 'OUT' || dir === 'IN') { where.push('direction = ?'); params.push(dir); }
+      if (['OK', 'FAIL', 'PARTIAL', 'INFO'].includes(st)) { where.push('status = ?'); params.push(st); }
+      const rows: any[] = await tenantDb.query(
+        `SELECT id, direction, operation, trigger, summary, status, detail, actor, created_at
+           FROM aiosell_sync_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+          ORDER BY created_at DESC LIMIT ${limit}`, params
+      ).catch(() => []);
+      res.json({ success: true, count: rows.length, entries: rows });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   // Owner-configurable automation: what each booking event does toward Aiosell +
@@ -33000,6 +33066,7 @@ ${data.tenant.name}`;
       const list: AiosellReservation[] = Array.isArray(r.data) ? r.data : (Array.isArray(r.data?.reservations) ? r.data.reservations : []);
       let ingested = 0;
       if (req.body?.ingest) for (const rv of list) { const out = await aiosellIngestReservation(req.params.id, rv).catch(() => ({ ok: false } as any)); if (out.ok) ingested++; }
+      logAiosellSync(tenantDb, { direction: 'IN', operation: 'FETCH', trigger: 'manual', actor: req.user?.email, status: 'OK', summary: `Pulled reservations ${startDate}→${endDate} — ${list.length} found${req.body?.ingest ? `, ${ingested} imported` : ''}` });
       res.json({ success: true, count: list.length, ingested, reservations: list });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -33014,6 +33081,7 @@ ${data.tenant.name}`;
       if (!t.hotelCode || !bookingId || !channel) return res.status(400).json({ error: 'hotel code, bookingId and channel required.' });
       if (!['booking.com', 'gommt'].includes(channel)) return res.status(400).json({ error: 'channel must be booking.com or gommt.' });
       const r = await aiosellMarkNoShow(cfg, t.hotelCode, bookingId, channel);
+      logAiosellSync(tenantDb, { direction: 'OUT', operation: 'NOSHOW', trigger: 'manual', actor: req.user?.email, status: r.ok ? 'OK' : 'FAIL', summary: `Marked no-show — ${channel} booking ${bookingId}`, detail: r.message });
       res.status(r.ok ? 200 : 502).json({ success: r.ok, message: r.message });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -33055,7 +33123,9 @@ ${data.tenant.name}`;
         });
       }
       const applied = results.filter(x => x.ok).length;
-      res.status(200).json({ success: applied > 0, applied, failed: results.length - applied, results });
+      const failedN = results.length - applied;
+      logAiosellSync(tenantDb, { direction: 'OUT', operation: 'MULTIPLIER', trigger: 'manual', actor: req.user?.email, status: failedN === 0 ? 'OK' : applied > 0 ? 'PARTIAL' : 'FAIL', summary: `Channel rate multiplier — ${results.map(x => `${x.channel} ×${x.multiplier}`).join(', ')}`, detail: `${applied} applied, ${failedN} not applied${failedN ? '; ' + results.filter(x => !x.ok).map(x => `${x.channel}: ${x.message}`).join(' | ') : ''}` });
+      res.status(200).json({ success: applied > 0, applied, failed: failedN, results });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   // Room status / restrictions push (stop-sell, min/max stay, CTA/CTD) to chosen
@@ -33089,6 +33159,7 @@ ${data.tenant.name}`;
       const r = ratePlanCode
         ? await aiosellPushRateRestrictions(cfg, t.hotelCode, channels, [{ startDate, endDate, rates: [{ roomCode, rateplanCode: ratePlanCode, restrictions: restr }] }])
         : await aiosellPushInventoryRestrictions(cfg, t.hotelCode, channels, [{ startDate, endDate, rooms: [{ roomCode, restrictions: restr }] }]);
+      logAiosellSync(tenantDb, { direction: 'OUT', operation: 'RESTRICTIONS', trigger: 'manual', actor: req.user?.email, status: r.ok ? 'OK' : 'FAIL', summary: `${req.body?.stopSell === true ? 'Stop-sell' : req.body?.stopSell === false ? 'Open' : 'Restriction'} ${roomCode}${ratePlanCode ? `/${ratePlanCode}` : ''} ${startDate}→${endDate} → ${channels.join(', ')}`, detail: r.message });
       res.status(r.ok ? 200 : 502).json({ success: r.ok, message: r.message });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -48633,7 +48704,7 @@ ${data.tenant.name}`;
             const lastMs = cfg.last_scheduled_at ? new Date(cfg.last_scheduled_at).getTime() : 0;
             const dueMs = Math.max(5, cfg.schedule_interval_minutes) * 60 * 1000;
             if (nowMs - lastMs < dueMs) continue; // not due yet for this property
-            const out = await aiosellSyncTenant(h.restaurant_id, cfg.schedule_days_ahead, { rates: !!cfg.schedule_push_rates });
+            const out = await aiosellSyncTenant(h.restaurant_id, cfg.schedule_days_ahead, { rates: !!cfg.schedule_push_rates, trigger: 'scheduled' });
             // Stamp last_scheduled_at only on a genuine push (out.ok); a no-op tenant
             // (no creds/mappings) is skipped without churning the timestamp.
             if (out.ok) await tdb.run("UPDATE aiosell_automation SET last_scheduled_at = CURRENT_TIMESTAMP WHERE id='DEFAULT'").catch(() => {});
@@ -49516,9 +49587,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-mapping-display-onlogin',
+    commit_marker: 'aiosell-sync-log',
     code_features: [
-      'aiosell-mapping-display-onlogin',            // BUGFIX (owner report "system is resetting on new login — I can't see what I mapped in the past"): Aiosell room mappings LOOKED wiped after every login. Not data loss — the mappings persist in channel_room_mappings; the panel just never LOADED or SHOWED them on mount. Cause: loadMappingData() (which fetches /channel-room-mappings + room-types + rate-plans) ran ONLY when the owner clicked "Fetch from Aiosell", and the entire Step-2 mapping display — including the "Saved mappings" chips — was nested inside the `property` (post-fetch) branch. Fix (App.tsx AiosellPanel): (1) call loadMappingData() in a mount useEffect so saved mappings load immediately after login; (2) hoist the "Saved mappings" list ABOVE the fetch gate so it always renders when mappings exist (shows "N mapped" + code→room-type chips + remove), with the "click Fetch from Aiosell" empty-state now shown only when there are genuinely zero mappings. Frontend-only. tsc + vite build clean.
+      'aiosell-sync-log',                           // FEATURE (owner request "no audit logs for any hand exchange between Atithi-Setu and the OTA (Aiosell) — create user-readable logs on every sync, as a separate tab"): NEW per-tenant `aiosell_sync_log` table (auto-created, self-pruning @120 days) + `logAiosellSync()` helper writing a PLAIN-ENGLISH row for every PMS↔Aiosell exchange, fire-and-forget (never breaks a sync). Wired into: availability/rate pushes inside aiosellSyncTenant (OK/PARTIAL/FAIL, tagged with trigger live/scheduled/manual + actor), stop-sell/restrictions, channel multiplier (per-channel applied/not-applied), no-show, and INBOUND OTA reservations at the webhook (↓ "Received Booking.com booking — <guest> · <dates>"). New GET /hotel/aiosell/sync-log?limit&direction&status. FRONTEND: new "📜 Sync Log" sub-tab in Channel Manager & RMS → AiosellSyncLog component: readable table (When · Dir ↑out/↓in · Operation · Trigger+actor · What happened+detail · Status badge), direction/status filters, refresh, CSV export. New TC-AIOSELL-SYNCLOG test. tsc + vite build clean.
+      'aiosell-mapping-display-onlogin',            //BUGFIX (owner report "system is resetting on new login — I can't see what I mapped in the past"): Aiosell room mappings LOOKED wiped after every login. Not data loss — the mappings persist in channel_room_mappings; the panel just never LOADED or SHOWED them on mount. Cause: loadMappingData() (which fetches /channel-room-mappings + room-types + rate-plans) ran ONLY when the owner clicked "Fetch from Aiosell", and the entire Step-2 mapping display — including the "Saved mappings" chips — was nested inside the `property` (post-fetch) branch. Fix (App.tsx AiosellPanel): (1) call loadMappingData() in a mount useEffect so saved mappings load immediately after login; (2) hoist the "Saved mappings" list ABOVE the fetch gate so it always renders when mappings exist (shows "N mapped" + code→room-type chips + remove), with the "click Fetch from Aiosell" empty-state now shown only when there are genuinely zero mappings. Frontend-only. tsc + vite build clean.
       'aiosell-automation-config',                  //FEATURE (owner request "configure events per booking — owner decides what happens when a booking is created/confirmed/cancelled… + live AND schedule-based"): the hard-wired auto-sync is now OWNER-CONFIGURABLE. New "⚙️ Automation & triggers" view in the Aiosell panel + per-tenant `aiosell_automation` table (auto-created). LIVE: a master toggle + per booking event (CREATED/MODIFIED/CHECKED_IN/CHECKED_OUT/CANCELLED) an OTA action — Sync availability · Sync availability+rates · Do nothing — plus an "Alert manager" checkbox (fires notifyBilling → owner/manager email+WhatsApp via new AIOSELL_BOOKING_EVENT template; guest messaging stays in Notifications). The finish-hook middleware became a factory `aiosellEventHook(evt)`; `handleAiosellBookingEvent` reads the config and acts. Inbound OTA reservations route through the same engine (book→CREATED, cancel→CANCELLED, modify→MODIFIED). SCHEDULE: owner picks an interval (15/30/60/120 min) + days-ahead + push-rates; the sweep is now a 5-min tick that fires each property on ITS OWN cadence (schedule_interval_minutes) and stamps last_scheduled_at only on a real push. aiosellSyncTenant gained an {rates} option; scheduleAiosellResync coalesces per-tenant (widest day-window + rates-if-any-event-wants). Defaults reproduce the prior behaviour, so nothing changes until customised. GET/PUT /hotel/aiosell/automation (SETTINGS-gated, input-sanitised). New TC-AIOSELL-AUTOMATION test. tsc + vite build clean.
       'aiosell-live-autosync',                      //FEATURE (owner request "there will be direct booking also, how does that reach Aiosell? automate on booking status"): a channel manager only stops overbooking if the PMS keeps Aiosell in step with EVERY booking — including direct/walk-in/agent bookings the OTAs never see. Aiosell needs the room-TYPE availability COUNT (not guest PII), and its inventory push is an ABSOLUTE upsert (idempotent). NEW scheduleAiosellResync(restaurantId) — a per-tenant DEBOUNCED (8s) background resync that coalesces bursts (a 10-room group booking → ONE push) and calls the existing aiosellSyncTenant (120-day window). Wired via an aiosellResyncOnSuccess middleware hung on the response 'finish' event of the hotel booking CREATE / MODIFY(PATCH) / CHECKOUT / CANCEL routes — fires only on 2xx, AFTER the client already has its answer (zero added latency, no Cloudflare-502 risk since the outbound call is off the request path). Inbound OTA reservations also re-push so the OTHER channels close out in step. SAFETY NET: a 30-min reconcile cron re-pushes ARI for every Aiosell-enabled property (covers a process restart dropping an in-memory debounce timer). aiosellSyncTenant self-guards (no creds/disabled/no mappings → cheap no-op), so non-Aiosell tenants are unaffected. Frontend: Step 3 shows a "Live auto-sync is ON" banner (manual Push now becomes a force-refresh). tsc + vite build clean.
       'aiosell-multiplier-channel-dropdown',        //UX HARDENING (owner request): the per-channel rate multiplier's channel field was FREE TEXT — a typo like "makemytrip" instead of "gommt" is accepted by the form but Aiosell silently no-ops it (the O-4 "multiplier not updated" class of failure). The channel is now a DROPDOWN of canonical Aiosell channel codes (Booking.com/GoMMT/Agoda/Expedia/Airbnb/Cleartrip/EaseMyTrip/Yatra/Hostelworld/Tripadvisor) — value sent is always the exact `code`, never a display label. Already-chosen channels are disabled in other rows (no dup lines). An "Other channel (enter code)…" option keeps a power-user escape hatch (reveals a text box) for an OTA not yet catalogued. Frontend-only; the backend multipliers:[{channel,multiplier}] contract is unchanged. tsc + vite build clean.

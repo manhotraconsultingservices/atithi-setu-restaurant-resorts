@@ -1668,6 +1668,18 @@ async function testChannelManager() {
   } else {
     fail('TC-AIOSELL-AUTOMATION', 'Automation config endpoint responds', `HTTP ${auto.status}, keys=${Object.keys(auto.data || {}).join(',')}`);
   }
+
+  // TC-AIOSELL-SYNCLOG: the plain-English PMS↔OTA exchange log endpoint responds
+  // with an entries array (each availability/rate push, restriction, multiplier,
+  // no-show, and inbound OTA reservation is recorded here for the owner to read).
+  const slog = await api('GET', `/api/restaurant/${restaurantId}/hotel/aiosell/sync-log?limit=5`);
+  if (slog.status === 200 && Array.isArray(slog.data?.entries)) {
+    pass('TC-AIOSELL-SYNCLOG', 'Sync-log endpoint responds (readable PMS↔OTA exchange log)', `${slog.data.entries.length} recent entr${slog.data.entries.length === 1 ? 'y' : 'ies'}`);
+  } else if (slog.status === 403 || slog.status === 404) {
+    skip('TC-AIOSELL-SYNCLOG', 'Sync log', `HTTP ${slog.status}`);
+  } else {
+    fail('TC-AIOSELL-SYNCLOG', 'Sync-log endpoint responds', `HTTP ${slog.status}, keys=${Object.keys(slog.data || {}).join(',')}`);
+  }
 }
 
 // ── Reports tests ──────────────────────────────────────────────────────────
