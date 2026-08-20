@@ -60755,6 +60755,12 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
             <p className="text-xs text-[#6b5d52] mt-0.5">Send inventory + rates for the next N days to Aiosell → all OTAs.</p>
           </div>
           <div className="p-5 space-y-3">
+            {enabled && mappings.length > 0 && (
+              <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-[12px] text-emerald-900 flex items-start gap-2">
+                <span className="text-sm leading-none mt-0.5">🔄</span>
+                <span><b>Live auto-sync is ON.</b> Availability is pushed to Aiosell automatically whenever a booking is <b>created, modified, cancelled, or checked out</b> — direct, walk-in, agent and OTA bookings alike — so the OTAs close out in real time and can&rsquo;t oversell. A safety sweep also re-pushes every 30 minutes. Use <b>Push now</b> only to force an immediate full refresh (e.g. after changing rates or mappings).</span>
+              </div>
+            )}
             <div className="flex items-end gap-2">
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Days ahead</label>

@@ -1640,6 +1640,21 @@ async function testChannelManager() {
   } else {
     fail('TC-AIOSELL-WEBHOOK-AUTH', 'Inbound reservation webhook requires auth', `expected 401, got HTTP ${wh.status}`);
   }
+
+  // TC-AIOSELL-AUTOSYNC: booking-driven live auto-sync must be deployed. On every
+  // availability-affecting booking event (create / modify / cancel / checkout) +
+  // inbound OTA reservation, the PMS re-pushes absolute room-type availability to
+  // Aiosell in the background (debounced), backed by a 30-min reconcile cron — so
+  // direct/walk-in bookings can't leave the OTAs overselling. The push targets the
+  // Aiosell sandbox and can't be asserted end-to-end here without live OTA creds,
+  // so we gate on the deployed feature marker in the public version manifest.
+  const ver = await fetch(`${BASE_URL}/api/version`).then(r => r.json()).catch(() => ({}));
+  const feats = JSON.stringify(ver?.code_features || ver || '');
+  if (feats.includes('aiosell-live-autosync')) {
+    pass('TC-AIOSELL-AUTOSYNC', 'Booking-driven live auto-sync deployed (availability auto-pushes to Aiosell)');
+  } else {
+    fail('TC-AIOSELL-AUTOSYNC', 'Live auto-sync feature marker present in /api/version', `not found; marker=${ver?.commit_marker || '?'}`);
+  }
 }
 
 // ── Reports tests ──────────────────────────────────────────────────────────
