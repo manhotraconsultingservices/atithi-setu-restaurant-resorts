@@ -1692,6 +1692,32 @@ async function testChannelManager() {
   } else {
     pass('TC-AIOSELL-NOSHOW', 'Per-booking OTA no-show endpoint present (resolves OTA ref + propagates)', `HTTP ${ns.status}`);
   }
+
+  // TC-AIOSELL-INBOUND-DIAG: the webhook delivery-diagnostics endpoint answers
+  // "is Aiosell reaching us, and if rejected, why?" (1) A deliberately bad-cred
+  // inbound webhook (well-formed Basic + a bogus hotelCode) must still 401 cleanly
+  // — proving the new attempt-logging never breaks the reject path. (2) The
+  // owner-facing endpoint returns the diagnostic shape {matched[], unrecognised[]}.
+  const badAuth = 'Basic ' + Buffer.from('wrong-user:wrong-pass').toString('base64');
+  const diagHotel = `AUTOTEST-DIAG-${Date.now()}`;
+  const badWh = await fetch(`${BASE_URL}/api/public/aiosell/reservation`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: badAuth },
+    body: JSON.stringify({ action: 'book', hotelCode: diagHotel, bookingId: 'DIAG-1' }),
+  });
+  if (badWh.status === 401) pass('TC-AIOSELL-INBOUND-DIAG', 'Bad-cred inbound webhook still rejects cleanly (401) with attempt-logging on');
+  else fail('TC-AIOSELL-INBOUND-DIAG', 'Bad-cred inbound webhook rejects', `expected 401, got HTTP ${badWh.status}`);
+
+  const diag = await api('GET', `/api/restaurant/${restaurantId}/hotel/aiosell/inbound-attempts`);
+  const diagMsg = JSON.stringify(diag.data || {});
+  if (diag.status === 404 && /route not found/i.test(diagMsg)) {
+    fail('TC-AIOSELL-INBOUND-DIAG', 'Inbound-attempts endpoint deployed', 'HTTP 404 route-not-found — endpoint not registered');
+  } else if (diag.status === 200 && Array.isArray(diag.data?.matched) && Array.isArray(diag.data?.unrecognised)) {
+    pass('TC-AIOSELL-INBOUND-DIAG', 'Inbound-attempts diagnostics endpoint responds (matched + unrecognised)', `${diag.data.matched.length} matched, ${diag.data.unrecognised.length} unrecognised (last 60m)`);
+  } else if (diag.status === 403) {
+    skip('TC-AIOSELL-INBOUND-DIAG', 'Inbound-attempts diagnostics', `HTTP ${diag.status}`);
+  } else {
+    fail('TC-AIOSELL-INBOUND-DIAG', 'Inbound-attempts diagnostics endpoint responds', `HTTP ${diag.status}, keys=${Object.keys(diag.data || {}).join(',')}`);
+  }
 }
 
 // ── Reports tests ──────────────────────────────────────────────────────────

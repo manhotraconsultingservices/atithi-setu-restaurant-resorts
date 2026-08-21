@@ -32581,6 +32581,51 @@ ${data.tenant.name}`;
       _aiosellCentralReady = true;
     } catch (e: any) { console.warn('[aiosell] central table ensure failed:', e?.message || e); }
   }
+
+  // ── Inbound-webhook delivery diagnostics ────────────────────────────────────
+  // Records EVERY inbound webhook hit that carries a well-formed Basic header
+  // (anonymous/no-auth scanners are rejected before this, so they never flood the
+  // log). Purpose: let an owner SEE whether Aiosell is actually reaching the server
+  // and, if a call is rejected, exactly WHY (bad credentials vs unregistered
+  // hotelCode) — previously a 401 left zero trace. Central because an unrecognised
+  // hotelCode has no tenant DB to log into. Never stores the presented password.
+  let _aiosellInboundReady = false;
+  async function aiosellLogInboundAttempt(e: { hotelCode?: string | null; presentedUser?: string | null; restaurantId?: string | null; action?: string | null; outcome: string; reason?: string; ip?: string | null; }): Promise<void> {
+    try {
+      await ensureAiosellCentral();
+      if (!_aiosellInboundReady) {
+        await centralDb.run(`CREATE TABLE IF NOT EXISTS aiosell_inbound_attempts (
+          id TEXT PRIMARY KEY, hotel_code TEXT, presented_user TEXT, restaurant_id TEXT,
+          action TEXT, outcome TEXT, reason TEXT, source_ip TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+        await centralDb.run("CREATE INDEX IF NOT EXISTS idx_aiosell_inbound_created ON aiosell_inbound_attempts (created_at DESC)").catch(() => {});
+        _aiosellInboundReady = true;
+      }
+      const id = `AIA-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      await centralDb.run(
+        `INSERT INTO aiosell_inbound_attempts (id, hotel_code, presented_user, restaurant_id, action, outcome, reason, source_ip)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, String(e.hotelCode || '').slice(0, 120), String(e.presentedUser || '').slice(0, 120), e.restaurantId || null,
+         String(e.action || '').slice(0, 40), e.outcome, String(e.reason || '').slice(0, 300), String(e.ip || '').slice(0, 60)]
+      ).catch(() => {});
+      // Light self-prune (~5% of writes): 30-day retention on diagnostics.
+      if (Math.random() < 0.05) await centralDb.run("DELETE FROM aiosell_inbound_attempts WHERE created_at < (CURRENT_TIMESTAMP - INTERVAL '30 days')").catch(() => {});
+    } catch { /* diagnostics must never break the webhook */ }
+  }
+  // Extract ONLY the username from a Basic header (never the password) — for the diagnostic trail.
+  function aiosellBasicAuthUser(header: any): string | null {
+    try {
+      const m = /^Basic\s+(.+)$/i.exec(String(header || '')); if (!m) return null;
+      const dec = Buffer.from(m[1], 'base64').toString('utf8'); const i = dec.indexOf(':');
+      return (i < 0 ? dec : dec.slice(0, i)) || null;
+    } catch { return null; }
+  }
+  // Best-effort client IP behind the Cloudflare tunnel / proxy chain.
+  function aiosellClientIp(req: Request): string | null {
+    const cf = req.headers['cf-connecting-ip']; if (cf) return String(cf);
+    const xff = req.headers['x-forwarded-for']; if (xff) return String(xff).split(',')[0].trim();
+    return (req as any).ip || null;
+  }
   const _aiosellCredColDone = new Set<string>();
   async function aiosellEnsureCredCols(tenantDb: any, restaurantId: string): Promise<void> {
     if (_aiosellCredColDone.has(restaurantId)) return;
@@ -32840,10 +32885,17 @@ ${data.tenant.name}`;
     // ANY body parsing or DB work (no tenant-existence probing, no DoS amplification).
     const auth = req.headers['authorization'];
     if (!/^Basic\s+.+/i.test(String(auth || ''))) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    // Past this point the caller sent a Basic header — almost certainly a real
+    // integration (Aiosell), so it's safe to record for delivery diagnostics.
+    const ip = aiosellClientIp(req);
+    const presentedUser = aiosellBasicAuthUser(auth);
     const body: AiosellReservation = (req.body || {}) as AiosellReservation;
     const action = String(body.action || '').toLowerCase();
     const hotelCode = String(body.hotelCode || '');
-    if (!action || !hotelCode) return res.status(400).json({ success: false, message: 'action and hotelCode are required' });
+    if (!action || !hotelCode) {
+      aiosellLogInboundAttempt({ hotelCode, presentedUser, action, outcome: 'BAD_REQUEST', reason: 'missing action and/or hotelCode in body', ip });
+      return res.status(400).json({ success: false, message: 'action and hotelCode are required' });
+    }
     // Resolve the tenant (the hotelCode in the body is not a secret), then verify
     // the presented credentials against that tenant's stored creds (webhook
     // override if set, else the partner username/password), with the platform env
@@ -32857,9 +32909,32 @@ ${data.tenant.name}`;
       const tCfg = await aiosellCfgForTenant(await getTenantDb(restaurantId));
       tenantOk = verifyBasicAuthCredentials(process.env.AIOSELL_WEBHOOK_USERNAME || tCfg.username, process.env.AIOSELL_WEBHOOK_PASSWORD || tCfg.password, auth);
     }
-    if (!envOk && !tenantOk) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    if (!envOk && !tenantOk) {
+      // Diagnose WHY for the owner: unresolved hotelCode vs credentials that
+      // didn't match a resolved property. The public response stays a generic
+      // 401 (no property enumeration); the reason lives only in the owner's log.
+      const reason = restaurantId
+        ? `credentials did not match this property's saved Aiosell username/password (presented user '${presentedUser || ''}')`
+        : `hotelCode '${hotelCode}' is not registered/enabled for any property`;
+      aiosellLogInboundAttempt({ hotelCode, presentedUser, restaurantId, action, outcome: 'AUTH_FAIL', reason, ip });
+      // When the tenant DID resolve, also surface the rejection in its Sync Log so
+      // it appears alongside successful reservations in the 📜 Sync Log tab.
+      if (restaurantId) {
+        try {
+          logAiosellSync(await getTenantDb(restaurantId), {
+            direction: 'IN', operation: 'RESERVATION', trigger: 'webhook', actor: String((body as any).channel || 'Aiosell'),
+            status: 'FAIL', summary: 'Rejected inbound webhook — credentials did not match',
+            detail: `presented user '${presentedUser || ''}' · hotelCode ${hotelCode} · from ${ip || 'unknown IP'}`,
+          });
+        } catch { /* never block the webhook */ }
+      }
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
     // Authenticated — only now is it safe to reveal that no property is registered.
-    if (!restaurantId) return res.status(404).json({ success: false, message: `No property registered for hotelCode ${hotelCode}` });
+    if (!restaurantId) {
+      aiosellLogInboundAttempt({ hotelCode, presentedUser, action, outcome: 'HOTEL_UNKNOWN', reason: `authenticated via platform creds but hotelCode '${hotelCode}' is not registered`, ip });
+      return res.status(404).json({ success: false, message: `No property registered for hotelCode ${hotelCode}` });
+    }
     try {
       const out = await aiosellIngestReservation(restaurantId, body);
       // Log the inbound OTA hand-off in plain English (guest + channel + stay).
@@ -32876,6 +32951,11 @@ ${data.tenant.name}`;
           detail: out.ok ? `booking ${(body as any).bookingId || out.booking_id || ''}` : (out.reason || 'ingest failed'),
         });
       } catch { /* logging never blocks the webhook */ }
+      // Delivery diagnostic: an authenticated call that reached ingest — record
+      // whether it was accepted, a duplicate, or bounced on a mapping/validation.
+      aiosellLogInboundAttempt({ hotelCode, presentedUser, restaurantId, action, ip,
+        outcome: out.ok ? (out.duplicate ? 'DUPLICATE' : 'OK') : 'INGEST_FAIL',
+        reason: out.ok ? `booking ${(body as any).bookingId || out.booking_id || ''}` : (out.reason || 'ingest failed') });
       if (!out.ok) return res.status(out.status || 400).json({ success: false, message: out.reason || 'Failed' });
       // An OTA booking just consumed (or a cancel freed) a room — apply the owner's
       // configured action so the OTHER connected channels close/open in step.
@@ -33013,6 +33093,41 @@ ${data.tenant.name}`;
           ORDER BY created_at DESC LIMIT ${limit}`, params
       ).catch(() => []);
       res.json({ success: true, count: rows.length, entries: rows });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Inbound-webhook delivery diagnostics — "is Aiosell actually reaching us, and
+  // if a call is rejected, why?" Reads the central attempt log. `matched` = hits
+  // for THIS property (resolved to it, or carrying its registered hotel code).
+  // `unrecognised` = recent hits (last 60 min) whose hotelCode resolved to NO
+  // property — the tell-tale of Aiosell sending the wrong hotel code (returns
+  // only the code + time + outcome, never credentials).
+  app.get("/api/restaurant/:id/hotel/aiosell/inbound-attempts", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      await ensureAiosellCentral();
+      // The attempts table is created lazily on first inbound hit; if it doesn't
+      // exist yet the SELECTs below simply resolve to [] via their .catch.
+      const tenantDb = await getTenantDb(req.params.id);
+      const t = await aiosellTenantConfig(tenantDb);
+      const myCode = String(t.hotelCode || '');
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+      const matched: any[] = await centralDb.query(
+        `SELECT id, hotel_code, presented_user, restaurant_id, action, outcome, reason, source_ip, created_at
+           FROM aiosell_inbound_attempts
+          WHERE restaurant_id = ? ${myCode ? 'OR hotel_code = ?' : ''}
+          ORDER BY created_at DESC LIMIT ${limit}`,
+        myCode ? [req.params.id, myCode] : [req.params.id]
+      ).catch(() => []);
+      const unrecognised: any[] = await centralDb.query(
+        `SELECT hotel_code, outcome, source_ip, created_at
+           FROM aiosell_inbound_attempts
+          WHERE restaurant_id IS NULL AND outcome IN ('AUTH_FAIL','HOTEL_UNKNOWN','BAD_REQUEST')
+            ${myCode ? 'AND hotel_code <> ?' : ''}
+            AND created_at > (CURRENT_TIMESTAMP - INTERVAL '60 minutes')
+          ORDER BY created_at DESC LIMIT 20`,
+        myCode ? [myCode] : []
+      ).catch(() => []);
+      res.json({ success: true, hotel_code: myCode || null, matched_count: matched.length, matched, unrecognised });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   // Owner-configurable automation: what each booking event does toward Aiosell +
@@ -49635,9 +49750,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'filters-data-driven-groups-source',
+    commit_marker: 'aiosell-inbound-delivery-diagnostics',
     code_features: [
-      'filters-data-driven-groups-source',          //UX + CONVENTION (owner: "make Source filter dynamic — if no booking for a source, don't show it; the moment an Agoda booking id arrives it should appear. Adopt at other table filters + make it a design principle in CLAUDE.md"). Established that the Reservations/booking-history Source filter was ALREADY data-driven ([...new Set(hotelBookings.map(b=>b.booking_source))]) — a chip appears only when a loaded booking carries that source, so the first Agoda booking makes AGODA appear with zero code change. The one genuine hardcoded holdout was the Groups list "All Sources" <select> (a fixed 10-option enum: Direct/Walk-in/Agent/Booking.com/MMT/Goibibo/Agoda/Expedia/Airbnb/Direct-Web). Converted it to derive its options from the distinct booking_source values actually present in groupsList — `[...new Set(groupsList.map(g => g.booking_source || 'DIRECT'))].sort()` — mirroring the filter predicate's own `g.booking_source||'DIRECT'` defaulting so selection always matches; a labels lookup (LABELS[s]||s) keeps the emoji display without hardcoding the set. Codified the rule in CLAUDE.md ("Data-driven filter options"): derive filters for open-ended dimensions (source/category/department/agent/tender/tag) from the rows; keep fixed lifecycle/state enums (booking status, invoice/PO state) hardcoded. Frontend + doc only. tsc + vite build clean.
+      'aiosell-inbound-delivery-diagnostics',        //DIAGNOSTIC (owner: "Aiosell is validating the webhook but getting unauthorized — see if the request is even reaching us"). Problem: a rejected inbound webhook returned a bare 401 with ZERO trace, so the owner could not tell whether Aiosell was reaching the server, and — because an unregistered hotelCode also yields 401 (no property enumeration) — could not tell a bad password from a wrong hotel code. Now every inbound hit that carries a well-formed Basic header (anonymous scanners are still rejected before this, so no log-flood) is recorded to a NEW central `aiosell_inbound_attempts` table (id, hotel_code, presented_user [NEVER the password], restaurant_id, action, outcome, reason, source_ip; 30-day self-prune) via aiosellLogInboundAttempt(). Outcomes: OK / DUPLICATE / AUTH_FAIL / HOTEL_UNKNOWN / BAD_REQUEST / INGEST_FAIL, each with a plain reason (bad credentials vs unregistered hotelCode). When the hotelCode DOES resolve, the rejection is ALSO mirrored into that tenant's 📜 Sync Log (IN·RESERVATION·FAIL). NEW GET /hotel/aiosell/inbound-attempts (authenticate+hotelStaff) returns {hotel_code, matched[] (hits for this property — resolved to it or carrying its registered code), unrecognised[] (last-60-min hits whose hotelCode resolved to NO property — the tell-tale of Aiosell sending the wrong code; code+time+outcome only, no creds)}. FRONTEND: the AiosellSyncLog (📜 Sync Log tab) now leads with an "🛰️ Inbound webhook delivery" card — shows the registered hotel code, the last inbound attempt + outcome badge, a red banner when requests arrive with an unrecognised hotel code (vs your registered one), an amber "no inbound webhook has reached this server yet" empty-state, and a table of recent attempts (when · outcome · hotelCode · user sent · from IP · detail). The public 401 response is unchanged (still no property enumeration); the diagnosis lives only in the owner's log. New TC-AIOSELL-INBOUND-DIAG test. tsc + vite build clean.
+      'filters-data-driven-groups-source',      //UX + CONVENTION (owner: "make Source filter dynamic — if no booking for a source, don't show it; the moment an Agoda booking id arrives it should appear. Adopt at other table filters + make it a design principle in CLAUDE.md"). Established that the Reservations/booking-history Source filter was ALREADY data-driven ([...new Set(hotelBookings.map(b=>b.booking_source))]) — a chip appears only when a loaded booking carries that source, so the first Agoda booking makes AGODA appear with zero code change. The one genuine hardcoded holdout was the Groups list "All Sources" <select> (a fixed 10-option enum: Direct/Walk-in/Agent/Booking.com/MMT/Goibibo/Agoda/Expedia/Airbnb/Direct-Web). Converted it to derive its options from the distinct booking_source values actually present in groupsList — `[...new Set(groupsList.map(g => g.booking_source || 'DIRECT'))].sort()` — mirroring the filter predicate's own `g.booking_source||'DIRECT'` defaulting so selection always matches; a labels lookup (LABELS[s]||s) keeps the emoji display without hardcoding the set. Codified the rule in CLAUDE.md ("Data-driven filter options"): derive filters for open-ended dimensions (source/category/department/agent/tender/tag) from the rows; keep fixed lifecycle/state enums (booking status, invoice/PO state) hardcoded. Frontend + doc only. tsc + vite build clean.
       'aiosell-synclog-search',                 // UX (owner request): the 📜 Aiosell Sync Log is now filterable + searchable. Added an Operation dropdown (Availability / +rates / Rates / Stop-sell / Multiplier / No-show / OTA reservation / Fetch) and a free-text Search box that filters the loaded rows client-side across operation, trigger, actor, summary, detail, direction, and status (so you can find a guest name, room type, OTA booking id, or error text). A Clear button resets them; CSV export + the row count now reflect the filtered view; empty-state distinguishes "no activity" from "no match". Complements the existing direction/status server filters. Also documented the inbound OTA reservation JSON→room_bookings field mapping in CLAUDE.md. Frontend-only. tsc + vite build clean.
       'aiosell-ota-floating-inventory',             //FIX (owner: "I don't want to block the room, just minus inventory when there's a booking"): inbound OTA bookings (aiosellIngestReservation, book path) were inserted WITHOUT room_locked, so they took the column default room_locked=1 = PINNED to a specific physical room. Now they insert room_locked=0 (FLOATING) — the booking still decrements the room-TYPE availability (which is what gets pushed back to Aiosell), but the room isn't blocked: it reads as "Unassigned"/reshufflable until the front desk assigns it at check-in (the same pooled-inventory model as direct bookings, roomLocked=0). No schema change; availability still counts it via room_id→type. tsc + vite build clean.
       'aiosell-booking-room-category',              //UX (owner: "how do we know what room category an OTA guest booked?"): the Channel bookings report (/hotel/aiosell/bookings) now LEFT JOINs room_types and returns `category` (the mapped local room-type name), and the Reservations report table + CSV export show a new "Category" column (bold) next to Room. The category is what the Aiosell room code maps to in Step 2, so staff see the class each OTA guest booked without inferring it from the room number. Frontend + one SELECT; no logic change. tsc + vite build clean.

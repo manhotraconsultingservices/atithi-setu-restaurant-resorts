@@ -60130,6 +60130,7 @@ function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: 
   const [st, setSt] = useState<'' | 'OK' | 'FAIL' | 'PARTIAL' | 'INFO'>('');
   const [op, setOp] = useState('');   // operation filter (client-side)
   const [q, setQ] = useState('');     // free-text search (client-side)
+  const [inbound, setInbound] = useState<any>(null);   // webhook delivery diagnostics
 
   const load = useCallback(async () => {
     setLoading(true); setErr('');
@@ -60137,12 +60138,14 @@ function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: 
       const q = new URLSearchParams({ limit: '300' });
       if (dir) q.set('direction', dir);
       if (st) q.set('status', st);
-      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/aiosell/sync-log?${q}`, {
-        headers: { Authorization: `Bearer ${token}` }, credentials: 'include',
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j.error || `Failed (${res.status})`);
+      const [logRes, inbRes] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/hotel/aiosell/sync-log?${q}`, { headers: { Authorization: `Bearer ${token}` }, credentials: 'include' }),
+        fetch(`/api/restaurant/${restaurantId}/hotel/aiosell/inbound-attempts`, { headers: { Authorization: `Bearer ${token}` }, credentials: 'include' }).catch(() => null as any),
+      ]);
+      const j = await logRes.json().catch(() => ({}));
+      if (!logRes.ok) throw new Error(j.error || `Failed (${logRes.status})`);
       setEntries(Array.isArray(j.entries) ? j.entries : []);
+      if (inbRes && inbRes.ok) { const ij = await inbRes.json().catch(() => null); setInbound(ij || null); }
     } catch (e: any) { setErr(e.message || 'Failed to load sync log.'); }
     finally { setLoading(false); }
   }, [restaurantId, token, dir, st]);
@@ -60221,6 +60224,68 @@ function AiosellSyncLog({ restaurantId, token }: { restaurantId: string; token: 
       </div>
 
       {err && <div className="rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+      {inbound && (() => {
+        const outLabel: Record<string, string> = { OK: 'Accepted', DUPLICATE: 'Duplicate (ignored)', AUTH_FAIL: 'Rejected — auth', HOTEL_UNKNOWN: 'Rejected — unknown hotel code', BAD_REQUEST: 'Bad request', INGEST_FAIL: 'Reached, but not saved' };
+        const outCls = (o: string) => o === 'OK' ? 'bg-emerald-100 text-emerald-700' : o === 'DUPLICATE' ? 'bg-slate-100 text-slate-600'
+          : (o === 'AUTH_FAIL' || o === 'HOTEL_UNKNOWN') ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700';
+        const rows: any[] = Array.isArray(inbound.matched) ? inbound.matched : [];
+        const unrec: any[] = Array.isArray(inbound.unrecognised) ? inbound.unrecognised : [];
+        const last = rows[0];
+        return (
+          <div className="rounded-2xl border border-[#e8e0d8] bg-[#faf7f2] p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h4 className="text-sm font-bold text-[#1a1208] flex items-center gap-2">🛰️ Inbound webhook delivery <span className="text-[#9c8e85] font-normal">(is Aiosell reaching this property?)</span></h4>
+              {inbound.hotel_code && <span className="text-[11px] text-[#6b5d52]">Registered hotel code: <code className="px-1.5 py-0.5 rounded bg-white border border-[#e8e0d8] font-mono">{inbound.hotel_code}</code></span>}
+            </div>
+
+            {rows.length === 0 && unrec.length === 0 && (
+              <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5 text-sm text-amber-800">
+                <b>No inbound webhook has reached this server yet.</b> If Aiosell reports it is sending reservations, the request is not arriving — confirm the webhook URL <code className="font-mono">…/api/public/aiosell/reservation</code> is saved and enabled on Aiosell's side. (Only calls that carry an <code>Authorization: Basic</code> header are recorded here.)
+              </div>
+            )}
+
+            {last && (
+              <div className="text-sm text-[#1a1208]">
+                Last inbound attempt <b>{(() => { try { return new Date(last.created_at).toLocaleString(); } catch { return last.created_at; } })()}</b>
+                {' '}<span className={cn('inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold align-middle', outCls(last.outcome))}>{outLabel[last.outcome] || last.outcome}</span>
+                {last.reason && <span className="text-[#6b5d52]"> — {last.reason}</span>}
+              </div>
+            )}
+
+            {unrec.length > 0 && (
+              <div className="rounded-xl bg-red-50 border border-red-200 px-3 py-2.5 text-sm text-red-700">
+                ⚠ Requests are arriving with a hotel code this server does <b>not</b> recognise: {unrec.slice(0, 5).map((u, i) => <code key={i} className="mx-0.5 px-1.5 py-0.5 rounded bg-white border border-red-200 font-mono">{u.hotel_code || '(blank)'}</code>)}.
+                {inbound.hotel_code ? <> Your registered code is <code className="font-mono">{inbound.hotel_code}</code> — update the hotel code Aiosell is sending so they match.</> : <> Set this property's hotel code in Setup, then have Aiosell send that exact code.</>}
+              </div>
+            )}
+
+            {rows.length > 0 && (
+              <div className="rounded-xl border border-[#e8e0d8] bg-white overflow-x-auto">
+                <table className="w-full text-[12px] min-w-[640px]">
+                  <thead>
+                    <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] border-b border-[#efe6da]">
+                      <th className="py-2 px-3 whitespace-nowrap">When</th><th className="py-2 px-3">Outcome</th><th className="py-2 px-3">Hotel code</th><th className="py-2 px-3">User sent</th><th className="py-2 px-3">From IP</th><th className="py-2 px-3">Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.slice(0, 8).map((r, i) => (
+                      <tr key={i} className="border-b border-[#f7f2ec] last:border-0 align-top">
+                        <td className="py-2 px-3 whitespace-nowrap text-[#6b5d52] tabular-nums">{(() => { try { return new Date(r.created_at).toLocaleString(); } catch { return r.created_at; } })()}</td>
+                        <td className="py-2 px-3"><span className={cn('inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold', outCls(r.outcome))}>{outLabel[r.outcome] || r.outcome}</span></td>
+                        <td className="py-2 px-3 font-mono text-[11px]">{r.hotel_code || '—'}</td>
+                        <td className="py-2 px-3 font-mono text-[11px]">{r.presented_user || '—'}</td>
+                        <td className="py-2 px-3 font-mono text-[11px] text-[#9c8e85]">{r.source_ip || '—'}</td>
+                        <td className="py-2 px-3 text-[#6b5d52]">{r.reason || ''}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="rounded-2xl border border-[#e8e0d8] overflow-x-auto">
         <table className="w-full text-sm min-w-[720px]">
