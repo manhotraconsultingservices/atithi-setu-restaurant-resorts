@@ -22046,16 +22046,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <select value={groupsSourceFilter} onChange={e => setGroupsSourceFilter(e.target.value)}
                           className="px-2 py-1.5 text-xs rounded-lg border border-violet-200 bg-white focus:outline-none focus:ring-1 ring-violet-400 text-[#3d3128]">
                           <option value="">All Sources</option>
-                          <option value="DIRECT">🏠 Direct</option>
-                          <option value="WALK_IN">🚶 Walk-in</option>
-                          <option value="AGENT">🤝 Agent</option>
-                          <option value="BOOKING">🌐 Booking.com</option>
-                          <option value="MMT">✈️ MakeMyTrip</option>
-                          <option value="GOIBIBO">🧳 Goibibo</option>
-                          <option value="AGODA">🏨 Agoda</option>
-                          <option value="EXPEDIA">🌍 Expedia</option>
-                          <option value="AIRBNB">🏠 Airbnb</option>
-                          <option value="DIRECT_WEB">🌐 Direct (Web)</option>
+                          {/* Data-driven: only sources that actually occur in the loaded groups —
+                              mirrors the filter predicate's `g.booking_source || 'DIRECT'` defaulting. */}
+                          {[...new Set((groupsList as any[]).map((g: any) => g.booking_source || 'DIRECT').filter(Boolean))].sort().map((s: string) => {
+                            const lbl: Record<string, string> = { DIRECT: '🏠 Direct', WALK_IN: '🚶 Walk-in', WALKIN: '🚶 Walk-in', AGENT: '🤝 Agent', BOOKING: '🌐 Booking.com', MMT: '✈️ MakeMyTrip', GOIBIBO: '🧳 Goibibo', AGODA: '🏨 Agoda', EXPEDIA: '🌍 Expedia', AIRBNB: '🏠 Airbnb', DIRECT_WEB: '🌐 Direct (Web)' };
+                            return <option key={s} value={s}>{lbl[s] || s}</option>;
+                          })}
                         </select>
                         {(groupsSearch || groupsSourceFilter) && <span className="text-[10px] text-violet-600 font-semibold">{sorted.length} of {groupsList.length}</span>}
                       </div>
