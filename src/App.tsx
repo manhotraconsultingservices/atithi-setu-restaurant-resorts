@@ -34097,6 +34097,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           const outstanding = Math.max(0, Number(bd.total_amount||0) - Number(bd.advance_paid||0));
           const STATUS_LABEL: Record<string,string> = { BOOKED:'Confirmed', CHECKED_IN:'Checked In', CHECKING_OUT:'Checking Out', CHECKED_OUT:'Checked Out', CANCELLED:'Cancelled', ASSIGNED:'Assigned' };
           const STATUS_CLS: Record<string,string> = { BOOKED:'bg-blue-100 text-blue-800', CHECKED_IN:'bg-emerald-100 text-emerald-800', CHECKING_OUT:'bg-amber-100 text-amber-800', CHECKED_OUT:'bg-slate-100 text-slate-700', CANCELLED:'bg-stone-100 text-stone-500', ASSIGNED:'bg-rose-100 text-rose-700' };
+          // Derived, booking-related attributes surfaced in the enriched overview.
+          const bdSrc = String(bd.booking_source || '');
+          const bdOtaRef = bd.channel_ref ? String(bd.channel_ref).replace(/^AIOSELL:/i, '') : null;
+          const bdIsOTA = !!bd.channel_ref || /AIOSELL|BOOKING|AGODA|MMT|GOIBIBO|EXPEDIA|AIRBNB|CLEARTRIP|YATRA|OTA/i.test(bdSrc);
+          const bdIsCancelled = String(bd.status || '').toUpperCase() === 'CANCELLED';
+          const bdIsDayUse = String(bd.booking_type || '').toUpperCase() === 'DAY_USE';
+          const bdFnb = Number(bd.fnb_total || 0);
+          const bdFnbUnpaid = Number(bd.fnb_unpaid || 0);
+          const bdCommission = Number(bd.commission_amount || 0);
+          const bdNet = Number(bd.net_amount || 0);
+          const bdChildren = Number(bd.extra_children_with_mattress || 0) + Number(bd.extra_children_no_mattress || 0);
+          const bdDocs = Number(bd.document_count || 0);
+          const bdAdults = Number(bd.num_adults || bd.num_guests || 1);
+          const inr = (x:any) => `₹${Number(x||0).toLocaleString('en-IN')}`;
+          const fmtD = (x:any) => { try { return x ? new Date(x).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : ''; } catch { return String(x||''); } };
+          const fmtDT = (x:any) => { try { return x ? new Date(x).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : ''; } catch { return String(x||''); } };
           return (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setBookingDetailTarget(null)}>
               <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto p-5" onClick={e => e.stopPropagation()}>
@@ -34121,44 +34137,93 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     )}
                     <button type="button" onClick={() => { setBookingDetailTarget(null); setEditingBooking({ ...bd }); setShowBookingModal(true); }} className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-[12px] font-bold hover:bg-[#a84612]">✎ Edit booking</button>
                   </div>
+                  {/* Meta chips — booking-level attributes at a glance */}
+                  <div className="flex flex-wrap gap-1.5">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#efe9e1] text-[#6b5d52]">{bdIsDayUse ? '🕑 Day-use' : '🌙 Overnight'}</span>
+                    {bd.created_at && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#efe9e1] text-[#6b5d52]">Booked {fmtD(bd.created_at)}</span>}
+                    {bdOtaRef && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700">OTA ref {bdOtaRef}</span>}
+                    {bd.group_name && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 text-purple-700">👥 {bd.group_name}</span>}
+                    {Number(bd.room_locked) === 0 && !['CHECKED_IN','CHECKED_OUT'].includes(String(bd.status||'').toUpperCase()) && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700">Unassigned room</span>}
+                    {Number(bd.no_show) === 1 && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">No-show</span>}
+                    {bd.payment_status && bd.payment_status !== 'UNINVOICED' && <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">{String(bd.payment_status).replace(/_/g,' ')}</span>}
+                  </div>
+
                   {/* Stay summary */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="bg-[#faf7f2] rounded-2xl p-3">
                       <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Room</p>
-                      <p className="text-sm font-bold text-[#1a1208]">{bd.room_name || bd.room_id || '—'}</p>
-                      {bd.room_type_name && <p className="text-[11px] text-[#6b5d52]">{bd.room_type_name}</p>}
+                      <p className="text-sm font-bold text-[#1a1208]">{bd.room_name || (bd.room_number ? `Room ${bd.room_number}` : bd.room_id) || '—'}</p>
+                      {(bd.room_category || bd.room_type_name) && <p className="text-[11px] text-[#6b5d52]">{bd.room_category || bd.room_type_name}</p>}
                     </div>
                     <div className="bg-[#faf7f2] rounded-2xl p-3">
                       <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Dates</p>
-                      <p className="text-sm font-bold text-[#1a1208]">{String(bd.check_in_date||'').slice(0,10)}</p>
-                      <p className="text-[11px] text-[#6b5d52]">→ {String(bd.check_out_date||'').slice(0,10)} · {nights} night{nights!==1?'s':''}</p>
+                      <p className="text-sm font-bold text-[#1a1208]">{fmtD(bd.check_in_date)}{bdIsDayUse && bd.day_use_start_time ? ` · ${bd.day_use_start_time}` : ''}</p>
+                      <p className="text-[11px] text-[#6b5d52]">→ {fmtD(bd.check_out_date)} · {bdIsDayUse ? 'day-use' : `${nights} night${nights!==1?'s':''}`}</p>
+                      {bd.actual_checkin_at && <p className="text-[10px] text-emerald-700 mt-0.5">In: {fmtDT(bd.actual_checkin_at)}{bd.actual_checkout_at ? ` · Out: ${fmtDT(bd.actual_checkout_at)}` : ''}</p>}
                     </div>
                     <div className="bg-[#faf7f2] rounded-2xl p-3">
                       <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Guests</p>
                       <p className="text-sm font-bold text-[#1a1208]">{bd.num_guests||1} guest{(bd.num_guests||1)!==1?'s':''}</p>
-                      {bd.num_adults && <p className="text-[11px] text-[#6b5d52]">{bd.num_adults} adult{bd.num_adults!==1?'s':''}{bd.extra_adults>0?` · ${bd.extra_adults} extra`:''}</p>}
+                      <p className="text-[11px] text-[#6b5d52]">{bdAdults} adult{bdAdults!==1?'s':''}{Number(bd.extra_adults)>0?` · ${bd.extra_adults} extra`:''}{bdChildren>0?` · ${bdChildren} child${bdChildren!==1?'ren':''}`:''}</p>
                     </div>
                     <div className="bg-[#faf7f2] rounded-2xl p-3">
                       <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Source</p>
                       <p className="text-sm font-bold text-[#1a1208]">{bd.booking_source || '—'}</p>
-                      {bd.meal_plan_snapshot && <p className="text-[11px] text-[#6b5d52]">{bd.meal_plan_snapshot}</p>}
+                      {(bd.meal_plan_snapshot || bd.rate_plan_snapshot) && <p className="text-[11px] text-[#6b5d52]">{[bd.rate_plan_snapshot, bd.meal_plan_snapshot].filter(Boolean).join(' · ')}</p>}
                     </div>
                   </div>
+
+                  {/* Guest KYC — rendered only when there's identity data beyond name/phone/email */}
+                  {(bd.guest_gstin || bd.guest_nationality || bd.guest_state || bd.guest_id_proof || bdDocs > 0) && (
+                    <div className="grid grid-cols-2 gap-3">
+                      {(bd.guest_nationality || bd.guest_state) && <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Nationality / State</p><p className="text-sm font-bold text-[#1a1208]">{[bd.guest_nationality, bd.guest_state].filter(Boolean).join(' · ')}</p></div>}
+                      {bd.guest_gstin && <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Guest GSTIN</p><p className="text-sm font-mono font-bold text-[#1a1208]">{bd.guest_gstin}</p></div>}
+                      <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">ID documents</p><p className="text-sm font-bold text-[#1a1208]">{bdDocs > 0 ? `${bdDocs} on file` : (bd.guest_id_proof ? '1 on file' : 'None uploaded')}</p></div>
+                    </div>
+                  )}
                   {/* Financials */}
                   <div className="rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
-                    <div className="bg-[#cc5a16]/5 px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Financials</div>
+                    <div className="bg-[#cc5a16]/5 px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Financials{bd.room_rate_gst_exclusive != null && <span className="ml-1 normal-case font-semibold text-[#9c8e85]">· rate is GST-{Number(bd.room_rate_gst_exclusive)===1?'exclusive':'inclusive'}</span>}</div>
                     <div className="divide-y divide-[#cc5a16]/5">
-                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Room rate / night</span><span className="font-mono font-bold">₹{Number(bd.room_rate||0).toLocaleString('en-IN')}</span></div>
-                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Total</span><span className="font-mono font-bold">₹{Number(bd.total_amount||0).toLocaleString('en-IN')}</span></div>
-                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Advance paid</span><span className="font-mono font-bold text-emerald-700">₹{Number(bd.advance_paid||0).toLocaleString('en-IN')}</span></div>
-                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Outstanding</span><span className={cn('font-mono font-bold', outstanding>0?'text-rose-600':'text-emerald-700')}>₹{outstanding.toLocaleString('en-IN')}</span></div>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Room rate / night</span><span className="font-mono font-bold">{inr(bd.room_rate)}</span></div>
+                      {bdFnb > 0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Room-service F&amp;B</span><span className="font-mono font-bold">{inr(bdFnb)}{bdFnbUnpaid>0 && <span className="text-rose-600"> ({inr(bdFnbUnpaid)} unpaid)</span>}</span></div>}
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Total</span><span className="font-mono font-bold">{inr(bd.total_amount)}</span></div>
+                      {bdCommission > 0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">OTA commission{bd.commission_pct?` (${Number(bd.commission_pct)}%)`:''}</span><span className="font-mono font-bold text-rose-600">− {inr(bdCommission)}</span></div>}
+                      {bdCommission > 0 && bdNet > 0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Net to property</span><span className="font-mono font-bold">{inr(bdNet)}</span></div>}
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Advance paid</span><span className="font-mono font-bold text-emerald-700">{inr(bd.advance_paid)}</span></div>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Outstanding</span><span className={cn('font-mono font-bold', outstanding>0?'text-rose-600':'text-emerald-700')}>{inr(outstanding)}</span></div>
                     </div>
                   </div>
+
+                  {/* Channel / OTA settlement — only for OTA bookings with settlement data */}
+                  {bdIsOTA && (bdOtaRef || Number(bd.channel_prepaid)===1 || Number(bd.channel_tax)>0 || Number(bd.channel_tcs)>0 || Number(bd.channel_tds)>0) && (
+                    <div className="rounded-2xl border border-indigo-100 overflow-hidden">
+                      <div className="bg-indigo-50 px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-indigo-700">Channel / OTA</div>
+                      <div className="divide-y divide-indigo-50">
+                        {bdOtaRef && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">OTA reference</span><span className="font-mono font-bold">{bdOtaRef}</span></div>}
+                        <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Payment model</span><span className="font-bold">{Number(bd.channel_prepaid)===1?'Prepaid (collected by OTA)':'Pay at hotel'}</span></div>
+                        {Number(bd.channel_tax)>0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">OTA tax</span><span className="font-mono font-bold">{inr(bd.channel_tax)}</span></div>}
+                        {Number(bd.channel_tcs)>0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">TCS</span><span className="font-mono font-bold">{inr(bd.channel_tcs)}</span></div>}
+                        {Number(bd.channel_tds)>0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">TDS</span><span className="font-mono font-bold">{inr(bd.channel_tds)}</span></div>}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Special requests */}
                   {bd.special_requests && (
                     <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3">
                       <p className="text-[10px] font-bold uppercase tracking-widest text-amber-800 mb-1">Special Requests</p>
                       <p className="text-[12px] text-amber-900">{bd.special_requests}</p>
+                    </div>
+                  )}
+
+                  {/* Cancellation — only when cancelled */}
+                  {bdIsCancelled && (
+                    <div className="bg-stone-50 border border-stone-200 rounded-2xl px-4 py-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-stone-600 mb-1">Cancellation</p>
+                      <p className="text-[12px] text-stone-700">{[bd.cancelled_at?`On ${fmtDT(bd.cancelled_at)}`:null, bd.cancelled_source?`via ${bd.cancelled_source}`:null, bd.cancelled_by?`by ${bd.cancelled_by}`:null].filter(Boolean).join(' · ') || 'Cancelled'}</p>
+                      {bd.cancellation_reason && <p className="text-[12px] text-stone-600 mt-0.5">Reason: {bd.cancellation_reason}</p>}
+                      {Number(bd.cancellation_refund_amount)>0 && <p className="text-[12px] text-stone-600 mt-0.5">Refund: {inr(bd.cancellation_refund_amount)}{bd.cancellation_refund_pct?` (${Number(bd.cancellation_refund_pct)}%)`:''}</p>}
                     </div>
                   )}
                   {/* Actions */}
