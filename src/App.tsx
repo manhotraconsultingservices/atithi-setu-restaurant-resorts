@@ -34118,7 +34118,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto p-5" onClick={e => e.stopPropagation()}>
                 <ObjectDetail
                   title={bd.guest_name}
-                  subtitle={`${bd.id} · ${bd.guest_phone || '—'}${bd.guest_email ? ` · ${bd.guest_email}` : ''}`}
+                  subtitle={bd.id}
                   statusPill={<span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', STATUS_CLS[bd.status] || 'bg-gray-100 text-gray-600')}>{STATUS_LABEL[bd.status] || bd.status}</span>}
                   onBack={() => setBookingDetailTarget(null)}
                   backLabel="Close"
@@ -34172,6 +34172,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       {(bd.meal_plan_snapshot || bd.rate_plan_snapshot) && <p className="text-[11px] text-[#6b5d52]">{[bd.rate_plan_snapshot, bd.meal_plan_snapshot].filter(Boolean).join(' · ')}</p>}
                     </div>
                   </div>
+
+                  {/* Contact — guest phone / email promoted from the header, as tap-to-call / tap-to-mail */}
+                  {(bd.guest_phone || bd.guest_email) && (
+                    <div className="grid grid-cols-2 gap-3">
+                      {bd.guest_phone && <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Phone</p><a href={`tel:${bd.guest_phone}`} className="text-sm font-bold text-[#1a1208] hover:text-[#cc5a16] break-all">{bd.guest_phone}</a></div>}
+                      {bd.guest_email && <div className="bg-[#faf7f2] rounded-2xl p-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Email</p><a href={`mailto:${bd.guest_email}`} className="text-sm font-bold text-[#1a1208] hover:text-[#cc5a16] break-all">{bd.guest_email}</a></div>}
+                    </div>
+                  )}
 
                   {/* Guest KYC — rendered only when there's identity data beyond name/phone/email */}
                   {(bd.guest_gstin || bd.guest_nationality || bd.guest_state || bd.guest_id_proof || bdDocs > 0) && (
