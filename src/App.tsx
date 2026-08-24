@@ -111,7 +111,14 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // to any non-owner with an ancient unmarked allowedTabs list — which is
 // the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
 // only be visible to Business owner. this is critical.").
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'RESTAURANT_REPORTS', 'HR_PAYROLL', 'PROCUREMENT', 'ALL_REPORTS']);
+// NOTE: DELIVERY and RESTAURANT_REPORTS were removed from this grandfather set
+// (2026-08-24). They were leaking into the nav for restricted built-in roles
+// (e.g. Front Desk) whose /my-permissions list carries no marker — the reported
+// "Front Desk user can access Delivery Partners / Restaurant Reports" bug. They
+// are ordinary module tabs: a role sees them only if granted in the Staff Access
+// matrix (or if unrestricted). Keeping the rest of the set preserves migration
+// safety for the tabs that genuinely relied on it.
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'HR_PAYROLL', 'PROCUREMENT', 'ALL_REPORTS']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -21857,7 +21864,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   // submit sends room_type_id so the server auto-assigns (not locks).
                   room_type_id: room?.type_id || '__UNCATEGORISED__',
                   room_floating: true,
-                  room_rate: room?.base_rate || 0,
+                  room_rate: 0,  // seed 0 → server routes through the matrix resolver so extra adult/child charges are itemized into the folio; a non-zero seed is read as a manual all-in override that drops extras (matches New Booking + walk-in)
                   check_in_date: date,
                   check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
                   booking_type: 'OVERNIGHT',
@@ -21887,7 +21894,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   room_id: roomId,
                   room_type_id: room?.type_id || '__UNCATEGORISED__',
                   room_floating: true,
-                  room_rate: room?.base_rate || 0,
+                  room_rate: 0,  // seed 0 → server routes through the matrix resolver so extra adult/child charges are itemized into the folio; a non-zero seed is read as a manual all-in override that drops extras (matches New Booking + walk-in)
                   check_in_date: date,
                   check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
                   booking_type: 'OVERNIGHT',
@@ -21922,7 +21929,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   // submit sends room_type_id so the server auto-assigns (not locks).
                   room_type_id: room?.type_id || '__UNCATEGORISED__',
                   room_floating: true,
-                  room_rate: room?.base_rate || 0,
+                  room_rate: 0,  // seed 0 → server routes through the matrix resolver so extra adult/child charges are itemized into the folio; a non-zero seed is read as a manual all-in override that drops extras (matches New Booking + walk-in)
                   check_in_date: date,
                   check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
                   booking_type: 'OVERNIGHT',
@@ -23407,7 +23414,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           // Option A — float against the clicked room's category.
                           room_type_id: room?.type_id || '__UNCATEGORISED__',
                           room_floating: true,
-                          room_rate: room?.base_rate || 0,
+                          room_rate: 0,  // seed 0 → server routes through the matrix resolver so extra adult/child charges are itemized into the folio; a non-zero seed is read as a manual all-in override that drops extras (matches New Booking + walk-in)
                           check_in_date: date,
                           check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
                           booking_type: 'OVERNIGHT',
@@ -44239,7 +44246,11 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today, module: 'SHARED' });
+  // module starts unset (was 'SHARED') and is a required choice — a pre-set SHARED
+  // default meant every entry saved without touching the dropdown was tagged Shared,
+  // so it never showed under the Hotel/Restaurant filters (reported bug). The filter
+  // itself works; the defect was this default.
+  const [form, setForm] = useState({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today, module: '' });
   const [saving, setSaving] = useState(false);
   const role = (localStorage.getItem('role') || '').toUpperCase();
   const canDelete = ['OWNER', 'SUPER_ADMIN'].includes(role);
@@ -44318,6 +44329,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
               <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Module</label>
               <select value={form.module} onChange={e => setForm(f => ({ ...f, module: e.target.value }))}
                 className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                <option value="" disabled>Select module…</option>
                 <option value="HOTEL">Hotel</option>
                 <option value="RESTAURANT">Restaurant</option>
                 <option value="SHARED">Shared / Property-wide</option>
@@ -44349,7 +44361,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
           <div className="flex gap-2 pt-1">
             <button onClick={() => setShowForm(false)}
               className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2] transition-colors">Cancel</button>
-            <button onClick={save} disabled={saving || !form.amount || !form.category}
+            <button onClick={save} disabled={saving || !form.amount || !form.category || !form.module}
               className="px-6 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50 hover:bg-[#a84612] transition-colors">
               {saving ? 'Saving…' : 'Save Entry'}
             </button>
@@ -46422,7 +46434,11 @@ const HsdEmpty: React.FC<{ msg: string }> = ({ msg }) =>
 function HotelStaffDashboard({ restaurantId, token, userRole }: {
   restaurantId: string; token: string; userRole: string;
 }) {
-  const today = new Date().toISOString().slice(0, 10);
+  // IST calendar date (en-CA → YYYY-MM-DD), matching the server's stats endpoint.
+  // Was new Date().toISOString().slice(0,10) — a UTC date that never === the
+  // full-ISO-timestamp check_in_date/check_out_date the API returns (pg DATE →
+  // JS Date → ".....T00:00:00.000Z"), so Arrivals/Departures always read 0.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
   const ROLE_META: Record<string, { label: string; emoji: string; color: string }> = {
     FRONT_DESK:   { label: 'Front Desk',   emoji: '🛎️',  color: 'amber' },
@@ -46497,8 +46513,11 @@ function HotelStaffDashboard({ restaurantId, token, userRole }: {
   const inProgressSr = serviceRequests.filter(s => s.status === 'IN_PROGRESS');
   const doneSr       = serviceRequests.filter(s => s.status === 'COMPLETED' || s.status === 'CANCELLED');
 
-  const arrivals   = bookings.filter(b => b.check_in_date  === today && (b.status === 'BOOKED' || b.status === 'CONFIRMED'));
-  const departures = bookings.filter(b => b.check_out_date === today && b.status === 'CHECKED_IN');
+  // Compare on the DATE part only (check_in/out_date arrive as full ISO timestamps).
+  // Arrivals = expected/arrived today (BOOKED or CHECKED_IN), matching the server's
+  // stats definition; 'CONFIRMED' was never a real room_bookings status.
+  const arrivals   = bookings.filter(b => String(b.check_in_date  || '').slice(0, 10) === today && (b.status === 'BOOKED' || b.status === 'CHECKED_IN'));
+  const departures = bookings.filter(b => String(b.check_out_date || '').slice(0, 10) === today && b.status === 'CHECKED_IN');
   const inhouse    = bookings.filter(b => b.status === 'CHECKED_IN');
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -55130,6 +55149,16 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
     if (!supplierId) { setErr('Pick a supplier'); return; }
     const validLines = lines.filter(l => l.ingredient_id && Number(l.qty_ordered) > 0);
     if (validLines.length === 0) { setErr('Add at least one line item'); return; }
+    // Require a positive unit price on every line. The price auto-fills from the
+    // item master's "Last Purchase ₹" (default_unit_price), which is optional — so
+    // items created/seeded without a price default to ₹0 and the whole PO totals to
+    // ₹0 (reported bug). Prompt for the price rather than silently saving a ₹0 PO.
+    const noPrice = validLines.find(l => !(Number(l.unit_price) > 0));
+    if (noPrice) {
+      const ing = ingredients.find(x => x.id === noPrice.ingredient_id);
+      setErr(`Enter a unit price for "${ing?.name || 'the selected item'}" — it has no saved purchase price, so the PO would total ₹0.`);
+      return;
+    }
     setSaving(true); setErr('');
     try {
       const r = await fetch(`/api/restaurant/${restaurantId}/inventory/purchase-orders`, {

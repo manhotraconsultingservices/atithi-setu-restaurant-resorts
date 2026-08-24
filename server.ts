@@ -5174,7 +5174,16 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
     const _isBuiltinRole = _SYSTEM_ROLE_SET.has(String(role).toUpperCase());
     if (perms !== null && _isBuiltinRole) {
       const RBAC_NEWLY_ADDED = [
-        'HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'HOUSEKEEPING',
+        'HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT',
+        // HOUSEKEEPING removed from this inject-to-Full list (2026-08-24): like the
+        // Events tabs below, defaulting it to level 3 for EVERY built-in role meant a
+        // restricted role (e.g. Front Desk set to None) still saw Housekeeping in its
+        // nav and passed requireTabAccess('HOUSEKEEPING') — the reported "Front Desk
+        // can access Housekeeping" leak. Migration safety is now handled the same way
+        // as Events: requireTabAction grandfathers only the module's built-in
+        // operational roles for a HOUSEKEEPING tab absent from the saved matrix
+        // (HOUSEKEEPING is a HOTEL_TAB_IDS member), so genuine hotel ops roles keep
+        // access while the matrix stays authoritative for restricted/custom roles.
         // NOTE: the core Events tabs (EVENTS_DASHBOARD … EVENTS_SETTINGS) are
         // deliberately NOT defaulted to Full here. Doing so caused the reported
         // "owner set the role to None but the user still had full access" bug:
@@ -23879,11 +23888,21 @@ ${data.tenant.name}`;
       const conflict = await venueBookingConflict(db, req.params.vid, eventDate, endDate, startTime, endTime, excludeId, bufferMin);
       const blocked = conflict ? null : await venueBlockConflict(db, req.params.vid, eventDate);
       const cleaning = (!conflict && !blocked) ? await hasOpenHousekeepingJob(db, req.params.vid).catch(() => false) : false;
+      // Hall Status board gate — a hall currently marked OCCUPIED/CLEANING/MAINTENANCE/
+      // BLOCKED is unavailable for a booking that RUNS TODAY. This flag is a "now"
+      // operational state (set at event check-in), so it is scoped to today only:
+      // future-dated bookings remain governed purely by the date-overlap conflict
+      // above, and a hall busy today never blocks next week's booking.
+      const todayIst = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const spansToday = String(eventDate).slice(0, 10) <= todayIst && todayIst <= String(endDate || eventDate).slice(0, 10);
+      const boardStatus = String(venue.status || 'VACANT').toUpperCase();
+      const occupiedNow = spansToday && ['OCCUPIED', 'CLEANING', 'MAINTENANCE', 'BLOCKED'].includes(boardStatus);
       const rate = resolveVenueCharge(venue, rateBasis, startTime, endTime, { slot, eventDate, endDate, profile });
-      const available = !conflict && !blocked && !cleaning;
+      const available = !conflict && !blocked && !cleaning && !occupiedNow;
       const reason = conflict ? `Clashes with an existing booking (incl. ${bufferMin}-min turnaround)`
         : blocked ? `Hall blocked: ${blocked.reason || 'maintenance'}`
         : cleaning ? 'Hall has an open cleaning checklist from a prior event'
+        : occupiedNow ? `Hall is currently ${boardStatus.toLowerCase()} and unavailable for a booking today`
         : 'Available';
       res.json({ available, reason, rate: round2(rate), start_time: startTime, end_time: endTime, slot, buffer_min: bufferMin });
     } catch (err: any) { console.error("/events venue availability-check error:", err); res.status(500).json({ error: "Failed to check availability" }); }
@@ -24879,15 +24898,27 @@ ${data.tenant.name}`;
       const sched = await resolveVenueBooking(db, b);
       const { rateBasis, startTime, endTime, slot, bufferMin, venueRate } = sched;
 
-      // Venue conflict guard (only meaningful for held statuses; INQUIRY skips it).
-      // The check is turnaround-aware: two same-day windows clash unless there's a
-      // buffer-minute gap between them.
       const targetStatus = b.status || 'INQUIRY';
-      if (sched.venueId && (targetStatus === 'CONFIRMED' || targetStatus === 'IN_PROGRESS')) {
-        const conflict = await venueBookingConflict(db, sched.venueId, b.event_date, b.end_date || null, startTime, endTime, undefined, bufferMin);
-        if (conflict) return res.status(409).json({ error: "Venue already booked for this date/time (or within its turnaround buffer)" });
-        const blocked = await venueBlockConflict(db, sched.venueId, b.event_date);
-        if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
+      if (sched.venueId) {
+        // Hall Status board gate (mirrors the availability-check endpoint): reject a
+        // booking that RUNS TODAY into a hall currently marked non-VACANT. Scoped to
+        // today only — the board status is a "now" flag, so it never blocks a future-
+        // dated booking; those are governed by the date-overlap guard below.
+        const vrow: any = await db.get("SELECT status FROM event_venues WHERE id = ?", [sched.venueId]).catch(() => null);
+        const todayIst = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+        const spansToday = String(b.event_date).slice(0, 10) <= todayIst && todayIst <= String(b.end_date || b.event_date).slice(0, 10);
+        const boardStatus = String(vrow?.status || 'VACANT').toUpperCase();
+        if (spansToday && ['OCCUPIED', 'CLEANING', 'MAINTENANCE', 'BLOCKED'].includes(boardStatus)) {
+          return res.status(409).json({ error: `Hall is currently ${boardStatus.toLowerCase()} and unavailable for a booking today. Free it on the Hall Status board first.` });
+        }
+        // Date/time overlap guard — turnaround-aware; only meaningful for held
+        // statuses (an INQUIRY is tentative and may share a future slot).
+        if (targetStatus === 'CONFIRMED' || targetStatus === 'IN_PROGRESS') {
+          const conflict = await venueBookingConflict(db, sched.venueId, b.event_date, b.end_date || null, startTime, endTime, undefined, bufferMin);
+          if (conflict) return res.status(409).json({ error: "Venue already booked for this date/time (or within its turnaround buffer)" });
+          const blocked = await venueBlockConflict(db, sched.venueId, b.event_date);
+          if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
+        }
       }
 
       const id = mkEventId('EVT');
@@ -34136,8 +34167,11 @@ ${data.tenant.name}`;
       const t = to   || new Date().toISOString().slice(0, 10);
 
       const [hotelFolio, spaFolio, restaurantOrders, procurement, petty, payroll] = await Promise.all([
-        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='closed' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        // Hotel folios settle with status='settled' (see server ~4301/37500/42831);
+        // 'closed' is the SPA/table-session vocabulary. Filtering hotel on 'closed'
+        // matched zero rows → Hotel Room Revenue always showed ₹0.
+        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
@@ -34265,8 +34299,8 @@ ${data.tenant.name}`;
       const t = month + '-31';
 
       const [hotelGst, spaGst, restaurantGst, procItc] = await Promise.all([
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='closed' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
       ]);
@@ -37807,6 +37841,17 @@ ${data.tenant.name}`;
         // checkout time. The blank INSERT that was here previously left the folio
         // with subtotal=0, causing the group invoice to total ₹0.
         await createFolioWithRoomCharges(req.params.id, b);
+        // Raise the CHECK_IN checklist for this room, mirroring the single-booking
+        // check-in path (~38929). Non-blocking + idempotent (dedupe key on source_ref)
+        // so a bulk check-in never stalls; the group route intentionally does NOT
+        // apply the single path's 409 blocking gate — blocking a bulk loop on one
+        // room's mandatory tasks is worse UX. Gated by the same owner flag.
+        try {
+          if (Number(check.restaurant?.checklist_validate_on_checkin ?? 1) === 1) {
+            const rmCi: any = await db.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+            await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmCi?.name || (rmCi?.room_number ? `Room ${rmCi.room_number}` : b.room_id), source_ref: b.id, guest_label: guestName || null, room_type_id: rmCi?.type_id || null, trigger: 'CHECK_IN', due_date: _checklistDueDate('CHECK_IN', { checkInDate: b.check_in_date }) });
+          }
+        } catch (e) { console.warn('[group checkin] checklist raise (non-fatal):', e); }
         writeObjectAudit(db, req, {
           objectType: 'ROOM_BOOKING', objectId: b.id, action: 'CHECKED_IN',
           summary: `Checked in via group check-in${guestName ? ` — ${guestName}` : ''}`,
@@ -39536,13 +39581,35 @@ ${data.tenant.name}`;
       // or waive=true. settleFolioForBooking flips folio.status='settled'
       // and stamps payment_method (single-column legacy). The detailed
       // payment breakdown lives in folio_payments now.
+      //
+      // GUEST-BILLS FIX: the "Guest Bills" list reads this single legacy
+      // folios.payment_method column. Previously it took the request body's
+      // secondary "settlement method (legacy)" dropdown, which defaults to CASH —
+      // so in the New-Booking → check-in → check-out flow (where the balance is
+      // collected via the "Receive payment" box, recorded into folio_payments)
+      // Guest Bills always showed Cash even though the folio/invoice showed the
+      // real method. Derive it from the ACTUAL payment ledger (dominant non-void,
+      // non-refund folio_payments method), falling back to the body then CASH, so
+      // Guest Bills matches the folio for BOTH the new-booking and walk-in flows.
+      // A single column can't represent split payments, hence "dominant".
+      let effectiveMethod = String(payment_method || '').toUpperCase().trim();
+      if (openFolio?.id) {
+        const pm: any = await tenantDb.get(
+          `SELECT UPPER(payment_method) AS pm FROM folio_payments
+             WHERE folio_id = ? AND (is_voided IS NULL OR is_voided = 0)
+               AND UPPER(COALESCE(payment_type,'')) <> 'REFUND'
+           GROUP BY UPPER(payment_method) ORDER BY SUM(amount) DESC LIMIT 1`, [openFolio.id]
+        ).catch(() => null);
+        if (pm?.pm) effectiveMethod = String(pm.pm);
+      }
+      if (!effectiveMethod) effectiveMethod = 'CASH';
       const settled = await settleFolioForBooking(
-        req.params.id, b.id, payment_method || 'CASH', discount || 0, !!waive, loyaltyResolver
+        req.params.id, b.id, effectiveMethod, discount || 0, !!waive, loyaltyResolver
       );
 
       const now = new Date().toISOString();
       await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ?", [now, req.params.bookingId]);
-      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CHECKED_OUT', summary: `Checked out — ${b.guest_name || ''}${settled?.grand_total != null ? ` · ₹${Number(settled.grand_total).toFixed(2)} via ${payment_method || 'CASH'}` : ''}${waive ? ' (waived)' : ''}`.trim(), before: { status: b.status, actual_checkout_at: b.actual_checkout_at || null }, after: { status: 'CHECKED_OUT', actual_checkout_at: now, grand_total: settled?.grand_total != null ? Number(settled.grand_total) : null, payment_method: payment_method || 'CASH', waived: !!waive, folio_id: settled?.id || null } });
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CHECKED_OUT', summary: `Checked out — ${b.guest_name || ''}${settled?.grand_total != null ? ` · ₹${Number(settled.grand_total).toFixed(2)} via ${effectiveMethod}` : ''}${waive ? ' (waived)' : ''}`.trim(), before: { status: b.status, actual_checkout_at: b.actual_checkout_at || null }, after: { status: 'CHECKED_OUT', actual_checkout_at: now, grand_total: settled?.grand_total != null ? Number(settled.grand_total) : null, payment_method: effectiveMethod, waived: !!waive, folio_id: settled?.id || null } });
       await tenantDb.run("UPDATE rooms SET status = 'CLEANING' WHERE id = ?", [b.room_id]);
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: b.room_id, action: 'CLEANING', summary: `Cleaning — guest ${b.guest_name || ''} checked out`.trim() });
       await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]);
@@ -49737,9 +49804,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'upi-link-raw-vpa-fix',
+    commit_marker: 'qa-bugfix-batch-1',
     code_features: [
-      'upi-link-raw-vpa-fix',                        //BUGFIX (owner, 5+yr UPI-integration review: "guest UPI url doesn't work; 0% commission open-source solution"). ROOT CAUSE: the guest-facing UPI deep link built `pa` with encodeURIComponent(vpa), turning the mandatory '@' into %40 (`pa=hotel%40okhdfcbank`). Per the NPCI UPI Linking Spec, `pa` must be the RAW vpa — PhonePe/BHIM/Paytm + most QR scanners reject a %40-encoded UPI ID (GPay silently decodes it, hiding the bug in testing). All three guest surfaces (deep link, QR value, reconstructed Android intent://) derived from that one broken string, so all failed together; the restaurant customer QR built `pa` raw and worked, which pinpointed it. FIX: new shared, unit-tested `upiLink.ts` (buildUpiUri + isValidVpa) — single source of truth imported by BOTH server.ts and src/App.tsx (removing 5 drifting copies). It keeps `pa` RAW, URL-encodes only free-text pn/tn, fixes `am` to 2 decimals, sanitises `tr` to NPCI alphanumeric (≤35), and returns '' for an invalid VPA so no dead link/QR is ever emitted. Replaced all 5 builders (buildHotelPaymentLinkPayload, public-booking confirmation, resend-payment-link override, restaurant customer QR + Open-UPI-App link). Settings now show a live preview of the real link and a red "this UPI ID doesn't look valid" warning when the VPA fails the grammar. This is the correct 0%-commission approach — a direct upi:// deep link/QR to the property's own VPA, money straight to their bank, no gateway/MDR; nothing to sign up for. New unit test test-scripts/upi_link_builder_check.ts (npm run test:upi) — all invariants green. tsc + vite build clean.
+      'qa-bugfix-batch-1',                           //BUGFIXES (QA manual-testing batch, root-caused + fixed): (1) GROUP CHECK-IN CHECKLIST — the bulk booking-groups/:id/checkin handler flipped status + created folios but never raised the CHECK_IN checklist (single check-in does at ~38929); added a non-blocking, idempotent raiseChecklistJobs per room (group checkOUT already raised it). (2) OCCUPIED VENUE BOOKABLE — event_venues.status (Hall Status board) was never consulted by booking availability; the create-event guard also skipped conflict checks for INQUIRY. Added a same-day board-status gate (OCCUPIED/CLEANING/MAINTENANCE/BLOCKED → 409) to BOTH the availability-check endpoint and the create handler, date-scoped to today so future bookings are unaffected. (3) HOTEL ROOM REVENUE ₹0 IN P&L — /reports/pnl filtered hotel folios on status='closed' but hotel folios settle as 'settled' ('closed' is spa/table vocab); fixed hotel P&L + the identical GST-ledger hotel query. (4) EXPENSE ENTRIES ALWAYS 'SHARED' — the Expense Journal form defaulted module to 'SHARED' so entries never showed under Hotel/Restaurant filters; made module a required explicit choice (filter itself was correct). (5) RBAC LEAK — Front Desk (restricted built-in role) could see Housekeeping / Delivery Partners / Restaurant Reports: removed DELIVERY + RESTAURANT_REPORTS from the ALWAYS_VISIBLE_TABS grandfather set, and removed HOUSEKEEPING from the RBAC_NEWLY_ADDED inject-to-Full list (now matrix-authoritative with requireTabAction ops-role fallback, same pattern already applied to Events tabs). (6) FRONT-DESK DASHBOARD ARRIVALS/DEPARTURES 0 — compared a UTC date-only `today` with `===` against full-ISO-timestamp check_in/out_date (In-House worked, it's status-only); fixed to IST date + .slice(0,10), arrivals = BOOKED|CHECKED_IN today (matches server stats). (7) EXTRA ADULT/CHILD CHARGES MISSING FROM FOLIO — 4 calendar/dashboard/stay-view new-booking seeds sent room_rate=base_rate (non-zero), which the server treats as a manual all-in override that DROPS extras; changed all 4 to room_rate=0 so the matrix resolver itemizes extra-person charges (matches New Booking + walk-in). (8) GUEST BILLS SHOWS 'CASH' — the checkout stamped folios.payment_method from the legacy secondary dropdown (default CASH); now derives it from the dominant real folio_payments method so Guest Bills matches the folio/invoice for the new-booking flow (walk-in already worked). (9) PO ₹0 PRICE — a PO line whose item master has no default_unit_price saved a ₹0 line (₹0 subtotal/GST/total); the PO form now requires a positive unit price and names the item. Test-team non-bugs called out separately (refund manual by policy; edit-after-check-in block is by design). tsc + vite build clean.
+      'upi-link-raw-vpa-fix',                    //BUGFIX (owner, 5+yr UPI-integration review: "guest UPI url doesn't work; 0% commission open-source solution"). ROOT CAUSE: the guest-facing UPI deep link built `pa` with encodeURIComponent(vpa), turning the mandatory '@' into %40 (`pa=hotel%40okhdfcbank`). Per the NPCI UPI Linking Spec, `pa` must be the RAW vpa — PhonePe/BHIM/Paytm + most QR scanners reject a %40-encoded UPI ID (GPay silently decodes it, hiding the bug in testing). All three guest surfaces (deep link, QR value, reconstructed Android intent://) derived from that one broken string, so all failed together; the restaurant customer QR built `pa` raw and worked, which pinpointed it. FIX: new shared, unit-tested `upiLink.ts` (buildUpiUri + isValidVpa) — single source of truth imported by BOTH server.ts and src/App.tsx (removing 5 drifting copies). It keeps `pa` RAW, URL-encodes only free-text pn/tn, fixes `am` to 2 decimals, sanitises `tr` to NPCI alphanumeric (≤35), and returns '' for an invalid VPA so no dead link/QR is ever emitted. Replaced all 5 builders (buildHotelPaymentLinkPayload, public-booking confirmation, resend-payment-link override, restaurant customer QR + Open-UPI-App link). Settings now show a live preview of the real link and a red "this UPI ID doesn't look valid" warning when the VPA fails the grammar. This is the correct 0%-commission approach — a direct upi:// deep link/QR to the property's own VPA, money straight to their bank, no gateway/MDR; nothing to sign up for. New unit test test-scripts/upi_link_builder_check.ts (npm run test:upi) — all invariants green. tsc + vite build clean.
       'booking-overview-contact-card',           //UX (owner: "yes bring [phone/email] on here"): follow-up to booking-overview-enriched. Guest phone + email lived only in the small ObjectDetail subtitle; promoted them into a proper Contact card in the Overview grid — Phone as a tel: link, Email as a mailto: link (tap-to-call / tap-to-mail on mobile), each null-guarded so a booking with only one still renders. Simplified the header subtitle to just the booking id now that contact has a home in the body. Frontend-only. tsc + vite build clean.
       'booking-overview-enriched',               //UX (owner: "enrich the booking Overview page by adding booking-related attributes"). The ObjectDetail booking Overview surfaced only Room/Dates/Guests/Source + a 4-line Financials + Special requests. It now shows far more of the room_bookings record the API already returns (b.* + room joins): (1) a META-CHIP row — Overnight/Day-use, "Booked <date>" (created_at), OTA reference (channel_ref minus the AIOSELL: prefix), group name, "Unassigned room" (room_locked=0 pre-checkin), No-show, and a payment_status chip. (2) ENRICHED stay cards — Room now shows room_number + mapped category (bd.room_category, the value the list actually returns — the old code read bd.room_type_name which is absent on list rows), Dates show formatted dates + day-use window + actual check-in/out timestamps, Guests show adults/extra/children breakdown, Source shows rate-plan + meal-plan snapshot. (3) NEW Guest-KYC card (rendered only when present) — nationality/state, guest GSTIN, ID-documents-on-file count (document_count). (4) ENRICHED Financials — GST-exclusive/inclusive note, room-service F&B total (+ unpaid), OTA commission (%+amount) and Net-to-property, alongside Total/Advance/Outstanding. (5) NEW Channel/OTA settlement card for OTA bookings — OTA reference, prepaid vs pay-at-hotel (channel_prepaid), OTA tax/TCS/TDS (channel_tax/tcs/tds). (6) NEW Cancellation card for cancelled bookings — when/via/by, reason, refund. All fields already come from GET /hotel/bookings (b.* + room_name/room_number/room_category/document_count/advance_paid/fnb_total/fnb_unpaid); every new block is null-guarded so a sparse walk-in booking still renders cleanly. Frontend-only. tsc + vite build clean.
       'aiosell-inbound-delivery-diagnostics',    //DIAGNOSTIC (owner: "Aiosell is validating the webhook but getting unauthorized — see if the request is even reaching us"). Problem: a rejected inbound webhook returned a bare 401 with ZERO trace, so the owner could not tell whether Aiosell was reaching the server, and — because an unregistered hotelCode also yields 401 (no property enumeration) — could not tell a bad password from a wrong hotel code. Now every inbound hit that carries a well-formed Basic header (anonymous scanners are still rejected before this, so no log-flood) is recorded to a NEW central `aiosell_inbound_attempts` table (id, hotel_code, presented_user [NEVER the password], restaurant_id, action, outcome, reason, source_ip; 30-day self-prune) via aiosellLogInboundAttempt(). Outcomes: OK / DUPLICATE / AUTH_FAIL / HOTEL_UNKNOWN / BAD_REQUEST / INGEST_FAIL, each with a plain reason (bad credentials vs unregistered hotelCode). When the hotelCode DOES resolve, the rejection is ALSO mirrored into that tenant's 📜 Sync Log (IN·RESERVATION·FAIL). NEW GET /hotel/aiosell/inbound-attempts (authenticate+hotelStaff) returns {hotel_code, matched[] (hits for this property — resolved to it or carrying its registered code), unrecognised[] (last-60-min hits whose hotelCode resolved to NO property — the tell-tale of Aiosell sending the wrong code; code+time+outcome only, no creds)}. FRONTEND: the AiosellSyncLog (📜 Sync Log tab) now leads with an "🛰️ Inbound webhook delivery" card — shows the registered hotel code, the last inbound attempt + outcome badge, a red banner when requests arrive with an unrecognised hotel code (vs your registered one), an amber "no inbound webhook has reached this server yet" empty-state, and a table of recent attempts (when · outcome · hotelCode · user sent · from IP · detail). The public 401 response is unchanged (still no property enumeration); the diagnosis lives only in the owner's log. New TC-AIOSELL-INBOUND-DIAG test. tsc + vite build clean.
