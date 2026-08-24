@@ -12,6 +12,7 @@ import { MyChecklists } from './MyChecklists';
 import { ChecklistBoard } from './ChecklistBoard';
 import { StatusBoard } from './StatusBoard';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
+import { buildUpiUri } from '../upiLink';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
@@ -27428,15 +27429,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <p className="text-[10px] text-[#9c8e85] mt-1">What the guest will see as the payee — usually your property name.</p>
                     </div>
                   </div>
-                  {(propertyProfile as any).upi_vpa && (
-                    <div className="text-[11px] text-[#3d3128] bg-white rounded-xl p-2.5 border border-[#e8d8c4]">
-                      <strong>Preview UPI link:</strong>{' '}
-                      <code className="font-mono text-[10px] break-all">
-                        upi://pay?pa={encodeURIComponent((propertyProfile as any).upi_vpa)}&pn={encodeURIComponent((propertyProfile as any).upi_payee_name || 'Property')}&am=2400.00&cu=INR&tn=Booking%20BK-...
-                      </code>
-                      <p className="text-[10px] text-[#9c8e85] mt-1">This is what guests will see in their confirmation email (amount + booking ID auto-filled).</p>
-                    </div>
-                  )}
+                  {(propertyProfile as any).upi_vpa && (() => {
+                    const previewLink = buildUpiUri({ pa: (propertyProfile as any).upi_vpa, pn: (propertyProfile as any).upi_payee_name || (propertyProfile as any).name || 'Property', am: 2400, tn: 'Booking BK-...', tr: 'BK...' });
+                    if (!previewLink) return (
+                      <div className="text-[11px] text-rose-700 bg-rose-50 rounded-xl p-2.5 border border-rose-200">
+                        ⚠ <strong>This UPI ID doesn't look valid.</strong> It must be in the form <code className="font-mono">name@bank</code> (e.g. <code className="font-mono">vivekscafe@okhdfcbank</code>) — otherwise the payment link/QR won't open in the guest's UPI app.
+                      </div>
+                    );
+                    return (
+                      <div className="text-[11px] text-[#3d3128] bg-white rounded-xl p-2.5 border border-[#e8d8c4]">
+                        <strong>Preview UPI link:</strong>{' '}
+                        <code className="font-mono text-[10px] break-all">{previewLink}</code>
+                        <p className="text-[10px] text-[#9c8e85] mt-1">This is what guests will see in their confirmation email (amount + booking ID auto-filled). The UPI ID stays un-encoded so every app can open it.</p>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Description */}
@@ -49727,15 +49734,15 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                     <div className="bg-[#faf7f2] p-6 rounded-[32px] inline-block shadow-inner border border-[#cc5a16]/10">
                       <QRCodeCanvas
                         value={upiQrType === 'DYNAMIC'
-                          ? `upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}&am=${orderTotal.toFixed(2)}&cu=INR&tn=${order.id}&tr=${order.id}`
-                          : `upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}`}
+                          ? buildUpiUri({ pa: restaurant.upi_id || '', pn: restaurant.name, am: orderTotal, tn: order.id, tr: order.id })
+                          : buildUpiUri({ pa: restaurant.upi_id || '', pn: restaurant.name })}
                         size={200} level="H" includeMargin={true}
                       />
                     </div>
                     <div className="space-y-4">
                       <p className="text-xs text-[#6b5d52]">{upiQrType === 'DYNAMIC' ? "Scan to pay exact amount automatically" : "Scan to pay. Enter the amount manually."}</p>
                       <div className="grid gap-3">
-                        <a href={`upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}&am=${orderTotal.toFixed(2)}&cu=INR&tn=${order.id}&tr=${order.id}`}
+                        <a href={buildUpiUri({ pa: restaurant.upi_id || '', pn: restaurant.name, am: orderTotal, tn: order.id, tr: order.id })}
                           className="flex items-center justify-center gap-2 w-full bg-[#cc5a16] text-white py-4 rounded-2xl font-bold hover:bg-[#a84612] transition-all">
                           <Smartphone size={18} /> Open UPI App
                         </a>

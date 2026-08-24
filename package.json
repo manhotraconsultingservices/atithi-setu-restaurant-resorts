@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "npx tsx server.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:upi": "tsx test-scripts/upi_link_builder_check.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1036.0",

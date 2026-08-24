@@ -61,6 +61,7 @@ import {
   aiosellMarkNoShow, aiosellFetchData, aiosellChannelMultiplier,
   type AiosellReservation, type AiosellInventoryUpdate, type AiosellRateUpdate,
 } from "./aiosellClient.ts";
+import { buildUpiUri } from "./upiLink.ts";
 import multer from "multer";
 import cron from "node-cron";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
@@ -2483,15 +2484,10 @@ async function buildHotelPaymentLinkPayload(
   const upiVpa = String(restaurant?.upi_vpa || '').trim();
   const upiPayee = String(restaurant?.upi_payee_name || restaurant?.name || '').trim();
   const currency = restaurant?.currency_symbol || '₹';
+  // tr carries the booking id (sanitised) so an incoming UPI credit can be
+  // matched back to this stay at reconciliation. buildUpiUri keeps `pa` raw.
   const upi_link = upiVpa && grandTotal > 0
-    ? `upi://pay?pa=${encodeURIComponent(upiVpa)}` +
-      `&pn=${encodeURIComponent(upiPayee)}` +
-      `&am=${grandTotal.toFixed(2)}` +
-      `&cu=INR` +
-      `&tn=${encodeURIComponent(`Booking ${bookingId}`)}` +
-      // tr = transaction reference (NPCI spec): carries the booking id so an
-      // incoming UPI credit can be matched back to this stay at reconciliation.
-      `&tr=${encodeURIComponent(String(bookingId))}`
+    ? buildUpiUri({ pa: upiVpa, pn: upiPayee, am: grandTotal, tn: `Booking ${bookingId}`, tr: String(bookingId) })
     : '';
 
   return {
@@ -36531,11 +36527,7 @@ ${data.tenant.name}`;
       const upiPayeeName = String(check.restaurant?.upi_payee_name || check.restaurant?.name || '').trim();
       const upiTotal = Math.round(grandTotal * 100) / 100;
       const upi_payment_link = upiVpa && upiTotal > 0
-        ? `upi://pay?pa=${encodeURIComponent(upiVpa)}` +
-          `&pn=${encodeURIComponent(upiPayeeName)}` +
-          `&am=${upiTotal.toFixed(2)}` +
-          `&cu=INR` +
-          `&tn=${encodeURIComponent(`Booking ${createdBookings[0].id}`)}`
+        ? buildUpiUri({ pa: upiVpa, pn: upiPayeeName, am: upiTotal, tn: `Booking ${createdBookings[0].id}`, tr: String(createdBookings[0].id) })
         : '';
 
       // Return shape stays backwards-compatible for single-room
@@ -39179,12 +39171,7 @@ ${data.tenant.name}`;
       if (override > 0 && override < payload.amount) {
         payload.amount = Math.round(override * 100) / 100;
         if (payload.upi_vpa) {
-          payload.upi_link = `upi://pay?pa=${encodeURIComponent(payload.upi_vpa)}` +
-            `&pn=${encodeURIComponent(payload.upi_payee)}` +
-            `&am=${payload.amount.toFixed(2)}` +
-            `&cu=INR` +
-            `&tn=${encodeURIComponent(`Booking ${req.params.bookingId} (partial)`)}` +
-            `&tr=${encodeURIComponent(String(req.params.bookingId))}`;
+          payload.upi_link = buildUpiUri({ pa: payload.upi_vpa, pn: payload.upi_payee, am: payload.amount, tn: `Booking ${req.params.bookingId} (partial)`, tr: String(req.params.bookingId) });
         }
       }
 
@@ -49750,9 +49737,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'booking-overview-contact-card',
+    commit_marker: 'upi-link-raw-vpa-fix',
     code_features: [
-      'booking-overview-contact-card',               //UX (owner: "yes bring [phone/email] on here"): follow-up to booking-overview-enriched. Guest phone + email lived only in the small ObjectDetail subtitle; promoted them into a proper Contact card in the Overview grid — Phone as a tel: link, Email as a mailto: link (tap-to-call / tap-to-mail on mobile), each null-guarded so a booking with only one still renders. Simplified the header subtitle to just the booking id now that contact has a home in the body. Frontend-only. tsc + vite build clean.
+      'upi-link-raw-vpa-fix',                        //BUGFIX (owner, 5+yr UPI-integration review: "guest UPI url doesn't work; 0% commission open-source solution"). ROOT CAUSE: the guest-facing UPI deep link built `pa` with encodeURIComponent(vpa), turning the mandatory '@' into %40 (`pa=hotel%40okhdfcbank`). Per the NPCI UPI Linking Spec, `pa` must be the RAW vpa — PhonePe/BHIM/Paytm + most QR scanners reject a %40-encoded UPI ID (GPay silently decodes it, hiding the bug in testing). All three guest surfaces (deep link, QR value, reconstructed Android intent://) derived from that one broken string, so all failed together; the restaurant customer QR built `pa` raw and worked, which pinpointed it. FIX: new shared, unit-tested `upiLink.ts` (buildUpiUri + isValidVpa) — single source of truth imported by BOTH server.ts and src/App.tsx (removing 5 drifting copies). It keeps `pa` RAW, URL-encodes only free-text pn/tn, fixes `am` to 2 decimals, sanitises `tr` to NPCI alphanumeric (≤35), and returns '' for an invalid VPA so no dead link/QR is ever emitted. Replaced all 5 builders (buildHotelPaymentLinkPayload, public-booking confirmation, resend-payment-link override, restaurant customer QR + Open-UPI-App link). Settings now show a live preview of the real link and a red "this UPI ID doesn't look valid" warning when the VPA fails the grammar. This is the correct 0%-commission approach — a direct upi:// deep link/QR to the property's own VPA, money straight to their bank, no gateway/MDR; nothing to sign up for. New unit test test-scripts/upi_link_builder_check.ts (npm run test:upi) — all invariants green. tsc + vite build clean.
+      'booking-overview-contact-card',           //UX (owner: "yes bring [phone/email] on here"): follow-up to booking-overview-enriched. Guest phone + email lived only in the small ObjectDetail subtitle; promoted them into a proper Contact card in the Overview grid — Phone as a tel: link, Email as a mailto: link (tap-to-call / tap-to-mail on mobile), each null-guarded so a booking with only one still renders. Simplified the header subtitle to just the booking id now that contact has a home in the body. Frontend-only. tsc + vite build clean.
       'booking-overview-enriched',               //UX (owner: "enrich the booking Overview page by adding booking-related attributes"). The ObjectDetail booking Overview surfaced only Room/Dates/Guests/Source + a 4-line Financials + Special requests. It now shows far more of the room_bookings record the API already returns (b.* + room joins): (1) a META-CHIP row — Overnight/Day-use, "Booked <date>" (created_at), OTA reference (channel_ref minus the AIOSELL: prefix), group name, "Unassigned room" (room_locked=0 pre-checkin), No-show, and a payment_status chip. (2) ENRICHED stay cards — Room now shows room_number + mapped category (bd.room_category, the value the list actually returns — the old code read bd.room_type_name which is absent on list rows), Dates show formatted dates + day-use window + actual check-in/out timestamps, Guests show adults/extra/children breakdown, Source shows rate-plan + meal-plan snapshot. (3) NEW Guest-KYC card (rendered only when present) — nationality/state, guest GSTIN, ID-documents-on-file count (document_count). (4) ENRICHED Financials — GST-exclusive/inclusive note, room-service F&B total (+ unpaid), OTA commission (%+amount) and Net-to-property, alongside Total/Advance/Outstanding. (5) NEW Channel/OTA settlement card for OTA bookings — OTA reference, prepaid vs pay-at-hotel (channel_prepaid), OTA tax/TCS/TDS (channel_tax/tcs/tds). (6) NEW Cancellation card for cancelled bookings — when/via/by, reason, refund. All fields already come from GET /hotel/bookings (b.* + room_name/room_number/room_category/document_count/advance_paid/fnb_total/fnb_unpaid); every new block is null-guarded so a sparse walk-in booking still renders cleanly. Frontend-only. tsc + vite build clean.
       'aiosell-inbound-delivery-diagnostics',    //DIAGNOSTIC (owner: "Aiosell is validating the webhook but getting unauthorized — see if the request is even reaching us"). Problem: a rejected inbound webhook returned a bare 401 with ZERO trace, so the owner could not tell whether Aiosell was reaching the server, and — because an unregistered hotelCode also yields 401 (no property enumeration) — could not tell a bad password from a wrong hotel code. Now every inbound hit that carries a well-formed Basic header (anonymous scanners are still rejected before this, so no log-flood) is recorded to a NEW central `aiosell_inbound_attempts` table (id, hotel_code, presented_user [NEVER the password], restaurant_id, action, outcome, reason, source_ip; 30-day self-prune) via aiosellLogInboundAttempt(). Outcomes: OK / DUPLICATE / AUTH_FAIL / HOTEL_UNKNOWN / BAD_REQUEST / INGEST_FAIL, each with a plain reason (bad credentials vs unregistered hotelCode). When the hotelCode DOES resolve, the rejection is ALSO mirrored into that tenant's 📜 Sync Log (IN·RESERVATION·FAIL). NEW GET /hotel/aiosell/inbound-attempts (authenticate+hotelStaff) returns {hotel_code, matched[] (hits for this property — resolved to it or carrying its registered code), unrecognised[] (last-60-min hits whose hotelCode resolved to NO property — the tell-tale of Aiosell sending the wrong code; code+time+outcome only, no creds)}. FRONTEND: the AiosellSyncLog (📜 Sync Log tab) now leads with an "🛰️ Inbound webhook delivery" card — shows the registered hotel code, the last inbound attempt + outcome badge, a red banner when requests arrive with an unrecognised hotel code (vs your registered one), an amber "no inbound webhook has reached this server yet" empty-state, and a table of recent attempts (when · outcome · hotelCode · user sent · from IP · detail). The public 401 response is unchanged (still no property enumeration); the diagnosis lives only in the owner's log. New TC-AIOSELL-INBOUND-DIAG test. tsc + vite build clean.
       'filters-data-driven-groups-source',      //UX + CONVENTION (owner: "make Source filter dynamic — if no booking for a source, don't show it; the moment an Agoda booking id arrives it should appear. Adopt at other table filters + make it a design principle in CLAUDE.md"). Established that the Reservations/booking-history Source filter was ALREADY data-driven ([...new Set(hotelBookings.map(b=>b.booking_source))]) — a chip appears only when a loaded booking carries that source, so the first Agoda booking makes AGODA appear with zero code change. The one genuine hardcoded holdout was the Groups list "All Sources" <select> (a fixed 10-option enum: Direct/Walk-in/Agent/Booking.com/MMT/Goibibo/Agoda/Expedia/Airbnb/Direct-Web). Converted it to derive its options from the distinct booking_source values actually present in groupsList — `[...new Set(groupsList.map(g => g.booking_source || 'DIRECT'))].sort()` — mirroring the filter predicate's own `g.booking_source||'DIRECT'` defaulting so selection always matches; a labels lookup (LABELS[s]||s) keeps the emoji display without hardcoding the set. Codified the rule in CLAUDE.md ("Data-driven filter options"): derive filters for open-ended dimensions (source/category/department/agent/tender/tag) from the rows; keep fixed lifecycle/state enums (booking status, invoice/PO state) hardcoded. Frontend + doc only. tsc + vite build clean.
