@@ -13970,7 +13970,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const todayIso = todayISO();
     const scheduledDate = normaliseBookingDate(full.check_in_date);
     if (scheduledDate && scheduledDate > todayIso) {
-      setHotelError(`Check-in is not allowed before the check-in date (${scheduledDate}). You can check this guest in on or after that day.`);
+      const msg = `Check-in is not allowed before the check-in date (${scheduledDate}). You can check this guest in on or after that day.`;
+      // Toast is immediate + floats over everything. The shared hotelError banner
+      // can render off-screen (e.g. when this fires from the booking-detail modal),
+      // which read as "the validation message doesn't appear until I refresh".
+      toast.error(msg);
+      setHotelError(msg);
       return;
     }
     setCheckInChecklistTarget(full);
@@ -33121,7 +33126,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl p-7 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-bold font-serif text-[#1a1208]">{editingBooking.id ? 'Edit Booking' : 'New Booking'}</h3>
-              <button onClick={() => { setShowBookingModal(false); setEditingBooking(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              <button onClick={() => { setShowBookingModal(false); setEditingBooking(null); setHotelError(''); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
             </div>
             {/* Inline error strip — surfaces server-side validation failures
                 (date order, double-booking, capacity, room status) directly
@@ -33199,8 +33204,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     else if (editingBooking.room_floating === false) _payload.room_locked = 1;
                   }
                   await saveBooking(_payload);
-                  setShowBookingModal(false); setEditingBooking(null);
-                } catch (err: any) { setHotelError(err.message || 'Save failed'); }
+                  setShowBookingModal(false); setEditingBooking(null); setHotelError('');
+                } catch (err: any) { const m = err.message || 'Save failed'; toast.error(m); setHotelError(m); }
               }}
               className="space-y-4"
             >
@@ -34057,7 +34062,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               )}
 
               <div className="flex gap-2 pt-2">
-                <button type="button" onClick={() => { setShowBookingModal(false); setEditingBooking(null); }} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                <button type="button" onClick={() => { setShowBookingModal(false); setEditingBooking(null); setHotelError(''); }} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
                 <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">{editingBooking.id ? 'Save' : 'Create Booking'}</button>
               </div>
             </form>

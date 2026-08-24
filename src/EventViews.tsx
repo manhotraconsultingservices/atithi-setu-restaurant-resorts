@@ -1842,9 +1842,11 @@ function EventQuotations({ restaurantId, token }: Props) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);   // gate the empty-state so it doesn't flash during the N+1 load
   const [sendQuote, setSendQuote] = useState<{ id: string; email: string } | null>(null);
 
   const load = async () => {
+    setLoading(true);
     try {
       const bookings = await api('/events/bookings');
       const all: any[] = [];
@@ -1855,6 +1857,7 @@ function EventQuotations({ restaurantId, token }: Props) {
       all.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
       setRows(all);
     } catch { /* */ }
+    finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
 
@@ -1865,7 +1868,7 @@ function EventQuotations({ restaurantId, token }: Props) {
       <DataTable
         data={rows}
         rowKey={(r: any) => r.id}
-        emptyMessage={t('events.quotes.empty')}
+        emptyMessage={loading ? 'Loading quotations…' : t('events.quotes.empty')}
         columnChooser columnFilters tableId="events-quotations" exportFilename="event-quotations"
         columns={[
           { key: 'quote_number', label: t('events.quotes.number'), sortable: true, searchable: true, filterable: true },
