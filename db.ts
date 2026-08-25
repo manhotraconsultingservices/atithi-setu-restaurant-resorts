@@ -1716,6 +1716,9 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS ifsc_code TEXT").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS credit_days INTEGER DEFAULT 0").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS supplier_type TEXT DEFAULT 'GENERAL'").catch(() => {});
+  // GST-D2: TDS section (194C/194J/194H/194I) drives the correct rate + threshold;
+  // tds_category stays as the deductee-rate hint (NIL / 1PCT / 2PCT for legacy 194C).
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS tds_section TEXT").catch(() => {});
 
   // module flag on purchase_orders allows hotel items to use the same PO workflow
   await db.exec("ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'").catch(() => {});
@@ -2788,6 +2791,7 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['2300','TDS Payable — Sec 194C','LIABILITY',250],
     ['2310','TDS Payable — Sec 194J','LIABILITY',260],
     ['2320','TDS Payable — Sec 194H','LIABILITY',270],
+    ['2340','TDS Payable — Sec 194I (Rent)','LIABILITY',272],
     ['2330','TDS Payable — Sec 192 (Salary)','LIABILITY',275],
     ['2400','Salaries & Wages Payable','LIABILITY',280],
     ['2500','EPF Payable','LIABILITY',290],

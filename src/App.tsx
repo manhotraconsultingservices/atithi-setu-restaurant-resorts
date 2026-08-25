@@ -62196,7 +62196,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     gst_number: '', credit_days: '0', payment_terms: '', supplier_type: 'GENERAL',
     bank_account_number: '', bank_name: '', ifsc_code: '', notes: '',
     pan_number: '', msme_registered: false as boolean, vendor_category: '',
-    credit_limit: '', tds_category: 'NIL',
+    credit_limit: '', tds_category: 'NIL', tds_section: 'NONE',
     contract_start_date: '', contract_end_date: '',
     preferred_status: 'PREFERRED',
     pan_doc_url: '', msme_doc_url: '', gst_doc_url: '',
@@ -62338,7 +62338,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
       ifsc_code: s.ifsc_code || '', notes: s.notes || '',
       pan_number: s.pan_number || '', msme_registered: Boolean(s.msme_registered),
       vendor_category: s.vendor_category || '', credit_limit: String(s.credit_limit || ''),
-      tds_category: s.tds_category || 'NIL',
+      tds_category: s.tds_category || 'NIL', tds_section: s.tds_section || 'NONE',
       contract_start_date: String(s.contract_start_date || '').slice(0, 10),
       contract_end_date: String(s.contract_end_date || '').slice(0, 10),
       preferred_status: s.preferred_status || 'PREFERRED',
@@ -63422,12 +63422,24 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                   placeholder="0" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
               </div>
               <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">TDS Category</label>
-                <select value={supForm.tds_category} onChange={e => setSupForm(f => ({ ...f, tds_category: e.target.value }))}
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">TDS Section</label>
+                <select value={supForm.tds_section} onChange={e => setSupForm(f => ({ ...f, tds_section: e.target.value }))}
                   className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
-                  <option value="NIL">NIL (no TDS)</option>
-                  <option value="1PCT">1% TDS</option>
-                  <option value="2PCT">2% TDS</option>
+                  <option value="NONE">None (no TDS)</option>
+                  <option value="194C">194C — Contractor (1% / 2%)</option>
+                  <option value="194J">194J — Professional / Technical (10%)</option>
+                  <option value="194H">194H — Commission / Brokerage (5%)</option>
+                  <option value="194I">194I — Rent (10%)</option>
+                </select>
+                <p className="text-[10px] text-[#9c8e85] mt-1">Rate &amp; threshold applied automatically on the ex-GST value; no PAN → 20%.</p>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">194C deductee</label>
+                <select value={supForm.tds_category} onChange={e => setSupForm(f => ({ ...f, tds_category: e.target.value }))}
+                  disabled={supForm.tds_section !== '194C'}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none disabled:opacity-50">
+                  <option value="1PCT">Individual / HUF — 1%</option>
+                  <option value="2PCT">Company / Firm — 2%</option>
                 </select>
               </div>
 

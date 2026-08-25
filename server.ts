@@ -4224,13 +4224,22 @@ async function addLateCheckoutFolioEntry(
 // is governed by the restaurant/food tax structure, not the hotel room slab.
 async function reapplyHotelGstRates(tenantDb: DbInterface, restaurantId: string, folioId: string): Promise<void> {
   const cfg = await loadHotelTaxConfig(restaurantId);
+  // GST-A4: the ₹7,500 slab test applies to the VALUE OF SUPPLY (the amount charged).
+  // For GST-INCLUSIVE tariffs that is the GROSS (amount + gst) — matching how the slab
+  // was chosen at seed — while the stored `amount` is only the back-calculated pre-tax
+  // base. Testing the slab on that pre-tax base wrongly downgraded inclusive rooms near
+  // the boundary from 18% to 12% at settlement. For exclusive tariffs the taxable
+  // `amount` IS the value of supply, so we keep using it there.
+  const incRow: any = await centralDb.get("SELECT rates_include_gst FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+  const inclusive = Number(incRow?.rates_include_gst ?? 1) === 1;
   const entries: any[] = await tenantDb.query(
     `SELECT id, amount, gst_rate, gst_amount FROM folio_entries
      WHERE folio_id = ? AND entry_type NOT IN ('F_AND_B', 'PAYMENT')`,
     [folioId]
   );
   for (const e of entries) {
-    const newRate = gstRateForTariff(Number(e.amount), cfg);
+    const valueOfSupply = inclusive ? (Number(e.amount) + Number(e.gst_amount || 0)) : Number(e.amount);
+    const newRate = gstRateForTariff(valueOfSupply, cfg);
     const newGst  = Math.round(Number(e.amount) * newRate / 100 * 100) / 100;
     if (newRate === Number(e.gst_rate) && newGst === Number(e.gst_amount)) continue;
     await tenantDb.run(
@@ -4426,14 +4435,46 @@ function _glAccountForSupplierInvoice(module: string, notes: string): { code: st
   return { code: '6000', name: 'Miscellaneous Expenses' };
 }
 
-function _tdsForSupplierPayment(tdsCategory: string, gross: number): {
+// GST-D2: section-aware TDS. Rate + threshold come from the section (194C/J/H/I);
+// TDS is computed on the ex-GST `taxableBase`, and the threshold test uses the
+// single-payment amount OR the FY-to-date aggregate (so the ₹1L 194C aggregate and
+// the annual 194J/H/I thresholds trigger correctly). No PAN → 20%. Legacy suppliers
+// with only a tds_category (NIL/1PCT/2PCT) fall back to 194C at that manual rate.
+function _tdsForSupplierPayment(opts: {
+  section?: string | null; category?: string | null; hasPan?: boolean;
+  taxableBase: number; fyAggregateBase?: number;
+} | string, legacyGross?: number): {
   section: string; rate: number; amount: number; nature: string; accountCode: string; accountName: string;
 } | null {
-  const cat = String(tdsCategory || 'NIL').toUpperCase();
-  if (cat === 'NIL' || gross < 30000) return null;
-  const rate = (cat === 'COMPANY' || cat === 'PARTNERSHIP') ? 2.0 : 1.0;
-  const amount = Math.round(gross * rate) / 100;
-  return { section: '194C', rate, amount, nature: 'Contractor payment', accountCode: '2300', accountName: 'TDS Payable — Sec 194C' };
+  // Back-compat: old call signature (tds_category, gross).
+  const o = typeof opts === 'string' ? { category: opts, taxableBase: Number(legacyGross || 0) } : opts;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const section = String(o.section || '').toUpperCase();
+  const cat = String(o.category || 'NIL').toUpperCase();
+  const base = Math.max(0, Number(o.taxableBase || 0));
+  const agg = Math.max(base, Number(o.fyAggregateBase || 0));
+  const noPan = o.hasPan === false;
+
+  // No section chosen → legacy manual-rate 194C (NIL / 1PCT / 2PCT).
+  if (!section || section === 'NONE') {
+    if (cat === 'NIL' || !cat) return null;
+    const legacyRate = cat === '2PCT' ? 2 : cat === '1PCT' ? 1 : (cat === 'COMPANY' || cat === 'PARTNERSHIP' || cat === 'FIRM') ? 2 : 1;
+    if (base < 30000 && agg < 100000) return null;
+    const rate = noPan ? 20 : legacyRate;
+    return { section: '194C', rate, amount: r2(base * rate / 100), nature: 'Contractor payment', accountCode: '2300', accountName: 'TDS Payable — Sec 194C' };
+  }
+  const SEC: Record<string, { rate: number; single: number; annual: number; nature: string; code: string; name: string }> = {
+    '194C': { rate: (cat === 'COMPANY' || cat === 'PARTNERSHIP' || cat === 'FIRM' || cat === '2PCT') ? 2 : 1, single: 30000, annual: 100000, nature: 'Contractor payment',            code: '2300', name: 'TDS Payable — Sec 194C' },
+    '194J': { rate: 10, single: 30000, annual: 30000,  nature: 'Professional / technical fees', code: '2310', name: 'TDS Payable — Sec 194J' },
+    '194H': { rate: 5,  single: 0,     annual: 15000,  nature: 'Commission / brokerage',        code: '2320', name: 'TDS Payable — Sec 194H' },
+    '194I': { rate: 10, single: 0,     annual: 240000, nature: 'Rent',                          code: '2340', name: 'TDS Payable — Sec 194I (Rent)' },
+  };
+  const s = SEC[section];
+  if (!s) return null;
+  const meets = (s.single > 0 && base >= s.single) || (agg >= s.annual);
+  if (!meets) return null;
+  const rate = noPan ? Math.max(20, s.rate) : s.rate;
+  return { section, rate, amount: r2(base * rate / 100), nature: s.nature, accountCode: s.code, accountName: s.name };
 }
 
 function _glCurrentQuarter(): string {
@@ -12868,14 +12909,30 @@ async function startServer() {
       !isServiceChargeTaxRow(c)
     );
 
+    // GST-A3: a restaurant inside a "specified premises" (a hotel where any room
+    // tariff > ₹7,500) must charge F&B at 18%, not 5%. The charge-to-room folio path
+    // already applies this; mirror it here so a standalone/walk-in POS bill is correct.
+    // Targeted + safe: only bumps a 5% GST row up to 18%, only for a hotel that
+    // actually has such rooms; other configured rates and non-hotel tenants are untouched.
+    let specifiedPremises = false;
+    try {
+      const hCfg = await loadHotelTaxConfig(opts.tenantId);
+      const tdb = await getTenantDb(opts.tenantId);
+      const hi: any = await tdb.get("SELECT 1 AS s FROM rooms WHERE base_rate > ? LIMIT 1", [hCfg.slab2Max]).catch(() => null);
+      specifiedPremises = !!hi?.s;
+    } catch { /* not a hotel / no rooms → 5% stands */ }
+    const effConfigs = specifiedPremises
+      ? activeConfigs.map(c => (Number(c.rate_percent) === 5 ? { ...c, rate_percent: 18 } : c))
+      : activeConfigs;
+
     let taxLines: TaxLine[] = [];
     let totalTax = 0;
     let usedLegacyGst = false;
 
-    if (activeConfigs.length > 0) {
+    if (effConfigs.length > 0) {
       const computed = computeTaxes({
         tenant: { country: tenantRow?.country || 'IN' },
-        taxConfigs: activeConfigs,
+        taxConfigs: effConfigs,
         subtotalAfterDiscount: taxableBase,
         isIntrastate: opts.isIntrastate,
       });
@@ -12883,8 +12940,9 @@ async function startServer() {
       totalTax = computed.total;
     } else if (opts.legacyGstFallback && opts.legacyGstFallback.apply_gst &&
                opts.legacyGstFallback.gst_percent > 0) {
-      // No tax_config rows configured → honour the legacy single GST input.
-      const rate = Number(opts.legacyGstFallback.gst_percent);
+      // No tax_config rows configured → honour the legacy single GST input
+      // (bumped to 18% for specified premises, mirroring the folio path).
+      const rate = (specifiedPremises && Number(opts.legacyGstFallback.gst_percent) === 5) ? 18 : Number(opts.legacyGstFallback.gst_percent);
       const amount = Math.round((taxableBase * rate / 100) * 100) / 100;
       if (amount > 0) {
         taxLines = [{ id: 'GST', label: 'GST', rate, amount }];
@@ -21035,8 +21093,20 @@ ${data.tenant.name}`;
       try {
         const payDate = (payment_date || new Date().toISOString().slice(0, 10)) as string;
         const cashAcct = _glAccountForPaymentMethod(payment_method || 'BANK');
-        const sup: any = await db.get("SELECT tds_category, pan FROM suppliers WHERE id = ?", [inv.supplier_id]);
-        const tds = _tdsForSupplierPayment(sup?.tds_category || 'NIL', payAmt);
+        const sup: any = await db.get("SELECT tds_section, tds_category, pan FROM suppliers WHERE id = ?", [inv.supplier_id]);
+        // TDS is on the ex-GST taxable value; the threshold uses this payment's base
+        // OR the FY-to-date aggregate of ex-GST invoice value billed to the supplier.
+        const invTotal = Number(inv.total_amount || 0);
+        const taxFrac = invTotal > 0 ? Math.max(0, invTotal - Number(inv.gst_amount || 0)) / invTotal : 1;
+        const taxableBase = +(payAmt * taxFrac).toFixed(2);
+        const fyStart = `${getYearIST()}-04-01`;
+        const aggRow: any = await db.get(
+          "SELECT COALESCE(SUM(total_amount - COALESCE(gst_amount,0)),0) AS agg FROM supplier_invoices WHERE supplier_id = ? AND COALESCE(invoice_date, created_at::text) >= ?",
+          [inv.supplier_id, fyStart]).catch(() => ({ agg: taxableBase }));
+        const tds = _tdsForSupplierPayment({
+          section: sup?.tds_section, category: sup?.tds_category, hasPan: !!(sup?.pan && String(sup.pan).trim()),
+          taxableBase, fyAggregateBase: Number(aggRow?.agg || taxableBase),
+        });
         const tdsAmt = tds ? Math.min(Number(tds.amount || 0), payAmt) : 0;
         const cashOut = +(payAmt - tdsAmt).toFixed(2);
         const glLines: GlLine[] = [
@@ -21056,7 +21126,7 @@ ${data.tenant.name}`;
                 gross_amount, tds_section, tds_rate, tds_amount, nature_of_payment, quarter)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [tdsId, req.params.id, inv.supplier_id, inv.supplier_name || 'Supplier', sup?.pan || null,
-             pid, payDate, payAmt, tds.section, tds.rate, tdsAmt, tds.nature, _glCurrentQuarter()]
+             pid, payDate, taxableBase, tds.section, tds.rate, tdsAmt, tds.nature, _glCurrentQuarter()]
           );
         }
       } catch (glErr) { console.error('[GL] supplier payment error:', glErr); }
@@ -21298,7 +21368,7 @@ ${data.tenant.name}`;
         name, contact_name, phone, email, address, gst_number,
         lead_time_days, payment_terms, credit_days, supplier_type,
         bank_account_number, bank_name, ifsc_code, notes,
-        pan_number, msme_registered, vendor_category, credit_limit, tds_category,
+        pan_number, msme_registered, vendor_category, credit_limit, tds_category, tds_section,
         contract_start_date, contract_end_date, preferred_status,
         pan_doc_url, msme_doc_url, gst_doc_url,
       } = req.body;
@@ -21309,16 +21379,16 @@ ${data.tenant.name}`;
         `INSERT INTO suppliers (id, name, contact_name, phone, email, address, gst_number,
            lead_time_days, payment_terms, credit_days, supplier_type,
            bank_account_number, bank_name, ifsc_code, notes,
-           pan_number, msme_registered, vendor_category, credit_limit, tds_category,
+           pan_number, msme_registered, vendor_category, credit_limit, tds_category, tds_section,
            contract_start_date, contract_end_date, preferred_status,
            pan_doc_url, msme_doc_url, gst_doc_url, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [id, name, contact_name || null, phone || null, email || null, address || null,
          gst_number || null, lead_time_days || 0, payment_terms || null,
          credit_days || 0, supplier_type || 'GENERAL',
          bank_account_number || null, bank_name || null, ifsc_code || null, notes || null,
          pan_number || null, msme_registered ? 1 : 0, vendor_category || null,
-         credit_limit || null, tds_category || 'NIL',
+         credit_limit || null, tds_category || 'NIL', tds_section || null,
          contract_start_date || null, contract_end_date || null, preferred_status || 'PREFERRED',
          pan_doc_url || null, msme_doc_url || null, gst_doc_url || null]
       );
@@ -21336,7 +21406,7 @@ ${data.tenant.name}`;
         'name', 'contact_name', 'phone', 'email', 'address', 'gst_number',
         'lead_time_days', 'payment_terms', 'credit_days', 'supplier_type',
         'bank_account_number', 'bank_name', 'ifsc_code', 'notes', 'is_active',
-        'pan_number', 'msme_registered', 'vendor_category', 'credit_limit', 'tds_category',
+        'pan_number', 'msme_registered', 'vendor_category', 'credit_limit', 'tds_category', 'tds_section',
         'contract_start_date', 'contract_end_date', 'preferred_status',
         'pan_doc_url', 'msme_doc_url', 'gst_doc_url',
       ];
@@ -49930,8 +50000,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-p1-reverse-charge-line',
+    commit_marker: 'gst-p1-tds-sectionwise-fnb18',
     code_features: [
+      'gst-p1-tds-sectionwise-fnb18',                //GST/TDS P1 batch (D-2 + A-3 + A-4). (D-2) SECTION-AWARE TDS: vendor withholding was 194C-only (single 1%/2% band). _tdsForSupplierPayment is now section-driven — the supplier carries a NEW tds_section (194C/194J/194H/194I; UI dropdown on the supplier form, DB column suppliers.tds_section) and withholding uses the correct rate + threshold per section: 194C 1% (indiv/HUF) or 2% (company/firm — via the existing 194C deductee-rate control), single ₹30,000 / annual ₹1,00,000; 194J 10% @ ₹30,000; 194H 5% @ ₹15,000; 194I(rent) 10% @ ₹2,40,000. The taxable base is now EX-GST (payAmt × (invoiceTotal−gst)/invoiceTotal, not the gross), the FY-aggregate test sums ex-GST supplier_invoices from 1-Apr, and missing-PAN forces 20% (Sec 206AA). New COA 2340 "TDS Payable — Sec 194I". tds_payable_ledger now stores the ex-GST taxableBase. Legacy string-category calls still resolve (194C fallback) so nothing breaks. (A-3) SPECIFIED-PREMISES F&B 18%: a standalone/walk-in restaurant POS bill in a hotel that has any room > ₹7,500 now charges F&B at 18% (not 5%), mirroring the charge-to-room folio path — computeInvoiceTaxes probes rooms.base_rate > slab2Max and, only then, bumps a 5% GST config row (or the legacy 5% fallback) to 18%; other configured rates and non-hotel tenants are untouched. (A-4) INCLUSIVE-SLAB CONSISTENCY: reapplyHotelGstRates was choosing the room's GST slab from the stored pre-tax base, which for a GST-INCLUSIVE tariff wrongly downgraded a room near the boundary from 18% to 12% at settlement; it now tests the slab on the VALUE OF SUPPLY (gross = amount+gst for inclusive tenants, taxable amount for exclusive), consistent with how the slab was picked at seed. tsc + vite build clean.
       'gst-p1-reverse-charge-line',                  //GST P1 (B-5): every tax invoice now carries the mandatory "Reverse Charge: No" declaration (Rule 46(l)) — these are forward-charge supplies. Added to the Classic hotel PDF (invoiceService.ts meta rows), the Boutique PDF (invoiceServiceBoutique.ts stay card), and the restaurant thermal tax invoice (buildThermalHTML, shown when it's a registered-supplier TAX INVOICE). New REVERSE_CHG bilingual label. tsc + vite build clean.
       'gst-p1-gstr1-structured',                 //GST P1 (C-1): GSTR-1 is now a portal-ALIGNED structured return, not just rate-wise buckets. Rebuilt /accounting/gst/gstr1 to add: TABLE 4 invoice-level B2B (per recipient GSTIN + invoice: number/date/POS/rate + CGST/SGST/IGST + invoice value) — and FIXED the B2B classification bug: GSTIN is now resolved for BOTH hotel (room_bookings.guest_gstin) AND EVENT folios (event_bookings.customer_gstin) via COALESCE (events were wrongly dumped into B2C); TABLE 7 B2CS (rate-wise B2C + POS); TABLE 12 HSN/SAC summary (from gst_output_register, rate-wise); TABLE 13 document series (issued invoice numbers per doc type from folios.invoice_number — enabled by the B-1 persisted serials). Place of supply = the property's state. Each new section is independently guarded (degrades to [] on error) and the GL-derived output-GST TOTAL is unchanged so it still reconciles to gst-outstanding/trial balance; back-compat b2b/b2c rate-wise arrays retained so the existing UI keeps working. FRONTEND: the GSTR-1 report now renders the B2B-invoice, HSN(T12), and doc-series(T13) tables. Residual (tracked): restaurant/spa invoice-level B2B + their HSN need the output register extended to those modules; portal JSON export still TODO. New TC-ACC-GSTR1-STRUCT test. tsc + vite build clean.
       'gst-p0-complete',                         //GST/TDS P0 remediation COMPLETE + a safety refinement: the B-3 RANDOM→SEQUENTIAL invoice-mode migration is now a ONE-TIME migration guarded by a new central platform_flags marker (gst_b3_random_to_sequential), so a tenant that later deliberately re-selects RANDOM in Settings is no longer flipped back on every server restart. All five P0 certification blockers are now live: A-1 (0% budget-room slab → 12%), A-2 (accommodation/F&B/events billed intra-state CGST/SGST, invoice↔GL aligned), B-1/B-3 (consecutive persisted per-FY invoice serials + SEQUENTIAL default), B-2 (restaurant thermal bill is a Rule-46 tax invoice), D-1 (vendor TDS withheld in the GL). tsc + vite build clean.
