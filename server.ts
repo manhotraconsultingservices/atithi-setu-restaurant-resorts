@@ -37554,6 +37554,16 @@ ${data.tenant.name}`;
             [payment_method || 'CASH', now, masterFolioRow.id]
           );
           totalGrand += Number(masterFolioRow.grand_total || 0);
+          // GL (Day Book reflection fix): post the master folio's OWN charges to the
+          // ledger (FOLIO-<id>, idempotent + balanced). Previously this raw settle
+          // skipped the GL, so a consolidated group bill never reached the Day Book.
+          // No double-count: the child room folios are settled+posted individually
+          // above, and the master folio is created empty and carries only group-level
+          // charges distinct from the rooms'.
+          await _postFolioGl(tenantDb, req.params.id, masterFolioRow.id, {
+            revenueCode: '4000', revenueName: 'Room Revenue',
+            sourceType: 'FOLIO_SETTLEMENT', postedBy: req.user?.email || req.user?.id || null,
+          }).catch((e) => console.warn('[group-checkout] master folio GL post failed:', e));
         } catch (mfErr) {
           console.warn('[group-checkout] failed to settle master folio:', mfErr);
         }
@@ -46682,6 +46692,18 @@ ${data.tenant.name}`;
         }
       }
 
+      // GL CAPTURE (Day Book reflection fix): when THIS patch marks the order PAID,
+      // post its standalone-F&B revenue to the GL. Previously only the dedicated
+      // /orders/:id/payment endpoint and session-close posted _postOrderGl, so an
+      // order settled through this generic PATCH (e.g. a manual invoice marked paid
+      // from the Invoices list) never reached the Day Book. _postOrderGl is
+      // idempotent on ORDER-<id> and skips folio-bound / charge-to-room orders, so
+      // this can't double-post an order already captured elsewhere.
+      if (payment_status && String(payment_status).toUpperCase() === 'PAID' && updatedOrder) {
+        try { await _postOrderGl(db, req.user!.restaurantId, updatedOrder, req.user?.email || req.user?.id || null); }
+        catch (glErr) { console.error(`[GL] order PATCH capture failed for ${req.params.id}:`, glErr); }
+      }
+
       // ── Charge room-service F&B to the folio ON DELIVERY ──────────────
       // A CHARGE_TO_ROOM order (in-room QR) posts to the guest folio only when
       // the food is actually DELIVERED — not at order time — so cancelled or
@@ -49823,9 +49845,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'expense-include-shared-toggle',
+    commit_marker: 'gl-daybook-reflection-fix',
     code_features: [
-      'expense-include-shared-toggle',               //FEATURE (owner request): optional "+ Include shared" overlay in the Expense Journal. Strict module buckets stay the DEFAULT (Hotel/Restaurant/Shared are mutually exclusive; a Shared entry shows only under Shared). When viewing a specific module (Hotel OR Restaurant), a new checkbox folds property-wide SHARED costs into that view too — WITHOUT conflating them: each row keeps its own Module badge, and a header line shows Total / of-which-Shared / module-only subtotals. Backend: GET /petty-cash?module=HOTEL&include_shared=1 → `... IN (?, 'SHARED')` (ignored for ALL — already shows everything — and for the SHARED filter itself); response summary gains include_shared + shared_in/shared_out. Frontend ExpenseJournalView: includeShared state + toggle shown only for Hotel/Restaurant + the separate shared subtotal line. New self-cleaning TC-EXPENSE-SHARED test (strict excludes shared; overlay folds it with a shared_out subtotal; overlay ignored for the Shared filter). tsc + vite build clean.
+      'gl-daybook-reflection-fix',                   //BUGFIX (owner day-book audit found settled txns missing from the GL/Day Book — books still BALANCED (trial balance diff 0, 0 gl_exceptions), but ~₹11.6k of recent settled revenue never posted a journal, so GL-derived reports understated it). Two real posting gaps found + fixed forward: (1) RESTAURANT — the generic PATCH /orders/:id sets payment_status='PAID' but never called _postOrderGl (only the dedicated /orders/:id/payment endpoint + session-close did), so an order settled via that PATCH (e.g. a manual invoice marked paid from the Invoices list) never reached the Day Book; now posts _postOrderGl (idempotent on ORDER-<id>, skips folio-bound). (2) HOTEL — the group-checkout MASTER (consolidated) folio settle did a raw UPDATE folios SET status='settled' with no GL post (per-room child folios DO post via settleFolioForBooking); now posts _postFolioGl (FOLIO-<id>, no double-count since the master folio is created empty and holds only group-level charges). Also NEW owner-only POST /accounting/backfill-gl (dry_run=1 supported) — idempotent, balanced-or-exception, posts GL for any settled HOTEL folio / paid standalone order that is missing its journal, to reflect PRE-EXISTING gaps. Events were a false-positive in the audit (advances post EVENT-PAY-*, revenue recognized at checkout as FOLIO-* — deferred, not missing). Reconciliation test (e2e_daybook_full_loop.mjs) corrected: diagnostics (gl read health + trial balance + gl_exceptions), events reconciled by their real model, missing hotel/restaurant txns printed with date+amount. tsc + vite build clean.
+      'expense-include-shared-toggle',           //FEATURE (owner request): optional "+ Include shared" overlay in the Expense Journal. Strict module buckets stay the DEFAULT (Hotel/Restaurant/Shared are mutually exclusive; a Shared entry shows only under Shared). When viewing a specific module (Hotel OR Restaurant), a new checkbox folds property-wide SHARED costs into that view too — WITHOUT conflating them: each row keeps its own Module badge, and a header line shows Total / of-which-Shared / module-only subtotals. Backend: GET /petty-cash?module=HOTEL&include_shared=1 → `... IN (?, 'SHARED')` (ignored for ALL — already shows everything — and for the SHARED filter itself); response summary gains include_shared + shared_in/shared_out. Frontend ExpenseJournalView: includeShared state + toggle shown only for Hotel/Restaurant + the separate shared subtotal line. New self-cleaning TC-EXPENSE-SHARED test (strict excludes shared; overlay folds it with a shared_out subtotal; overlay ignored for the Shared filter). tsc + vite build clean.
       'qa-bugfix-batch-2-ux',                    //BUGFIXES (QA batch 2 — UI/UX): (1) QUOTATION LIST FLASH — EventQuotations had no loading state, so its DataTable showed the "No quotations yet" empty-state during the 2-3s N+1 load (bookings → per-booking detail); added a `loading` flag and gated the emptyMessage ("Loading quotations…") so the empty-state only shows after load completes. (2) CHECK-IN VALIDATION NOT IMMEDIATE — the early-check-in-before-date message was set only into the SHARED hotelError banner, which can render off-screen when triggered from the booking-detail modal (read as "message only appears after refresh"); now also fired as a toast (immediate, floats over everything). (3) STUCK EDIT-AFTER-CHECK-IN ERROR — the edit-blocked save error set the sticky shared hotelError banner and the 3 booking-modal close paths never cleared it, so it lingered across views; now cleared on every modal close and also surfaced as an auto-dismissing toast (the check-in EDIT BLOCK itself is by design — server locks a checked-in booking — only the stuck message was the defect). NON-BUGS called out: (4) guest-portal "Charged to your room" — the order-confirmation panel ALREADY auto-dismisses (useEffect citing this exact report); the remaining line is a deliberate Food-tab payment-model header. (5) invoice "Thank you" on page 2 — real but DEFERRED: the footer is absolute-positioned and this block is delicately tuned to avoid a prior "Grand Total clipped" regression, so it needs a visual PDF render to fix safely rather than a blind layout change. Frontend-only. tsc + vite build clean.
       'qa-bugfix-batch-1',                       //BUGFIXES (QA manual-testing batch, root-caused + fixed): (1) GROUP CHECK-IN CHECKLIST — the bulk booking-groups/:id/checkin handler flipped status + created folios but never raised the CHECK_IN checklist (single check-in does at ~38929); added a non-blocking, idempotent raiseChecklistJobs per room (group checkOUT already raised it). (2) OCCUPIED VENUE BOOKABLE — event_venues.status (Hall Status board) was never consulted by booking availability; the create-event guard also skipped conflict checks for INQUIRY. Added a same-day board-status gate (OCCUPIED/CLEANING/MAINTENANCE/BLOCKED → 409) to BOTH the availability-check endpoint and the create handler, date-scoped to today so future bookings are unaffected. (3) HOTEL ROOM REVENUE ₹0 IN P&L — /reports/pnl filtered hotel folios on status='closed' but hotel folios settle as 'settled' ('closed' is spa/table vocab); fixed hotel P&L + the identical GST-ledger hotel query. (4) EXPENSE ENTRIES ALWAYS 'SHARED' — the Expense Journal form defaulted module to 'SHARED' so entries never showed under Hotel/Restaurant filters; made module a required explicit choice (filter itself was correct). (5) RBAC LEAK — Front Desk (restricted built-in role) could see Housekeeping / Delivery Partners / Restaurant Reports: removed DELIVERY + RESTAURANT_REPORTS from the ALWAYS_VISIBLE_TABS grandfather set, and removed HOUSEKEEPING from the RBAC_NEWLY_ADDED inject-to-Full list (now matrix-authoritative with requireTabAction ops-role fallback, same pattern already applied to Events tabs). (6) FRONT-DESK DASHBOARD ARRIVALS/DEPARTURES 0 — compared a UTC date-only `today` with `===` against full-ISO-timestamp check_in/out_date (In-House worked, it's status-only); fixed to IST date + .slice(0,10), arrivals = BOOKED|CHECKED_IN today (matches server stats). (7) EXTRA ADULT/CHILD CHARGES MISSING FROM FOLIO — 4 calendar/dashboard/stay-view new-booking seeds sent room_rate=base_rate (non-zero), which the server treats as a manual all-in override that DROPS extras; changed all 4 to room_rate=0 so the matrix resolver itemizes extra-person charges (matches New Booking + walk-in). (8) GUEST BILLS SHOWS 'CASH' — the checkout stamped folios.payment_method from the legacy secondary dropdown (default CASH); now derives it from the dominant real folio_payments method so Guest Bills matches the folio/invoice for the new-booking flow (walk-in already worked). (9) PO ₹0 PRICE — a PO line whose item master has no default_unit_price saved a ₹0 line (₹0 subtotal/GST/total); the PO form now requires a positive unit price and names the item. Test-team non-bugs called out separately (refund manual by policy; edit-after-check-in block is by design). tsc + vite build clean.
       'upi-link-raw-vpa-fix',                    //BUGFIX (owner, 5+yr UPI-integration review: "guest UPI url doesn't work; 0% commission open-source solution"). ROOT CAUSE: the guest-facing UPI deep link built `pa` with encodeURIComponent(vpa), turning the mandatory '@' into %40 (`pa=hotel%40okhdfcbank`). Per the NPCI UPI Linking Spec, `pa` must be the RAW vpa — PhonePe/BHIM/Paytm + most QR scanners reject a %40-encoded UPI ID (GPay silently decodes it, hiding the bug in testing). All three guest surfaces (deep link, QR value, reconstructed Android intent://) derived from that one broken string, so all failed together; the restaurant customer QR built `pa` raw and worked, which pinpointed it. FIX: new shared, unit-tested `upiLink.ts` (buildUpiUri + isValidVpa) — single source of truth imported by BOTH server.ts and src/App.tsx (removing 5 drifting copies). It keeps `pa` RAW, URL-encodes only free-text pn/tn, fixes `am` to 2 decimals, sanitises `tr` to NPCI alphanumeric (≤35), and returns '' for an invalid VPA so no dead link/QR is ever emitted. Replaced all 5 builders (buildHotelPaymentLinkPayload, public-booking confirmation, resend-payment-link override, restaurant customer QR + Open-UPI-App link). Settings now show a live preview of the real link and a red "this UPI ID doesn't look valid" warning when the VPA fails the grammar. This is the correct 0%-commission approach — a direct upi:// deep link/QR to the property's own VPA, money straight to their bank, no gateway/MDR; nothing to sign up for. New unit test test-scripts/upi_link_builder_check.ts (npm run test:upi) — all invariants green. tsc + vite build clean.
@@ -50439,6 +50462,65 @@ ${data.tenant.name}`;
       const openCount = (rows || []).filter((r: any) => !Number(r.resolved)).length;
       res.json({ count: (rows || []).length, open: openCount, exceptions: rows || [] });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to load GL exceptions' }); }
+  });
+
+  // BACKFILL — post GL journals for settled HOTEL folios / paid standalone orders
+  // that never reached the Day Book (settled through a path that skipped GL, e.g.
+  // a consolidated master folio or an order marked PAID via the generic PATCH before
+  // those paths were wired to post). IDEMPOTENT: skips anything already posted; each
+  // posting is balanced or diverted to gl_exceptions, so it can neither double-post
+  // nor unbalance the ledger. Owner-only. `dry_run=1` reports candidates without
+  // writing. Spa/Event folios use their own posting paths + revenue accounts and are
+  // out of scope here.
+  app.post("/api/restaurant/:id/accounting/backfill-gl", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const from = String(req.query.from || req.body?.from || '2000-01-01');
+      const to = String(req.query.to || req.body?.to || new Date().toISOString().slice(0, 10));
+      const dryRun = String(req.query.dry_run || req.body?.dry_run || '') === '1';
+      const has = async (ref: string) => !!(await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [ref]).catch(() => null));
+      const posted: string[] = []; const stillMissing: string[] = []; let alreadyPosted = 0; let candidates = 0;
+      // 1) Settled HOTEL folios → revenue 4000 (Room Revenue), AR 1100.
+      const folios: any[] = await db.query(
+        `SELECT id FROM folios
+          WHERE UPPER(COALESCE(folio_kind,'HOTEL')) = 'HOTEL' AND status IN ('settled','closed')
+            AND TO_CHAR(COALESCE(settled_at, created_at),'YYYY-MM-DD') BETWEEN ? AND ?`, [from, to]
+      ).catch(() => []);
+      for (const f of folios) {
+        const ref = `FOLIO-${f.id}`;
+        if (await has(ref)) { alreadyPosted++; continue; }
+        candidates++;
+        if (dryRun) { posted.push(ref); continue; }
+        await _postFolioGl(db, req.params.id, f.id, { revenueCode: '4000', revenueName: 'Room Revenue', sourceType: 'FOLIO_BACKFILL', postedBy: req.user?.email || 'BACKFILL' }).catch(() => {});
+        (await has(ref) ? posted : stillMissing).push(ref);
+      }
+      // 2) PAID standalone orders (not folio-bound / charge-to-room) → ORDER-<id>.
+      const orders: any[] = await db.query(
+        `SELECT * FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL
+            AND UPPER(COALESCE(status,'')) <> 'CANCELLED'
+            AND (folio_id IS NULL OR folio_id = '') AND UPPER(COALESCE(payment_method,'')) <> 'CHARGE_TO_ROOM'
+            AND TO_CHAR(created_at,'YYYY-MM-DD') BETWEEN ? AND ?`, [from, to]
+      ).catch(() => []);
+      for (const o of orders) {
+        const ref = `ORDER-${o.id}`;
+        if (await has(ref)) { alreadyPosted++; continue; }
+        candidates++;
+        if (dryRun) { posted.push(ref); continue; }
+        await _postOrderGl(db, req.params.id, o, req.user?.email || 'BACKFILL');
+        (await has(ref) ? posted : stillMissing).push(ref);
+      }
+      res.json({
+        ok: true, dry_run: dryRun, from, to,
+        already_posted: alreadyPosted,
+        candidates,
+        posted_count: dryRun ? 0 : posted.length,
+        still_missing_count: stillMissing.length,
+        posted: posted.slice(0, 100),
+        still_missing: stillMissing.slice(0, 100),
+        note: stillMissing.length ? 'Some could not post (e.g. a folio with subtotal=0 and no entries) — check /accounting/gl-exceptions.' : undefined,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Backfill failed' }); }
   });
 
   app.get("/api/restaurant/:id/accounting/tds-payable", authenticate, async (req: AuthRequest, res: Response) => {
