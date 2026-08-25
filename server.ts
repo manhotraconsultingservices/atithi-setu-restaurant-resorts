@@ -1643,6 +1643,30 @@ function gstRateForTariff(tariff: number, cfg?: HotelTaxConfig): number {
   return slab3Rate;
 }
 
+// GST-A4: the ₹7,500 accommodation slab is tested against the VALUE OF SUPPLY —
+// the amount actually charged. For a GST-INCLUSIVE tariff that is the gross
+// (stored net + extracted GST); for exclusive it is the taxable amount. Using
+// only the stored pre-tax base for an inclusive folio wrongly downgraded a room
+// near the boundary from 18% to 12% at settlement. Kept pure so reapplyHotelGstRates
+// and the /accounting/gst/selftest diagnostic share ONE implementation.
+function valueOfSupplyForSlab(amount: number, gstAmount: number, inclusive: boolean): number {
+  return inclusive ? (Number(amount) + Number(gstAmount || 0)) : Number(amount);
+}
+
+// GST-A3: F&B inside a "specified premises" (a hotel with any room > ₹7,500) is
+// 18%, not 5%. Given the active tax_config rows + whether the tenant is a
+// specified premises, return the effective rows: a 5% GST line is bumped to 18%,
+// every other configured rate is left untouched. Pure so computeInvoiceTaxes and
+// the selftest diagnostic share exactly one implementation.
+function applyFnb18ForSpecifiedPremises(configs: any[], specifiedPremises: boolean): any[] {
+  if (!specifiedPremises) return configs;
+  return configs.map(c => (Number(c.rate_percent) === 5 ? { ...c, rate_percent: 18 } : c));
+}
+// Scalar variant for the single-rate legacy GST fallback path.
+function fnb18RateForSpecifiedPremises(rate: number, specifiedPremises: boolean): number {
+  return (specifiedPremises && Number(rate) === 5) ? 18 : Number(rate);
+}
+
 /**
  * Break a stored matrix rate down into {net, gst, gross} based on the
  * tenant's `rates_include_gst` flag.
@@ -4238,7 +4262,7 @@ async function reapplyHotelGstRates(tenantDb: DbInterface, restaurantId: string,
     [folioId]
   );
   for (const e of entries) {
-    const valueOfSupply = inclusive ? (Number(e.amount) + Number(e.gst_amount || 0)) : Number(e.amount);
+    const valueOfSupply = valueOfSupplyForSlab(e.amount, e.gst_amount, inclusive);
     const newRate = gstRateForTariff(valueOfSupply, cfg);
     const newGst  = Math.round(Number(e.amount) * newRate / 100 * 100) / 100;
     if (newRate === Number(e.gst_rate) && newGst === Number(e.gst_amount)) continue;
@@ -12926,9 +12950,7 @@ async function startServer() {
         specifiedPremises = !!hi?.s;
       } catch { /* not a hotel / no rooms → 5% stands */ }
     }
-    const effConfigs = specifiedPremises
-      ? activeConfigs.map(c => (Number(c.rate_percent) === 5 ? { ...c, rate_percent: 18 } : c))
-      : activeConfigs;
+    const effConfigs = applyFnb18ForSpecifiedPremises(activeConfigs, specifiedPremises);
 
     let taxLines: TaxLine[] = [];
     let totalTax = 0;
@@ -12947,7 +12969,7 @@ async function startServer() {
                opts.legacyGstFallback.gst_percent > 0) {
       // No tax_config rows configured → honour the legacy single GST input
       // (bumped to 18% for specified premises, mirroring the folio path).
-      const rate = (specifiedPremises && Number(opts.legacyGstFallback.gst_percent) === 5) ? 18 : Number(opts.legacyGstFallback.gst_percent);
+      const rate = fnb18RateForSpecifiedPremises(opts.legacyGstFallback.gst_percent, specifiedPremises);
       const amount = Math.round((taxableBase * rate / 100) * 100) / 100;
       if (amount > 0) {
         taxLines = [{ id: 'GST', label: 'GST', rate, amount }];
@@ -50005,8 +50027,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-p1-tds-sectionwise-fnb18b',
+    commit_marker: 'gst-p1-a3a4-selftest',
     code_features: [
+      'gst-p1-a3a4-selftest',                        //GST P1 test coverage: the A-3 (specified-premises F&B 18%) and A-4 (inclusive-slab value-of-supply) rate decisions were extracted into pure helpers (valueOfSupplyForSlab, applyFnb18ForSpecifiedPremises, fnb18RateForSpecifiedPremises) reused by BOTH the production paths (reapplyHotelGstRates, computeInvoiceTaxes) and a NEW deterministic owner-only diagnostic GET /accounting/gst/selftest that runs those exact helpers over canned boundary scenarios (inclusive Rs8000→18, inclusive Rs7500→12, exclusive Rs7400→12 with no false 18, 5%→18 only under specified premises, a configured 12% line untouched, legacy fallback 5→18). Zero data mutation, so the automated smoke suite verifies A-3/A-4 on every cloud deploy without creating bookings/orders on a live tenant. New suite tests TC-GST-A3-LOGIC / TC-GST-A4-LOGIC (real FAIL on regression, not skip). tsc + vite build clean.
       'gst-p1-tds-sectionwise-fnb18b',               //GST/TDS P1 batch (D-2 + A-3 + A-4). [b: A-3 now guards the room-tariff probe behind a has-5%-line check so a POS bill with no 5% GST row skips the extra DB read entirely.] (D-2) SECTION-AWARE TDS: vendor withholding was 194C-only (single 1%/2% band). _tdsForSupplierPayment is now section-driven — the supplier carries a NEW tds_section (194C/194J/194H/194I; UI dropdown on the supplier form, DB column suppliers.tds_section) and withholding uses the correct rate + threshold per section: 194C 1% (indiv/HUF) or 2% (company/firm — via the existing 194C deductee-rate control), single ₹30,000 / annual ₹1,00,000; 194J 10% @ ₹30,000; 194H 5% @ ₹15,000; 194I(rent) 10% @ ₹2,40,000. The taxable base is now EX-GST (payAmt × (invoiceTotal−gst)/invoiceTotal, not the gross), the FY-aggregate test sums ex-GST supplier_invoices from 1-Apr, and missing-PAN forces 20% (Sec 206AA). New COA 2340 "TDS Payable — Sec 194I". tds_payable_ledger now stores the ex-GST taxableBase. Legacy string-category calls still resolve (194C fallback) so nothing breaks. (A-3) SPECIFIED-PREMISES F&B 18%: a standalone/walk-in restaurant POS bill in a hotel that has any room > ₹7,500 now charges F&B at 18% (not 5%), mirroring the charge-to-room folio path — computeInvoiceTaxes probes rooms.base_rate > slab2Max and, only then, bumps a 5% GST config row (or the legacy 5% fallback) to 18%; other configured rates and non-hotel tenants are untouched. (A-4) INCLUSIVE-SLAB CONSISTENCY: reapplyHotelGstRates was choosing the room's GST slab from the stored pre-tax base, which for a GST-INCLUSIVE tariff wrongly downgraded a room near the boundary from 18% to 12% at settlement; it now tests the slab on the VALUE OF SUPPLY (gross = amount+gst for inclusive tenants, taxable amount for exclusive), consistent with how the slab was picked at seed. tsc + vite build clean.
       'gst-p1-reverse-charge-line',                  //GST P1 (B-5): every tax invoice now carries the mandatory "Reverse Charge: No" declaration (Rule 46(l)) — these are forward-charge supplies. Added to the Classic hotel PDF (invoiceService.ts meta rows), the Boutique PDF (invoiceServiceBoutique.ts stay card), and the restaurant thermal tax invoice (buildThermalHTML, shown when it's a registered-supplier TAX INVOICE). New REVERSE_CHG bilingual label. tsc + vite build clean.
       'gst-p1-gstr1-structured',                 //GST P1 (C-1): GSTR-1 is now a portal-ALIGNED structured return, not just rate-wise buckets. Rebuilt /accounting/gst/gstr1 to add: TABLE 4 invoice-level B2B (per recipient GSTIN + invoice: number/date/POS/rate + CGST/SGST/IGST + invoice value) — and FIXED the B2B classification bug: GSTIN is now resolved for BOTH hotel (room_bookings.guest_gstin) AND EVENT folios (event_bookings.customer_gstin) via COALESCE (events were wrongly dumped into B2C); TABLE 7 B2CS (rate-wise B2C + POS); TABLE 12 HSN/SAC summary (from gst_output_register, rate-wise); TABLE 13 document series (issued invoice numbers per doc type from folios.invoice_number — enabled by the B-1 persisted serials). Place of supply = the property's state. Each new section is independently guarded (degrades to [] on error) and the GL-derived output-GST TOTAL is unchanged so it still reconciles to gst-outstanding/trial balance; back-compat b2b/b2c rate-wise arrays retained so the existing UI keeps working. FRONTEND: the GSTR-1 report now renders the B2B-invoice, HSN(T12), and doc-series(T13) tables. Residual (tracked): restaurant/spa invoice-level B2B + their HSN need the output register extended to those modules; portal JSON export still TODO. New TC-ACC-GSTR1-STRUCT test. tsc + vite build clean.
@@ -50881,6 +50904,56 @@ ${data.tenant.name}`;
   // Per-journal aggregate of the revenue base + GST-payable lines; B2B if the
   // source folio carries a guest GSTIN. TOTAL output tax reconciles to
   // gst-outstanding exactly; the B2B/B2C/rate split is a partition of that total.
+  // GST-A3/A4 SELF-TEST — a deterministic, ZERO-DATA-MUTATION diagnostic that runs
+  // the REAL rate-decision helpers (gstRateForTariff / valueOfSupplyForSlab /
+  // applyFnb18ForSpecifiedPremises / fnb18RateForSpecifiedPremises) over canned
+  // boundary scenarios. Lets the automated smoke suite verify A-3 (specified-premises
+  // F&B 18%) and A-4 (inclusive-slab value-of-supply) on every deploy WITHOUT creating
+  // bookings/orders on a live tenant. Owner-only; read-only; no DB writes/reads.
+  app.get("/api/restaurant/:id/accounting/gst/selftest", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    // Canonical current-regime slabs: ≤₹1,000→12, ≤₹7,500→12, >₹7,500→18.
+    const cfg: HotelTaxConfig = { slab1Max: 1000, slab1Rate: 12, slab2Max: 7500, slab2Rate: 12, slab3Rate: 18, serviceChargePct: 0 };
+    const scenarios: { id: string; area: string; desc: string; expected: number; actual: number; pass: boolean }[] = [];
+    const add = (id: string, area: string, desc: string, expected: number, actual: number) =>
+      scenarios.push({ id, area, desc, expected, actual, pass: Number(expected) === Number(actual) });
+
+    // ── A-4: inclusive-slab consistency (value of supply drives the slab) ──
+    // Inclusive ₹8,000 all-in room: stored net 6779.66 + gst 1220.34 → VOS 8000 → 18%.
+    add('A4-INCL-8000', 'A4', 'inclusive all-in Rs 8,000 room stays 18% (VOS=gross)', 18,
+        gstRateForTariff(valueOfSupplyForSlab(6779.66, 1220.34, true), cfg));
+    // The OLD bug basis (pre-tax 6779.66 alone) would pick 12% — documents the regression the fix removes.
+    add('A4-INCL-BUGBASIS', 'A4', 'pre-tax base 6779.66 alone would wrongly be 12% (old bug)', 12,
+        gstRateForTariff(6779.66, cfg));
+    // Inclusive ₹7,500 all-in room: VOS 7500 → 12% (≤ slab2Max), stable.
+    add('A4-INCL-7500', 'A4', 'inclusive all-in Rs 7,500 room = 12% (boundary, <=7500)', 12,
+        gstRateForTariff(valueOfSupplyForSlab(6696.43, 803.57, true), cfg));
+    // Exclusive ₹7,400 taxable room: VOS = taxable 7400 → 12% (must NOT jump to 18 as gross would).
+    add('A4-EXCL-7400', 'A4', 'exclusive taxable Rs 7,400 room = 12% (VOS=taxable, no false 18%)', 12,
+        gstRateForTariff(valueOfSupplyForSlab(7400, 888, false), cfg));
+    // Exclusive ₹8,000 taxable room → 18%.
+    add('A4-EXCL-8000', 'A4', 'exclusive taxable Rs 8,000 room = 18%', 18,
+        gstRateForTariff(valueOfSupplyForSlab(8000, 1440, false), cfg));
+
+    // ── A-3: specified-premises F&B 18% ──
+    const rateOf = (rows: any[]) => (rows && rows[0] ? Number(rows[0].rate_percent) : NaN);
+    const cfg5  = [{ id: 'GST', label: 'GST', rate_percent: 5 }];
+    const cfg12 = [{ id: 'GST', label: 'GST', rate_percent: 12 }];
+    add('A3-SPEC-5to18', 'A3', 'specified premises bumps 5% F&B -> 18%', 18,
+        rateOf(applyFnb18ForSpecifiedPremises(cfg5, true)));
+    add('A3-NONSPEC-5', 'A3', 'non-specified premises leaves 5% as 5%', 5,
+        rateOf(applyFnb18ForSpecifiedPremises(cfg5, false)));
+    add('A3-SPEC-12keep', 'A3', 'specified premises leaves a configured 12% line untouched', 12,
+        rateOf(applyFnb18ForSpecifiedPremises(cfg12, true)));
+    add('A3-LEGACY-5to18', 'A3', 'legacy 5% fallback -> 18% under specified premises', 18,
+        fnb18RateForSpecifiedPremises(5, true));
+    add('A3-LEGACY-18keep', 'A3', 'legacy 18% fallback stays 18%', 18,
+        fnb18RateForSpecifiedPremises(18, true));
+
+    const failed = scenarios.filter(s => !s.pass);
+    res.json({ ok: failed.length === 0, pass_count: scenarios.length - failed.length, fail_count: failed.length, scenarios });
+  });
+
   app.get("/api/restaurant/:id/accounting/gst/gstr1", authenticate, async (req: AuthRequest, res: Response) => {
     if (!_acctOwnerOnly(req, res)) return;
     try {

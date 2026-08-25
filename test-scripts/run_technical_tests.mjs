@@ -647,6 +647,37 @@ async function testAccounting() {
     skip('TC-ACC-TDS-SEC', 'Section-wise TDS payable accounts', 'chart of accounts unavailable (RBAC/empty)');
   }
 
+  // TC-GST-A3-LOGIC / TC-GST-A4-LOGIC (GST P1 A-3 + A-4): exercise the REAL
+  // rate-decision helpers on the live build via the deterministic self-test
+  // endpoint (no data mutation). A-3 = specified-premises F&B 18%; A-4 =
+  // inclusive-slab value-of-supply. A regression here fails, not skips.
+  const st = await api('GET', `/api/restaurant/${restaurantId}/accounting/gst/selftest`);
+  if (st.status === 200 && st.data && Array.isArray(st.data.scenarios)) {
+    const a4 = st.data.scenarios.filter(s => s.area === 'A4');
+    const a3 = st.data.scenarios.filter(s => s.area === 'A3');
+    const a4Fail = a4.filter(s => !s.pass);
+    const a3Fail = a3.filter(s => !s.pass);
+    if (a4.length >= 5 && a4Fail.length === 0) {
+      pass('TC-GST-A4-LOGIC', `Inclusive-slab value-of-supply logic correct (${a4.length} boundary scenarios)`);
+    } else {
+      fail('TC-GST-A4-LOGIC', 'Inclusive-slab value-of-supply logic', a4Fail.length ? a4Fail.map(s => `${s.id}: got ${s.actual} want ${s.expected}`).join('; ') : `only ${a4.length} A4 scenarios ran`);
+    }
+    if (a3.length >= 5 && a3Fail.length === 0) {
+      pass('TC-GST-A3-LOGIC', `Specified-premises F&B 18% logic correct (${a3.length} scenarios)`);
+    } else {
+      fail('TC-GST-A3-LOGIC', 'Specified-premises F&B 18% logic', a3Fail.length ? a3Fail.map(s => `${s.id}: got ${s.actual} want ${s.expected}`).join('; ') : `only ${a3.length} A3 scenarios ran`);
+    }
+  } else if (st.status === 403) {
+    skip('TC-GST-A3-LOGIC', 'GST A3/A4 self-test', 'RBAC: need OWNER role');
+    skip('TC-GST-A4-LOGIC', 'GST A3/A4 self-test', 'RBAC: need OWNER role');
+  } else if (st.status === 404) {
+    fail('TC-GST-A3-LOGIC', 'GST A3/A4 self-test endpoint', 'HTTP 404 — /accounting/gst/selftest not deployed');
+    fail('TC-GST-A4-LOGIC', 'GST A3/A4 self-test endpoint', 'HTTP 404 — /accounting/gst/selftest not deployed');
+  } else {
+    fail('TC-GST-A3-LOGIC', 'GST A3/A4 self-test', `HTTP ${st.status}`);
+    fail('TC-GST-A4-LOGIC', 'GST A3/A4 self-test', `HTTP ${st.status}`);
+  }
+
   // Manual journal POST — balanced entry test
   const mjRes = await api('POST', `/api/restaurant/${restaurantId}/accounting/journal-entries`, {
     entry_date: today,
