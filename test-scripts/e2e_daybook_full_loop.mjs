@@ -286,16 +286,33 @@ async function activeEvents() {
 // PART B — RECONCILIATION (read-only): every settled transaction in the range
 // must have a balanced Day Book journal.
 // ═══════════════════════════════════════════════════════════════════════════
-function reconReport(id, label, txns, chk) {
+// Classify a ref that is missing from the window's ACTIVE Day Book, against the
+// full ledger (include_reversed=1): 'gap' = no journal anywhere (true posting
+// gap); 'reversed' = only reversed rows (credit-noted / revised → net-zero,
+// correct); 'active-elsewhere' = an active journal exists, just dated outside
+// the recon window.
+async function classifyRef(ref) {
+  const r = await api('GET', `/api/restaurant/${RID}/accounting/gl-entries?journal_ref=${encodeURIComponent(ref)}&include_reversed=1`);
+  const rows = Array.isArray(r.data) ? r.data : [];
+  if (rows.length === 0) return 'gap';
+  const active = rows.filter(e => Number(e.is_reversed || 0) === 0);
+  return active.length === 0 ? 'reversed' : 'active-elsewhere';
+}
+
+async function reconReport(id, label, txns, chk) {
   if (txns.length === 0) { skip(id, `${label}: no settled transactions in range`); return; }
-  let ok = 0; const bad = [];
+  let ok = 0; const reversed = []; const gaps = [];
   for (const t of txns) {
     const s = chk(t.ref);
-    if (s === 'ok') ok++;
-    else bad.push(`${t.ref} (settled ${String(t.date || '?').slice(0, 10)}, ₹${r2(t.amt || 0)}${s === 'unbalanced' ? ', UNBALANCED' : ''})`);
+    if (s === 'ok') { ok++; continue; }
+    if (s === 'unbalanced') { gaps.push(`${t.ref} (UNBALANCED, ₹${r2(t.amt || 0)})`); continue; }
+    const cls = await classifyRef(t.ref);       // 'missing' from window — check the full ledger
+    if (cls === 'reversed') reversed.push(`${t.ref} (₹${r2(t.amt || 0)})`);
+    else if (cls === 'active-elsewhere') ok++;   // journal exists, just dated outside the window
+    else gaps.push(`${t.ref} (settled ${String(t.date || '?').slice(0, 10)}, ₹${r2(t.amt || 0)})`);
   }
-  if (bad.length === 0) pass(id, `${label}: ${ok}/${txns.length} settled txns reflected + balanced in Day Book`);
-  else fail(id, `${label}: ${ok}/${txns.length} reflected; ${bad.length} NOT reflected → ${bad.slice(0, 8).join('; ')}${bad.length > 8 ? ' …' : ''}`);
+  if (gaps.length === 0) pass(id, `${label}: ${ok} reflected${reversed.length ? ` + ${reversed.length} reversed/credit-noted (net-zero, OK)` : ''}; 0 true gaps`);
+  else fail(id, `${label}: ${gaps.length} TRUE gap(s) → ${gaps.slice(0, 8).join('; ')}${reversed.length ? ` · (also ${reversed.length} reversed/credit-noted, OK)` : ''}`);
 }
 
 async function reconcile() {
@@ -336,14 +353,14 @@ async function reconcile() {
   if (Array.isArray(ord.data)) {
     const settled = ord.data.filter(o => String(o.payment_status).toUpperCase() === 'PAID' && String(o.status).toUpperCase() !== 'CANCELLED'
       && String(o.payment_method).toUpperCase() !== 'CHARGE_TO_ROOM' && !o.folio_id && inRange(o.created_at));
-    reconReport('TC-DB-RECON-REST', 'Restaurant orders', settled.map(o => ({ ref: `ORDER-${o.id}`, date: o.created_at, amt: o.total_amount })), chk);
+    await reconReport('TC-DB-RECON-REST', 'Restaurant orders', settled.map(o => ({ ref: `ORDER-${o.id}`, date: o.created_at, amt: o.total_amount })), chk);
   } else skip('TC-DB-RECON-REST', `orders list HTTP ${ord.status}`);
 
   // Hotel: settled folios.
   const fol = await api('GET', `/api/restaurant/${RID}/hotel/folios`);
   if (Array.isArray(fol.data)) {
     const settled = fol.data.filter(f => String(f.status).toLowerCase() === 'settled' && inRange(f.settled_at || f.created_at));
-    reconReport('TC-DB-RECON-HOTEL', 'Hotel folios', settled.map(f => ({ ref: `FOLIO-${f.id}`, date: f.settled_at || f.created_at, amt: f.grand_total })), chk);
+    await reconReport('TC-DB-RECON-HOTEL', 'Hotel folios', settled.map(f => ({ ref: `FOLIO-${f.id}`, date: f.settled_at || f.created_at, amt: f.grand_total })), chk);
   } else skip('TC-DB-RECON-HOTEL', `folios list HTTP ${fol.status}`);
 
   // Events: revenue is recognized at CHECKOUT as FOLIO-<folio_id>. Advances post
