@@ -748,6 +748,15 @@ async function testAccounting() {
   } else if (g1.status === 403) { skip('TC-ACC-GSTR1', 'GSTR-1', 'RBAC: need OWNER role'); }
   else if (g1.status === 404) { fail('TC-ACC-GSTR1', 'GSTR-1', 'HTTP 404 — accounting route unreachable'); }
   else { fail('TC-ACC-GSTR1', 'GSTR-1 responds', `HTTP ${g1.status}`); }
+  // TC-ACC-GSTR1-STRUCT — the return now carries the portal-aligned sections
+  // (invoice-level B2B, HSN Table 12, document series Table 13). Each is guarded
+  // server-side, so at minimum they must be present as arrays.
+  if (g1.status === 200 && g1.data) {
+    const d = g1.data;
+    const structural = Array.isArray(d.b2b_invoices) && Array.isArray(d.hsn) && Array.isArray(d.docs) && Array.isArray(d.b2cs);
+    if (structural) pass('TC-ACC-GSTR1-STRUCT', 'GSTR-1 returns B2B-invoice / HSN(T12) / docs(T13) / B2CS sections', `${d.b2b_invoices.length} B2B inv · ${d.hsn.length} HSN · ${d.docs.length} doc-series`);
+    else fail('TC-ACC-GSTR1-STRUCT', 'GSTR-1 structured sections present', `keys=${Object.keys(d).join(',')}`);
+  } else if (g1.status === 403) { skip('TC-ACC-GSTR1-STRUCT', 'GSTR-1 structure', 'RBAC'); }
   const g3 = await api('GET', `/api/restaurant/${restaurantId}/accounting/gst/gstr3b?from=${fyStart}&to=${today}`);
   if (g3.status === 200 && g3.data && g3.data.itc_available && gso2.status === 200 && gso2.data) {
     const okO = r2f(g3.data.output_tax) === r2f(gso2.data.output_gst);

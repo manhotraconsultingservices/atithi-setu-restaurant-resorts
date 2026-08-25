@@ -8709,7 +8709,41 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   </table>
                 </div>
               ))}
-              <p className="text-[11px] text-[#9c8e85]">Working sheet — total Output GST reconciles to GST Outstanding. Rate labels are snapped to the nearest slab; rupee totals are exact.</p>
+
+              {/* Table 4 — invoice-level B2B (hotel + events with a customer GSTIN) */}
+              {Array.isArray(gstr1.b2b_invoices) && gstr1.b2b_invoices.length > 0 && (
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse min-w-[720px]">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={9}>B2B — invoice detail (Table 4){gstr1.place_of_supply ? ` · POS ${gstr1.place_of_supply}` : ''}</th></tr>
+                      <tr className="bg-[#faf6ef] text-left text-xs"><th className="px-3 py-1.5">Recipient GSTIN</th><th className="px-3 py-1.5">Invoice #</th><th className="px-3 py-1.5">Date</th><th className="px-3 py-1.5 text-right">Rate %</th><th className="px-3 py-1.5 text-right">Taxable</th><th className="px-3 py-1.5 text-right">CGST</th><th className="px-3 py-1.5 text-right">SGST</th><th className="px-3 py-1.5 text-right">IGST</th><th className="px-3 py-1.5 text-right">Value</th></tr></thead>
+                    <tbody>{gstr1.b2b_invoices.map((r: any, i: number) => (<tr key={i} className="border-t border-[#f0e8d8]"><td className="px-3 py-2 font-mono text-xs">{r.gstin}</td><td className="px-3 py-2 font-mono text-xs">{r.invoice_no}</td><td className="px-3 py-2 tabular-nums">{r.invoice_date}</td><td className="px-3 py-2 text-right">{r.rate}%</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.taxable)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.sgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.igst)}</td><td className="px-3 py-2 text-right tabular-nums font-semibold">{fmtAmt(r.invoice_value)}</td></tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Table 12 — HSN/SAC summary */}
+              {Array.isArray(gstr1.hsn) && gstr1.hsn.length > 0 && (
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={6}>HSN / SAC summary (Table 12)</th></tr>
+                      <tr className="bg-[#faf6ef] text-left text-xs"><th className="px-3 py-1.5">HSN / SAC</th><th className="px-3 py-1.5 text-right">Rate %</th><th className="px-3 py-1.5 text-right">Taxable</th><th className="px-3 py-1.5 text-right">CGST</th><th className="px-3 py-1.5 text-right">SGST</th><th className="px-3 py-1.5 text-right">IGST</th></tr></thead>
+                    <tbody>{gstr1.hsn.map((h: any, i: number) => (<tr key={i} className="border-t border-[#f0e8d8]"><td className="px-3 py-2 font-mono text-xs">{h.hsn_sac}</td><td className="px-3 py-2 text-right">{h.rate}%</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.taxable)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.sgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.igst)}</td></tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Table 13 — document series */}
+              {Array.isArray(gstr1.docs) && gstr1.docs.length > 0 && (
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={4}>Documents issued (Table 13)</th></tr>
+                      <tr className="bg-[#faf6ef] text-left text-xs"><th className="px-3 py-1.5">Document</th><th className="px-3 py-1.5">From</th><th className="px-3 py-1.5">To</th><th className="px-3 py-1.5 text-right">Total</th></tr></thead>
+                    <tbody>{gstr1.docs.map((d: any, i: number) => (<tr key={i} className="border-t border-[#f0e8d8]"><td className="px-3 py-2">{d.doc_type}</td><td className="px-3 py-2 font-mono text-xs">{d.from || '—'}</td><td className="px-3 py-2 font-mono text-xs">{d.to || '—'}</td><td className="px-3 py-2 text-right tabular-nums">{d.total}</td></tr>))}</tbody>
+                  </table>
+                </div>
+              )}
+
+              <p className="text-[11px] text-[#9c8e85]">Working sheet reconciled to the GL. B2B invoice detail + HSN (Table 12) + document series (Table 13) cover hotel &amp; event supplies; restaurant/spa invoice-level detail follows once the output register is extended. Rate labels snap to the nearest slab; rupee totals are exact.</p>
             </>
           ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a period and refresh.</p>}
         </div>

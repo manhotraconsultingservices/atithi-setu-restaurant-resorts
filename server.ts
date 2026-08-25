@@ -49930,9 +49930,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-p0-complete',
+    commit_marker: 'gst-p1-gstr1-structured',
     code_features: [
-      'gst-p0-complete',                             //GST/TDS P0 remediation COMPLETE + a safety refinement: the B-3 RANDOM→SEQUENTIAL invoice-mode migration is now a ONE-TIME migration guarded by a new central platform_flags marker (gst_b3_random_to_sequential), so a tenant that later deliberately re-selects RANDOM in Settings is no longer flipped back on every server restart. All five P0 certification blockers are now live: A-1 (0% budget-room slab → 12%), A-2 (accommodation/F&B/events billed intra-state CGST/SGST, invoice↔GL aligned), B-1/B-3 (consecutive persisted per-FY invoice serials + SEQUENTIAL default), B-2 (restaurant thermal bill is a Rule-46 tax invoice), D-1 (vendor TDS withheld in the GL). tsc + vite build clean.
+      'gst-p1-gstr1-structured',                     //GST P1 (C-1): GSTR-1 is now a portal-ALIGNED structured return, not just rate-wise buckets. Rebuilt /accounting/gst/gstr1 to add: TABLE 4 invoice-level B2B (per recipient GSTIN + invoice: number/date/POS/rate + CGST/SGST/IGST + invoice value) — and FIXED the B2B classification bug: GSTIN is now resolved for BOTH hotel (room_bookings.guest_gstin) AND EVENT folios (event_bookings.customer_gstin) via COALESCE (events were wrongly dumped into B2C); TABLE 7 B2CS (rate-wise B2C + POS); TABLE 12 HSN/SAC summary (from gst_output_register, rate-wise); TABLE 13 document series (issued invoice numbers per doc type from folios.invoice_number — enabled by the B-1 persisted serials). Place of supply = the property's state. Each new section is independently guarded (degrades to [] on error) and the GL-derived output-GST TOTAL is unchanged so it still reconciles to gst-outstanding/trial balance; back-compat b2b/b2c rate-wise arrays retained so the existing UI keeps working. FRONTEND: the GSTR-1 report now renders the B2B-invoice, HSN(T12), and doc-series(T13) tables. Residual (tracked): restaurant/spa invoice-level B2B + their HSN need the output register extended to those modules; portal JSON export still TODO. New TC-ACC-GSTR1-STRUCT test. tsc + vite build clean.
+      'gst-p0-complete',                         //GST/TDS P0 remediation COMPLETE + a safety refinement: the B-3 RANDOM→SEQUENTIAL invoice-mode migration is now a ONE-TIME migration guarded by a new central platform_flags marker (gst_b3_random_to_sequential), so a tenant that later deliberately re-selects RANDOM in Settings is no longer flipped back on every server restart. All five P0 certification blockers are now live: A-1 (0% budget-room slab → 12%), A-2 (accommodation/F&B/events billed intra-state CGST/SGST, invoice↔GL aligned), B-1/B-3 (consecutive persisted per-FY invoice serials + SEQUENTIAL default), B-2 (restaurant thermal bill is a Rule-46 tax invoice), D-1 (vendor TDS withheld in the GL). tsc + vite build clean.
       'gst-fix-p0-tds-in-gl',                    //INCOME-TAX/TDS COMPLIANCE FIX (P0, batch 3 — D-1). Vendor TDS was a MEMORANDUM-only row (tds_payable_ledger) with NO GL counterpart: the supplier-payment journal debited full AP and credited full cash, so the TDS liability never hit the balance sheet and the supplier read as fully paid. Now the payment is WITHHELD IN THE LEDGER — Dr Accounts Payable (full, 2000) / Cr Cash-Bank (NET of TDS) / Cr TDS Payable (2300, the withheld tax). The journal balances by construction; the tds_payable_ledger row now reconciles to the 2300 GL balance and feeds 26Q. The payment-reversal (DELETE) path already contra-reverses the whole SP-<pid> journal (TDS line included) and now also drops the memorandum row so the two stay in lockstep. TDS accounts 2300/2310/2320 (194C/J/H) are seeded (2310/2320 ready for the D-2 section-aware follow-up). Scope note: this is the GL-integration fix; the section-awareness (194C-only → 194C/J/H/I), the ₹1L annual-aggregate threshold, and the ex-GST taxable base remain P1 (D-2). tsc + vite build clean.
       'gst-fix-p0-invoices',                     //GST COMPLIANCE FIX (P0, batch 2 — tax invoices, Rule 46/48/53). (B-1) HOTEL & CREDIT-NOTE INVOICE NUMBERS are now consecutive, persisted per-FY serials instead of Date.now()/UUID fragments recomputed at render. New allocateFolioSerial/ensureFolioInvoiceNumber allocate a serial from the tenant's atomic `invoice` sequence (shared with restaurant orders) — credit notes get their own `credit-note`/CN- series — and PERSIST it on folios.invoice_number (COALESCE, idempotent: re-rendering never mints a new number). Hotels always get a serial regardless of the RANDOM/SEQUENTIAL toggle. Wired into both the invoice-pdf and email-invoice endpoints. (B-3) DEFAULT numbering mode is now SEQUENTIAL (was RANDOM) with a per-FY reset default; existing RANDOM tenants are migrated to SEQUENTIAL (RANDOM prints a non-serial #<uuid>, invalid under Rule 46(b)). (B-2) RESTAURANT thermal bill is now a proper TAX INVOICE for registered suppliers — adds the "TAX INVOICE" caption, supplier address, SAC (996331), and splits the lumped GST into CGST+SGST (Rule 46(g),(m)). (B-6) credit note now cites the original invoice's DATE as well as its number (Rule 53(1A)(f)). (B-7) invoice-prefix charset tightened to alphanumeric + '-' '/' and capped so number ≤16 chars. (B-8) yearly reset now keys off the Indian FINANCIAL year (1 Apr), not the calendar year. Residual: consolidated GROUP invoices still use INV-GRP-<id> (tracked). tsc + vite build clean.
       'gst-fix-p0-rates-and-pos',                //GST COMPLIANCE FIX (P0, batch 1 of the certification-review remediation): (A-1) HOTEL ROOM SLAB DEFAULT — the ≤₹1,000=0% band was the withdrawn (pre-18-Jul-2022) regime; a ₹1,000 room is legally 12%. Corrected the default slab-1 rate 0→12 in the server fallback (loadHotelTaxConfig/gstRateForTariff), the DB column default (db.ts, ALTER … SET DEFAULT 12), and the tax-config UI defaults; plus a one-time data migration UPDATE restaurants SET hotel_gst_slab1_rate=12 WHERE it was 0 for the ≤₹1,000 accommodation band (0% on ≤₹1,000 accommodation is not valid under current law). (A-2) PLACE OF SUPPLY / IGST — accommodation (IGST Act §12(3)(b)), restaurant/F&B (§12(4)) and events (venue) always have POS = the property's location, so an out-of-state guest is still an INTRA-state supply (CGST+SGST). The invoice templates (invoiceService.ts + invoiceServiceBoutique.ts) were deriving IGST from guest.state vs hotel.state, emitting IGST invoices that ALSO disagreed with the GL (which always books CGST/SGST). Now they render intra-state CGST/SGST for these supplies (server may still force a value explicitly); the computeTaxes path already defaulted intra-state. Aligns invoice ↔ ledger ↔ GSTR-1 heads. tsc + vite build clean.
@@ -50819,6 +50820,7 @@ ${data.tenant.name}`;
       if (to)   { mainDate += ' AND g.entry_date <= ?'; mainParams.push(to);   subDate += ' AND entry_date <= ?'; subParams.push(to); }
       const rows: any[] = await db.query(
         `SELECT g.journal_ref, MAX(g.source_type) AS source_type, MAX(g.source_id) AS source_id,
+                MIN(g.entry_date) AS entry_date,
                 SUM(CASE WHEN c.type='REVENUE' OR g.account_code LIKE '4%' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS taxable,
                 SUM(CASE WHEN g.account_code='2200' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS cgst,
                 SUM(CASE WHEN g.account_code='2210' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS sgst,
@@ -50830,35 +50832,107 @@ ${data.tenant.name}`;
                WHERE restaurant_id = ? AND is_reversed = 0 ${subDate} AND account_code IN (${gstPh}))
           GROUP BY g.journal_ref`,
         [...mainParams, ...subParams, ...GST]).catch(() => []);
-      // Resolve GSTIN for folio-settlement journals (hotel folios carry it).
-      const folioIds = rows.filter(r => String(r.source_type) === 'FOLIO_SETTLEMENT' && r.source_id).map(r => String(r.source_id));
-      const gstinMap: Record<string, string> = {};
+      // Resolve invoice number / date / GSTIN for FOLIO journals — hotel (room_bookings.
+      // guest_gstin) AND events (event_bookings.customer_gstin). C-1 fix: events were
+      // previously mis-classified B2C because only the hotel GSTIN was resolved.
+      const folioIds = rows.filter(r => r.source_id && String(r.journal_ref || '').startsWith('FOLIO-')).map(r => String(r.source_id));
+      const folioMeta: Record<string, any> = {};
       if (folioIds.length) {
         const fph = folioIds.map(() => '?').join(',');
         const frows: any[] = await db.query(
-          `SELECT f.id AS folio_id, b.guest_gstin FROM folios f LEFT JOIN room_bookings b ON b.id = f.booking_id WHERE f.id IN (${fph})`,
-          folioIds).catch(() => []);
-        for (const fr of frows) { if (fr.guest_gstin) gstinMap[String(fr.folio_id)] = String(fr.guest_gstin); }
+          `SELECT f.id AS folio_id, f.invoice_number, f.settled_at, f.created_at, f.doc_type,
+                  COALESCE(rb.guest_gstin, eb.customer_gstin) AS gstin
+             FROM folios f
+             LEFT JOIN room_bookings rb ON rb.id = f.booking_id
+             LEFT JOIN event_bookings eb ON eb.id = f.event_booking_id
+            WHERE f.id IN (${fph})`, folioIds).catch(() => []);
+        for (const fr of frows) folioMeta[String(fr.folio_id)] = fr;
       }
+      // Place of supply = the property's own state (intra-state supplies).
+      const propRow: any = await centralDb.get("SELECT state FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+      const pos = propRow?.state || null;
+
       const SLABS = [0, 5, 12, 18, 28];
       const snap = (rate: number) => SLABS.reduce((best, s) => Math.abs(s - rate) < Math.abs(best - rate) ? s : best, SLABS[0]);
-      const b2bMap: Record<number, any> = {}, b2cMap: Record<number, any> = {};
+      const b2bInvoices: any[] = [];               // Table 4 — invoice-level B2B
+      const b2csMap: Record<number, any> = {};     // Table 7 — rate-wise B2C
       let tTaxable = 0, tCgst = 0, tSgst = 0, tIgst = 0;
       for (const r of rows) {
         const taxable = Number(r.taxable || 0), cgst = Number(r.cgst || 0), sgst = Number(r.sgst || 0), igst = Number(r.igst || 0);
         const tax = cgst + sgst + igst;
         if (Math.abs(tax) < 0.005 && Math.abs(taxable) < 0.005) continue;
-        const gstin = String(r.source_type) === 'FOLIO_SETTLEMENT' ? gstinMap[String(r.source_id)] : null;
-        const rate = taxable > 0 ? snap(round(tax / taxable * 100)) : 0;
-        const target = gstin ? b2bMap : b2cMap;
-        const cur = target[rate] || { rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, invoices: 0 };
-        cur.taxable += taxable; cur.cgst += cgst; cur.sgst += sgst; cur.igst += igst; cur.invoices += 1;
-        target[rate] = cur;
         tTaxable += taxable; tCgst += cgst; tSgst += sgst; tIgst += igst;
+        const rate = taxable > 0 ? snap(round(tax / taxable * 100)) : 0;
+        const meta = folioMeta[String(r.source_id)];
+        const gstin = meta?.gstin || null;
+        if (gstin) {
+          b2bInvoices.push({
+            gstin,
+            invoice_no: meta.invoice_number || String(r.journal_ref || '').replace(/^FOLIO-/, ''),
+            invoice_date: String(meta.settled_at || meta.created_at || r.entry_date || '').slice(0, 10),
+            place_of_supply: pos, rate,
+            taxable: round(taxable), cgst: round(cgst), sgst: round(sgst), igst: round(igst),
+            invoice_value: round(taxable + tax),
+          });
+        } else {
+          const cur = b2csMap[rate] || { rate, place_of_supply: pos, taxable: 0, cgst: 0, sgst: 0, igst: 0, invoices: 0 };
+          cur.taxable += taxable; cur.cgst += cgst; cur.sgst += sgst; cur.igst += igst; cur.invoices += 1;
+          b2csMap[rate] = cur;
+        }
       }
-      const toArr = (m: Record<number, any>) => Object.values(m).map((x: any) => ({ rate: x.rate, taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), invoices: x.invoices })).sort((a, b) => a.rate - b.rate);
+      b2bInvoices.sort((a, b) => String(a.gstin).localeCompare(String(b.gstin)) || String(a.invoice_no).localeCompare(String(b.invoice_no)));
+      const b2cs = Object.values(b2csMap).map((x: any) => ({ rate: x.rate, place_of_supply: x.place_of_supply, taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), invoices: x.invoices })).sort((a, b) => a.rate - b.rate);
+
+      // Table 12 — HSN/SAC summary (from the GST output register's invoice-line HSN).
+      const hsn: any[] = await (async () => {
+        try {
+          const p: any[] = [req.params.id];
+          let w = '';
+          if (from) { w += ' AND invoice_date >= ?'; p.push(from); }
+          if (to)   { w += ' AND invoice_date <= ?'; p.push(to); }
+          const hr: any[] = await db.query(
+            `SELECT hsn_sac,
+                    ROUND((COALESCE(cgst_rate,0)+COALESCE(sgst_rate,0)+COALESCE(igst_rate,0))::numeric, 2) AS rate,
+                    SUM(taxable_value) AS taxable, SUM(cgst_amount) AS cgst, SUM(sgst_amount) AS sgst, SUM(igst_amount) AS igst
+               FROM gst_output_register
+              WHERE restaurant_id = ?${w}
+              GROUP BY hsn_sac, rate ORDER BY hsn_sac, rate`, p).catch(() => []);
+          return hr.map((h: any) => ({ hsn_sac: h.hsn_sac || '—', rate: Number(h.rate || 0), taxable: round(h.taxable), cgst: round(h.cgst), sgst: round(h.sgst), igst: round(h.igst) }));
+        } catch { return []; }
+      })();
+
+      // Table 13 — document series (issued invoice numbers per document type).
+      const docs: any[] = await (async () => {
+        try {
+          const p: any[] = [];
+          let w = '';
+          if (from) { w += ' AND DATE(COALESCE(settled_at, created_at)) >= ?'; p.push(from); }
+          if (to)   { w += ' AND DATE(COALESCE(settled_at, created_at)) <= ?'; p.push(to); }
+          const dr: any[] = await db.query(
+            `SELECT COALESCE(doc_type,'INVOICE') AS doc_type, MIN(invoice_number) AS from_no, MAX(invoice_number) AS to_no, COUNT(*)::int AS total
+               FROM folios
+              WHERE invoice_number IS NOT NULL AND status IN ('settled','closed')${w}
+              GROUP BY COALESCE(doc_type,'INVOICE')`, p).catch(() => []);
+          return dr.map((d: any) => ({ doc_type: d.doc_type === 'CREDIT_NOTE' ? 'Credit / Debit Note' : 'Tax Invoice', from: d.from_no, to: d.to_no, total: Number(d.total || 0), cancelled: 0 }));
+        } catch { return []; }
+      })();
+
+      // Back-compat: rate-wise b2b/b2c aggregates the existing UI already reads.
+      const b2bAgg: Record<number, any> = {};
+      for (const r of b2bInvoices) { const c = b2bAgg[r.rate] || { rate: r.rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, invoices: 0 }; c.taxable += r.taxable; c.cgst += r.cgst; c.sgst += r.sgst; c.igst += r.igst; c.invoices += 1; b2bAgg[r.rate] = c; }
+      const b2b = Object.values(b2bAgg).map((x: any) => ({ rate: x.rate, taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), invoices: x.invoices })).sort((a, b) => a.rate - b.rate);
       const totals = { taxable: round(tTaxable), cgst: round(tCgst), sgst: round(tSgst), igst: round(tIgst), output_gst: round(tCgst + tSgst + tIgst) };
-      res.json({ period: { from: from || null, to: to || null }, b2b: toArr(b2bMap), b2c: toArr(b2cMap), totals });
+      res.json({
+        period: { from: from || null, to: to || null },
+        place_of_supply: pos,
+        b2b_invoices: b2bInvoices,   // Table 4 — invoice-level (hotel + events)
+        b2b,                          // rate-wise aggregate (back-compat)
+        b2cs, b2c: b2cs,              // Table 7 — rate-wise B2C (b2c = back-compat alias)
+        hsn,                          // Table 12
+        docs,                         // Table 13
+        totals,
+        note: 'Reconciles to the GL output-tax total. B2B is classified for GSTIN-bearing hotel + event supplies; HSN summary is from the GST output register (hotel-populated). Restaurant/spa invoice-level B2B + HSN follow once the output register is extended to those modules.',
+      });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
