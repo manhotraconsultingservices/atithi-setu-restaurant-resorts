@@ -844,6 +844,50 @@ async function testAccounting() {
   } else if (badMj.status === 403) { skip('TC-ACC-MJ-UNBALANCED', 'Unbalanced manual journal', 'RBAC: need OWNER role'); }
   else if (badMj.status === 201) { fail('TC-ACC-MJ-UNBALANCED', 'Unbalanced manual journal refused', 'HTTP 201 — REGRESSION: unbalanced journal accepted (H1 not deployed)'); }
   else { fail('TC-ACC-MJ-UNBALANCED', 'Unbalanced manual journal refused', `HTTP ${badMj.status}`); }
+
+  // ── TC-EXPENSE-SHARED — Expense Journal strict module buckets + opt-in overlay ──
+  // Seed a HOTEL expense and a SHARED expense on the same day, then verify:
+  //  (a) STRICT — the Hotel filter shows Hotel, never Shared.
+  //  (b) OVERLAY — include_shared=1 folds Shared into the Hotel view and reports a
+  //      separate shared_out subtotal (never conflated).
+  //  (c) The overlay is ignored for the SHARED filter itself (include_shared=false).
+  // Self-cleaning: both seeded entries are deleted at the end.
+  {
+    const day = today;
+    const hotelAmt = 1234.50, sharedAmt = 567.25;
+    const mk = (module, amount) => api('POST', `/api/restaurant/${restaurantId}/petty-cash`,
+      { direction: 'OUT', amount, category: 'TECHTEST-EXP', notes: 'TECHTEST expense-shared', entry_date: day, module });
+    const h = await mk('HOTEL', hotelAmt);
+    const s = await mk('SHARED', sharedAmt);
+    if (h.status === 403 || s.status === 403) {
+      skip('TC-EXPENSE-SHARED', 'Expense buckets + include-shared overlay', 'RBAC: need OWNER/MANAGER');
+    } else if (h.status !== 200 || !h.data?.id || s.status !== 200 || !s.data?.id) {
+      fail('TC-EXPENSE-SHARED', 'Seed expense entries', `HTTP hotel=${h.status} shared=${s.status}`);
+    } else {
+      const q = `from=${day}&to=${day}`;
+      const strict  = await api('GET', `/api/restaurant/${restaurantId}/petty-cash?${q}&module=HOTEL`);
+      const overlay = await api('GET', `/api/restaurant/${restaurantId}/petty-cash?${q}&module=HOTEL&include_shared=1`);
+      const selfSh  = await api('GET', `/api/restaurant/${restaurantId}/petty-cash?${q}&module=SHARED&include_shared=1`);
+      const modsOf = r => new Set((Array.isArray(r.data?.rows) ? r.data.rows : []).map(x => String(x.module || '').toUpperCase()));
+      const sm = modsOf(strict), om = modsOf(overlay), ssm = modsOf(selfSh);
+      const strictOk  = strict.status === 200 && sm.has('HOTEL') && !sm.has('SHARED');
+      const overlayOk = overlay.status === 200 && om.has('HOTEL') && om.has('SHARED')
+        && overlay.data?.summary?.include_shared === true
+        && Number(overlay.data?.summary?.shared_out || 0) >= sharedAmt - 0.01;
+      const selfOk    = selfSh.status === 200 && ssm.has('SHARED') && !ssm.has('HOTEL')
+        && overlay.data && selfSh.data?.summary?.include_shared === false;
+      if (strictOk && overlayOk && selfOk) {
+        pass('TC-EXPENSE-SHARED', 'Strict module buckets + opt-in include-shared overlay (with separate shared subtotal)',
+          `strict Hotel excludes Shared; overlay folds Shared (shared_out ₹${overlay.data.summary.shared_out}); overlay ignored for Shared filter`);
+      } else {
+        fail('TC-EXPENSE-SHARED', 'Expense buckets + include-shared overlay',
+          `strictOk=${strictOk} overlayOk=${overlayOk} selfOk=${selfOk} · strict=[${[...sm]}] overlay=[${[...om]}] inc=${overlay.data?.summary?.include_shared} shared_out=${overlay.data?.summary?.shared_out}`);
+      }
+      // Cleanup
+      await api('DELETE', `/api/restaurant/${restaurantId}/petty-cash/${h.data.id}`).catch(() => {});
+      await api('DELETE', `/api/restaurant/${restaurantId}/petty-cash/${s.data.id}`).catch(() => {});
+    }
+  }
 }
 
 // ── Spa tests ──────────────────────────────────────────────────────────────

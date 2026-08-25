@@ -44248,7 +44248,9 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
   const [from, setFrom] = useState(monthAgo);
   const [to, setTo] = useState(today);
   const [modFilter, setModFilter] = useState<'ALL' | 'HOTEL' | 'RESTAURANT' | 'SHARED'>('ALL');
+  const [includeShared, setIncludeShared] = useState(false);   // opt-in overlay: fold property-wide SHARED into a Hotel/Restaurant view
   const [rows, setRows] = useState<any[]>([]);
+  const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   // module starts unset (was 'SHARED') and is a required choice — a pre-set SHARED
@@ -44267,14 +44269,16 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
     }).then(r => r.ok ? r.json() : r.json().then((b: any) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))),
   [restaurantId, token]);
 
+  const canOverlayShared = modFilter === 'HOTEL' || modFilter === 'RESTAURANT';
   const load = useCallback(() => {
     setLoading(true);
     const mod = modFilter !== 'ALL' ? `&module=${modFilter}` : '';
-    api(`/petty-cash?from=${from}&to=${to}${mod}`)
-      .then((d: any) => setRows(d.rows ?? []))
-      .catch(() => setRows([]))
+    const overlay = (modFilter === 'HOTEL' || modFilter === 'RESTAURANT') && includeShared ? '&include_shared=1' : '';
+    api(`/petty-cash?from=${from}&to=${to}${mod}${overlay}`)
+      .then((d: any) => { setRows(d.rows ?? []); setSummary(d.summary ?? null); })
+      .catch(() => { setRows([]); setSummary(null); })
       .finally(() => setLoading(false));
-  }, [api, from, to, modFilter]);
+  }, [api, from, to, modFilter, includeShared]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -44394,11 +44398,29 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
             </button>
           ))}
         </div>
+        {/* Opt-in overlay — only for a specific module. Folds property-wide SHARED
+            costs into this Hotel/Restaurant view; they stay labeled + subtotalled
+            separately (strict buckets remain the default). */}
+        {canOverlayShared && (
+          <label className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] font-bold cursor-pointer select-none border border-[#e8dccf] text-[#6b5d52] hover:border-[#cc5a16]/40" title="Also include property-wide (Shared) costs in this view">
+            <input type="checkbox" checked={includeShared} onChange={e => setIncludeShared(e.target.checked)} className="accent-[#cc5a16]" />
+            + Include shared
+          </label>
+        )}
         <button onClick={load}
           className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold border border-[#e8dccf] text-[#6b5d52] hover:bg-[#faf7f2] transition-colors">
           <RefreshCw size={12} className={cn(loading && 'animate-spin')} /> Refresh
         </button>
       </div>
+
+      {canOverlayShared && includeShared && summary?.include_shared && (
+        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[#6b5d52] bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2">
+          <span>Showing <b className="text-[#1a1208]">{modFilter.charAt(0) + modFilter.slice(1).toLowerCase()}</b> + property-wide <b className="text-[#1a1208]">Shared</b> costs.</span>
+          <span>Total expense: <b className="text-red-600 tabular-nums">₹{Number(summary.total_out || 0).toLocaleString('en-IN')}</b></span>
+          <span>· of which Shared: <b className="text-red-600 tabular-nums">₹{Number(summary.shared_out || 0).toLocaleString('en-IN')}</b></span>
+          <span className="text-[#9c8e85]">· {modFilter.charAt(0) + modFilter.slice(1).toLowerCase()}-only: ₹{Number((summary.total_out || 0) - (summary.shared_out || 0)).toLocaleString('en-IN')}</span>
+        </div>
+      )}
 
       <DataTable
         data={rows}

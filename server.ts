@@ -30900,18 +30900,34 @@ ${data.tenant.name}`;
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
       const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
       const moduleFilter = req.query.module ? String(req.query.module).toUpperCase() : null;
-      const modClause = moduleFilter ? ` AND COALESCE(module,'RESTAURANT') = ?` : '';
-      const modParam = moduleFilter ? [moduleFilter] : [];
+      // "Include shared" overlay: when viewing a specific module (Hotel/Restaurant),
+      // optionally fold in property-wide SHARED entries too. Only meaningful for
+      // HOTEL/RESTAURANT — ignored for ALL (already shows everything) and for SHARED
+      // itself. Strict buckets stay the DEFAULT; this is an opt-in overlay, and each
+      // row keeps its own `module` so the UI still labels + subtotals shared separately.
+      const includeShared = String(req.query.include_shared || '') === '1'
+        && (moduleFilter === 'HOTEL' || moduleFilter === 'RESTAURANT');
+      let modClause = '';
+      const modParam: any[] = [];
+      if (moduleFilter) {
+        if (includeShared) { modClause = ` AND COALESCE(module,'RESTAURANT') IN (?, 'SHARED')`; modParam.push(moduleFilter); }
+        else { modClause = ` AND COALESCE(module,'RESTAURANT') = ?`; modParam.push(moduleFilter); }
+      }
       const rows: any[] = await tenantDb.query(
         `SELECT * FROM petty_cash
           WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?${modClause}
           ORDER BY entry_date DESC, created_at DESC`,
         [from, to, ...modParam]
       ).catch(() => []);
-      let totalIn = 0, totalOut = 0;
+      let totalIn = 0, totalOut = 0, sharedIn = 0, sharedOut = 0;
       for (const r of rows) {
-        if (r.direction === 'OUT') totalOut += Number(r.amount || 0);
-        else totalIn += Number(r.amount || 0);
+        const amt = Number(r.amount || 0);
+        if (r.direction === 'OUT') totalOut += amt; else totalIn += amt;
+        // Shared slice (only when overlaid) so the UI can show it as a separate,
+        // clearly-labeled subtotal that is never conflated with the module's own spend.
+        if (includeShared && String(r.module || 'RESTAURANT').toUpperCase() === 'SHARED') {
+          if (r.direction === 'OUT') sharedOut += amt; else sharedIn += amt;
+        }
       }
       const openRow: any = await tenantDb.get(
         `SELECT COALESCE(SUM(CASE WHEN direction='OUT' THEN -amount ELSE amount END),0)::float AS bal
@@ -30926,6 +30942,9 @@ ${data.tenant.name}`;
           total_in: Math.round(totalIn * 100) / 100,
           total_out: Math.round(totalOut * 100) / 100,
           closing_balance: Math.round((opening + totalIn - totalOut) * 100) / 100,
+          include_shared: includeShared,
+          shared_in: Math.round(sharedIn * 100) / 100,
+          shared_out: Math.round(sharedOut * 100) / 100,
         },
       });
     } catch (err: any) {
@@ -49804,9 +49823,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'qa-bugfix-batch-2-ux',
+    commit_marker: 'expense-include-shared-toggle',
     code_features: [
-      'qa-bugfix-batch-2-ux',                        //BUGFIXES (QA batch 2 — UI/UX): (1) QUOTATION LIST FLASH — EventQuotations had no loading state, so its DataTable showed the "No quotations yet" empty-state during the 2-3s N+1 load (bookings → per-booking detail); added a `loading` flag and gated the emptyMessage ("Loading quotations…") so the empty-state only shows after load completes. (2) CHECK-IN VALIDATION NOT IMMEDIATE — the early-check-in-before-date message was set only into the SHARED hotelError banner, which can render off-screen when triggered from the booking-detail modal (read as "message only appears after refresh"); now also fired as a toast (immediate, floats over everything). (3) STUCK EDIT-AFTER-CHECK-IN ERROR — the edit-blocked save error set the sticky shared hotelError banner and the 3 booking-modal close paths never cleared it, so it lingered across views; now cleared on every modal close and also surfaced as an auto-dismissing toast (the check-in EDIT BLOCK itself is by design — server locks a checked-in booking — only the stuck message was the defect). NON-BUGS called out: (4) guest-portal "Charged to your room" — the order-confirmation panel ALREADY auto-dismisses (useEffect citing this exact report); the remaining line is a deliberate Food-tab payment-model header. (5) invoice "Thank you" on page 2 — real but DEFERRED: the footer is absolute-positioned and this block is delicately tuned to avoid a prior "Grand Total clipped" regression, so it needs a visual PDF render to fix safely rather than a blind layout change. Frontend-only. tsc + vite build clean.
+      'expense-include-shared-toggle',               //FEATURE (owner request): optional "+ Include shared" overlay in the Expense Journal. Strict module buckets stay the DEFAULT (Hotel/Restaurant/Shared are mutually exclusive; a Shared entry shows only under Shared). When viewing a specific module (Hotel OR Restaurant), a new checkbox folds property-wide SHARED costs into that view too — WITHOUT conflating them: each row keeps its own Module badge, and a header line shows Total / of-which-Shared / module-only subtotals. Backend: GET /petty-cash?module=HOTEL&include_shared=1 → `... IN (?, 'SHARED')` (ignored for ALL — already shows everything — and for the SHARED filter itself); response summary gains include_shared + shared_in/shared_out. Frontend ExpenseJournalView: includeShared state + toggle shown only for Hotel/Restaurant + the separate shared subtotal line. New self-cleaning TC-EXPENSE-SHARED test (strict excludes shared; overlay folds it with a shared_out subtotal; overlay ignored for the Shared filter). tsc + vite build clean.
+      'qa-bugfix-batch-2-ux',                    //BUGFIXES (QA batch 2 — UI/UX): (1) QUOTATION LIST FLASH — EventQuotations had no loading state, so its DataTable showed the "No quotations yet" empty-state during the 2-3s N+1 load (bookings → per-booking detail); added a `loading` flag and gated the emptyMessage ("Loading quotations…") so the empty-state only shows after load completes. (2) CHECK-IN VALIDATION NOT IMMEDIATE — the early-check-in-before-date message was set only into the SHARED hotelError banner, which can render off-screen when triggered from the booking-detail modal (read as "message only appears after refresh"); now also fired as a toast (immediate, floats over everything). (3) STUCK EDIT-AFTER-CHECK-IN ERROR — the edit-blocked save error set the sticky shared hotelError banner and the 3 booking-modal close paths never cleared it, so it lingered across views; now cleared on every modal close and also surfaced as an auto-dismissing toast (the check-in EDIT BLOCK itself is by design — server locks a checked-in booking — only the stuck message was the defect). NON-BUGS called out: (4) guest-portal "Charged to your room" — the order-confirmation panel ALREADY auto-dismisses (useEffect citing this exact report); the remaining line is a deliberate Food-tab payment-model header. (5) invoice "Thank you" on page 2 — real but DEFERRED: the footer is absolute-positioned and this block is delicately tuned to avoid a prior "Grand Total clipped" regression, so it needs a visual PDF render to fix safely rather than a blind layout change. Frontend-only. tsc + vite build clean.
       'qa-bugfix-batch-1',                       //BUGFIXES (QA manual-testing batch, root-caused + fixed): (1) GROUP CHECK-IN CHECKLIST — the bulk booking-groups/:id/checkin handler flipped status + created folios but never raised the CHECK_IN checklist (single check-in does at ~38929); added a non-blocking, idempotent raiseChecklistJobs per room (group checkOUT already raised it). (2) OCCUPIED VENUE BOOKABLE — event_venues.status (Hall Status board) was never consulted by booking availability; the create-event guard also skipped conflict checks for INQUIRY. Added a same-day board-status gate (OCCUPIED/CLEANING/MAINTENANCE/BLOCKED → 409) to BOTH the availability-check endpoint and the create handler, date-scoped to today so future bookings are unaffected. (3) HOTEL ROOM REVENUE ₹0 IN P&L — /reports/pnl filtered hotel folios on status='closed' but hotel folios settle as 'settled' ('closed' is spa/table vocab); fixed hotel P&L + the identical GST-ledger hotel query. (4) EXPENSE ENTRIES ALWAYS 'SHARED' — the Expense Journal form defaulted module to 'SHARED' so entries never showed under Hotel/Restaurant filters; made module a required explicit choice (filter itself was correct). (5) RBAC LEAK — Front Desk (restricted built-in role) could see Housekeeping / Delivery Partners / Restaurant Reports: removed DELIVERY + RESTAURANT_REPORTS from the ALWAYS_VISIBLE_TABS grandfather set, and removed HOUSEKEEPING from the RBAC_NEWLY_ADDED inject-to-Full list (now matrix-authoritative with requireTabAction ops-role fallback, same pattern already applied to Events tabs). (6) FRONT-DESK DASHBOARD ARRIVALS/DEPARTURES 0 — compared a UTC date-only `today` with `===` against full-ISO-timestamp check_in/out_date (In-House worked, it's status-only); fixed to IST date + .slice(0,10), arrivals = BOOKED|CHECKED_IN today (matches server stats). (7) EXTRA ADULT/CHILD CHARGES MISSING FROM FOLIO — 4 calendar/dashboard/stay-view new-booking seeds sent room_rate=base_rate (non-zero), which the server treats as a manual all-in override that DROPS extras; changed all 4 to room_rate=0 so the matrix resolver itemizes extra-person charges (matches New Booking + walk-in). (8) GUEST BILLS SHOWS 'CASH' — the checkout stamped folios.payment_method from the legacy secondary dropdown (default CASH); now derives it from the dominant real folio_payments method so Guest Bills matches the folio/invoice for the new-booking flow (walk-in already worked). (9) PO ₹0 PRICE — a PO line whose item master has no default_unit_price saved a ₹0 line (₹0 subtotal/GST/total); the PO form now requires a positive unit price and names the item. Test-team non-bugs called out separately (refund manual by policy; edit-after-check-in block is by design). tsc + vite build clean.
       'upi-link-raw-vpa-fix',                    //BUGFIX (owner, 5+yr UPI-integration review: "guest UPI url doesn't work; 0% commission open-source solution"). ROOT CAUSE: the guest-facing UPI deep link built `pa` with encodeURIComponent(vpa), turning the mandatory '@' into %40 (`pa=hotel%40okhdfcbank`). Per the NPCI UPI Linking Spec, `pa` must be the RAW vpa — PhonePe/BHIM/Paytm + most QR scanners reject a %40-encoded UPI ID (GPay silently decodes it, hiding the bug in testing). All three guest surfaces (deep link, QR value, reconstructed Android intent://) derived from that one broken string, so all failed together; the restaurant customer QR built `pa` raw and worked, which pinpointed it. FIX: new shared, unit-tested `upiLink.ts` (buildUpiUri + isValidVpa) — single source of truth imported by BOTH server.ts and src/App.tsx (removing 5 drifting copies). It keeps `pa` RAW, URL-encodes only free-text pn/tn, fixes `am` to 2 decimals, sanitises `tr` to NPCI alphanumeric (≤35), and returns '' for an invalid VPA so no dead link/QR is ever emitted. Replaced all 5 builders (buildHotelPaymentLinkPayload, public-booking confirmation, resend-payment-link override, restaurant customer QR + Open-UPI-App link). Settings now show a live preview of the real link and a red "this UPI ID doesn't look valid" warning when the VPA fails the grammar. This is the correct 0%-commission approach — a direct upi:// deep link/QR to the property's own VPA, money straight to their bank, no gateway/MDR; nothing to sign up for. New unit test test-scripts/upi_link_builder_check.ts (npm run test:upi) — all invariants green. tsc + vite build clean.
       'booking-overview-contact-card',           //UX (owner: "yes bring [phone/email] on here"): follow-up to booking-overview-enriched. Guest phone + email lived only in the small ObjectDetail subtitle; promoted them into a proper Contact card in the Overview grid — Phone as a tel: link, Email as a mailto: link (tap-to-call / tap-to-mail on mobile), each null-guarded so a booking with only one still renders. Simplified the header subtitle to just the booking id now that contact has a home in the body. Frontend-only. tsc + vite build clean.
