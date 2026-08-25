@@ -18,6 +18,33 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// ── Optional local credentials (gitignored) ─────────────────────────────────
+// Lets the suite run fully non-interactively (including by an agent) without a
+// hidden password prompt (run-tests.bat) or secrets on the command line: load
+// KEY=VALUE pairs from a gitignored test-scripts/.env.local (override the path
+// with SMOKE_ENV_FILE). The real environment ALWAYS wins — this file is only a
+// fallback for keys that are otherwise unset — and it is never committed
+// (.gitignore covers .env*). Populate it with OWNER_EMAIL / OWNER_PASSWORD /
+// RESTAURANT_ID (see smoke-credentials.sample).
+(function loadLocalEnv() {
+  const candidates = [process.env.SMOKE_ENV_FILE, join(__dirname, '.env.local')].filter(Boolean);
+  for (const file of candidates) {
+    let text;
+    try { text = readFileSync(file, 'utf8'); } catch { continue; }
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+      if (key && process.env[key] === undefined) process.env[key] = val;
+    }
+    break; // first readable file wins
+  }
+})();
+
 const BASE_URL   = process.env.BASE_URL       || 'https://erp.atithi-setu.com';
 const EMAIL      = process.env.OWNER_EMAIL    || process.env.LIVE_LOGIN_ID || '';
 const PASSWORD   = process.env.OWNER_PASSWORD || process.env.LIVE_PASSWORD || '';
