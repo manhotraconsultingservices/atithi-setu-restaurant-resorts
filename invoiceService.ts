@@ -243,6 +243,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         ['BOOKING_REF', data.stay.bookingId || '—'],
         ['FOLIO_ID',    data.folio.id],
         ['POS',         data.placeOfSupply || data.hotel.state || 'N/A'],
+        ['REVERSE_CHG', 'No'],   // Rule 46(l) — forward-charge supply
       ];
       let metaY = y;
       const rowH = drawBilingual ? 16 : 14;

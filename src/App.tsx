@@ -47327,6 +47327,7 @@ function buildThermalHTML(d: ThermalReceiptData): string {
   <div class="rule">${dash}</div>
 
   ${isTaxInvoice ? `<div class="dim">SAC: ${sac} · Restaurant service</div>` : ''}
+  ${isTaxInvoice ? `<div class="dim">Reverse charge: No</div>` : ''}
   <div>${totalLine(isTaxInvoice ? 'Taxable value' : 'Subtotal', d.subtotal)}</div>
   ${d.discountAmount && d.discountAmount > 0 ? `<div class="dim">${totalLine(d.loyaltyDiscountLabel || 'Discount', -d.discountAmount)}</div>` : ''}
   ${d.serviceChargeAmount && d.serviceChargeAmount > 0 ? `<div class="dim">${totalLine(`Service Charge (${d.serviceChargePercent ?? 0}%)`, d.serviceChargeAmount)}</div>` : ''}

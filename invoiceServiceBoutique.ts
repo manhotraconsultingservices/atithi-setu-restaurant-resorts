@@ -274,6 +274,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
         ['Check-out', data.stay.actualCheckOutAt ? fmtDateTime(data.stay.actualCheckOutAt) : fmtDate(data.stay.checkOutDate)],
         ['Nights',    `${nights}  ·  Guests ${data.stay.numGuests || 1}`],
         ['Place',     data.placeOfSupply || data.hotel.state || '—'],
+        ['Reverse charge', 'No'],   // Rule 46(l) — forward-charge supply
       ];
       const stayCardH = 15 + (label('ROOM').hi ? 10 : 0) + 8 + stayRows.length * 12 + 10;
       const cardH = Math.max(billCardH, stayCardH);

@@ -88,6 +88,7 @@ export const L = {
   TERMS:       { en: 'TERMS & CONDITIONS',       hi: 'नियम एवं शर्तें' },
   THANK:       { en: 'Thank you for your stay.', hi: 'आपकी ठहरने के लिए धन्यवाद।' },
   REASON:      { en: 'Reason',                   hi: 'कारण' },
+  REVERSE_CHG: { en: 'Reverse Charge',           hi: 'रिवर्स चार्ज' },
 };
 export type LabelKey = keyof typeof L;
 
