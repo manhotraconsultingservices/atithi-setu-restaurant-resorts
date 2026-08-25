@@ -21015,18 +21015,29 @@ ${data.tenant.name}`;
         "UPDATE supplier_invoices SET paid_amount = ?, outstanding_amount = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         [newPaid, newOutstanding, newStatus, inv.id]
       );
-      // GL: Dr AP, Cr Cash/Bank; create TDS payable ledger entry if applicable
+      // GL — D-1: vendor TDS is now WITHHELD IN THE LEDGER, not just recorded in a
+      // memorandum table. We clear the FULL payable (Dr AP), pay the supplier NET of
+      // TDS (Cr Cash/Bank), and book the withheld tax as a liability (Cr 2300 TDS
+      // Payable). So the balance sheet shows the TDS liability and the supplier reads
+      // as paid net of tax; the tds_payable_ledger row is the section-wise detail
+      // that reconciles to the 2300 GL balance.
       try {
         const payDate = (payment_date || new Date().toISOString().slice(0, 10)) as string;
         const cashAcct = _glAccountForPaymentMethod(payment_method || 'BANK');
-        await _postGlEntries(db, req.params.id, `SP-${pid}`, payDate, 'SUPPLIER_PAYMENT', pid, [
-          { account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: payAmt, cr_amount: 0, narration: `Payment to supplier ${inv.supplier_id}` },
-          { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: payAmt, narration: `Payment to supplier ${inv.supplier_id}` },
-        ], (req as any).user?.email || (req as any).user?.id);
-        // TDS compliance record
         const sup: any = await db.get("SELECT tds_category, pan FROM suppliers WHERE id = ?", [inv.supplier_id]);
         const tds = _tdsForSupplierPayment(sup?.tds_category || 'NIL', payAmt);
-        if (tds) {
+        const tdsAmt = tds ? Math.min(Number(tds.amount || 0), payAmt) : 0;
+        const cashOut = +(payAmt - tdsAmt).toFixed(2);
+        const glLines: GlLine[] = [
+          { account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: payAmt, cr_amount: 0, narration: `Payment to supplier ${inv.supplier_id}` },
+          { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: cashOut, narration: `Payment to supplier ${inv.supplier_id}${tdsAmt > 0 ? ' (net of TDS)' : ''}` },
+        ];
+        if (tds && tdsAmt > 0) {
+          glLines.push({ account_code: tds.accountCode || '2300', account_name: tds.accountName || 'TDS Payable', dr_amount: 0, cr_amount: tdsAmt, narration: `TDS ${tds.section} withheld — supplier ${inv.supplier_id}` });
+        }
+        await _postGlEntries(db, req.params.id, `SP-${pid}`, payDate, 'SUPPLIER_PAYMENT', pid, glLines, (req as any).user?.email || (req as any).user?.id);
+        // Section-wise TDS detail (reconciles to the 2300 GL balance; feeds 26Q).
+        if (tds && tdsAmt > 0) {
           const tdsId = `TDS-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
           await db.run(
             `INSERT INTO tds_payable_ledger
@@ -21034,7 +21045,7 @@ ${data.tenant.name}`;
                 gross_amount, tds_section, tds_rate, tds_amount, nature_of_payment, quarter)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [tdsId, req.params.id, inv.supplier_id, inv.supplier_name || 'Supplier', sup?.pan || null,
-             pid, payDate, payAmt, tds.section, tds.rate, tds.amount, tds.nature, _glCurrentQuarter()]
+             pid, payDate, payAmt, tds.section, tds.rate, tdsAmt, tds.nature, _glCurrentQuarter()]
           );
         }
       } catch (glErr) { console.error('[GL] supplier payment error:', glErr); }
@@ -21081,11 +21092,14 @@ ${data.tenant.name}`;
       const pay: any = await db.get("SELECT * FROM supplier_payments WHERE id = ?", [req.params.paymentId]);
       if (!pay) return res.status(404).json({ error: 'Payment not found' });
       await db.run("DELETE FROM supplier_payments WHERE id = ?", [req.params.paymentId]);
-      // Phase 3.2 — reverse the payment's GL journal (Dr AP / Cr Cash backed out).
+      // Phase 3.2 — reverse the payment's GL journal (Dr AP / Cr Cash / Cr TDS backed out).
       await _reverseJournal(db, req.params.id, `SP-${req.params.paymentId}`, {
         sourceType: 'SUPPLIER_PAYMENT_REVERSAL', sourceId: req.params.paymentId,
         reason: 'Supplier payment deleted', postedBy: req.user?.email || req.user?.id || null,
       });
+      // D-1: the GL TDS line is reversed above; drop the matching memorandum detail
+      // row so the tds_payable_ledger stays reconciled to the 2300 GL balance.
+      await db.run("DELETE FROM tds_payable_ledger WHERE payment_id = ?", [req.params.paymentId]).catch(() => {});
       if (pay.invoice_id) {
         const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [pay.invoice_id]);
         if (inv) {
@@ -49905,9 +49919,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-fix-p0-invoices',
+    commit_marker: 'gst-fix-p0-tds-in-gl',
     code_features: [
-      'gst-fix-p0-invoices',                         //GST COMPLIANCE FIX (P0, batch 2 — tax invoices, Rule 46/48/53). (B-1) HOTEL & CREDIT-NOTE INVOICE NUMBERS are now consecutive, persisted per-FY serials instead of Date.now()/UUID fragments recomputed at render. New allocateFolioSerial/ensureFolioInvoiceNumber allocate a serial from the tenant's atomic `invoice` sequence (shared with restaurant orders) — credit notes get their own `credit-note`/CN- series — and PERSIST it on folios.invoice_number (COALESCE, idempotent: re-rendering never mints a new number). Hotels always get a serial regardless of the RANDOM/SEQUENTIAL toggle. Wired into both the invoice-pdf and email-invoice endpoints. (B-3) DEFAULT numbering mode is now SEQUENTIAL (was RANDOM) with a per-FY reset default; existing RANDOM tenants are migrated to SEQUENTIAL (RANDOM prints a non-serial #<uuid>, invalid under Rule 46(b)). (B-2) RESTAURANT thermal bill is now a proper TAX INVOICE for registered suppliers — adds the "TAX INVOICE" caption, supplier address, SAC (996331), and splits the lumped GST into CGST+SGST (Rule 46(g),(m)). (B-6) credit note now cites the original invoice's DATE as well as its number (Rule 53(1A)(f)). (B-7) invoice-prefix charset tightened to alphanumeric + '-' '/' and capped so number ≤16 chars. (B-8) yearly reset now keys off the Indian FINANCIAL year (1 Apr), not the calendar year. Residual: consolidated GROUP invoices still use INV-GRP-<id> (tracked). tsc + vite build clean.
+      'gst-fix-p0-tds-in-gl',                        //INCOME-TAX/TDS COMPLIANCE FIX (P0, batch 3 — D-1). Vendor TDS was a MEMORANDUM-only row (tds_payable_ledger) with NO GL counterpart: the supplier-payment journal debited full AP and credited full cash, so the TDS liability never hit the balance sheet and the supplier read as fully paid. Now the payment is WITHHELD IN THE LEDGER — Dr Accounts Payable (full, 2000) / Cr Cash-Bank (NET of TDS) / Cr TDS Payable (2300, the withheld tax). The journal balances by construction; the tds_payable_ledger row now reconciles to the 2300 GL balance and feeds 26Q. The payment-reversal (DELETE) path already contra-reverses the whole SP-<pid> journal (TDS line included) and now also drops the memorandum row so the two stay in lockstep. TDS accounts 2300/2310/2320 (194C/J/H) are seeded (2310/2320 ready for the D-2 section-aware follow-up). Scope note: this is the GL-integration fix; the section-awareness (194C-only → 194C/J/H/I), the ₹1L annual-aggregate threshold, and the ex-GST taxable base remain P1 (D-2). tsc + vite build clean.
+      'gst-fix-p0-invoices',                     //GST COMPLIANCE FIX (P0, batch 2 — tax invoices, Rule 46/48/53). (B-1) HOTEL & CREDIT-NOTE INVOICE NUMBERS are now consecutive, persisted per-FY serials instead of Date.now()/UUID fragments recomputed at render. New allocateFolioSerial/ensureFolioInvoiceNumber allocate a serial from the tenant's atomic `invoice` sequence (shared with restaurant orders) — credit notes get their own `credit-note`/CN- series — and PERSIST it on folios.invoice_number (COALESCE, idempotent: re-rendering never mints a new number). Hotels always get a serial regardless of the RANDOM/SEQUENTIAL toggle. Wired into both the invoice-pdf and email-invoice endpoints. (B-3) DEFAULT numbering mode is now SEQUENTIAL (was RANDOM) with a per-FY reset default; existing RANDOM tenants are migrated to SEQUENTIAL (RANDOM prints a non-serial #<uuid>, invalid under Rule 46(b)). (B-2) RESTAURANT thermal bill is now a proper TAX INVOICE for registered suppliers — adds the "TAX INVOICE" caption, supplier address, SAC (996331), and splits the lumped GST into CGST+SGST (Rule 46(g),(m)). (B-6) credit note now cites the original invoice's DATE as well as its number (Rule 53(1A)(f)). (B-7) invoice-prefix charset tightened to alphanumeric + '-' '/' and capped so number ≤16 chars. (B-8) yearly reset now keys off the Indian FINANCIAL year (1 Apr), not the calendar year. Residual: consolidated GROUP invoices still use INV-GRP-<id> (tracked). tsc + vite build clean.
       'gst-fix-p0-rates-and-pos',                //GST COMPLIANCE FIX (P0, batch 1 of the certification-review remediation): (A-1) HOTEL ROOM SLAB DEFAULT — the ≤₹1,000=0% band was the withdrawn (pre-18-Jul-2022) regime; a ₹1,000 room is legally 12%. Corrected the default slab-1 rate 0→12 in the server fallback (loadHotelTaxConfig/gstRateForTariff), the DB column default (db.ts, ALTER … SET DEFAULT 12), and the tax-config UI defaults; plus a one-time data migration UPDATE restaurants SET hotel_gst_slab1_rate=12 WHERE it was 0 for the ≤₹1,000 accommodation band (0% on ≤₹1,000 accommodation is not valid under current law). (A-2) PLACE OF SUPPLY / IGST — accommodation (IGST Act §12(3)(b)), restaurant/F&B (§12(4)) and events (venue) always have POS = the property's location, so an out-of-state guest is still an INTRA-state supply (CGST+SGST). The invoice templates (invoiceService.ts + invoiceServiceBoutique.ts) were deriving IGST from guest.state vs hotel.state, emitting IGST invoices that ALSO disagreed with the GL (which always books CGST/SGST). Now they render intra-state CGST/SGST for these supplies (server may still force a value explicitly); the computeTaxes path already defaulted intra-state. Aligns invoice ↔ ledger ↔ GSTR-1 heads. tsc + vite build clean.
       'gl-entries-include-reversed',             //DIAGNOSTIC (day-book audit follow-up): the /accounting/gl-entries endpoint now accepts include_reversed=1 (default still hides reversed rows) + a journal_ref filter, so a folio/order whose journal was REVERSED (e.g. by a credit note / folio revision) can be audited — it has no ACTIVE journal (correctly net-zero) but is NOT a true posting gap. Read-only; default behaviour unchanged. The reconciliation (e2e_daybook_full_loop.mjs) now classifies a window-missing ref against the full ledger: 'reversed' (credit-noted/revised → net-zero, OK, not a fail) vs 'active-elsewhere' (journal dated outside the window → OK) vs a TRUE gap. This resolves the RESTO-1003 audit: 207/223 FY hotel folios already posted; the ~16 backfill non-posts are zero-value/empty folios (nothing to post); the 4 the old reconcile flagged have reversed (credit-noted) journals — correct accounting, not missing revenue. tsc + vite build clean.
       'gl-daybook-reflection-fix',               //BUGFIX (owner day-book audit found settled txns missing from the GL/Day Book — books still BALANCED (trial balance diff 0, 0 gl_exceptions), but ~₹11.6k of recent settled revenue never posted a journal, so GL-derived reports understated it). Two real posting gaps found + fixed forward: (1) RESTAURANT — the generic PATCH /orders/:id sets payment_status='PAID' but never called _postOrderGl (only the dedicated /orders/:id/payment endpoint + session-close did), so an order settled via that PATCH (e.g. a manual invoice marked paid from the Invoices list) never reached the Day Book; now posts _postOrderGl (idempotent on ORDER-<id>, skips folio-bound). (2) HOTEL — the group-checkout MASTER (consolidated) folio settle did a raw UPDATE folios SET status='settled' with no GL post (per-room child folios DO post via settleFolioForBooking); now posts _postFolioGl (FOLIO-<id>, no double-count since the master folio is created empty and holds only group-level charges). Also NEW owner-only POST /accounting/backfill-gl (dry_run=1 supported) — idempotent, balanced-or-exception, posts GL for any settled HOTEL folio / paid standalone order that is missing its journal, to reflect PRE-EXISTING gaps. Events were a false-positive in the audit (advances post EVENT-PAY-*, revenue recognized at checkout as FOLIO-* — deferred, not missing). Reconciliation test (e2e_daybook_full_loop.mjs) corrected: diagnostics (gl read health + trial balance + gl_exceptions), events reconciled by their real model, missing hotel/restaurant txns printed with date+amount. tsc + vite build clean.
