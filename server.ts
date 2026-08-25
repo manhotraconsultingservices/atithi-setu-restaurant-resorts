@@ -5941,12 +5941,18 @@ async function startServer() {
   // invoice_number column, and the frontend continues to display the legacy
   // "#last-8-chars" form.
   try {
-    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_numbering_mode TEXT DEFAULT 'RANDOM'`);
-    await centralDb.run(`UPDATE restaurants SET invoice_numbering_mode = 'RANDOM' WHERE invoice_numbering_mode IS NULL`);
+    // GST-B3: a tax invoice must carry a consecutive serial number (Rule 46(b)).
+    // RANDOM mode prints a non-serial "#<uuid>", so default (and migrate existing
+    // tenants) to SEQUENTIAL with a per-FY reset. Numbering stays per-tenant
+    // configurable; a tenant can switch back in Settings if they must.
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_numbering_mode TEXT DEFAULT 'SEQUENTIAL'`);
+    await centralDb.run(`ALTER TABLE restaurants ALTER COLUMN invoice_numbering_mode SET DEFAULT 'SEQUENTIAL'`).catch(() => {});
+    await centralDb.run(`UPDATE restaurants SET invoice_numbering_mode = 'SEQUENTIAL' WHERE invoice_numbering_mode IS NULL OR invoice_numbering_mode = 'RANDOM'`);
     await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_number_prefix TEXT DEFAULT 'INV-'`);
     await centralDb.run(`UPDATE restaurants SET invoice_number_prefix = 'INV-' WHERE invoice_number_prefix IS NULL`);
-    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_yearly_reset INTEGER DEFAULT 0`);
-    await centralDb.run(`UPDATE restaurants SET invoice_yearly_reset = 0 WHERE invoice_yearly_reset IS NULL`);
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_yearly_reset INTEGER DEFAULT 1`);
+    await centralDb.run(`ALTER TABLE restaurants ALTER COLUMN invoice_yearly_reset SET DEFAULT 1`).catch(() => {});
+    await centralDb.run(`UPDATE restaurants SET invoice_yearly_reset = 1 WHERE invoice_yearly_reset IS NULL`);
     console.log("[invoice-numbering-migration] mode + prefix + yearly_reset columns ensured");
   } catch (err) {
     console.error("[invoice-numbering-migration] Warning:", err);
@@ -42326,20 +42332,22 @@ ${data.tenant.name}`;
       // zero tax so line items match the (already zeroed) summary total.
       if (Number(folio.gst_exempt) === 1) entries.forEach((e: any) => { e.gst_amount = 0; e.gst_rate = 0; });
 
-      // Invoice number
+      // Invoice number — GST-B1: a persisted, consecutive per-FY serial (Rule 46(b)),
+      // stable across re-renders (stored on folios.invoice_number). Falls back to a
+      // deterministic id-derived number only if the sequence can't be read.
       const invoiceDate = folio.settled_at || folio.created_at || new Date().toISOString();
-      const settledDate = new Date(invoiceDate);
       const isCredit = folio.doc_type === 'CREDIT_NOTE';
-      const prefix = isCredit ? 'CN' : 'INV';
-      const invNum = `${prefix}-${settledDate.getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
+      const invNum = await ensureFolioInvoiceNumber(tenantDb, req.params.id, folio);
 
-      // Parent invoice (if credit note)
+      // Parent invoice (if credit note) — reference its stored serial AND its date
+      // (Rule 53(1A)(f) requires both).
       let parentInvoiceNumber: string | undefined;
+      let parentInvoiceDate: string | undefined;
       if (isCredit && folio.parent_folio_id) {
-        const parent: any = await tenantDb.get("SELECT id, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
+        const parent: any = await tenantDb.get("SELECT id, doc_type, invoice_number, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
         if (parent) {
-          const pd = new Date(parent.settled_at || parent.created_at);
-          parentInvoiceNumber = `INV-${pd.getFullYear()}-${String(parent.id).slice(-6).toUpperCase()}`;
+          parentInvoiceNumber = await ensureFolioInvoiceNumber(tenantDb, req.params.id, parent);
+          parentInvoiceDate = String(parent.settled_at || parent.created_at || '').slice(0, 10);
         }
       }
 
@@ -42398,6 +42406,7 @@ ${data.tenant.name}`;
         // sameStateGst is now auto-derived from guest.state vs hotel.state
         isCreditNote:  isCredit,
         parentInvoiceNumber,
+        parentInvoiceDate,
         creditNoteReason: folio.reason,
         bilingual:        true,
         // Phase 2: pass tenant-level currency/country so non-India invoices
@@ -42476,17 +42485,16 @@ ${data.tenant.name}`;
       if (Number(folio.gst_exempt) === 1) entries.forEach((e: any) => { e.gst_amount = 0; e.gst_rate = 0; });
 
       const invoiceDate = folio.settled_at || folio.created_at || new Date().toISOString();
-      const settledDate = new Date(invoiceDate);
       const isCredit = folio.doc_type === 'CREDIT_NOTE';
-      const prefix = isCredit ? 'CN' : 'INV';
-      const invNum = `${prefix}-${settledDate.getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
+      const invNum = await ensureFolioInvoiceNumber(tenantDb, req.params.id, folio);   // GST-B1: persisted serial
 
       let parentInvoiceNumber: string | undefined;
+      let parentInvoiceDate: string | undefined;
       if (isCredit && folio.parent_folio_id) {
-        const parent: any = await tenantDb.get("SELECT id, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
+        const parent: any = await tenantDb.get("SELECT id, doc_type, invoice_number, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
         if (parent) {
-          const pd = new Date(parent.settled_at || parent.created_at);
-          parentInvoiceNumber = `INV-${pd.getFullYear()}-${String(parent.id).slice(-6).toUpperCase()}`;
+          parentInvoiceNumber = await ensureFolioInvoiceNumber(tenantDb, req.params.id, parent);
+          parentInvoiceDate = String(parent.settled_at || parent.created_at || '').slice(0, 10);
         }
       }
 
@@ -42526,6 +42534,7 @@ ${data.tenant.name}`;
         placeOfSupply: hotel.state,
         isCreditNote: isCredit,
         parentInvoiceNumber,
+        parentInvoiceDate,
         creditNoteReason: folio.reason,
         bilingual: true,
         // Phase 2: tenant currency context (see download-invoice for rationale)
@@ -44512,15 +44521,17 @@ ${data.tenant.name}`;
   });
 
   // ─── Invoice numbering helpers (RANDOM / SEQUENTIAL with prefix + yearly reset) ──
-  // Allowed prefix charset — keeps audit logs / file paths safe.
-  const INVOICE_PREFIX_RE = /^[A-Za-z0-9_\-./]{1,12}$/;
+  // Allowed prefix charset — Rule 46(b) permits only alphanumerics, '-' and '/'
+  // (max 16 chars total). Cap the prefix at 6 so prefix + "YYYY-NNNN" (9) ≤ 15.
+  const INVOICE_PREFIX_RE = /^[A-Za-z0-9\/-]{1,6}$/;
 
-  // Compute the year in IST (Asia/Kolkata, UTC+05:30) — used for yearly-reset
-  // counters. Uses pure offset math so it works regardless of the host's
-  // system timezone.
+  // Indian FINANCIAL year (Apr–Mar) in IST — used for the yearly-reset counter so
+  // the series resets on 1 April, not 1 January (Rule 46(b) intent). Jan–Mar
+  // belong to the PREVIOUS FY start year. Pure offset math (host-tz independent).
   const getYearIST = (): number => {
-    const istNowMs = Date.now() + (5.5 * 60 * 60 * 1000);
-    return new Date(istNowMs).getUTCFullYear();
+    const ist = new Date(Date.now() + (5.5 * 60 * 60 * 1000));
+    const y = ist.getUTCFullYear();
+    return ist.getUTCMonth() >= 3 ? y : y - 1;   // month 3 = April (0-indexed)
   };
 
   const formatInvoiceNumber = (prefix: string, n: number, year: number | null): string => {
@@ -44562,6 +44573,53 @@ ${data.tenant.name}`;
       console.warn(`[invoice-numbering] Failed to generate sequential number for ${restaurantId}; falling back to RANDOM:`, err);
       return null;
     }
+  };
+
+  // GST-B1: allocate a consecutive, per-FY serial for a HOTEL folio invoice or
+  // credit note. Hotels always get a serial (accommodation invoices must carry a
+  // valid Rule 46(b) number regardless of the tenant's RANDOM/SEQUENTIAL toggle).
+  // Invoices share the tenant's single `invoice` series (with restaurant orders);
+  // credit notes get their own `credit-note` series with a CN- prefix. The caller
+  // PERSISTS the returned number on folios.invoice_number so it is stable across
+  // re-renders and forms a gap-free series.
+  const allocateFolioSerial = async (
+    tenantDb: DbInterface, restaurantId: string, isCredit: boolean
+  ): Promise<string | null> => {
+    try {
+      const r: any = await centralDb.get(
+        `SELECT invoice_number_prefix, invoice_yearly_reset FROM restaurants WHERE id = ?`, [restaurantId]);
+      const yearlyReset = Number(r?.invoice_yearly_reset ?? 1) !== 0;   // default: reset per FY
+      const year = yearlyReset ? getYearIST() : null;
+      if (isCredit) {
+        const n = await getNextTenantSequence(tenantDb, yearlyReset ? `credit-note-${year}` : 'credit-note');
+        return formatInvoiceNumber('CN-', n, year);
+      }
+      const rawPrefix = String(r?.invoice_number_prefix || '').trim();
+      const prefix = (rawPrefix && INVOICE_PREFIX_RE.test(rawPrefix)) ? rawPrefix : 'INV-';
+      const n = await getNextTenantSequence(tenantDb, yearlyReset ? `invoice-${year}` : 'invoice');
+      return formatInvoiceNumber(prefix, n, year);
+    } catch (err) {
+      console.warn(`[invoice-numbering] folio serial alloc failed for ${restaurantId}:`, err);
+      return null;
+    }
+  };
+  // Allocate-or-reuse the persisted serial for a folio. Idempotent: sets
+  // folios.invoice_number once (COALESCE), re-reads, and returns the stored value
+  // so re-rendering the PDF never mints a new number.
+  const ensureFolioInvoiceNumber = async (tenantDb: DbInterface, restaurantId: string, folio: any): Promise<string> => {
+    if (folio?.invoice_number) return String(folio.invoice_number);
+    const isCredit = folio?.doc_type === 'CREDIT_NOTE';
+    let num = await allocateFolioSerial(tenantDb, restaurantId, isCredit);
+    if (!num) {
+      const yr = new Date(folio?.settled_at || folio?.created_at || Date.now()).getFullYear();
+      num = `${isCredit ? 'CN-' : 'INV-'}${yr}-${String(folio?.id || '').slice(-6).toUpperCase()}`;
+    }
+    try {
+      await tenantDb.run("UPDATE folios SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?", [num, folio.id]);
+      const row: any = await tenantDb.get("SELECT invoice_number FROM folios WHERE id = ?", [folio.id]);
+      if (row?.invoice_number) return String(row.invoice_number);
+    } catch { /* fall through to the allocated value */ }
+    return num;
   };
 
   // Helper to compute display_number consistently when serializing invoices.
@@ -49847,9 +49905,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-fix-p0-rates-and-pos',
+    commit_marker: 'gst-fix-p0-invoices',
     code_features: [
-      'gst-fix-p0-rates-and-pos',                    //GST COMPLIANCE FIX (P0, batch 1 of the certification-review remediation): (A-1) HOTEL ROOM SLAB DEFAULT — the ≤₹1,000=0% band was the withdrawn (pre-18-Jul-2022) regime; a ₹1,000 room is legally 12%. Corrected the default slab-1 rate 0→12 in the server fallback (loadHotelTaxConfig/gstRateForTariff), the DB column default (db.ts, ALTER … SET DEFAULT 12), and the tax-config UI defaults; plus a one-time data migration UPDATE restaurants SET hotel_gst_slab1_rate=12 WHERE it was 0 for the ≤₹1,000 accommodation band (0% on ≤₹1,000 accommodation is not valid under current law). (A-2) PLACE OF SUPPLY / IGST — accommodation (IGST Act §12(3)(b)), restaurant/F&B (§12(4)) and events (venue) always have POS = the property's location, so an out-of-state guest is still an INTRA-state supply (CGST+SGST). The invoice templates (invoiceService.ts + invoiceServiceBoutique.ts) were deriving IGST from guest.state vs hotel.state, emitting IGST invoices that ALSO disagreed with the GL (which always books CGST/SGST). Now they render intra-state CGST/SGST for these supplies (server may still force a value explicitly); the computeTaxes path already defaulted intra-state. Aligns invoice ↔ ledger ↔ GSTR-1 heads. tsc + vite build clean.
+      'gst-fix-p0-invoices',                         //GST COMPLIANCE FIX (P0, batch 2 — tax invoices, Rule 46/48/53). (B-1) HOTEL & CREDIT-NOTE INVOICE NUMBERS are now consecutive, persisted per-FY serials instead of Date.now()/UUID fragments recomputed at render. New allocateFolioSerial/ensureFolioInvoiceNumber allocate a serial from the tenant's atomic `invoice` sequence (shared with restaurant orders) — credit notes get their own `credit-note`/CN- series — and PERSIST it on folios.invoice_number (COALESCE, idempotent: re-rendering never mints a new number). Hotels always get a serial regardless of the RANDOM/SEQUENTIAL toggle. Wired into both the invoice-pdf and email-invoice endpoints. (B-3) DEFAULT numbering mode is now SEQUENTIAL (was RANDOM) with a per-FY reset default; existing RANDOM tenants are migrated to SEQUENTIAL (RANDOM prints a non-serial #<uuid>, invalid under Rule 46(b)). (B-2) RESTAURANT thermal bill is now a proper TAX INVOICE for registered suppliers — adds the "TAX INVOICE" caption, supplier address, SAC (996331), and splits the lumped GST into CGST+SGST (Rule 46(g),(m)). (B-6) credit note now cites the original invoice's DATE as well as its number (Rule 53(1A)(f)). (B-7) invoice-prefix charset tightened to alphanumeric + '-' '/' and capped so number ≤16 chars. (B-8) yearly reset now keys off the Indian FINANCIAL year (1 Apr), not the calendar year. Residual: consolidated GROUP invoices still use INV-GRP-<id> (tracked). tsc + vite build clean.
+      'gst-fix-p0-rates-and-pos',                //GST COMPLIANCE FIX (P0, batch 1 of the certification-review remediation): (A-1) HOTEL ROOM SLAB DEFAULT — the ≤₹1,000=0% band was the withdrawn (pre-18-Jul-2022) regime; a ₹1,000 room is legally 12%. Corrected the default slab-1 rate 0→12 in the server fallback (loadHotelTaxConfig/gstRateForTariff), the DB column default (db.ts, ALTER … SET DEFAULT 12), and the tax-config UI defaults; plus a one-time data migration UPDATE restaurants SET hotel_gst_slab1_rate=12 WHERE it was 0 for the ≤₹1,000 accommodation band (0% on ≤₹1,000 accommodation is not valid under current law). (A-2) PLACE OF SUPPLY / IGST — accommodation (IGST Act §12(3)(b)), restaurant/F&B (§12(4)) and events (venue) always have POS = the property's location, so an out-of-state guest is still an INTRA-state supply (CGST+SGST). The invoice templates (invoiceService.ts + invoiceServiceBoutique.ts) were deriving IGST from guest.state vs hotel.state, emitting IGST invoices that ALSO disagreed with the GL (which always books CGST/SGST). Now they render intra-state CGST/SGST for these supplies (server may still force a value explicitly); the computeTaxes path already defaulted intra-state. Aligns invoice ↔ ledger ↔ GSTR-1 heads. tsc + vite build clean.
       'gl-entries-include-reversed',             //DIAGNOSTIC (day-book audit follow-up): the /accounting/gl-entries endpoint now accepts include_reversed=1 (default still hides reversed rows) + a journal_ref filter, so a folio/order whose journal was REVERSED (e.g. by a credit note / folio revision) can be audited — it has no ACTIVE journal (correctly net-zero) but is NOT a true posting gap. Read-only; default behaviour unchanged. The reconciliation (e2e_daybook_full_loop.mjs) now classifies a window-missing ref against the full ledger: 'reversed' (credit-noted/revised → net-zero, OK, not a fail) vs 'active-elsewhere' (journal dated outside the window → OK) vs a TRUE gap. This resolves the RESTO-1003 audit: 207/223 FY hotel folios already posted; the ~16 backfill non-posts are zero-value/empty folios (nothing to post); the 4 the old reconcile flagged have reversed (credit-noted) journals — correct accounting, not missing revenue. tsc + vite build clean.
       'gl-daybook-reflection-fix',               //BUGFIX (owner day-book audit found settled txns missing from the GL/Day Book — books still BALANCED (trial balance diff 0, 0 gl_exceptions), but ~₹11.6k of recent settled revenue never posted a journal, so GL-derived reports understated it). Two real posting gaps found + fixed forward: (1) RESTAURANT — the generic PATCH /orders/:id sets payment_status='PAID' but never called _postOrderGl (only the dedicated /orders/:id/payment endpoint + session-close did), so an order settled via that PATCH (e.g. a manual invoice marked paid from the Invoices list) never reached the Day Book; now posts _postOrderGl (idempotent on ORDER-<id>, skips folio-bound). (2) HOTEL — the group-checkout MASTER (consolidated) folio settle did a raw UPDATE folios SET status='settled' with no GL post (per-room child folios DO post via settleFolioForBooking); now posts _postFolioGl (FOLIO-<id>, no double-count since the master folio is created empty and holds only group-level charges). Also NEW owner-only POST /accounting/backfill-gl (dry_run=1 supported) — idempotent, balanced-or-exception, posts GL for any settled HOTEL folio / paid standalone order that is missing its journal, to reflect PRE-EXISTING gaps. Events were a false-positive in the audit (advances post EVENT-PAY-*, revenue recognized at checkout as FOLIO-* — deferred, not missing). Reconciliation test (e2e_daybook_full_loop.mjs) corrected: diagnostics (gl read health + trial balance + gl_exceptions), events reconciled by their real model, missing hotel/restaurant txns printed with date+amount. tsc + vite build clean.
       'expense-include-shared-toggle',           //FEATURE (owner request): optional "+ Include shared" overlay in the Expense Journal. Strict module buckets stay the DEFAULT (Hotel/Restaurant/Shared are mutually exclusive; a Shared entry shows only under Shared). When viewing a specific module (Hotel OR Restaurant), a new checkbox folds property-wide SHARED costs into that view too — WITHOUT conflating them: each row keeps its own Module badge, and a header line shows Total / of-which-Shared / module-only subtotals. Backend: GET /petty-cash?module=HOTEL&include_shared=1 → `... IN (?, 'SHARED')` (ignored for ALL — already shows everything — and for the SHARED filter itself); response summary gains include_shared + shared_in/shared_out. Frontend ExpenseJournalView: includeShared state + toggle shown only for Hotel/Restaurant + the separate shared subtotal line. New self-cleaning TC-EXPENSE-SHARED test (strict excludes shared; overlay folds it with a shared_out subtotal; overlay ignored for the Shared filter). tsc + vite build clean.

@@ -11994,6 +11994,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const total         = taxable + gstAmt;
     const html = buildThermalHTML({
       restaurantName:       restaurant?.name || 'Restaurant',
+      restaurantAddress:    ([(restaurant as any)?.address_line1, (restaurant as any)?.city, (restaurant as any)?.state, (restaurant as any)?.pincode].filter(Boolean).join(', ')) || (restaurant as any)?.business_location || undefined,
       gstin:                restaurant?.gst_number,
       gstEnabled:           applyGst && effGstRate > 0,
       gstPercent:           effGstRate,
@@ -47135,6 +47136,8 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
 // ============================================================
 interface ThermalReceiptData {
   restaurantName: string;
+  restaurantAddress?: string;   // supplier address (Rule 46(c)) — printed under the name when present
+  sacCode?: string;             // SAC for the restaurant supply (Rule 46(g)); defaults to 996331
   gstin?: string;
   gstEnabled?: boolean;
   gstPercent?: number;
@@ -47218,8 +47221,21 @@ function buildThermalHTML(d: ThermalReceiptData): string {
         .map(l => `<div class="dim">${totalLine(`${l.label} @ ${Number(l.rate || 0).toFixed(2)}%`, Number(l.amount || 0))}</div>`)
         .join('');
     }
-    return d.gstAmount > 0 ? `<div class="dim">${totalLine(gstLabel, d.gstAmount)}</div>` : '';
+    if (d.gstAmount > 0) {
+      // GST-B2: a restaurant supply's place of supply is the restaurant (intra-state),
+      // so split the tax into CGST + SGST rather than a single lumped "GST" line, as a
+      // tax invoice requires (Rule 46(m)). (Non-India tenants pass taxLines[] above.)
+      const half = Math.round((d.gstAmount / 2) * 100) / 100;
+      const rate = (Number(d.gstPercent ?? 0) / 2);
+      return `<div class="dim">${totalLine(`CGST @ ${rate.toFixed(2)}%`, half)}</div>`
+           + `<div class="dim">${totalLine(`SGST @ ${rate.toFixed(2)}%`, +(d.gstAmount - half).toFixed(2))}</div>`;
+    }
+    return '';
   })();
+  // A registered supplier (GSTIN + GST enabled) issues a TAX INVOICE carrying the
+  // SAC and a CGST/SGST split; otherwise this is a plain sale receipt.
+  const isTaxInvoice = !!(d.gstEnabled && d.gstin && d.gstin !== '0');
+  const sac = d.sacCode || '996331';
 
   return `<!DOCTYPE html>
 <html>
@@ -47258,7 +47274,9 @@ function buildThermalHTML(d: ThermalReceiptData): string {
 </head>
 <body>
   <div class="center bold" style="font-size:13px;margin-bottom:2px;">${d.restaurantName}</div>
+  ${d.restaurantAddress ? `<div class="center dim">${d.restaurantAddress}</div>` : ''}
   ${d.gstin && d.gstin !== '0' && d.gstEnabled ? `<div class="center dim">GSTIN: ${d.gstin}</div>` : ''}
+  ${isTaxInvoice ? `<div class="center bold" style="font-size:12px;margin-top:3px;letter-spacing:1px;">TAX INVOICE</div>` : ''}
   <div class="spacer"></div>
   <div class="rule">${rule}</div>
 
@@ -47274,7 +47292,8 @@ function buildThermalHTML(d: ThermalReceiptData): string {
   ${itemsHTML}
   <div class="rule">${dash}</div>
 
-  <div>${totalLine('Subtotal', d.subtotal)}</div>
+  ${isTaxInvoice ? `<div class="dim">SAC: ${sac} · Restaurant service</div>` : ''}
+  <div>${totalLine(isTaxInvoice ? 'Taxable value' : 'Subtotal', d.subtotal)}</div>
   ${d.discountAmount && d.discountAmount > 0 ? `<div class="dim">${totalLine(d.loyaltyDiscountLabel || 'Discount', -d.discountAmount)}</div>` : ''}
   ${d.serviceChargeAmount && d.serviceChargeAmount > 0 ? `<div class="dim">${totalLine(`Service Charge (${d.serviceChargePercent ?? 0}%)`, d.serviceChargeAmount)}</div>` : ''}
   ${taxLinesHTML}

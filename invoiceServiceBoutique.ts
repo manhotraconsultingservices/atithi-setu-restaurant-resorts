@@ -233,7 +233,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
       if (isCreditNote && data.parentInvoiceNumber) {
         doc.roundedRect(M, y, INNER_W, 24, 4).fillAndStroke('#fdf0f0', '#c13b3b');
         doc.fillColor('#c13b3b').font('Helvetica-Bold').fontSize(9)
-           .text(`Against original invoice: ${data.parentInvoiceNumber}${data.creditNoteReason ? ` · Reason: ${data.creditNoteReason}` : ''}`,
+           .text(`Against original invoice: ${data.parentInvoiceNumber}${data.parentInvoiceDate ? ` dated ${data.parentInvoiceDate}` : ''}${data.creditNoteReason ? ` · Reason: ${data.creditNoteReason}` : ''}`,
                  M + 10, y + 8, { width: INNER_W - 20 });
         y += 32;
       }

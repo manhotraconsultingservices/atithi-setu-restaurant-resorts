@@ -179,6 +179,7 @@ export interface InvoiceData {
   // Phase 5: Credit note variant
   isCreditNote?: boolean;
   parentInvoiceNumber?: string; // shown on credit notes as "Against Invoice #..."
+  parentInvoiceDate?: string;   // original invoice date — Rule 53(1A)(f) requires number AND date
   creditNoteReason?: string;
   bilingual?: boolean;          // default true — include Hindi sub-labels
   // Phase 2 — multi-currency + configurable tax. Optional. When absent we
