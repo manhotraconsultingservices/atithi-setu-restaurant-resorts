@@ -10683,7 +10683,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   }>({
     min_stay_nights: 1, max_stay_nights: null,
     refund_full_days: null, refund_partial_pct: null, late_checkout_time: null,
-    gst_slab1_max: 1000, gst_slab1_rate: 0,
+    gst_slab1_max: 1000, gst_slab1_rate: 12,  // ≤₹1,000 → 12% (0% exemption withdrawn 18-Jul-2022)
     gst_slab2_max: 7500, gst_slab2_rate: 12,
     gst_slab3_rate: 18,
     service_charge_percent: 0,
@@ -13253,7 +13253,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         refund_partial_pct: data.refund_partial_pct == null ? null : Number(data.refund_partial_pct),
         late_checkout_time: data.late_checkout_time || null,
         gst_slab1_max:      Number(data.gst_slab1_max  ?? 1000),
-        gst_slab1_rate:     Number(data.gst_slab1_rate ?? 0),
+        gst_slab1_rate:     Number(data.gst_slab1_rate ?? 12),
         gst_slab2_max:      Number(data.gst_slab2_max  ?? 7500),
         gst_slab2_rate:     Number(data.gst_slab2_rate ?? 12),
         gst_slab3_rate:     Number(data.gst_slab3_rate ?? 18),

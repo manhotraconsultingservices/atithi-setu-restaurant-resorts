@@ -1599,9 +1599,10 @@ function normaliseDateIso(v: any): string {
 }
 
 // Phase H2 — Hotel tax config (per-tenant slabs + service charge).
-// Loaded once per folio operation. Defaults match the post-2022 Indian
-// GST Council slabs (0 / 12 / 18 based on tariff) so existing tenants
-// keep the exact same behaviour they had before this commit.
+// Loaded once per folio operation. Defaults follow the CURRENT Indian GST
+// accommodation regime (12 / 18 on transaction value): ≤ ₹7,500 → 12%, > ₹7,500
+// → 18%. The pre-18-Jul-2022 "≤₹1,000 = 0% exempt" band is WITHDRAWN, so the
+// slab1 (≤₹1,000) rate defaults to 12%, not 0% (see GST-A1 migration in db.ts).
 interface HotelTaxConfig {
   slab1Max: number; slab1Rate: number;
   slab2Max: number; slab2Rate: number;
@@ -1619,7 +1620,7 @@ async function loadHotelTaxConfig(restaurantId: string): Promise<HotelTaxConfig>
   );
   return {
     slab1Max:  Number(r?.hotel_gst_slab1_max ?? 1000),
-    slab1Rate: Number(r?.hotel_gst_slab1_rate ?? 0),
+    slab1Rate: Number(r?.hotel_gst_slab1_rate ?? 12),   // ≤₹1,000 band → 12% (the 0% exemption was withdrawn 18-Jul-2022)
     slab2Max:  Number(r?.hotel_gst_slab2_max ?? 7500),
     slab2Rate: Number(r?.hotel_gst_slab2_rate ?? 12),
     slab3Rate: Number(r?.hotel_gst_slab3_rate ?? 18),
@@ -1628,11 +1629,12 @@ async function loadHotelTaxConfig(restaurantId: string): Promise<HotelTaxConfig>
 }
 
 // GST rate for an Indian hotel night based on tariff slab. Reads the
-// tenant config when provided; falls back to the post-2022 GST Council
-// defaults (0 / 12 / 18) when called without a tenant context.
+// tenant config when provided; falls back to the current accommodation
+// defaults (12 / 12 / 18) when called without a tenant context — the ≤₹1,000
+// 0% band was withdrawn 18-Jul-2022.
 function gstRateForTariff(tariff: number, cfg?: HotelTaxConfig): number {
   const slab1Max  = cfg?.slab1Max  ?? 1000;
-  const slab1Rate = cfg?.slab1Rate ?? 0;
+  const slab1Rate = cfg?.slab1Rate ?? 12;
   const slab2Max  = cfg?.slab2Max  ?? 7500;
   const slab2Rate = cfg?.slab2Rate ?? 12;
   const slab3Rate = cfg?.slab3Rate ?? 18;
@@ -49845,9 +49847,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gl-entries-include-reversed',
+    commit_marker: 'gst-fix-p0-rates-and-pos',
     code_features: [
-      'gl-entries-include-reversed',                 //DIAGNOSTIC (day-book audit follow-up): the /accounting/gl-entries endpoint now accepts include_reversed=1 (default still hides reversed rows) + a journal_ref filter, so a folio/order whose journal was REVERSED (e.g. by a credit note / folio revision) can be audited — it has no ACTIVE journal (correctly net-zero) but is NOT a true posting gap. Read-only; default behaviour unchanged. The reconciliation (e2e_daybook_full_loop.mjs) now classifies a window-missing ref against the full ledger: 'reversed' (credit-noted/revised → net-zero, OK, not a fail) vs 'active-elsewhere' (journal dated outside the window → OK) vs a TRUE gap. This resolves the RESTO-1003 audit: 207/223 FY hotel folios already posted; the ~16 backfill non-posts are zero-value/empty folios (nothing to post); the 4 the old reconcile flagged have reversed (credit-noted) journals — correct accounting, not missing revenue. tsc + vite build clean.
+      'gst-fix-p0-rates-and-pos',                    //GST COMPLIANCE FIX (P0, batch 1 of the certification-review remediation): (A-1) HOTEL ROOM SLAB DEFAULT — the ≤₹1,000=0% band was the withdrawn (pre-18-Jul-2022) regime; a ₹1,000 room is legally 12%. Corrected the default slab-1 rate 0→12 in the server fallback (loadHotelTaxConfig/gstRateForTariff), the DB column default (db.ts, ALTER … SET DEFAULT 12), and the tax-config UI defaults; plus a one-time data migration UPDATE restaurants SET hotel_gst_slab1_rate=12 WHERE it was 0 for the ≤₹1,000 accommodation band (0% on ≤₹1,000 accommodation is not valid under current law). (A-2) PLACE OF SUPPLY / IGST — accommodation (IGST Act §12(3)(b)), restaurant/F&B (§12(4)) and events (venue) always have POS = the property's location, so an out-of-state guest is still an INTRA-state supply (CGST+SGST). The invoice templates (invoiceService.ts + invoiceServiceBoutique.ts) were deriving IGST from guest.state vs hotel.state, emitting IGST invoices that ALSO disagreed with the GL (which always books CGST/SGST). Now they render intra-state CGST/SGST for these supplies (server may still force a value explicitly); the computeTaxes path already defaulted intra-state. Aligns invoice ↔ ledger ↔ GSTR-1 heads. tsc + vite build clean.
+      'gl-entries-include-reversed',             //DIAGNOSTIC (day-book audit follow-up): the /accounting/gl-entries endpoint now accepts include_reversed=1 (default still hides reversed rows) + a journal_ref filter, so a folio/order whose journal was REVERSED (e.g. by a credit note / folio revision) can be audited — it has no ACTIVE journal (correctly net-zero) but is NOT a true posting gap. Read-only; default behaviour unchanged. The reconciliation (e2e_daybook_full_loop.mjs) now classifies a window-missing ref against the full ledger: 'reversed' (credit-noted/revised → net-zero, OK, not a fail) vs 'active-elsewhere' (journal dated outside the window → OK) vs a TRUE gap. This resolves the RESTO-1003 audit: 207/223 FY hotel folios already posted; the ~16 backfill non-posts are zero-value/empty folios (nothing to post); the 4 the old reconcile flagged have reversed (credit-noted) journals — correct accounting, not missing revenue. tsc + vite build clean.
       'gl-daybook-reflection-fix',               //BUGFIX (owner day-book audit found settled txns missing from the GL/Day Book — books still BALANCED (trial balance diff 0, 0 gl_exceptions), but ~₹11.6k of recent settled revenue never posted a journal, so GL-derived reports understated it). Two real posting gaps found + fixed forward: (1) RESTAURANT — the generic PATCH /orders/:id sets payment_status='PAID' but never called _postOrderGl (only the dedicated /orders/:id/payment endpoint + session-close did), so an order settled via that PATCH (e.g. a manual invoice marked paid from the Invoices list) never reached the Day Book; now posts _postOrderGl (idempotent on ORDER-<id>, skips folio-bound). (2) HOTEL — the group-checkout MASTER (consolidated) folio settle did a raw UPDATE folios SET status='settled' with no GL post (per-room child folios DO post via settleFolioForBooking); now posts _postFolioGl (FOLIO-<id>, no double-count since the master folio is created empty and holds only group-level charges). Also NEW owner-only POST /accounting/backfill-gl (dry_run=1 supported) — idempotent, balanced-or-exception, posts GL for any settled HOTEL folio / paid standalone order that is missing its journal, to reflect PRE-EXISTING gaps. Events were a false-positive in the audit (advances post EVENT-PAY-*, revenue recognized at checkout as FOLIO-* — deferred, not missing). Reconciliation test (e2e_daybook_full_loop.mjs) corrected: diagnostics (gl read health + trial balance + gl_exceptions), events reconciled by their real model, missing hotel/restaurant txns printed with date+amount. tsc + vite build clean.
       'expense-include-shared-toggle',           //FEATURE (owner request): optional "+ Include shared" overlay in the Expense Journal. Strict module buckets stay the DEFAULT (Hotel/Restaurant/Shared are mutually exclusive; a Shared entry shows only under Shared). When viewing a specific module (Hotel OR Restaurant), a new checkbox folds property-wide SHARED costs into that view too — WITHOUT conflating them: each row keeps its own Module badge, and a header line shows Total / of-which-Shared / module-only subtotals. Backend: GET /petty-cash?module=HOTEL&include_shared=1 → `... IN (?, 'SHARED')` (ignored for ALL — already shows everything — and for the SHARED filter itself); response summary gains include_shared + shared_in/shared_out. Frontend ExpenseJournalView: includeShared state + toggle shown only for Hotel/Restaurant + the separate shared subtotal line. New self-cleaning TC-EXPENSE-SHARED test (strict excludes shared; overlay folds it with a shared_out subtotal; overlay ignored for the Shared filter). tsc + vite build clean.
       'qa-bugfix-batch-2-ux',                    //BUGFIXES (QA batch 2 — UI/UX): (1) QUOTATION LIST FLASH — EventQuotations had no loading state, so its DataTable showed the "No quotations yet" empty-state during the 2-3s N+1 load (bookings → per-booking detail); added a `loading` flag and gated the emptyMessage ("Loading quotations…") so the empty-state only shows after load completes. (2) CHECK-IN VALIDATION NOT IMMEDIATE — the early-check-in-before-date message was set only into the SHARED hotelError banner, which can render off-screen when triggered from the booking-detail modal (read as "message only appears after refresh"); now also fired as a toast (immediate, floats over everything). (3) STUCK EDIT-AFTER-CHECK-IN ERROR — the edit-blocked save error set the sticky shared hotelError banner and the 3 booking-modal close paths never cleared it, so it lingered across views; now cleared on every modal close and also surfaced as an auto-dismissing toast (the check-in EDIT BLOCK itself is by design — server locks a checked-in booking — only the stuck message was the defect). NON-BUGS called out: (4) guest-portal "Charged to your room" — the order-confirmation panel ALREADY auto-dismisses (useEffect citing this exact report); the remaining line is a deliberate Food-tab payment-model header. (5) invoice "Thank you" on page 2 — real but DEFERRED: the footer is absolute-positioned and this block is delicately tuned to avoid a prior "Grand Total clipped" regression, so it needs a visual PDF render to fix safely rather than a blind layout change. Frontend-only. tsc + vite build clean.

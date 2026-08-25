@@ -483,11 +483,13 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       // driven by data.taxLines (populated by the server from tax_config).
       const tenantCountry = (data.tenant?.country || 'IN').toUpperCase();
       const isIndia = tenantCountry === 'IN';
-      let sameState: boolean;
-      if (data.sameStateGst !== undefined) sameState = data.sameStateGst;
-      else if (data.guest.state && data.hotel.state) {
-        sameState = normaliseState(data.guest.state) === normaliseState(data.hotel.state);
-      } else sameState = true; // default conservative
+      // GST-A2: Place of supply for accommodation (IGST Act §12(3)(b)),
+      // restaurant/F&B (§12(4)) and events (venue) is ALWAYS the property's
+      // location, so an out-of-state guest is still an INTRA-state supply →
+      // CGST+SGST. Do NOT derive interstate status from the guest's home state
+      // (that emitted IGST invoices that also disagreed with the GL, which books
+      // CGST/SGST for these supplies). Server may still force a value explicitly.
+      const sameState: boolean = (data.sameStateGst !== undefined) ? data.sameStateGst : true;
 
       // ─── M-5 (BCG follow-up) — per-rate GST rendering ────────────────
       // Hotel stays that cross slab boundaries (night 1 at ₹6,000 → 12%,

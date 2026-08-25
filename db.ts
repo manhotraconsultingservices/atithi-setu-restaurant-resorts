@@ -371,22 +371,29 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS checklist_validate_on_checkout INT DEFAULT 1;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS checklist_two_stage_cleaning INT DEFAULT 0;
     -- Phase H2 — Hotel-specific GST + service charge.
-    -- Indian hotels follow a tariff-slab GST regime (post-2022 GST Council):
-    --   ≤ ₹1,000/night  → 0%   (exempt)
-    --   ₹1,001-₹7,500   → 12%
+    -- Indian hotels follow a tariff-slab GST regime. The ≤₹1,000 = 0% (exempt)
+    -- band was WITHDRAWN w.e.f. 18-Jul-2022; the current transaction-value regime is:
+    --   ≤ ₹7,500/night  → 12%
     --   > ₹7,500        → 18%
-    -- Stored per-tenant so a property can override (some properties operate
-    -- under different state policies or claim ITC variants). The thresholds
-    -- and rates themselves are configurable.
+    -- We keep the slab1 threshold column for flexibility but its default rate is 12%
+    -- (not 0%). Stored per-tenant so a property can override the thresholds/rates.
     --   hotel_service_charge_percent applies to ROOM CHARGES ONLY (not to
-    --   F&B or chargeable services like laundry). 0 = no service charge
-    --   (default — preserves existing behaviour).
+    --   F&B or chargeable services like laundry). 0 = no service charge (default).
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab1_max  DOUBLE PRECISION DEFAULT 1000;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab1_rate DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab1_rate DOUBLE PRECISION DEFAULT 12;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab2_max  DOUBLE PRECISION DEFAULT 7500;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab2_rate DOUBLE PRECISION DEFAULT 12;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab3_rate DOUBLE PRECISION DEFAULT 18;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_service_charge_percent DOUBLE PRECISION DEFAULT 0;
+    -- GST-A1 (2026-08): the ≤₹1,000=0% default above was the pre-Jul-2022 (withdrawn)
+    -- regime. Correct the column default for new rows, and fix existing rows still
+    -- carrying that buggy default to 12% (scoped to the accommodation slab). 0% on a
+    -- ≤₹1,000 accommodation supply is not valid under current law, so this is a
+    -- compliance floor — a property that genuinely needs a different rate still sets
+    -- its own slab rates, which are never 0 for this band.
+    ALTER TABLE restaurants ALTER COLUMN hotel_gst_slab1_rate SET DEFAULT 12;
+    UPDATE restaurants SET hotel_gst_slab1_rate = 12
+      WHERE hotel_gst_slab1_rate = 0 AND COALESCE(hotel_gst_slab1_max, 1000) <= 1000;
     -- Phase H3 — Restaurant default service charge.
     -- A negotiable restaurant fee (separate from statutory GST). Sourced
     -- as the pre-populated default for the editable "Service Charge %"

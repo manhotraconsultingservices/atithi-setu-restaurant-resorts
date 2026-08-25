@@ -535,11 +535,10 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
 
       const tenantCountry = (data.tenant?.country || 'IN').toUpperCase();
       const isIndia = tenantCountry === 'IN';
-      let sameState: boolean;
-      if (data.sameStateGst !== undefined) sameState = data.sameStateGst;
-      else if (data.guest.state && data.hotel.state) {
-        sameState = normaliseState(data.guest.state) === normaliseState(data.hotel.state);
-      } else sameState = true;
+      // GST-A2: place of supply for accommodation / F&B / events is always the
+      // property's location → intra-state (CGST+SGST) even for out-of-state guests.
+      // Do not derive interstate from guest state (see invoiceService.ts).
+      const sameState: boolean = (data.sameStateGst !== undefined) ? data.sameStateGst : true;
 
       if (isIndia) {
         // Group entries by (HSN, rate) for the tax summary
