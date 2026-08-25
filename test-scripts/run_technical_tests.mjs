@@ -603,6 +603,23 @@ async function testAccounting() {
     fail('TC-ACC-006', 'TDS payable list loads', `HTTP ${tds.status}`);
   }
 
+  // TC-ACC-TDS-SEC (GST/TDS P1 D-2): section-aware TDS seeds a dedicated
+  // 194I (Rent) payable account. Verify 2340 is present in the chart of
+  // accounts (2300/2310/2320 for 194C/J/H were seeded earlier). Read-only,
+  // reuses the `coa` fetch above.
+  if (coa.status === 200 && Array.isArray(coa.data) && coa.data.length > 0) {
+    const codes = coa.data.map(a => a.code);
+    const tdsSecAccts = ['2300','2310','2320','2340'];
+    const missingTds = tdsSecAccts.filter(c => !codes.includes(c));
+    if (missingTds.length === 0) {
+      pass('TC-ACC-TDS-SEC', 'Section-wise TDS payable accounts present (194C 2300 / 194J 2310 / 194H 2320 / 194I 2340)');
+    } else {
+      fail('TC-ACC-TDS-SEC', 'Section-wise TDS payable accounts present', `missing: ${missingTds.join(', ')} — D-2 COA seed may not have run on this tenant`);
+    }
+  } else {
+    skip('TC-ACC-TDS-SEC', 'Section-wise TDS payable accounts', 'chart of accounts unavailable (RBAC/empty)');
+  }
+
   // Manual journal POST — balanced entry test
   const mjRes = await api('POST', `/api/restaurant/${restaurantId}/accounting/journal-entries`, {
     entry_date: today,
