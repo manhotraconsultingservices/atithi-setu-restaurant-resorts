@@ -2929,6 +2929,16 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
       <section style={{ background: heroBg, color: '#fff', minHeight: heroImg ? '68vh' : 'auto', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '64px 20px' }}>
         <div style={{ maxWidth: 760 }}>
           {property.logo_url && <img src={property.logo_url} alt="" style={{ height: 54, marginBottom: 18, borderRadius: 10 }} />}
+          {/* Business name eyebrow — surface it in the HEADER, not only the footer.
+              When a tenant sets a custom marketing hero_title (e.g. "Celebrate at …"),
+              the h1 shows that headline and the actual business name previously only
+              appeared in the footer at the very bottom (reported: "restaurant name is
+              coming in the last"). Show the name above the headline whenever it differs. */}
+          {property.name && p.hero_title && p.hero_title !== property.name && (
+            <div style={{ fontSize: 'clamp(13px, 2vw, 16px)', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', opacity: 0.92, marginBottom: 10, textShadow: heroImg ? '0 1px 8px rgba(0,0,0,0.4)' : 'none' }}>
+              {property.name}
+            </div>
+          )}
           <h1 style={{ fontSize: 'clamp(30px, 6vw, 52px)', fontWeight: 800, margin: 0, lineHeight: 1.08, letterSpacing: '-0.02em', textShadow: heroImg ? '0 2px 16px rgba(0,0,0,0.4)' : 'none' }}>
             {p.hero_title || property.name || t('public.events.enquire')}
           </h1>
