@@ -1368,10 +1368,16 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       qty_ordered DOUBLE PRECISION NOT NULL,
       unit TEXT NOT NULL,
       unit_price DOUBLE PRECISION NOT NULL,
+      gst_percent DOUBLE PRECISION DEFAULT 0,
       qty_received DOUBLE PRECISION DEFAULT 0,
       is_fully_received INT DEFAULT 0
     )
   `);
+  // The applied GST rate per PO line (defaults to the ingredient's gst_percent,
+  // overridable on the PO form). Added after the table shipped, so ALTER for
+  // existing tenants. Without it, PO GST was computed only from the ingredient
+  // master's gst_percent and read ₹0 whenever that was 0/unset.
+  await db.exec(`ALTER TABLE purchase_order_items ADD COLUMN IF NOT EXISTS gst_percent DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_poi_po ON purchase_order_items (po_id)`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_poi_ingredient ON purchase_order_items (ingredient_id)`);
 

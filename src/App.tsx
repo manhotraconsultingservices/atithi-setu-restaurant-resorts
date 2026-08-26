@@ -55219,7 +55219,7 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
   const [supplierId, setSupplierId] = useState(suppliers[0]?.id || '');
   const [expectedDate, setExpectedDate] = useState('');
   const [notes, setNotes] = useState('');
-  const [lines, setLines] = useState<any[]>([{ ingredient_id: '', qty_ordered: 1, unit_price: 0 }]);
+  const [lines, setLines] = useState<any[]>([{ ingredient_id: '', qty_ordered: 1, unit_price: 0, gst_percent: 0 }]);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -55232,20 +55232,24 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
         if (ing) {
           next.unit = ing.unit;
           if (!next.unit_price) next.unit_price = ing.default_unit_price || 0;
+          // Default the line's GST rate to the item master's rate; still editable
+          // below so items whose master rate is 0/unset can be given the applicable rate.
+          next.gst_percent = Number(ing.gst_percent ?? 0);
         }
       }
       return next;
     }));
   };
 
-  const addLine = () => setLines(prev => [...prev, { ingredient_id: '', qty_ordered: 1, unit_price: 0 }]);
+  const addLine = () => setLines(prev => [...prev, { ingredient_id: '', qty_ordered: 1, unit_price: 0, gst_percent: 0 }]);
   const removeLine = (i: number) => setLines(prev => prev.filter((_, idx) => idx !== i));
 
   const subtotal = lines.reduce((s, l) => s + Number(l.qty_ordered || 0) * Number(l.unit_price || 0), 0);
-  const gstTotal = lines.reduce((s, l) => {
-    const ing = ingredients.find(x => x.id === l.ingredient_id);
-    return s + Number(l.qty_ordered || 0) * Number(l.unit_price || 0) * (Number(ing?.gst_percent || 0) / 100);
-  }, 0);
+  // GST from the PER-LINE rate (defaults to the item's, editable) — previously
+  // read the ingredient master's gst_percent directly, so GST showed ₹0 whenever
+  // that was 0/unset (reported "GST not calculated in Purchase Order").
+  const gstTotal = lines.reduce((s, l) =>
+    s + Number(l.qty_ordered || 0) * Number(l.unit_price || 0) * (Number(l.gst_percent || 0) / 100), 0);
 
   const save = async () => {
     if (!supplierId) { setErr('Pick a supplier'); return; }
@@ -55277,6 +55281,7 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
               qty_ordered: Number(l.qty_ordered),
               unit: l.unit || ing?.unit || 'unit',
               unit_price: Number(l.unit_price),
+              gst_percent: Number(l.gst_percent || 0),
             };
           }),
         }),
@@ -55308,11 +55313,10 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
           </div>
           <div className="space-y-2">
             {lines.map((l, i) => {
-              const ing = ingredients.find(x => x.id === l.ingredient_id);
               const lineTotal = Number(l.qty_ordered || 0) * Number(l.unit_price || 0);
               return (
                 <div key={i} className="bg-[#faf7f2] rounded-2xl p-3 grid grid-cols-12 gap-2 items-end">
-                  <div className="col-span-12 md:col-span-5">
+                  <div className="col-span-12 md:col-span-4">
                     <select value={l.ingredient_id} onChange={e => updateLine(i, 'ingredient_id', e.target.value)} className={inputClass}>
                       <option value="">Pick ingredient…</option>
                       {ingredients.map((x: any) => <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>)}
@@ -55324,9 +55328,14 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
                   <div className="col-span-4 md:col-span-2">
                     <input type="number" min={0} step="0.01" value={l.unit_price} onChange={e => updateLine(i, 'unit_price', e.target.value)} className={inputClass} placeholder="₹/unit" />
                   </div>
-                  <div className="col-span-3 md:col-span-2 text-right font-mono text-sm font-bold">
-                    ₹{lineTotal.toFixed(2)}
-                    {ing?.gst_percent > 0 && <p className="text-[10px] text-[#9c8e85] font-normal">+{ing.gst_percent}% GST</p>}
+                  <div className="col-span-4 md:col-span-2">
+                    <div className="relative">
+                      <input type="number" min={0} max={28} step="0.01" value={l.gst_percent ?? 0} onChange={e => updateLine(i, 'gst_percent', e.target.value)} className={cn(inputClass, "pr-6")} placeholder="GST" title="GST rate for this line (%)" />
+                      <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-[#9c8e85] pointer-events-none">%</span>
+                    </div>
+                  </div>
+                  <div className="col-span-11 md:col-span-1 text-right font-mono text-sm font-bold">
+                    ₹{(lineTotal * (1 + Number(l.gst_percent || 0) / 100)).toFixed(2)}
                   </div>
                   <div className="col-span-1">
                     <button onClick={() => removeLine(i)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg"><Trash2 size={14}/></button>

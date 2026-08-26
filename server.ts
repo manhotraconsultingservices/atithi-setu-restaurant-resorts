@@ -17378,7 +17378,13 @@ ${data.tenant.name}`;
         if (!ing) continue;
         const qty = Math.max(0, Number(it.qty_ordered));
         const price = Math.max(0, Number(it.unit_price));
-        const gstPct = Number(ing.gst_percent || 0);
+        // Applied GST rate: honour the per-line value the PO form sends (it
+        // defaults to the ingredient's gst_percent but is editable, so items whose
+        // master rate is 0/unset still get the applicable rate) — fall back to the
+        // ingredient master when the line omits it.
+        const gstPct = (it.gst_percent != null && it.gst_percent !== '')
+          ? Math.max(0, Number(it.gst_percent))
+          : Number(ing.gst_percent || 0);
         const lineSubtotal = qty * price;
         const lineGst = lineSubtotal * (gstPct / 100);
         totalAmount += lineSubtotal;
@@ -17388,6 +17394,7 @@ ${data.tenant.name}`;
           qty_ordered: qty,
           unit: String(it.unit || ing.unit || 'unit').toLowerCase(),
           unit_price: price,
+          gst_percent: gstPct,
         });
       }
       if (validItems.length === 0) {
@@ -17415,11 +17422,11 @@ ${data.tenant.name}`;
       for (const it of validItems) {
         await db.run(
           `INSERT INTO purchase_order_items
-            (id, po_id, ingredient_id, qty_ordered, unit, unit_price)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+            (id, po_id, ingredient_id, qty_ordered, unit, unit_price, gst_percent)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             `POI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
-            poId, it.ingredient_id, it.qty_ordered, it.unit, it.unit_price,
+            poId, it.ingredient_id, it.qty_ordered, it.unit, it.unit_price, it.gst_percent,
           ]
         );
       }
@@ -17480,15 +17487,20 @@ ${data.tenant.name}`;
         if (!ing) continue;
         const qty = Math.max(0, Number(it.qty_ordered));
         const price = Math.max(0, Number(it.unit_price));
+        // Honour the per-line GST rate (defaults to the ingredient's, editable on
+        // the form); fall back to the ingredient master when the line omits it.
+        const gstPct = (it.gst_percent != null && it.gst_percent !== '')
+          ? Math.max(0, Number(it.gst_percent))
+          : Number(ing.gst_percent || 0);
         totalAmount += qty * price;
-        gstAmount += qty * price * (Number(ing.gst_percent || 0) / 100);
+        gstAmount += qty * price * (gstPct / 100);
         await db.run(
-          `INSERT INTO purchase_order_items (id, po_id, ingredient_id, qty_ordered, unit, unit_price)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO purchase_order_items (id, po_id, ingredient_id, qty_ordered, unit, unit_price, gst_percent)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             `POI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
             req.params.id, it.ingredient_id, qty,
-            String(it.unit || ing.unit || 'unit').toLowerCase(), price,
+            String(it.unit || ing.unit || 'unit').toLowerCase(), price, gstPct,
           ]
         );
       }
@@ -50053,9 +50065,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'fix-early-checkin-message-persists',
+    commit_marker: 'fix-po-gst-per-line-rate',
     code_features: [
-      'fix-early-checkin-message-persists',          //BUGFIX (QA: check-in restriction message persists until manual refresh). The early-check-in guard in confirmAndCheckIn (App.tsx) set the message into BOTH a toast (auto-dismisses ~4s) AND the SHARED sticky `hotelError` banner via setHotelError(msg) — the banner was never cleared for this case, so "Check-in is not allowed before the check-in date" lingered on the Reservations page until refresh. FIX: this transient validation now fires the TOAST ONLY (immediate, floats over everything, self-clearing) and clears the shared banner (setHotelError('')) instead of setting it — so a prior stale error can't masquerade as this one either. Frontend-only; no API/behavior change to the actual check-in. tsc + vite build clean.
+      'fix-po-gst-per-line-rate',                    //BUGFIX (QA: GST not calculated in Purchase Order — GST ₹0.00, Grand Total excludes GST). ROOT CAUSE: both the PO form and the create/PATCH endpoints derived GST SOLELY from the ingredient master's gst_percent, and the PO line had no way to set a rate — so any item whose master gst_percent was 0/unset produced ₹0 GST with no recourse. FIX: a per-line GST% is now first-class. (1) DB — new `purchase_order_items.gst_percent` column (idempotent ALTER; the PO PDF already read it). (2) Backend — POST + PATCH /inventory/purchase-orders honour `it.gst_percent` (fallback to the ingredient master), compute the header gst_amount/grand_total from it, and STORE it per line. (3) Frontend POCreateModal — each line has an editable GST% field that auto-defaults to the item's rate on pick but can be set for items with none; the modal's GST + Grand Total and each line total now reflect it, and the rate is sent per item. Verified on RESTO-1003: a PO with a 5%/12%/18% line now returns gst_amount>0 and grand_total = subtotal + gst. tsc + vite build clean.
+      'fix-early-checkin-message-persists',         //BUGFIX (QA: check-in restriction message persists until manual refresh). The early-check-in guard in confirmAndCheckIn (App.tsx) set the message into BOTH a toast (auto-dismisses ~4s) AND the SHARED sticky `hotelError` banner via setHotelError(msg) — the banner was never cleared for this case, so "Check-in is not allowed before the check-in date" lingered on the Reservations page until refresh. FIX: this transient validation now fires the TOAST ONLY (immediate, floats over everything, self-clearing) and clears the shared banner (setHotelError('')) instead of setting it — so a prior stale error can't masquerade as this one either. Frontend-only; no API/behavior change to the actual check-in. tsc + vite build clean.
       'fix-frontdesk-hr-payroll-nav-leak',          //BUGFIX (QA: HR & Payroll / Staff Payroll visible to Front Desk without access — nav shows them, clicking 403s). ROOT CAUSE: a built-in role (FRONT_DESK) with no configured Staff-Access matrix row resolves in getTabPermissionsForRole to perms===null → /my-permissions returns allowed_tabs:null → the frontend treats the role as UNRESTRICTED and isTabVisible(id,null) returns true for EVERY tab (fail-open). The backend Workforce endpoints are correctly permission-gated (workforceStaff), so the tabs showed in nav but 403'd on click. FIX (frontend, App.tsx): (1) isVisible() now gates HR_PAYROLL + STAFF_PAYROLL like the other sensitive tabs (CASH_DRAWER/CHECKLISTS) — visible ONLY to owner/admin, MANAGER, or a role that EXPLICITLY lists the tab in allowed_tabs; never under the fail-open null list — mirroring the backend workforceStaff gate so a nav-visible tab is never API-403. (2) HR_PAYROLL + STAFF_PAYROLL removed from the ALWAYS_VISIBLE_TABS grandfather set (defense-in-depth for markerless seeded lists + the content pane), same precedent as the earlier DELIVERY/RESTAURANT_REPORTS leak fix. Reproduced + verified on RESTO-1003: FRONT_DESK before=VISIBLE(leak) → after=hidden; OWNER/MANAGER/granted-role still visible; backend GET /hr/employees stays 403 for FRONT_DESK. Regression test TC-RBAC-FD-WORKFORCE. tsc + vite build clean.
       'fix-folio-checkout-gl-date',                 //BUGFIX (QA: checkout/payment journal missing from the Day Book). ROOT CAUSE: Postgres returns TIMESTAMP columns (folios.settled_at) as JS Date objects at runtime, but the HOTEL checkout GL post (settleFolioForBooking inline, ~4347) did `settled.settled_at.slice(0,10)` — Date has no .slice → TypeError, swallowed by the surrounding try/catch, so the folio was marked 'settled' but its FOLIO-<id> journal was SILENTLY NOT POSTED (no gl_exception either). Reproduced on RESTO-1003: checkout 200 + folio settled + ₹0 GL lines. Sibling derivations in _postOrderGl / _postFolioGl / payroll used `.toString().slice(0,10)`, which on a Date yields a garbage entry_date ("Wed Aug 26") that no Day Book date filter matches. FIX: one safe helper `_glPostDate(ts)` coerces Date|string|null → a real YYYY-MM-DD (fallback now); routed all four GL-post sites (folio checkout, _postOrderGl, _postFolioGl, payroll_run) through it. Now the checkout journal posts on the settlement date and appears in the Day Book. Pre-existing settled folios missing their journal can be backfilled via the existing owner-only POST /accounting/backfill-gl (now also date-correct). Regression test TC-HOTEL-CHECKOUT-GL asserts a checkout posts a balanced FOLIO journal dated today. tsc + vite build clean.
       'fix-extra-person-checkin-parity',            //BUGFIX (QA: extra adult/child charges not reflected correctly at check-in). Root cause: the booking POST and the check-in folio seeder (createFolioWithRoomCharges) DISAGREED on when a positive room_rate is a "manual all-in override". Booking creation treated ANY positive room_rate as all-in (total_amount = rate × nights, extra-person charges DROPPED), but check-in only treats a rate that DIFFERS from the plan's night-1 base as an override — a rate equal to the night-1 base still itemises extras. So a booking sent with room_rate = base_rate (the edit-draft seeds room_rate from the stored booking; staff can also type it) stored total_amount WITHOUT the extra adult/child, then check-in added them, making the stay total jump between booking and check-in. FIX: both the single (POST /hotel/bookings) and group (POST /hotel/bookings/group) creation paths now apply the SAME override rule as check-in — compute the breakdown, treat rate>0 as all-in ONLY when |rate − night1| > 0.01, else total = base + extras. Reproduced + verified on RESTO-1003: room_rate=base now stores 3700 (=2400 base + 800 extra adult + 500 extra child) matching the folio; room_rate=0 unchanged; a genuine all-in override still drops separate extras on both sides. tsc + vite build clean.
