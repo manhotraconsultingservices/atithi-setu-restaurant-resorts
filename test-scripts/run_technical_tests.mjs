@@ -522,6 +522,37 @@ async function testProcurement() {
   section('PROCUREMENT — Supplier Invoices / Payments / Ledger');
   if (!restaurantId) { skip('TC-PROC-*', 'All procurement tests', 'no restaurantId'); return; }
 
+  // TC-PROC-PO-GST — a Purchase Order must calculate GST from the per-line rate
+  // and include it in the grand total. Regression for "GST not calculated in
+  // Purchase Order" (GST ₹0.00 because it derived only from the ingredient
+  // master's gst_percent, with no way to set a line rate). Creates a PO with an
+  // explicit 18% line and asserts gst_amount/grand_total. Self-cleaning (cancels).
+  try {
+    const sups = await api('GET', `/api/restaurant/${restaurantId}/inventory/suppliers`);
+    const ings = await api('GET', `/api/restaurant/${restaurantId}/inventory/ingredients`);
+    const sup = (Array.isArray(sups.data) ? sups.data : [])[0];
+    const ing = (Array.isArray(ings.data) ? ings.data : []).find(x => x && x.id);
+    if (!sup || !ing) {
+      skip('TC-PROC-PO-GST', 'PO GST calculation', 'no supplier/ingredient on this tenant');
+    } else {
+      const cr = await api('POST', `/api/restaurant/${restaurantId}/inventory/purchase-orders`, {
+        supplier_id: sup.id, notes: 'automated PO GST test',
+        items: [{ ingredient_id: ing.id, qty_ordered: 2, unit_price: 100, unit: ing.unit || 'unit', gst_percent: 18 }],
+      });
+      const total = Number(cr.data?.total_amount), gst = Number(cr.data?.gst_amount), grand = Number(cr.data?.grand_total);
+      if (cr.status === 201 && total === 200 && Math.abs(gst - 36) < 0.01 && Math.abs(grand - 236) < 0.01) {
+        pass('TC-PROC-PO-GST', `PO GST calculated from per-line rate (subtotal ₹200 + 18% ₹36 = ₹236)`);
+      } else if (cr.status === 403) {
+        skip('TC-PROC-PO-GST', 'PO GST calculation', 'RBAC: need INVENTORY access');
+      } else {
+        fail('TC-PROC-PO-GST', 'PO must include GST in the grand total', `status ${cr.status}: total=${total} gst=${gst} grand=${grand} (expected 200/36/236 — GST not applied)`);
+      }
+      if (cr.data?.id) { try { await api('POST', `/api/inventory/purchase-orders/${cr.data.id}/cancel`, {}); } catch {} }
+    }
+  } catch (e) {
+    skip('TC-PROC-PO-GST', 'PO GST calculation', `error: ${e?.message || e}`);
+  }
+
   const si = await api('GET', `/api/restaurant/${restaurantId}/procurement/supplier-invoices`);
   if (si.status === 200 && Array.isArray(si.data)) {
     pass('TC-PROC-001', `Supplier invoices list loads (${si.data.length} invoices)`);
