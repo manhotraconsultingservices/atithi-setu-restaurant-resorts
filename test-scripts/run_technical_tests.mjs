@@ -666,6 +666,26 @@ async function testInventory() {
     fail('TC-INV-SUP', 'Suppliers endpoint responds', `HTTP ${su.status}`);
   }
 
+  // TC-INV-ANALYTICS — the Kitchen Inventory → Analytics tab loads three
+  // endpoints; ANY one 500 blanks the whole tab (reported: /inventory/expiring
+  // 500'd on a bad Postgres EXTRACT over a date-minus-date integer). Each must
+  // return 200 (or a clean 403/404 gate) — a 500 is the regression.
+  {
+    const eps = [
+      { id: 'abc-analysis', path: '/inventory/abc-analysis' },
+      { id: 'expiring',     path: '/inventory/expiring?days=7' },
+      { id: 'dead-stock',   path: '/inventory/dead-stock?days=30' },
+    ];
+    const results = await Promise.all(eps.map(e => api('GET', `/api/restaurant/${restaurantId}${e.path}`).then(r => ({ ...e, status: r.status, err: r.data?.error }))));
+    const server500 = results.filter(r => r.status >= 500);
+    const ok = results.filter(r => r.status === 200);
+    if (server500.length === 0) {
+      pass('TC-INV-ANALYTICS', `Kitchen Inventory analytics endpoints healthy (${ok.length}/3 → 200, none 500)`);
+    } else {
+      fail('TC-INV-ANALYTICS', 'Inventory analytics endpoints must not 500 (blanks the tab)', server500.map(r => `${r.id}: ${r.status} ${r.err || ''}`).join('; '));
+    }
+  }
+
   const po = await api('GET', `/api/restaurant/${restaurantId}/inventory/purchase-orders`);
   if (po.status === 200) {
     pass('TC-INV-005', 'Purchase orders endpoint responds');

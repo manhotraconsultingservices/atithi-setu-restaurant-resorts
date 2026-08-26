@@ -46018,24 +46018,49 @@ function InventoryAnalyticsView({ restaurantId, token }: { restaurantId: string;
   const [expiringData, setExpiringData] = useState<any>(null);
   const [deadStockData, setDeadStockData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [errored, setErrored] = useState<string[]>([]);
   const api = async (path: string) => {
     const r = await fetch(`/api/restaurant/${restaurantId}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!r.ok) throw new Error('Failed');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
   };
   useEffect(() => {
     setLoading(true);
-    Promise.all([api('/inventory/abc-analysis'), api('/inventory/expiring?days=7'), api('/inventory/dead-stock?days=30')])
-      .then(([abc, exp, dead]) => { setAbcData(abc); setExpiringData(exp); setDeadStockData(dead); })
-      .catch(() => {})
+    setErrored([]);
+    // allSettled — NOT Promise.all: a single failing endpoint must not blank the
+    // whole tab. A 500 on /inventory/expiring used to reject Promise.all, the
+    // .catch swallowed it, and all three sections stayed null → "Analytics page is
+    // blank" even though ABC + dead-stock loaded fine. Each section loads on its own.
+    Promise.allSettled([api('/inventory/abc-analysis'), api('/inventory/expiring?days=7'), api('/inventory/dead-stock?days=30')])
+      .then(([abc, exp, dead]) => {
+        const failed: string[] = [];
+        if (abc.status === 'fulfilled') setAbcData(abc.value); else failed.push('ABC analysis');
+        if (exp.status === 'fulfilled') setExpiringData(exp.value); else failed.push('expiry alerts');
+        if (dead.status === 'fulfilled') setDeadStockData(dead.value); else failed.push('dead stock');
+        setErrored(failed);
+      })
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restaurantId]);
 
   if (loading) return <div className="text-center py-16"><RefreshCw size={28} className="mx-auto animate-spin text-[#9c8e85]" /></div>;
 
+  const nothingLoaded = !abcData && !expiringData && !deadStockData;
+
   return (
     <div className="space-y-5">
+      {errored.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-sm text-amber-800 flex items-center gap-2">
+          <AlertTriangle size={15} className="shrink-0" />
+          <span>Some analytics couldn't be loaded ({errored.join(', ')}). The sections below are still shown.</span>
+        </div>
+      )}
+      {nothingLoaded && (
+        <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-8 text-center">
+          <p className="text-sm text-[#6b5d52] font-medium">No inventory analytics to display yet.</p>
+          <p className="text-xs text-[#9c8e85] mt-1">Analytics build up from your inventory, purchase orders, goods receipts, wastage, and stock counts.</p>
+        </div>
+      )}
       {expiringData && expiringData.count > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
           <h3 className="text-sm font-bold text-amber-800 mb-3 flex items-center gap-2">
