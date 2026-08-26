@@ -46865,6 +46865,31 @@ ${data.tenant.name}`;
   );
 
   // Orders: Update Status
+  // KDS atomic "claim": a chef accepts a queued order only if it isn't already
+  // taken. Prevents two chefs grabbing the same ticket — the generic PATCH below
+  // blindly overwrote chef_id (last-writer-wins). Conditional UPDATE + re-read;
+  // returns 409 (with the current owner) if another chef already has it.
+  app.post("/api/orders/:id/accept", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const chefId = String(req.user?.id || req.user?.email || 'chef');
+      const chefName = String(req.body?.chef_name || req.user?.userName || req.user?.email || 'Chef');
+      await db.run(
+        `UPDATE orders SET chef_id = ?, chef_name = ?, kitchen_status = 'accepted',
+                accepted_at = COALESCE(accepted_at, CURRENT_TIMESTAMP)
+          WHERE id = ? AND (chef_id IS NULL OR chef_id = '') AND kitchen_status = 'queued'`,
+        [chefId, chefName, req.params.id]
+      );
+      const order: any = await db.get("SELECT id, chef_id, chef_name, kitchen_status, status FROM orders WHERE id = ?", [req.params.id]);
+      if (!order) return res.status(404).json({ error: 'Order not found' });
+      if (String(order.chef_id || '') !== chefId) {
+        return res.status(409).json({ error: `Already accepted by ${order.chef_name || 'another chef'}`, chef_id: order.chef_id, chef_name: order.chef_name, kitchen_status: order.kitchen_status });
+      }
+      try { broadcastWs('ORDER_UPDATE', { id: order.id, kitchen_status: order.kitchen_status, chef_id: order.chef_id, chef_name: order.chef_name }, req.user!.restaurantId); } catch {}
+      res.json(order);
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Accept failed' }); }
+  });
+
   app.patch("/api/orders/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
@@ -46938,6 +46963,12 @@ ${data.tenant.name}`;
       if (kitchen_status) {
         query += "kitchen_status = ?, ";
         params.push(kitchen_status);
+        // Stamp the first time each kitchen transition happens (KDS metrics/SLA).
+        const ks = String(kitchen_status).toLowerCase();
+        if (ks === 'accepted')                      query += "accepted_at = COALESCE(accepted_at, CURRENT_TIMESTAMP), ";
+        else if (ks === 'preparing')                query += "preparing_at = COALESCE(preparing_at, CURRENT_TIMESTAMP), ";
+        else if (ks === 'ready')                    query += "ready_at = COALESCE(ready_at, CURRENT_TIMESTAMP), ";
+        else if (ks === 'served' || ks === 'delivered') query += "served_at = COALESCE(served_at, CURRENT_TIMESTAMP), ";
       }
       if (chef_id !== undefined) {
         query += "chef_id = ?, ";
@@ -50160,9 +50191,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-url-tokenization',
+    commit_marker: 'kds-atomic-accept-nearlive',
     code_features: [
-      'public-url-tokenization',                     //FEATURE (governance): public-facing links no longer expose the internal RESTO-<id>. Each tenant gets an opaque `restaurants.public_token` (~12-char, backfilled at startup). New `resolvePublicRestaurantId(param)` (token-first, id fallback for back-compat) + `resolvePublicTenantParam` middleware rewrites `req.params.id` on the PUBLIC/guest endpoints (menu-page, GET /restaurant/:id, /menu, /tables/public, /sessions[+/:token status/request-bill/cancel], /orders, /waiter-calls, /loyalty preview-discount, /hotel/room-sessions + room-charge-request[+status]) so a token OR id both resolve. Frontend "Public pages" share panel now emits `/menu/<token>` (+ /spa,/events); the whole downstream order flow inherits the token from the URL (tenantId→?r=→restaurantId), so no id is exposed in the shared link. (/book already used the opaque booking_slug.) Existing raw-id QRs/links keep working. NOTE residual: the owner-dashboard QR-code builders (?r=<id>) + PublicRestaurantPage order URL still emit the raw id in a separate component scope — follow-up to thread the token there. tsc + vite build clean.
+      'kds-atomic-accept-nearlive',                  //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
+      'public-url-tokenization',                    //FEATURE (governance): public-facing links no longer expose the internal RESTO-<id>. Each tenant gets an opaque `restaurants.public_token` (~12-char, backfilled at startup). New `resolvePublicRestaurantId(param)` (token-first, id fallback for back-compat) + `resolvePublicTenantParam` middleware rewrites `req.params.id` on the PUBLIC/guest endpoints (menu-page, GET /restaurant/:id, /menu, /tables/public, /sessions[+/:token status/request-bill/cancel], /orders, /waiter-calls, /loyalty preview-discount, /hotel/room-sessions + room-charge-request[+status]) so a token OR id both resolve. Frontend "Public pages" share panel now emits `/menu/<token>` (+ /spa,/events); the whole downstream order flow inherits the token from the URL (tenantId→?r=→restaurantId), so no id is exposed in the shared link. (/book already used the opaque booking_slug.) Existing raw-id QRs/links keep working. NOTE residual: the owner-dashboard QR-code builders (?r=<id>) + PublicRestaurantPage order URL still emit the raw id in a separate component scope — follow-up to thread the token there. tsc + vite build clean.
       'fix-events-delete-list-filter',              //BUGFIX (QA: Delete button "not working" in Rental Inventory & Hall/Venue). The delete DID work — both are SOFT deletes (is_active=0, to preserve historical bookings) — but the two MANAGEMENT list queries (GET /events/venues and GET /events/rental-items) selected ALL rows with no is_active filter, so the "deleted" venue/item reappeared on the reload after delete → looked broken. Added WHERE is_active = 1 to both list queries (the booking/availability queries already filtered active). Now a deleted venue/rental item disappears from the list immediately. tsc + vite build clean.
       'ctr-staff-only-hardening',                   //GOVERNANCE (owner decision): charge-to-room is now STAFF-ONLY everywhere. (1) The PUBLIC unauth POST /api/restaurant/:id/orders now REJECTS payment_method=CHARGE_TO_ROOM (403 before any INSERT) — closes the hole where a QR diner / crafted request self-healed a checked-in booking and posted F&B straight to a guest's folio (posted_by=QR_ORDER). (2) GET /hotel/verify-guest-room is now authenticate+restaurantStaff (was public and returned a checked-in guest's NAME to any anonymous caller keyed on a room number — a PII/occupancy leak). (3) In-room dining (RoomGuestInterface) no longer self-charges: placeRoomServiceOrder submits a STAFF-APPROVED room-charge REQUEST (POST /hotel/room-charge-request → staff /approve posts to folio) with an "order submitted, front desk will confirm" confirmation; needs the room's active check-in. Staff charge-to-room paths (/orders/:id/charge-to-room, /invoices/manual, both authenticated) unchanged. tsc + vite build clean.
       'fix-events-public-name-header',              //BUGFIX (public Events page: "restaurant name is coming in the last"). The /events/:id public page hero renders `p.hero_title || property.name` — when a tenant sets a custom marketing hero_title (e.g. "Celebrate at Vivek's Cafe"), the business NAME dropped out of the header and appeared ONLY in the footer at the very bottom. Now the business name shows as an uppercase eyebrow line ABOVE the hero headline whenever a distinct hero_title is set (EventViews.tsx hero). Confirmed live on RESTO-1003 (name "Manhotra Consulting" was footer-only). tsc + vite build clean.

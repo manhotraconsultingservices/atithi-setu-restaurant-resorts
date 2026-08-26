@@ -46760,6 +46760,7 @@ function HotelStaffDashboard({ restaurantId, token, userRole }: {
 
 // --- CHEF DASHBOARD ---
 function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: string }) {
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<'QUEUE' | 'ATTENDANCE'>('QUEUE');
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(false);
@@ -46799,7 +46800,7 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
   useEffect(() => {
     if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     fetchOrders();
-    const interval = setInterval(fetchOrders, 30000);
+    const interval = setInterval(fetchOrders, 6000);  // KDS near-live refresh (was 30s)
     return () => clearInterval(interval);
   }, [restaurantId]);
 
@@ -46840,12 +46841,25 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
     fetchOrders();
   };
 
-  // Accept order: assign this chef, set kitchen_status = 'accepted'
-  const acceptOrder = (id: string) => patchOrder(id, {
-    kitchen_status: 'accepted',
-    chef_id: chefIdentity.id,
-    chef_name: chefIdentity.name,
-  });
+  // Accept order — ATOMIC claim. The server 409s if another chef already took it
+  // (the old PATCH blindly overwrote chef_id, so two chefs could both "accept").
+  const acceptOrder = async (id: string) => {
+    try {
+      const res = await fetch(`/api/orders/${id}/accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ chef_name: chefIdentity.name }),
+      });
+      if (res.status === 409) {
+        const d = await res.json().catch(() => ({}));
+        toast.info(`Already taken by ${d.chef_name || 'another chef'}.`);
+      }
+    } catch (err) {
+      console.error('accept failed', err);
+    } finally {
+      fetchOrders();
+    }
+  };
 
   // Start preparing with chosen ETA
   const startPreparing = (id: string) => {
@@ -57593,7 +57607,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   useEffect(() => {
     if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     fetchData();
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(fetchData, 6000);  // waiter near-live order status (was 30s)
     const clock    = setInterval(() => setLiveNow(Date.now()), 1000);
     return () => { clearInterval(interval); clearInterval(clock); };
   }, [restaurantId]);
