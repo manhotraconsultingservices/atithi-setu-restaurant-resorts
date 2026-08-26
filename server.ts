@@ -31577,31 +31577,41 @@ ${data.tenant.name}`;
         ).catch(() => null);
         if (mp) mealPlanSnapshot = `${mp.code} · ${mp.name}`;
       }
-      if (bookingType === 'DAY_USE') {
-        if (rate <= 0) {
-          const breakdown = await computeBookingTotalWithExtras(req.params.id, resolvedRoomId, check_in_date, check_in_date, {
-            mealPlanId: meal_plan_id || null, extraAdults: xpAdults,
-            extraChildrenWithMattress: xpChildMat, extraChildrenNoMattress: xpChildNoMat,
-            bookingType: 'DAY_USE',
-          });
-          rate = breakdown.per_night[0]?.base_rate || 0;
-          total = breakdown.total;
-        } else {
-          total = rate;
-        }
-      } else {
+      // BILLING CONSISTENCY — extra-person parity with check-in (2026-08-26).
+      // The folio the guest is actually billed from is seeded at check-in by
+      // createFolioWithRoomCharges, which treats a positive room_rate as a
+      // MANUAL ALL-IN OVERRIDE *only when it differs from the plan's night-1
+      // rate*; a room_rate that equals the computed night-1 base is NOT an
+      // override, so extra adult/child charges are still itemised on top.
+      // The booking POST previously treated ANY positive room_rate as all-in
+      // (total = rate × nights, extras dropped) — so a booking sent with
+      // room_rate = base_rate stored a total_amount WITHOUT the extra-person
+      // charges, and check-in then added them, making the stay total jump
+      // between booking creation and check-in (reported bug). We now apply the
+      // SAME override rule here so total_amount matches the folio in every case:
+      //   • rate ≤ 0            → auto: rate = night-1 base, total = base+extras
+      //   • rate == night-1     → NOT an override: total = base+extras
+      //   • rate  ≠ night-1     → all-in override: total = rate × nights (no extras)
+      const _bt = bookingType === 'DAY_USE' ? 'DAY_USE' : 'OVERNIGHT';
+      if (bookingType !== 'DAY_USE') {
         nights = Math.max(1, Math.ceil((new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000));
-        if (rate <= 0) {
-          const breakdown = await computeBookingTotalWithExtras(req.params.id, resolvedRoomId, check_in_date, check_out_date, {
-            mealPlanId: meal_plan_id || null, extraAdults: xpAdults,
-            extraChildrenWithMattress: xpChildMat, extraChildrenNoMattress: xpChildNoMat,
-            bookingType: 'OVERNIGHT',
-          });
-          rate = breakdown.per_night[0]?.base_rate || 0;
-          total = breakdown.total;
-        } else {
-          total = rate * nights;
+      }
+      const _breakdown = await computeBookingTotalWithExtras(
+        req.params.id, resolvedRoomId, check_in_date,
+        bookingType === 'DAY_USE' ? check_in_date : check_out_date,
+        {
+          mealPlanId: meal_plan_id || null, extraAdults: xpAdults,
+          extraChildrenWithMattress: xpChildMat, extraChildrenNoMattress: xpChildNoMat,
+          bookingType: _bt,
         }
+      );
+      const _night1 = _breakdown.per_night[0]?.base_rate || 0;
+      const _isRateOverride = rate > 0 && Math.abs(rate - _night1) > 0.01;
+      if (rate <= 0) rate = _night1;
+      if (_isRateOverride) {
+        total = bookingType === 'DAY_USE' ? rate : rate * nights;
+      } else {
+        total = _breakdown.total;
       }
       // BA-FIX-#4 — auto-lookup OTA commission on staff-entered bookings
       // ----------------------------------------------------------------
@@ -32039,30 +32049,27 @@ ${data.tenant.name}`;
         // per-category meal-plan rate AND adds extra-person charges.
         let rate = Number(r.room_rate) || 0;
         let total: number;
-        if (bookingType === 'DAY_USE') {
-          if (rate <= 0) {
-            const breakdown = await computeBookingTotalWithExtras(req.params.id, r.room_id, check_in_date, check_in_date, {
-              mealPlanId: rowMealPlanId, extraAdults: occ.extraAdults,
-              extraChildrenWithMattress: occ.childMat, extraChildrenNoMattress: occ.childNoMat,
-              bookingType: 'DAY_USE',
-            });
-            rate = breakdown.per_night[0]?.base_rate || 0;
-            total = breakdown.total;
-          } else {
-            total = rate;
+        // Same extra-person parity rule as the single booking POST + check-in
+        // (2026-08-26): a positive room_rate is an all-in override ONLY when it
+        // differs from the plan's night-1 rate; a rate equal to the night-1 base
+        // still itemises extra adult/child charges. Keeps each group member's
+        // total_amount in lockstep with the folio seeded at check-in.
+        const rowBreakdown = await computeBookingTotalWithExtras(
+          req.params.id, r.room_id, check_in_date,
+          bookingType === 'DAY_USE' ? check_in_date : check_out_date,
+          {
+            mealPlanId: rowMealPlanId, extraAdults: occ.extraAdults,
+            extraChildrenWithMattress: occ.childMat, extraChildrenNoMattress: occ.childNoMat,
+            bookingType: bookingType === 'DAY_USE' ? 'DAY_USE' : 'OVERNIGHT',
           }
+        );
+        const rowNight1 = rowBreakdown.per_night[0]?.base_rate || 0;
+        const rowOverride = rate > 0 && Math.abs(rate - rowNight1) > 0.01;
+        if (rate <= 0) rate = rowNight1;
+        if (rowOverride) {
+          total = bookingType === 'DAY_USE' ? rate : rate * nights;
         } else {
-          if (rate <= 0) {
-            const breakdown = await computeBookingTotalWithExtras(req.params.id, r.room_id, check_in_date, check_out_date, {
-              mealPlanId: rowMealPlanId, extraAdults: occ.extraAdults,
-              extraChildrenWithMattress: occ.childMat, extraChildrenNoMattress: occ.childNoMat,
-              bookingType: 'OVERNIGHT',
-            });
-            rate = breakdown.per_night[0]?.base_rate || 0;
-            total = breakdown.total;
-          } else {
-            total = rate * nights;
-          }
+          total = rowBreakdown.total;
         }
         groupGross += total;
         const rowMpSnap = await getMpSnapshot(rowMealPlanId);
@@ -50027,9 +50034,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-p1-a3a4-selftest',
+    commit_marker: 'fix-extra-person-checkin-parity',
     code_features: [
-      'gst-p1-a3a4-selftest',                        //GST P1 test coverage: the A-3 (specified-premises F&B 18%) and A-4 (inclusive-slab value-of-supply) rate decisions were extracted into pure helpers (valueOfSupplyForSlab, applyFnb18ForSpecifiedPremises, fnb18RateForSpecifiedPremises) reused by BOTH the production paths (reapplyHotelGstRates, computeInvoiceTaxes) and a NEW deterministic owner-only diagnostic GET /accounting/gst/selftest that runs those exact helpers over canned boundary scenarios (inclusive Rs8000→18, inclusive Rs7500→12, exclusive Rs7400→12 with no false 18, 5%→18 only under specified premises, a configured 12% line untouched, legacy fallback 5→18). Zero data mutation, so the automated smoke suite verifies A-3/A-4 on every cloud deploy without creating bookings/orders on a live tenant. New suite tests TC-GST-A3-LOGIC / TC-GST-A4-LOGIC (real FAIL on regression, not skip). tsc + vite build clean.
+      'fix-extra-person-checkin-parity',             //BUGFIX (QA: extra adult/child charges not reflected correctly at check-in). Root cause: the booking POST and the check-in folio seeder (createFolioWithRoomCharges) DISAGREED on when a positive room_rate is a "manual all-in override". Booking creation treated ANY positive room_rate as all-in (total_amount = rate × nights, extra-person charges DROPPED), but check-in only treats a rate that DIFFERS from the plan's night-1 base as an override — a rate equal to the night-1 base still itemises extras. So a booking sent with room_rate = base_rate (the edit-draft seeds room_rate from the stored booking; staff can also type it) stored total_amount WITHOUT the extra adult/child, then check-in added them, making the stay total jump between booking and check-in. FIX: both the single (POST /hotel/bookings) and group (POST /hotel/bookings/group) creation paths now apply the SAME override rule as check-in — compute the breakdown, treat rate>0 as all-in ONLY when |rate − night1| > 0.01, else total = base + extras. Reproduced + verified on RESTO-1003: room_rate=base now stores 3700 (=2400 base + 800 extra adult + 500 extra child) matching the folio; room_rate=0 unchanged; a genuine all-in override still drops separate extras on both sides. tsc + vite build clean.
+      'gst-p1-a3a4-selftest',                       //GST P1 test coverage: the A-3 (specified-premises F&B 18%) and A-4 (inclusive-slab value-of-supply) rate decisions were extracted into pure helpers (valueOfSupplyForSlab, applyFnb18ForSpecifiedPremises, fnb18RateForSpecifiedPremises) reused by BOTH the production paths (reapplyHotelGstRates, computeInvoiceTaxes) and a NEW deterministic owner-only diagnostic GET /accounting/gst/selftest that runs those exact helpers over canned boundary scenarios (inclusive Rs8000→18, inclusive Rs7500→12, exclusive Rs7400→12 with no false 18, 5%→18 only under specified premises, a configured 12% line untouched, legacy fallback 5→18). Zero data mutation, so the automated smoke suite verifies A-3/A-4 on every cloud deploy without creating bookings/orders on a live tenant. New suite tests TC-GST-A3-LOGIC / TC-GST-A4-LOGIC (real FAIL on regression, not skip). tsc + vite build clean.
       'gst-p1-tds-sectionwise-fnb18b',               //GST/TDS P1 batch (D-2 + A-3 + A-4). [b: A-3 now guards the room-tariff probe behind a has-5%-line check so a POS bill with no 5% GST row skips the extra DB read entirely.] (D-2) SECTION-AWARE TDS: vendor withholding was 194C-only (single 1%/2% band). _tdsForSupplierPayment is now section-driven — the supplier carries a NEW tds_section (194C/194J/194H/194I; UI dropdown on the supplier form, DB column suppliers.tds_section) and withholding uses the correct rate + threshold per section: 194C 1% (indiv/HUF) or 2% (company/firm — via the existing 194C deductee-rate control), single ₹30,000 / annual ₹1,00,000; 194J 10% @ ₹30,000; 194H 5% @ ₹15,000; 194I(rent) 10% @ ₹2,40,000. The taxable base is now EX-GST (payAmt × (invoiceTotal−gst)/invoiceTotal, not the gross), the FY-aggregate test sums ex-GST supplier_invoices from 1-Apr, and missing-PAN forces 20% (Sec 206AA). New COA 2340 "TDS Payable — Sec 194I". tds_payable_ledger now stores the ex-GST taxableBase. Legacy string-category calls still resolve (194C fallback) so nothing breaks. (A-3) SPECIFIED-PREMISES F&B 18%: a standalone/walk-in restaurant POS bill in a hotel that has any room > ₹7,500 now charges F&B at 18% (not 5%), mirroring the charge-to-room folio path — computeInvoiceTaxes probes rooms.base_rate > slab2Max and, only then, bumps a 5% GST config row (or the legacy 5% fallback) to 18%; other configured rates and non-hotel tenants are untouched. (A-4) INCLUSIVE-SLAB CONSISTENCY: reapplyHotelGstRates was choosing the room's GST slab from the stored pre-tax base, which for a GST-INCLUSIVE tariff wrongly downgraded a room near the boundary from 18% to 12% at settlement; it now tests the slab on the VALUE OF SUPPLY (gross = amount+gst for inclusive tenants, taxable amount for exclusive), consistent with how the slab was picked at seed. tsc + vite build clean.
       'gst-p1-reverse-charge-line',                  //GST P1 (B-5): every tax invoice now carries the mandatory "Reverse Charge: No" declaration (Rule 46(l)) — these are forward-charge supplies. Added to the Classic hotel PDF (invoiceService.ts meta rows), the Boutique PDF (invoiceServiceBoutique.ts stay card), and the restaurant thermal tax invoice (buildThermalHTML, shown when it's a registered-supplier TAX INVOICE). New REVERSE_CHG bilingual label. tsc + vite build clean.
       'gst-p1-gstr1-structured',                 //GST P1 (C-1): GSTR-1 is now a portal-ALIGNED structured return, not just rate-wise buckets. Rebuilt /accounting/gst/gstr1 to add: TABLE 4 invoice-level B2B (per recipient GSTIN + invoice: number/date/POS/rate + CGST/SGST/IGST + invoice value) — and FIXED the B2B classification bug: GSTIN is now resolved for BOTH hotel (room_bookings.guest_gstin) AND EVENT folios (event_bookings.customer_gstin) via COALESCE (events were wrongly dumped into B2C); TABLE 7 B2CS (rate-wise B2C + POS); TABLE 12 HSN/SAC summary (from gst_output_register, rate-wise); TABLE 13 document series (issued invoice numbers per doc type from folios.invoice_number — enabled by the B-1 persisted serials). Place of supply = the property's state. Each new section is independently guarded (degrades to [] on error) and the GL-derived output-GST TOTAL is unchanged so it still reconciles to gst-outstanding/trial balance; back-compat b2b/b2c rate-wise arrays retained so the existing UI keeps working. FRONTEND: the GSTR-1 report now renders the B2B-invoice, HSN(T12), and doc-series(T13) tables. Residual (tracked): restaurant/spa invoice-level B2B + their HSN need the output register extended to those modules; portal JSON export still TODO. New TC-ACC-GSTR1-STRUCT test. tsc + vite build clean.
