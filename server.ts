@@ -24936,17 +24936,24 @@ ${data.tenant.name}`;
     }
     return { created, skipped, failed, results };
   };
-  const migOwnerOnly = (req: AuthRequest) => ['OWNER', 'SUPER_ADMIN', 'CTO', 'ADMIN'].includes(String(req.user?.role || '').toUpperCase());
+  // Data Migration is a SUPER-ADMIN (platform) activity, NOT a tenant one — the
+  // owner asked to hide it from tenants and keep it for super users only. So the
+  // tenant OWNER is deliberately EXCLUDED here (frontend hides the tab too).
+  const migOwnerOnly = (req: AuthRequest) => ['SUPER_ADMIN', 'CTO', 'ADMIN'].includes(String(req.user?.role || '').toUpperCase());
 
   app.get("/api/restaurant/:id/events/migration/spec", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
+    // Was missing the gate its sibling validate/commit endpoints have — any events
+    // staff could read the migration schema. Super-admin only now (schema is a
+    // platform-migration concern).
+    if (!migOwnerOnly(req)) return res.status(403).json({ error: 'Super admin only' });
     res.json({ entities: Object.keys(MIG_COLS).map(k => ({ id: k, label: MIG_LABELS[k], columns: MIG_COLS[k] })) });
   });
   app.post("/api/restaurant/:id/events/migration/validate", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
-    if (!migOwnerOnly(req)) return res.status(403).json({ error: 'Owner or admin only' });
+    if (!migOwnerOnly(req)) return res.status(403).json({ error: 'Super admin only' });
     try {
       const db = await getTenantDb(req.params.id); const { entity, rows } = req.body || {};
       if (!MIG_COLS[entity]) return res.status(400).json({ error: 'Unknown entity' });
@@ -24957,7 +24964,7 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/events/migration/commit", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
-    if (!migOwnerOnly(req)) return res.status(403).json({ error: 'Owner or admin only' });
+    if (!migOwnerOnly(req)) return res.status(403).json({ error: 'Super admin only' });
     try {
       const db = await getTenantDb(req.params.id); const { entity, rows } = req.body || {};
       if (!MIG_COLS[entity]) return res.status(400).json({ error: 'Unknown entity' });
@@ -35713,8 +35720,12 @@ ${data.tenant.name}`;
   app.get("/api/public/restaurant/:id/menu-page", async (req: Request, res: Response) => {
     try {
       const id = req.params.id;
+      // NOTE: `restaurants` has NO `phone` or `cover_image_url` column — selecting
+      // them threw `column "phone" does not exist` → 500, which the public menu page
+      // shows as "Restaurant not found" (the whole page broke). Select only real
+      // columns; phone/cover default to '' in the response below.
       const row: any = await centralDb.get(
-        "SELECT name, city, state, phone, logo_url, cover_image_url, currency_symbol FROM restaurants WHERE id = ? AND is_active = 1 AND access_revoked = 0",
+        "SELECT name, city, state, logo_url, currency_symbol FROM restaurants WHERE id = ? AND is_active = 1 AND access_revoked = 0",
         [id]
       );
       if (!row) return res.status(404).json({ error: "Restaurant not found" });
@@ -50068,9 +50079,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'fix-inventory-analytics-blank',
+    commit_marker: 'fix-publicpage-migration-ctr-governance',
     code_features: [
-      'fix-inventory-analytics-blank',               //BUGFIX (QA: Kitchen Inventory → Analytics tab blank). TWO faults. (1) BACKEND — GET /inventory/expiring 500'd with "function pg_catalog.extract(unknown, integer) does not exist": in Postgres (date - date) is ALREADY an INTEGER day count, so EXTRACT(DAY FROM (expiry_date::date - CURRENT_DATE)) is invalid; replaced with the direct subtraction ((expiry_date::date - CURRENT_DATE)::integer). (2) FRONTEND — InventoryAnalyticsView fetched abc-analysis + expiring + dead-stock via Promise.all with a swallowing .catch, so that ONE 500 rejected the whole batch and left all three sections null → the ENTIRE tab rendered blank even though ABC + dead-stock returned 200. Switched to Promise.allSettled (each section loads independently), added an amber "some analytics couldn't be loaded (…)" banner naming any failed section, and a friendly empty-state when nothing loads at all. Verified on RESTO-1003: /inventory/expiring now 200; the tab renders ABC + expiry + dead-stock. New test TC-INV-ANALYTICS asserts all three endpoints return 200. tsc + vite build clean.
+      'fix-publicpage-migration-ctr-governance',     //BUGFIXES + GOVERNANCE (public surface + access). (A) PUBLIC MENU PAGE 500 → "Restaurant not found": GET /api/public/restaurant/:id/menu-page selected `phone` and `cover_image_url` — columns that DON'T exist on `restaurants` → "column phone does not exist" 500, which the QR menu page renders as "Restaurant not found" (whole page dead). Now selects only real columns (name/city/state/logo_url/currency_symbol); phone/cover default to ''. (B) DATA MIGRATION hidden from tenants: EVENTS_MIGRATION ("Data Migration") is a SUPER-ADMIN activity, not a tenant one. Gated the nav entry, isVisible, the ?tab= redirect guard, and the content branch to a new isPlatformAdmin (SUPER_ADMIN/CTO) instead of isOwnerOrAdmin (which included the tenant OWNER); removed it from the NEWLY_ADDED grandfather set; backend events/migration/{spec,validate,commit} now require super-admin (migOwnerOnly drops OWNER) and the previously-ungated /spec is guarded. (C) CHARGE-TO-ROOM leak: removed the "Charge to Hotel Room" option from the PUBLIC table-QR / walk-in diner flow (CustomerInterface — 3 buttons) so an anonymous diner can't charge an arbitrary guest's folio; staff-side charge-to-room (PostpaidInvoiceModal / on-demand invoice, hotel-gated) and the room-bound in-room-dining QR are unchanged pending the in-room scope decision. tsc + vite build clean.
+      'fix-inventory-analytics-blank',              //BUGFIX (QA: Kitchen Inventory → Analytics tab blank). TWO faults. (1) BACKEND — GET /inventory/expiring 500'd with "function pg_catalog.extract(unknown, integer) does not exist": in Postgres (date - date) is ALREADY an INTEGER day count, so EXTRACT(DAY FROM (expiry_date::date - CURRENT_DATE)) is invalid; replaced with the direct subtraction ((expiry_date::date - CURRENT_DATE)::integer). (2) FRONTEND — InventoryAnalyticsView fetched abc-analysis + expiring + dead-stock via Promise.all with a swallowing .catch, so that ONE 500 rejected the whole batch and left all three sections null → the ENTIRE tab rendered blank even though ABC + dead-stock returned 200. Switched to Promise.allSettled (each section loads independently), added an amber "some analytics couldn't be loaded (…)" banner naming any failed section, and a friendly empty-state when nothing loads at all. Verified on RESTO-1003: /inventory/expiring now 200; the tab renders ABC + expiry + dead-stock. New test TC-INV-ANALYTICS asserts all three endpoints return 200. tsc + vite build clean.
       'fix-po-gst-per-line-rate',                   //BUGFIX (QA: GST not calculated in Purchase Order — GST ₹0.00, Grand Total excludes GST). ROOT CAUSE: both the PO form and the create/PATCH endpoints derived GST SOLELY from the ingredient master's gst_percent, and the PO line had no way to set a rate — so any item whose master gst_percent was 0/unset produced ₹0 GST with no recourse. FIX: a per-line GST% is now first-class. (1) DB — new `purchase_order_items.gst_percent` column (idempotent ALTER; the PO PDF already read it). (2) Backend — POST + PATCH /inventory/purchase-orders honour `it.gst_percent` (fallback to the ingredient master), compute the header gst_amount/grand_total from it, and STORE it per line. (3) Frontend POCreateModal — each line has an editable GST% field that auto-defaults to the item's rate on pick but can be set for items with none; the modal's GST + Grand Total and each line total now reflect it, and the rate is sent per item. Verified on RESTO-1003: a PO with a 5%/12%/18% line now returns gst_amount>0 and grand_total = subtotal + gst. tsc + vite build clean.
       'fix-early-checkin-message-persists',         //BUGFIX (QA: check-in restriction message persists until manual refresh). The early-check-in guard in confirmAndCheckIn (App.tsx) set the message into BOTH a toast (auto-dismisses ~4s) AND the SHARED sticky `hotelError` banner via setHotelError(msg) — the banner was never cleared for this case, so "Check-in is not allowed before the check-in date" lingered on the Reservations page until refresh. FIX: this transient validation now fires the TOAST ONLY (immediate, floats over everything, self-clearing) and clears the shared banner (setHotelError('')) instead of setting it — so a prior stale error can't masquerade as this one either. Frontend-only; no API/behavior change to the actual check-in. tsc + vite build clean.
       'fix-frontdesk-hr-payroll-nav-leak',          //BUGFIX (QA: HR & Payroll / Staff Payroll visible to Front Desk without access — nav shows them, clicking 403s). ROOT CAUSE: a built-in role (FRONT_DESK) with no configured Staff-Access matrix row resolves in getTabPermissionsForRole to perms===null → /my-permissions returns allowed_tabs:null → the frontend treats the role as UNRESTRICTED and isTabVisible(id,null) returns true for EVERY tab (fail-open). The backend Workforce endpoints are correctly permission-gated (workforceStaff), so the tabs showed in nav but 403'd on click. FIX (frontend, App.tsx): (1) isVisible() now gates HR_PAYROLL + STAFF_PAYROLL like the other sensitive tabs (CASH_DRAWER/CHECKLISTS) — visible ONLY to owner/admin, MANAGER, or a role that EXPLICITLY lists the tab in allowed_tabs; never under the fail-open null list — mirroring the backend workforceStaff gate so a nav-visible tab is never API-403. (2) HR_PAYROLL + STAFF_PAYROLL removed from the ALWAYS_VISIBLE_TABS grandfather set (defense-in-depth for markerless seeded lists + the content pane), same precedent as the earlier DELIVERY/RESTAURANT_REPORTS leak fix. Reproduced + verified on RESTO-1003: FRONT_DESK before=VISIBLE(leak) → after=hidden; OWNER/MANAGER/granted-role still visible; backend GET /hr/employees stays 403 for FRONT_DESK. Regression test TC-RBAC-FD-WORKFORCE. tsc + vite build clean.

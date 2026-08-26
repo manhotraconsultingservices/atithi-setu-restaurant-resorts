@@ -11390,6 +11390,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const isOwnerOrAdmin: boolean = currentRole === 'OWNER'
                                 || currentRole === 'SUPER_ADMIN'
                                 || currentRole === 'CTO';
+  // Platform super-user (NOT the tenant owner). Used to gate features that are a
+  // SUPER-ADMIN activity, not a tenant one — e.g. Data Migration (EVENTS_MIGRATION),
+  // which the owner asked to hide from tenants and keep for super users only.
+  const isPlatformAdmin: boolean = currentRole === 'SUPER_ADMIN' || currentRole === 'CTO';
   // Owner-only redirect: if a non-owner directly types ?tab=STAFF_ACCESS
   // (or had it cached from a prior owner session in localStorage), bounce
   // them to MONITOR. UI also hides the nav entry, so this only fires on
@@ -11403,7 +11407,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'ROOM_SETUP' && !isOwnerOrAdmin) {
       setActiveTab('MONITOR');
     }
-  }, [activeTab, isOwnerOrAdmin]);
+    // Data Migration is a SUPER-ADMIN activity — bounce a tenant owner/staff who
+    // reaches ?tab=EVENTS_MIGRATION via a deep-link or cached activeTab (the nav
+    // entry is hidden for them, this covers the URL/cache edge cases).
+    if (activeTab === 'EVENTS_MIGRATION' && !isPlatformAdmin) {
+      setActiveTab('MONITOR');
+    }
+  }, [activeTab, isOwnerOrAdmin, isPlatformAdmin]);
 
   const [showTemplatePanel, setShowTemplatePanel]     = useState(false);
   const [showOnDemandModal, setShowOnDemandModal]     = useState(false);
@@ -13606,7 +13616,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Full(3) for any role that doesn't have them configured yet. This prevents
         // an owner from accidentally revoking access simply by opening the matrix
         // and saving before explicitly setting a level for these new tabs.
-        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'EVENTS_MIGRATION', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
           // Spa operational tabs — grantable in Staff Access from now on; prefill Full
           // so spa staff on tenants that pre-configured the matrix aren't locked out.
           'SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_INVENTORY'];
@@ -14937,7 +14947,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_HOUSEKEEPING', label: 'Cleaning Checklist' },
               { id: 'EVENTS_CHECKLISTS', label: 'Checklist Templates' },
               { id: 'EVENTS_REPORTS',    label: 'Events Reports' },
-              ...(isOwnerOrAdmin ? [{ id: 'EVENTS_MIGRATION', label: 'Data Migration' } as NavTab] : []),
+              ...(isPlatformAdmin ? [{ id: 'EVENTS_MIGRATION', label: 'Data Migration' } as NavTab] : []),
               { id: 'EVENTS_SETTINGS',   label: 'Public Page Settings' },
             ],
           },
@@ -15053,7 +15063,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           if (id === 'CHECKLISTS') return isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs);
           // Event checklist config — owner OR a granted role; only when Events is enabled.
           if (id === 'EVENTS_CHECKLISTS') return (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs)) && isEventsEnabled;
-          if (id === 'EVENTS_MIGRATION') return isOwnerOrAdmin && isEventsEnabled;
+          // Data Migration = super-admin only (hidden from tenant owner/staff).
+          if (id === 'EVENTS_MIGRATION') return isPlatformAdmin && isEventsEnabled;
           // My Checklist is the personal work queue — visible to every staff member.
           if (id === 'MY_CHECKLIST') return true;
           // Checklist Board is the manager/owner cockpit over every checklist instance.
@@ -15788,7 +15799,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="EVENT" /></div>
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
-      ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS' || activeTab === 'EVENTS_MIGRATION') && isEventsEnabled ? (
+      ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS' || (activeTab === 'EVENTS_MIGRATION' && isPlatformAdmin)) && isEventsEnabled ? (
         <LanguageProvider secondary={secondaryLanguage}>
           <EventsModule restaurantId={restaurantId} token={token!} tab={activeTab} />
         </LanguageProvider>
@@ -50812,14 +50823,11 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                       {isPlacingOrder ? <RefreshCw size={20} className="animate-spin" /> : <IndianRupee size={20} />}
                       {isPlacingOrder ? 'Placing Order…' : 'Add to Bill'}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => openRoomCharge('ORDER')}
-                      disabled={isPlacingOrder}
-                      className="w-full border-2 border-[#1e3a5f] text-[#1e3a5f] py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#1e3a5f] hover:text-white transition-all disabled:opacity-60"
-                    >
-                      <BedDouble size={20} /> Charge to Hotel Room
-                    </button>
+                    {/* GOVERNANCE (2026-08-26): "Charge to Hotel Room" removed from the
+                        public table-QR / walk-in diner flow. Only STAFF may charge to a
+                        room (via the staff Postpaid Invoice / room-charge approval), so an
+                        anonymous diner can't charge an arbitrary guest's folio. In-room
+                        dining (the room-bound ?room= QR) is a separate flow. */}
                   </>
                 ) : checkoutMode === 'cloud_kitchen' ? (
                   <button
@@ -50851,14 +50859,8 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                     >
                       <Utensils size={20} /> Pay at Table
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => openRoomCharge('ORDER')}
-                      disabled={isPlacingOrder}
-                      className="w-full border-2 border-[#1e3a5f] text-[#1e3a5f] py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#1e3a5f] hover:text-white transition-all disabled:opacity-60"
-                    >
-                      <BedDouble size={20} /> Charge to Hotel Room
-                    </button>
+                    {/* GOVERNANCE (2026-08-26): "Charge to Hotel Room" removed from the
+                        public QR diner flow — staff-only (see note above). */}
                   </>
                 )}
               </div>
@@ -50920,13 +50922,8 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                 >
                   <Utensils size={20} /> Pay at Table (Cash / Card)
                 </button>
-                <button
-                  type="button"
-                  onClick={() => openRoomCharge('SESSION')}
-                  className="w-full border-2 border-[#1e3a5f] text-[#1e3a5f] py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#1e3a5f] hover:text-white transition-all"
-                >
-                  <BedDouble size={20} /> Charge to Hotel Room
-                </button>
+                {/* GOVERNANCE (2026-08-26): "Charge to Hotel Room" removed from the
+                    public "Request Bill" flow — staff-only (see note in checkout). */}
               </div>
             </motion.div>
           </div>
