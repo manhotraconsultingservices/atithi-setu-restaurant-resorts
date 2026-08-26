@@ -1169,6 +1169,34 @@ node scripts/test-invoice-math.cjs             # end-to-end math regression
 
 ---
 
+## Recent Feature Additions (2026-08 cycle — GST/TDS compliance, public-surface governance, KDS)
+
+> Each item ships with a `BUILD_VERSION.commit_marker` in `server.ts` (curl `/api/version`) and, where applicable, a regression test in `test-scripts/run_technical_tests.mjs`. Verified live on `erp.atithi-setu.com` (tenant RESTO-1003 = **"Manhotra Consulting"**). Deploy = push `master`; the VPS rebuilds (`dist/` is server-built).
+
+### India GST / TDS compliance (markers `gst-fix-p0-*`, `gst-p1-*`)
+* **P0:** hotel room slab default 0%→12% (the ≤₹1,000=0% band was withdrawn 18-Jul-2022); accommodation/F&B/events place-of-supply = property → always intra-state CGST/SGST (invoice↔GL aligned); consecutive **persisted** per-FY invoice serials (`folios.invoice_number`) + SEQUENTIAL default; restaurant thermal bill is a Rule-46 tax invoice (SAC 996331, CGST/SGST split); vendor **TDS withheld in the GL** (Dr AP / Cr Cash-net / Cr TDS Payable 2300).
+* **P1:** portal-aligned **GSTR-1** (Table 4 invoice-level B2B incl. event GSTIN, Table 7 B2CS, Table 12 HSN, Table 13 doc series); Rule 46(l) "Reverse charge: No" on every tax invoice; **section-aware TDS** (`suppliers.tds_section` → 194C/194J/194H/194I, correct rate+threshold, ex-GST base, FY aggregate, no-PAN 20%, COA 2340); **specified-premises F&B 18%** for standalone POS in a hotel with any room >₹7,500; **inclusive-slab value-of-supply** consistency (`reapplyHotelGstRates`). Deterministic `GET /accounting/gst/selftest` + `TC-GST-A3/A4-LOGIC`. B-4 e-invoice/IRN + business income tax = OUT OF SCOPE (CA-handled).
+
+### QA bug batch (root-caused + fixed + regression-tested)
+* **Extra adult/child charges dropped at check-in** (`fix-extra-person-checkin-parity`) — booking POST treated ANY positive `room_rate` as an all-in override (extras dropped), but check-in only did so when the rate *differs* from the plan's night-1 base. Both `/hotel/bookings` + `/bookings/group` now use the same `|rate−night1|>0.01` rule. `TC-HOTEL-EXTRA-PARITY`.
+* **Checkout journal missing from the Day Book** (`fix-folio-checkout-gl-date`) — Postgres returns TIMESTAMP columns as JS `Date`; `settled_at.slice(0,10)` threw and was swallowed, so the folio settled with **no GL journal**. New `_glPostDate()` coerces `Date|string→YYYY-MM-DD`; routed folio-checkout / `_postOrderGl` / `_postFolioGl` / payroll through it. `TC-HOTEL-CHECKOUT-GL`. **LANDMINE: never `.slice()` a Postgres timestamp — coerce first.**
+* **HR & Payroll / Staff Payroll visible to Front Desk** (`fix-frontdesk-hr-payroll-nav-leak`) — a built-in role with no matrix row resolves to `allowed_tabs:null` (fail-open → sees every tab). `isVisible()` now gates these sensitive tabs to owner/admin/MANAGER/explicit-grant (mirrors `workforceStaff`). `TC-RBAC-FD-WORKFORCE`.
+* **Check-in restriction message persists** (`fix-early-checkin-message-persists`) — the early-check-in guard set the sticky shared `hotelError` banner; now toast-only (auto-dismisses) + clears the banner.
+* **PO GST always ₹0** (`fix-po-gst-per-line-rate`) — GST derived only from the ingredient master's `gst_percent` with no per-line rate. Added editable per-line GST% (new `purchase_order_items.gst_percent`), honored in POST+PATCH. `TC-PROC-PO-GST`.
+* **Kitchen Inventory Analytics blank** (`fix-inventory-analytics-blank`) — `/inventory/expiring` 500'd (`EXTRACT(DAY FROM (date−date))` — the subtraction is already an integer); fixed. Frontend switched `Promise.all`→`allSettled` so one failing panel can't blank the whole tab. `TC-INV-ANALYTICS`.
+* **Events "Delete not working" (Rental Inventory / Hall & Venue)** (`fix-events-delete-list-filter`) — delete is a soft-delete (`is_active=0`) but the mgmt list queries lacked `WHERE is_active=1`, so deleted rows reappeared on reload. Added the filter.
+
+### Public-surface governance (markers `fix-publicpage-*`, `ctr-*`, `public-url-tokenization`)
+* **Public menu "Restaurant not found"** — `GET /public/restaurant/:id/menu-page` selected non-existent `phone`/`cover_image_url` columns → 500. Fixed to real columns only.
+* **Data Migration hidden from tenants** — `EVENTS_MIGRATION` is a SUPER-ADMIN activity; gated the nav/isVisible/redirect/content to a new `isPlatformAdmin` (SUPER_ADMIN/CTO, excludes tenant OWNER); backend `events/migration/{spec,validate,commit}` now super-admin (the ungated `/spec` is guarded).
+* **Charge-to-room is STAFF-ONLY everywhere** — removed the option from all public guest QR flows; the **public** `POST /orders` now 403s `CHARGE_TO_ROOM` (closes the unauth folio-post hole); `verify-guest-room` is now staff-authenticated (was leaking a checked-in guest's NAME to anonymous callers); in-room dining now submits a staff-approved `room-charge-request` instead of self-charging. `TC-BIZ-RS-002` guards the 403.
+* **Events public page name in the header** — the hero showed a custom `hero_title` and the business name only appeared in the footer; now shows the name as an eyebrow above the hero.
+* **Tokenized public URLs** — each tenant has an opaque `restaurants.public_token`; `resolvePublicRestaurantId()` + `resolvePublicTenantParam` middleware make the guest endpoints accept token OR id (back-compat); the share panel emits `/menu/<token>` (the whole order flow inherits it), so the internal `RESTO-<id>` is no longer in public links. Residual: owner-dashboard QR-code builders still emit the raw id (follow-up).
+
+### KDS — unified kitchen queue (marker `kds-atomic-accept-nearlive`)
+* The shared tenant-wide queue + chef accept already existed; added an **atomic claim** `POST /api/orders/:id/accept` (conditional `UPDATE … WHERE chef_id empty AND kitchen_status='queued'` → 409 if taken) so two chefs can't grab the same ticket; per-transition timestamps (`accepted/preparing/ready/served_at`); ChefDashboard + WaiterDashboard polling 30s→6s for near-live status; orders schema hardened (`chef_id/chef_name/eta/waiter_id` + timestamps). Owner chose **polling over WebSocket** (the WS layer — `broadcastWs`/`__wss` — is still a no-op; a real WS server is the future upgrade).
+* **PENDING (designed, not built):** **thermal KOT auto-print** — needs a print-routing layer (per-station printer config, a print-job queue, and an on-prem ESC-POS print agent); browser `window.print()` can't silently target a specific printer.
+
 ## Development Workflow
 
 * **Branch:** `dev` is the canonical branch. Push to `dev` triggers GitHub Actions auto-deploy to the VPS via `.github/workflows/deploy-vps.yml`.
