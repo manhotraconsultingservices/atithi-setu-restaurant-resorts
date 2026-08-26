@@ -2425,16 +2425,19 @@ async function testRoomServiceQR() {
     room_id: String(room.id),
     payment_method: 'CHARGE_TO_ROOM',
     customer_name: 'AUTOMATED_TEST_DO_NOT_PROCESS',
-    items: [],
-    total_amount: 0,
-    gst_amount: 0,
+    items: [{ name: 'x', quantity: 1, price: 10 }],
+    total_amount: 10,
   });
-  if (rsEmpty.status === 400 || rsEmpty.status === 422) {
-    pass('TC-BIZ-RS-002', 'CHARGE_TO_ROOM endpoint reachable — empty items rejected by validation');
-  } else if (rsEmpty.status === 200 || rsEmpty.status === 201) {
-    pass('TC-BIZ-RS-002', 'CHARGE_TO_ROOM endpoint reachable — accepted (postpaid QR session or order created)');
+  // GOVERNANCE (2026-08-26): charge-to-room is STAFF-ONLY. The PUBLIC (unauth)
+  // /orders endpoint must REJECT payment_method=CHARGE_TO_ROOM (403) so a QR diner
+  // or a crafted request can't post F&B to a hotel guest's folio. Staff charge to
+  // room via the authenticated paths (/orders/:id/charge-to-room, /invoices/manual)
+  // or the staff-approved /hotel/room-charge-request flow. A 200/201 here means the
+  // leak is reopened.
+  if (rsEmpty.status === 403) {
+    pass('TC-BIZ-RS-002', 'Public /orders rejects CHARGE_TO_ROOM (staff-only) — 403 as expected');
   } else {
-    fail('TC-BIZ-RS-002', 'CHARGE_TO_ROOM endpoint reachable', `HTTP ${rsEmpty.status}`);
+    fail('TC-BIZ-RS-002', 'Public /orders must reject CHARGE_TO_ROOM with 403 (staff-only)', `got HTTP ${rsEmpty.status} — the guest charge-to-room leak may be reopened`);
   }
 
   // TC-BIZ-RS-003: Staff endpoint — pending-folio room orders (unbilled room service reconciliation)
