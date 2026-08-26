@@ -4344,7 +4344,7 @@ async function settleFolioForBooking(
       const journalRef = `FOLIO-${folio.id}`;
       const already = await tenantDb.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
       if (!already) {
-        const entryDate = (settled.settled_at || new Date().toISOString()).slice(0, 10);
+        const entryDate = _glPostDate(settled.settled_at);
         const subtotal  = Number(settled.subtotal  || 0);
         const gstAmt    = Number(settled.gst_amount || 0);
         const discount  = Number(settled.discount  || 0);
@@ -4516,6 +4516,25 @@ function _glCurrentQuarter(): string {
 // (e.g. the manual-journal endpoint) inspect this and refuse to report success.
 interface GlPostResult { ok: boolean; posted: number; dropped: boolean; reason?: string; }
 
+// Safe posting date (YYYY-MM-DD) for a GL journal. Postgres returns TIMESTAMP
+// columns (folios.settled_at, orders.created_at, …) as JS Date objects at
+// runtime even though the declared type is string|null. Two ways that bit us:
+//   • `(folio.settled_at).slice(0,10)` throws (Date has no .slice) — the whole
+//     GL post was wrapped in try/catch, so the folio-checkout journal was
+//     SILENTLY dropped → "no journal entries in the Day Book" after checkout.
+//   • `(folio.settled_at).toString().slice(0,10)` yields "Wed Aug 26" — a
+//     garbage entry_date that no Day Book date filter ever matches.
+// Coerce Date | ISO/date string | null to a real YYYY-MM-DD (falling back to
+// now), so every settlement journal lands on a valid, filterable date.
+function _glPostDate(ts?: unknown): string {
+  let d: Date;
+  if (ts instanceof Date) d = ts;
+  else if (ts != null && String(ts).trim() !== '') d = new Date(String(ts));
+  else d = new Date();
+  if (isNaN(d.getTime())) d = new Date();
+  return d.toISOString().slice(0, 10);
+}
+
 async function _postGlEntries(
   db: any,
   restaurantId: string,
@@ -4653,7 +4672,7 @@ async function _postOrderGl(db: any, restaurantId: string, order: any, postedBy:
     const netRev = +(taxable / (1 + scp / 100)).toFixed(2);
     const svcAmt = +(taxable - netRev).toFixed(2);
     const isEco = Number(order.is_eco_paid || 0) === 1;
-    const entryDate = (order.created_at || new Date().toISOString()).toString().slice(0, 10);
+    const entryDate = _glPostDate(order.created_at);
 
     const lines: GlLine[] = [];
     if (isEco) {
@@ -4702,7 +4721,7 @@ async function _postFolioGl(
     const arName = opts.arName || 'Accounts Receivable — Guests';
     const cgst = +(gstAmt / 2).toFixed(2);
     const sgst = +(gstAmt - cgst).toFixed(2);
-    const entryDate = (folio.settled_at || folio.created_at || new Date().toISOString()).toString().slice(0, 10);
+    const entryDate = _glPostDate(folio.settled_at || folio.created_at);
     const payments: any[] = await db.query("SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0", [folioId]).catch(() => []);
     const advances = (payments || []).filter((p: any) => p.payment_type === 'ADVANCE' || p.payment_type === 'INTERIM');
     const advTotal = advances.reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
@@ -4761,7 +4780,7 @@ async function _postPayrollRunGl(db: any, restaurantId: string, runId: string, p
     // Reimbursement (expense claims paid with the run) is already expensed at claim
     // approval (Cr 2400); clear that liability here so the journal balances to net_pay.
     const REIMB = +((Number(run.total_net || 0) + Number(run.total_deductions || 0)) - Number(run.total_gross || 0)).toFixed(2);
-    const entryDate = (run.paid_at || run.updated_at || new Date().toISOString()).toString().slice(0, 10);
+    const entryDate = _glPostDate(run.paid_at || run.updated_at);
     const lines: GlLine[] = [];
     lines.push({ account_code: '5100', account_name: 'Salaries & Wages', dr_amount: G, cr_amount: 0, narration: `Payroll ${runId}` });
     if (PFer > 0) lines.push({ account_code: '5110', account_name: 'EPF — Employer Contribution', dr_amount: PFer, cr_amount: 0, narration: `Employer EPF ${runId}` });
@@ -50034,9 +50053,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'fix-extra-person-checkin-parity',
+    commit_marker: 'fix-folio-checkout-gl-date',
     code_features: [
-      'fix-extra-person-checkin-parity',             //BUGFIX (QA: extra adult/child charges not reflected correctly at check-in). Root cause: the booking POST and the check-in folio seeder (createFolioWithRoomCharges) DISAGREED on when a positive room_rate is a "manual all-in override". Booking creation treated ANY positive room_rate as all-in (total_amount = rate × nights, extra-person charges DROPPED), but check-in only treats a rate that DIFFERS from the plan's night-1 base as an override — a rate equal to the night-1 base still itemises extras. So a booking sent with room_rate = base_rate (the edit-draft seeds room_rate from the stored booking; staff can also type it) stored total_amount WITHOUT the extra adult/child, then check-in added them, making the stay total jump between booking and check-in. FIX: both the single (POST /hotel/bookings) and group (POST /hotel/bookings/group) creation paths now apply the SAME override rule as check-in — compute the breakdown, treat rate>0 as all-in ONLY when |rate − night1| > 0.01, else total = base + extras. Reproduced + verified on RESTO-1003: room_rate=base now stores 3700 (=2400 base + 800 extra adult + 500 extra child) matching the folio; room_rate=0 unchanged; a genuine all-in override still drops separate extras on both sides. tsc + vite build clean.
+      'fix-folio-checkout-gl-date',                  //BUGFIX (QA: checkout/payment journal missing from the Day Book). ROOT CAUSE: Postgres returns TIMESTAMP columns (folios.settled_at) as JS Date objects at runtime, but the HOTEL checkout GL post (settleFolioForBooking inline, ~4347) did `settled.settled_at.slice(0,10)` — Date has no .slice → TypeError, swallowed by the surrounding try/catch, so the folio was marked 'settled' but its FOLIO-<id> journal was SILENTLY NOT POSTED (no gl_exception either). Reproduced on RESTO-1003: checkout 200 + folio settled + ₹0 GL lines. Sibling derivations in _postOrderGl / _postFolioGl / payroll used `.toString().slice(0,10)`, which on a Date yields a garbage entry_date ("Wed Aug 26") that no Day Book date filter matches. FIX: one safe helper `_glPostDate(ts)` coerces Date|string|null → a real YYYY-MM-DD (fallback now); routed all four GL-post sites (folio checkout, _postOrderGl, _postFolioGl, payroll_run) through it. Now the checkout journal posts on the settlement date and appears in the Day Book. Pre-existing settled folios missing their journal can be backfilled via the existing owner-only POST /accounting/backfill-gl (now also date-correct). Regression test TC-HOTEL-CHECKOUT-GL asserts a checkout posts a balanced FOLIO journal dated today. tsc + vite build clean.
+      'fix-extra-person-checkin-parity',            //BUGFIX (QA: extra adult/child charges not reflected correctly at check-in). Root cause: the booking POST and the check-in folio seeder (createFolioWithRoomCharges) DISAGREED on when a positive room_rate is a "manual all-in override". Booking creation treated ANY positive room_rate as all-in (total_amount = rate × nights, extra-person charges DROPPED), but check-in only treats a rate that DIFFERS from the plan's night-1 base as an override — a rate equal to the night-1 base still itemises extras. So a booking sent with room_rate = base_rate (the edit-draft seeds room_rate from the stored booking; staff can also type it) stored total_amount WITHOUT the extra adult/child, then check-in added them, making the stay total jump between booking and check-in. FIX: both the single (POST /hotel/bookings) and group (POST /hotel/bookings/group) creation paths now apply the SAME override rule as check-in — compute the breakdown, treat rate>0 as all-in ONLY when |rate − night1| > 0.01, else total = base + extras. Reproduced + verified on RESTO-1003: room_rate=base now stores 3700 (=2400 base + 800 extra adult + 500 extra child) matching the folio; room_rate=0 unchanged; a genuine all-in override still drops separate extras on both sides. tsc + vite build clean.
       'gst-p1-a3a4-selftest',                       //GST P1 test coverage: the A-3 (specified-premises F&B 18%) and A-4 (inclusive-slab value-of-supply) rate decisions were extracted into pure helpers (valueOfSupplyForSlab, applyFnb18ForSpecifiedPremises, fnb18RateForSpecifiedPremises) reused by BOTH the production paths (reapplyHotelGstRates, computeInvoiceTaxes) and a NEW deterministic owner-only diagnostic GET /accounting/gst/selftest that runs those exact helpers over canned boundary scenarios (inclusive Rs8000→18, inclusive Rs7500→12, exclusive Rs7400→12 with no false 18, 5%→18 only under specified premises, a configured 12% line untouched, legacy fallback 5→18). Zero data mutation, so the automated smoke suite verifies A-3/A-4 on every cloud deploy without creating bookings/orders on a live tenant. New suite tests TC-GST-A3-LOGIC / TC-GST-A4-LOGIC (real FAIL on regression, not skip). tsc + vite build clean.
       'gst-p1-tds-sectionwise-fnb18b',               //GST/TDS P1 batch (D-2 + A-3 + A-4). [b: A-3 now guards the room-tariff probe behind a has-5%-line check so a POS bill with no 5% GST row skips the extra DB read entirely.] (D-2) SECTION-AWARE TDS: vendor withholding was 194C-only (single 1%/2% band). _tdsForSupplierPayment is now section-driven — the supplier carries a NEW tds_section (194C/194J/194H/194I; UI dropdown on the supplier form, DB column suppliers.tds_section) and withholding uses the correct rate + threshold per section: 194C 1% (indiv/HUF) or 2% (company/firm — via the existing 194C deductee-rate control), single ₹30,000 / annual ₹1,00,000; 194J 10% @ ₹30,000; 194H 5% @ ₹15,000; 194I(rent) 10% @ ₹2,40,000. The taxable base is now EX-GST (payAmt × (invoiceTotal−gst)/invoiceTotal, not the gross), the FY-aggregate test sums ex-GST supplier_invoices from 1-Apr, and missing-PAN forces 20% (Sec 206AA). New COA 2340 "TDS Payable — Sec 194I". tds_payable_ledger now stores the ex-GST taxableBase. Legacy string-category calls still resolve (194C fallback) so nothing breaks. (A-3) SPECIFIED-PREMISES F&B 18%: a standalone/walk-in restaurant POS bill in a hotel that has any room > ₹7,500 now charges F&B at 18% (not 5%), mirroring the charge-to-room folio path — computeInvoiceTaxes probes rooms.base_rate > slab2Max and, only then, bumps a 5% GST config row (or the legacy 5% fallback) to 18%; other configured rates and non-hotel tenants are untouched. (A-4) INCLUSIVE-SLAB CONSISTENCY: reapplyHotelGstRates was choosing the room's GST slab from the stored pre-tax base, which for a GST-INCLUSIVE tariff wrongly downgraded a room near the boundary from 18% to 12% at settlement; it now tests the slab on the VALUE OF SUPPLY (gross = amount+gst for inclusive tenants, taxable amount for exclusive), consistent with how the slab was picked at seed. tsc + vite build clean.
       'gst-p1-reverse-charge-line',                  //GST P1 (B-5): every tax invoice now carries the mandatory "Reverse Charge: No" declaration (Rule 46(l)) — these are forward-charge supplies. Added to the Classic hotel PDF (invoiceService.ts meta rows), the Boutique PDF (invoiceServiceBoutique.ts stay card), and the restaurant thermal tax invoice (buildThermalHTML, shown when it's a registered-supplier TAX INVOICE). New REVERSE_CHG bilingual label. tsc + vite build clean.
