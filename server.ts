@@ -29706,10 +29706,13 @@ ${data.tenant.name}`;
     }
   });
 
-  // ─── VERIFY GUEST ROOM (public — called from restaurant table QR) ───────────
-  // A hotel guest at a restaurant table can look themselves up by room number.
-  // Returns {ok, room_id, booking_id, guest_name, room_name} or {ok:false, error}.
-  app.get("/api/restaurant/:id/hotel/verify-guest-room", async (req: Request, res: Response) => {
+  // ─── VERIFY GUEST ROOM (STAFF-ONLY) ─────────────────────────────────────────
+  // Was PUBLIC and returned a checked-in guest's NAME for any room number typed by
+  // an anonymous caller — a PII leak (anyone could enumerate which rooms are occupied
+  // and by whom). Its only consumer was the public table-QR "charge to room" flow,
+  // which is now removed (charge-to-room is staff-only, owner decision 2026-08-26).
+  // Gated to authenticated staff so guest identity is never disclosed anonymously.
+  app.get("/api/restaurant/:id/hotel/verify-guest-room", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ ok: false, error: check.error });
     try {
@@ -45868,6 +45871,22 @@ ${data.tenant.name}`;
       const finalBookingId = booking_id || bookingId || null;
       const isChargeToRoom = String(finalPaymentMethod || '').toUpperCase() === 'CHARGE_TO_ROOM';
 
+      // GOVERNANCE (owner decision 2026-08-26): CHARGE-TO-ROOM IS STAFF-ONLY.
+      // This is the PUBLIC (unauthenticated) guest-order endpoint. A QR diner — or a
+      // crafted request with a guessed room_id — must NOT be able to post F&B directly
+      // to a hotel guest's folio (the old path self-healed the checked-in booking and
+      // posted with posted_by='QR_ORDER', no auth, no session binding). The guest QR
+      // UIs no longer offer it; staff charge to room via the AUTHENTICATED paths
+      // (POST /orders/:id/charge-to-room, POST /invoices/manual) or the staff-approved
+      // POST /hotel/room-charge-request → /approve flow. Reject before any INSERT so no
+      // stranded order/charge is created.
+      if (isChargeToRoom) {
+        return res.status(403).json({
+          error: 'Charge to room is a staff-only action. Please ask our staff to add this to your room bill.',
+          code: 'CHARGE_TO_ROOM_STAFF_ONLY',
+        });
+      }
+
       // ─────────────────────────────────────────────────────────────
       // L-2 — Min-margin guard (BCG audit, Tier 1 follow-up)
       // ─────────────────────────────────────────────────────────────
@@ -50079,9 +50098,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'fix-events-public-name-header',
+    commit_marker: 'ctr-staff-only-hardening',
     code_features: [
-      'fix-events-public-name-header',               //BUGFIX (public Events page: "restaurant name is coming in the last"). The /events/:id public page hero renders `p.hero_title || property.name` — when a tenant sets a custom marketing hero_title (e.g. "Celebrate at Vivek's Cafe"), the business NAME dropped out of the header and appeared ONLY in the footer at the very bottom. Now the business name shows as an uppercase eyebrow line ABOVE the hero headline whenever a distinct hero_title is set (EventViews.tsx hero). Confirmed live on RESTO-1003 (name "Manhotra Consulting" was footer-only). tsc + vite build clean.
+      'ctr-staff-only-hardening',                    //GOVERNANCE (owner decision): charge-to-room is now STAFF-ONLY everywhere. (1) The PUBLIC unauth POST /api/restaurant/:id/orders now REJECTS payment_method=CHARGE_TO_ROOM (403 before any INSERT) — closes the hole where a QR diner / crafted request self-healed a checked-in booking and posted F&B straight to a guest's folio (posted_by=QR_ORDER). (2) GET /hotel/verify-guest-room is now authenticate+restaurantStaff (was public and returned a checked-in guest's NAME to any anonymous caller keyed on a room number — a PII/occupancy leak). (3) In-room dining (RoomGuestInterface) no longer self-charges: placeRoomServiceOrder submits a STAFF-APPROVED room-charge REQUEST (POST /hotel/room-charge-request → staff /approve posts to folio) with an "order submitted, front desk will confirm" confirmation; needs the room's active check-in. Staff charge-to-room paths (/orders/:id/charge-to-room, /invoices/manual, both authenticated) unchanged. tsc + vite build clean.
+      'fix-events-public-name-header',              //BUGFIX (public Events page: "restaurant name is coming in the last"). The /events/:id public page hero renders `p.hero_title || property.name` — when a tenant sets a custom marketing hero_title (e.g. "Celebrate at Vivek's Cafe"), the business NAME dropped out of the header and appeared ONLY in the footer at the very bottom. Now the business name shows as an uppercase eyebrow line ABOVE the hero headline whenever a distinct hero_title is set (EventViews.tsx hero). Confirmed live on RESTO-1003 (name "Manhotra Consulting" was footer-only). tsc + vite build clean.
       'fix-publicpage-migration-ctr-governance',    //BUGFIXES + GOVERNANCE (public surface + access). (A) PUBLIC MENU PAGE 500 → "Restaurant not found": GET /api/public/restaurant/:id/menu-page selected `phone` and `cover_image_url` — columns that DON'T exist on `restaurants` → "column phone does not exist" 500, which the QR menu page renders as "Restaurant not found" (whole page dead). Now selects only real columns (name/city/state/logo_url/currency_symbol); phone/cover default to ''. (B) DATA MIGRATION hidden from tenants: EVENTS_MIGRATION ("Data Migration") is a SUPER-ADMIN activity, not a tenant one. Gated the nav entry, isVisible, the ?tab= redirect guard, and the content branch to a new isPlatformAdmin (SUPER_ADMIN/CTO) instead of isOwnerOrAdmin (which included the tenant OWNER); removed it from the NEWLY_ADDED grandfather set; backend events/migration/{spec,validate,commit} now require super-admin (migOwnerOnly drops OWNER) and the previously-ungated /spec is guarded. (C) CHARGE-TO-ROOM leak: removed the "Charge to Hotel Room" option from the PUBLIC table-QR / walk-in diner flow (CustomerInterface — 3 buttons) so an anonymous diner can't charge an arbitrary guest's folio; staff-side charge-to-room (PostpaidInvoiceModal / on-demand invoice, hotel-gated) and the room-bound in-room-dining QR are unchanged pending the in-room scope decision. tsc + vite build clean.
       'fix-inventory-analytics-blank',              //BUGFIX (QA: Kitchen Inventory → Analytics tab blank). TWO faults. (1) BACKEND — GET /inventory/expiring 500'd with "function pg_catalog.extract(unknown, integer) does not exist": in Postgres (date - date) is ALREADY an INTEGER day count, so EXTRACT(DAY FROM (expiry_date::date - CURRENT_DATE)) is invalid; replaced with the direct subtraction ((expiry_date::date - CURRENT_DATE)::integer). (2) FRONTEND — InventoryAnalyticsView fetched abc-analysis + expiring + dead-stock via Promise.all with a swallowing .catch, so that ONE 500 rejected the whole batch and left all three sections null → the ENTIRE tab rendered blank even though ABC + dead-stock returned 200. Switched to Promise.allSettled (each section loads independently), added an amber "some analytics couldn't be loaded (…)" banner naming any failed section, and a friendly empty-state when nothing loads at all. Verified on RESTO-1003: /inventory/expiring now 200; the tab renders ABC + expiry + dead-stock. New test TC-INV-ANALYTICS asserts all three endpoints return 200. tsc + vite build clean.
       'fix-po-gst-per-line-rate',                   //BUGFIX (QA: GST not calculated in Purchase Order — GST ₹0.00, Grand Total excludes GST). ROOT CAUSE: both the PO form and the create/PATCH endpoints derived GST SOLELY from the ingredient master's gst_percent, and the PO line had no way to set a rate — so any item whose master gst_percent was 0/unset produced ₹0 GST with no recourse. FIX: a per-line GST% is now first-class. (1) DB — new `purchase_order_items.gst_percent` column (idempotent ALTER; the PO PDF already read it). (2) Backend — POST + PATCH /inventory/purchase-orders honour `it.gst_percent` (fallback to the ingredient master), compute the header gst_amount/grand_total from it, and STORE it per line. (3) Frontend POCreateModal — each line has an editable GST% field that auto-defaults to the item's rate on pick but can be set for items with none; the modal's GST + Grand Total and each line total now reflect it, and the rate is sent per item. Verified on RESTO-1003: a PO with a 5%/12%/18% line now returns gst_amount>0 and grand_total = subtotal + gst. tsc + vite build clean.

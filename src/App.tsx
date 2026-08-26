@@ -47922,40 +47922,39 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
 
   const placeRoomServiceOrder = async () => {
     if (cartLines.length === 0 || placingFoodOrder) return;
+    // GOVERNANCE (owner decision 2026-08-26): in-room dining no longer SELF-CHARGES
+    // the folio. Charge-to-room is a STAFF action. The guest's order is submitted as
+    // a STAFF-APPROVED room-charge request — the front desk verifies the guest and
+    // posts it to the room bill. Needs the room's active check-in (booking_id).
+    if (!session?.booking_id) {
+      setFoodOrderConfirm({ placed: false, reason: 'This room has no active check-in on file. Please contact the front desk to order room service.' });
+      return;
+    }
     setPlacingFoodOrder(true);
     setFoodOrderConfirm(null);
     try {
-      const itemsPayload = cartLines.map(l => ({
-        id: l.id, name: l.name, quantity: l.qty,
-        price: Number(l.price || 0), unit_price: Number(l.price || 0),
-      }));
-      const res = await fetch(`/api/restaurant/${restaurantId}/orders`, {
+      const cart = cartLines.map(l => ({ id: l.id, name: l.name, quantity: l.qty, price: Number(l.price || 0) }));
+      const roomLabel = room?.room_number ? `Room ${room.room_number}` : (room?.name || `Room ${roomId}`);
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/room-charge-request`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          items: itemsPayload,
-          total_amount: cartSubtotal,
+          room_id: roomId,
+          booking_id: session.booking_id,
+          guest_name: guestName || session?.guest_name || null,
+          room_name: roomLabel,
+          purpose: 'ORDER',
+          cart_json: JSON.stringify(cart),
+          amount: cartSubtotal,
           customer_name: guestName || session?.guest_name || null,
           customer_phone: guestPhone || session?.guest_phone || null,
-          payment_method: 'CHARGE_TO_ROOM',
-          room_id: roomId,
-          booking_id: session?.booking_id || null,
-          table_number: `Room ${room?.room_number || room?.name || roomId}`,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || 'Order failed');
-      // The backend returns `room_service: { ok, folio_id, reason }` when
-      // payment_method=CHARGE_TO_ROOM. Show a confirmation that matches.
-      const rs = data?.room_service || {};
-      // placed=true → the order reached the kitchen (200 OK). folioId present
-      // → it was also charged to the room. placed && !folioId → kitchen has
-      // it but the charge needs front-desk reconciliation.
-      setFoodOrderConfirm({
-        placed: true,
-        folioId: rs.folio_id,
-        reason: rs.ok ? undefined : (rs.reason || 'no-folio'),
-      });
+      if (!res.ok || !data?.ok) throw new Error(data?.error || 'Order failed');
+      // Submitted for staff approval — NOT yet charged. reason:'awaiting-staff'
+      // renders the "front desk will confirm and add it to your bill" message.
+      setFoodOrderConfirm({ placed: true, folioId: undefined, reason: 'awaiting-staff' });
       setCart({});  // clear cart on success
     } catch (err: any) {
       setFoodOrderConfirm({ placed: false, reason: err?.message || 'Order failed' });
@@ -48279,8 +48278,10 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
                       </>
                     ) : kitchenOnly ? (
                       <>
-                        <p className="font-bold text-sm">Order sent to the kitchen ✓</p>
-                        <p className="text-xs mt-0.5">{foodOrderConfirm.reason === 'awaiting-delivery'
+                        <p className="font-bold text-sm">{foodOrderConfirm.reason === 'awaiting-staff' ? 'Order submitted ✓' : 'Order sent to the kitchen ✓'}</p>
+                        <p className="text-xs mt-0.5">{foodOrderConfirm.reason === 'awaiting-staff'
+                          ? "The front desk will confirm your order and add it to your room bill. Thank you!"
+                          : foodOrderConfirm.reason === 'awaiting-delivery'
                           ? "Your food is being prepared — it'll be added to your room bill once it's delivered."
                           : `Your food is being prepared. We couldn't add it to your room bill automatically${foodOrderConfirm.reason === 'no-open-folio-for-room-or-booking' ? " (this room isn't linked to a checked-in booking yet)" : ''} — the front desk will add it to your bill.`}</p>
                       </>
