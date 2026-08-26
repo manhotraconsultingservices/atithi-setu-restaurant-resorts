@@ -14013,11 +14013,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const scheduledDate = normaliseBookingDate(full.check_in_date);
     if (scheduledDate && scheduledDate > todayIso) {
       const msg = `Check-in is not allowed before the check-in date (${scheduledDate}). You can check this guest in on or after that day.`;
-      // Toast is immediate + floats over everything. The shared hotelError banner
-      // can render off-screen (e.g. when this fires from the booking-detail modal),
-      // which read as "the validation message doesn't appear until I refresh".
+      // Transient validation → TOAST ONLY (immediate, floats over everything,
+      // auto-dismisses in ~4s). We deliberately do NOT set the shared hotelError
+      // banner here: it is sticky and was never cleared for this case, so it
+      // lingered on the Reservations page until a manual refresh (reported
+      // "check-in restriction message persists"). The toast is the self-clearing
+      // feedback; clear any stale banner so a prior error can't masquerade as this one.
       toast.error(msg);
-      setHotelError(msg);
+      setHotelError('');
       return;
     }
     setCheckInChecklistTarget(full);
