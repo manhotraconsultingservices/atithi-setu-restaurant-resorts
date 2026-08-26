@@ -287,6 +287,51 @@ async function testHotel() {
     fail('TC-HOTEL-DAYUSE-FILTER', 'Day-use date filter', `HTTP ${hbFiltered.status}`);
   }
 
+  // TC-HOTEL-EXTRA-PARITY — extra adult/child charges must be identical whether
+  // the booking is created with room_rate=0 (matrix) or room_rate=base_rate.
+  // Regression for the QA bug where a booking sent with room_rate=base stored a
+  // total_amount WITHOUT the extra-person charges (dropped), while check-in added
+  // them — so the stay total jumped between booking and check-in. Same room, same
+  // extras, rate=0 vs rate=base → total_amount MUST match. Self-cleaning (cancels
+  // both). Skips unless the tenant is MATRIX with a priced vacant room.
+  try {
+    const tf = await api('GET', `/api/restaurant/${restaurantId}/hotel/tariff`);
+    const model = tf.data?.tariff_model;
+    const mealPlanId = (tf.data?.meal_plans || []).filter(m => m.is_active !== 0)[0]?.id || null;
+    const roomsResp = await api('GET', `/api/restaurant/${restaurantId}/hotel/rooms`);
+    const priced = (Array.isArray(roomsResp.data) ? roomsResp.data : []).filter(r => Number(r.base_rate) > 0 && String(r.status).toUpperCase() === 'VACANT');
+    if (tf.status !== 200 || model !== 'MATRIX' || priced.length === 0) {
+      skip('TC-HOTEL-EXTRA-PARITY', 'Extra-person booking↔check-in parity', `needs MATRIX tenant + a priced vacant room (model=${model}, priced=${priced.length})`);
+    } else {
+      const room = priced[0];
+      const cap = Math.max(1, Number(room.capacity || 1));
+      const base = Number(room.base_rate);
+      const ci = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const co = new Date(new Date(ci + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10);
+      const mk = (room_rate) => ({
+        room_id: room.id, guest_name: 'PARITY TEST (auto)', guest_phone: '9990000000', guest_nationality: 'IN',
+        check_in_date: ci, check_out_date: co, booking_source: 'WALK_IN', booking_type: 'OVERNIGHT',
+        meal_plan_id: mealPlanId, num_adults: cap + 1, extra_children_with_mattress: 1, extra_children_no_mattress: 0, room_rate,
+      });
+      const cancel = async (bid) => { if (bid) await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings/${bid}/cancel`, { reason: 'automated parity test cleanup' }); };
+      const b1 = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings`, mk(0));
+      const t1 = Number(b1.data?.total_amount);
+      await cancel(b1.data?.id);
+      const b2 = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings`, mk(base));
+      const t2 = Number(b2.data?.total_amount);
+      await cancel(b2.data?.id);
+      if (b1.status !== 201 || b2.status !== 201) {
+        skip('TC-HOTEL-EXTRA-PARITY', 'Extra-person booking↔check-in parity', `booking create returned ${b1.status}/${b2.status} (RBAC/validation)`);
+      } else if (Math.abs(t1 - t2) < 0.01) {
+        pass('TC-HOTEL-EXTRA-PARITY', `room_rate=0 and room_rate=base store the SAME total incl. extras (₹${t1} == ₹${t2}; base ₹${base})`);
+      } else {
+        fail('TC-HOTEL-EXTRA-PARITY', 'Extra-person booking↔check-in parity', `room_rate=0 total ₹${t1} ≠ room_rate=base total ₹${t2} — extras dropped when room_rate=base (the reported bug)`);
+      }
+    }
+  } catch (e) {
+    skip('TC-HOTEL-EXTRA-PARITY', 'Extra-person booking↔check-in parity', `error: ${e?.message || e}`);
+  }
+
   // Rate Grid — Aiosell-style Rates & Inventory endpoint (Part C).
   const rg = await api('GET', `/api/restaurant/${restaurantId}/hotel/rate-grid`);
   if (rg.status === 200 && Array.isArray(rg.data?.dates) && Array.isArray(rg.data?.room_types)) {
