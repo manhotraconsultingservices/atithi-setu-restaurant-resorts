@@ -1176,6 +1176,18 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_id TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_post_status TEXT").catch(() => {});
+  // KDS (Kitchen Display) — promote the chef-assignment fields that used to be
+  // created lazily inside endpoints (fragile) into the real migration, and add the
+  // waiter link + per-transition timestamps for the unified live queue + prep metrics.
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_name TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS waiter_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS waiter_name TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS preparing_at TIMESTAMP").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS ready_at TIMESTAMP").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS served_at TIMESTAMP").catch(() => {});
   // Cloud-kitchen / online-delivery: structured customer delivery address
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line1 TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line2 TEXT").catch(() => {});

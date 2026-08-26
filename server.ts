@@ -398,6 +398,35 @@ function slugify(name: string): string {
     .slice(0, 48);
 }
 
+// Resolve a PUBLIC URL param — an opaque `public_token` OR the raw restaurant id
+// (back-compat for old QR codes/links) — to the internal restaurant id. Returns
+// null if neither matches. Public/guest endpoints run their `req.params.id`
+// through this so links like /menu/<token> and ?r=<token> work without exposing
+// RESTO-<id>. Cheap single central lookup.
+const _publicIdCache = new Map<string, { id: string | null; at: number }>();
+async function resolvePublicRestaurantId(param: string): Promise<string | null> {
+  const p = String(param || '').trim();
+  if (!p) return null;
+  const now = Date.now();
+  const hit = _publicIdCache.get(p);
+  if (hit && (now - hit.at) < 60000) return hit.id;
+  const row: any = await centralDb.get(
+    "SELECT id FROM restaurants WHERE public_token = ? OR id = ? LIMIT 1",
+    [p, p]
+  ).catch(() => null);
+  const id = row?.id || null;
+  _publicIdCache.set(p, { id, at: now });
+  return id;
+}
+// Express middleware: rewrite req.params.id (token→internal id) for public/guest
+// routes, so the rest of the handler (getTenantDb, queries) works unchanged.
+async function resolvePublicTenantParam(req: any, res: any, next: any): Promise<void> {
+  const resolved = await resolvePublicRestaurantId(req.params?.id);
+  if (!resolved) { res.status(404).json({ error: 'Restaurant not found' }); return; }
+  req.params.id = resolved;
+  next();
+}
+
 async function generateUniqueSlug(restaurantName: string, excludeId?: string): Promise<string> {
   let base = slugify(restaurantName) || 'restaurant';
   if (RESERVED_SLUGS.has(base)) base = `${base}-app`;
@@ -5913,6 +5942,32 @@ async function startServer() {
     console.error("[slug-migration] Warning:", err);
   }
 
+  // ====== Public URL token: OPAQUE id for public-facing links ======
+  // Public menu/booking links used the raw internal restaurant id (e.g.
+  // "/menu/RESTO-1003"), exposing it. Each tenant gets an opaque `public_token`
+  // so links become "/menu/<token>"; public endpoints resolve token OR id
+  // (back-compat) via resolvePublicRestaurantId().
+  try {
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS public_token TEXT`);
+    await centralDb.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_restaurants_public_token ON restaurants(public_token) WHERE public_token IS NOT NULL AND public_token <> ''`);
+    const needsToken: any[] = await centralDb.query(
+      "SELECT id FROM restaurants WHERE (public_token IS NULL OR public_token = '') AND id <> 'SYSTEM'"
+    );
+    for (const r of needsToken) {
+      let tok = '';
+      for (let attempt = 0; attempt < 6; attempt++) {
+        // URL-safe base62-ish, ~12 chars, non-guessable.
+        const cand = randomBytes(12).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 12);
+        if (cand.length < 10) continue;
+        const clash: any = await centralDb.get("SELECT 1 AS x FROM restaurants WHERE public_token = ?", [cand]).catch(() => null);
+        if (!clash) { tok = cand; break; }
+      }
+      if (tok) await centralDb.run("UPDATE restaurants SET public_token = ? WHERE id = ?", [tok, r.id]);
+    }
+  } catch (err) {
+    console.error("[public-token-migration] Warning:", err);
+  }
+
   // ====== Hospitality module: property_type column migration ======
   // Single feature-gate column. Values: 'RESTAURANT' | 'HOTEL' | 'BOTH'.
   // Default preserves legacy tenants (they all remain pure restaurant).
@@ -9855,7 +9910,7 @@ async function startServer() {
   });
 
   // Menu: Get Restaurant Menu
-  app.get("/api/restaurant/:id/menu", async (req: Request, res: Response) => {
+  app.get("/api/restaurant/:id/menu", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       
@@ -10867,6 +10922,7 @@ async function startServer() {
   // to query, so this is functionally equivalent to the existing customer-
   // facing flow.
   app.get("/api/restaurant/:id/loyalty/customers/:phone/preview-discount",
+    resolvePublicTenantParam,
     async (req: Request, res: Response) => {
     try {
       const phone = _normalisePhone(req.params.phone);
@@ -22230,7 +22286,7 @@ ${data.tenant.name}`;
   });
 
   // Get Restaurant Info
-  app.get("/api/restaurant/:id", async (req: Request, res: Response) => {
+  app.get("/api/restaurant/:id", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const restaurant = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [req.params.id]);
       if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
@@ -29655,7 +29711,7 @@ ${data.tenant.name}`;
   });
 
   // ─── ROOM SESSIONS (guest-facing, public) ─────────────────────────────────
-  app.post("/api/restaurant/:id/hotel/room-sessions", async (req: Request, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/room-sessions", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -29843,7 +29899,7 @@ ${data.tenant.name}`;
   }
 
   // Guest submits — no auth (public table QR)
-  app.post("/api/restaurant/:id/hotel/room-charge-request", async (req: Request, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/room-charge-request", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ ok: false, error: check.error });
     try {
@@ -29885,7 +29941,7 @@ ${data.tenant.name}`;
   });
 
   // Guest polls for approval — no auth
-  app.get("/api/restaurant/:id/hotel/room-charge-request/:reqId/status", async (req: Request, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/room-charge-request/:reqId/status", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await ensureRoomChargeRequestsTable(tenantDb);
@@ -35726,7 +35782,7 @@ ${data.tenant.name}`;
   });
 
   // Public restaurant menu page — no auth required.
-  app.get("/api/public/restaurant/:id/menu-page", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/menu-page", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const id = req.params.id;
       // NOTE: `restaurants` has NO `phone` or `cover_image_url` column — selecting
@@ -43712,7 +43768,7 @@ ${data.tenant.name}`;
   });
 
   // Tables: Public (no auth — customer QR scan uses this to resolve table name)
-  app.get("/api/restaurant/:id/tables/public", async (req: Request, res: Response) => {
+  app.get("/api/restaurant/:id/tables/public", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const tables = await db.query("SELECT id, name, capacity, status FROM tables ORDER BY name");
@@ -43725,7 +43781,7 @@ ${data.tenant.name}`;
   // Sessions: Create or Resume (Postpaid mode)
   // POST /api/restaurant/:id/sessions
   // Body: { table_id, table_name, session_token? (for resume), customer_name?, customer_phone? }
-  app.post("/api/restaurant/:id/sessions", async (req: Request, res: Response) => {
+  app.post("/api/restaurant/:id/sessions", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const { table_id, table_name, session_token, customer_name, customer_phone } = req.body;
       const db = await getTenantDb(req.params.id);
@@ -43854,7 +43910,7 @@ ${data.tenant.name}`;
   });
 
   // Sessions: Get by Token (Postpaid — customer re-scan / refresh)
-  app.get("/api/restaurant/:id/sessions/:token", async (req: Request, res: Response) => {
+  app.get("/api/restaurant/:id/sessions/:token", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const session = await db.get(
@@ -44009,7 +44065,7 @@ ${data.tenant.name}`;
   });
 
   // Sessions: Request Bill (Customer triggers at end of postpaid meal)
-  app.post("/api/restaurant/:id/sessions/:token/request-bill", async (req: Request, res: Response) => {
+  app.post("/api/restaurant/:id/sessions/:token/request-bill", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const { payment_method } = req.body;
       const db = await getTenantDb(req.params.id);
@@ -44604,7 +44660,7 @@ ${data.tenant.name}`;
   // cancel is refused (409) and the guest is told to ask staff. Runs the SAME
   // side-effects as the staff cancel: returns ingredient stock + reverses any
   // folio posting + broadcasts ORDER_UPDATE so the kitchen drops it live.
-  app.post("/api/restaurant/:id/sessions/:token/orders/:orderId/cancel", async (req: Request, res: Response) => {
+  app.post("/api/restaurant/:id/sessions/:token/orders/:orderId/cancel", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const session: any = await db.get(
@@ -45516,7 +45572,7 @@ ${data.tenant.name}`;
   };
 
   // POST /api/restaurant/:id/waiter-calls — Customer creates a call (no auth)
-  app.post("/api/restaurant/:id/waiter-calls", async (req: Request, res: Response) => {
+  app.post("/api/restaurant/:id/waiter-calls", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await ensureWaiterCallsTable(db);
@@ -45604,7 +45660,7 @@ ${data.tenant.name}`;
   });
 
   // Orders: Create Order (mode-aware: prepaid holds for payment, postpaid goes to KDS immediately)
-  app.post("/api/restaurant/:id/orders", async (req: Request, res: Response) => {
+  app.post("/api/restaurant/:id/orders", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const {
         table_number, tableNumber,
@@ -50104,9 +50160,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'fix-events-delete-list-filter',
+    commit_marker: 'public-url-tokenization',
     code_features: [
-      'fix-events-delete-list-filter',               //BUGFIX (QA: Delete button "not working" in Rental Inventory & Hall/Venue). The delete DID work — both are SOFT deletes (is_active=0, to preserve historical bookings) — but the two MANAGEMENT list queries (GET /events/venues and GET /events/rental-items) selected ALL rows with no is_active filter, so the "deleted" venue/item reappeared on the reload after delete → looked broken. Added WHERE is_active = 1 to both list queries (the booking/availability queries already filtered active). Now a deleted venue/rental item disappears from the list immediately. tsc + vite build clean.
+      'public-url-tokenization',                     //FEATURE (governance): public-facing links no longer expose the internal RESTO-<id>. Each tenant gets an opaque `restaurants.public_token` (~12-char, backfilled at startup). New `resolvePublicRestaurantId(param)` (token-first, id fallback for back-compat) + `resolvePublicTenantParam` middleware rewrites `req.params.id` on the PUBLIC/guest endpoints (menu-page, GET /restaurant/:id, /menu, /tables/public, /sessions[+/:token status/request-bill/cancel], /orders, /waiter-calls, /loyalty preview-discount, /hotel/room-sessions + room-charge-request[+status]) so a token OR id both resolve. Frontend "Public pages" share panel now emits `/menu/<token>` (+ /spa,/events); the whole downstream order flow inherits the token from the URL (tenantId→?r=→restaurantId), so no id is exposed in the shared link. (/book already used the opaque booking_slug.) Existing raw-id QRs/links keep working. NOTE residual: the owner-dashboard QR-code builders (?r=<id>) + PublicRestaurantPage order URL still emit the raw id in a separate component scope — follow-up to thread the token there. tsc + vite build clean.
+      'fix-events-delete-list-filter',              //BUGFIX (QA: Delete button "not working" in Rental Inventory & Hall/Venue). The delete DID work — both are SOFT deletes (is_active=0, to preserve historical bookings) — but the two MANAGEMENT list queries (GET /events/venues and GET /events/rental-items) selected ALL rows with no is_active filter, so the "deleted" venue/item reappeared on the reload after delete → looked broken. Added WHERE is_active = 1 to both list queries (the booking/availability queries already filtered active). Now a deleted venue/rental item disappears from the list immediately. tsc + vite build clean.
       'ctr-staff-only-hardening',                   //GOVERNANCE (owner decision): charge-to-room is now STAFF-ONLY everywhere. (1) The PUBLIC unauth POST /api/restaurant/:id/orders now REJECTS payment_method=CHARGE_TO_ROOM (403 before any INSERT) — closes the hole where a QR diner / crafted request self-healed a checked-in booking and posted F&B straight to a guest's folio (posted_by=QR_ORDER). (2) GET /hotel/verify-guest-room is now authenticate+restaurantStaff (was public and returned a checked-in guest's NAME to any anonymous caller keyed on a room number — a PII/occupancy leak). (3) In-room dining (RoomGuestInterface) no longer self-charges: placeRoomServiceOrder submits a STAFF-APPROVED room-charge REQUEST (POST /hotel/room-charge-request → staff /approve posts to folio) with an "order submitted, front desk will confirm" confirmation; needs the room's active check-in. Staff charge-to-room paths (/orders/:id/charge-to-room, /invoices/manual, both authenticated) unchanged. tsc + vite build clean.
       'fix-events-public-name-header',              //BUGFIX (public Events page: "restaurant name is coming in the last"). The /events/:id public page hero renders `p.hero_title || property.name` — when a tenant sets a custom marketing hero_title (e.g. "Celebrate at Vivek's Cafe"), the business NAME dropped out of the header and appeared ONLY in the footer at the very bottom. Now the business name shows as an uppercase eyebrow line ABOVE the hero headline whenever a distinct hero_title is set (EventViews.tsx hero). Confirmed live on RESTO-1003 (name "Manhotra Consulting" was footer-only). tsc + vite build clean.
       'fix-publicpage-migration-ctr-governance',    //BUGFIXES + GOVERNANCE (public surface + access). (A) PUBLIC MENU PAGE 500 → "Restaurant not found": GET /api/public/restaurant/:id/menu-page selected `phone` and `cover_image_url` — columns that DON'T exist on `restaurants` → "column phone does not exist" 500, which the QR menu page renders as "Restaurant not found" (whole page dead). Now selects only real columns (name/city/state/logo_url/currency_symbol); phone/cover default to ''. (B) DATA MIGRATION hidden from tenants: EVENTS_MIGRATION ("Data Migration") is a SUPER-ADMIN activity, not a tenant one. Gated the nav entry, isVisible, the ?tab= redirect guard, and the content branch to a new isPlatformAdmin (SUPER_ADMIN/CTO) instead of isOwnerOrAdmin (which included the tenant OWNER); removed it from the NEWLY_ADDED grandfather set; backend events/migration/{spec,validate,commit} now require super-admin (migOwnerOnly drops OWNER) and the previously-ungated /spec is guarded. (C) CHARGE-TO-ROOM leak: removed the "Charge to Hotel Room" option from the PUBLIC table-QR / walk-in diner flow (CustomerInterface — 3 buttons) so an anonymous diner can't charge an arbitrary guest's folio; staff-side charge-to-room (PostpaidInvoiceModal / on-demand invoice, hotel-gated) and the room-bound in-room-dining QR are unchanged pending the in-room scope decision. tsc + vite build clean.

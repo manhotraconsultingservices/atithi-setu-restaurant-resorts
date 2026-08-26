@@ -43851,6 +43851,18 @@ function HotelHomeLaunchpad({
   const [snap, setSnap] = useState<any>(null);
   const [heroUrl, setHeroUrl] = useState<string>('');
   const [bookingSlug, setBookingSlug] = useState<string>('');
+  // Opaque public token for public-facing links (hides the internal RESTO-<id>).
+  // Falls back to restaurantId until loaded / for tenants without one.
+  const [publicToken, setPublicToken] = useState<string>('');
+  useEffect(() => {
+    if (!restaurantId || !token) return;
+    let abort = false;
+    fetch(`/api/restaurant/${restaurantId}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!abort && d?.public_token) setPublicToken(d.public_token); })
+      .catch(() => {});
+    return () => { abort = true; };
+  }, [restaurantId, token]);
   const [worklist, setWorklist] = useState<{arrivals:any[];departures:any[];spaToday:any[];rooms:any[]}>({arrivals:[],departures:[],spaToday:[],rooms:[]});
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
@@ -43990,11 +44002,13 @@ function HotelHomeLaunchpad({
         {/* Public pages */}
         {(() => {
           const origin = window.location.origin;
+          // Use the opaque public token (not the raw RESTO-id) in public links.
+          const pub = publicToken || restaurantId;
           const links: { label: string; url: string; color: string }[] = [];
-          if (isHotelEnabled) links.push({ label: 'Hotel booking', url: `${origin}/book/${bookingSlug || restaurantId}`, color: '#cc5a16' });
-          if (isRestaurantEnabled) links.push({ label: 'Restaurant menu', url: `${origin}/menu/${restaurantId}`, color: '#0f6e56' });
-          if (isSpaEnabled) links.push({ label: 'Spa booking', url: `${origin}/spa/${restaurantId}`, color: '#7e5792' });
-          if (isEventsEnabled) links.push({ label: 'Events & Convention', url: `${origin}/events/${restaurantId}`, color: '#7c3aed' });
+          if (isHotelEnabled) links.push({ label: 'Hotel booking', url: `${origin}/book/${bookingSlug || pub}`, color: '#cc5a16' });
+          if (isRestaurantEnabled) links.push({ label: 'Restaurant menu', url: `${origin}/menu/${pub}`, color: '#0f6e56' });
+          if (isSpaEnabled) links.push({ label: 'Spa booking', url: `${origin}/spa/${pub}`, color: '#7e5792' });
+          if (isEventsEnabled) links.push({ label: 'Events & Convention', url: `${origin}/events/${pub}`, color: '#7c3aed' });
           if (links.length === 0) return null;
           return (
             <div className="mb-5">
