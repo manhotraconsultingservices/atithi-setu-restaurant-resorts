@@ -118,7 +118,14 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // are ordinary module tabs: a role sees them only if granted in the Staff Access
 // matrix (or if unrestricted). Keeping the rest of the set preserves migration
 // safety for the tabs that genuinely relied on it.
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'HR_PAYROLL', 'PROCUREMENT', 'ALL_REPORTS']);
+// NOTE: HR_PAYROLL and STAFF_PAYROLL were removed from this set (2026-08-26) for
+// the SAME reason — the reported "HR & Payroll / Staff Payroll visible to Front
+// Desk without access (nav shows them, clicking 403s)" bug. A built-in role's
+// /my-permissions list is markerless (no __perm_complete__/__perm_v3__), so it
+// fell through isTabVisible() to this grandfather set. The Workforce endpoints are
+// already permission-gated (workforceStaff, marker `hr-workforce-permission-gate`),
+// so these are matrix-gated tabs: visible only if granted (or unrestricted owner).
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'PROCUREMENT', 'ALL_REPORTS']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -15060,6 +15067,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // accessible (_acctStaff), so surface it to cash-handling roles directly, plus
           // any role the owner grants it in Staff Access.
           if (id === 'CASH_DRAWER') return isOwnerOrAdmin || currentRole === 'MANAGER' || currentRole === 'CASHIER' || currentRole === 'FRONT_DESK' || isTabVisible(id, effectiveAllowedTabs);
+          // HR & Payroll / Staff (operational) Payroll carry sensitive salary + statutory
+          // data. Show them ONLY to owner/admin, MANAGER, or a role EXPLICITLY granted the
+          // tab — NEVER under the fail-open null list (a built-in role with no configured
+          // matrix row resolves to allowed_tabs=null and would otherwise see every tab).
+          // Mirrors the backend workforceStaff gate (requireModuleAccess(['HR_PAYROLL',
+          // 'STAFF_PAYROLL','ROSTER','TIMESHEET'], ['MANAGER'])), so a nav-visible tab is
+          // never API-403. Reported: "HR & Payroll / Staff Payroll visible to Front Desk
+          // without access (nav shows them, clicking 403s)".
+          if (id === 'HR_PAYROLL' || id === 'STAFF_PAYROLL') {
+            return isOwnerOrAdmin || currentRole === 'MANAGER' || (Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id));
+          }
           // Spa Billing — module-gated AND permissionable (was hard-forced visible).
           if (id === 'SPA_BILLING') return isSpaEnabled && (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs));
           // The Events-module cleaning tab reuses the shared HOUSEKEEPING

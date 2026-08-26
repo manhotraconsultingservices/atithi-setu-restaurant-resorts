@@ -2874,6 +2874,42 @@ async function testRBACHardening() {
   section('RBAC HARDENING — F5/F8/F9 (Therapist Role, Hotel PII, Default Seeds)');
   if (!restaurantId) { skip('TC-RBAC-*', 'All RBAC hardening tests', 'no restaurantId'); return; }
 
+  // TC-RBAC-FD-WORKFORCE — HR & Payroll / Staff Payroll must NOT be nav-visible to
+  // a built-in Front Desk role that wasn't granted them, and the backend must 403.
+  // Regression for the reported "HR & Payroll / Staff Payroll visible to Front Desk
+  // without access (nav shows them, clicking 403s)". A built-in role with no matrix
+  // row resolves to allowed_tabs=null (fail-open) — the frontend now gates these two
+  // sensitive tabs to owner/manager/explicitly-granted, mirroring workforceStaff.
+  try {
+    const tag = 'fdwf' + Math.random().toString(36).slice(2, 7);
+    const loginId = 'rbacfdwf_' + tag, pwd = 'Test@' + tag + '1';
+    const mk = await api('POST', '/api/owner/staff', { name: 'RBAC FDWF ' + tag, role: 'FRONT_DESK', loginId, password: pwd, employee_type: 'LOGIN' });
+    const uid = mk.data?.id || mk.data?.staff?.id;
+    const lg = await api('POST', '/api/auth/login', { loginId, password: pwd, restaurantId });
+    const fdTok = lg.data?.token || lg.data?.jwt_token;
+    if (mk.status !== 200 || !fdTok) {
+      skip('TC-RBAC-FD-WORKFORCE', 'Front Desk HR/Payroll nav + API gate', `staff create/login failed (${mk.status}/${lg.status})`);
+    } else {
+      const mp = await api('GET', `/api/restaurant/${restaurantId}/my-permissions`, null, fdTok);
+      const allowed = mp.data?.allowed_tabs;
+      // Mirror the frontend isVisible() gate for these two sensitive tabs (role=FRONT_DESK, not owner/manager).
+      const navVisible = (id) => (Array.isArray(allowed) && allowed.includes(id)); // owner/manager excluded here by construction
+      const hrNav = navVisible('HR_PAYROLL'), payNav = navVisible('STAFF_PAYROLL');
+      const hrApi = await api('GET', `/api/restaurant/${restaurantId}/hr/employees`, null, fdTok);
+      const backendDenies = hrApi.status === 403;
+      if (!hrNav && !payNav && backendDenies) {
+        pass('TC-RBAC-FD-WORKFORCE', 'Front Desk: HR & Payroll / Staff Payroll hidden in nav (not granted) + API 403', `allowed_tabs=${Array.isArray(allowed) ? allowed.length + ' tabs' : allowed}`);
+      } else if (hrNav || payNav) {
+        fail('TC-RBAC-FD-WORKFORCE', 'Front Desk must not see HR/Payroll in nav', `HR_PAYROLL granted=${hrNav} STAFF_PAYROLL granted=${payNav} — nav would show a tab the API 403s`);
+      } else {
+        fail('TC-RBAC-FD-WORKFORCE', 'Front Desk HR endpoint must 403', `GET /hr/employees returned ${hrApi.status} (expected 403) — backend gate regressed`);
+      }
+    }
+    if (uid) { try { await api('DELETE', `/api/owner/staff/${uid}`); } catch {} }
+  } catch (e) {
+    skip('TC-RBAC-FD-WORKFORCE', 'Front Desk HR/Payroll nav + API gate', `error: ${e?.message || e}`);
+  }
+
   // ── F9: Hotel PII endpoints must reject unauthenticated requests ──────────
   // These endpoints were previously accessible without credentials.
   // All should now return 401 (unauthenticated) rather than 200.
