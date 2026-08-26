@@ -332,6 +332,72 @@ async function testHotel() {
     skip('TC-HOTEL-EXTRA-PARITY', 'Extra-person booking↔check-in parity', `error: ${e?.message || e}`);
   }
 
+  // TC-HOTEL-CHECKOUT-GL — a guest checkout must post its FOLIO settlement
+  // journal to the GL so it appears in the Day Book. Regression for the bug
+  // where settleFolioForBooking crashed on settled_at.slice() (Postgres returns
+  // the timestamp as a Date), the crash was swallowed, and the folio was marked
+  // settled with NO journal posted. Full flow: book → checkin → pay → checkout →
+  // assert a balanced FOLIO journal dated today. Self-cleaning: credit-notes the
+  // folio to reverse. Skips unless MATRIX hotel with a priced vacant room.
+  try {
+    const tf = await api('GET', `/api/restaurant/${restaurantId}/hotel/tariff`);
+    const mealPlanId = (tf.data?.meal_plans || []).filter(m => m.is_active !== 0)[0]?.id || null;
+    const roomsResp = await api('GET', `/api/restaurant/${restaurantId}/hotel/rooms`);
+    const priced = (Array.isArray(roomsResp.data) ? roomsResp.data : []).filter(r => Number(r.base_rate) > 0 && String(r.status).toUpperCase() === 'VACANT');
+    if (tf.status !== 200 || tf.data?.tariff_model !== 'MATRIX' || priced.length === 0) {
+      skip('TC-HOTEL-CHECKOUT-GL', 'Checkout posts a GL journal (Day Book)', `needs MATRIX tenant + a priced vacant room`);
+    } else {
+      const room = priced[0];
+      const cap = Math.max(1, Number(room.capacity || 1));
+      const ci = new Date().toISOString().slice(0, 10);
+      const co = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+      const cr = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings`, {
+        room_id: room.id, guest_name: 'CHECKOUT-GL TEST (auto)', guest_phone: '9990000000', guest_nationality: 'IN',
+        check_in_date: ci, check_out_date: co, booking_source: 'WALK_IN', booking_type: 'OVERNIGHT',
+        meal_plan_id: mealPlanId, num_adults: cap, room_rate: 0,
+      });
+      const bid = cr.data?.id;
+      // upload a 1x1 PNG so the ID-at-checkin gate passes (raw multipart)
+      let folioId = null, checkoutStatus = 0;
+      if (cr.status === 201 && bid) {
+        const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000155a2b4e40000000049454e44ae426082', 'hex');
+        const fd = new FormData();
+        fd.append('file', new Blob([png], { type: 'image/png' }), 'id.png');
+        fd.append('doc_type', 'AADHAAR');
+        await fetch(`${BASE_URL}/api/restaurant/${restaurantId}/hotel/bookings/${bid}/documents`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd }).catch(() => {});
+        const cin = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings/${bid}/checkin`, { skip_form_c_for_now: true });
+        folioId = cin.data?.folio?.id || cin.data?.folio_id;
+        if (folioId) {
+          const out = await api('GET', `/api/restaurant/${restaurantId}/hotel/folios/${folioId}/outstanding`);
+          const owe = Number(out.data?.outstanding ?? out.data?.grand_total ?? 0);
+          if (owe > 0) await api('POST', `/api/restaurant/${restaurantId}/hotel/folios/${folioId}/payments`, { amount: owe, payment_method: 'CASH', payment_type: 'FINAL' });
+          const cout = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings/${bid}/checkout`, { payment_method: 'CASH' });
+          checkoutStatus = cout.status;
+        }
+      }
+      if (cr.status !== 201 || !folioId || checkoutStatus !== 200) {
+        skip('TC-HOTEL-CHECKOUT-GL', 'Checkout posts a GL journal', `setup incomplete (create=${cr.status}, folio=${!!folioId}, checkout=${checkoutStatus})`);
+      } else {
+        const gl = await api('GET', `/api/restaurant/${restaurantId}/accounting/gl-entries?journal_ref=FOLIO-${folioId}`);
+        const lines = Array.isArray(gl.data) ? gl.data : [];
+        const dr = lines.reduce((s, e) => s + Number(e.dr_amount || 0), 0);
+        const cr2 = lines.reduce((s, e) => s + Number(e.cr_amount || 0), 0);
+        const day = lines[0] ? String(lines[0].entry_date).slice(0, 10) : '';
+        if (lines.length >= 2 && Math.abs(dr - cr2) < 0.02 && day === ci) {
+          pass('TC-HOTEL-CHECKOUT-GL', `Checkout posted a balanced FOLIO journal dated today (${lines.length} lines, Dr=Cr=₹${dr.toFixed(2)}, ${day})`);
+        } else if (lines.length === 0) {
+          fail('TC-HOTEL-CHECKOUT-GL', 'Checkout posts a GL journal', `NO journal posted for FOLIO-${folioId} — checkout settled the folio but never reached the Day Book (the reported bug)`);
+        } else {
+          fail('TC-HOTEL-CHECKOUT-GL', 'Checkout posts a GL journal', `journal unbalanced/misdated: lines=${lines.length} Dr=${dr} Cr=${cr2} entry_date=${day} (expected ${ci})`);
+        }
+        // cleanup — reverse via credit note so the books stay net-zero
+        await api('POST', `/api/restaurant/${restaurantId}/hotel/folios/${folioId}/credit-note`, { reason: 'automated checkout-GL test reversal' }).catch(() => {});
+      }
+    }
+  } catch (e) {
+    skip('TC-HOTEL-CHECKOUT-GL', 'Checkout posts a GL journal', `error: ${e?.message || e}`);
+  }
+
   // Rate Grid — Aiosell-style Rates & Inventory endpoint (Part C).
   const rg = await api('GET', `/api/restaurant/${restaurantId}/hotel/rate-grid`);
   if (rg.status === 200 && Array.isArray(rg.data?.dates) && Array.isArray(rg.data?.room_types)) {
