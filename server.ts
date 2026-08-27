@@ -5353,7 +5353,15 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
     // saved set is authoritative: NO injection, so requireTabAction/Access denies
     // every unassigned tab and /my-permissions omits them.
     const _isBuiltinRole = _SYSTEM_ROLE_SET.has(String(role).toUpperCase());
-    if (perms !== null && _isBuiltinRole) {
+    // A backfilled/authoritative built-in role carries a '__complete__' sentinel:
+    // its matrix is a DELIBERATE, COMPLETE set (exactly like a custom role created
+    // in the modern Staff Access UI), so we DON'T grandfather newly-added tabs into
+    // it — otherwise a seeded WAITER/CHEF would silently re-acquire HOTEL_INVENTORY /
+    // SPA_* / checklist tabs it was never granted (the "waiter sees everything" leak
+    // survives a naive backfill). Legacy built-in rows (no sentinel) keep the
+    // migration-safety grandfather unchanged. See POST /role-permissions/backfill-defaults.
+    const _authoritative = !!(perms && (perms as any)['__complete__']);
+    if (perms !== null && _isBuiltinRole && !_authoritative) {
       const RBAC_NEWLY_ADDED = [
         // EXPENSE_JOURNAL + PROCUREMENT removed from this inject-to-Full list
         // (2026-08-28): they are owner-controlled FINANCE tabs. Auto-granting them
@@ -5417,7 +5425,7 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
 async function getAllowedTabsForRole(tenantId: string, role: string): Promise<string[] | null> {
   const perms = await getTabPermissionsForRole(tenantId, role);
   if (perms === null) return null;
-  const tabs = Object.keys(perms).filter(k => (perms[k] ?? 0) >= 1);
+  const tabs = Object.keys(perms).filter(k => !k.startsWith('__') && (perms[k] ?? 0) >= 1);
   return tabs.length > 0 ? tabs : null;
 }
 
@@ -7566,7 +7574,7 @@ async function startServer() {
         }
       }
       if (perms === null) return res.json({ allowed_tabs: null, tab_permissions: null });
-      const allowed_tabs = Object.keys(perms).filter(k => (perms[k] ?? 0) >= 1);
+      const allowed_tabs = Object.keys(perms).filter(k => !k.startsWith('__') && (perms[k] ?? 0) >= 1);
       // A configured role with ZERO viewable tabs means the owner deliberately
       // restricted it to nothing — NOT "no restriction". Returning null here
       // made the frontend treat the role as unrestricted and show every menu
@@ -7581,12 +7589,19 @@ async function startServer() {
       // tabs leak in — the reported "unassigned modules still visible"). Built-in
       // roles keep their legacy grandfathering unchanged.
       const isCustomRole = !!roleKey && !_SYSTEM_ROLE_SET.has(roleKey);
+      // A seeded/authoritative built-in role (carries the '__complete__' sentinel)
+      // is treated exactly like a custom role: its tab set is COMPLETE, so the
+      // frontend must grandfather NOTHING (no ALWAYS_VISIBLE / legacy-tab leak).
+      const _authoritative = !!(perms as any)['__complete__'];
+      const isComplete = isCustomRole || _authoritative;
+      const cleanPerms: Record<string, number> = {};
+      for (const k of Object.keys(perms)) if (!k.startsWith('__')) cleanPerms[k] = perms[k] as number;
       const outTabs = allowed_tabs.length > 0
-        ? (isCustomRole ? [...allowed_tabs, '__perm_complete__'] : allowed_tabs)
+        ? (isComplete ? [...allowed_tabs, '__perm_complete__'] : allowed_tabs)
         : ['__perm_v3__'];
       res.json({
         allowed_tabs: outTabs,
-        tab_permissions: perms,
+        tab_permissions: cleanPerms,
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch permissions" });
@@ -7617,6 +7632,76 @@ async function startServer() {
       res.json({ roles: rows.map(r => ({ role: String(r.role), count: Number(r.count) || 0 })) });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to list roles in use" });
+    }
+  });
+
+  // Idempotent seed backfill — gives an EXISTING tenant's in-use BUILT-IN roles a
+  // real Staff-Access matrix, closing the fail-open leak (a built-in role with no
+  // matrix row resolves to null → sees/accesses EVERY tab: the reported "Waiter sees
+  // everything"). Seeds ONLY roles that currently resolve to null (no row, or an
+  // empty row); NEVER overwrites a configured matrix. The seeded matrix carries the
+  // '__complete__' sentinel so it is authoritative like a custom role — no
+  // newly-added-tab grandfather inject and no ALWAYS_VISIBLE leak, so a seeded WAITER
+  // sees EXACTLY its default operational tabs. The owner refines it afterwards in
+  // Settings → Staff Access. MANAGER / EVENTS_MANAGER are intentionally skipped
+  // (no default → stay broad, appropriate for a senior role). Supports ?dryRun=1.
+  app.post("/api/restaurant/:id/role-permissions/backfill-defaults", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    const tenantId = req.params.id;
+    const dryRun = String((req.query as any).dryRun ?? (req.body as any)?.dryRun ?? '') === '1'
+      || (req.query as any).dryRun === 'true' || (req.body as any)?.dryRun === true;
+    try {
+      const tdb = await getTenantDb(tenantId);
+      // Built-in roles actually assigned to a LOGIN staff member (same source as roles-in-use).
+      const rows: any[] = await tdb.query(
+        `SELECT UPPER(TRIM(role)) AS role, COUNT(*) AS count
+           FROM attendance_staff
+          WHERE employee_type = 'LOGIN' AND is_active = 1
+            AND role IS NOT NULL AND TRIM(role) <> ''
+          GROUP BY UPPER(TRIM(role))`
+      ).catch(() => []);
+      const seeded: any[] = [];
+      const skipped: any[] = [];
+      for (const r of rows) {
+        const role = String(r.role || '').toUpperCase();
+        const defaults = DEFAULT_ROLE_PERMS[role];
+        if (!defaults) {
+          skipped.push({ role, staff_count: Number(r.count) || 0,
+            reason: _SYSTEM_ROLE_SET.has(role) ? 'senior-role-stays-broad (no restrictive default)' : 'custom-or-unknown-role' });
+          continue;
+        }
+        // Only seed a role with NO usable matrix (fail-open). Never touch a configured one.
+        const existing = await getTabPermissionsForRole(tenantId, role);
+        if (existing !== null) {
+          skipped.push({ role, staff_count: Number(r.count) || 0, reason: 'already-configured',
+            tab_count: Object.keys(existing).filter(k => !k.startsWith('__')).length });
+          continue;
+        }
+        const seededPerms: Record<string, number> = { ...defaults, __complete__: 1 };
+        if (!dryRun) {
+          await centralDb.run(
+            `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
+             VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
+             ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
+            [tenantId, role, JSON.stringify(seededPerms)]
+          );
+        }
+        seeded.push({ role, staff_count: Number(r.count) || 0, granted_tabs: Object.keys(defaults) });
+      }
+      if (!dryRun && seeded.length > 0) invalidateTabCacheForTenant(tenantId);
+      // Resolve the final state per seeded role so the caller can VERIFY the outcome
+      // (exactly the granted tabs, no leaked modules).
+      const resolved: Record<string, string[]> = {};
+      if (!dryRun) {
+        for (const s of seeded) {
+          const p = await getTabPermissionsForRole(tenantId, s.role);
+          resolved[s.role] = p ? Object.keys(p).filter(k => !k.startsWith('__') && (p[k] ?? 0) >= 1) : [];
+        }
+      }
+      res.json({ ok: true, dry_run: dryRun, seeded, skipped, resolved });
+    } catch (err: any) {
+      console.error('[backfill-defaults] error:', err);
+      res.status(500).json({ error: err?.message || 'backfill failed' });
     }
   });
 
@@ -50568,7 +50653,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-single-source-declutter',
+    commit_marker: 'rbac-builtin-seed-backfill',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

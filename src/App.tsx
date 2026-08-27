@@ -57336,7 +57336,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
         initial={{ scale: 0.93, opacity: 0, y: 24 }} animate={{ scale: 1, opacity: 1, y: 0 }}
         exit={{ scale: 0.93, opacity: 0, y: 24 }}
         transition={{ type: 'spring', stiffness: 320, damping: 28 }}
-        className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl flex flex-col overflow-hidden"
+        className="bg-white rounded-3xl shadow-2xl w-full max-w-6xl flex flex-col overflow-hidden"
         style={{ maxHeight: '92vh' }}
       >
         {/* ── HEADER ── */}

@@ -4176,6 +4176,49 @@ async function testGstFieldEqualsPrint() {
   } catch (e) { skip(ID, 'GST field==print', `error: ${e?.message || e}`); }
 }
 
+// RBAC — the seed backfill closes the FAIL-OPEN leak: a built-in role (WAITER/CHEF/…)
+// with no restaurant_role_permissions row resolved to null → saw/accessed EVERY tab
+// ("Waiter sees everything"). After backfill each in-use built-in role has a real,
+// authoritative matrix (no finance/HR/settings leak, no newly-added-tab grandfather).
+async function testRbacBackfill() {
+  section('RBAC — built-in role seed backfill closes the fail-open leak');
+  const FORBIDDEN = ['ACCOUNTS_PNL','ACCOUNTS_CASHFLOW','ACCOUNTS_GST','ACCOUNTS_VENDOR_AGING',
+    'HR_PAYROLL','STAFF_PAYROLL','EXPENSE_JOURNAL','STAFF_ACCESS','DATA_MIGRATION','EVENTS_MIGRATION','PROCUREMENT'];
+  // Dry-run (non-mutating): the endpoint exists and no seeded default leaks a sensitive tab.
+  try {
+    const dr = await api('POST', `/api/restaurant/${restaurantId}/role-permissions/backfill-defaults?dryRun=1`, {});
+    if (dr.status === 404) { fail('TC-RBAC-BACKFILL', 'seed backfill endpoint present', 'endpoint 404 — not deployed'); }
+    else if (dr.status !== 200 || !dr.data?.ok) { skip('TC-RBAC-BACKFILL', 'seed backfill dry-run', `status ${dr.status}`); }
+    else {
+      const seeded = Array.isArray(dr.data.seeded) ? dr.data.seeded : [];
+      const skippedC = Array.isArray(dr.data.skipped) ? dr.data.skipped : [];
+      const leak = seeded.find(s => (s.granted_tabs || []).some(t => FORBIDDEN.includes(String(t).toUpperCase())));
+      if (leak) fail('TC-RBAC-BACKFILL', 'seeded defaults must not grant finance/HR/settings tabs', `role ${leak.role} → [${leak.granted_tabs}]`);
+      else pass('TC-RBAC-BACKFILL', `Dry-run OK — ${seeded.length} role(s) seedable, ${skippedC.length} skipped; no seeded default leaks a finance/HR/settings tab`);
+    }
+  } catch (e) { skip('TC-RBAC-BACKFILL', 'seed backfill dry-run', `error: ${e?.message || e}`); }
+
+  // Live: no in-use built-in operational role may be fail-open (perms_row MISSING).
+  try {
+    const d = await api('GET', `/api/restaurant/${restaurantId}/rbac-diagnostics`);
+    if (d.status !== 200) { skip('TC-RBAC-NO-FAILOPEN', 'no built-in role fail-open', `diagnostics ${d.status}`); return; }
+    const staff = Array.isArray(d.data?.login_staff) ? d.data.login_staff : [];
+    const OPS = ['WAITER','CHEF','CASHIER','FRONT_DESK','HOUSEKEEPING','MAINTENANCE','CONCIERGE','THERAPIST'];
+    const failOpen = staff.filter(s =>
+      OPS.includes(String(s.role || '').toUpperCase()) &&
+      Number(s.is_active) === 1 &&
+      String(s.perms_row || '').toUpperCase().startsWith('MISSING'));
+    if (failOpen.length > 0) {
+      fail('TC-RBAC-NO-FAILOPEN', 'in-use built-in operational roles must have a matrix (not fail-open)',
+        `fail-open: ${failOpen.map(s => `${s.name || s.login_id}(${s.role})`).join(', ')} — run POST /role-permissions/backfill-defaults`);
+    } else {
+      const opsStaff = staff.filter(s => OPS.includes(String(s.role || '').toUpperCase()) && Number(s.is_active) === 1);
+      if (opsStaff.length === 0) skip('TC-RBAC-NO-FAILOPEN', 'no built-in operational login staff', 'nothing to check');
+      else pass('TC-RBAC-NO-FAILOPEN', `${opsStaff.length} built-in operational login(s) all have a restrictive matrix (no fail-open)`);
+    }
+  } catch (e) { skip('TC-RBAC-NO-FAILOPEN', 'no built-in role fail-open', `error: ${e?.message || e}`); }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -4198,6 +4241,7 @@ async function main() {
   await testGstFieldEqualsPrint();
   await testTableClearFreshSession();
   await testGstCompliance();
+  await testRbacBackfill();
   await testHotel();
   await testProcurement();
   await testHR();
