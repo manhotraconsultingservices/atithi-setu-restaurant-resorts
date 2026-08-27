@@ -46940,11 +46940,13 @@ ${data.tenant.name}`;
     if (!row) { res.status(403).json({ error: 'invalid print agent token' }); return false; }
     return true;
   };
-  app.get("/api/restaurant/:id/kitchen-printers", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/kitchen-printers", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
     try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM kitchen_printers ORDER BY is_default DESC, name")); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.post("/api/restaurant/:id/kitchen-printers", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/kitchen-printers", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { name, station, conn_type, host, port, copies, is_default } = req.body || {};
@@ -46956,7 +46958,8 @@ ${data.tenant.name}`;
       res.status(201).json(await db.get("SELECT * FROM kitchen_printers WHERE id = ?", [pid]));
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.patch("/api/restaurant/:id/kitchen-printers/:pid", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/kitchen-printers/:pid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
     try {
       const db = await getTenantDb(req.params.id);
       const allowed = ['name', 'station', 'conn_type', 'host', 'port', 'copies', 'is_active', 'is_default'];
@@ -46969,15 +46972,18 @@ ${data.tenant.name}`;
       res.json(await db.get("SELECT * FROM kitchen_printers WHERE id = ?", [req.params.pid]));
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.delete("/api/restaurant/:id/kitchen-printers/:pid", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/kitchen-printers/:pid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
     try { const db = await getTenantDb(req.params.id); await db.run("DELETE FROM kitchen_printers WHERE id = ?", [req.params.pid]); res.json({ success: true }); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.get("/api/restaurant/:id/print-agent-token", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/print-agent-token", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
     try { const row: any = await centralDb.get("SELECT print_agent_token FROM restaurants WHERE id = ?", [req.params.id]); res.json({ token: row?.print_agent_token || null }); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.post("/api/restaurant/:id/print-agent-token/rotate", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/print-agent-token/rotate", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
     try { const tok = 'pat_' + randomBytes(18).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 24); await centralDb.run("UPDATE restaurants SET print_agent_token = ? WHERE id = ?", [tok, req.params.id]); res.json({ token: tok }); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -50336,7 +50342,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'thermal-kot-autoprint-pipeline',
+    commit_marker: 'thermal-kot-autoprint-fix',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
