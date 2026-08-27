@@ -3582,20 +3582,25 @@ async function testDineInTableFlow() {
                                 .reduce((s, o) => s + Number(o.total_amount || 0), 0);
       const aggregatesAll = Math.abs(billedTotal - (totalA + totalB)) < 0.01;   // 240 + 180 = 420
 
-      // Edit/remove a line item while generating the bill: drop the Naan line
-      // from order B via the invoice-edit endpoint → the recomputed total must
-      // fall by the removed line's value (₹80).
-      let editOk = false, newTotal = null;
+      // Edit the bill's items (manual-invoice style) via the SAME invoice-edit
+      // endpoint the Command Center item-editor uses: first REMOVE the Naan line
+      // (180→100), then ADD a new line (100→200). Totals must recompute down then
+      // up — this is the add/remove capability the bug asked for.
+      let editOk = false, removedTotal = null, addedTotal = null;
       if (orderIdB) {
-        const ed = await api('PATCH', `/api/restaurant/${restaurantId}/orders/${orderIdB}/invoice`,
+        const rem = await api('PATCH', `/api/restaurant/${restaurantId}/orders/${orderIdB}/invoice`,
           { items: [{ name: itemsB[0].name, price: 100, quantity: 1 }], discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: 0 });
-        newTotal = Number(ed.data?.total);
-        editOk = ed.status === 200 && Math.abs(newTotal - 100) < 0.01;   // was 180, Naan (₹80) removed → 100
+        removedTotal = Number(rem.data?.total);   // was 180 → 100 (Naan ₹80 removed)
+        const add = await api('PATCH', `/api/restaurant/${restaurantId}/orders/${orderIdB}/invoice`,
+          { items: [{ name: itemsB[0].name, price: 100, quantity: 1 }, { name: `E2E Added ${tag}`, price: 50, quantity: 2 }], discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: 0 });
+        addedTotal = Number(add.data?.total);     // 100 + (50×2) = 200
+        editOk = rem.status === 200 && Math.abs(removedTotal - 100) < 0.01
+              && add.status === 200 && Math.abs(addedTotal - 200) < 0.01;
       }
       if (rb.status === 200 && aggregatesAll && editOk) {
-        pass('TC-DINE-INVOICE-EDIT', `Bill aggregated both rounds (₹${billedTotal}) and removing a line item recomputed the order total ₹${totalB}→₹${newTotal}`);
+        pass('TC-DINE-INVOICE-EDIT', `Bill aggregated both rounds (₹${billedTotal}); removing a line dropped the order ₹${totalB}→₹${removedTotal}, adding a line raised it →₹${addedTotal}`);
       } else {
-        fail('TC-DINE-INVOICE-EDIT', 'Manager generates invoice + edits/removes an item', `request-bill=${rb.status} aggregatesAll=${aggregatesAll} (got ₹${billedTotal}, expected ₹${totalA + totalB}) editOk=${editOk} (newTotal=₹${newTotal}, expected ₹100)`);
+        fail('TC-DINE-INVOICE-EDIT', 'Manager generates invoice + edits/removes/adds an item', `request-bill=${rb.status} aggregatesAll=${aggregatesAll} (got ₹${billedTotal}, expected ₹${totalA + totalB}) editOk=${editOk} (removed=₹${removedTotal}→100, added=₹${addedTotal}→200)`);
       }
     }
   } catch (e) {
@@ -3776,6 +3781,38 @@ function checkContentGuardConsistency() {
   }
 }
 
+// ── Command Centre / waiter UX fixes (source guards, no server needed) ───────
+// Guards the three reported fixes so they can't silently regress:
+//  1. Tables natural-sort (N1 < N2 < N11, not N1 < N11 < N2).
+//  2. Waiter table board is paginated (100+ tables don't force endless scroll).
+//  3. Manager can add/remove items on a bill via the manual-invoice-style editor,
+//     in BOTH the Command Centre table bill and the single-order invoice.
+function checkBillingUxFixes() {
+  try {
+    const src = readFileSync(join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+    // Bug 1 — natural sort
+    const hasNaturalCompare = /function\s+naturalCompare\s*\(/.test(src);
+    const cmdCenterNatural  = /case 'name':\s*return d \* naturalCompare\(a\.name, b\.name\)/.test(src);
+    (hasNaturalCompare && cmdCenterNatural ? pass : fail)('TC-UX-TABLE-NATSORT',
+      'Tables sort naturally (N1 < N2 < N11)',
+      (hasNaturalCompare && cmdCenterNatural) ? '' : `naturalCompare=${hasNaturalCompare} cmdCenterUsesIt=${cmdCenterNatural}`);
+    // Bug 2 — waiter pagination
+    const hasPaged   = /const pagedTables =/.test(src) && /pagedTables\.map\(t =>/.test(src);
+    const hasPageBar = /<PaginationBar[^>]*totalPages=\{tableTotalPages\}/.test(src);
+    (hasPaged && hasPageBar ? pass : fail)('TC-UX-WAITER-PAGINATION',
+      'Waiter table board is paginated + searchable',
+      (hasPaged && hasPageBar) ? '' : `pagedTables=${hasPaged} paginationBar=${hasPageBar}`);
+    // Bug 3 — manual-invoice-style item editor, reused in both places
+    const editorDefined = /function\s+InvoiceItemsEditor\s*\(/.test(src);
+    const usages = (src.match(/<InvoiceItemsEditor\b/g) || []).length;
+    (editorDefined && usages >= 2 ? pass : fail)('TC-UX-INVOICE-ITEM-EDITOR',
+      'Add/remove items editor (manual-invoice style) wired into the table bill AND the invoice',
+      (editorDefined && usages >= 2) ? `${usages} usages` : `defined=${editorDefined} usages=${usages} (need ≥2)`);
+  } catch (e) {
+    skip('TC-UX-TABLE-NATSORT', 'Billing/waiter UX guards', `could not read src/App.tsx (${e?.message || e})`);
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -3786,6 +3823,7 @@ async function main() {
 
   checkOotbRoleRouting();
   checkContentGuardConsistency();
+  checkBillingUxFixes();
   await testAuth();
   await testRestaurant();
   await testDineInTableFlow();

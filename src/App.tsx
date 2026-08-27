@@ -420,6 +420,30 @@ function orderLocationLabel(tableNumber: any): string {
   return /^room\b/i.test(t) ? t : `Table ${t}`;
 }
 
+// Natural / alphanumeric compare so table names sort like a human expects:
+// N1 < N2 < N11 (not N1 < N11 < N2), N01 < N02 < N11, "A10" after "A9".
+// Splits each string into text/number chunks and compares number chunks
+// numerically, text chunks case-insensitively.
+function naturalCompare(a: any, b: any): number {
+  const sa = String(a ?? ''), sb = String(b ?? '');
+  const ra = sa.match(/(\d+|\D+)/g) || [];
+  const rb = sb.match(/(\d+|\D+)/g) || [];
+  const n = Math.min(ra.length, rb.length);
+  for (let i = 0; i < n; i++) {
+    const ca = ra[i], cb = rb[i];
+    const na = /^\d/.test(ca), nb = /^\d/.test(cb);
+    if (na && nb) {
+      const da = Number(ca), db = Number(cb);
+      if (da !== db) return da - db;
+    } else {
+      const cmp = ca.toLowerCase().localeCompare(cb.toLowerCase());
+      if (cmp !== 0) return cmp;
+    }
+  }
+  return ra.length - rb.length;
+}
+const byTableName = (a: any, b: any) => naturalCompare(a?.name, b?.name);
+
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '', inQuote = false;
@@ -12323,7 +12347,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (res.ok) {
         const contentType = res.headers.get("content-type");
         if (contentType && contentType.indexOf("application/json") !== -1) {
-          setTables(await res.json());
+          const _tbls = await res.json();
+          setTables(Array.isArray(_tbls) ? _tbls.slice().sort(byTableName) : _tbls);
         }
       }
     } catch (err) {
@@ -12668,7 +12693,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       ]);
       if (tablesRes.ok) {
         const data = await tablesRes.json();
-        setLiveTables(data);
+        setLiveTables(Array.isArray(data) ? data.slice().sort(byTableName) : data);
         setLiveLastRefresh(new Date());
       }
       if (ordersRes.ok) {
@@ -29855,7 +29880,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     rows.sort((a, b) => {
                       const d = monitorSort.dir === 'asc' ? 1 : -1;
                       switch (monitorSort.col) {
-                        case 'name':     return d * (a.name || '').localeCompare(b.name || '');
+                        case 'name':     return d * naturalCompare(a.name, b.name);
                         case 'status': {
                           const rank = (t: typeof a) =>
                             t.session_status === 'bill_requested' ? 0
@@ -36143,8 +36168,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               </div>
 
-              {/* Items Table */}
+              {/* Items — editable (manual-invoice style) in edit mode, read-only otherwise */}
               <div className="flex-1 overflow-y-auto px-8 py-4">
+                {invoiceMode === 'edit' ? (
+                  <InvoiceItemsEditor items={invoiceItems} onChange={setInvoiceItems} menu={menu} />
+                ) : (
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-[11px] uppercase tracking-widest text-[#9c8e85] border-b border-[#cc5a16]/10">
@@ -36192,46 +36220,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     ))}
                   </tbody>
                 </table>
-
-                {/* Add item row — edit mode only */}
-                {invoiceMode === 'edit' && (
-                  <div className="mt-4 pt-4 border-t border-dashed border-[#cc5a16]/20">
-                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Add Item</p>
-                    <div className="flex items-center gap-2">
-                      <input
-                        placeholder="Item name"
-                        value={addItemForm.name}
-                        onChange={e => setAddItemForm(p => ({ ...p, name: e.target.value }))}
-                        className="flex-1 bg-[#faf7f2] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
-                      />
-                      <input
-                        placeholder="₹ Price"
-                        type="number"
-                        min="0"
-                        value={addItemForm.price}
-                        onChange={e => setAddItemForm(p => ({ ...p, price: e.target.value }))}
-                        className="w-24 bg-[#faf7f2] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
-                      />
-                      <input
-                        placeholder="Qty"
-                        type="number"
-                        min="1"
-                        value={addItemForm.quantity}
-                        onChange={e => setAddItemForm(p => ({ ...p, quantity: e.target.value }))}
-                        className="w-16 bg-[#faf7f2] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
-                      />
-                      <button
-                        onClick={() => {
-                          if (!addItemForm.name.trim() || !addItemForm.price) return;
-                          setInvoiceItems(prev => [...prev, { name: addItemForm.name.trim(), price: Number(addItemForm.price), quantity: Math.max(1, Number(addItemForm.quantity) || 1) }]);
-                          setAddItemForm({ name: '', price: '', quantity: '1' });
-                        }}
-                        className="px-3 py-2 bg-[#cc5a16] text-white rounded-xl hover:bg-[#a84612] transition-all"
-                      >
-                        <Plus size={15} />
-                      </button>
-                    </div>
-                  </div>
                 )}
               </div>
 
@@ -56760,9 +56748,98 @@ function InventoryOnboardingWizard({ token, restaurantId, onClose, onComplete }:
   );
 }
 
+// ─── InvoiceItemsEditor — reusable manual-invoice-style line-item editor ───────
+// Same UX as the "New Invoice" (manual) screen: quick-add from the menu, add a
+// custom line, and an editable cart (qty −/+, price, remove). Emits the whole
+// item list via onChange. Item shape: { name, price, quantity, ...preserved }.
+// `newItemExtra` is merged into every NEW line (the table bill uses it to tag
+// which round a newly-added item belongs to).
+function InvoiceItemsEditor({ items, onChange, menu = [], newItemExtra = {} }: {
+  items: any[]; onChange: (items: any[]) => void; menu?: any[]; newItemExtra?: any;
+}) {
+  const [search, setSearch] = useState('');
+  const [openPicker, setOpenPicker] = useState(false);
+  const [draft, setDraft] = useState({ name: '', price: '', quantity: '1' });
+  const qtyOf = (it: any) => Number(it.quantity ?? it.qty ?? 1);
+
+  const addFromMenu = (m: any) => {
+    const price = Number(m.price) || 0;
+    const idx = items.findIndex(it => it.name === m.name && Number(it.price) === price);
+    if (idx >= 0) onChange(items.map((it, i) => i === idx ? { ...it, quantity: qtyOf(it) + 1 } : it));
+    else onChange([...items, { name: m.name, price, quantity: 1, ...newItemExtra }]);
+  };
+  const addCustom = () => {
+    const n = draft.name.trim(); const p = Math.max(0, Number(draft.price) || 0); const q = Math.max(1, Number(draft.quantity) || 1);
+    if (!n) return;
+    onChange([...items, { name: n, price: p, quantity: q, ...newItemExtra }]);
+    setDraft({ name: '', price: '', quantity: '1' });
+  };
+  const bump = (i: number, d: number) => { const cur = items[i]; if (!cur) return; const q = qtyOf(cur) + d; onChange(q <= 0 ? items.filter((_, j) => j !== i) : items.map((it, j) => j === i ? { ...it, quantity: q } : it)); };
+  const setPrice = (i: number, v: string) => onChange(items.map((it, j) => j === i ? { ...it, price: Math.max(0, Number(v) || 0) } : it));
+  const removeAt = (i: number) => onChange(items.filter((_, j) => j !== i));
+
+  const q = search.trim().toLowerCase();
+  const menuList = (Array.isArray(menu) ? menu : []).filter((m: any) => m?.name && (!q || String(m.name).toLowerCase().includes(q) || String(m.category || '').toLowerCase().includes(q))).slice(0, 40);
+  const subtotal = items.reduce((s, it) => s + Number(it.price || 0) * qtyOf(it), 0);
+  const inputCls = "border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20";
+
+  return (
+    <div className="space-y-2">
+      {items.length === 0 ? (
+        <p className="text-xs text-[#9c8e85] italic text-center py-3 bg-[#faf7f2] rounded-xl">No items — add from the menu or a custom line below.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((it, i) => (
+            <div key={i} className="flex items-center gap-2 bg-[#faf7f2] rounded-xl px-2.5 py-1.5">
+              <span className="flex-1 min-w-0 truncate text-sm font-medium text-[#1a1208]">{it.name || 'Item'}</span>
+              <div className="flex items-center gap-1 shrink-0">
+                <span className="text-[10px] text-[#9c8e85]">₹</span>
+                <input type="number" min="0" value={it.price ?? 0} onChange={e => setPrice(i, e.target.value)} className="w-16 border border-[#cc5a16]/15 rounded-md px-1.5 py-1 text-xs text-right outline-none focus:ring-2 ring-[#cc5a16]/20" />
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button type="button" onClick={() => bump(i, -1)} className="w-6 h-6 rounded-md bg-white border border-[#cc5a16]/20 text-[#cc5a16] font-bold leading-none">−</button>
+                <span className="w-6 text-center text-sm font-mono">{qtyOf(it)}</span>
+                <button type="button" onClick={() => bump(i, +1)} className="w-6 h-6 rounded-md bg-white border border-[#cc5a16]/20 text-[#cc5a16] font-bold leading-none">+</button>
+              </div>
+              <span className="w-16 text-right text-sm font-mono text-[#3d3128] shrink-0">₹{(Number(it.price || 0) * qtyOf(it)).toFixed(0)}</span>
+              <button type="button" onClick={() => removeAt(i)} className="shrink-0 w-6 h-6 rounded-md text-red-500 hover:bg-red-50 font-bold leading-none" title="Remove item">×</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        {Array.isArray(menu) && menu.length > 0 && (
+          <div className="relative">
+            <button type="button" onClick={() => setOpenPicker(v => !v)} className="px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white text-xs font-bold whitespace-nowrap">+ Menu item</button>
+            {openPicker && (
+              <div className="absolute z-30 mt-1 w-72 max-h-72 overflow-auto bg-white rounded-xl shadow-xl border border-[#cc5a16]/15 p-2 space-y-1">
+                <input autoFocus value={search} onChange={e => setSearch(e.target.value)} placeholder="Search menu…" className={inputCls + " w-full mb-1"} />
+                {menuList.length === 0 ? <p className="text-xs text-[#9c8e85] italic px-1 py-2">No menu items match.</p> :
+                  menuList.map((m: any, k: number) => (
+                    <button type="button" key={k} onClick={() => addFromMenu(m)} className="w-full flex justify-between items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-[#faf7f2] text-left">
+                      <span className="text-sm text-[#1a1208] truncate">{m.name}</span>
+                      <span className="text-xs font-mono text-[#6b5d52] shrink-0">₹{Number(m.price || 0).toFixed(0)}</span>
+                    </button>
+                  ))}
+              </div>
+            )}
+          </div>
+        )}
+        <input value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder="Custom item" className={inputCls + " flex-1 min-w-[110px]"} />
+        <input type="number" min="0" value={draft.price} onChange={e => setDraft({ ...draft, price: e.target.value })} placeholder="₹" className={inputCls + " w-20"} />
+        <input type="number" min="1" value={draft.quantity} onChange={e => setDraft({ ...draft, quantity: e.target.value })} placeholder="Qty" className={inputCls + " w-16"} />
+        <button type="button" onClick={addCustom} className="px-3 py-1.5 rounded-lg bg-[#0d0a07]/5 text-[#3d3128] text-xs font-bold border border-[#cc5a16]/15">Add</button>
+      </div>
+      <div className="flex justify-end text-xs text-[#6b5d52] pt-1"><span className="font-mono">Items subtotal: ₹{subtotal.toFixed(2)}</span></div>
+    </div>
+  );
+}
+
 // ─── PostpaidInvoiceModal — consolidated invoice for a full table session ──────
 // Combines all order rounds into one invoice with editable adjustments.
-// Owner can: review rounds · edit discount/service charge/GST · print · close table.
+// Owner can: review rounds · edit items (add/remove) · edit discount/service
+// charge/GST · print · close table.
 function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   restaurantId: string; token: string; table: { id: string; name: string }; onClose: () => void;
 }) {
@@ -56787,6 +56864,14 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const [confirmClose, setConfirmClose] = useState(false);
   const [payMethod, setPayMethod]     = useState<'CASH' | 'CARD' | 'UPI' | 'CHARGE_TO_ROOM'>('CASH');
   const [expanded, setExpanded]       = useState<Record<number, boolean>>({});
+
+  // Item editing (add/remove lines on the table bill, manual-invoice style).
+  // editItems is a FLAT consolidated list across active rounds; each line keeps
+  // an _orderId so it persists back to the right round on save.
+  const [editingItems, setEditingItems] = useState(false);
+  const [editItems, setEditItems]        = useState<any[]>([]);
+  const [savingItems, setSavingItems]    = useState(false);
+  const [menuItems, setMenuItems]        = useState<any[]>([]);
 
   // Charge-to-Room: a walk-in diner who is a checked-in hotel guest can push the
   // whole bill onto their room folio instead of paying now — settled at check-out.
@@ -56838,6 +56923,24 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       })
       .catch(() => { setFetchErr('Failed to load session data'); setLoading(false); });
   }, [table.id]);
+
+  // Reload just the session + orders (after an item edit) without resetting the
+  // adjustment inputs the manager may have already touched.
+  const reloadOrders = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/tables/${table.id}/active-session`, { headers: { Authorization: `Bearer ${token}` } });
+      const d = await r.json();
+      if (d?.session) { setSession(d.session); setOrders(d.session.orders || []); }
+    } catch { /* ignore */ }
+  };
+
+  // Menu — powers the item-editor's quick-add tiles.
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/menu`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : []))
+      .then(d => setMenuItems(Array.isArray(d) ? d.filter((m: any) => m?.available !== false) : []))
+      .catch(() => setMenuItems([]));
+  }, [restaurantId, token]);
 
   // Load checked-in rooms once. Empty for restaurant-only tenants (the endpoint
   // returns []), so the "Charge to Room" option only appears at hotel properties.
@@ -56999,6 +57102,59 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     try { await persistAdjustments(); setSaveDone(true); setTimeout(() => setSaveDone(false), 2500); }
     catch { /* silent */ }
     finally { setSaving(false); }
+  };
+
+  // ── Item editing (add/remove lines on the bill) ─────────────────────────────
+  // Enter edit mode: flatten every active round's items into one editable list,
+  // tagging each line with the round (_orderId) it came from so we can save it
+  // back to the right order. New lines added in the editor inherit the first
+  // active round's id (see newItemExtra below).
+  const enterEditItems = () => {
+    const flat = activeOrders.flatMap((o: any) =>
+      (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
+        name: it.name, price: Number(it.price || 0), quantity: Number(it.quantity ?? it.qty ?? 1), _orderId: o.id,
+      }))
+    );
+    setEditItems(flat);
+    setEditingItems(true);
+  };
+
+  const saveItems = async () => {
+    if (savingItems) return;
+    setSavingItems(true);
+    const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+    const fallbackId = activeOrders[0]?.id;
+    try {
+      // Group the edited lines back by their owning round; untagged / new lines
+      // fall into the first active round.
+      const groups: Record<string, any[]> = {};
+      for (const o of activeOrders) groups[o.id] = [];
+      for (const it of editItems) {
+        const oid = (it._orderId && groups[it._orderId]) ? it._orderId : fallbackId;
+        if (!oid) continue;
+        (groups[oid] = groups[oid] || []).push({ name: it.name, price: Number(it.price || 0), quantity: Number(it.quantity ?? it.qty ?? 1) });
+      }
+      for (const o of activeOrders) {
+        const g = (groups[o.id] || []).filter(x => x.name && x.quantity > 0);
+        if (g.length === 0) {
+          // Every line of this round was removed → cancel the whole round.
+          await fetch(`/api/orders/${o.id}`, { method: 'PATCH', headers: H, body: JSON.stringify({ status: 'CANCELLED' }) });
+        } else {
+          // Persist items only (session-level discount/svc/GST stay on the session).
+          await fetch(`/api/restaurant/${restaurantId}/orders/${o.id}/invoice`, {
+            method: 'PATCH', headers: H,
+            body: JSON.stringify({ items: g, discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: 0 }),
+          });
+        }
+      }
+      await reloadOrders();
+      setEditingItems(false);
+      toast.success('Items updated');
+    } catch {
+      toast.error('Failed to update items');
+    } finally {
+      setSavingItems(false);
+    }
   };
 
   const handlePrint = () => {
@@ -57231,16 +57387,34 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
 
               {/* ── ORDER ROUNDS ── */}
               <section>
-                <div className="flex items-center gap-2 mb-3">
-                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">
-                    Order Rounds ({totalRounds} active{cancelledCnt > 0 ? `, ${cancelledCnt} cancelled` : ''})
-                  </p>
-                  {cancelledCnt > 0 && (
-                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-600 uppercase tracking-widest">
-                      {cancelledCnt} excluded from bill
-                    </span>
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <div className="flex items-center gap-2">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                      Order Rounds ({totalRounds} active{cancelledCnt > 0 ? `, ${cancelledCnt} cancelled` : ''})
+                    </p>
+                    {cancelledCnt > 0 && (
+                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-600 uppercase tracking-widest">
+                        {cancelledCnt} excluded from bill
+                      </span>
+                    )}
+                  </div>
+                  {!editingItems && activeOrders.length > 0 && session?.status !== 'closed' && (
+                    <button type="button" onClick={enterEditItems}
+                      className="px-3 py-1.5 rounded-lg bg-[#cc5a16]/10 text-[#cc5a16] text-[11px] font-bold uppercase tracking-widest hover:bg-[#cc5a16]/20 transition-all shrink-0">
+                      ✏️ Edit items
+                    </button>
                   )}
                 </div>
+                {editingItems ? (
+                  <div className="rounded-2xl border border-[#cc5a16]/20 p-3 space-y-3">
+                    <p className="text-[11px] text-[#9c8e85]">Add or remove items on this table's bill. New items are added to Round {activeOrders[0]?.round_number || 1}. Click <b>Save items</b> to update the bill.</p>
+                    <InvoiceItemsEditor items={editItems} onChange={setEditItems} menu={menuItems} newItemExtra={{ _orderId: activeOrders[0]?.id }} />
+                    <div className="flex gap-2 justify-end pt-1">
+                      <button type="button" onClick={() => setEditingItems(false)} disabled={savingItems} className="px-4 py-2 rounded-xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52] disabled:opacity-60">Cancel</button>
+                      <button type="button" onClick={saveItems} disabled={savingItems} className="px-4 py-2 rounded-xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">{savingItems ? 'Saving…' : 'Save items'}</button>
+                    </div>
+                  </div>
+                ) : (
                 <div className="space-y-2.5">
                   {orders.map((order: any, idx: number) => {
                     const isCancelled = order.status === 'CANCELLED';
@@ -57316,6 +57490,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                     );
                   })}
                 </div>
+                )}
               </section>
 
               {/* ── ADJUSTMENTS PANEL ── */}
@@ -57766,6 +57941,11 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   // Shared-floor mode: when ON, this waiter sees ALL tables + all calls (any
   // waiter can serve any table), not only tables assigned to them.
   const [sharedFloor, setSharedFloor] = useState(false);
+  // Table board search + pagination — with shared-floor ON a property can have
+  // 100+ tables; a filter box + pages keep the board usable (no endless scroll).
+  const [tableSearch, setTableSearch] = useState('');
+  const [tablePage, setTablePage] = useState(1);
+  const TABLES_PER_PAGE = 12;
   const { lastMessage: waiterMsg } = useSocket('WAITER', restaurantId);
 
   // Fetch restaurant settings (to honor alerts_enabled + shared-floor toggles)
@@ -57866,8 +58046,18 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
 
   const readyOrders = orders.filter(o => o.status === 'READY');
   // Shared-floor ON → every waiter sees ALL tables (any waiter can serve any
-  // table). OFF → only tables assigned to me (legacy behaviour).
-  const myTables = sharedFloor ? liveTables : (myId ? liveTables.filter(t => t.assigned_waiter_id === myId) : []);
+  // table). OFF → only tables assigned to me (legacy behaviour). Natural-sorted
+  // so N1 < N2 < N11 (not N1 < N11 < N2).
+  const myTables = (sharedFloor ? liveTables : (myId ? liveTables.filter(t => t.assigned_waiter_id === myId) : []))
+    .slice().sort(byTableName);
+  // Search + pagination over the sorted board.
+  const tableQuery = tableSearch.trim().toLowerCase();
+  const filteredTables = tableQuery
+    ? myTables.filter(t => String(t.name || '').toLowerCase().includes(tableQuery))
+    : myTables;
+  const tableTotalPages = Math.max(1, Math.ceil(filteredTables.length / TABLES_PER_PAGE));
+  const tablePageSafe = Math.min(tablePage, tableTotalPages);
+  const pagedTables = filteredTables.slice((tablePageSafe - 1) * TABLES_PER_PAGE, tablePageSafe * TABLES_PER_PAGE);
   // Shared-floor ON → show every waiter-call. OFF → calls for my assigned tables
   // OR calls explicitly assigned to me.
   const myTableNames = myTables.map(t => t.name);
@@ -58135,15 +58325,30 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
               </div>
             </div>
 
-            <div className="space-y-6">
-              <h3 className="text-xl font-bold font-serif">{sharedFloor ? 'All Tables' : 'My Tables'}</h3>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <h3 className="text-xl font-bold font-serif">{sharedFloor ? 'All Tables' : 'My Tables'}{filteredTables.length > 0 ? <span className="ml-2 text-sm font-normal text-[#9c8e85]">({filteredTables.length})</span> : null}</h3>
+                {myTables.length > TABLES_PER_PAGE && (
+                  <input
+                    value={tableSearch}
+                    onChange={e => { setTableSearch(e.target.value); setTablePage(1); }}
+                    placeholder="Search table…"
+                    className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 bg-[#faf7f2] text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 w-full sm:w-52"
+                  />
+                )}
+              </div>
               {myTables.length === 0 ? (
                 <div className="p-8 text-center bg-white rounded-3xl border border-dashed border-[#cc5a16]/20">
                   <p className="text-[#9c8e85] text-sm italic">{sharedFloor ? 'No tables configured yet.' : 'No tables assigned to you yet.'}</p>
                 </div>
+              ) : filteredTables.length === 0 ? (
+                <div className="p-8 text-center bg-white rounded-3xl border border-dashed border-[#cc5a16]/20">
+                  <p className="text-[#9c8e85] text-sm italic">No table matches “{tableSearch}”.</p>
+                </div>
               ) : (
+                <>
                 <div className="space-y-3">
-                  {myTables.map(t => {
+                  {pagedTables.map(t => {
                     const isOccupied = t.status === 'OCCUPIED';
                     const isUnavail  = t.status === 'NOT_AVAILABLE';
                     const elapsedMs  = t.session_opened_at ? liveNow - new Date(t.session_opened_at).getTime() : 0;
@@ -58210,6 +58415,10 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
                     );
                   })}
                 </div>
+                {filteredTables.length > TABLES_PER_PAGE && (
+                  <PaginationBar page={tablePageSafe} totalPages={tableTotalPages} setPage={setTablePage} total={filteredTables.length} pageSize={TABLES_PER_PAGE} />
+                )}
+                </>
               )}
             </div>
           </div>
