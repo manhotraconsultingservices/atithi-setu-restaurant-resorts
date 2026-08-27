@@ -3600,10 +3600,12 @@ async function testDineInTableFlow() {
       if (orderIdB) {
         const rem = await api('PATCH', `/api/restaurant/${restaurantId}/orders/${orderIdB}/invoice`,
           { items: [{ name: itemsB[0].name, price: 100, quantity: 1 }], discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: 0 });
-        removedTotal = Number(rem.data?.total);   // was 180 → 100 (Naan ₹80 removed)
+        // Assert the item SUBTOTAL (the endpoint's `total` now correctly includes
+        // the tenant's configured taxes — GST + ST — on the edited items).
+        removedTotal = Number(rem.data?.subtotal);   // was 180 → 100 (Naan ₹80 removed)
         const add = await api('PATCH', `/api/restaurant/${restaurantId}/orders/${orderIdB}/invoice`,
           { items: [{ name: itemsB[0].name, price: 100, quantity: 1 }, { name: `E2E Added ${tag}`, price: 50, quantity: 2 }], discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: 0 });
-        addedTotal = Number(add.data?.total);     // 100 + (50×2) = 200
+        addedTotal = Number(add.data?.subtotal);     // 100 + (50×2) = 200
         editOk = rem.status === 200 && Math.abs(removedTotal - 100) < 0.01
               && add.status === 200 && Math.abs(addedTotal - 200) < 0.01;
       }
