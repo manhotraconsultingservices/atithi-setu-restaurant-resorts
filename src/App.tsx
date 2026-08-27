@@ -36565,6 +36565,38 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 </div>
 
+                {/* ── PINNED ORDER ITEMS — always visible under the header so staff
+                    never overlook what was ordered (the editable cart stays in the
+                    rail; this is a read-only summary, no functional change). ── */}
+                {(() => {
+                  const _items: any[] = isSess
+                    ? (inv.rounds || []).flatMap((r: any) => (Array.isArray(r.items) ? r.items : []))
+                    : (invEdit.items || []);
+                  const _rows = _items.filter((it: any) => String(it?.name || '').trim());
+                  if (!_rows.length) return null;
+                  const _qty = _rows.reduce((s: number, it: any) => s + Number(it.quantity ?? it.qty ?? 1), 0);
+                  const _sub = _rows.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity ?? it.qty ?? 1), 0);
+                  return (
+                    <div className="shrink-0 border-b border-[#cc5a16]/10 bg-[#faf7f2]/60 px-4 sm:px-6 py-3">
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">🧾 Order Items <span className="text-[#9c8e85] normal-case tracking-normal font-normal">· {_qty} item{_qty !== 1 ? 's' : ''}</span></p>
+                        <p className="text-[11px] font-bold text-[#3d3128]">Subtotal ₹{_sub.toFixed(2)}</p>
+                      </div>
+                      <div className="max-h-[24vh] overflow-y-auto rounded-xl bg-white border border-[#cc5a16]/10 divide-y divide-[#cc5a16]/5">
+                        {_rows.map((it: any, i: number) => (
+                          <div key={i} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
+                            <span className="text-[#1a1208] font-medium truncate">{it.name}</span>
+                            <span className="flex items-center gap-3 shrink-0">
+                              <span className="text-[#9c8e85] font-mono text-xs">×{it.quantity ?? it.qty ?? 1}</span>
+                              <span className="font-mono text-[#3d3128] w-20 text-right">₹{(Number(it.price || 0) * Number(it.quantity ?? it.qty ?? 1)).toFixed(2)}</span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Body — ORDER = 3-col tile UI; SESSION = read-only items list */}
                 <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
 
@@ -37412,6 +37444,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <X size={16} />
                   </button>
                 </div>
+
+                {/* ── PINNED ORDER ITEMS — always visible under the header so the
+                    items being billed stay in view even on mobile (the editable cart
+                    remains in the right rail; this is a read-only summary). ── */}
+                {(() => {
+                  const _rows = (odInvoiceItems || []).filter((it: any) => String(it?.name || '').trim());
+                  if (!_rows.length) return null;
+                  const _qty = _rows.reduce((s: number, it: any) => s + Number(it.qty ?? it.quantity ?? 1), 0);
+                  const _sub = _rows.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.qty ?? it.quantity ?? 1), 0);
+                  return (
+                    <div className="shrink-0 border-b border-[#cc5a16]/10 bg-[#faf7f2]/60 px-4 sm:px-6 py-3">
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">🧾 Order Items <span className="text-[#9c8e85] normal-case tracking-normal font-normal">· {_qty} item{_qty !== 1 ? 's' : ''}</span></p>
+                        <p className="text-[11px] font-bold text-[#3d3128]">Subtotal ₹{_sub.toFixed(2)}</p>
+                      </div>
+                      <div className="max-h-[24vh] overflow-y-auto rounded-xl bg-white border border-[#cc5a16]/10 divide-y divide-[#cc5a16]/5">
+                        {_rows.map((it: any, i: number) => (
+                          <div key={i} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
+                            <span className="text-[#1a1208] font-medium truncate">{it.name}</span>
+                            <span className="flex items-center gap-3 shrink-0">
+                              <span className="text-[#9c8e85] font-mono text-xs">×{it.qty ?? it.quantity ?? 1}</span>
+                              <span className="font-mono text-[#3d3128] w-20 text-right">₹{(Number(it.price || 0) * Number(it.qty ?? it.quantity ?? 1)).toFixed(2)}</span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* ─── Body: 3-col on desktop, stacked on mobile ──────── */}
                 <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
@@ -57550,12 +57611,15 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
             </div>
           ) : (
             <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
-              {/* LEFT — quick-add menu tiles + order rounds (matches Manual Invoice) */}
-              <div className="flex-1 px-6 py-5 space-y-6 lg:overflow-y-auto lg:min-h-0">
+              {/* LEFT — order rounds (always at top) + quick-add menu tiles below.
+                  flex `order` keeps the ORDERED ITEMS pinned first so staff always
+                  see what was ordered without scrolling; the add-items palette sits
+                  underneath. */}
+              <div className="flex-1 px-6 py-5 flex flex-col gap-6 lg:overflow-y-auto lg:min-h-0">
 
-              {/* ── QUICK-ADD MENU TILES (tap a dish to add — like Manual Invoice) ── */}
+              {/* ── QUICK-ADD MENU TILES (tap a dish to add — rendered BELOW the order list) ── */}
               {session?.status !== 'closed' && menuItems.length > 0 && (
-                <section>
+                <section className="order-2">
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Add Items</p>
                     <span className="text-[10px] text-[#9c8e85]">Tap a dish to add it to the bill</span>
