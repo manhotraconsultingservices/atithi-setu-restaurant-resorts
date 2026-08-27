@@ -27841,10 +27841,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
 
           {/* Capability section sub-nav — only shows tabs for modules this
-              tenant actually has. Shared "Business & Billing" is always first. */}
+              tenant actually has. The shared business/billing section is always
+              first (labelled "Restaurant" for the restaurant-facing context). */}
           {(() => {
             const secs = ([
-              { id: 'BUSINESS', label: 'Business & Billing', on: true },
+              { id: 'BUSINESS', label: 'Restaurant', on: true },
               { id: 'HOTEL', label: 'Hotel', on: isHotelEnabled },
               { id: 'SPA', label: 'Spa & Wellness', on: isSpaEnabled },
               { id: 'EVENTS', label: 'Events & Convention', on: isEventsEnabled },
@@ -36311,27 +36312,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         placeholder="0"
                       />
                     </div>
-                    {/* GST % */}
-                    <div className={cn("rounded-2xl px-4 py-3 transition-colors", invoiceApplyGst ? "bg-green-50" : "bg-[#faf7f2]")}>
-                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] block mb-1">GST (%)</label>
-                      <input
-                        type="number" min="0" max="100" step="0.1"
-                        value={invoiceGstPercent}
-                        onChange={e => setInvoiceGstPercent(Math.max(0, Math.min(100, Number(e.target.value))))}
-                        disabled={!invoiceApplyGst}
-                        className="w-full bg-transparent text-sm font-mono font-bold outline-none disabled:opacity-40"
-                        placeholder="5"
-                      />
-                    </div>
-                    {/* Apply GST toggle */}
-                    <div className="bg-[#faf7f2] rounded-2xl px-4 py-3 flex items-center justify-between">
-                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Apply GST</label>
-                      <button
-                        onClick={() => setInvoiceApplyGst(p => !p)}
-                        className={cn("relative w-11 h-6 rounded-full transition-colors duration-200 shrink-0", invoiceApplyGst ? "bg-green-500" : "bg-[#0d0a07]/20")}
-                      >
-                        <span className={cn("absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all duration-200", invoiceApplyGst ? "left-6" : "left-1")} />
-                      </button>
+                    {/* GST is NON-EDITABLE — always applied from Settings → Tax Lines. */}
+                    <div className="bg-[#faf7f2] rounded-2xl px-4 py-3 col-span-2">
+                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] block mb-1">GST / Taxes</label>
+                      <p className="text-xs text-[#6b5d52]">Applied automatically from Settings → Tax Lines (not manually edited).</p>
                     </div>
                   </div>
                 )}
@@ -36788,21 +36772,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </div>
                           <div>
                             <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
-                              title="GST rate applied on the subtotal after service charge.">
-                              GST %
+                              title="GST always applies from Settings → Tax Lines. It cannot be edited on an invoice.">
+                              GST / Taxes
                             </label>
-                            <div className="flex gap-1">
-                              <input type="number" min="0" value={invEdit.gstPct}
-                                onChange={e => setInvEdit(p => ({ ...p, gstPct: Number(e.target.value) || 0 }))}
-                                className="min-w-0 flex-1 border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                              <button
-                                onClick={() => setInvEdit(p => ({ ...p, applyGst: !p.applyGst }))}
-                                className={cn(
-                                  "shrink-0 px-2 rounded-lg text-[10px] font-bold transition-all",
-                                  invEdit.applyGst ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]"
-                                )}>
-                                {invEdit.applyGst ? 'ON' : 'OFF'}
-                              </button>
+                            <div className="border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 text-[11px] text-[#6b5d52] bg-[#faf7f2]">
+                              Auto from settings
                             </div>
                           </div>
                         </div>
@@ -57667,35 +57641,9 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                     </div>
                   )}
 
-                  {/* GST toggle + % */}
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => setApplyGst(!applyGst)}
-                        className={cn(
-                          "relative inline-flex h-5 w-9 rounded-full transition-colors",
-                          applyGst ? 'bg-[#cc5a16]' : 'bg-[#0d0a07]/15'
-                        )}
-                      >
-                        <span className={cn(
-                          "inline-block h-4 w-4 rounded-full bg-white shadow transition-transform mt-0.5",
-                          applyGst ? 'translate-x-4' : 'translate-x-0.5'
-                        )} />
-                      </button>
-                      <label className="text-sm text-[#3d3128] cursor-pointer" onClick={() => setApplyGst(!applyGst)}>
-                        Apply GST (%)
-                      </label>
-                    </div>
-                    <input
-                      type="number" min="0" max="28" step="0.5"
-                      value={gstPct || ''}
-                      onChange={e => setGstPct(Math.max(0, Math.min(28, Number(e.target.value))))}
-                      disabled={!applyGst}
-                      placeholder="5"
-                      className="w-32 text-right bg-[#faf7f2] border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 disabled:opacity-30 disabled:cursor-not-allowed"
-                    />
-                  </div>
+                  {/* GST is NON-EDITABLE — it always applies from Settings → Tax
+                      Lines (no manual GST field). The tax breakdown below shows the
+                      exact rates + amounts the server computed from settings. */}
                   {/* M-2 — when the server preview returned multiple tax lines (e.g. GST + Cess),
                        render each as its own row so the customer sees the real breakdown
                        instead of a single averaged "GST @ X%". Single-rate tenants

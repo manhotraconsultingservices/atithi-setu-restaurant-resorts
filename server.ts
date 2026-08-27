@@ -13103,9 +13103,16 @@ async function startServer() {
 
     // ── Tax lines from tax_config ──────────────────────────────────────
     const tenantRow: any = await centralDb.get(
-      "SELECT country, tax_template_id FROM restaurants WHERE id = ?",
+      "SELECT country, tax_template_id, is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
       [opts.tenantId]
     );
+    // GST is NON-EDITABLE — it ALWAYS derives from the tenant's settings, never
+    // from a client-sent value. tax_config rows (multi-tax) are the primary
+    // source; for a legacy single-GST tenant we fall back to the settings
+    // gst_percentage + is_gst_enabled below. The opts.legacyGstFallback the
+    // callers pass is ignored for the rate/on-off (kept only for type compat).
+    const settingsGstEnabled = Number(tenantRow?.is_gst_enabled) === 1;
+    const settingsGstPct = Math.max(0, Number(tenantRow?.gst_percentage || 0));
     const configs = await _loadTaxConfig(opts.tenantId, tenantRow?.tax_template_id || 'IN_GST');
     // Phase H3 — filter out service-charge rows from tax_config so they
     // never apply as taxes. Service charge is handled via the dedicated
@@ -13124,7 +13131,7 @@ async function startServer() {
     // actually has such rooms; other configured rates and non-hotel tenants are untouched.
     // Only pay for the room-tariff probe when there is a 5% line that could be bumped.
     const has5pct = activeConfigs.some(c => Number(c.rate_percent) === 5) ||
-      !!(opts.legacyGstFallback && opts.legacyGstFallback.apply_gst && Number(opts.legacyGstFallback.gst_percent) === 5);
+      (settingsGstEnabled && settingsGstPct === 5);
     let specifiedPremises = false;
     if (has5pct) {
       try {
@@ -13149,11 +13156,11 @@ async function startServer() {
       });
       taxLines = computed.lines;
       totalTax = computed.total;
-    } else if (opts.legacyGstFallback && opts.legacyGstFallback.apply_gst &&
-               opts.legacyGstFallback.gst_percent > 0) {
-      // No tax_config rows configured → honour the legacy single GST input
-      // (bumped to 18% for specified premises, mirroring the folio path).
-      const rate = fnb18RateForSpecifiedPremises(opts.legacyGstFallback.gst_percent, specifiedPremises);
+    } else if (settingsGstEnabled && settingsGstPct > 0) {
+      // No tax_config rows → apply the tenant's SETTINGS single GST (always on
+      // when enabled; bumped to 18% for specified premises). The client-sent GST
+      // is ignored — GST is non-editable and always comes from settings.
+      const rate = fnb18RateForSpecifiedPremises(settingsGstPct, specifiedPremises);
       const amount = Math.round((taxableBase * rate / 100) * 100) / 100;
       if (amount > 0) {
         taxLines = [{ id: 'GST', label: 'GST', rate, amount }];
@@ -50510,7 +50517,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-multitax-total-consistent',
+    commit_marker: 'gst-noneditable-from-settings',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

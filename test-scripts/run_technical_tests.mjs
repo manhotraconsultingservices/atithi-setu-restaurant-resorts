@@ -3603,10 +3603,17 @@ async function testDineInTableFlow() {
         // Assert the item SUBTOTAL (the endpoint's `total` now correctly includes
         // the tenant's configured taxes — GST + ST — on the edited items).
         removedTotal = Number(rem.data?.subtotal);   // was 180 → 100 (Naan ₹80 removed)
+        // GST is NON-EDITABLE: the PATCH sent gst_percent:0 / apply_gst:0, yet the
+        // grand total must still carry the tenant's SETTINGS taxes (total > subtotal
+        // when GST is enabled) — the client value is ignored.
+        const remGrand = Number(rem.data?.total);
+        const rest2 = await api('GET', `/api/restaurant/${restaurantId}`);
+        const gstOn = rest2.data?.is_gst_enabled === 1 || rest2.data?.is_gst_enabled === true;
+        const settingsTaxApplied = !gstOn || remGrand > removedTotal + 0.01;
         const add = await api('PATCH', `/api/restaurant/${restaurantId}/orders/${orderIdB}/invoice`,
           { items: [{ name: itemsB[0].name, price: 100, quantity: 1 }, { name: `E2E Added ${tag}`, price: 50, quantity: 2 }], discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: 0 });
         addedTotal = Number(add.data?.subtotal);     // 100 + (50×2) = 200
-        editOk = rem.status === 200 && Math.abs(removedTotal - 100) < 0.01
+        editOk = rem.status === 200 && Math.abs(removedTotal - 100) < 0.01 && settingsTaxApplied
               && add.status === 200 && Math.abs(addedTotal - 200) < 0.01;
       }
       if (rb.status === 200 && aggregatesAll && editOk) {
@@ -3846,6 +3853,12 @@ function checkBillingUxFixes() {
     (paidHelper && noBareClosedPaid ? pass : fail)('TC-UX-INVOICE-PAID-SIGNAL',
       'Cleared/unsettled table bill is NOT auto-marked Paid (paid = settled payment, not just closed)',
       (paidHelper && noBareClosedPaid) ? '' : `helper=${paidHelper} noBareClosedPaid=${noBareClosedPaid}`);
+    // GST non-editable — the manual "Apply GST" toggles on the table-bill + single
+    // -order invoice modals are removed (GST always applies from settings).
+    const noApplyGstToggle = !/setInvoiceApplyGst\(p => !p\)/.test(src) && !/onClick=\{\(\) => setApplyGst\(!applyGst\)\}/.test(src);
+    (noApplyGstToggle ? pass : fail)('TC-UX-INVOICE-GST-NONEDITABLE',
+      'No manual Apply-GST toggle on the restaurant table-bill / single-order invoices (GST is settings-only)',
+      noApplyGstToggle ? '' : 'an editable Apply GST toggle still exists on a restaurant invoice modal');
   } catch (e) {
     skip('TC-UX-TABLE-NATSORT', 'Billing/waiter UX guards', `could not read src/App.tsx (${e?.message || e})`);
   }
