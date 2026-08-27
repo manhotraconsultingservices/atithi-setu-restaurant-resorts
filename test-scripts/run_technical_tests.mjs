@@ -3832,6 +3832,11 @@ function checkBillingUxFixes() {
     (editorDefined && usages >= 2 ? pass : fail)('TC-UX-INVOICE-ITEM-EDITOR',
       'Add/remove items editor (manual-invoice style) wired into the table bill AND the invoice',
       (editorDefined && usages >= 2) ? `${usages} usages` : `defined=${editorDefined} usages=${usages} (need ≥2)`);
+    // Phantom-GST guard — a ₹0-subtotal invoice must not print GST from a stale snapshot.
+    const gstGuard = /const gstAmt = taxable <= 0/.test(src);
+    (gstGuard ? pass : fail)('TC-UX-INVOICE-PHANTOM-GST',
+      'Printed bill shows no GST when the subtotal is ₹0 (no stale-snapshot phantom GST/TOTAL)',
+      gstGuard ? '' : 'the taxable<=0 → GST 0 guard is missing from buildInvoiceHTML');
   } catch (e) {
     skip('TC-UX-TABLE-NATSORT', 'Billing/waiter UX guards', `could not read src/App.tsx (${e?.message || e})`);
   }
@@ -3968,6 +3973,13 @@ async function testTableClearFreshSession() {
     const free = await api('PATCH', `/api/restaurant/${restaurantId}/tables/${table.id}/status`, { status: 'AVAILABLE' });
     const asMid = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
     const sessionEnded = !asMid.data?.session;   // old session must be gone
+    // The cleared-but-unsettled bill must survive as a DRAFT invoice (not lost).
+    const invs = await api('GET', `/api/restaurant/${restaurantId}/invoices`);
+    const g1Inv = (Array.isArray(invs.data) ? invs.data : []).find(iv =>
+      Array.isArray(iv.order_ids) ? iv.order_ids.includes(o1id) : (iv.id === o1id));
+    const draftKept = !!g1Inv && String(g1Inv.invoice_status || 'DRAFT').toUpperCase() === 'DRAFT';
+    if (draftKept) pass('TC-DINE-CLEAR-DRAFT', 'Clearing a table leaves the unsettled bill as a DRAFT invoice (not discarded)');
+    else fail('TC-DINE-CLEAR-DRAFT', 'Cleared table keeps a DRAFT invoice', `found=${!!g1Inv} status=${g1Inv?.invoice_status} — the unsettled bill was lost or not marked DRAFT`);
     // Guest 2
     const o2 = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
       table_id: table.id, table_number: table.name, checkout_mode: 'postpaid',
@@ -3982,6 +3994,13 @@ async function testTableClearFreshSession() {
       pass('TC-DINE-TABLE-CLEAR', `Freed table ended the old session; guest-2's bill has only their order (${orders2.length})`);
     } else {
       fail('TC-DINE-TABLE-CLEAR', 'Free-table must start a fresh session', `free=${free.status} oldSessionEnded=${sessionEnded} carriedOldOrders=${carriedOld} hasNew=${hasNew} count=${orders2.length} — the next guest inherited the previous bill`);
+    }
+    // The invoice editor must REJECT emptying an invoice to zero items (which used
+    // to strand a stale GST snapshot → the reported "Subtotal ₹0 · GST ₹4 · TOTAL ₹4").
+    if (o2id) {
+      const empt = await api('PATCH', `/api/restaurant/${restaurantId}/orders/${o2id}/invoice`, { items: [], discount_amount: 0, service_charge_percent: 0, gst_percent: 5, apply_gst: 1 });
+      if (empt.status === 400) pass('TC-INVOICE-EMPTY-REJECT', 'Invoice edit rejects removing every line item (400) — no phantom-GST invoices');
+      else fail('TC-INVOICE-EMPTY-REJECT', 'Invoice edit must reject empty items', `got ${empt.status} (expected 400) — an invoice can still be emptied, stranding a phantom GST`);
     }
   } catch (e) {
     skip('TC-DINE-TABLE-CLEAR', 'Free-table fresh session', `error: ${e?.message || e}`);

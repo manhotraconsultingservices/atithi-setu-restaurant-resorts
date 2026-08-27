@@ -12524,9 +12524,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       return [];
     })();
     const taxFromLines = parsedTaxLines.reduce((s, l) => s + Number(l.amount || 0), 0);
-    const gstAmt = parsedTaxLines.length > 0
-      ? Number(taxFromLines.toFixed(2))
-      : (applyGst ? taxable * gstPct / 100 : 0);
+    // Guard against a STALE tax snapshot on an invoice whose line items were
+    // emptied (an edit removed every line): with no taxable base there can be no
+    // GST, so never print a phantom "GST ₹X / TOTAL ₹X" on a ₹0 subtotal. Fixes
+    // the reported bill that showed Subtotal ₹0.00 · GST ₹4.00 · TOTAL ₹4.00.
+    const gstAmt = taxable <= 0
+      ? 0
+      : parsedTaxLines.length > 0
+        ? Number(taxFromLines.toFixed(2))
+        : (applyGst ? taxable * gstPct / 100 : 0);
     const total   = Number((taxable + gstAmt).toFixed(2));
 
     // If the loyalty redemption amount was recorded server-side AND matches

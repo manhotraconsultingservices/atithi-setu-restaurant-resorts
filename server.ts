@@ -48631,10 +48631,15 @@ ${data.tenant.name}`;
       // already 'closed' and excluded) removes it from resume + the live board
       // while preserving the row for records. Orders/GL are untouched (an unpaid
       // walk-out books no revenue). Non-fatal.
+      // The session is NOT deleted and its invoice_status is left at DRAFT (unless
+      // it was already PRINTED/PAID) so an UNSETTLED bill isn't lost when a table
+      // is cleared — it stays in the Invoices list as a DRAFT the owner can still
+      // review, settle or delete. A properly settled bill already carries a
+      // PRINTED/PAID status and the COALESCE preserves it.
       let clearedSession = false;
       if (status === 'AVAILABLE') {
         const r: any = await db.run(
-          "UPDATE table_sessions SET status = 'closed', closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP) WHERE table_id = ? AND status IN ('open','bill_requested') AND deleted_at IS NULL",
+          "UPDATE table_sessions SET status = 'closed', closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP), invoice_status = COALESCE(invoice_status, 'DRAFT') WHERE table_id = ? AND status IN ('open','bill_requested') AND deleted_at IS NULL",
           [req.params.tableId]
         ).catch((e: any) => { console.warn('[table-free] session close failed:', e?.message || e); return null; });
         clearedSession = !!(r && (r.changes || r.rowCount));
@@ -48868,22 +48873,34 @@ ${data.tenant.name}`;
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge_percent FLOAT DEFAULT 0").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0").catch(() => {});
       const { items, discount_amount = 0, service_charge_percent = 0, gst_percent = 0, apply_gst = 0 } = req.body;
+      // An invoice must keep at least one line item. Editing every line away used
+      // to leave items=[] + total=0 while the STALE tax_label_snapshot kept
+      // printing a phantom GST (the reported "Subtotal ₹0 · GST ₹4 · TOTAL ₹4"
+      // bill). To remove everything, delete the invoice instead.
+      const cleanItems = Array.isArray(items)
+        ? items.filter((it: any) => String(it?.name || '').trim() && Number(it?.quantity ?? it?.qty ?? 1) > 0)
+        : [];
+      if (cleanItems.length === 0) {
+        return res.status(400).json({ error: 'An invoice must keep at least one item. To remove it entirely, delete the invoice instead.' });
+      }
       // Snapshot the pre-edit state so the audit trail shows what changed (an
       // accidental edit to a money field is then visible + reversible).
       const beforeRow: any = await db.get(
         "SELECT items, discount_amount, service_charge_percent, gst_percent, apply_gst, total_amount, invoice_number FROM orders WHERE id = ?",
         [req.params.orderId]
       ).catch(() => null);
-      const rawSubtotal   = (items as any[]).reduce((s, it) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
+      const rawSubtotal   = cleanItems.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity ?? it.qty ?? 1), 0);
       const afterDiscount = Math.max(0, rawSubtotal - Number(discount_amount));
       const svcAmt        = afterDiscount * Number(service_charge_percent) / 100;
       const taxable       = afterDiscount + svcAmt;
       const effGst        = apply_gst ? Number(gst_percent) : 0;
       const gstAmount     = taxable * effGst / 100;
       const total         = taxable + gstAmount;
+      // Clear tax_label_snapshot so the printed bill recomputes GST from the
+      // fresh gst_percent — never from a snapshot left over from a prior state.
       await db.run(
-        "UPDATE orders SET items = ?, discount_amount = ?, service_charge_percent = ?, gst_percent = ?, apply_gst = ?, total_amount = ?, gst_amount = ? WHERE id = ?",
-        [JSON.stringify(items), Number(discount_amount), Number(service_charge_percent), Number(gst_percent), apply_gst ? 1 : 0, total, gstAmount, req.params.orderId]
+        "UPDATE orders SET items = ?, discount_amount = ?, service_charge_percent = ?, gst_percent = ?, apply_gst = ?, total_amount = ?, gst_amount = ?, tax_label_snapshot = NULL WHERE id = ?",
+        [JSON.stringify(cleanItems), Number(discount_amount), Number(service_charge_percent), Number(gst_percent), apply_gst ? 1 : 0, total, gstAmount, req.params.orderId]
       );
       let beforeItems: any = beforeRow?.items;
       try { beforeItems = typeof beforeItems === 'string' ? JSON.parse(beforeItems) : beforeItems; } catch { /* keep raw */ }
@@ -48891,7 +48908,7 @@ ${data.tenant.name}`;
         objectType: 'INVOICE', objectId: req.params.orderId, action: 'EDITED',
         summary: `Invoice ${beforeRow?.invoice_number || `#${String(req.params.orderId).slice(-8).toUpperCase()}`} edited${beforeRow ? ` — total ₹${Number(beforeRow.total_amount || 0).toFixed(2)} → ₹${Number(total).toFixed(2)}` : ''}`,
         before: beforeRow ? { items: beforeItems, discount_amount: Number(beforeRow.discount_amount || 0), service_charge_percent: Number(beforeRow.service_charge_percent || 0), gst_percent: Number(beforeRow.gst_percent || 0), apply_gst: Number(beforeRow.apply_gst || 0), total_amount: Number(beforeRow.total_amount || 0) } : undefined,
-        after: { items, discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, total_amount: total },
+        after: { items: cleanItems, discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, total_amount: total },
       }).catch(() => {});
       res.json({ success: true, subtotal: afterDiscount, discount_amount: Number(discount_amount), service_charge_amount: svcAmt, gst_amount: gstAmount, total });
     } catch (err: any) {
@@ -50459,7 +50476,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'table-clear-fix-and-rbac-p0',
+    commit_marker: 'invoice-phantom-gst-clear-draft',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
