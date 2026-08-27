@@ -4143,6 +4143,39 @@ async function testGstCompliance() {
   }
 }
 
+// COMPLIANCE (India GST, single source) — the GST rate PRINTED on an invoice must
+// equal EXACTLY the rate in Settings → GST (restaurants.gst_percentage). No second
+// GST rate hidden in tax_config, no silent per-bill bump. Regression for the
+// "field shows 5, invoice shows 6 — 2 GST % inconsistent" bug.
+async function testGstFieldEqualsPrint() {
+  section('COMPLIANCE — printed GST rate == Settings GST rate (single source of truth)');
+  const ID = 'TC-GST-FIELD-EQUALS-PRINT';
+  try {
+    const g = await api('GET', `/api/restaurant/${restaurantId}`);
+    if (g.status !== 200) { skip(ID, 'GST field==print', `GET restaurant ${g.status}`); return; }
+    const enabled = Number(g.data?.is_gst_enabled) === 1;
+    const gstin = String(g.data?.gst_number || '').trim();
+    const hasGstin = !!gstin && gstin !== '0';
+    const settingsPct = Number(g.data?.gst_percentage || 0);
+    const pv = await api('GET', `/api/restaurant/${restaurantId}/invoices/preview-totals?subtotal=1000`);
+    const lines = Array.isArray(pv.data?.taxLines) ? pv.data.taxLines : [];
+    const gstLines = lines.filter(l => /gst/i.test(String(l.label || l.id || '')));
+    if (!enabled || !hasGstin || settingsPct <= 0) {
+      if (gstLines.length === 0) pass(ID, `GST off / no-GSTIN → no GST line printed (enabled=${enabled}, gstin=${hasGstin}, rate=${settingsPct}%)`);
+      else fail(ID, 'GST must not print when off / no GSTIN', `found ${gstLines.length} GST line(s) [${gstLines.map(l => `${l.label} ${l.rate}%`).join(', ')}]`);
+      return;
+    }
+    // GST on: the printed rate must equal the Settings rate. Split tenants emit
+    // CGST + SGST whose rates sum to the Settings rate; single-line tenants emit GST.
+    const printedRate = gstLines.reduce((s, l) => s + Number(l.rate || 0), 0);
+    if (gstLines.length >= 1 && Math.abs(printedRate - settingsPct) < 0.01) {
+      pass(ID, `Printed GST ${printedRate}% == Settings ${settingsPct}% [${gstLines.map(l => `${l.label} ${l.rate}%`).join(' + ')}]`);
+    } else {
+      fail(ID, 'Printed GST rate must equal the Settings GST rate', `settings=${settingsPct}% printed=${printedRate}% lines=[${gstLines.map(l => `${l.label} ${l.rate}`).join(', ')}] — a second GST rate is leaking from tax_config`);
+    }
+  } catch (e) { skip(ID, 'GST field==print', `error: ${e?.message || e}`); }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -4162,6 +4195,7 @@ async function main() {
   await testBulkAssignWaiter();
   await testQrBillGst();
   await testInvoicePrintTaxes();
+  await testGstFieldEqualsPrint();
   await testTableClearFreshSession();
   await testGstCompliance();
   await testHotel();

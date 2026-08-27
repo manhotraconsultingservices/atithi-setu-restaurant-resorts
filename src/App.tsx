@@ -28801,48 +28801,66 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 onChange={e => setRestaurant(prev => prev ? { ...prev, name: e.target.value } : null)}
               />
             </div>
-            <div>
-              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">GST Number</label>
-              <input 
-                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                placeholder="e.g. 22AAAAA0000A1Z5"
-                value={restaurant?.gst_number || ''}
-                onChange={e => setRestaurant(prev => prev ? { ...prev, gst_number: e.target.value } : null)}
-              />
-            </div>
-            <div>
-              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">GST Percentage (%)</label>
-              <input 
-                type="number"
-                step="0.01"
-                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                placeholder="e.g. 5"
-                value={restaurant?.gst_percentage || 0}
-                onChange={e => setRestaurant(prev => prev ? { ...prev, gst_percentage: parseFloat(e.target.value) || 0 } : null)}
-              />
-            </div>
-            <div className="flex items-center justify-between p-4 bg-[#faf7f2] rounded-2xl">
-              <div>
-                <p className="text-sm font-bold text-[#1a1a1a]">Charge GST</p>
-                <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest">Enable or disable GST on invoices</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-[#6b5d52] w-7 text-right">
-                  {restaurant?.is_gst_enabled ? 'ON' : 'OFF'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setRestaurant(prev => prev ? { ...prev, is_gst_enabled: !prev.is_gst_enabled } : null)}
-                  className={cn(
-                    "w-12 h-6 rounded-full transition-colors relative",
-                    restaurant?.is_gst_enabled ? "bg-[#cc5a16]" : "bg-gray-300"
-                  )}
-                >
-                  <motion.div
-                    animate={{ x: restaurant?.is_gst_enabled ? 24 : 4 }}
-                    className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm"
+            {/* ── GST — the SINGLE source of truth for invoicing ──────────
+                One GST rate, set here. Every restaurant invoice prints exactly
+                this rate (staff cannot edit GST on a bill). The old duplicate
+                GST line inside "Currency & Non-India Tax" is gone. */}
+            <div className="pt-4 border-t border-[#f0ebe4]">
+              <h4 className="text-sm font-bold text-[#1a1a1a] mb-1">GST</h4>
+              <p className="text-[11px] text-[#6b5d52] mb-3 leading-relaxed">
+                The one place GST is configured — invoices always print this rate, non-editable by staff.
+                <b> No GST number ⇒ GST is not charged.</b> Updating the GST number resets the rate to 5% (standard restaurant GST).
+              </p>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">GST Number (GSTIN)</label>
+                  <input
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    placeholder="e.g. 22AAAAA0000A1Z5"
+                    value={restaurant?.gst_number || ''}
+                    onChange={e => setRestaurant(prev => prev ? { ...prev, gst_number: e.target.value } : null)}
                   />
-                </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">GST Rate (%)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                      placeholder="e.g. 5"
+                      value={restaurant?.gst_percentage || 0}
+                      onChange={e => setRestaurant(prev => prev ? { ...prev, gst_percentage: parseFloat(e.target.value) || 0 } : null)}
+                    />
+                    {restaurant?.is_gst_enabled && !(Number(restaurant?.gst_percentage) > 0) && (
+                      <p className="text-[10px] text-[#c13b3b] font-bold mt-1">Enter a GST rate — required to save while GST is on.</p>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between p-4 bg-[#faf7f2] rounded-2xl">
+                    <div>
+                      <p className="text-sm font-bold text-[#1a1a1a]">Charge GST</p>
+                      <p className="text-[10px] text-[#6b5d52] uppercase tracking-widest">On invoices</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-[#6b5d52] w-7 text-right">
+                        {restaurant?.is_gst_enabled ? 'ON' : 'OFF'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setRestaurant(prev => prev ? { ...prev, is_gst_enabled: !prev.is_gst_enabled } : null)}
+                        className={cn(
+                          "w-12 h-6 rounded-full transition-colors relative shrink-0",
+                          restaurant?.is_gst_enabled ? "bg-[#cc5a16]" : "bg-gray-300"
+                        )}
+                      >
+                        <motion.div
+                          animate={{ x: restaurant?.is_gst_enabled ? 24 : 4 }}
+                          className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm"
+                        />
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -28905,13 +28923,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
 
-            {/* ── Taxes & Currency (Phase 2: multi-country) ──────────────
-                The GST controls above remain the canonical input for an
-                Indian tenant's flat rate. This panel exposes country +
-                preset + per-line tax editing for tenants operating outside
-                India. Indian tenants who never touch this panel keep the
-                exact pre-Phase-2 behaviour. */}
-            <TaxCurrencyPanel restaurantId={restaurantId} token={token!} />
+            {/* ── Advanced: Currency & Non-India Tax (collapsed) ──────────
+                Indian GST is set in the GST section above (single source).
+                This panel is ONLY for tenants operating outside India —
+                foreign currency + non-GST tax lines. Collapsed by default so
+                the page stays uncluttered; the GST line was removed from it. */}
+            <details className="pt-4 border-t border-[#f0ebe4] group">
+              <summary className="cursor-pointer list-none flex items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-bold text-[#1a1a1a]">Advanced — Currency &amp; Non-India Tax</h4>
+                  <p className="text-[11px] text-[#6b5d52]">Only for tenants operating outside India. Indian GST is set above.</p>
+                </div>
+                <ChevronDown size={16} className="text-[#9c8e85] transition-transform group-open:rotate-180 shrink-0" />
+              </summary>
+              <div className="mt-3">
+                <TaxCurrencyPanel restaurantId={restaurantId} token={token!} />
+              </div>
+            </details>
 
             {/* ── Checkout Mode Toggle ─────────────────────────────────── */}
             <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
@@ -60322,7 +60350,13 @@ function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token
       if (!res.ok) { setMessage('Failed to load tax config'); return; }
       const data = await res.json();
       setCfg(data);
-      setTaxLines(data.all_configs || []);
+      // GST is single-sourced from Settings → GST (not a duplicate tax line here).
+      // Hide GST rows from this editor; saving without them also cleans them out of
+      // tax_config so there is never a second GST rate that disagrees with Settings.
+      setTaxLines((data.all_configs || []).filter((c: any) => {
+        const s = (String(c?.id || '') + ' ' + String(c?.label || '')).toLowerCase();
+        return !(/gst/.test(s) && !/service/.test(s));
+      }));
       setServiceChargePct(Number(data.service_charge_percent || 0));
     } finally { setLoading(false); }
   }, [restaurantId, token]);
@@ -60498,9 +60532,12 @@ function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token
 
       {/* Tax line editor */}
       <div>
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Tax Lines</p>
-          <button type="button" onClick={addLine} className="text-xs font-bold text-[#cc5a16]">+ Add line</button>
+        <div className="flex items-start justify-between mb-2 gap-3">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Tax Lines <span className="normal-case tracking-normal font-normal text-[#9c8e85]">(non-GST only)</span></p>
+            <p className="text-[10px] text-[#9c8e85] mt-0.5">GST is managed in Settings → GST. Add only non-GST taxes here (e.g. VAT for tenants outside India).</p>
+          </div>
+          <button type="button" onClick={addLine} className="text-xs font-bold text-[#cc5a16] shrink-0">+ Add line</button>
         </div>
         {taxLines.length === 0 && (
           <p className="text-xs text-[#9c8e85] italic px-3 py-3 bg-white rounded-2xl">
