@@ -9539,6 +9539,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'LOYALTY'                                   // tier-based customer loyalty (Phase 1)
     | 'ROSTER' | 'TIMESHEET' | 'STAFF_PAYROLL'    // shift roster + planned-vs-actual + operational payroll (Phase 3)
     | 'ROOMS' | 'ROOM_SETUP' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1 (ROOMS=availability board, ROOM_SETUP=owner-only setup)
+    | 'KITCHEN_PRINTERS'   // owner-only thermal KOT printer config
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE' | 'HOTEL_INVENTORY'  // hospitality Phase 2 & 3
     | 'HOUSEKEEPING'                             // cleaning checklist worklist + config + log
     | 'EVENTS_HOUSEKEEPING'                      // event-scoped cleaning checklist under the Events nav
@@ -11405,6 +11406,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // Room Setup is owner-only too — bounce non-owners who reach it via a
     // stale URL/cache (the nav already hides the entry for them).
     if (activeTab === 'ROOM_SETUP' && !isOwnerOrAdmin) {
+      setActiveTab('MONITOR');
+    }
+    if (activeTab === 'KITCHEN_PRINTERS' && !isOwnerOrAdmin) {
       setActiveTab('MONITOR');
     }
     // Data Migration is a SUPER-ADMIN activity — bounce a tenant owner/staff who
@@ -14914,6 +14918,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'QR',        label: 'QR & Tables' },
               { id: 'BOOKINGS',  label: 'Table Bookings' },
               { id: 'DELIVERY',           label: 'Delivery Partners' },
+              ...(isOwnerOrAdmin ? [{ id: 'KITCHEN_PRINTERS', label: 'Kitchen Printers' } as NavTab] : []),
               { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports' },
             ],
           },
@@ -15055,6 +15060,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // Room Setup is owner-only (room CRUD + types + tariff). Mirror the
           // STAFF_ACCESS gate: owners always see it; everyone else never does.
           if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
+          if (id === 'KITCHEN_PRINTERS') return isOwnerOrAdmin;
           // Checklist Templates: owner/admin always, PLUS any role the owner grants
           // "Checklist Templates" in Staff Access (honor the grant). Editing stays
           // owner-only server-side (write endpoints are requireOwnerOrAdmin) — a
@@ -15793,6 +15799,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="p-1"><ChecklistBoard restaurantId={restaurantId} token={token!} /></div>
       ) : activeTab === 'STATUS_BOARD' ? (
         <div className="p-1"><StatusBoard restaurantId={restaurantId} token={token!} isEventsEnabled={isEventsEnabled} onOpenRoom={(rm) => setRoomDetailTarget(rm)} /></div>
+      ) : activeTab === 'KITCHEN_PRINTERS' ? (
+        <div className="p-1"><PrintersConfig restaurantId={restaurantId!} token={token!} /></div>
       ) : activeTab === 'CHECKLISTS' ? (
         <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="ROOM" /></div>
       ) : activeTab === 'EVENTS_CHECKLISTS' && isEventsEnabled ? (
@@ -46759,6 +46767,98 @@ function HotelStaffDashboard({ restaurantId, token, userRole }: {
 }
 
 // --- CHEF DASHBOARD ---
+// ── Kitchen Printers config (owner-only) — thermal KOT auto-print setup ───────
+function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const toast = useToast();
+  const [printers, setPrinters] = useState<any[]>([]);
+  const [agentToken, setAgentToken] = useState<string>('');
+  const blank = { name: '', station: 'ALL', conn_type: 'NETWORK', host: '', port: 9100, copies: 1, is_default: 0 };
+  const [form, setForm] = useState<any>(blank);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const api = (p: string) => `/api/restaurant/${restaurantId}${p}`;
+  const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const load = async () => {
+    try {
+      const [pr, at] = await Promise.all([
+        fetch(api('/kitchen-printers'), { headers: H }).then(r => r.ok ? r.json() : []),
+        fetch(api('/print-agent-token'), { headers: H }).then(r => r.ok ? r.json() : ({} as any)),
+      ]);
+      setPrinters(Array.isArray(pr) ? pr : []);
+      setAgentToken(at?.token || '');
+    } catch { /* */ }
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [restaurantId]);
+  const save = async () => {
+    if (!form.name?.trim()) { toast.error('Printer name is required'); return; }
+    setBusy(true);
+    try {
+      const body = JSON.stringify({ ...form, port: Number(form.port) || 9100, copies: Number(form.copies) || 1, is_default: form.is_default ? 1 : 0 });
+      const r = editing
+        ? await fetch(api(`/kitchen-printers/${editing}`), { method: 'PATCH', headers: H, body })
+        : await fetch(api('/kitchen-printers'), { method: 'POST', headers: H, body });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); toast.error(d.error || 'Save failed'); }
+      else { setForm(blank); setEditing(null); await load(); toast.success('Saved'); }
+    } finally { setBusy(false); }
+  };
+  const edit = (p: any) => { setEditing(p.id); setForm({ name: p.name, station: p.station || 'ALL', conn_type: p.conn_type || 'NETWORK', host: p.host || '', port: p.port || 9100, copies: p.copies || 1, is_default: p.is_default || 0 }); };
+  const del = async (id: string) => { if (!window.confirm('Delete this printer?')) return; await fetch(api(`/kitchen-printers/${id}`), { method: 'DELETE', headers: H }); await load(); };
+  const rotate = async () => { if (!window.confirm('Rotate the agent token? The running print agent must be updated with the new token.')) return; const r = await fetch(api('/print-agent-token/rotate'), { method: 'POST', headers: H }); const d = await r.json().catch(() => ({})); if (d.token) { setAgentToken(d.token); toast.success('Token rotated'); } };
+  const input = "w-full bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20";
+  return (
+    <div className="max-w-4xl space-y-5">
+      <div>
+        <h2 className="text-2xl font-bold font-serif">Kitchen Printers</h2>
+        <p className="text-sm text-[#6b5d52] mt-1">Auto-print Kitchen Order Tickets (KOTs) to thermal printers. Add each printer, then run the on-prem <b>print agent</b> (download <code>print-agent/</code> from the app repo) on a PC/Raspberry Pi on the same network. See <code>print-agent/README.md</code> for setup.</p>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
+        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Print agent token</p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <code className="bg-[#faf7f2] border border-[#e8dccf] rounded-lg px-3 py-1.5 text-xs font-mono break-all">{agentToken || '—'}</code>
+          <button onClick={() => { navigator.clipboard?.writeText(agentToken); toast.success('Copied'); }} className="text-xs font-bold text-[#cc5a16] hover:underline">Copy</button>
+          <button onClick={rotate} className="text-xs font-bold text-red-500 hover:underline">Rotate</button>
+        </div>
+        <p className="text-[11px] text-[#9c8e85] mt-2">Put this in the agent's <code>.env</code> as <code>AGENT_TOKEN</code>, with <code>BASE_URL={typeof window !== 'undefined' ? window.location.origin : ''}</code> and <code>RESTAURANT_ID={restaurantId}</code>.</p>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm space-y-3">
+        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{editing ? 'Edit printer' : 'Add a printer'}</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div><label className="text-[11px] text-[#6b5d52]">Name</label><input className={input} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Kitchen printer" /></div>
+          <div><label className="text-[11px] text-[#6b5d52]">Station (menu category, or ALL)</label><input className={input} value={form.station} onChange={e => setForm({ ...form, station: e.target.value.toUpperCase() })} placeholder="ALL / TANDOOR / BAR" /></div>
+          <div><label className="text-[11px] text-[#6b5d52]">Printer IP</label><input className={input} value={form.host} onChange={e => setForm({ ...form, host: e.target.value })} placeholder="192.168.1.50" /></div>
+          <div><label className="text-[11px] text-[#6b5d52]">Port</label><input type="number" className={input} value={form.port} onChange={e => setForm({ ...form, port: e.target.value })} placeholder="9100" /></div>
+          <div><label className="text-[11px] text-[#6b5d52]">Copies</label><input type="number" min={1} className={input} value={form.copies} onChange={e => setForm({ ...form, copies: e.target.value })} /></div>
+          <label className="flex items-center gap-2 mt-6 text-sm"><input type="checkbox" checked={!!form.is_default} onChange={e => setForm({ ...form, is_default: e.target.checked ? 1 : 0 })} /> Default printer</label>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={save} disabled={busy} className="px-4 py-2 rounded-xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">{editing ? 'Update' : 'Add printer'}</button>
+          {editing && <button onClick={() => { setEditing(null); setForm(blank); }} className="px-4 py-2 rounded-xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
+        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Configured printers</p>
+        {printers.length === 0 ? <p className="text-sm text-[#9c8e85] py-3 text-center">No printers yet. Add one above.</p> : (
+          <div className="overflow-x-auto"><table className="w-full text-sm">
+            <thead><tr className="border-b border-[#f1ece3] text-left text-[10px] uppercase tracking-widest text-[#9c8e85]">
+              <th className="py-2">Name</th><th>Station</th><th>Address</th><th>Copies</th><th></th></tr></thead>
+            <tbody>{printers.map(p => (
+              <tr key={p.id} className="border-b border-[#f1ece3]">
+                <td className="py-2 font-medium">{p.name}{p.is_default ? <span className="ml-1 text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">DEFAULT</span> : ''}{!p.is_active ? <span className="ml-1 text-[9px] bg-[#faf7f2] text-[#9c8e85] px-1.5 py-0.5 rounded-full">OFF</span> : ''}</td>
+                <td className="text-[#6b5d52]">{p.station}</td>
+                <td className="font-mono text-xs">{p.host || '—'}:{p.port}</td>
+                <td>{p.copies}</td>
+                <td className="text-right whitespace-nowrap"><button onClick={() => edit(p)} className="text-xs font-bold text-[#cc5a16] hover:underline mr-3">Edit</button><button onClick={() => del(p.id)} className="text-xs font-bold text-red-500 hover:underline">Delete</button></td>
+              </tr>))}</tbody>
+          </table></div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: string }) {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'QUEUE' | 'ATTENDANCE'>('QUEUE');
