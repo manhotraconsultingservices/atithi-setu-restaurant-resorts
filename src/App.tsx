@@ -15392,6 +15392,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <TherapistDashboard restaurantId={restaurantId!} token={token!} />
         ) : (currentRole === 'FRONT_DESK' || currentRole === 'HOUSEKEEPING' || currentRole === 'MAINTENANCE' || currentRole === 'CONCIERGE') ? (
           <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={currentRole} />
+        ) : (!!currentRole && currentRole.toUpperCase().startsWith('CUSTOM_') && Array.isArray(allowedTabs)
+              && (allowedTabs.includes('MONITOR') || allowedTabs.includes('ORDERS') || allowedTabs.includes('QR'))
+              && !(allowedTabs.includes('HOTEL_BOOKINGS') || allowedTabs.includes('SERVICE_REQUESTS') || allowedTabs.includes('ROOMS') || allowedTabs.includes('FOLIOS'))) ? (
+          // A CUSTOM role granted the Command Centre / restaurant-ops tabs lands on the
+          // SAME live board a built-in Waiter does — so e.g. a custom "Captain" role sees
+          // its dashboard on Home instead of the generic launchpad. Leak-safe: it only
+          // renders a board whose data the role can already reach via its grants.
+          <WaiterDashboard restaurantId={restaurantId!} token={token!} />
+        ) : (!!currentRole && currentRole.toUpperCase().startsWith('CUSTOM_') && Array.isArray(allowedTabs)
+              && (allowedTabs.includes('HOTEL_BOOKINGS') || allowedTabs.includes('SERVICE_REQUESTS') || allowedTabs.includes('ROOMS') || allowedTabs.includes('FOLIOS'))) ? (
+          <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={currentRole} />
+        ) : (!!currentRole && currentRole.toUpperCase().startsWith('CUSTOM_') && Array.isArray(allowedTabs)
+              && (allowedTabs.includes('SPA_CALENDAR') || allowedTabs.includes('SPA_APPOINTMENTS'))) ? (
+          <TherapistDashboard restaurantId={restaurantId!} token={token!} />
         ) : (
         <HotelHomeLaunchpad
           restaurantId={restaurantId!}
@@ -26759,8 +26773,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // hotelOnly      = hidden for RESTAURANT tenants
             // restaurantOnly = hidden for HOTEL-only tenants
             const PERMISSIBLE_TABS: { id: string; label: string; description: string; hotelOnly?: boolean; restaurantOnly?: boolean; eventsOnly?: boolean; spaOnly?: boolean }[] = [
-              { id: 'MONITOR',           label: 'Monitor / Dashboard',     description: 'Real-time KPIs, today\'s revenue, live order board, daily summary.' },
-              { id: 'ORDERS',            label: 'Orders (POS)',            description: 'Place dine-in / takeaway orders, view current orders, kitchen ticket status.',        restaurantOnly: true },
+              { id: 'MONITOR',           label: 'Command Centre / Dashboard', description: 'The live operational dashboard — the Waiter / Cashier home screen: table map, live order board, KPIs, today\'s revenue, daily summary. Grant this to give a custom role the Command Centre (waiter) dashboard.' },
+              { id: 'ORDERS',            label: 'Orders (POS) / KDS',      description: 'Place dine-in / takeaway orders, view current orders, and the Kitchen Display (KDS) ticket queue + status. Grant to give a custom kitchen / waiter role the KDS.', restaurantOnly: true },
               { id: 'INVOICES',          label: 'Invoices',                description: 'Manual invoice creation, GST invoice download, invoice list, refunds.' },
               { id: 'MENU',              label: 'Menu Management',         description: 'Add/edit menu items, categories, prices, photos, recipe management.',                 restaurantOnly: true },
               { id: 'INVENTORY',         label: 'Inventory',               description: 'Ingredients, suppliers, purchase orders, wastage, stock counts, recipe cost.',        restaurantOnly: true },
@@ -26967,8 +26981,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
             const roleHasGrantInModule = (roleId: string, tabs: { id: string }[]) =>
               tabs.some(t => ((staffAccess[roleId]?.[t.id] ?? 0) as number) > 0);
+            // A custom role is bound to a module by its SCOPE, so it only appears
+            // in that module's Staff Access section (and in cross-cutting sections,
+            // handled by the caller). BOTH spans every operational module. Fixes the
+            // old RESTAURANT-vs-else logic that mis-placed SPA / EVENTS-scoped roles.
+            const MODULE_SCOPE: Record<string, string> = { RESTAURANT: 'RESTAURANT', FRONTDESK: 'HOTEL', SPA: 'SPA', EVENTS: 'EVENTS' };
             const customScopeMatchesModule = (scope: string, mk: string) =>
-              mk === 'RESTAURANT' ? (scope === 'RESTAURANT' || scope === 'BOTH') : (scope === 'HOTEL' || scope === 'BOTH');
+              scope === 'BOTH' || MODULE_SCOPE[mk] === scope;
             const rolesForModule = (mk: string, tabs: { id: string }[]): RoleDesc[] => allVisibleRoles.filter(r => {
               if (roleHasGrantInModule(r.id, tabs)) return true;   // never hide configured access
               if (!OPERATIONAL_MODULES.has(mk)) return true;       // cross-cutting → every role
@@ -58091,6 +58110,8 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   // 100+ tables; a filter box + pages keep the board usable (no endless scroll).
   const [tableSearch, setTableSearch] = useState('');
   const [tablePage, setTablePage] = useState(1);
+  // Free / Busy status filter for the table board.
+  const [tableStatusFilter, setTableStatusFilter] = useState<'ALL' | 'FREE' | 'BUSY'>('ALL');
   const TABLES_PER_PAGE = 12;
   const { lastMessage: waiterMsg } = useSocket('WAITER', restaurantId);
 
@@ -58206,9 +58227,16 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
     .slice().sort(byTableName);
   // Search + pagination over the sorted board.
   const tableQuery = tableSearch.trim().toLowerCase();
-  const filteredTables = tableQuery
-    ? myTables.filter(t => String(t.name || '').toLowerCase().includes(tableQuery))
-    : myTables;
+  // Free = AVAILABLE; Busy = anything else (occupied / bill requested).
+  const filteredTables = myTables.filter(t => {
+    if (tableQuery && !String(t.name || '').toLowerCase().includes(tableQuery)) return false;
+    const isFree = String(t.status) === 'AVAILABLE';
+    if (tableStatusFilter === 'FREE' && !isFree) return false;
+    if (tableStatusFilter === 'BUSY' && isFree) return false;
+    return true;
+  });
+  const freeCount = myTables.filter(t => String(t.status) === 'AVAILABLE').length;
+  const busyCount = myTables.length - freeCount;
   const tableTotalPages = Math.max(1, Math.ceil(filteredTables.length / TABLES_PER_PAGE));
   const tablePageSafe = Math.min(tablePage, tableTotalPages);
   const pagedTables = filteredTables.slice((tablePageSafe - 1) * TABLES_PER_PAGE, tablePageSafe * TABLES_PER_PAGE);
@@ -58482,14 +58510,34 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
             <div className="space-y-4">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <h3 className="text-xl font-bold font-serif">{sharedFloor ? 'All Tables' : 'My Tables'}{filteredTables.length > 0 ? <span className="ml-2 text-sm font-normal text-[#9c8e85]">({filteredTables.length})</span> : null}</h3>
-                {myTables.length > 8 && (
-                  <input
-                    value={tableSearch}
-                    onChange={e => { setTableSearch(e.target.value); setTablePage(1); }}
-                    placeholder="Search table…"
-                    className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 bg-[#faf7f2] text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 w-full sm:w-52"
-                  />
-                )}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Free / Busy filter */}
+                  <div className="flex gap-1 bg-[#faf7f2] rounded-xl p-1">
+                    {([['ALL', 'All', myTables.length], ['FREE', 'Free', freeCount], ['BUSY', 'Busy', busyCount]] as const).map(([key, label, count]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => { setTableStatusFilter(key as 'ALL' | 'FREE' | 'BUSY'); setTablePage(1); }}
+                        className={cn(
+                          "px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wide transition-all",
+                          tableStatusFilter === key
+                            ? (key === 'FREE' ? "bg-emerald-500 text-white" : key === 'BUSY' ? "bg-[#cc5a16] text-white" : "bg-[#3d3128] text-white")
+                            : "text-[#6b5d52] hover:bg-white"
+                        )}
+                      >
+                        {label} <span className="opacity-70 font-mono">{count}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {myTables.length > 8 && (
+                    <input
+                      value={tableSearch}
+                      onChange={e => { setTableSearch(e.target.value); setTablePage(1); }}
+                      placeholder="Search table…"
+                      className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 bg-[#faf7f2] text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 w-full sm:w-52"
+                    />
+                  )}
+                </div>
               </div>
               {myTables.length === 0 ? (
                 <div className="p-8 text-center bg-white rounded-3xl border border-dashed border-[#cc5a16]/20">
@@ -58497,7 +58545,9 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
                 </div>
               ) : filteredTables.length === 0 ? (
                 <div className="p-8 text-center bg-white rounded-3xl border border-dashed border-[#cc5a16]/20">
-                  <p className="text-[#9c8e85] text-sm italic">No table matches “{tableSearch}”.</p>
+                  <p className="text-[#9c8e85] text-sm italic">
+                    {tableSearch ? `No table matches “${tableSearch}”.` : tableStatusFilter === 'FREE' ? 'No free tables right now.' : tableStatusFilter === 'BUSY' ? 'No busy tables right now.' : 'No tables.'}
+                  </p>
                 </div>
               ) : (
                 <>

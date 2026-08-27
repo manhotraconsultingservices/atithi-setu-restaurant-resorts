@@ -7596,9 +7596,15 @@ async function startServer() {
       const isComplete = isCustomRole || _authoritative;
       const cleanPerms: Record<string, number> = {};
       for (const k of Object.keys(perms)) if (!k.startsWith('__')) cleanPerms[k] = perms[k] as number;
+      // An AUTHORITATIVE role (custom, or a seeded built-in with '__complete__')
+      // that resolves to ZERO grantable tabs is DENY-ALL by intent (a new custom
+      // role before the owner grants anything, or a role the owner set to None) —
+      // emit the hide-all '__perm_complete__' marker so the frontend grandfathers
+      // NOTHING. A non-authoritative empty (a legacy built-in None) keeps the older
+      // '__perm_v3__' marker (which still grandfathers post-V3 tabs).
       const outTabs = allowed_tabs.length > 0
         ? (isComplete ? [...allowed_tabs, '__perm_complete__'] : allowed_tabs)
-        : ['__perm_v3__'];
+        : (isComplete ? ['__perm_complete__'] : ['__perm_v3__']);
       res.json({
         allowed_tabs: outTabs,
         tab_permissions: cleanPerms,
@@ -31480,19 +31486,21 @@ ${data.tenant.name}`;
         `INSERT INTO custom_roles (id, restaurant_id, name, emoji, scope) VALUES (?, ?, ?, ?, ?)`,
         [id, req.params.id, name.trim(), emoji || '👤', scope || 'BOTH']
       );
-      // Seed a usable permission baseline for the new role in the CENTRAL Staff-
-      // Access matrix. Without a row here, a user assigned to this role hits the
-      // "no menus" bug: getTabPermissionsForRole returns null (fail-open) until
-      // the owner opens Staff Access and — because the matrix pre-fills a custom
-      // column as all-None — saves an all-zero row, which /my-permissions then
-      // reports as the hide-everything marker. Seeding a scope-based default (and
-      // surfacing those levels in the matrix) breaks that trap. INSERT OR IGNORE
-      // so a re-created id never clobbers an existing configured row.
+      // DENY-BY-DEFAULT: a NEW custom role starts with NO access. We seed a
+      // blank-but-AUTHORITATIVE row (the '__complete__' sentinel only) rather than
+      // leaving the row absent. Absent → getTabPermissionsForRole returns null →
+      // FAIL-OPEN (the user would see EVERY menu); the sentinel row instead
+      // resolves to zero grantable tabs → /my-permissions emits the hide-all
+      // '__perm_complete__' marker, so the assigned user sees only Home / My
+      // Checklist until the owner EXPLICITLY grants tabs in Settings → Staff
+      // Access. The sentinel also reads as "has access" to the zero-access
+      // self-heal, so it is never auto-baselined back to a default set. INSERT OR
+      // IGNORE so a re-created id never clobbers an existing configured row.
       try {
         await centralDb.run(
           `INSERT OR IGNORE INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions)
            VALUES (?, ?, '[]', ?)`,
-          [req.params.id, id, JSON.stringify(defaultCustomRolePerms(scope))]
+          [req.params.id, id, JSON.stringify({ __complete__: 1 })]
         );
         invalidateTabCacheForTenant(req.params.id);
       } catch (seedErr) {
@@ -50665,7 +50673,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'staff-access-catalogue-complete',
+    commit_marker: 'custom-role-dashboards-deny-default',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
