@@ -3624,6 +3624,63 @@ async function testDineInTableFlow() {
   }
 }
 
+// ── DINE-IN — shared-floor setting (all waiters see every table) ─────────────
+// Owner toggle `restaurants.waiter_shared_floor`: when 1, every waiter's board
+// shows ALL tables (any waiter can serve any table); when 0, each waiter sees
+// only their assigned tables. Asserts the setting round-trips through the
+// settings PATCH/GET (migration + PATCH whitelist + GET all wired), and a source
+// guard confirms the Waiter Dashboard honors the flag. Self-restoring: the PATCH
+// echoes back the tenant's current non-COALESCE settings so nothing is blanked,
+// and the flag is restored to its original value at the end.
+async function testWaiterSharedFloor() {
+  section('DINE-IN — Shared-floor setting (all waiters see every table)');
+  // API round-trip
+  try {
+    const g = await api('GET', `/api/restaurant/${restaurantId}`);
+    if (g.status !== 200 || !g.data?.id) {
+      skip('TC-DINE-SHARED-FLOOR', 'Shared-floor setting round-trips', `GET restaurant ${g.status}`);
+    } else {
+      const r = g.data;
+      const orig = (r.waiter_shared_floor === 1 || r.waiter_shared_floor === true) ? 1 : 0;
+      // Echo the non-COALESCE settings fields so the PATCH never blanks them.
+      const base = {
+        name: r.name, gst_number: r.gst_number, gst_percentage: r.gst_percentage,
+        is_gst_enabled: r.is_gst_enabled, template_id: r.template_id, table_count: r.table_count,
+        upi_id: r.upi_id, checkout_mode: r.checkout_mode || 'postpaid',
+      };
+      const setFloor = (v) => api('PATCH', `/api/restaurant/${restaurantId}`, { ...base, waiter_shared_floor: v });
+      const readFloor = async () => {
+        const gg = await api('GET', `/api/restaurant/${restaurantId}`);
+        return (gg.data?.waiter_shared_floor === 1 || gg.data?.waiter_shared_floor === true) ? 1 : 0;
+      };
+      const p1 = await setFloor(1); const on = await readFloor();
+      const p0 = await setFloor(0); const off = await readFloor();
+      await setFloor(orig).catch(() => {});   // restore original
+      if (p1.status === 200 && p0.status === 200 && on === 1 && off === 0) {
+        pass('TC-DINE-SHARED-FLOOR', 'Shared-floor setting persists both ways via the owner settings PATCH/GET');
+      } else if (p1.status === 403 || p0.status === 403) {
+        skip('TC-DINE-SHARED-FLOOR', 'Shared-floor setting round-trips', `settings PATCH not permitted (${p1.status}/${p0.status})`);
+      } else {
+        fail('TC-DINE-SHARED-FLOOR', 'Shared-floor setting round-trips', `patch1=${p1.status} on=${on} patch0=${p0.status} off=${off} — the waiter_shared_floor setting did not persist`);
+      }
+    }
+  } catch (e) {
+    skip('TC-DINE-SHARED-FLOOR', 'Shared-floor setting round-trips', `error: ${e?.message || e}`);
+  }
+  // Source guard — the Waiter Dashboard must branch its table board on the flag.
+  try {
+    const src = readFileSync(join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+    const tablesHonorsFlag = /myTables\s*=\s*sharedFloor\s*\?\s*liveTables/.test(src);
+    const readsFlag = /setSharedFloor\(data\.waiter_shared_floor/.test(src);
+    const ok = tablesHonorsFlag && readsFlag;
+    (ok ? pass : fail)('TC-DINE-SHARED-FLOOR-UI',
+      'Waiter Dashboard shows all tables when shared-floor is on (else only assigned tables)',
+      ok ? '' : `tablesHonorsFlag=${tablesHonorsFlag} readsFlag=${readsFlag}`);
+  } catch (e) {
+    skip('TC-DINE-SHARED-FLOOR-UI', 'Shared-floor dashboard guard', `could not read src/App.tsx (${e?.message || e})`);
+  }
+}
+
 // ── Frontend source guard (no server needed) ────────────────────────────────
 // The OOTB operational staff roles (CHEF/WAITER/CASHIER/THERAPIST/FRONT_DESK/
 // HOUSEKEEPING/MAINTENANCE/CONCIERGE) must render the permission-aware
@@ -3687,6 +3744,7 @@ async function main() {
   await testAuth();
   await testRestaurant();
   await testDineInTableFlow();
+  await testWaiterSharedFloor();
   await testHotel();
   await testProcurement();
   await testHR();

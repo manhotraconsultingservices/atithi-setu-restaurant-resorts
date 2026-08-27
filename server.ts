@@ -6047,6 +6047,13 @@ async function startServer() {
     // Audible + visual alert toggle for unacknowledged waiter-calls / service-requests
     await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS alerts_enabled INT DEFAULT 1`);
     await centralDb.run(`UPDATE restaurants SET alerts_enabled = 1 WHERE alerts_enabled IS NULL`);
+    // Shared-floor mode — when 1, EVERY waiter's dashboard shows ALL tables (and
+    // all waiter-calls), so any waiter can serve any table (matches the "any
+    // waiter can take any table order" behaviour). DEFAULT 0 preserves the
+    // existing assigned-tables-only view for every current tenant; per-table
+    // assignment stays available for accountability / call routing.
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS waiter_shared_floor INT DEFAULT 0`);
+    await centralDb.run(`UPDATE restaurants SET waiter_shared_floor = 0 WHERE waiter_shared_floor IS NULL`);
     // ====== Spa & Wellness module gate (separate, orthogonal to property_type) ======
     // A dedicated boolean — NOT a new property_type value — so spa is independent
     // of the RESTAURANT/HOTEL/BOTH enum. DEFAULT 0 = every existing tenant keeps
@@ -43640,6 +43647,7 @@ ${data.tenant.name}`;
       const {
         name, gst_number, gst_percentage, is_gst_enabled, template_id, table_count,
         upi_id, checkout_mode, logo_url, menu_display_mode, alerts_enabled,
+        waiter_shared_floor,
         invoice_numbering_mode, invoice_number_prefix, invoice_yearly_reset,
         // R-2 — FSSAI mandatory food-safety identifier
         fssai_license_number, fssai_license_valid_until,
@@ -43703,6 +43711,7 @@ ${data.tenant.name}`;
         ? (allowedModes.includes(menu_display_mode) ? menu_display_mode : null)
         : null;
       const alertsVal = alerts_enabled === undefined ? null : (alerts_enabled ? 1 : 0);
+      const sharedFloorVal = waiter_shared_floor === undefined ? null : (waiter_shared_floor ? 1 : 0);
 
       // Validate checkout_mode — only allow known values; default to postpaid.
       const allowedCheckoutModes = new Set(['postpaid', 'prepaid', 'cloud_kitchen']);
@@ -43744,6 +43753,7 @@ ${data.tenant.name}`;
           logo_url = COALESCE(?, logo_url),
           menu_display_mode = COALESCE(?, menu_display_mode),
           alerts_enabled = COALESCE(?, alerts_enabled),
+          waiter_shared_floor = COALESCE(?, waiter_shared_floor),
           invoice_numbering_mode = COALESCE(?, invoice_numbering_mode),
           invoice_number_prefix = COALESCE(?, invoice_number_prefix),
           invoice_yearly_reset = COALESCE(?, invoice_yearly_reset),
@@ -43778,6 +43788,7 @@ ${data.tenant.name}`;
         logo_url !== undefined ? (logo_url || null) : null,
         menuMode,
         alertsVal,
+        sharedFloorVal,
         safeInvoiceMode,
         safeInvoicePrefix,
         safeYearlyReset,
@@ -50342,7 +50353,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'thermal-kot-config-ui',
+    commit_marker: 'waiter-shared-floor',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

@@ -14286,6 +14286,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           checkout_mode: restaurant.checkout_mode || 'postpaid',
           menu_display_mode: (restaurant as any).menu_display_mode || 'PHOTO',
           alerts_enabled: (restaurant as any).alerts_enabled !== 0 && (restaurant as any).alerts_enabled !== false,
+          waiter_shared_floor: ((restaurant as any).waiter_shared_floor === 1 || (restaurant as any).waiter_shared_floor === true) ? 1 : 0,
           invoice_numbering_mode: String((restaurant as any).invoice_numbering_mode || 'RANDOM').toUpperCase(),
           invoice_number_prefix: String((restaurant as any).invoice_number_prefix || 'INV-').trim() || 'INV-',
           invoice_yearly_reset: (restaurant as any).invoice_yearly_reset ? 1 : 0,
@@ -29145,6 +29146,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     type="checkbox"
                     checked={(restaurant as any)?.alerts_enabled !== 0 && (restaurant as any)?.alerts_enabled !== false}
                     onChange={e => setRestaurant(prev => prev ? ({...prev, alerts_enabled: e.target.checked ? 1 : 0} as any) : null)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-[#9c8e85]/30 rounded-full peer-checked:bg-[#cc5a16] transition-colors"></div>
+                  <div className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform peer-checked:translate-x-5"></div>
+                </div>
+              </label>
+            </div>
+
+            {/* ── Shared-floor toggle — all waiters see every table ────────────── */}
+            <div className="space-y-3">
+              <div>
+                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Waiter Floor Mode</label>
+                <p className="text-[11px] text-[#9c8e85] mt-1">
+                  Shared floor: every waiter sees ALL tables and all guest calls, so any waiter can serve any table. Turn off to restrict each waiter to only the tables assigned to them (assign a waiter per table in QR &amp; Tables).
+                </p>
+              </div>
+              <label className="flex items-center justify-between gap-4 bg-[#faf7f2] rounded-2xl px-4 py-3 cursor-pointer">
+                <div className="flex items-center gap-3">
+                  <span className="text-lg">🍽️</span>
+                  <div>
+                    <div className="text-sm font-bold text-[#1a1208]">Shared floor — all waiters see every table</div>
+                    <div className="text-[11px] text-[#6b5d52]">Off = each waiter sees only their assigned tables</div>
+                  </div>
+                </div>
+                <div className="relative">
+                  <input
+                    type="checkbox"
+                    checked={(restaurant as any)?.waiter_shared_floor === 1 || (restaurant as any)?.waiter_shared_floor === true}
+                    onChange={e => setRestaurant(prev => prev ? ({...prev, waiter_shared_floor: e.target.checked ? 1 : 0} as any) : null)}
                     className="sr-only peer"
                   />
                   <div className="w-11 h-6 bg-[#9c8e85]/30 rounded-full peer-checked:bg-[#cc5a16] transition-colors"></div>
@@ -57683,15 +57713,21 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   const [declineReasonMap, setDeclineReasonMap] = useState<Record<string,string>>({});
   const [waiterOrderTable, setWaiterOrderTable] = useState<{ tableId: string; tableName: string } | null>(null);
   const [alertsEnabled, setAlertsEnabled] = useState(true);
+  // Shared-floor mode: when ON, this waiter sees ALL tables + all calls (any
+  // waiter can serve any table), not only tables assigned to them.
+  const [sharedFloor, setSharedFloor] = useState(false);
   const { lastMessage: waiterMsg } = useSocket('WAITER', restaurantId);
 
-  // Fetch restaurant settings (to honor alerts_enabled toggle)
+  // Fetch restaurant settings (to honor alerts_enabled + shared-floor toggles)
   useEffect(() => {
     if (!restaurantId) return;
     fetch(`/api/restaurant/${restaurantId}`)
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (data) setAlertsEnabled(data.alerts_enabled !== 0 && data.alerts_enabled !== false);
+        if (data) {
+          setAlertsEnabled(data.alerts_enabled !== 0 && data.alerts_enabled !== false);
+          setSharedFloor(data.waiter_shared_floor === 1 || data.waiter_shared_floor === true);
+        }
       })
       .catch(() => {});
   }, [restaurantId]);
@@ -57779,11 +57815,13 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   };
 
   const readyOrders = orders.filter(o => o.status === 'READY');
-  // Only show tables assigned to me
-  const myTables = myId ? liveTables.filter(t => t.assigned_waiter_id === myId) : [];
-  // Show calls for my assigned tables OR calls explicitly assigned to me
+  // Shared-floor ON → every waiter sees ALL tables (any waiter can serve any
+  // table). OFF → only tables assigned to me (legacy behaviour).
+  const myTables = sharedFloor ? liveTables : (myId ? liveTables.filter(t => t.assigned_waiter_id === myId) : []);
+  // Shared-floor ON → show every waiter-call. OFF → calls for my assigned tables
+  // OR calls explicitly assigned to me.
   const myTableNames = myTables.map(t => t.name);
-  const myWaiterCalls = waiterCalls.filter(c =>
+  const myWaiterCalls = sharedFloor ? waiterCalls : waiterCalls.filter(c =>
     myTableNames.includes(c.table_number) || c.assigned_waiter_id === myId
   );
 
@@ -58048,10 +58086,10 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
             </div>
 
             <div className="space-y-6">
-              <h3 className="text-xl font-bold font-serif">My Tables</h3>
+              <h3 className="text-xl font-bold font-serif">{sharedFloor ? 'All Tables' : 'My Tables'}</h3>
               {myTables.length === 0 ? (
                 <div className="p-8 text-center bg-white rounded-3xl border border-dashed border-[#cc5a16]/20">
-                  <p className="text-[#9c8e85] text-sm italic">No tables assigned to you yet.</p>
+                  <p className="text-[#9c8e85] text-sm italic">{sharedFloor ? 'No tables configured yet.' : 'No tables assigned to you yet.'}</p>
                 </div>
               ) : (
                 <div className="space-y-3">
