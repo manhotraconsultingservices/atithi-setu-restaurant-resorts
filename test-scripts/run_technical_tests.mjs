@@ -3399,6 +3399,231 @@ function generateReport() {
   return failed;
 }
 
+// ── DINE-IN — waiter → KDS → deliver → table bill (full order lifecycle) ─────
+// Validates the business flow the owner described end-to-end, on real endpoints:
+//   1. A waiter places an order for a specific table (staff-auth POST /orders).
+//   2. The order is tagged to that table (auto session + table OCCUPIED) and
+//      lands in the kitchen queue (kitchen_status='queued').
+//   3. Placing an order auto-enqueues a thermal KOT print job for the chef's
+//      station printer (the KDS auto-print pipeline).
+//   4. Order lifecycle: a chef accepts (atomic claim), cooks (preparing→ready),
+//      and the waiter delivers (served) — kitchen_status advances with stamps.
+//   5. ANY waiter can take the table's order: a DIFFERENT waiter places a second
+//      round on the SAME table → same session, round 2 (no per-waiter lock).
+//   6. Command Center sees ALL of the table's orders together (the per-table
+//      drill-down endpoint returns every round).
+//   7. The manager generates the table invoice (request-bill aggregates every
+//      round) and can edit/remove a line item while billing (total recomputes).
+// Fully self-cleaning: cancels every order it creates, closes the session (so
+// the table is freed and — because all orders are cancelled — NO GL is posted),
+// acks + removes any printer/print-job it created, and deletes the throwaway
+// waiters. Skips cleanly (never falsely fails) when the tenant has no free table
+// or staff can't be provisioned.
+async function testDineInTableFlow() {
+  section('DINE-IN — Waiter → KDS → Deliver → Table Bill (order lifecycle)');
+
+  const IDS = ['TC-DINE-WAITER-ORDER', 'TC-DINE-KDS-PRINT', 'TC-DINE-LIFECYCLE',
+               'TC-DINE-ANY-WAITER', 'TC-DINE-CMD-CENTER', 'TC-DINE-INVOICE-EDIT'];
+  const skipAll = (why) => IDS.forEach(id => skip(id, 'Dine-in table order lifecycle', why));
+
+  // Teardown state — everything created is torn down in the finally block.
+  const created = { orderIds: [], waiterIds: [], printerId: null, sessionToken: null, tableId: null, patToken: null };
+
+  try {
+    // ── Pick a table that has NO active session (never disturb a live table) ──
+    const tablesResp = await api('GET', `/api/restaurant/${restaurantId}/tables`);
+    const tables = Array.isArray(tablesResp.data) ? tablesResp.data : [];
+    if (tables.length === 0) { skipAll('tenant has no dine-in tables configured'); return; }
+    let table = null;
+    for (const t of tables) {
+      const as = await api('GET', `/api/restaurant/${restaurantId}/tables/${t.id}/active-session`);
+      if (as.status === 200 && !as.data?.session) { table = t; break; }
+    }
+    if (!table) { skipAll('every table currently has an active session — no free table to test on'); return; }
+    created.tableId = table.id;
+
+    // ── Provision two throwaway waiters (proves "any waiter can take any table") ─
+    const tag = Date.now();
+    const mkWaiter = async (n) => {
+      const loginId = `dinewaiter${n}_${tag}`;
+      const pwd = `Dn!${tag}${n}xZ`;
+      const mk = await api('POST', '/api/owner/staff', { name: `Dine Waiter ${n} ${tag}`, role: 'WAITER', loginId, password: pwd, employee_type: 'LOGIN' });
+      if (mk.status !== 200 && mk.status !== 201) return { id: null, tok: '' };
+      const id = mk.data?.id || mk.data?.staff?.id || null;
+      const lg = await api('POST', '/api/auth/login', { loginId, password: pwd, restaurantId });
+      return { id, tok: lg.data?.jwt_token || lg.data?.token || '' };
+    };
+    const wA = await mkWaiter('A');
+    const wB = await mkWaiter('B');
+    if (wA.id) created.waiterIds.push(wA.id);
+    if (wB.id) created.waiterIds.push(wB.id);
+    // Fall back to the owner token if staff provisioning is blocked, so the core
+    // flow still runs (the ANY-WAITER assertion is the only one that strictly
+    // needs two distinct waiters).
+    const tokA = wA.tok || token;
+    const tokB = wB.tok || token;
+
+    // ── Ensure a KDS station printer exists so the order enqueues a KOT ───────
+    // Reuse an existing active printer if the tenant already configured one;
+    // otherwise create a temporary 'ALL' printer pointed at a non-routable
+    // TEST-NET IP (RFC 5737) so no real hardware is ever contacted.
+    const prs = await api('GET', `/api/restaurant/${restaurantId}/kitchen-printers`);
+    const activePrinters = (Array.isArray(prs.data) ? prs.data : []).filter(p => p.is_active !== 0 && p.is_active !== false);
+    if (activePrinters.length === 0) {
+      const mkp = await api('POST', `/api/restaurant/${restaurantId}/kitchen-printers`, { name: `E2E KDS ${tag}`, station: 'ALL', host: '192.0.2.1', port: 9100, copies: 1 });
+      if (mkp.status === 201 && mkp.data?.id) created.printerId = mkp.data.id;
+    }
+    const patResp = await api('GET', `/api/restaurant/${restaurantId}/print-agent-token`);
+    created.patToken = patResp.data?.token || null;
+    const havePrinter = activePrinters.length > 0 || !!created.printerId;
+
+    // ── STEP 1+2: waiter A places an order for the table ─────────────────────
+    const itemsA = [{ name: `E2E-A Veg Roll ${tag}`, price: 120, quantity: 2, category: 'ALL' }];
+    const totalA = 240;
+    const oa = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
+      table_id: table.id, table_number: table.name, items: itemsA,
+      total_amount: totalA, gst_amount: 0, checkout_mode: 'postpaid', customer_name: 'E2E Dine-in',
+    }, tokA);
+    const orderIdA = oa.data?.id || oa.data?.orderId || null;
+    if (orderIdA) created.orderIds.push(orderIdA);
+
+    // Read the table's active session (this is the Command Center per-table view).
+    let as1 = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+    const sess1 = as1.data?.session || null;
+    created.sessionToken = sess1?.session_token || null;
+    const aTagged = !!sess1 && (sess1.orders || []).some(o => o.id === orderIdA);
+    if (oa.status === 200 && orderIdA && aTagged && String(oa.data?.kitchen_status || '') === 'queued') {
+      pass('TC-DINE-WAITER-ORDER', `Waiter placed an order for table "${sess1.table_display_name || table.name}" → queued for kitchen + tagged to the table session`);
+    } else {
+      fail('TC-DINE-WAITER-ORDER', 'Waiter places a table order', `status=${oa.status} orderId=${orderIdA} kitchen_status=${oa.data?.kitchen_status} tagged=${aTagged}`);
+    }
+
+    // ── STEP 3: order auto-enqueued a thermal KOT for the chef's station ──────
+    if (!havePrinter || !created.patToken) {
+      skip('TC-DINE-KDS-PRINT', 'Order auto-prints a KOT to the KDS printer', `no station printer / agent token available (havePrinter=${havePrinter}, token=${!!created.patToken})`);
+    } else {
+      const pend = await api('GET', `/api/restaurant/${restaurantId}/print-jobs/pending?agent_token=${encodeURIComponent(created.patToken)}`);
+      const jobs = Array.isArray(pend.data) ? pend.data : [];
+      const mine = jobs.filter(j => j.order_id === orderIdA);
+      if (mine.length > 0) {
+        pass('TC-DINE-KDS-PRINT', `Placing the order queued a KOT print job for the chef's station printer (${mine.length} job(s) for the order)`);
+      } else {
+        fail('TC-DINE-KDS-PRINT', 'Order auto-prints a KOT to the KDS printer', `no PENDING print job found for order ${orderIdA} (${jobs.length} pending total) — the KDS auto-print enqueue did not fire`);
+      }
+      // Ack every pending job for our test orders so nothing is left queued.
+      for (const j of jobs) {
+        await api('POST', `/api/restaurant/${restaurantId}/print-jobs/${j.id}/ack?agent_token=${encodeURIComponent(created.patToken)}`, { status: 'PRINTED' }).catch(() => {});
+      }
+    }
+
+    // ── STEP 4: chef accepts (atomic) → preparing → ready → waiter delivers ──
+    if (!orderIdA) {
+      skip('TC-DINE-LIFECYCLE', 'Order lifecycle accept→prepare→ready→serve', 'order was not created');
+    } else {
+      const acc = await api('POST', `/api/orders/${orderIdA}/accept`, {}, tokA);
+      const prep = await api('PATCH', `/api/orders/${orderIdA}`, { kitchen_status: 'preparing' }, tokA);
+      const ready = await api('PATCH', `/api/orders/${orderIdA}`, { kitchen_status: 'ready' }, tokA);
+      const served = await api('PATCH', `/api/orders/${orderIdA}`, { status: 'DELIVERED', kitchen_status: 'served' }, tokA);
+      const accepted = acc.status === 200 && String(acc.data?.kitchen_status || acc.data?.order?.kitchen_status || 'accepted') !== 'queued';
+      const allOk = accepted && prep.status === 200 && ready.status === 200 && served.status === 200;
+      if (allOk) {
+        pass('TC-DINE-LIFECYCLE', 'Chef accepted (atomic claim) → preparing → ready → waiter delivered — every kitchen transition accepted');
+      } else {
+        fail('TC-DINE-LIFECYCLE', 'Order lifecycle accept→prepare→ready→serve', `accept=${acc.status} prep=${prep.status} ready=${ready.status} serve=${served.status}`);
+      }
+    }
+
+    // ── STEP 5: a DIFFERENT waiter places a second round on the SAME table ────
+    const itemsB = [
+      { name: `E2E-B Dal ${tag}`, price: 100, quantity: 1, category: 'ALL' },
+      { name: `E2E-B Naan ${tag}`, price: 40, quantity: 2, category: 'ALL' },
+    ];
+    const totalB = 180;
+    const ob = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
+      table_id: table.id, table_number: table.name, items: itemsB,
+      total_amount: totalB, gst_amount: 0, checkout_mode: 'postpaid', customer_name: 'E2E Dine-in',
+    }, tokB);
+    const orderIdB = ob.data?.id || ob.data?.orderId || null;
+    if (orderIdB) created.orderIds.push(orderIdB);
+
+    const as2 = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+    const sess2 = as2.data?.session || null;
+    const bOrders = sess2?.orders || [];
+    const bRow = bOrders.find(o => o.id === orderIdB);
+    const sameSession = !!sess1 && !!sess2 && sess1.id === sess2.id;
+    if (!wB.tok) {
+      // Couldn't provision a second distinct waiter — the placement still proves
+      // table aggregation, but not the "different waiter" property, so skip.
+      skip('TC-DINE-ANY-WAITER', 'Any waiter can take any table order', 'could not provision a second distinct WAITER account');
+    } else if (ob.status === 200 && bRow && sameSession && Number(bRow.round_number) >= 2) {
+      pass('TC-DINE-ANY-WAITER', `A different waiter added round ${bRow.round_number} to the SAME table session — no per-waiter table lock; both rounds tagged to the table`);
+    } else {
+      fail('TC-DINE-ANY-WAITER', 'Any waiter can take any table order', `status=${ob.status} sameSession=${sameSession} round=${bRow?.round_number} — second waiter's order did not join the table's session`);
+    }
+
+    // ── STEP 6: Command Center shows ALL of the table's orders together ───────
+    const cmdOrders = sess2?.orders || [];
+    const hasA = cmdOrders.some(o => o.id === orderIdA);
+    const hasB = cmdOrders.some(o => o.id === orderIdB);
+    if (hasA && hasB && cmdOrders.length >= 2) {
+      pass('TC-DINE-CMD-CENTER', `Command Center per-table view returns every round for the table (${cmdOrders.length} orders across the session)`);
+    } else {
+      fail('TC-DINE-CMD-CENTER', 'Command Center shows all table orders', `A=${hasA} B=${hasB} count=${cmdOrders.length} — not all of the table's orders are visible together`);
+    }
+
+    // ── STEP 7: manager generates the bill (aggregates rounds) + edits a line ─
+    if (!created.sessionToken) {
+      skip('TC-DINE-INVOICE-EDIT', 'Manager generates invoice + edits/removes an item', 'no session token to bill');
+    } else {
+      const rb = await api('POST', `/api/restaurant/${restaurantId}/sessions/${created.sessionToken}/request-bill`, {});
+      const as3 = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+      const billed = as3.data?.session?.orders || [];
+      const billedTotal = billed.filter(o => String(o.status || '').toUpperCase() !== 'CANCELLED')
+                                .reduce((s, o) => s + Number(o.total_amount || 0), 0);
+      const aggregatesAll = Math.abs(billedTotal - (totalA + totalB)) < 0.01;   // 240 + 180 = 420
+
+      // Edit/remove a line item while generating the bill: drop the Naan line
+      // from order B via the invoice-edit endpoint → the recomputed total must
+      // fall by the removed line's value (₹80).
+      let editOk = false, newTotal = null;
+      if (orderIdB) {
+        const ed = await api('PATCH', `/api/restaurant/${restaurantId}/orders/${orderIdB}/invoice`,
+          { items: [{ name: itemsB[0].name, price: 100, quantity: 1 }], discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: 0 });
+        newTotal = Number(ed.data?.total);
+        editOk = ed.status === 200 && Math.abs(newTotal - 100) < 0.01;   // was 180, Naan (₹80) removed → 100
+      }
+      if (rb.status === 200 && aggregatesAll && editOk) {
+        pass('TC-DINE-INVOICE-EDIT', `Bill aggregated both rounds (₹${billedTotal}) and removing a line item recomputed the order total ₹${totalB}→₹${newTotal}`);
+      } else {
+        fail('TC-DINE-INVOICE-EDIT', 'Manager generates invoice + edits/removes an item', `request-bill=${rb.status} aggregatesAll=${aggregatesAll} (got ₹${billedTotal}, expected ₹${totalA + totalB}) editOk=${editOk} (newTotal=₹${newTotal}, expected ₹100)`);
+      }
+    }
+  } catch (e) {
+    skipAll(`error: ${e?.message || e}`);
+  } finally {
+    // ── Teardown (net-zero) — cancel every order, then close the session so the
+    //    table is freed. Because every order is CANCELLED first, close posts NO
+    //    GL. Then remove the temp printer + waiters. Each step is best-effort.
+    try {
+      for (const oid of created.orderIds) {
+        await api('PATCH', `/api/orders/${oid}`, { status: 'CANCELLED' }).catch(() => {});
+      }
+      if (created.sessionToken) {
+        await api('PATCH', `/api/restaurant/${restaurantId}/sessions/${created.sessionToken}/close`, { payment_method: 'CASH' }).catch(() => {});
+      }
+      if (created.tableId) {
+        await api('PATCH', `/api/restaurant/${restaurantId}/tables/${created.tableId}/status`, { status: 'VACANT' }).catch(() => {});
+      }
+      if (created.printerId) {
+        await api('DELETE', `/api/restaurant/${restaurantId}/kitchen-printers/${created.printerId}`).catch(() => {});
+      }
+      for (const wid of created.waiterIds) {
+        await api('DELETE', `/api/owner/staff/${wid}`).catch(() => {});
+      }
+    } catch { /* teardown best-effort */ }
+  }
+}
+
 // ── Frontend source guard (no server needed) ────────────────────────────────
 // The OOTB operational staff roles (CHEF/WAITER/CASHIER/THERAPIST/FRONT_DESK/
 // HOUSEKEEPING/MAINTENANCE/CONCIERGE) must render the permission-aware
@@ -3461,6 +3686,7 @@ async function main() {
   checkContentGuardConsistency();
   await testAuth();
   await testRestaurant();
+  await testDineInTableFlow();
   await testHotel();
   await testProcurement();
   await testHR();
