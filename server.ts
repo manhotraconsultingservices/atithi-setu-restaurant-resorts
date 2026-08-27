@@ -13103,7 +13103,7 @@ async function startServer() {
 
     // ── Tax lines from tax_config ──────────────────────────────────────
     const tenantRow: any = await centralDb.get(
-      "SELECT country, tax_template_id, is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+      "SELECT country, tax_template_id, is_gst_enabled, gst_percentage, gst_number FROM restaurants WHERE id = ?",
       [opts.tenantId]
     );
     // GST is NON-EDITABLE — it ALWAYS derives from the tenant's settings, never
@@ -13113,6 +13113,10 @@ async function startServer() {
     // callers pass is ignored for the rate/on-off (kept only for type compat).
     const settingsGstEnabled = Number(tenantRow?.is_gst_enabled) === 1;
     const settingsGstPct = Math.max(0, Number(tenantRow?.gst_percentage || 0));
+    // COMPLIANCE: a business with NO GSTIN cannot legally charge GST, so GST is
+    // never applied without a GST number — regardless of settings/tax_config.
+    const _gstin = String(tenantRow?.gst_number || '').trim();
+    const hasGstin = !!_gstin && _gstin !== '0';
     const configs = await _loadTaxConfig(opts.tenantId, tenantRow?.tax_template_id || 'IN_GST');
     // Phase H3 — filter out service-charge rows from tax_config so they
     // never apply as taxes. Service charge is handled via the dedicated
@@ -13121,7 +13125,9 @@ async function startServer() {
     const activeConfigs = (configs || []).filter(c =>
       Number(c.enabled || 1) === 1 &&
       Number(c.rate_percent || 0) > 0 &&
-      !isServiceChargeTaxRow(c)
+      !isServiceChargeTaxRow(c) &&
+      // Drop GST-type rows when the tenant has no GSTIN (compliance).
+      !(!hasGstin && /gst/i.test(String((c as any).id || (c as any).label || '')))
     );
 
     // GST-A3: a restaurant inside a "specified premises" (a hotel where any room
@@ -13156,10 +13162,10 @@ async function startServer() {
       });
       taxLines = computed.lines;
       totalTax = computed.total;
-    } else if (settingsGstEnabled && settingsGstPct > 0) {
+    } else if (hasGstin && settingsGstEnabled && settingsGstPct > 0) {
       // No tax_config rows → apply the tenant's SETTINGS single GST (always on
-      // when enabled; bumped to 18% for specified premises). The client-sent GST
-      // is ignored — GST is non-editable and always comes from settings.
+      // when enabled AND a GSTIN exists; bumped to 18% for specified premises).
+      // The client-sent GST is ignored — GST is non-editable and from settings.
       const rate = fnb18RateForSpecifiedPremises(settingsGstPct, specifiedPremises);
       const amount = Math.round((taxableBase * rate / 100) * 100) / 100;
       if (amount > 0) {
@@ -43712,6 +43718,36 @@ ${data.tenant.name}`;
         invoice_terms_hotel, invoice_cancellation_hotel, invoice_payment_hotel,
         invoice_terms_events, invoice_cancellation_events, invoice_payment_events,
       } = req.body;
+
+      // ── India GST COMPLIANCE (tested via TC-GST-COMPLIANCE-*) ──────────────
+      //  • GST can only be charged with a valid GSTIN → no GSTIN forces GST OFF.
+      //  • Setting / changing the GSTIN resets the restaurant GST rate to the 5%
+      //    default and enables GST.
+      //  • Enabling GST with no rate is rejected — the settings cannot be saved.
+      let effIsGstEnabled = is_gst_enabled ? 1 : 0;
+      let effGstPct = gst_percentage != null ? Number(gst_percentage) : 0;
+      if (gst_number !== undefined || is_gst_enabled !== undefined || gst_percentage !== undefined) {
+        const _cur: any = await centralDb.get(
+          "SELECT gst_number FROM restaurants WHERE id = ?", [req.params.id]
+        ).catch(() => null);
+        const curGstin = String(_cur?.gst_number || '').trim();
+        const newGstin = gst_number !== undefined ? String(gst_number || '').trim() : curGstin;
+        const hasGstin = !!newGstin && newGstin !== '0';
+        if (!hasGstin) {
+          effIsGstEnabled = 0;   // no GSTIN → GST cannot be applied
+        } else {
+          if (gst_number !== undefined && newGstin !== curGstin) {
+            effGstPct = 5; effIsGstEnabled = 1;   // GSTIN set/changed → reset to the 5% restaurant default
+          }
+          if (effIsGstEnabled && !(effGstPct > 0)) {
+            return res.status(400).json({
+              error: 'A GST rate is required when GST is enabled. Set the GST % (e.g. 5%) before saving.',
+              code: 'GST_RATE_REQUIRED',
+            });
+          }
+        }
+      }
+
       // COALESCE-friendly text coercion: undefined → null (keep existing);
       // provided (incl. empty) → trimmed string (empty string clears the field).
       const _txt = (v: any): string | null => v === undefined ? null : String(v ?? '').trim();
@@ -43827,8 +43863,8 @@ ${data.tenant.name}`;
       `, [
         name,
         gst_number || null,
-        gst_percentage != null ? Number(gst_percentage) : 0,
-        is_gst_enabled ? 1 : 0,
+        effGstPct,          // compliance-adjusted GST rate (5% default on GSTIN set)
+        effIsGstEnabled,    // compliance-adjusted GST on/off (off without a GSTIN)
         template_id || 'CLASSIC',
         table_count || 0,
         upi_id || null,
@@ -50517,7 +50553,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-noneditable-from-settings',
+    commit_marker: 'gst-compliance-gstin-gate',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

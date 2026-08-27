@@ -4090,6 +4090,59 @@ async function testInvoicePrintTaxes() {
   }
 }
 
+// COMPLIANCE (India GST) — GST can only be charged with a GSTIN; setting/changing
+// the GSTIN resets the rate to 5%; enabling GST with no rate is rejected. These
+// PATCH the tenant's GST settings, so the whole thing snapshots + restores the
+// original GST config in a finally block (robust re-read + force).
+async function testGstCompliance() {
+  section('COMPLIANCE — GST requires GSTIN · defaults 5% on GSTIN set · rate required');
+  const IDS = ['TC-GST-COMPLIANCE-RATE', 'TC-GST-COMPLIANCE-NO-GSTIN', 'TC-GST-COMPLIANCE-RESET5'];
+  let snap = null, base = null;
+  try {
+    const g = await api('GET', `/api/restaurant/${restaurantId}`);
+    if (g.status !== 200 || !g.data?.id) { IDS.forEach(id => skip(id, 'GST compliance', `GET restaurant ${g.status}`)); return; }
+    const r = g.data;
+    snap = { gst_number: r.gst_number, gst_percentage: r.gst_percentage, is_gst_enabled: r.is_gst_enabled };
+    base = { name: r.name, template_id: r.template_id, table_count: r.table_count, upi_id: r.upi_id, checkout_mode: r.checkout_mode || 'postpaid' };
+    const P = (extra) => api('PATCH', `/api/restaurant/${restaurantId}`, { ...base, ...extra });
+
+    // 1. GST on + valid GSTIN (unchanged) + NO rate → rejected (can't save).
+    const p1 = await P({ gst_number: snap.gst_number || 'TESTGSTIN0001', is_gst_enabled: true, gst_percentage: 0 });
+    // (if snap had no GSTIN, that PATCH sets one → reset to 5, not a 400; guard for that)
+    if (p1.status === 400) pass('TC-GST-COMPLIANCE-RATE', 'Enabling GST with no rate is rejected (settings not saved, 400)');
+    else if (!snap.gst_number) skip('TC-GST-COMPLIANCE-RATE', 'GST rate-required', 'tenant had no GSTIN to reuse (reset-to-5 path)');
+    else fail('TC-GST-COMPLIANCE-RATE', 'GST rate must be required when enabled', `got ${p1.status} (expected 400)`);
+
+    // 2. No GSTIN → GST forced OFF + no GST line on invoices.
+    const p2 = await P({ gst_number: '', is_gst_enabled: true, gst_percentage: 6 });
+    const g2 = await api('GET', `/api/restaurant/${restaurantId}`);
+    const gstOff = Number(g2.data?.is_gst_enabled) === 0;
+    const pv = await api('GET', `/api/restaurant/${restaurantId}/invoices/preview-totals?subtotal=200`);
+    const noGstLine = !(Array.isArray(pv.data?.taxLines) && pv.data.taxLines.some(l => /gst/i.test(String(l.label || l.id || ''))));
+    if (p2.status === 200 && gstOff && noGstLine) pass('TC-GST-COMPLIANCE-NO-GSTIN', 'No GSTIN → GST disabled and no GST line on invoices');
+    else fail('TC-GST-COMPLIANCE-NO-GSTIN', 'No GSTIN must block GST', `patch=${p2.status} gstOff=${gstOff} noGstLine=${noGstLine}`);
+
+    // 3. Setting/changing the GSTIN resets the rate to 5% and enables GST.
+    const p3 = await P({ gst_number: 'CMPLGSTIN0009', is_gst_enabled: false, gst_percentage: 0 });
+    const g3 = await api('GET', `/api/restaurant/${restaurantId}`);
+    const reset5 = Number(g3.data?.gst_percentage) === 5 && Number(g3.data?.is_gst_enabled) === 1;
+    if (p3.status === 200 && reset5) pass('TC-GST-COMPLIANCE-RESET5', 'Setting/changing the GSTIN resets GST to 5% + enables it');
+    else fail('TC-GST-COMPLIANCE-RESET5', 'GSTIN change must reset GST to 5%', `patch=${p3.status} rate=${g3.data?.gst_percentage} enabled=${g3.data?.is_gst_enabled}`);
+  } catch (e) {
+    IDS.forEach(id => skip(id, 'GST compliance', `error: ${e?.message || e}`));
+  } finally {
+    // Robust restore: two-step so the reset-to-5 rule doesn't clobber the rate.
+    if (snap && base) {
+      try {
+        // Step A — restore the GSTIN (may trigger reset-to-5).
+        await api('PATCH', `/api/restaurant/${restaurantId}`, { ...base, gst_number: snap.gst_number || '', is_gst_enabled: !!Number(snap.is_gst_enabled), gst_percentage: Number(snap.gst_percentage || 0) }).catch(() => {});
+        // Step B — same GSTIN (no change) → set the exact original rate + on/off back.
+        await api('PATCH', `/api/restaurant/${restaurantId}`, { ...base, gst_number: snap.gst_number || '', is_gst_enabled: !!Number(snap.is_gst_enabled), gst_percentage: Number(snap.gst_percentage || 0) }).catch(() => {});
+      } catch { /* best-effort */ }
+    }
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -4110,6 +4163,7 @@ async function main() {
   await testQrBillGst();
   await testInvoicePrintTaxes();
   await testTableClearFreshSession();
+  await testGstCompliance();
   await testHotel();
   await testProcurement();
   await testHR();
