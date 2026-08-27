@@ -26936,32 +26936,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // visible even if currently unassigned — so the screen can never
             // hide (and thereby strand) access that is actually in effect.
             type RoleDesc = { id: string; label: string; hint: string; kind: 'custom' | 'builtin'; affinity: string; scope: string; count?: number; locked?: boolean };
-            const visibleTabSet = new Set(visibleTabs.map(t => t.id));
             const roleMap = new Map<string, RoleDesc>();
             for (const cr of customRoles) {
               const id = String(cr.id).toUpperCase();
               if (PRIVILEGED_ROLES.has(id)) continue;
               roleMap.set(id, { id, label: `${cr.emoji || '👤'} ${cr.name}`, hint: 'Custom role', kind: 'custom', affinity: 'CUSTOM', scope: String(cr.scope || 'BOTH').toUpperCase() });
             }
-            for (const ru of rolesInUse) {
-              const id = String(ru.role || '').toUpperCase();
-              if (!id || PRIVILEGED_ROLES.has(id) || roleMap.has(id)) continue;
-              const meta = BUILTIN_ROLE_META[id];
-              roleMap.set(id, meta
-                ? { id, label: meta.label, hint: meta.hint, kind: 'builtin', affinity: meta.affinity, scope: 'BOTH', count: ru.count }
-                : { id, label: prettifyRole(id), hint: 'Role assigned to staff', kind: 'builtin', affinity: 'ALL', scope: 'BOTH', count: ru.count });
-            }
-            for (const key of Object.keys(staffAccess)) {
-              const id = key.toUpperCase();
-              if (PRIVILEGED_ROLES.has(id) || roleMap.has(id)) continue;
-              const perms = staffAccess[key] || {};
-              // only resurrect if it has a live grant on a page this tenant can still see
-              if (!Object.entries(perms).some(([tab, v]) => (v as number) > 0 && visibleTabSet.has(tab))) continue;
-              const meta = BUILTIN_ROLE_META[id];
-              roleMap.set(id, meta
-                ? { id, label: meta.label, hint: meta.hint, kind: 'builtin', affinity: meta.affinity, scope: 'BOTH' }
-                : { id, label: prettifyRole(id), hint: 'Configured role', kind: 'builtin', affinity: 'ALL', scope: 'BOTH' });
-            }
+            // ── Custom-role-only model (owner directive 2026-08-28) ──────────────
+            // Staff Access shows ONLY the Business Owner (added below, locked) and the
+            // tenant's ACTIVE custom roles (above — the backend GET /custom-roles
+            // already filters is_active=1, so stale / soft-deleted roles never appear).
+            // Built-in operational roles (Waiter/Chef/Manager/…) and configured-but-
+            // orphaned roles are intentionally NOT shown as columns: the owner manages
+            // access exclusively through custom roles. Every PAGE stays a grantable
+            // ROW, so no feature a built-in role could do is hidden — it is all
+            // assignable to a custom role. (Built-in roles still assigned to staff keep
+            // working via their seeded matrix; reassign that staff to a custom role to
+            // manage them here.) `rolesInUse` / `BUILTIN_ROLE_META` / `prettifyRole`
+            // remain wired for the role-count chips + built-in metadata used elsewhere.
+            void rolesInUse; void BUILTIN_ROLE_META; void prettifyRole;
             const allVisibleRoles = Array.from(roleMap.values()).sort((a, b) => {
               const ia = ROLE_ORDER.indexOf(a.id), ib = ROLE_ORDER.indexOf(b.id);
               if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
@@ -27012,21 +27005,41 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               3: 'bg-emerald-100 text-emerald-700',
             };
 
-            // Bulk helpers — scoped to the ACTIVE module's pages / roles, and
-            // merge into (never replace) a role's other-module grants.
+            // A custom role can only be granted pages that belong to its SCOPE — a
+            // RESTAURANT role can't be given hotel / spa / events pages (and vice
+            // versa), so it "can't see anything outside Restaurant". Scope-less
+            // (general) pages are grantable to any role; a BOTH-scope role (or the
+            // owner) can be granted anything. Out-of-scope cells render as N/A.
+            const tabAllowedForRole = (tab: any, role: RoleDesc): boolean => {
+              if (role.kind !== 'custom') return true;
+              const scope = role.scope;
+              if (scope === 'BOTH') return true;
+              if (tab?.hotelOnly)      return scope === 'HOTEL';
+              if (tab?.restaurantOnly) return scope === 'RESTAURANT';
+              if (tab?.spaOnly)        return scope === 'SPA';
+              if (tab?.eventsOnly)     return scope === 'EVENTS';
+              return true;
+            };
+            // Bulk helpers — scoped to the ACTIVE module's pages / roles, and merge
+            // into (never replace) a role's other-module grants. They skip pages that
+            // are out-of-scope for a role (rendered N/A) so bulk never over-grants.
             const grantAllForTab = (tabId: string) => {
-              const everyRoleFull = moduleRoles.every(r => ((staffAccess[r.id]?.[tabId] ?? 0) as number) >= 3);
+              const tabObj: any = moduleTabs.find(t => t.id === tabId) || { id: tabId };
+              const eligible = moduleRoles.filter(r => tabAllowedForRole(tabObj, r));
+              const everyRoleFull = eligible.length > 0 && eligible.every(r => ((staffAccess[r.id]?.[tabId] ?? 0) as number) >= 3);
               setStaffAccess(prev => {
                 const next = { ...prev };
-                for (const r of moduleRoles) next[r.id] = { ...(next[r.id] || {}), [tabId]: everyRoleFull ? 0 : 3 };
+                for (const r of eligible) next[r.id] = { ...(next[r.id] || {}), [tabId]: everyRoleFull ? 0 : 3 };
                 return next;
               });
             };
             const grantAllForRole = (roleId: string) => {
-              const hasAll = moduleTabs.every(t => ((staffAccess[roleId]?.[t.id] ?? 0) as number) >= 3);
+              const role = cols.find(r => r.id === roleId);
+              const eligibleTabs = moduleTabs.filter(t => !role || tabAllowedForRole(t, role));
+              const hasAll = eligibleTabs.length > 0 && eligibleTabs.every(t => ((staffAccess[roleId]?.[t.id] ?? 0) as number) >= 3);
               setStaffAccess(prev => {
                 const cur = { ...(prev[roleId] || {}) };
-                for (const t of moduleTabs) cur[t.id] = hasAll ? 0 : 3;
+                for (const t of eligibleTabs) cur[t.id] = hasAll ? 0 : 3;
                 return { ...prev, [roleId]: cur };
               });
             };
@@ -27224,6 +27237,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     <span className="inline-flex items-center justify-center gap-0.5 text-[10px] font-bold rounded-lg px-1.5 py-1 w-full bg-emerald-100 text-emerald-700 cursor-not-allowed" title="The Business Owner always has full access.">
                                       <Lock size={9} /> Full
                                     </span>
+                                  </td>
+                                );
+                              }
+                              if (!tabAllowedForRole(t, r)) {
+                                return (
+                                  <td key={r.id} className="px-1 py-2 text-center align-middle">
+                                    <span
+                                      className="inline-flex items-center justify-center text-[9px] font-bold rounded-lg px-1.5 py-1 w-full bg-gray-50 text-gray-300 cursor-not-allowed"
+                                      title={`Not available to a ${String(r.scope).toLowerCase()} role — this page is outside its module.`}
+                                    >N/A</span>
                                   </td>
                                 );
                               }
