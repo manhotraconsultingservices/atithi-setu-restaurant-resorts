@@ -3423,7 +3423,7 @@ async function testDineInTableFlow() {
   section('DINE-IN — Waiter → KDS → Deliver → Table Bill (order lifecycle)');
 
   const IDS = ['TC-DINE-WAITER-ORDER', 'TC-DINE-KDS-PRINT', 'TC-DINE-LIFECYCLE',
-               'TC-DINE-ANY-WAITER', 'TC-DINE-CMD-CENTER', 'TC-DINE-INVOICE-EDIT'];
+               'TC-DINE-ANY-WAITER', 'TC-DINE-CMD-CENTER', 'TC-DINE-INVOICE-EDIT', 'TC-DINE-BILL-ADJUSTMENT'];
   const skipAll = (why) => IDS.forEach(id => skip(id, 'Dine-in table order lifecycle', why));
 
   // Teardown state — everything created is torn down in the finally block.
@@ -3598,9 +3598,23 @@ async function testDineInTableFlow() {
               && add.status === 200 && Math.abs(addedTotal - 200) < 0.01;
       }
       if (rb.status === 200 && aggregatesAll && editOk) {
-        pass('TC-DINE-INVOICE-EDIT', `Bill aggregated both rounds (₹${billedTotal}); removing a line dropped the order ₹${totalB}→₹${removedTotal}, adding a line raised it →₹${addedTotal}`);
+        pass('TC-DINE-INVOICE-EDIT', `Bill aggregated both rounds (₹${billedTotal}); removing a line dropped the order ₹${totalB}→${removedTotal}, adding a line raised it →₹${addedTotal}`);
       } else {
         fail('TC-DINE-INVOICE-EDIT', 'Manager generates invoice + edits/removes/adds an item', `request-bill=${rb.status} aggregatesAll=${aggregatesAll} (got ₹${billedTotal}, expected ₹${totalA + totalB}) editOk=${editOk} (removed=₹${removedTotal}→100, added=₹${addedTotal}→200)`);
+      }
+
+      // Manager Adjustment round: items the manager adds at billing time become a
+      // separate, labeled round (is_adjustment=1), never queued to the kitchen.
+      const adj = await api('POST', `/api/restaurant/${restaurantId}/sessions/${created.sessionToken}/adjustment`,
+        { items: [{ name: `E2E Adj ${tag}`, price: 30, quantity: 3 }] });   // ₹90
+      const adjId = adj.data?.id;
+      if (adjId) created.orderIds.push(adjId);   // ensure teardown cancels it
+      const asAdj = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+      const adjRow = (asAdj.data?.session?.orders || []).find(o => o.id === adjId);
+      if (adj.status === 201 && adjRow && Number(adjRow.is_adjustment) === 1 && Math.abs(Number(adjRow.total_amount) - 90) < 0.01) {
+        pass('TC-DINE-BILL-ADJUSTMENT', `Manager-added items created a separate adjustment round (₹${adjRow.total_amount}, is_adjustment=1, kitchen_status=${adjRow.kitchen_status})`);
+      } else {
+        fail('TC-DINE-BILL-ADJUSTMENT', 'Manager adjustment round', `status=${adj.status} found=${!!adjRow} is_adjustment=${adjRow?.is_adjustment} total=${adjRow?.total_amount}`);
       }
     }
   } catch (e) {

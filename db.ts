@@ -1188,6 +1188,9 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS preparing_at TIMESTAMP").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS ready_at TIMESTAMP").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS served_at TIMESTAMP").catch(() => {});
+  // Manager-adjustment marker — an order the manager added to a table bill at
+  // billing time (shows as its own "Manager Adjustment" round; never queued).
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_adjustment INTEGER DEFAULT 0").catch(() => {});
   // Cloud-kitchen / online-delivery: structured customer delivery address
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line1 TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line2 TEXT").catch(() => {});

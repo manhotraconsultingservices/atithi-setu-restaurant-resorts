@@ -57123,29 +57123,36 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     if (savingItems) return;
     setSavingItems(true);
     const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
-    const fallbackId = activeOrders[0]?.id;
     try {
-      // Group the edited lines back by their owning round; untagged / new lines
-      // fall into the first active round.
+      const activeIds = new Set(activeOrders.map((o: any) => o.id));
+      // Existing lines persist back to the round they came from; lines added in
+      // the editor (_isNew) become a separate "Manager Adjustment" round.
       const groups: Record<string, any[]> = {};
       for (const o of activeOrders) groups[o.id] = [];
+      const newItems: any[] = [];
       for (const it of editItems) {
-        const oid = (it._orderId && groups[it._orderId]) ? it._orderId : fallbackId;
-        if (!oid) continue;
-        (groups[oid] = groups[oid] || []).push({ name: it.name, price: Number(it.price || 0), quantity: Number(it.quantity ?? it.qty ?? 1) });
+        const line = { name: it.name, price: Number(it.price || 0), quantity: Number(it.quantity ?? it.qty ?? 1) };
+        if (!line.name || line.quantity <= 0) continue;
+        if (!it._isNew && it._orderId && activeIds.has(it._orderId)) groups[it._orderId].push(line);
+        else newItems.push(line);
       }
+      // 1. Persist edits to existing rounds (cancel a round emptied of all items).
       for (const o of activeOrders) {
-        const g = (groups[o.id] || []).filter(x => x.name && x.quantity > 0);
+        const g = groups[o.id] || [];
         if (g.length === 0) {
-          // Every line of this round was removed → cancel the whole round.
           await fetch(`/api/orders/${o.id}`, { method: 'PATCH', headers: H, body: JSON.stringify({ status: 'CANCELLED' }) });
         } else {
-          // Persist items only (session-level discount/svc/GST stay on the session).
           await fetch(`/api/restaurant/${restaurantId}/orders/${o.id}/invoice`, {
             method: 'PATCH', headers: H,
             body: JSON.stringify({ items: g, discount_amount: 0, service_charge_percent: 0, gst_percent: 0, apply_gst: 0 }),
           });
         }
+      }
+      // 2. New items → one "Manager Adjustment" round (never touches the kitchen).
+      if (newItems.length > 0 && session?.session_token) {
+        await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/adjustment`, {
+          method: 'POST', headers: H, body: JSON.stringify({ items: newItems }),
+        });
       }
       await reloadOrders();
       setEditingItems(false);
@@ -57407,8 +57414,8 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                 </div>
                 {editingItems ? (
                   <div className="rounded-2xl border border-[#cc5a16]/20 p-3 space-y-3">
-                    <p className="text-[11px] text-[#9c8e85]">Add or remove items on this table's bill. New items are added to Round {activeOrders[0]?.round_number || 1}. Click <b>Save items</b> to update the bill.</p>
-                    <InvoiceItemsEditor items={editItems} onChange={setEditItems} menu={menuItems} newItemExtra={{ _orderId: activeOrders[0]?.id }} />
+                    <p className="text-[11px] text-[#9c8e85]">Add or remove items on this table's bill. Newly-added items appear as a separate <b>Manager Adjustment</b> round. Click <b>Save items</b> to update the bill.</p>
+                    <InvoiceItemsEditor items={editItems} onChange={setEditItems} menu={menuItems} newItemExtra={{ _isNew: true }} />
                     <div className="flex gap-2 justify-end pt-1">
                       <button type="button" onClick={() => setEditingItems(false)} disabled={savingItems} className="px-4 py-2 rounded-xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52] disabled:opacity-60">Cancel</button>
                       <button type="button" onClick={saveItems} disabled={savingItems} className="px-4 py-2 rounded-xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">{savingItems ? 'Saving…' : 'Save items'}</button>
@@ -57422,6 +57429,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                     const roundSub    = items.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
                     const isOpen      = expanded[idx] !== false;
                     const roundNum    = order.round_number || idx + 1;
+                    const isAdjustment = !!order.is_adjustment && !isCancelled;
                     return (
                       <div key={order.id || idx} className={cn("rounded-2xl border overflow-hidden", isCancelled ? "border-red-200 opacity-60" : "border-[#cc5a16]/10")}>
                         {/* Round header — clickable to collapse */}
@@ -57431,11 +57439,11 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                           className={cn("w-full flex items-center justify-between px-4 py-3 transition-colors", isCancelled ? "bg-red-50 hover:bg-red-100/50" : "bg-[#faf7f2] hover:bg-[#f5ece0]")}
                         >
                           <div className="flex items-center gap-2.5">
-                            <span className={cn("flex items-center justify-center h-6 w-6 rounded-full text-white text-[11px] font-black shrink-0", isCancelled ? "bg-red-400" : "bg-[#cc5a16]")}>
-                              {roundNum}
+                            <span className={cn("flex items-center justify-center h-6 w-6 rounded-full text-white text-[11px] font-black shrink-0", isCancelled ? "bg-red-400" : isAdjustment ? "bg-[#1e3a5f]" : "bg-[#cc5a16]")}>
+                              {isAdjustment ? '✎' : roundNum}
                             </span>
                             <span className={cn("text-xs font-bold", isCancelled ? "text-red-500 line-through" : "text-[#3d3128]")}>
-                              Round {roundNum}
+                              {isAdjustment ? 'Manager Adjustment' : `Round ${roundNum}`}
                             </span>
                             {isCancelled ? (
                               <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-red-100 text-red-600 uppercase tracking-widest">Cancelled</span>

@@ -44122,6 +44122,43 @@ ${data.tenant.name}`;
     }
   });
 
+  // Sessions: add a "Manager Adjustment" round — extra items the manager adds
+  // to a table bill (owner/manager only). Creates a NEW order in the session,
+  // marked is_adjustment=1 and already served (never touches the kitchen queue /
+  // KOT printers), so the added items show as their own round on the bill.
+  app.post("/api/restaurant/:id/sessions/:token/adjustment", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!['OWNER', 'MANAGER'].includes(req.user!.role)) {
+        return res.status(403).json({ error: "Access denied — manager or owner only" });
+      }
+      const db = await getTenantDb(req.params.id);
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_adjustment INTEGER DEFAULT 0").catch(() => {});
+      const items = (Array.isArray(req.body?.items) ? req.body.items : [])
+        .map((it: any) => ({ name: String(it.name || '').trim(), price: Number(it.price || 0), quantity: Math.max(1, Math.floor(Number(it.quantity ?? it.qty ?? 1))) }))
+        .filter((it: any) => it.name && it.price >= 0 && it.quantity > 0);
+      if (items.length === 0) return res.status(400).json({ error: "No valid items to add" });
+      const session: any = await db.get(
+        "SELECT * FROM table_sessions WHERE session_token = ? AND status IN ('open','bill_requested') AND deleted_at IS NULL",
+        [req.params.token]
+      );
+      if (!session) return res.status(404).json({ error: "Active session not found" });
+      const subtotal = items.reduce((s: number, it: any) => s + it.price * it.quantity, 0);
+      const roundRow: any = await db.get("SELECT COALESCE(MAX(round_number), 0) AS mx FROM orders WHERE session_id = ?", [session.id]).catch(() => ({ mx: 0 }));
+      const roundNum = Number(roundRow?.mx || 0) + 1;
+      const id = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO orders (id, table_number, items, total_amount, gst_amount, status, kitchen_status, payment_status, session_id, checkout_mode, round_number, is_adjustment, created_at)
+         VALUES (?, ?, ?, ?, 0, 'DELIVERED', 'served', 'PENDING', ?, 'postpaid', ?, 1, NOW())`,
+        [id, session.table_name || null, JSON.stringify(items), subtotal, session.id, roundNum]
+      );
+      await db.run("UPDATE table_sessions SET round_count = ? WHERE id = ?", [roundNum, session.id]).catch(() => {});
+      res.status(201).json({ success: true, id, round_number: roundNum, total_amount: subtotal, items_added: items.length });
+    } catch (err: any) {
+      console.error("Session adjustment error:", err);
+      res.status(500).json({ error: "Failed to add adjustment items" });
+    }
+  });
+
   // Sessions: Owner — list all sessions for a restaurant
   app.get("/api/restaurant/:id/sessions", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -50372,7 +50409,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'billing-ux-fixes',
+    commit_marker: 'manager-adjustment-round',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
