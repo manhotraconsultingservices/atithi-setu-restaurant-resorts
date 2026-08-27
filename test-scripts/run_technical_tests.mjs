@@ -3675,7 +3675,7 @@ async function testWaiterSharedFloor() {
   // Source guard — the Waiter Dashboard must branch its table board on the flag.
   try {
     const src = readFileSync(join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
-    const tablesHonorsFlag = /myTables\s*=\s*sharedFloor\s*\?\s*liveTables/.test(src);
+    const tablesHonorsFlag = /myTables\s*=\s*\(?\s*sharedFloor\s*\?\s*liveTables/.test(src);
     const readsFlag = /setSharedFloor\(data\.waiter_shared_floor/.test(src);
     const ok = tablesHonorsFlag && readsFlag;
     (ok ? pass : fail)('TC-DINE-SHARED-FLOOR-UI',
