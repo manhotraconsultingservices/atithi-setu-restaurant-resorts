@@ -57308,7 +57308,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
         initial={{ scale: 0.93, opacity: 0, y: 24 }} animate={{ scale: 1, opacity: 1, y: 0 }}
         exit={{ scale: 0.93, opacity: 0, y: 24 }}
         transition={{ type: 'spring', stiffness: 320, damping: 28 }}
-        className="bg-white rounded-3xl shadow-2xl w-full max-w-xl flex flex-col overflow-hidden"
+        className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl flex flex-col overflow-hidden"
         style={{ maxHeight: '92vh' }}
       >
         {/* ── HEADER ── */}
@@ -57375,8 +57375,8 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
           )}
         </div>
 
-        {/* ── SCROLLABLE CONTENT ── */}
-        <div className="flex-1 overflow-y-auto">
+        {/* ── BODY (two-column touch layout — matches Manual Invoice) ── */}
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
           {loading ? (
             <div className="py-20 flex flex-col items-center gap-3">
               <Clock size={28} className="animate-spin text-[#cc5a16]" />
@@ -57427,7 +57427,9 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
               </button>
             </div>
           ) : (
-            <div className="px-6 py-5 space-y-6">
+            <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
+              {/* LEFT — order rounds (like Manual Invoice item list) */}
+              <div className="flex-1 px-6 py-5 space-y-6 lg:overflow-y-auto lg:min-h-0">
 
               {/* ── ORDER ROUNDS ── */}
               <section>
@@ -57537,7 +57539,11 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                 </div>
                 )}
               </section>
+              </div>{/* /LEFT */}
 
+              {/* RIGHT RAIL — bill adjustments + grand total (matches Manual Invoice cart aside) */}
+              <aside className="lg:w-96 shrink-0 border-t lg:border-t-0 lg:border-l border-[#cc5a16]/10 bg-[#faf7f2]/30 lg:overflow-y-auto lg:min-h-0">
+              <div className="px-5 py-5">
               {/* ── ADJUSTMENTS PANEL ── */}
               <section className="rounded-2xl border border-[#cc5a16]/15 overflow-hidden">
                 <div className="px-4 py-3 bg-[#faf7f2] border-b border-[#cc5a16]/10 flex items-center justify-between">
@@ -57699,6 +57705,8 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                   </button>
                 </div>
               </section>
+              </div>{/* /right-rail inner */}
+              </aside>{/* /RIGHT RAIL */}
             </div>
           )}
         </div>

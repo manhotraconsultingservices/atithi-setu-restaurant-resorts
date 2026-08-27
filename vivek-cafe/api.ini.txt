@@ -1,0 +1,5 @@
+Hotelcode = 1000122158
+Channel Manager = eglobe solutions
+Access Token =faaf033cfe
+Status = Active
+Created By User =sarthakresortsmanali
