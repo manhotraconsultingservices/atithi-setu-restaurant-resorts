@@ -5243,6 +5243,20 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
 // Shared helper: normalize raw DB order rows (snake_case) into camelCase aliases
 // so both snake_case references (REPORTS/CSV) and camelCase references (PAYMENTS/UPI) work.
 // Also parses the `items` field from a JSON string into an array (PostgreSQL stores it as TEXT).
+// Is an invoice actually PAID? A table SESSION counts as paid only when it was
+// truly SETTLED — a real payment method was recorded — NOT merely because its
+// status is 'closed'. Staff can now clear/free a table without settling; that
+// leaves the session 'closed' but UNPAID (a DRAFT invoice). Using 'closed' alone
+// as the paid signal wrongly marked those cleared tables as PAID.
+function isInvoicePaid(inv: any): boolean {
+  if (!inv) return false;
+  if (inv.invoice_type === 'SESSION') {
+    const pm = String(inv.payment_method || '').toUpperCase();
+    return inv.session_status === 'closed' && !!pm && pm !== 'NONE';
+  }
+  return String(inv.payment_status || '').toUpperCase() === 'PAID';
+}
+
 function normalizeOrder(o: any): any {
   let parsedItems = o.items;
   if (typeof parsedItems === 'string') {
@@ -20285,7 +20299,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
           {/* Invoice stats */}
           {invoices.length > 0 && (() => {
-            const isPaidFn = (i: any) => i.invoice_type === 'SESSION' ? i.session_status === 'closed' : i.payment_status === 'PAID';
+            const isPaidFn = isInvoicePaid;
             const paid    = invoices.filter(isPaidFn).length;
             const unpaid  = invoices.filter(i => !isPaidFn(i)).length;
             const printed = invoices.filter(i => i.invoice_status === 'PRINTED' && !isPaidFn(i)).length;
@@ -20348,7 +20362,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   {(() => {
                     const q = invoiceSearch.toLowerCase();
                     let rows = invoices.filter(inv => {
-                      const paidNow = inv.invoice_type === 'SESSION' ? inv.session_status === 'closed' : inv.payment_status === 'PAID';
+                      const paidNow = isInvoicePaid(inv);
                       if (invoiceStatusFilter === 'PAID'    && !paidNow) return false;
                       if (invoiceStatusFilter === 'UNPAID'  && paidNow)  return false;
                       if (invoiceStatusFilter === 'PRINTED' && (inv.invoice_status !== 'PRINTED' || paidNow)) return false;
@@ -20373,7 +20387,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     });
                     // Sort
                     rows = [...rows].sort((a, b) => {
-                      const getPaidStatus = (i: any) => i.invoice_type === 'SESSION' ? i.session_status === 'closed' : i.payment_status === 'PAID';
+                      const getPaidStatus = isInvoicePaid;
                       let va: any, vb: any;
                       switch (invoiceSortKey) {
                         case 'id':       va = String(a.id||'');                          vb = String(b.id||''); break;
@@ -20403,9 +20417,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     const pageRows   = rows.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
                     return pageRows.map(inv => {
                       const isSession  = inv.invoice_type === 'SESSION';
-                      const isPaid     = isSession
-                        ? inv.session_status === 'closed'
-                        : (inv.payment_status === 'PAID');
+                      const isPaid     = isInvoicePaid(inv);
                       // Sessions that haven't requested the bill yet show as ACTIVE
                       const isSessionActive = isSession && inv.session_status === 'open';
                       const invStatus  = isSessionActive

@@ -3837,6 +3837,13 @@ function checkBillingUxFixes() {
     (gstGuard ? pass : fail)('TC-UX-INVOICE-PHANTOM-GST',
       'Printed bill shows no GST when the subtotal is ₹0 (no stale-snapshot phantom GST/TOTAL)',
       gstGuard ? '' : 'the taxable<=0 → GST 0 guard is missing from buildInvoiceHTML');
+    // Paid-status guard — a SESSION is PAID only when actually settled (payment
+    // method recorded), NOT merely 'closed'; else a cleared table shows as Paid.
+    const paidHelper = /function isInvoicePaid\(inv: any\)/.test(src) && /session_status === 'closed' && !!pm && pm !== 'NONE'/.test(src);
+    const noBareClosedPaid = !/isPaid\s*=\s*isSession\s*\?\s*inv\.session_status === 'closed'/.test(src);
+    (paidHelper && noBareClosedPaid ? pass : fail)('TC-UX-INVOICE-PAID-SIGNAL',
+      'Cleared/unsettled table bill is NOT auto-marked Paid (paid = settled payment, not just closed)',
+      (paidHelper && noBareClosedPaid) ? '' : `helper=${paidHelper} noBareClosedPaid=${noBareClosedPaid}`);
   } catch (e) {
     skip('TC-UX-TABLE-NATSORT', 'Billing/waiter UX guards', `could not read src/App.tsx (${e?.message || e})`);
   }
@@ -3977,9 +3984,12 @@ async function testTableClearFreshSession() {
     const invs = await api('GET', `/api/restaurant/${restaurantId}/invoices`);
     const g1Inv = (Array.isArray(invs.data) ? invs.data : []).find(iv =>
       Array.isArray(iv.order_ids) ? iv.order_ids.includes(o1id) : (iv.id === o1id));
+    // Must be a DRAFT AND NOT settled (no payment method) — clearing a table
+    // must never auto-mark the bill as Paid.
     const draftKept = !!g1Inv && String(g1Inv.invoice_status || 'DRAFT').toUpperCase() === 'DRAFT';
-    if (draftKept) pass('TC-DINE-CLEAR-DRAFT', 'Clearing a table leaves the unsettled bill as a DRAFT invoice (not discarded)');
-    else fail('TC-DINE-CLEAR-DRAFT', 'Cleared table keeps a DRAFT invoice', `found=${!!g1Inv} status=${g1Inv?.invoice_status} — the unsettled bill was lost or not marked DRAFT`);
+    const notPaid = !!g1Inv && !(g1Inv.payment_method && String(g1Inv.payment_method).toUpperCase() !== 'NONE');
+    if (draftKept && notPaid) pass('TC-DINE-CLEAR-DRAFT', 'Clearing a table leaves the unsettled bill as a DRAFT + UNPAID invoice (not discarded, not auto-Paid)');
+    else fail('TC-DINE-CLEAR-DRAFT', 'Cleared table keeps a DRAFT unpaid invoice', `found=${!!g1Inv} status=${g1Inv?.invoice_status} payment_method=${g1Inv?.payment_method} — the unsettled bill was lost, not DRAFT, or wrongly marked Paid`);
     // Guest 2
     const o2 = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
       table_id: table.id, table_number: table.name, checkout_mode: 'postpaid',
