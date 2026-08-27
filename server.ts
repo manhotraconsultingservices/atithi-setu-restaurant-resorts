@@ -427,6 +427,51 @@ async function resolvePublicTenantParam(req: any, res: any, next: any): Promise<
   next();
 }
 
+// Thermal KOT auto-print: enqueue print jobs for a just-placed order. Groups the
+// order's items by menu category and routes to each active printer whose `station`
+// matches (or station='ALL' → the whole order). Fire-and-forget — NEVER blocks or
+// fails order placement. The on-prem print agent pulls PENDING jobs + prints them.
+async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string): Promise<void> {
+  try {
+    const db = await getTenantDb(restaurantId);
+    const printers: any[] = await db.query("SELECT * FROM kitchen_printers WHERE is_active = 1").catch(() => []);
+    if (!printers || printers.length === 0) return;               // no printers configured → no-op
+    const order: any = await db.get(
+      "SELECT id, table_number, items, customer_name, round_number, created_at FROM orders WHERE id = ?",
+      [orderId]
+    );
+    if (!order) return;
+    let items: any[] = [];
+    try { items = JSON.parse(order.items || '[]'); } catch { items = []; }
+    if (!Array.isArray(items) || items.length === 0) return;
+    const norm = (it: any) => ({
+      name: it.name || it.menuName || 'Item',
+      qty: Number(it.quantity ?? it.qty ?? 1),
+      category: String(it.category || '').toUpperCase(),
+      note: it.note || it.instructions || it.special_instructions || '',
+    });
+    const all = items.map(norm);
+    for (const p of printers) {
+      const station = String(p.station || 'ALL').toUpperCase();
+      const lines = station === 'ALL' ? all : all.filter(it => it.category === station);
+      if (lines.length === 0) continue;
+      const content = JSON.stringify({
+        kind: 'KOT', order_id: order.id, table: order.table_number || null,
+        round: order.round_number || 1, customer: order.customer_name || null,
+        at: order.created_at, station: p.station || 'ALL',
+        items: lines.map(l => ({ name: l.name, qty: l.qty, note: l.note })),
+      });
+      const jid = `PJ-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        "INSERT INTO print_jobs (id, printer_id, order_id, kind, content, status) VALUES (?, ?, ?, 'KOT', ?, 'PENDING')",
+        [jid, p.id, order.id, content]
+      ).catch(() => {});
+    }
+  } catch (e) {
+    console.warn(`[print] enqueue failed for order ${orderId}:`, e);
+  }
+}
+
 async function generateUniqueSlug(restaurantName: string, excludeId?: string): Promise<string> {
   let base = slugify(restaurantName) || 'restaurant';
   if (RESERVED_SLUGS.has(base)) base = `${base}-app`;
@@ -5966,6 +6011,22 @@ async function startServer() {
     }
   } catch (err) {
     console.error("[public-token-migration] Warning:", err);
+  }
+
+  // ====== Print-agent token: authenticates the on-prem thermal print agent ======
+  // The agent polls the print-job queue + acks jobs using this per-tenant token
+  // (header X-Print-Agent-Token) — it is NOT a user/JWT. Backfilled for all tenants.
+  try {
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS print_agent_token TEXT`);
+    const needsPat: any[] = await centralDb.query(
+      "SELECT id FROM restaurants WHERE (print_agent_token IS NULL OR print_agent_token = '') AND id <> 'SYSTEM'"
+    );
+    for (const r of needsPat) {
+      const tok = 'pat_' + randomBytes(18).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 24);
+      await centralDb.run("UPDATE restaurants SET print_agent_token = ? WHERE id = ?", [tok, r.id]);
+    }
+  } catch (err) {
+    console.error("[print-agent-token-migration] Warning:", err);
   }
 
   // ====== Hospitality module: property_type column migration ======
@@ -46162,6 +46223,10 @@ ${data.tenant.name}`;
         }
       }
 
+      // Thermal KOT auto-print — enqueue print jobs for the configured station
+      // printer(s). Fire-and-forget: never blocks or fails order placement.
+      enqueuePrintJobsForOrder(req.params.id, id).catch(() => {});
+
       res.json({
         success: true,
         id,
@@ -46865,6 +46930,86 @@ ${data.tenant.name}`;
   );
 
   // Orders: Update Status
+  // ═══ Thermal KOT printing — printer config + print-job queue ════════════════
+  // Auth for the on-prem print AGENT (NOT a JWT user): header X-Print-Agent-Token
+  // (or ?agent_token=) must match restaurants.print_agent_token for this tenant.
+  const _printAgentAuth = async (req: any, res: any): Promise<boolean> => {
+    const tok = String(req.headers['x-print-agent-token'] || req.query.agent_token || '').trim();
+    if (!tok) { res.status(401).json({ error: 'print agent token required' }); return false; }
+    const row: any = await centralDb.get("SELECT id FROM restaurants WHERE id = ? AND print_agent_token = ?", [req.params.id, tok]).catch(() => null);
+    if (!row) { res.status(403).json({ error: 'invalid print agent token' }); return false; }
+    return true;
+  };
+  app.get("/api/restaurant/:id/kitchen-printers", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+    try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM kitchen_printers ORDER BY is_default DESC, name")); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/restaurant/:id/kitchen-printers", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { name, station, conn_type, host, port, copies, is_default } = req.body || {};
+      if (!name) return res.status(400).json({ error: 'name is required' });
+      const pid = `KPR-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      if (Number(is_default) === 1) await db.run("UPDATE kitchen_printers SET is_default = 0").catch(() => {});
+      await db.run("INSERT INTO kitchen_printers (id, name, station, conn_type, host, port, copies, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [pid, String(name), String(station || 'ALL').toUpperCase(), String(conn_type || 'NETWORK').toUpperCase(), host || null, Number(port) || 9100, Number(copies) || 1, Number(is_default) === 1 ? 1 : 0]);
+      res.status(201).json(await db.get("SELECT * FROM kitchen_printers WHERE id = ?", [pid]));
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.patch("/api/restaurant/:id/kitchen-printers/:pid", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const allowed = ['name', 'station', 'conn_type', 'host', 'port', 'copies', 'is_active', 'is_default'];
+      const sets: string[] = []; const vals: any[] = [];
+      for (const k of allowed) if (k in (req.body || {})) { let v = (req.body as any)[k]; if (k === 'station' || k === 'conn_type') v = String(v).toUpperCase(); sets.push(`${k} = ?`); vals.push(v); }
+      if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+      if (Number((req.body as any)?.is_default) === 1) await db.run("UPDATE kitchen_printers SET is_default = 0").catch(() => {});
+      vals.push(req.params.pid);
+      await db.run(`UPDATE kitchen_printers SET ${sets.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM kitchen_printers WHERE id = ?", [req.params.pid]));
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.delete("/api/restaurant/:id/kitchen-printers/:pid", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+    try { const db = await getTenantDb(req.params.id); await db.run("DELETE FROM kitchen_printers WHERE id = ?", [req.params.pid]); res.json({ success: true }); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.get("/api/restaurant/:id/print-agent-token", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+    try { const row: any = await centralDb.get("SELECT print_agent_token FROM restaurants WHERE id = ?", [req.params.id]); res.json({ token: row?.print_agent_token || null }); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/restaurant/:id/print-agent-token/rotate", authenticate, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+    try { const tok = 'pat_' + randomBytes(18).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 24); await centralDb.run("UPDATE restaurants SET print_agent_token = ? WHERE id = ?", [tok, req.params.id]); res.json({ token: tok }); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Agent: poll PENDING jobs (agent-token auth).
+  app.get("/api/restaurant/:id/print-jobs/pending", async (req: Request, res: Response) => {
+    if (!(await _printAgentAuth(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const jobs: any[] = await db.query(
+        `SELECT j.id, j.order_id, j.kind, j.content, j.attempts,
+                p.name AS printer_name, p.host, p.port, p.conn_type, p.copies
+           FROM print_jobs j LEFT JOIN kitchen_printers p ON p.id = j.printer_id
+          WHERE j.status = 'PENDING' AND j.attempts < 6 ORDER BY j.created_at LIMIT 50`
+      ).catch(() => []);
+      res.json(jobs);
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Agent: ack a job (PRINTED clears it; failure retries up to 6, then FAILED).
+  app.post("/api/restaurant/:id/print-jobs/:jobId/ack", async (req: Request, res: Response) => {
+    if (!(await _printAgentAuth(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      if (String(req.body?.status || '').toUpperCase() === 'PRINTED') {
+        await db.run("UPDATE print_jobs SET status = 'PRINTED', printed_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.jobId]);
+      } else {
+        await db.run("UPDATE print_jobs SET status = CASE WHEN attempts + 1 >= 6 THEN 'FAILED' ELSE 'PENDING' END, attempts = attempts + 1, error = ? WHERE id = ?",
+          [String(req.body?.error || 'print error').slice(0, 300), req.params.jobId]);
+      }
+      res.json({ success: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
   // KDS atomic "claim": a chef accepts a queued order only if it isn't already
   // taken. Prevents two chefs grabbing the same ticket — the generic PATCH below
   // blindly overwrote chef_id (last-writer-wins). Conditional UPDATE + re-read;
@@ -50191,9 +50336,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'kds-atomic-accept-nearlive',
+    commit_marker: 'thermal-kot-autoprint-pipeline',
     code_features: [
-      'kds-atomic-accept-nearlive',                  //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
+      'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
+      'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
       'public-url-tokenization',                    //FEATURE (governance): public-facing links no longer expose the internal RESTO-<id>. Each tenant gets an opaque `restaurants.public_token` (~12-char, backfilled at startup). New `resolvePublicRestaurantId(param)` (token-first, id fallback for back-compat) + `resolvePublicTenantParam` middleware rewrites `req.params.id` on the PUBLIC/guest endpoints (menu-page, GET /restaurant/:id, /menu, /tables/public, /sessions[+/:token status/request-bill/cancel], /orders, /waiter-calls, /loyalty preview-discount, /hotel/room-sessions + room-charge-request[+status]) so a token OR id both resolve. Frontend "Public pages" share panel now emits `/menu/<token>` (+ /spa,/events); the whole downstream order flow inherits the token from the URL (tenantId→?r=→restaurantId), so no id is exposed in the shared link. (/book already used the opaque booking_slug.) Existing raw-id QRs/links keep working. NOTE residual: the owner-dashboard QR-code builders (?r=<id>) + PublicRestaurantPage order URL still emit the raw id in a separate component scope — follow-up to thread the token there. tsc + vite build clean.
       'fix-events-delete-list-filter',              //BUGFIX (QA: Delete button "not working" in Rental Inventory & Hall/Venue). The delete DID work — both are SOFT deletes (is_active=0, to preserve historical bookings) — but the two MANAGEMENT list queries (GET /events/venues and GET /events/rental-items) selected ALL rows with no is_active filter, so the "deleted" venue/item reappeared on the reload after delete → looked broken. Added WHERE is_active = 1 to both list queries (the booking/availability queries already filtered active). Now a deleted venue/rental item disappears from the list immediately. tsc + vite build clean.
       'ctr-staff-only-hardening',                   //GOVERNANCE (owner decision): charge-to-room is now STAFF-ONLY everywhere. (1) The PUBLIC unauth POST /api/restaurant/:id/orders now REJECTS payment_method=CHARGE_TO_ROOM (403 before any INSERT) — closes the hole where a QR diner / crafted request self-healed a checked-in booking and posted F&B straight to a guest's folio (posted_by=QR_ORDER). (2) GET /hotel/verify-guest-room is now authenticate+restaurantStaff (was public and returned a checked-in guest's NAME to any anonymous caller keyed on a room number — a PII/occupancy leak). (3) In-room dining (RoomGuestInterface) no longer self-charges: placeRoomServiceOrder submits a STAFF-APPROVED room-charge REQUEST (POST /hotel/room-charge-request → staff /approve posts to folio) with an "order submitted, front desk will confirm" confirmation; needs the room's active check-in. Staff charge-to-room paths (/orders/:id/charge-to-room, /invoices/manual, both authenticated) unchanged. tsc + vite build clean.

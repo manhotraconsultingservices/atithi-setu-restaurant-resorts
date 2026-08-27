@@ -1195,6 +1195,37 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_pincode TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_landmark TEXT").catch(() => {});
 
+  // ── Thermal KOT auto-print ────────────────────────────────────────────────
+  // Per-station thermal printers + a print-job queue an on-prem print AGENT pulls
+  // from (it sends ESC-POS to each printer by IP). `station` routes tickets: an
+  // order's items are grouped by menu category → each printer prints the items
+  // whose category matches its `station` (or ALL items when station='ALL').
+  await db.exec(`CREATE TABLE IF NOT EXISTS kitchen_printers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    station TEXT DEFAULT 'ALL',
+    conn_type TEXT DEFAULT 'NETWORK',
+    host TEXT,
+    port INTEGER DEFAULT 9100,
+    copies INTEGER DEFAULT 1,
+    is_active INTEGER DEFAULT 1,
+    is_default INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  await db.exec(`CREATE TABLE IF NOT EXISTS print_jobs (
+    id TEXT PRIMARY KEY,
+    printer_id TEXT,
+    order_id TEXT,
+    kind TEXT DEFAULT 'KOT',
+    content TEXT,
+    status TEXT DEFAULT 'PENDING',
+    attempts INTEGER DEFAULT 0,
+    error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    printed_at TIMESTAMP
+  )`).catch(() => {});
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs (status, created_at)").catch(() => {});
+
   // T1-L1: Soft-delete columns on orders + table_sessions (BCG audit, Tier 1)
   // Pre-T1, /invoice/order and /invoice/session endpoints physically DELETEd
   // rows after copying a snapshot to invoice_deletion_audit. That broke
