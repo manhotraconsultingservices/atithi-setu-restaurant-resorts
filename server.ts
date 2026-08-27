@@ -5298,9 +5298,9 @@ const TAB_CACHE_TTL_MS = 30 * 1000;
 // ABSENT — they stay fail-open (broad access, appropriate for a senior role);
 // seeding a restrictive default for them risks a lockout with no security upside.
 const DEFAULT_ROLE_PERMS: Record<string, Record<string, number>> = {
-  WAITER:        { ORDERS: 2, QR: 2, MENU: 1, LOYALTY: 1, FEEDBACK: 1, ROSTER: 1 },
-  CHEF:          { ORDERS: 2, MENU: 2, INVENTORY: 2, QR: 1 },
-  CASHIER:       { ORDERS: 2, QR: 2, INVOICES: 2, LOYALTY: 1, FEEDBACK: 1 },
+  WAITER:        { MONITOR: 2, ORDERS: 2, QR: 2, MENU: 1, LOYALTY: 1, FEEDBACK: 1, ROSTER: 1 },
+  CHEF:          { MONITOR: 1, ORDERS: 2, MENU: 2, INVENTORY: 2, QR: 1 },
+  CASHIER:       { MONITOR: 2, ORDERS: 2, QR: 2, INVOICES: 2, LOYALTY: 1, FEEDBACK: 1 },
   FRONT_DESK:    { HOTEL_BOOKINGS: 2, SERVICE_REQUESTS: 2, FOLIOS: 2, ROOMS: 1, SERVICES: 1, FRONT_OFFICE_REPORTS: 1 },
   HOUSEKEEPING:  { HOUSEKEEPING: 2, SERVICE_REQUESTS: 2, ROOMS: 1 },
   MAINTENANCE:   { SERVICE_REQUESTS: 2, ROOMS: 1 },
@@ -7650,6 +7650,13 @@ async function startServer() {
     const tenantId = req.params.id;
     const dryRun = String((req.query as any).dryRun ?? (req.body as any)?.dryRun ?? '') === '1'
       || (req.query as any).dryRun === 'true' || (req.body as any)?.dryRun === true;
+    // force=1 RE-seeds roles we previously auto-seeded (rows that carry the
+    // '__complete__' sentinel) from the CURRENT DEFAULT_ROLE_PERMS — used to push a
+    // corrected default (e.g. a newly-added dashboard tab) to already-seeded roles.
+    // It NEVER overwrites an owner-configured row (no sentinel), so Staff Access
+    // customisations are always safe.
+    const force = String((req.query as any).force ?? (req.body as any)?.force ?? '') === '1'
+      || (req.query as any).force === 'true' || (req.body as any)?.force === true;
     try {
       const tdb = await getTenantDb(tenantId);
       // Built-in roles actually assigned to a LOGIN staff member (same source as roles-in-use).
@@ -7670,10 +7677,15 @@ async function startServer() {
             reason: _SYSTEM_ROLE_SET.has(role) ? 'senior-role-stays-broad (no restrictive default)' : 'custom-or-unknown-role' });
           continue;
         }
-        // Only seed a role with NO usable matrix (fail-open). Never touch a configured one.
+        // Only seed a role with NO usable matrix (fail-open). Never touch an
+        // owner-configured one. With force=1 also RE-seed rows we auto-seeded
+        // earlier (they carry the '__complete__' sentinel) so a corrected default
+        // reaches them — but still never an owner-configured (sentinel-less) row.
         const existing = await getTabPermissionsForRole(tenantId, role);
-        if (existing !== null) {
-          skipped.push({ role, staff_count: Number(r.count) || 0, reason: 'already-configured',
+        const wasAutoSeeded = !!(existing && (existing as any)['__complete__']);
+        if (existing !== null && !(force && wasAutoSeeded)) {
+          skipped.push({ role, staff_count: Number(r.count) || 0,
+            reason: (force && !wasAutoSeeded) ? 'owner-configured (kept — force only re-seeds auto-seeded rows)' : 'already-configured',
             tab_count: Object.keys(existing).filter(k => !k.startsWith('__')).length });
           continue;
         }
@@ -50653,7 +50665,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-builtin-seed-backfill',
+    commit_marker: 'waiter-monitor-tab-plus-invoice-tiles',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

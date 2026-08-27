@@ -56937,6 +56937,9 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const [editItems, setEditItems]        = useState<any[]>([]);
   const [savingItems, setSavingItems]    = useState(false);
   const [menuItems, setMenuItems]        = useState<any[]>([]);
+  // Manual-Invoice-style quick-add tiles (category filter + search)
+  const [tileCat, setTileCat]            = useState<string>('ALL');
+  const [tileSearch, setTileSearch]      = useState('');
 
   // Charge-to-Room: a walk-in diner who is a checked-in hotel guest can push the
   // whole bill onto their room folio instead of paying now — settled at check-out.
@@ -57229,6 +57232,39 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     }
   };
 
+  // Manual-Invoice-style tile tap → add the item to the bill as a NEW line (which
+  // saves as a "Manager Adjustment" round). Seeds the editable list from the
+  // current rounds the first time so nothing already on the bill is lost.
+  const addMenuTileToBill = (mi: any) => {
+    const name = String(mi?.name || '').trim();
+    if (!name) return;
+    const price = Number(mi?.price ?? mi?.selling_price ?? 0);
+    setEditItems(prev => {
+      const base = editingItems
+        ? [...prev]
+        : activeOrders.flatMap((o: any) =>
+            (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
+              name: it.name, price: Number(it.price || 0),
+              quantity: Number(it.quantity ?? it.qty ?? 1), _orderId: o.id,
+            })));
+      const idx = base.findIndex(l => l._isNew && l.name === name && Number(l.price) === price);
+      if (idx >= 0) base[idx] = { ...base[idx], quantity: Number(base[idx].quantity || 1) + 1 };
+      else base.push({ name, price, quantity: 1, _isNew: true });
+      return base;
+    });
+    if (!editingItems) setEditingItems(true);
+  };
+
+  // Categories + filtered items for the quick-add palette (matches Manual Invoice).
+  const tileCategories = ['ALL', ...Array.from(new Set(menuItems.map((m: any) => String(m?.category || 'Other')).filter(Boolean)))];
+  const filteredTiles = menuItems.filter((m: any) => {
+    if (tileCat !== 'ALL' && String(m?.category || 'Other') !== tileCat) return false;
+    const q = tileSearch.trim().toLowerCase();
+    if (q && !String(m?.name || '').toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const newQtyFor = (name: string) => editItems.filter(l => l._isNew && l.name === name).reduce((s, l) => s + Number(l.quantity || 1), 0);
+
   const handlePrint = () => {
     if (!session || activeOrders.length === 0) return;
     const dt = new Date(session.opened_at || Date.now());
@@ -57456,8 +57492,47 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
             </div>
           ) : (
             <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
-              {/* LEFT — order rounds (like Manual Invoice item list) */}
+              {/* LEFT — quick-add menu tiles + order rounds (matches Manual Invoice) */}
               <div className="flex-1 px-6 py-5 space-y-6 lg:overflow-y-auto lg:min-h-0">
+
+              {/* ── QUICK-ADD MENU TILES (tap a dish to add — like Manual Invoice) ── */}
+              {session?.status !== 'closed' && menuItems.length > 0 && (
+                <section>
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Add Items</p>
+                    <span className="text-[10px] text-[#9c8e85]">Tap a dish to add it to the bill</span>
+                  </div>
+                  <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-1 px-1">
+                    {tileCategories.map(cat => (
+                      <button key={cat} type="button" onClick={() => setTileCat(cat)}
+                        className={cn("shrink-0 px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide transition-all",
+                          tileCat === cat ? "bg-[#cc5a16] text-white" : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#f0e6da]")}>
+                        {cat === 'ALL' ? 'All' : cat}
+                      </button>
+                    ))}
+                  </div>
+                  <input value={tileSearch} onChange={e => setTileSearch(e.target.value)}
+                    placeholder="Search dishes…"
+                    className="w-full mb-2 bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20" />
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {filteredTiles.length === 0 ? (
+                      <p className="col-span-full text-xs text-[#9c8e85] italic py-3 text-center">No dishes match.</p>
+                    ) : filteredTiles.slice(0, 60).map((mi: any, i: number) => {
+                      const inCart = newQtyFor(mi.name);
+                      return (
+                        <button key={mi.id || `${mi.name}-${i}`} type="button" onClick={() => addMenuTileToBill(mi)}
+                          className="relative text-left bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-2.5 hover:border-[#cc5a16]/40 hover:bg-[#cc5a16]/5 active:scale-[0.98] transition-all">
+                          {inCart > 0 && (
+                            <span className="absolute -top-1.5 -right-1.5 h-5 min-w-[20px] px-1 rounded-full bg-[#cc5a16] text-white text-[10px] font-black flex items-center justify-center">{inCart}</span>
+                          )}
+                          <span className="block text-sm font-semibold text-[#1a1208] leading-tight truncate">{mi.name}</span>
+                          <span className="block text-xs font-mono text-[#cc5a16] mt-1">₹{Number(mi.price ?? 0).toFixed(2)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
 
               {/* ── ORDER ROUNDS ── */}
               <section>
