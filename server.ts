@@ -45097,6 +45097,23 @@ ${data.tenant.name}`;
         const sessGstAmt = effectiveApplyGst ? sessTaxable * effectiveGstPct / 100 : 0;
         const sessComputedTotal = Number((sessTaxable + sessGstAmt).toFixed(2));
 
+        // Multi-tax-aware totals (GST + ST + every configured tax line) via the
+        // SAME computeInvoiceTotals the modal/preview uses — the single-GST math
+        // above undercounts multi-tax tenants (e.g. GST 6% + ST 10%) and dropped
+        // the ST line on the printed bill. No customer phone → no loyalty re-apply
+        // (the discount is already stored on the session row).
+        let sessTaxLines: any[] | undefined;
+        let sessMultiTotal = sessComputedTotal;
+        try {
+          const tt = await computeInvoiceTotals({
+            tenantId: req.params.id, subtotal: rawSubtotal, discountAmount: sessDiscount,
+            serviceChargePct: sessSvcPct,
+            legacyGstFallback: { gst_percent: effectiveGstPct, apply_gst: !!effectiveApplyGst },
+          });
+          sessTaxLines = tt.taxLines;
+          sessMultiTotal = tt.grandTotal;
+        } catch { /* fall back to single-GST computed total */ }
+
         sessionInvoices.push({
           id:                     sess.session_token,
           session_db_id:          sess.id,
@@ -45113,12 +45130,16 @@ ${data.tenant.name}`;
           // (set on Close). Fall back to the GST-inclusive computed total so
           // ACTIVE sessions show the correct ₹ in the list — matching the
           // print template instead of the raw subtotal.
-          total_amount:           Number(sess.bill_amount || sess.final_amount || sessComputedTotal || 0),
+          total_amount:           Number(sess.bill_amount || sess.final_amount || sessMultiTotal || 0),
           raw_subtotal:           rawSubtotal,
           discount_amount:        sessDiscount,
           service_charge_percent: sessSvcPct,
           gst_percent:            effectiveGstPct,
           apply_gst:              effectiveApplyGst,
+          // Full multi-tax breakdown (GST + ST + …) so the printed bill matches
+          // the modal instead of collapsing to a single GST line.
+          tax_lines:              sessTaxLines,
+          gst_amount:             sessTaxLines ? Number(sessTaxLines.reduce((s: number, l: any) => s + Number(l.amount || 0), 0).toFixed(2)) : sessGstAmt,
           session_status:         sess.status,
           // Real settlement signal — a session is PAID only when a payment method
           // was recorded (settle/close), NOT merely because status='closed'. A
@@ -48893,18 +48914,24 @@ ${data.tenant.name}`;
         "SELECT items, discount_amount, service_charge_percent, gst_percent, apply_gst, total_amount, invoice_number FROM orders WHERE id = ?",
         [req.params.orderId]
       ).catch(() => null);
-      const rawSubtotal   = cleanItems.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity ?? it.qty ?? 1), 0);
-      const afterDiscount = Math.max(0, rawSubtotal - Number(discount_amount));
-      const svcAmt        = afterDiscount * Number(service_charge_percent) / 100;
-      const taxable       = afterDiscount + svcAmt;
-      const effGst        = apply_gst ? Number(gst_percent) : 0;
-      const gstAmount     = taxable * effGst / 100;
-      const total         = taxable + gstAmount;
-      // Clear tax_label_snapshot so the printed bill recomputes GST from the
-      // fresh gst_percent — never from a snapshot left over from a prior state.
+      const rawSubtotal = cleanItems.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity ?? it.qty ?? 1), 0);
+      // Multi-tax-aware totals via the SAME computeInvoiceTotals the create path +
+      // preview use — so an edited invoice keeps EVERY configured tax line (GST +
+      // ST + …), not just a single GST, and the printed bill matches the modal. A
+      // FRESH snapshot (with amounts) is stored — never the stale one that caused
+      // the phantom-GST bill. No customer phone → no loyalty re-apply.
+      const editTotals = await computeInvoiceTotals({
+        tenantId: req.params.id, subtotal: rawSubtotal, discountAmount: Number(discount_amount),
+        serviceChargePct: Number(service_charge_percent),
+        legacyGstFallback: { gst_percent: Number(gst_percent), apply_gst: !!apply_gst },
+      });
+      const afterDiscount = editTotals.subtotalAfterDiscount;
+      const svcAmt        = editTotals.serviceCharge;
+      const gstAmount     = editTotals.totalTax;
+      const total         = editTotals.grandTotal;
       await db.run(
-        "UPDATE orders SET items = ?, discount_amount = ?, service_charge_percent = ?, gst_percent = ?, apply_gst = ?, total_amount = ?, gst_amount = ?, tax_label_snapshot = NULL WHERE id = ?",
-        [JSON.stringify(cleanItems), Number(discount_amount), Number(service_charge_percent), Number(gst_percent), apply_gst ? 1 : 0, total, gstAmount, req.params.orderId]
+        "UPDATE orders SET items = ?, discount_amount = ?, service_charge_percent = ?, gst_percent = ?, apply_gst = ?, total_amount = ?, gst_amount = ?, tax_label_snapshot = ? WHERE id = ?",
+        [JSON.stringify(cleanItems), Number(discount_amount), Number(service_charge_percent), Number(gst_percent), apply_gst ? 1 : 0, total, gstAmount, editTotals.taxLabelSnapshot || null, req.params.orderId]
       );
       let beforeItems: any = beforeRow?.items;
       try { beforeItems = typeof beforeItems === 'string' ? JSON.parse(beforeItems) : beforeItems; } catch { /* keep raw */ }
@@ -50480,7 +50507,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'cleared-table-not-auto-paid',
+    commit_marker: 'invoice-multitax-print-match',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

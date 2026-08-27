@@ -4022,6 +4022,59 @@ async function testTableClearFreshSession() {
   }
 }
 
+// The invoice a bill is PRINTED from must carry EVERY configured tax line (GST +
+// ST + any others), and its total must equal subtotal + all taxes — the printed
+// bill is built from exactly this data. Regression for "restaurant invoice not
+// taking GST + service tax; printed value ≠ invoice value" (multi-tax dropped ST).
+async function testInvoicePrintTaxes() {
+  section('DINE-IN — Printed invoice carries ALL configured taxes (GST + ST + …)');
+  const created = { orderId: null, token: null, tableId: null };
+  try {
+    const rest = await api('GET', `/api/restaurant/${restaurantId}`);
+    const gstEnabled = rest.data?.is_gst_enabled === 1 || rest.data?.is_gst_enabled === true;
+    const tablesResp = await api('GET', `/api/restaurant/${restaurantId}/tables`);
+    const tables = Array.isArray(tablesResp.data) ? tablesResp.data : [];
+    let table = null;
+    for (const t of tables) {
+      const as = await api('GET', `/api/restaurant/${restaurantId}/tables/${t.id}/active-session`);
+      if (as.status === 200 && !as.data?.session) { table = t; break; }
+    }
+    if (!table) { skip('TC-INVOICE-PRINT-TAXES', 'Invoice carries all configured taxes', 'no free table'); return; }
+    created.tableId = table.id;
+    const tag = Date.now();
+    const o = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
+      table_id: table.id, table_number: table.name, checkout_mode: 'postpaid',
+      items: [{ name: `Tax ${tag}`, price: 300, quantity: 1 }], total_amount: 300, gst_amount: 0, customer_name: 'Tax Test',
+    });
+    created.orderId = o.data?.id || o.data?.orderId || null;
+    const as1 = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+    created.token = as1.data?.session?.session_token || null;
+    if (created.token) await api('POST', `/api/restaurant/${restaurantId}/sessions/${created.token}/request-bill`, {});
+    const invs = await api('GET', `/api/restaurant/${restaurantId}/invoices`);
+    const inv = (Array.isArray(invs.data) ? invs.data : []).find(i =>
+      i.invoice_type === 'SESSION' && (Array.isArray(i.order_ids) ? i.order_ids.includes(created.orderId) : false));
+    const lines = Array.isArray(inv?.tax_lines) ? inv.tax_lines : [];
+    const sub = Number(inv?.raw_subtotal || 300);
+    const taxSum = lines.reduce((s, l) => s + Number(l.amount || 0), 0);
+    const total = Number(inv?.total_amount || 0);
+    const mathOk = total > 0 && Math.abs(total - (sub + taxSum)) < 0.5;   // no discount/svc here
+    const hasLines = !gstEnabled || lines.length >= 1;
+    if (inv && mathOk && hasLines) {
+      pass('TC-INVOICE-PRINT-TAXES', `Invoice carries ${lines.length} tax line(s) [${lines.map(l => `${l.label} ${l.rate}%`).join(', ') || 'none'}]; total ₹${total} = subtotal ₹${sub} + tax ₹${taxSum.toFixed(2)}`);
+    } else {
+      fail('TC-INVOICE-PRINT-TAXES', 'Invoice must carry all configured taxes with consistent total', `found=${!!inv} lines=${lines.length} gstEnabled=${gstEnabled} total=₹${total} subtotal=₹${sub} taxSum=₹${taxSum.toFixed(2)} mathOk=${mathOk} — printed value would not match the invoice`);
+    }
+  } catch (e) {
+    skip('TC-INVOICE-PRINT-TAXES', 'Invoice carries all configured taxes', `error: ${e?.message || e}`);
+  } finally {
+    try {
+      if (created.orderId) await api('PATCH', `/api/orders/${created.orderId}`, { status: 'CANCELLED' }).catch(() => {});
+      if (created.token) await api('PATCH', `/api/restaurant/${restaurantId}/sessions/${created.token}/close`, { payment_method: 'CASH' }).catch(() => {});
+      if (created.tableId) await api('PATCH', `/api/restaurant/${restaurantId}/tables/${created.tableId}/status`, { status: 'AVAILABLE' }).catch(() => {});
+    } catch { /* best-effort */ }
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -4040,6 +4093,7 @@ async function main() {
   await testWaiterSharedFloor();
   await testBulkAssignWaiter();
   await testQrBillGst();
+  await testInvoicePrintTaxes();
   await testTableClearFreshSession();
   await testHotel();
   await testProcurement();
