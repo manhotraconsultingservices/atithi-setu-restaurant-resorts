@@ -5287,6 +5287,27 @@ type CachedTabs = { perms: TabPerms | null; loadedAt: number };
 const _tabCache = new Map<string, CachedTabs>();
 const TAB_CACHE_TTL_MS = 30 * 1000;
 
+// Default Staff-Access matrix seeded for each built-in role — used BOTH at tenant
+// creation (register handler) AND by the idempotent backfill for existing tenants
+// (POST /role-permissions/backfill-defaults). Without a row a built-in role
+// resolves to null → fail-open (sees/accesses every tab). Each role gets its core
+// workflow; the owner expands/restricts via Settings → Staff Access.
+// Level: 0=None 1=View 2=Edit 3=Full. RULE: keep each role's PRIMARY operational
+// tab here (e.g. ORDERS for the POS roles, HOUSEKEEPING for housekeeping) or a
+// seeded role loses it from its nav. MANAGER / EVENTS_MANAGER are intentionally
+// ABSENT — they stay fail-open (broad access, appropriate for a senior role);
+// seeding a restrictive default for them risks a lockout with no security upside.
+const DEFAULT_ROLE_PERMS: Record<string, Record<string, number>> = {
+  WAITER:        { ORDERS: 2, QR: 2, MENU: 1, LOYALTY: 1, FEEDBACK: 1, ROSTER: 1 },
+  CHEF:          { ORDERS: 2, MENU: 2, INVENTORY: 2, QR: 1 },
+  CASHIER:       { ORDERS: 2, QR: 2, INVOICES: 2, LOYALTY: 1, FEEDBACK: 1 },
+  FRONT_DESK:    { HOTEL_BOOKINGS: 2, SERVICE_REQUESTS: 2, FOLIOS: 2, ROOMS: 1, SERVICES: 1, FRONT_OFFICE_REPORTS: 1 },
+  HOUSEKEEPING:  { HOUSEKEEPING: 2, SERVICE_REQUESTS: 2, ROOMS: 1 },
+  MAINTENANCE:   { SERVICE_REQUESTS: 2, ROOMS: 1 },
+  CONCIERGE:     { HOTEL_BOOKINGS: 2, SERVICE_REQUESTS: 2, ROOMS: 1, SERVICES: 1, CONCIERGE_FAQ: 1 },
+  THERAPIST:     { SPA_APPOINTMENTS: 2, SPA_CATALOG: 1, SPA_CLIENTS: 1 },
+};
+
 async function getTabPermissionsForRole(tenantId: string, role: string): Promise<TabPerms | null> {
   if (!tenantId || !role) return null;
   const key = `${tenantId}::${role.toUpperCase()}`;
@@ -5334,7 +5355,15 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
     const _isBuiltinRole = _SYSTEM_ROLE_SET.has(String(role).toUpperCase());
     if (perms !== null && _isBuiltinRole) {
       const RBAC_NEWLY_ADDED = [
-        'HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT',
+        // EXPENSE_JOURNAL + PROCUREMENT removed from this inject-to-Full list
+        // (2026-08-28): they are owner-controlled FINANCE tabs. Auto-granting them
+        // at level 3 to every built-in role surfaced Expense Journal / Procurement
+        // (nav + API) to operational roles — harmless while those roles were
+        // fail-open with no matrix, but once the seed backfill gives them a real
+        // matrix the inject would leak finance to a WAITER/CHEF. Owner always
+        // passes; a role that genuinely needs procurement is granted it explicitly.
+        // HOTEL_INVENTORY stays (module-gated hotel-ops tab, like the SPA_* below).
+        'HOTEL_INVENTORY',
         // HOUSEKEEPING removed from this inject-to-Full list (2026-08-24): like the
         // Events tabs below, defaulting it to level 3 for EVERY built-in role meant a
         // restricted role (e.g. Front Desk set to None) still saw Housekeeping in its
@@ -47465,17 +47494,7 @@ ${data.tenant.name}`;
       // the owner can expand/restrict further via Settings → Staff Access.
       // Level: 0=None, 1=View, 2=Edit, 3=Full
       try {
-        const defaultRolePerms: Record<string, Record<string, number>> = {
-          WAITER:       { QR: 2, LOYALTY: 1, ROSTER: 1 },
-          CHEF:         { MENU: 2, INVENTORY: 2, QR: 1 },
-          CASHIER:      { QR: 2, INVOICES: 2, LOYALTY: 1 },
-          FRONT_DESK:   { HOTEL_BOOKINGS: 2, SERVICE_REQUESTS: 2, FOLIOS: 2, ROOMS: 1, SERVICES: 1 },
-          HOUSEKEEPING: { SERVICE_REQUESTS: 2, ROOMS: 1 },
-          MAINTENANCE:  { SERVICE_REQUESTS: 2, ROOMS: 1 },
-          CONCIERGE:    { HOTEL_BOOKINGS: 2, SERVICE_REQUESTS: 2, ROOMS: 1, SERVICES: 1 },
-          THERAPIST:    { SPA_APPOINTMENTS: 2, SPA_CATALOG: 1, SPA_CLIENTS: 1 },
-        };
-        for (const [role, perms] of Object.entries(defaultRolePerms)) {
+        for (const [role, perms] of Object.entries(DEFAULT_ROLE_PERMS)) {
           await centralDb.run(
             `INSERT OR IGNORE INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions)
              VALUES (?, ?, '[]', ?)`,
@@ -48601,7 +48620,26 @@ ${data.tenant.name}`;
       }
 
       await db.run("UPDATE tables SET status = ? WHERE id = ?", [status, req.params.tableId]);
-      res.json({ success: true, status });
+
+      // CRITICAL (2026-08-28): freeing a table must END any lingering open /
+      // bill_requested session, or the NEXT guest inherits the previous guest's
+      // bill. The order-create path RESUMES an open session for the table within
+      // 4h (server.ts ~"AUTO-CREATED session"); if "Free" only flipped the table
+      // row and left the session 'open', a new guest's first order re-attached to
+      // it and the OLD orders showed up on the new bill. Marking the session
+      // 'closed' (only ever touches UNSETTLED sessions — a paid/closed session is
+      // already 'closed' and excluded) removes it from resume + the live board
+      // while preserving the row for records. Orders/GL are untouched (an unpaid
+      // walk-out books no revenue). Non-fatal.
+      let clearedSession = false;
+      if (status === 'AVAILABLE') {
+        const r: any = await db.run(
+          "UPDATE table_sessions SET status = 'closed', closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP) WHERE table_id = ? AND status IN ('open','bill_requested') AND deleted_at IS NULL",
+          [req.params.tableId]
+        ).catch((e: any) => { console.warn('[table-free] session close failed:', e?.message || e); return null; });
+        clearedSession = !!(r && (r.changes || r.rowCount));
+      }
+      res.json({ success: true, status, cleared_session: clearedSession });
     } catch (err) {
       console.error("Update table status error:", err);
       res.status(500).json({ error: "Failed to update table status" });
@@ -50421,7 +50459,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'issue-xlsx-rbac-gst-fixes',
+    commit_marker: 'table-clear-fix-and-rbac-p0',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

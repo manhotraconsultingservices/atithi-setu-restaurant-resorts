@@ -13243,6 +13243,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const updateTableStatus = async (tableId: string, status: TableStatus) => {
+    // Freeing a table ends its current session (next guest starts fresh) —
+    // confirm when there's still a live/unpaid bill so it isn't discarded by mistake.
+    if (status === 'AVAILABLE') {
+      const t = liveTables.find(x => x.id === tableId);
+      const hasLiveBill = t && (t.status === 'OCCUPIED' || t.session_status === 'bill_requested' || (t.bill_amount ?? 0) > 0);
+      if (hasLiveBill && !window.confirm(`Clear ${t?.name || 'this table'}? Its current session${(t?.bill_amount ?? 0) > 0 ? ` (₹${Math.round(t!.bill_amount!)})` : ''} will be closed and the next guest starts fresh. Settle the bill first if the guest is still here.`)) return;
+    }
     try {
       await fetch(`/api/restaurant/${restaurantId}/tables/${tableId}/status`, {
         method: 'PATCH',
@@ -15156,11 +15163,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             if (HOTEL_EVENTS_OPS.includes(currentRole || '')) return true;
             return Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id);
           }
-          // Finance tabs (PROCUREMENT, EXPENSE_JOURNAL) were introduced after
-          // the V3 permission marker was rolled out. Owners always see them so
-          // they are never locked out by a stale permission save. Staff
-          // visibility still flows through isTabVisible (V3 fix handles it).
-          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING' || id === 'ACCOUNTING') && isOwnerOrAdmin) return true;
+          // Finance tabs (Procurement, Expense Journal, Receivables, the
+          // Accounts sub-reports). HARD-gated (2026-08-28): owner/admin OR
+          // MANAGER OR a role the owner EXPLICITLY granted the tab. Previously
+          // this returned true only for the owner and then FELL THROUGH to
+          // isTabVisible for everyone else — so a fail-open (null-list) or
+          // inject-granted operational role saw the finance module. Now finance
+          // never leaks to Waiter/Chef/etc. via the null list or a legacy inject;
+          // a genuine grant still shows it. Mirrors the HR_PAYROLL gate above.
+          if (id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING' || id === 'ACCOUNTING') {
+            return isOwnerOrAdmin || currentRole === 'MANAGER' || (Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id));
+          }
           // Cash Drawer (till + shift handover) — the underlying endpoints are cashier-
           // accessible (_acctStaff), so surface it to cash-handling roles directly, plus
           // any role the owner grants it in Staff Access.
@@ -58048,6 +58061,14 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   }, [waiterMsg]);
 
   const updateTableStatus = async (tableId: string, status: TableStatus) => {
+    // Freeing a table ENDS its current session (so the next guest starts fresh).
+    // Confirm first when the table still has a live/unpaid session, so a stray
+    // tap can't discard an open bill.
+    if (status === 'AVAILABLE') {
+      const t = liveTables.find(x => x.id === tableId);
+      const hasLiveBill = t && (t.status === 'OCCUPIED' || t.session_status === 'bill_requested' || (t.bill_amount ?? 0) > 0);
+      if (hasLiveBill && !window.confirm(`Clear ${t?.name || 'this table'}? Its current session${(t?.bill_amount ?? 0) > 0 ? ` (₹${Math.round(t!.bill_amount!)})` : ''} will be closed and the next guest starts fresh. Settle the bill first if the guest is still here.`)) return;
+    }
     try {
       await fetch(`/api/restaurant/${restaurantId}/tables/${tableId}/status`, {
         method: 'PATCH',
@@ -58368,7 +58389,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
             <div className="space-y-4">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <h3 className="text-xl font-bold font-serif">{sharedFloor ? 'All Tables' : 'My Tables'}{filteredTables.length > 0 ? <span className="ml-2 text-sm font-normal text-[#9c8e85]">({filteredTables.length})</span> : null}</h3>
-                {myTables.length > TABLES_PER_PAGE && (
+                {myTables.length > 8 && (
                   <input
                     value={tableSearch}
                     onChange={e => { setTableSearch(e.target.value); setTablePage(1); }}
@@ -58387,7 +58408,9 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
                 </div>
               ) : (
                 <>
-                <div className="space-y-3">
+                {/* Responsive grid so a 100+ table floor is a few short rows per
+                    page, not one long scroll (paired with search + pagination). */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 items-start">
                   {pagedTables.map(t => {
                     const isOccupied = t.status === 'OCCUPIED';
                     const isUnavail  = t.status === 'NOT_AVAILABLE';

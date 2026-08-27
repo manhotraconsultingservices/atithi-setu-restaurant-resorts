@@ -3940,6 +3940,59 @@ async function testQrBillGst() {
   }
 }
 
+// CRITICAL — freeing a table must start the NEXT guest on a fresh session, never
+// carry the previous guest's orders onto the new bill. Guest-1 orders → table is
+// freed (status AVAILABLE) → guest-2 orders → the new session must contain ONLY
+// guest-2's order. Self-cleaning.
+async function testTableClearFreshSession() {
+  section('DINE-IN — Freeing a table starts the next guest fresh (no carried-over orders)');
+  const created = { orderIds: [], tableId: null };
+  try {
+    const tablesResp = await api('GET', `/api/restaurant/${restaurantId}/tables`);
+    const tables = Array.isArray(tablesResp.data) ? tablesResp.data : [];
+    let table = null;
+    for (const t of tables) {
+      const as = await api('GET', `/api/restaurant/${restaurantId}/tables/${t.id}/active-session`);
+      if (as.status === 200 && !as.data?.session) { table = t; break; }
+    }
+    if (!table) { skip('TC-DINE-TABLE-CLEAR', 'Free-table starts fresh session', 'no free table'); return; }
+    created.tableId = table.id;
+    const tag = Date.now();
+    // Guest 1
+    const o1 = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
+      table_id: table.id, table_number: table.name, checkout_mode: 'postpaid',
+      items: [{ name: `G1 ${tag}`, price: 100, quantity: 1 }], total_amount: 100, gst_amount: 0, customer_name: 'Guest One',
+    });
+    const o1id = o1.data?.id || o1.data?.orderId; if (o1id) created.orderIds.push(o1id);
+    // Free the table (the action under test)
+    const free = await api('PATCH', `/api/restaurant/${restaurantId}/tables/${table.id}/status`, { status: 'AVAILABLE' });
+    const asMid = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+    const sessionEnded = !asMid.data?.session;   // old session must be gone
+    // Guest 2
+    const o2 = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
+      table_id: table.id, table_number: table.name, checkout_mode: 'postpaid',
+      items: [{ name: `G2 ${tag}`, price: 200, quantity: 1 }], total_amount: 200, gst_amount: 0, customer_name: 'Guest Two',
+    });
+    const o2id = o2.data?.id || o2.data?.orderId; if (o2id) created.orderIds.push(o2id);
+    const as2 = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+    const orders2 = as2.data?.session?.orders || [];
+    const carriedOld = orders2.some(o => o.id === o1id);
+    const hasNew = orders2.some(o => o.id === o2id);
+    if (free.status === 200 && sessionEnded && !carriedOld && hasNew && orders2.length === 1) {
+      pass('TC-DINE-TABLE-CLEAR', `Freed table ended the old session; guest-2's bill has only their order (${orders2.length})`);
+    } else {
+      fail('TC-DINE-TABLE-CLEAR', 'Free-table must start a fresh session', `free=${free.status} oldSessionEnded=${sessionEnded} carriedOldOrders=${carriedOld} hasNew=${hasNew} count=${orders2.length} — the next guest inherited the previous bill`);
+    }
+  } catch (e) {
+    skip('TC-DINE-TABLE-CLEAR', 'Free-table fresh session', `error: ${e?.message || e}`);
+  } finally {
+    try {
+      for (const oid of created.orderIds) await api('PATCH', `/api/orders/${oid}`, { status: 'CANCELLED' }).catch(() => {});
+      if (created.tableId) await api('PATCH', `/api/restaurant/${restaurantId}/tables/${created.tableId}/status`, { status: 'AVAILABLE' }).catch(() => {});
+    } catch { /* best-effort */ }
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -3958,6 +4011,7 @@ async function main() {
   await testWaiterSharedFloor();
   await testBulkAssignWaiter();
   await testQrBillGst();
+  await testTableClearFreshSession();
   await testHotel();
   await testProcurement();
   await testHR();
