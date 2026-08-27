@@ -13226,6 +13226,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
 
+  // Bulk-assign one waiter (or clear all) across EVERY table in a single call.
+  const assignAllWaiters = async (waiterId: string | null) => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/tables/assign-waiter-bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ waiter_id: waiterId })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) {
+        const who = waiterId ? (staff.find((s: any) => s.id === waiterId)?.name || 'waiter') : null;
+        toast.success(who ? `Assigned ${who} to all ${d.updated ?? ''} tables`.trim() : `Cleared waiter from all tables`);
+      } else {
+        toast.error(d.error || 'Failed to assign all tables');
+      }
+      fetchLiveTables();
+    } catch (err) {
+      console.error("Failed to bulk-assign waiter", err);
+      toast.error('Failed to assign all tables');
+    }
+  };
+
   const patchWaiterCall = async (callId: string, body: Record<string, any>) => {
     await fetch(`/api/restaurant/${restaurantId}/waiter-calls/${callId}`, {
       method: 'PATCH',
@@ -29159,7 +29181,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div>
                 <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Waiter Floor Mode</label>
                 <p className="text-[11px] text-[#9c8e85] mt-1">
-                  Shared floor: every waiter sees ALL tables and all guest calls, so any waiter can serve any table. Turn off to restrict each waiter to only the tables assigned to them (assign a waiter per table in QR &amp; Tables).
+                  Shared floor: every waiter sees ALL tables and all guest calls, so any waiter can serve any table. Turn off to restrict each waiter to only the tables assigned to them (assign waiters per table — or all tables at once — from the Command Centre).
                 </p>
               </div>
               <label className="flex items-center justify-between gap-4 bg-[#faf7f2] rounded-2xl px-4 py-3 cursor-pointer">
@@ -29477,6 +29499,34 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </button>
             </div>
           </div>
+
+          {/* ── BULK WAITER ASSIGN ── owner/manager: assign one waiter to every
+               table at once (or clear all). Handy for handing a single waiter the
+               whole floor when shared-floor mode is off. Non-managers never see
+               it; the endpoint 403s them anyway. */}
+          {(isOwnerOrAdmin || currentRole === 'MANAGER') && staff.some((s: any) => s.role === 'WAITER' || s.role === 'MANAGER') && (
+            <div className="flex items-center gap-2 flex-wrap px-4 py-3 rounded-2xl backdrop-blur-md bg-white/5 border border-white/10">
+              <span className="text-[11px] font-bold uppercase tracking-widest text-[#f0ede8]/70">Assign all tables to</span>
+              <select
+                value=""
+                onChange={e => { const v = e.target.value; if (v) assignAllWaiters(v); }}
+                onClick={e => e.stopPropagation()}
+                className="rounded-xl px-3 py-1.5 text-xs bg-white/10 border border-white/15 text-[#f0ede8] outline-none hover:border-[#cc5a16]/40 cursor-pointer"
+              >
+                <option value="" className="text-black">Choose a waiter…</option>
+                {staff.filter((s: any) => s.role === 'WAITER' || s.role === 'MANAGER').map((s: any) => (
+                  <option key={s.id} value={s.id} className="text-black">{s.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={(e) => { e.stopPropagation(); assignAllWaiters(null); }}
+                className="px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest bg-white/5 border border-white/10 text-[#f0ede8]/70 hover:bg-white/10 transition-all"
+              >
+                Clear all
+              </button>
+              <span className="text-[11px] text-[#f0ede8]/40 hidden sm:inline">Sets every table's waiter in one click</span>
+            </div>
+          )}
 
           {/* ── STATS BAR ── glass cards with per-status colored glow */}
           {liveTables.length > 0 && (() => {

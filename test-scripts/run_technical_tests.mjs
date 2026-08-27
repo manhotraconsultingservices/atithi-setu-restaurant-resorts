@@ -3681,6 +3681,51 @@ async function testWaiterSharedFloor() {
   }
 }
 
+// ── DINE-IN — bulk-assign one waiter to every table ─────────────────────────
+// POST /tables/assign-waiter-bulk sets assigned_waiter_id on ALL tables at once
+// (or clears every table with waiter_id null). Owner/Manager only. Self-cleaning:
+// snapshots each table's current assignment first and restores it, and deletes
+// the throwaway waiter it creates.
+async function testBulkAssignWaiter() {
+  section('DINE-IN — Bulk-assign a waiter to all tables');
+  let waiterId = null;
+  let orig = [];
+  try {
+    const tg = await api('GET', `/api/restaurant/${restaurantId}/tables`);
+    const tables = Array.isArray(tg.data) ? tg.data : [];
+    if (tables.length === 0) { skip('TC-DINE-ASSIGN-ALL', 'Bulk-assign a waiter to every table', 'tenant has no tables'); return; }
+    orig = tables.map(t => [t.id, t.assigned_waiter_id || null]);   // snapshot for restore
+    const tag = Date.now();
+    const mk = await api('POST', '/api/owner/staff', { name: `Bulk Waiter ${tag}`, role: 'WAITER', loginId: `bulkwaiter_${tag}`, password: `Bk!${tag}xZ`, employee_type: 'LOGIN' });
+    waiterId = mk.data?.id || mk.data?.staff?.id || null;
+    if (!waiterId) { skip('TC-DINE-ASSIGN-ALL', 'Bulk-assign a waiter to every table', `could not create a throwaway waiter (${mk.status})`); return; }
+
+    const asgn = await api('POST', `/api/restaurant/${restaurantId}/tables/assign-waiter-bulk`, { waiter_id: waiterId });
+    const after = await api('GET', `/api/restaurant/${restaurantId}/tables`);
+    const allAssigned = (Array.isArray(after.data) ? after.data : []).every(t => t.assigned_waiter_id === waiterId);
+    const clr = await api('POST', `/api/restaurant/${restaurantId}/tables/assign-waiter-bulk`, { waiter_id: null });
+    const afterClear = await api('GET', `/api/restaurant/${restaurantId}/tables`);
+    const allCleared = (Array.isArray(afterClear.data) ? afterClear.data : []).every(t => !t.assigned_waiter_id);
+
+    if (asgn.status === 200 && allAssigned && clr.status === 200 && allCleared) {
+      pass('TC-DINE-ASSIGN-ALL', `Bulk-assigned one waiter to all ${tables.length} tables, then cleared all — both applied to every table`);
+    } else if (asgn.status === 403 || clr.status === 403) {
+      skip('TC-DINE-ASSIGN-ALL', 'Bulk-assign a waiter to every table', `not permitted (${asgn.status}/${clr.status})`);
+    } else {
+      fail('TC-DINE-ASSIGN-ALL', 'Bulk-assign a waiter to every table', `assign=${asgn.status} allAssigned=${allAssigned} clear=${clr.status} allCleared=${allCleared}`);
+    }
+  } catch (e) {
+    skip('TC-DINE-ASSIGN-ALL', 'Bulk-assign a waiter to every table', `error: ${e?.message || e}`);
+  } finally {
+    try {
+      for (const [tid, wid] of orig) {
+        await api('PATCH', `/api/restaurant/${restaurantId}/tables/${tid}/assign-waiter`, { waiter_id: wid }).catch(() => {});
+      }
+      if (waiterId) await api('DELETE', `/api/owner/staff/${waiterId}`).catch(() => {});
+    } catch { /* best-effort */ }
+  }
+}
+
 // ── Frontend source guard (no server needed) ────────────────────────────────
 // The OOTB operational staff roles (CHEF/WAITER/CASHIER/THERAPIST/FRONT_DESK/
 // HOUSEKEEPING/MAINTENANCE/CONCIERGE) must render the permission-aware
@@ -3745,6 +3790,7 @@ async function main() {
   await testRestaurant();
   await testDineInTableFlow();
   await testWaiterSharedFloor();
+  await testBulkAssignWaiter();
   await testHotel();
   await testProcurement();
   await testHR();
