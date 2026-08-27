@@ -14963,8 +14963,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             visible: true,
             tabs: [
               { id: 'MY_CHECKLIST', label: 'My Checklist' },
-              // Manager/owner cockpit over every checklist in the property.
-              ...((isOwnerOrAdmin || currentRole === 'MANAGER') ? [{ id: 'CHECKLIST_BOARD', label: 'Checklist Board' }] : []),
+              // Manager/owner cockpit over every checklist in the property. Always
+              // present; isVisible() gates it (owner / MANAGER / explicit grant).
+              { id: 'CHECKLIST_BOARD', label: 'Checklist Board' },
             ],
           },
           {
@@ -15061,13 +15062,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'PROCUREMENT',     label: 'Payables & Procurement' },
               { id: 'EXPENSE_JOURNAL', label: 'Expense Journal' },
               { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
-              ...(isOwnerOrAdmin ? [
-                { id: 'ACCOUNTS_VENDOR_AGING', label: 'Vendor Aging' } as NavTab,
-                { id: 'ACCOUNTS_PNL',          label: 'P&L Report' } as NavTab,
-                { id: 'ACCOUNTS_CASHFLOW',     label: 'Cash Flow' } as NavTab,
-                { id: 'ACCOUNTS_GST',          label: 'GST Ledger' } as NavTab,
-                { id: 'ACCOUNTING',            label: 'Ledger & Books' } as NavTab,
-              ] : []),
+              // Always present; isVisible() gates them to owner / MANAGER / a role the
+              // owner EXPLICITLY granted the tab in Staff Access — so finance is
+              // controllable per-role, not owner-hardcoded. Others never see them.
+              { id: 'ACCOUNTS_VENDOR_AGING', label: 'Vendor Aging' },
+              { id: 'ACCOUNTS_PNL',          label: 'P&L Report' },
+              { id: 'ACCOUNTS_CASHFLOW',     label: 'Cash Flow' },
+              { id: 'ACCOUNTS_GST',          label: 'GST Ledger' },
+              { id: 'ACCOUNTING',            label: 'Ledger & Books' },
             ],
           },
           {
@@ -15169,7 +15171,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // My Checklist is the personal work queue — visible to every staff member.
           if (id === 'MY_CHECKLIST') return true;
           // Checklist Board is the manager/owner cockpit over every checklist instance.
-          if (id === 'CHECKLIST_BOARD') return isOwnerOrAdmin || currentRole === 'MANAGER';
+          // Grantable per-role (owner / MANAGER / explicit grant) — mirrors the finance gate.
+          if (id === 'CHECKLIST_BOARD') return isOwnerOrAdmin || currentRole === 'MANAGER' || (Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id));
           // Status Board — rooms + halls status grid. Hotel/Events operational
           // tool: owner/manager always; hotel/events operational roles keep it
           // (migration safety); restaurant-only roles (Waiter/Chef/Cashier) and
@@ -26800,6 +26803,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EXPENSE_JOURNAL',      label: 'Expense Journal',       description: 'Daily operating expenses, petty cash entries, vendor payments, expense reports and approval.' },
               { id: 'PROCUREMENT',          label: 'Procurement & AP',      description: 'Purchase orders, supplier invoices, goods-received notes, accounts payable aging.' },
               { id: 'RECEIVABLES',          label: 'Receivables (AR)',      description: 'Customer / OTA receivables — agents, invoices, payments, aging, collection.' },
+              // ── Completeness pass (2026-08-28): every remaining nav tab is now
+              // grantable so the owner can control ALL menus/commands from here. ──
+              { id: 'CHECKLIST_BOARD',      label: 'Checklist Board',       description: 'Manager/owner cockpit over every checklist instance across the property — status, overdue, room/venue release gating.' },
+              { id: 'STATUS_BOARD',         label: 'Status Board',          description: 'Live rooms + event-halls status grid (vacant / occupied / cleaning / booked). Hotel/Events operational view.' },
+              { id: 'CASH_DRAWER',          label: 'Cash Drawer',           description: 'Cashier till — opening float, cash in/out, shift handover, and cash-count reconciliation.' },
+              { id: 'ACCOUNTING',           label: 'Ledger & Books',        description: 'Double-entry ledger, day book, trial balance, P&L, balance sheet and period close (owner finance).' },
+              { id: 'ACCOUNTS_PNL',         label: 'P&L Report',            description: 'Profit & Loss statement derived from the general ledger for any period.' },
+              { id: 'ACCOUNTS_CASHFLOW',    label: 'Cash Flow',             description: 'Cash-flow statement (operating / investing / financing) derived from the GL.' },
+              { id: 'ACCOUNTS_GST',         label: 'GST Ledger',            description: 'GST output/input register, GSTR-1 / 3B working sheets, and tax liability.' },
+              { id: 'ACCOUNTS_VENDOR_AGING', label: 'Vendor Aging',         description: 'Accounts-payable aging by supplier — outstanding balances bucketed by age.' },
               // Events & Convention tabs (only shown when the Events module is enabled).
               { id: 'EVENTS_DASHBOARD',  label: 'Events Dashboard',   description: 'Events ops cockpit: pipeline, win rate, revenue, receivables, venue utilization.', eventsOnly: true },
               { id: 'EVENTS_CALENDAR',   label: 'Events Calendar',    description: 'Venue × date booking calendar.', eventsOnly: true },
@@ -26854,6 +26867,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               SPA_CALENDAR: 'SPA', SPA_APPOINTMENTS: 'SPA', SPA_CATALOG: 'SPA', SPA_RESOURCES: 'SPA', SPA_CLIENTS: 'SPA', SPA_PACKAGES: 'SPA', SPA_REPORTS: 'SPA', SPA_BILLING: 'SPA', SPA_SETTINGS: 'SPA',
               EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
               EXPENSE_JOURNAL: 'ACCOUNTS', PROCUREMENT: 'ACCOUNTS', RECEIVABLES: 'ACCOUNTS',
+              ACCOUNTING: 'ACCOUNTS', ACCOUNTS_PNL: 'ACCOUNTS', ACCOUNTS_CASHFLOW: 'ACCOUNTS', ACCOUNTS_GST: 'ACCOUNTS', ACCOUNTS_VENDOR_AGING: 'ACCOUNTS', CASH_DRAWER: 'ACCOUNTS',
+              CHECKLIST_BOARD: 'OVERVIEW', STATUS_BOARD: 'FRONTDESK',
               LOYALTY: 'SALES', FEEDBACK: 'SALES', CHANNEL_MANAGER: 'SALES', PUBLIC_BOOKING_PAGE: 'SALES',
               INVENTORY: 'INVENTORY', HOTEL_INVENTORY: 'INVENTORY', SPA_INVENTORY: 'INVENTORY',
               ALL_REPORTS: 'REPORTS',
@@ -52005,12 +52020,13 @@ function SuperAdminDashboard({ token }: { token: string }) {
     'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'ALL_REPORTS', 'RESTAURANT_REPORTS', 'QR', 'BOOKINGS',
     'LOYALTY', 'STAFF', 'ROSTER', 'TIMESHEET', 'ORDERS', 'INVOICES', 'ATTENDANCE', 'HR_PAYROLL',
     'STAFF_PAYROLL', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'RECEIVABLES',
+    'ACCOUNTING', 'ACCOUNTS_PNL', 'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'CASH_DRAWER', 'CHECKLIST_BOARD',
     'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'SETTINGS'
   ];
   // Hotel-only tabs (shown only when the selected restaurant has property_type IN ('HOTEL','BOTH'))
   const HOTEL_TABS = [
     'ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS', 'HOUSEKEEPING', 'CHECKLISTS', 'HOTEL_INVENTORY',
-    'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE',
+    'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'STATUS_BOARD',
   ];
   // Events & Convention tabs (shown only when the selected restaurant has events_enabled)
   const EVENTS_TABS = [
