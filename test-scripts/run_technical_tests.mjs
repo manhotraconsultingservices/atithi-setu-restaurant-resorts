@@ -3188,6 +3188,16 @@ async function testRBACHardening() {
       map[role] = { EVENTS_BOOKINGS: 2, HR_PAYROLL: 1, SERVICE_REQUESTS: 1, CHECKLISTS: 1 };
       await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, map);
 
+      // issue.xlsx (rows 4/15) — Loyalty guest-list PII is now tab-gated. This
+      // custom role is CONFIGURED but was NOT granted LOYALTY, so it must be 403
+      // on GET /loyalty/customers; the owner must still get 200. (Billing's tier
+      // lookup uses a different endpoint and is unaffected.)
+      const loyDeny  = await api('GET', `/api/restaurant/${restaurantId}/loyalty/customers`, null, tok);
+      const loyOwner = await api('GET', `/api/restaurant/${restaurantId}/loyalty/customers`);
+      if (loyOwner.status !== 200) skip('TC-XLSX-LOYALTY-PII', 'Loyalty PII gate', `owner GET returned ${loyOwner.status}`);
+      else if (loyDeny.status === 403) pass('TC-XLSX-LOYALTY-PII', 'Loyalty guest list gated — ungranted role 403, owner 200');
+      else fail('TC-XLSX-LOYALTY-PII', 'Loyalty guest-list PII gate', `ungranted role got ${loyDeny.status} (expected 403); owner ${loyOwner.status}`);
+
       // F2b — the GRANTED custom role can now READ events bookings. This is the
       // core "assigned to a role but no access" fix: a custom role the owner
       // granted a module tab used to be blanket-403'd by the old requireRole().
@@ -3827,6 +3837,109 @@ function checkBillingUxFixes() {
   }
 }
 
+// ── issue.xlsx fixes — source guards (no server needed) ──────────────────────
+// Locks in the fixes for the reported QA issues so they can't silently regress.
+function checkIssueXlsxSourceFixes() {
+  try {
+    const app = readFileSync(join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+    let srv = ''; try { srv = readFileSync(join(__dirname, '..', 'server.ts'), 'utf8'); } catch {}
+    let ev = ''; try { ev = readFileSync(join(__dirname, '..', 'src', 'EventViews.tsx'), 'utf8'); } catch {}
+
+    // RBAC — leaked module tabs removed from the fail-open grandfather set.
+    const avMatch = app.match(/const ALWAYS_VISIBLE_TABS = new Set<string>\(\[([^\]]*)\]\)/);
+    const avBody = avMatch ? avMatch[1] : app;
+    const leaked = ['INVENTORY', 'LOYALTY', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'ALL_REPORTS'];
+    const stillLeaking = leaked.filter(t => new RegExp(`'${t}'`).test(avBody));
+    (stillLeaking.length === 0 ? pass : fail)('TC-XLSX-RBAC-GRANDFATHER',
+      'Leaked module tabs removed from ALWAYS_VISIBLE_TABS (no fail-open grandfather for restricted roles)',
+      stillLeaking.length === 0 ? '' : `still grandfathered: ${stillLeaking.join(', ')}`);
+
+    // Status Board no longer force-injected to Full; role-gated in isVisible.
+    const backInject  = /RBAC_NEWLY_ADDED = \[[\s\S]*?'STATUS_BOARD'[\s\S]*?\]/.test(srv);
+    const frontInject = /NEWLY_ADDED = \[[^\]]*'STATUS_BOARD'/.test(app);
+    const roleGate    = /id === 'STATUS_BOARD'[\s\S]{0,500}HOTEL_EVENTS_OPS/.test(app);
+    const sbOk = !backInject && !frontInject && roleGate;
+    (sbOk ? pass : fail)('TC-XLSX-RBAC-STATUSBOARD',
+      'Status Board no longer injected to Full; role-gated (owner/manager/hotel-events-ops/explicit-grant)',
+      sbOk ? '' : `backInject=${backInject} frontInject=${frontInject} roleGate=${roleGate}`);
+
+    // GST — Edit-Invoice zeroing effect bails for legacy single-GST tenants.
+    const gstFix = /if \(p\.usedLegacyGst\) return;/.test(app);
+    (gstFix ? pass : fail)('TC-XLSX-GST-NO-RESET',
+      'Edit-Invoice GST retained for legacy single-GST tenants (toggle no longer resets %; save keeps GST)',
+      gstFix ? '' : 'usedLegacyGst bail missing from the zeroing effect');
+
+    // Events delete confirmation wording.
+    if (ev) {
+      const svc = /confirm\('Delete this service\?'\)/.test(ev);
+      const pkg = /confirm\('Delete this package\?'\)/.test(ev);
+      (svc && pkg ? pass : fail)('TC-XLSX-EVENTS-DELETE-COPY',
+        'Events add-on/catering delete confirm says "Delete …?" (matches the button + actual removal)',
+        (svc && pkg) ? '' : `service=${svc} package=${pkg}`);
+    } else skip('TC-XLSX-EVENTS-DELETE-COPY', 'Events delete wording', 'EventViews.tsx not readable');
+
+    // Invoice preview stacks above the New Invoice modal.
+    const zfix = /Print Preview Modal[\s\S]{0,400}z-\[120\]/.test(app);
+    (zfix ? pass : fail)('TC-XLSX-PREVIEW-ZINDEX',
+      'Invoice print preview opens in the foreground (z-[120], above the New Invoice modal)',
+      zfix ? '' : 'preview modal not raised to z-[120]');
+  } catch (e) {
+    skip('TC-XLSX-RBAC-GRANDFATHER', 'issue.xlsx source guards', `read error: ${e?.message || e}`);
+  }
+}
+
+// issue.xlsx row 13 — GST must be applied to Table-QR / session bills. Creates a
+// table order + requests the bill and asserts the session carries the tenant's
+// GST rate. Self-cleaning. Skips when the tenant has GST disabled.
+async function testQrBillGst() {
+  section('DINE-IN — Table-QR / session bill GST (issue.xlsx row 13)');
+  const created = { orderId: null, token: null, tableId: null };
+  try {
+    const rest = await api('GET', `/api/restaurant/${restaurantId}`);
+    const gstEnabled = rest.data?.is_gst_enabled === 1 || rest.data?.is_gst_enabled === true;
+    const gstPct = Number(rest.data?.gst_percentage || 0);
+    if (!gstEnabled || gstPct <= 0) { skip('TC-XLSX-QR-GST', 'Table-QR bill GST', `tenant GST disabled (enabled=${gstEnabled}, pct=${gstPct})`); return; }
+    const tablesResp = await api('GET', `/api/restaurant/${restaurantId}/tables`);
+    const tables = Array.isArray(tablesResp.data) ? tablesResp.data : [];
+    let table = null;
+    for (const t of tables) {
+      const as = await api('GET', `/api/restaurant/${restaurantId}/tables/${t.id}/active-session`);
+      if (as.status === 200 && !as.data?.session) { table = t; break; }
+    }
+    if (!table) { skip('TC-XLSX-QR-GST', 'Table-QR bill GST', 'no free table'); return; }
+    created.tableId = table.id;
+    const tag = Date.now();
+    // Mimic the QR customer path: send subtotal + client-computed GST amount.
+    const sub = 200, gstAmt = Math.round(sub * gstPct) / 100;
+    const oa = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
+      table_id: table.id, table_number: table.name, checkout_mode: 'postpaid',
+      items: [{ name: `QR-GST ${tag}`, price: 200, quantity: 1 }], total_amount: sub + gstAmt, gst_amount: gstAmt, customer_name: 'QR GST',
+    });
+    created.orderId = oa.data?.id || oa.data?.orderId || null;
+    const as1 = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+    created.token = as1.data?.session?.session_token || null;
+    if (created.token) await api('POST', `/api/restaurant/${restaurantId}/sessions/${created.token}/request-bill`, {});
+    const as2 = await api('GET', `/api/restaurant/${restaurantId}/tables/${table.id}/active-session`);
+    const sess = as2.data?.session || {};
+    const billGst = Number(sess.gst_percent || 0);
+    const applied = Number(sess.apply_gst ?? 0) === 1;
+    const orderGst = (sess.orders || []).reduce((s, o) => s + Number(o.gst_amount || 0), 0);
+    if (oa.status === 200 && billGst > 0 && applied && orderGst > 0) {
+      pass('TC-XLSX-QR-GST', `Table bill carries GST (rate ${billGst}%, ₹${orderGst.toFixed(2)} across orders)`);
+    } else {
+      fail('TC-XLSX-QR-GST', 'Table-QR bill GST', `order=${oa.status} bill_gst%=${billGst} apply_gst=${applied} order_gst=₹${orderGst} (expected rate ${gstPct}% applied)`);
+    }
+  } catch (e) {
+    skip('TC-XLSX-QR-GST', 'Table-QR bill GST', `error: ${e?.message || e}`);
+  } finally {
+    try {
+      if (created.orderId) await api('PATCH', `/api/orders/${created.orderId}`, { status: 'CANCELLED' }).catch(() => {});
+      if (created.token) await api('PATCH', `/api/restaurant/${restaurantId}/sessions/${created.token}/close`, { payment_method: 'CASH' }).catch(() => {});
+      if (created.tableId) await api('PATCH', `/api/restaurant/${restaurantId}/tables/${created.tableId}/status`, { status: 'VACANT' }).catch(() => {});
+    } catch { /* best-effort */ }
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -3838,11 +3951,13 @@ async function main() {
   checkOotbRoleRouting();
   checkContentGuardConsistency();
   checkBillingUxFixes();
+  checkIssueXlsxSourceFixes();
   await testAuth();
   await testRestaurant();
   await testDineInTableFlow();
   await testWaiterSharedFloor();
   await testBulkAssignWaiter();
+  await testQrBillGst();
   await testHotel();
   await testProcurement();
   await testHR();

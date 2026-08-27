@@ -251,7 +251,7 @@ function EventVenues({ restaurantId, token }: Props) {
       setShowForm(false); setEdit(null); setForm(blank); await load();
     } catch (e: any) { alert(e.message); }
   };
-  const remove = async (id: string) => { if (!window.confirm('Deactivate this venue?')) return; try { await api(`/events/venues/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  const remove = async (id: string) => { if (!window.confirm('Delete this venue?')) return; try { await api(`/events/venues/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
   // Manual hall status board — setting it raises the matching VENUE_<status> checklist (non-blocking).
   const setStatus = async (id: string, status: string) => {
     setRows(rs => rs.map(r => r.id === id ? { ...r, status } : r));
@@ -404,7 +404,7 @@ function EventRentals({ restaurantId, token }: Props) {
       setShowForm(false); setEdit(null); setForm(blank); await load();
     } catch (e: any) { alert(e.message); }
   };
-  const remove = async (id: string) => { if (!window.confirm('Deactivate this item?')) return; try { await api(`/events/rental-items/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  const remove = async (id: string) => { if (!window.confirm('Delete this item?')) return; try { await api(`/events/rental-items/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
 
   return (
     <div>
@@ -501,7 +501,7 @@ function EventServices({ restaurantId, token }: Props) {
       setShowForm(false); setEdit(null); setForm(blank); await load();
     } catch (e: any) { alert(e.message); }
   };
-  const remove = async (id: string) => { if (!window.confirm('Deactivate this service?')) return; try { await api(`/events/services/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  const remove = async (id: string) => { if (!window.confirm('Delete this service?')) return; try { await api(`/events/services/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
 
   return (
     <div>
@@ -583,7 +583,7 @@ function EventCatering({ restaurantId, token }: Props) {
       setShowForm(false); setEdit(null); setForm(blank); await load();
     } catch (e: any) { alert(e.message); }
   };
-  const remove = async (id: string) => { if (!window.confirm('Deactivate this package?')) return; try { await api(`/events/catering-packages/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  const remove = async (id: string) => { if (!window.confirm('Delete this package?')) return; try { await api(`/events/catering-packages/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
 
   const setSection = (i: number, field: string, value: string) => {
     const s = [...(form.sections || [])]; s[i] = { ...s[i], [field]: value }; setForm({ ...form, sections: s });

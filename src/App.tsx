@@ -125,7 +125,17 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // fell through isTabVisible() to this grandfather set. The Workforce endpoints are
 // already permission-gated (workforceStaff, marker `hr-workforce-permission-gate`),
 // so these are matrix-gated tabs: visible only if granted (or unrestricted owner).
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'PROCUREMENT', 'ALL_REPORTS']);
+// NOTE: INVENTORY (Kitchen Inventory), LOYALTY, FRONT_OFFICE_REPORTS (Hotel
+// Reports), CHANNEL_MANAGER, PUBLIC_BOOKING_PAGE and ALL_REPORTS (Reports) were
+// removed from this grandfather set (2026-08-27) for the SAME reason as DELIVERY
+// / RESTAURANT_REPORTS / HR_PAYROLL above — QA reported them staying visible to
+// Chef/Waiter even after the owner set them to No Access. A built-in role's
+// /my-permissions list is markerless, so it fell through isTabVisible() to this
+// set. They are now ordinary matrix-gated tabs (visible only if granted, or to an
+// unrestricted owner). V2-marked legacy tenants keep migration safety because
+// LOYALTY/PROCUREMENT still live in TABS_INTRODUCED_AFTER_V2/_V3 below — only
+// markerless lists change behavior.
+const ALWAYS_VISIBLE_TABS = new Set<string>(['ROSTER', 'TIMESHEET', 'PROCUREMENT']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -11674,6 +11684,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   useEffect(() => {
     const p = invEditPreview;
     if (!p || !Array.isArray(p.taxLines) || p.taxLines.length === 0) return;
+    // Don't fight a legacy single-GST tenant: when the preview's tax lines came
+    // from the legacy gst_percentage fallback (usedLegacyGst) rather than real
+    // tax_config rows, the gstPct/applyGst fields ARE the source of truth. Zeroing
+    // them here wiped the GST the user picked — the reported "enabling GST resets
+    // % to 0%" and "GST not retained during manual-invoice payment/save" bugs.
+    // Only blank the legacy fields when tax_config genuinely drives the math.
+    if (p.usedLegacyGst) return;
     if (invEdit.gstPct === 0 && !invEdit.applyGst) return;
     setInvEdit(prev => ({ ...prev, gstPct: 0, applyGst: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -13667,7 +13684,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Full(3) for any role that doesn't have them configured yet. This prevents
         // an owner from accidentally revoking access simply by opening the matrix
         // and saving before explicitly setting a level for these new tabs.
-        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
+        // STATUS_BOARD removed (2026-08-27): prefilling it to Full leaked the
+        // hotel/events status grid into restaurant roles (Waiter) — its nav
+        // visibility is now role-gated in isVisible, not matrix-injected.
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD',
           // Spa operational tabs — grantable in Staff Access from now on; prefill Full
           // so spa staff on tenants that pre-configured the matrix aren't locked out.
           'SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_INVENTORY'];
@@ -15123,9 +15143,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           if (id === 'MY_CHECKLIST') return true;
           // Checklist Board is the manager/owner cockpit over every checklist instance.
           if (id === 'CHECKLIST_BOARD') return isOwnerOrAdmin || currentRole === 'MANAGER';
-          // Status Board — rooms + halls status grid. Module-gated AND permissionable:
-          // owner always sees it; staff go through the Staff Access matrix.
-          if (id === 'STATUS_BOARD') return (isHotelEnabled || isEventsEnabled) && (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs));
+          // Status Board — rooms + halls status grid. Hotel/Events operational
+          // tool: owner/manager always; hotel/events operational roles keep it
+          // (migration safety); restaurant-only roles (Waiter/Chef/Cashier) and
+          // every other role see it ONLY if the owner explicitly grants it —
+          // never via the fail-open null list or the retired inject. Reported:
+          // "Waiter can access Status Board without permission".
+          if (id === 'STATUS_BOARD') {
+            if (!(isHotelEnabled || isEventsEnabled)) return false;
+            if (isOwnerOrAdmin || currentRole === 'MANAGER') return true;
+            const HOTEL_EVENTS_OPS = ['FRONT_DESK', 'HOUSEKEEPING', 'CONCIERGE', 'MAINTENANCE', 'EVENTS_MANAGER'];
+            if (HOTEL_EVENTS_OPS.includes(currentRole || '')) return true;
+            return Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id);
+          }
           // Finance tabs (PROCUREMENT, EXPENSE_JOURNAL) were introduced after
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
@@ -36947,8 +36977,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         })()}
 
         {/* ── Print Preview Modal ── */}
+        {/* z-[120]: must sit ABOVE the New Invoice modal (z-50), which renders
+            later in the DOM — at equal z-index the preview stacked behind it. */}
         {printPreviewHtml && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col" style={{ maxHeight: '90vh' }}>
               <div className="flex items-center justify-between px-6 py-4 border-b border-[#cc5a16]/10">
                 <h3 className="font-bold text-[#1a1208]">Print Preview</h3>

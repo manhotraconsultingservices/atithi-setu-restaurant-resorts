@@ -5357,7 +5357,15 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
         // any role the owner explicitly grants "Checklist Templates" in Staff
         // Access). Auto-defaulting them to Full would leak the config tab into
         // every built-in staff role's nav the moment it stopped being owner-only.
-        'MY_CHECKLIST', 'CHECKLIST_BOARD', 'STATUS_BOARD',
+        // STATUS_BOARD removed from this inject-to-Full list (2026-08-27): like
+        // HOUSEKEEPING/Events above, defaulting the hotel+events status grid to
+        // level 3 for EVERY built-in role leaked it into RESTAURANT roles' nav
+        // (the reported "Waiter can access Status Board without permission"). It
+        // isn't a *-TAB_IDS member with its own endpoint (it reads the already
+        // hotel/events-gated /tables/live + rooms/halls data), so removing the
+        // inject only affects nav visibility — now handled per-role in the
+        // frontend isVisible (owner/manager/hotel-events-ops/explicit-grant).
+        'MY_CHECKLIST', 'CHECKLIST_BOARD',
         // Spa & Wellness — operational tabs; module-gated, so harmless on non-spa
         // tenants and prevents locking spa staff out on tenants that pre-configured
         // Staff Access before Spa shipped. (SPA_BILLING / SPA_SETTINGS stay out —
@@ -10720,7 +10728,11 @@ async function startServer() {
   //   limit?   = default 50, max 200
   //   offset?  = default 0
   //   sort?    = 'spent' | 'recent' | 'orders' | 'name' (default: spent)
-  app.get("/api/restaurant/:id/loyalty/customers", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/loyalty/customers", authenticate, requireTabAccess('LOYALTY'), async (req: AuthRequest, res: Response) => {
+    // Guest PII (names + phone numbers). Gate to the Loyalty tab so a role the
+    // owner has NOT granted Loyalty (e.g. Waiter) can't read the guest list via
+    // direct API call. Owner/Manager/granted roles pass; billing's tier lookup
+    // uses the separate /loyalty/lookup endpoint and is unaffected.
     try {
       const db = await getTenantDb(req.params.id);
       const q = String((req.query.q as string) || '').trim();
@@ -50409,7 +50421,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'manager-adjustment-round',
+    commit_marker: 'issue-xlsx-rbac-gst-fixes',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
