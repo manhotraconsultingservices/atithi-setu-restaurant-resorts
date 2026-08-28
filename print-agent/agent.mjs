@@ -230,8 +230,14 @@ function sendToUsb(printerName, buf) {
     ps.on('error', (e) => { try { fs.unlinkSync(tmp); } catch {} reject(e); });
     ps.on('close', (code) => {
       try { fs.unlinkSync(tmp); } catch {}
-      if (code === 0) resolve();
-      else reject(new Error((err.trim().split('\n').pop() || `powershell exit ${code}`).slice(0, 200)));
+      if (code === 0) { resolve(); return; }
+      // Surface the meaningful line (the .NET exception message — e.g. "OpenPrinter
+      // failed for 'X' (err 1801)") rather than PowerShell's trailing "+ ...ErrorId".
+      const lines = err.trim().split('\n').map(s => s.trim()).filter(Boolean);
+      const msg = lines.find(l => /OpenPrinter|WritePrinter|StartDoc|Exception calling/i.test(l))
+        || lines.find(l => !l.startsWith('+') && !l.startsWith('At ') && !/^~+$/.test(l))
+        || lines[0] || `powershell exit ${code}`;
+      reject(new Error(msg.replace(/^Exception calling "\w+" with "\d+" argument\(s\):\s*/i, '').replace(/^"|"$/g, '').slice(0, 200)));
     });
   });
 }
