@@ -1,0 +1,157 @@
+========================================================================
+   ATITHI-SETU  PRINT AGENT  —  DEPLOYMENT GUIDE
+   Automatic kitchen tickets (KOT) + customer bill printing
+========================================================================
+
+WHAT THIS DOES
+--------------
+ * When an order is placed (POS / waiter / customer QR), a Kitchen Order
+   Ticket prints AUTOMATICALLY at the kitchen printer — no button needed.
+ * When staff press "Print Bill" on a table, the customer invoice prints
+   at the bill printer.
+ * One small program (the "print agent") runs quietly on the billing PC
+   and drives ALL your printers.
+
+ The SAME program works for every restaurant. Nothing is hard-coded — it
+ just needs your Restaurant ID + token, which Setup.bat asks for. Use ONE
+ printer for everything, or TWO (kitchen + bill). Your choice.
+
+
+WHAT YOU NEED
+-------------
+ 1. A Windows PC at the counter that stays ON during service (the billing PC).
+ 2. One or two thermal receipt printers (58mm or 80mm), each INSTALLED on
+    that PC so Windows can print a test page to it:
+      - USB printer : plug it in, install the vendor driver, then confirm it
+                      shows under  Settings > Bluetooth & devices >
+                      Printers & scanners.
+      - Network printer : connect to the same Wi-Fi/LAN, note its IP address.
+ 3. Your Atithi-Setu OWNER login.
+
+
+========================================================================
+ PART A — SET UP PRINTERS IN THE APP   (do this once, from any device)
+========================================================================
+ 1. Log in to Atithi-Setu as the owner.
+ 2. Go to:   Restaurant  >  Kitchen Printers
+ 3. Click "Add a printer" and fill in:
+
+      Name        : any label, e.g. "Kitchen" or "Counter".
+      Station     : KITCHEN = food tickets for the chef
+                    INVOICE = the customer bill (Print Bill button)
+                    ALL     = ONE printer that prints BOTH
+                              (use this if you only have one printer;
+                               also tick "Default")
+      Connection  : USB     = printer plugged into the billing PC (common)
+                    Network = printer has its own IP address
+      If USB      : "Windows printer name" = the EXACT name from
+                    Printers & scanners (copy it letter-for-letter).
+      If Network  : enter the printer's IP and Port (usually 9100).
+      Copies      : 1  (raise it for duplicate tickets)
+
+ 4. Save. Repeat for a second printer if you have one.
+
+      RECOMMENDED — TWO PRINTERS:
+        Printer 1  ->  Name "Kitchen",  Station KITCHEN,  USB, kitchen printer name
+        Printer 2  ->  Name "Counter",  Station INVOICE,  USB, bill printer name
+
+      SIMPLE — ONE PRINTER:
+        Printer 1  ->  Name "Counter",  Station ALL,  USB, your printer name,
+                       tick "Default"
+
+ 5. On that page, click COPY next to "Print agent token". Keep it for Part B.
+    Also note your Restaurant ID (looks like  RESTO-1234).
+
+
+========================================================================
+ PART B — INSTALL THE AGENT ON THE BILLING PC   (about 5 minutes)
+========================================================================
+ 1. Copy the "AtithiSetuPrintAgent" folder onto the billing PC
+    (e.g. the Desktop, or  C:\AtithiSetu\ ).
+    If you received a .zip: right-click it > Extract All first.
+
+ 2. Double-click   Setup.bat
+
+    If Windows shows "Windows protected your PC":
+        click  "More info"  >  "Run anyway"   (normal for a new program).
+
+ 3. When asked, type:
+        Server URL     : press Enter to accept  https://erp.atithi-setu.com
+        Restaurant ID  : e.g.  RESTO-1234
+        Print agent token : paste the token you copied in Part A
+
+ 4. It saves the settings and installs the agent to start AUTOMATICALLY
+    every time the PC is switched on (running in the background, no window).
+
+ 5. Done.
+
+
+========================================================================
+ PART C — TEST IT
+========================================================================
+ 1. Place a test order in the app (any table, add an item, confirm).
+        ->  a Kitchen Order Ticket should print within a few seconds.
+ 2. Open that table's bill and press "Print Bill".
+        ->  the customer invoice should print.
+
+ Both printed? You're live. If not, see TROUBLESHOOTING below.
+
+
+========================================================================
+ EVERYDAY USE
+========================================================================
+ * Nothing to do — the agent runs by itself.
+ * Orders print kitchen tickets automatically; staff press "Print Bill"
+   for invoices.
+ * It restarts by itself after a reboot.
+ * Keep the billing PC ON and online during service.
+
+
+========================================================================
+ MANAGING THE AGENT
+========================================================================
+ * Stop / remove it       :  double-click  Uninstall.bat
+ * Add / change printers   :  do it in the app (Restaurant > Kitchen
+                              Printers). No change needed on the PC.
+ * Token changed/rotated   :  run Setup.bat again and paste the new token.
+
+
+========================================================================
+ TROUBLESHOOTING
+========================================================================
+ Nothing prints:
+   - Billing PC on and online? Did Setup.bat finish?
+   - In the app, is the printer "Active", and does its Station match?
+     (KITCHEN/ALL for orders; INVOICE/ALL for bills.)
+   - Try a Windows test page (Printers & scanners > printer > Manage >
+     Print test page). If THAT fails, it's a Windows/printer issue.
+
+ "AUTH FAILED":
+   - Wrong Restaurant ID or token. Re-copy the token from Kitchen Printers
+     and run Setup.bat again.
+
+ "OpenPrinter failed ... (err 1801)":
+   - The Windows printer NAME is wrong. Copy it EXACTLY as shown in
+     Printers & scanners into the printer's name field in the app.
+
+ Kitchen ticket prints but bill doesn't (or vice-versa):
+   - Check each printer's Station. Orders -> KITCHEN/ALL; bills ->
+     INVOICE/ALL (or the Default printer).
+
+ Garbled characters:
+   - The printer may need a different codepage. Send us the printer model.
+
+ Network printer won't connect:
+   - Wrong IP/port, printer off, or firewall. Confirm the IP and that
+     port 9100 is open.
+
+
+========================================================================
+ NOTES
+========================================================================
+ * The SAME AtithiSetuPrintAgent.exe works for ANY restaurant — only the
+   Restaurant ID + token differ (Setup.bat handles that).
+ * The agent only relays print tickets to your printers; it stores nothing.
+ * USB printing is Windows-only. For Linux / Raspberry Pi, use network
+   printers (see README.md / contact support).
+========================================================================

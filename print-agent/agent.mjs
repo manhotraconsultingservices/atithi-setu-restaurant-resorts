@@ -254,27 +254,38 @@ async function ack(jobId, status, error) {
   } catch (e) { console.error('ack failed:', e.message); }
 }
 
+// Re-entrancy guard: a USB print (Add-Type compile + spooler write) can take a
+// few seconds — longer than POLL_MS. Without this, the next interval would fire
+// while the first tick is still awaiting a print, both would fetch the SAME
+// still-PENDING job, and it would print twice. Skip a tick while one is running.
+let ticking = false;
 async function tick() {
-  let jobs = [];
+  if (ticking) return;
+  ticking = true;
   try {
-    const r = await fetch(api('/print-jobs/pending'), { headers });
-    if (r.status === 401 || r.status === 403) { console.error('AUTH FAILED — check AGENT_TOKEN / RESTAURANT_ID.'); return; }
-    if (!r.ok) return;
-    jobs = await r.json();
-  } catch (e) { console.error('poll failed:', e.message); return; }
-  for (const job of (Array.isArray(jobs) ? jobs : [])) {
-    const conn = String(job.conn_type || 'NETWORK').toUpperCase();
-    if (conn !== 'USB' && !job.host) { await ack(job.id, 'FAILED', 'printer has no host/IP configured'); continue; }
+    let jobs = [];
     try {
-      const buf = buildEscpos(job);
-      const copies = Math.max(1, Number(job.copies) || 1);
-      for (let i = 0; i < copies; i++) await sendJob(job, buf);
-      await ack(job.id, 'PRINTED');
-      console.log(`printed ${job.id} [${job.kind || 'KOT'}] → ${job.printer_name || job.host}`);
-    } catch (e) {
-      await ack(job.id, 'FAILED', e.message);
-      console.error(`print ${job.id} failed:`, e.message);
+      const r = await fetch(api('/print-jobs/pending'), { headers });
+      if (r.status === 401 || r.status === 403) { console.error('AUTH FAILED — check AGENT_TOKEN / RESTAURANT_ID.'); return; }
+      if (!r.ok) return;
+      jobs = await r.json();
+    } catch (e) { console.error('poll failed:', e.message); return; }
+    for (const job of (Array.isArray(jobs) ? jobs : [])) {
+      const conn = String(job.conn_type || 'NETWORK').toUpperCase();
+      if (conn !== 'USB' && !job.host) { await ack(job.id, 'FAILED', 'printer has no host/IP configured'); continue; }
+      try {
+        const buf = buildEscpos(job);
+        const copies = Math.max(1, Number(job.copies) || 1);
+        for (let i = 0; i < copies; i++) await sendJob(job, buf);
+        await ack(job.id, 'PRINTED');
+        console.log(`printed ${job.id} [${job.kind || 'KOT'}] → ${job.printer_name || job.host}`);
+      } catch (e) {
+        await ack(job.id, 'FAILED', e.message);
+        console.error(`print ${job.id} failed:`, e.message);
+      }
     }
+  } finally {
+    ticking = false;
   }
 }
 
