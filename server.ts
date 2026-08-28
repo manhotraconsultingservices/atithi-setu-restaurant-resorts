@@ -23806,6 +23806,36 @@ ${data.tenant.name}`;
     }
   };
 
+  // Resolve the TABLE + the WAITER who served it, for an invoice audit entry. The
+  // waiter is assigned to the TABLE (tables.assigned_waiter_id), so we walk
+  // session/order → table → attendance_staff. Best-effort (returns nulls on miss).
+  const _invoiceServeContext = async (
+    tenantDb: DbInterface,
+    opts: { tableId?: string | null; tableName?: string | null; sessionId?: string | null; sessionToken?: string | null }
+  ): Promise<{ table: string | null; waiter: string | null }> => {
+    let tableId = opts.tableId || null;
+    let tableName = opts.tableName || null;
+    let waiter: string | null = null;
+    try {
+      if (!tableId && (opts.sessionId || opts.sessionToken)) {
+        const s: any = await tenantDb.get(
+          `SELECT table_id, table_name FROM table_sessions WHERE ${opts.sessionId ? 'id' : 'session_token'} = ?`,
+          [opts.sessionId || opts.sessionToken]
+        ).catch(() => null);
+        if (s) { tableId = s.table_id || tableId; if (!tableName) tableName = s.table_name || null; }
+      }
+      if (tableId) {
+        const t: any = await tenantDb.get(
+          `SELECT t.name AS tname, st.name AS wname
+             FROM tables t LEFT JOIN attendance_staff st ON st.id = t.assigned_waiter_id
+            WHERE t.id = ?`, [tableId]
+        ).catch(() => null);
+        if (t) { if (!tableName) tableName = t.tname || null; waiter = t.wname || null; }
+      }
+    } catch { /* best-effort — audit context only */ }
+    return { table: tableName || null, waiter: waiter || null };
+  };
+
   // ─── Enable / disable the events module (SUPER_ADMIN / CTO only) ────────────
   app.post("/api/restaurant/:id/events/enable", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -44340,11 +44370,12 @@ ${data.tenant.name}`;
              req.params.sessionToken]
       );
       if (beforeSess?.id) {
-        writeObjectAudit(db, req, {
+        const _ctx = await _invoiceServeContext(db, { tableName: (beforeSess as any).table_name || null, tableId: (beforeSess as any).table_id || null, sessionId: beforeSess.id });
+        await writeObjectAudit(db, req, {
           objectType: 'INVOICE', objectId: String(beforeSess.id), action: 'EDITED',
-          summary: `Table-bill invoice ${beforeSess.invoice_number || ''} adjustments edited${hasFinal ? ` — total ₹${Number(beforeSess.final_amount || 0).toFixed(2)} → ₹${Number(final_amount).toFixed(2)}` : ''}`.trim(),
+          summary: `Table-bill invoice ${beforeSess.invoice_number || ''} adjustments edited${hasFinal ? ` — total ₹${Number(beforeSess.final_amount || 0).toFixed(2)} → ₹${Number(final_amount).toFixed(2)}` : ''}${_ctx.table ? ` · Table ${_ctx.table}` : ''}${_ctx.waiter ? ` · Served by ${_ctx.waiter}` : ''}`.trim(),
           before: { discount_amount: Number(beforeSess.discount_amount || 0), service_charge_percent: Number(beforeSess.service_charge_percent || 0), gst_percent: Number(beforeSess.gst_percent || 0), apply_gst: Number(beforeSess.apply_gst || 0), final_amount: Number(beforeSess.final_amount || 0) },
-          after: { discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, ...(hasFinal ? { final_amount: Number(final_amount) } : {}) },
+          after: { discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, ...(hasFinal ? { final_amount: Number(final_amount) } : {}), table: _ctx.table, waiter: _ctx.waiter },
         }).catch(() => {});
       }
       res.json({ success: true });
@@ -44397,6 +44428,16 @@ ${data.tenant.name}`;
         [id, session.table_name || null, JSON.stringify(items), adjTotal, adjGst, session.id, roundNum]
       );
       await db.run("UPDATE table_sessions SET round_count = ? WHERE id = ?", [roundNum, session.id]).catch(() => {});
+      // AUDIT — manager added items to the table bill (a new Manager Adjustment
+      // round). Keyed by session id; captures the added items, amount, table + waiter.
+      try {
+        const _ctx = await _invoiceServeContext(db, { tableName: session.table_name || null, tableId: (session as any).table_id || null, sessionId: session.id });
+        await writeObjectAudit(db, req, {
+          objectType: 'INVOICE', objectId: String(session.id), action: 'ITEMS_ADDED',
+          summary: `Manager added ${items.length} item(s) as round ${roundNum} — ₹${Number(subtotal).toFixed(2)}${adjGst > 0 ? ` + ₹${adjGst.toFixed(2)} GST` : ''}${_ctx.table ? ` · Table ${_ctx.table}` : ''}${_ctx.waiter ? ` · Served by ${_ctx.waiter}` : ''}`,
+          after: { round_number: roundNum, items, subtotal: Number(subtotal), gst_amount: adjGst, total_amount: adjTotal, table: _ctx.table, waiter: _ctx.waiter },
+        });
+      } catch { /* audit non-fatal */ }
       res.status(201).json({ success: true, id, round_number: roundNum, total_amount: adjTotal, gst_amount: adjGst, items_added: items.length });
     } catch (err: any) {
       console.error("Session adjustment error:", err);
@@ -44599,6 +44640,21 @@ ${data.tenant.name}`;
         [billAmount, loyaltyDiscount, payment_method || null, sessionGstPct, sessionApplyGst, assignedInvoiceNumber, session.id]
       );
 
+      // AUDIT — invoice GENERATED for this table via Command Centre / customer
+      // request-bill. Fire only on the FIRST request (open → bill_requested), never
+      // on idempotent re-taps. Captures amount, table + the waiter who served it,
+      // and the assigned invoice number (actor = staff when triggered from the modal).
+      if (String(session.status || '').toLowerCase() === 'open') {
+        try {
+          const _ctx = await _invoiceServeContext(db, { tableName: session.table_name || null, tableId: session.table_id || null, sessionId: session.id });
+          await writeObjectAudit(db, (req as unknown as AuthRequest), {
+            objectType: 'INVOICE', objectId: String(session.id), action: 'CREATED',
+            summary: `Invoice ${session.invoice_number || assignedInvoiceNumber || ''} generated (Command Centre) — ₹${Number(billAmount).toFixed(2)}${_ctx.table ? ` · Table ${_ctx.table}` : ''}${_ctx.waiter ? ` · Served by ${_ctx.waiter}` : ''}`.trim(),
+            after: { invoice_number: session.invoice_number || assignedInvoiceNumber || null, bill_amount: Number(billAmount), payment_method: payment_method || null, table: _ctx.table, waiter: _ctx.waiter },
+          });
+        } catch { /* audit non-fatal */ }
+      }
+
       console.log(`[request-bill] OK ${req.params.id}/${req.params.token} → bill_requested, amount=₹${billAmount.toFixed(2)}${loyaltyDiscount > 0 ? `, loyalty(${loyaltyTierName})=−₹${loyaltyDiscount.toFixed(2)}` : ''}, gst=${sessionGstPct}%, apply_gst=${sessionApplyGst}, invoice_number=${session.invoice_number || assignedInvoiceNumber || '(none)'}`);
 
       // Notify owner + waiters (don't await — fire and forget)
@@ -44734,6 +44790,28 @@ ${data.tenant.name}`;
             await _postOrderGl(db, req.params.id, o, req.user?.email || req.user?.id || null);
           }
         } catch (glErr) { console.error('[GL] session-close capture failed:', glErr); }
+
+        // AUDIT — the invoice was settled from Command Centre. Capture payment type,
+        // the table, and the waiter who served it (actor + timestamp are stamped by
+        // writeObjectAudit). Keyed by session id like the session invoice-audit read.
+        try {
+          const _ctx = await _invoiceServeContext(db, { sessionToken: req.params.token, sessionId: session.id, tableId: (session as any).table_id });
+          await writeObjectAudit(db, req, {
+            objectType: 'INVOICE',
+            objectId: String(session.id),
+            action: 'PAID',
+            summary: `Bill settled${payment_method ? ` via ${payment_method}` : ''}`
+                   + `${_ctx.table ? ` · Table ${_ctx.table}` : ''}${_ctx.waiter ? ` · Served by ${_ctx.waiter}` : ''}`
+                   + `${final_amount !== undefined ? ` · ₹${Number(final_amount || 0).toFixed(2)}` : ''}`,
+            after: {
+              status: 'PAID',
+              payment_method: payment_method || null,
+              final_amount: final_amount !== undefined ? Number(final_amount || 0) : null,
+              table: _ctx.table, waiter: _ctx.waiter,
+              invoice_number: (existingSess as any)?.invoice_number || null,
+            },
+          });
+        } catch { /* audit is non-fatal */ }
       }
       res.json({ success: true });
     } catch (err) {
@@ -45808,6 +45886,22 @@ ${data.tenant.name}`;
         [req.user?.id || 'unknown', req.user?.role || 'unknown', String(reason).trim(), req.params.orderId]
       );
 
+      // AUDIT — surface the cancellation in the invoice History trail (the central
+      // invoice_deletion_audit above is the forensic snapshot; this is the trail the
+      // History viewer reads). Captures reason, table + waiter, actor + timestamp.
+      try {
+        const _ctx = await _invoiceServeContext(db, { tableName: order.table_number || null, sessionId: order.session_id || null });
+        await writeObjectAudit(db, req, {
+          objectType: 'INVOICE',
+          objectId: String(req.params.orderId),
+          action: 'CANCELLED',
+          summary: `Invoice cancelled — ${String(reason).trim()}`
+                 + `${_ctx.table ? ` · Table ${_ctx.table}` : ''}${_ctx.waiter ? ` · Served by ${_ctx.waiter}` : ''}`,
+          before: { status: order.status, invoice_status: order.invoice_status, total_amount: Number(order.total_amount || 0), gst_amount: Number(order.gst_amount || 0), customer_name: order.customer_name || null },
+          after: { deleted: true, reason: String(reason).trim(), table: _ctx.table, waiter: _ctx.waiter },
+        });
+      } catch { /* audit non-fatal */ }
+
       console.log(`[invoice-delete] ORDER ${req.params.orderId} from ${req.params.id} by ${req.user?.id} (${req.user?.role}) — audit ${auditId} (soft-delete)`);
       res.json({ success: true, audit_id: auditId });
     } catch (err) {
@@ -45913,6 +46007,22 @@ ${data.tenant.name}`;
           WHERE id = ?`,
         [actorId, actorRole, reasonTrimmed, session.id]
       );
+
+      // AUDIT — surface the table-bill cancellation in the invoice History trail
+      // (keyed by session id, matching the session invoice-audit read).
+      try {
+        const _ctx = await _invoiceServeContext(db, { tableName: (session as any).table_name || null, tableId: (session as any).table_id || null, sessionId: session.id });
+        await writeObjectAudit(db, req, {
+          objectType: 'INVOICE',
+          objectId: String(session.id),
+          action: 'CANCELLED',
+          summary: `Table bill cancelled — ${reasonTrimmed}`
+                 + `${_ctx.table ? ` · Table ${_ctx.table}` : ''}${_ctx.waiter ? ` · Served by ${_ctx.waiter}` : ''}`
+                 + ` · ${orderIds.length} order(s)`,
+          before: { status: (session as any).status || null, invoice_number: (session as any).invoice_number || null },
+          after: { deleted: true, reason: reasonTrimmed, orders_cancelled: orderIds.length, table: _ctx.table, waiter: _ctx.waiter },
+        });
+      } catch { /* audit non-fatal */ }
 
       console.log(`[invoice-delete] SESSION ${session.session_token || session.id} from ${req.params.id} by ${req.user?.id} (${req.user?.role}) — ${orderIds.length} orders + 1 session — audit ${auditId} (soft-delete)`);
       res.json({ success: true, audit_id: auditId, deleted_orders: orderIds.length });
@@ -49150,11 +49260,12 @@ ${data.tenant.name}`;
       );
       let beforeItems: any = beforeRow?.items;
       try { beforeItems = typeof beforeItems === 'string' ? JSON.parse(beforeItems) : beforeItems; } catch { /* keep raw */ }
-      writeObjectAudit(db, req, {
+      const _ctxE = await _invoiceServeContext(db, { tableName: (beforeRow as any)?.table_number || null, sessionId: (beforeRow as any)?.session_id || null });
+      await writeObjectAudit(db, req, {
         objectType: 'INVOICE', objectId: req.params.orderId, action: 'EDITED',
-        summary: `Invoice ${beforeRow?.invoice_number || `#${String(req.params.orderId).slice(-8).toUpperCase()}`} edited${beforeRow ? ` — total ₹${Number(beforeRow.total_amount || 0).toFixed(2)} → ₹${Number(total).toFixed(2)}` : ''}`,
+        summary: `Invoice ${beforeRow?.invoice_number || `#${String(req.params.orderId).slice(-8).toUpperCase()}`} edited${beforeRow ? ` — total ₹${Number(beforeRow.total_amount || 0).toFixed(2)} → ₹${Number(total).toFixed(2)}` : ''}${_ctxE.table ? ` · Table ${_ctxE.table}` : ''}${_ctxE.waiter ? ` · Served by ${_ctxE.waiter}` : ''}`,
         before: beforeRow ? { items: beforeItems, discount_amount: Number(beforeRow.discount_amount || 0), service_charge_percent: Number(beforeRow.service_charge_percent || 0), gst_percent: Number(beforeRow.gst_percent || 0), apply_gst: Number(beforeRow.apply_gst || 0), total_amount: Number(beforeRow.total_amount || 0) } : undefined,
-        after: { items: cleanItems, discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, total_amount: total },
+        after: { items: cleanItems, discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, total_amount: total, table: _ctxE.table, waiter: _ctxE.waiter },
       }).catch(() => {});
       res.json({ success: true, subtotal: afterDiscount, discount_amount: Number(discount_amount), service_charge_amount: svcAmt, gst_amount: gstAmount, total });
     } catch (err: any) {
@@ -50722,7 +50833,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'waiter-tables-custom-roles-plus-gl-fixes',
+    commit_marker: 'invoice-audit-complete',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
