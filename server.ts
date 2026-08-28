@@ -31429,56 +31429,61 @@ ${data.tenant.name}`;
 
   app.get("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const tenantDb = await getTenantDb(req.params.id);
-      await _ensurePettyCash(tenantDb);
+      const db = await getTenantDb(req.params.id);
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
       const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
-      const moduleFilter = req.query.module ? String(req.query.module).toUpperCase() : null;
-      // "Include shared" overlay: when viewing a specific module (Hotel/Restaurant),
-      // optionally fold in property-wide SHARED entries too. Only meaningful for
-      // HOTEL/RESTAURANT — ignored for ALL (already shows everything) and for SHARED
-      // itself. Strict buckets stay the DEFAULT; this is an opt-in overlay, and each
-      // row keeps its own `module` so the UI still labels + subtotals shared separately.
-      const includeShared = String(req.query.include_shared || '') === '1'
-        && (moduleFilter === 'HOTEL' || moduleFilter === 'RESTAURANT');
-      let modClause = '';
-      const modParam: any[] = [];
-      if (moduleFilter) {
-        if (includeShared) { modClause = ` AND COALESCE(module,'RESTAURANT') IN (?, 'SHARED')`; modParam.push(moduleFilter); }
-        else { modClause = ` AND COALESCE(module,'RESTAURANT') = ?`; modParam.push(moduleFilter); }
-      }
-      const rows: any[] = await tenantDb.query(
-        `SELECT * FROM petty_cash
-          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?${modClause}
-          ORDER BY entry_date DESC, created_at DESC`,
-        [from, to, ...modParam]
-      ).catch(() => []);
-      let totalIn = 0, totalOut = 0, sharedIn = 0, sharedOut = 0;
-      for (const r of rows) {
-        const amt = Number(r.amount || 0);
-        if (r.direction === 'OUT') totalOut += amt; else totalIn += amt;
-        // Shared slice (only when overlaid) so the UI can show it as a separate,
-        // clearly-labeled subtotal that is never conflated with the module's own spend.
-        if (includeShared && String(r.module || 'RESTAURANT').toUpperCase() === 'SHARED') {
-          if (r.direction === 'OUT') sharedOut += amt; else sharedIn += amt;
-        }
-      }
-      const openRow: any = await tenantDb.get(
-        `SELECT COALESCE(SUM(CASE WHEN direction='OUT' THEN -amount ELSE amount END),0)::float AS bal
-           FROM petty_cash WHERE TO_CHAR(entry_date,'YYYY-MM-DD') < ?${modClause}`,
-        [from, ...modParam]
+      // GL-DERIVED cash-in-hand (account 1000) — owner directive 2026-08-28. This is
+      // the TRUE cash position, reconciled with the General Ledger: it reflects EVERY
+      // cash movement (sales, expenses, receipts, manual petty-cash), not just the
+      // legacy petty_cash table which missed GL-only expenses and mislabelled event
+      // receipts as petty-cash IN. Strictly read-only. Opening = Σ(dr−cr) before
+      // `from`; in = window debits, out = window credits; closing = opening + in − out.
+      const CASH = '1000';
+      const openRow: any = await db.get(
+        `SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries
+          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = ? AND entry_date < ?`,
+        [req.params.id, CASH, from]
       ).catch(() => ({ bal: 0 }));
-      const opening = Number(openRow?.bal || 0);
+      const opening = round(Number(openRow?.bal || 0));
+      const glRows: any[] = await db.query(
+        `SELECT id, entry_date, source_type, narration, dr_amount, cr_amount, created_at
+           FROM gl_entries
+          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = ?
+            AND entry_date BETWEEN ? AND ?
+          ORDER BY entry_date DESC, created_at DESC`,
+        [req.params.id, CASH, from, to]
+      ).catch(() => []);
+      let totalIn = 0, totalOut = 0;
+      const rows = (glRows || []).map((r: any) => {
+        const dr = Number(r.dr_amount || 0), cr = Number(r.cr_amount || 0);
+        const isIn = dr >= cr;
+        const amount = round(isIn ? dr : cr);
+        if (isIn) totalIn += amount; else totalOut += amount;
+        return {
+          id: r.id,
+          entry_date: r.entry_date,
+          direction: isIn ? 'IN' : 'OUT',
+          category: r.source_type || 'CASH',
+          amount,
+          notes: r.narration || null,
+          source: 'GL',        // GL-derived → read-only (not a manual petty_cash row)
+          readonly: true,
+        };
+      });
+      totalIn = round(totalIn); totalOut = round(totalOut);
       res.json({
         from, to, rows,
         summary: {
-          opening_balance: Math.round(opening * 100) / 100,
-          total_in: Math.round(totalIn * 100) / 100,
-          total_out: Math.round(totalOut * 100) / 100,
-          closing_balance: Math.round((opening + totalIn - totalOut) * 100) / 100,
-          include_shared: includeShared,
-          shared_in: Math.round(sharedIn * 100) / 100,
-          shared_out: Math.round(sharedOut * 100) / 100,
+          opening_balance: opening,
+          total_in: totalIn,
+          total_out: totalOut,
+          closing_balance: round(opening + totalIn - totalOut),
+          source: 'GENERAL_LEDGER',
+          // Legacy fields kept so the existing UI keeps rendering.
+          include_shared: false,
+          shared_in: 0,
+          shared_out: 0,
         },
       });
     } catch (err: any) {
@@ -50844,7 +50849,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'table-assign-role-then-person',
+    commit_marker: 'petty-cash-gl-derived',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
