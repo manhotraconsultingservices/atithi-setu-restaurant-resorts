@@ -4433,7 +4433,7 @@ async function settleFolioForBooking(
         const glLines: GlLine[] = [];
         if (subtotal + gstAmt > 0) {
           glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: subtotal + gstAmt - discount, cr_amount: 0, narration: `Guest bill ${folio.id}` });
-          glLines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: subtotal, narration: `Revenue folio ${folio.id}` });
+          glLines.push(...(await _folioRevenueGlLines(tenantDb, folio.id, subtotal)));
           if (discount > 0) glLines.push({ account_code: '4900', account_name: 'Other Income', dr_amount: discount, cr_amount: 0, narration: `Discount folio ${folio.id}` });
           if (cgst > 0) glLines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST folio ${folio.id}` });
           if (sgst > 0) glLines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST folio ${folio.id}` });
@@ -4489,6 +4489,34 @@ function _glAccountForEntryType(entryType: string): { code: string; name: string
   if (t === 'ANCILLARY_REVENUE')      return { code: '4030', name: 'Ancillary Revenue' };
   if (t === 'SPA_REVENUE')            return { code: '4040', name: 'Spa Revenue' };
   return { code: '4000', name: 'Room Revenue' };
+}
+
+// Split a settled folio's NET subtotal into Room Revenue (4000) and charged-to-room
+// F&B Revenue (4010) GL credit lines. Restaurant F&B pushed onto a room folio was
+// previously booked entirely to Room Revenue, mis-stating the P&L / GSTR revenue
+// lines; this recognises the F&B portion (folio_entries.entry_type='F_AND_B') as
+// F&B Revenue. A pure-hotel folio (no F&B entries) yields a SINGLE 4000 line
+// identical to the old behaviour, so hotel settlements are unaffected. The total
+// credit always equals `subtotal`, so the journal stays balanced. Forward-only:
+// existing GL rows are never rewritten (the historical backfill still uses 4000).
+async function _folioRevenueGlLines(tenantDb: any, folioId: string, subtotal: number): Promise<GlLine[]> {
+  let fnbSub = 0;
+  try {
+    const r: any = await tenantDb.get(
+      "SELECT COALESCE(SUM(amount),0) AS fnb FROM folio_entries WHERE folio_id = ? AND entry_type = 'F_AND_B'",
+      [folioId]
+    );
+    fnbSub = Math.max(0, Math.round(Number(r?.fnb || 0) * 100) / 100);
+  } catch { fnbSub = 0; }
+  fnbSub = Math.min(Math.max(0, subtotal), fnbSub);
+  const roomSub = Math.round((subtotal - fnbSub) * 100) / 100;
+  const lines: GlLine[] = [];
+  if (roomSub > 0) lines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: roomSub, narration: `Room revenue folio ${folioId}` });
+  if (fnbSub  > 0) lines.push({ account_code: '4010', account_name: 'F&B Revenue', dr_amount: 0, cr_amount: fnbSub,  narration: `F&B revenue (charged to room) folio ${folioId}` });
+  // Safety: never drop revenue to a rounding gap — if both rounded to 0 but the
+  // subtotal is positive, keep a single Room line so the journal still balances.
+  if (lines.length === 0 && subtotal > 0) lines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: Math.round(subtotal * 100) / 100, narration: `Room revenue folio ${folioId}` });
+  return lines;
 }
 
 // A checklist INSTANCE (job) is owned by a responsible team, derived from the
@@ -43443,7 +43471,7 @@ ${data.tenant.name}`;
           const glLines: GlLine[] = [];
           if (subtotal + gstAmt > 0) {
             glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: subtotal + gstAmt - disc, cr_amount: 0, narration: `Guest bill ${folio.id}` });
-            glLines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: subtotal, narration: `Revenue folio ${folio.id}` });
+            glLines.push(...(await _folioRevenueGlLines(tenantDb, folio.id, subtotal)));
             if (disc > 0) glLines.push({ account_code: '4900', account_name: 'Other Income', dr_amount: disc, cr_amount: 0, narration: `Discount folio ${folio.id}` });
             if (cgst > 0) glLines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST folio ${folio.id}` });
             if (sgst > 0) glLines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST folio ${folio.id}` });
@@ -44347,16 +44375,29 @@ ${data.tenant.name}`;
       );
       if (!session) return res.status(404).json({ error: "Active session not found" });
       const subtotal = items.reduce((s: number, it: any) => s + it.price * it.quantity, 0);
+      // GST-FIX (2026-08-28): a Manager Adjustment round must carry GST like any
+      // other round. Previously gst_amount was hardcoded to 0, so at session close
+      // _postOrderGl booked the whole adjustment to F&B Revenue with ZERO output
+      // GST — understating the GST liability even though the guest IS charged GST
+      // on it (the session bill applies GST to the full subtotal, adjustment
+      // included). GST is single-sourced from Settings and gated on GSTIN, so a
+      // no-GSTIN / GST-off tenant still correctly gets 0. No service charge /
+      // discount on an adjustment. The stored total_amount now carries the GST so
+      // _postOrderGl posts CGST/SGST; the on-screen round subtotal (sum of item
+      // prices) is unaffected, so nothing is double-counted.
+      const _adjTot = await computeInvoiceTotals({ tenantId: req.params.id, subtotal, serviceChargePct: 0 }).catch(() => null);
+      const adjGst   = _adjTot ? Number(_adjTot.totalTax || 0) : 0;
+      const adjTotal = _adjTot ? Number(_adjTot.grandTotal || subtotal) : subtotal;
       const roundRow: any = await db.get("SELECT COALESCE(MAX(round_number), 0) AS mx FROM orders WHERE session_id = ?", [session.id]).catch(() => ({ mx: 0 }));
       const roundNum = Number(roundRow?.mx || 0) + 1;
       const id = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
         `INSERT INTO orders (id, table_number, items, total_amount, gst_amount, status, kitchen_status, payment_status, session_id, checkout_mode, round_number, is_adjustment, created_at)
-         VALUES (?, ?, ?, ?, 0, 'DELIVERED', 'served', 'PENDING', ?, 'postpaid', ?, 1, NOW())`,
-        [id, session.table_name || null, JSON.stringify(items), subtotal, session.id, roundNum]
+         VALUES (?, ?, ?, ?, ?, 'DELIVERED', 'served', 'PENDING', ?, 'postpaid', ?, 1, NOW())`,
+        [id, session.table_name || null, JSON.stringify(items), adjTotal, adjGst, session.id, roundNum]
       );
       await db.run("UPDATE table_sessions SET round_count = ? WHERE id = ?", [roundNum, session.id]).catch(() => {});
-      res.status(201).json({ success: true, id, round_number: roundNum, total_amount: subtotal, items_added: items.length });
+      res.status(201).json({ success: true, id, round_number: roundNum, total_amount: adjTotal, gst_amount: adjGst, items_added: items.length });
     } catch (err: any) {
       console.error("Session adjustment error:", err);
       res.status(500).json({ error: "Failed to add adjustment items" });
@@ -48799,15 +48840,23 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const role = req.user!.role;
 
-      if (role === 'WAITER') {
-        // Waiter may only toggle their own assigned table
-        const table = await db.get("SELECT assigned_waiter_id FROM tables WHERE id = ?", [req.params.tableId]);
-        if (!table) return res.status(404).json({ error: "Table not found" });
-        if (table.assigned_waiter_id !== req.user!.id) {
-          return res.status(403).json({ error: "You are not assigned to this table." });
+      // Owner / Manager act on any table. EVERY OTHER floor staff member (the
+      // built-in WAITER *and*, after the move to custom-roles-only, any CUSTOM
+      // floor role) may only toggle the table ASSIGNED to them — unless the tenant
+      // runs shared-floor mode (any waiter serves any table). Generalised from the
+      // old `role === 'WAITER'` check, which 403'd custom-role waiters entirely and
+      // dropped the per-waiter restriction. `restaurantStaff` + requireTabAccess('QR')
+      // already gated who reaches here; this enforces the table-ownership rule.
+      if (!['OWNER', 'MANAGER'].includes(role)) {
+        const _rest: any = await centralDb.get("SELECT waiter_shared_floor FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+        const sharedFloor = Number(_rest?.waiter_shared_floor) === 1;
+        if (!sharedFloor) {
+          const table = await db.get("SELECT assigned_waiter_id FROM tables WHERE id = ?", [req.params.tableId]);
+          if (!table) return res.status(404).json({ error: "Table not found" });
+          if (table.assigned_waiter_id !== req.user!.id) {
+            return res.status(403).json({ error: "You are not assigned to this table." });
+          }
         }
-      } else if (!['OWNER', 'MANAGER'].includes(role)) {
-        return res.status(403).json({ error: "Access denied" });
       }
 
       await db.run("UPDATE tables SET status = ? WHERE id = ?", [status, req.params.tableId]);
@@ -50673,7 +50722,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-order-items-pinned-top',
+    commit_marker: 'waiter-tables-custom-roles-plus-gl-fixes',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

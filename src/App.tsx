@@ -230,6 +230,18 @@ function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boo
 // so treat it as always content-reachable (the nav is the gate, the backend enforces).
 const CONTENT_ALWAYS_ALLOWED = new Set<string>(['HOME', 'MY_CHECKLIST', 'CASH_DRAWER']);
 const CONTENT_PERM_ALIAS: Record<string, string> = { EVENTS_HOUSEKEEPING: 'HOUSEKEEPING' };
+// Staff eligible to be ASSIGNED A TABLE (act as a waiter). After the move to
+// custom-roles-only, the assign lists filtered by the built-in 'WAITER' role name
+// and came up empty — so no table could be assigned to a custom-role waiter. This
+// includes any LOGIN staff except owners/admins and the clearly back-office
+// built-in roles, so a tenant's custom "Waiter"/"Captain" roles (and built-in
+// WAITER/CASHIER/MANAGER) are all assignable to a table.
+const _NON_FLOOR_STAFF_ROLES = new Set(['OWNER', 'SUPER_ADMIN', 'CTO', 'ADMIN', 'CHEF', 'HOUSEKEEPING', 'MAINTENANCE', 'THERAPIST', 'FRONT_DESK', 'CONCIERGE', 'EVENTS_MANAGER']);
+function isAssignableFloorStaff(role: any): boolean {
+  const r = String(role || '').toUpperCase();
+  return !!r && !_NON_FLOOR_STAFF_ROLES.has(r);
+}
+
 function isContentAccessible(activeTab: string, allowedTabs: string[] | null | undefined): boolean {
   if (!allowedTabs) return true;                      // owner/manager — no restriction
   if (CONTENT_ALWAYS_ALLOWED.has(activeTab)) return true;
@@ -12742,7 +12754,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
       if (staffRes.ok) {
         const staff = await staffRes.json();
-        setAllWaiters(staff.filter((s: any) => s.role === 'WAITER').map((s: any) => ({ id: s.id, name: s.name })));
+        setAllWaiters(staff.filter((s: any) => isAssignableFloorStaff(s.role)).map((s: any) => ({ id: s.id, name: s.name })));
         setAllChefs(staff.filter((s: any) => ['CHEF','OWNER','MANAGER'].includes(s.role)).map((s: any) => ({ id: s.id, name: s.name })));
       }
       if (ckRes.ok) {
@@ -29676,7 +29688,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                table at once (or clear all). Handy for handing a single waiter the
                whole floor when shared-floor mode is off. Non-managers never see
                it; the endpoint 403s them anyway. */}
-          {(isOwnerOrAdmin || currentRole === 'MANAGER') && staff.some((s: any) => s.role === 'WAITER' || s.role === 'MANAGER') && (
+          {(isOwnerOrAdmin || currentRole === 'MANAGER') && staff.some((s: any) => isAssignableFloorStaff(s.role)) && (
             <div className="flex items-center gap-2 flex-wrap px-4 py-3 rounded-2xl backdrop-blur-md bg-white/5 border border-white/10">
               <span className="text-[11px] font-bold uppercase tracking-widest text-[#f0ede8]/70">Assign all tables to</span>
               <select
@@ -29686,7 +29698,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 className="rounded-xl px-3 py-1.5 text-xs bg-white/10 border border-white/15 text-[#f0ede8] outline-none hover:border-[#cc5a16]/40 cursor-pointer"
               >
                 <option value="" className="text-black">Choose a waiter…</option>
-                {staff.filter((s: any) => s.role === 'WAITER' || s.role === 'MANAGER').map((s: any) => (
+                {staff.filter((s: any) => isAssignableFloorStaff(s.role)).map((s: any) => (
                   <option key={s.id} value={s.id} className="text-black">{s.name}</option>
                 ))}
               </select>
@@ -30136,7 +30148,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 className="w-full min-w-[120px] rounded-lg px-2 py-1.5 text-xs bg-[#faf7f2] border border-[#cc5a16]/10 text-[#3d3128] outline-none hover:border-[#cc5a16]/30 transition-colors cursor-pointer"
                               >
                                 <option value="">— Assign —</option>
-                                {staff.filter((s: any) => s.role === 'WAITER' || s.role === 'MANAGER').map((s: any) => (
+                                {staff.filter((s: any) => isAssignableFloorStaff(s.role)).map((s: any) => (
                                   <option key={s.id} value={s.id}>{s.name}</option>
                                 ))}
                               </select>
