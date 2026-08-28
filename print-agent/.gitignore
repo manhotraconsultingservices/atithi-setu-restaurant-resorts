@@ -1,0 +1,6 @@
+# Built binary (57 MB — distributed to clients directly, not via git)
+dist/
+# Local runtime config (contains the agent token)
+.env
+# pkg / npm scratch
+node_modules/

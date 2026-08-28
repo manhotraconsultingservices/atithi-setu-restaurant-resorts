@@ -47069,7 +47069,7 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
   const toast = useToast();
   const [printers, setPrinters] = useState<any[]>([]);
   const [agentToken, setAgentToken] = useState<string>('');
-  const blank = { name: '', station: 'ALL', conn_type: 'NETWORK', host: '', port: 9100, copies: 1, is_default: 0 };
+  const blank = { name: '', station: 'ALL', conn_type: 'USB', host: '', port: 9100, copies: 1, is_default: 0 };
   const [form, setForm] = useState<any>(blank);
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47105,8 +47105,8 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
   return (
     <div className="max-w-4xl space-y-5">
       <div>
-        <h2 className="text-2xl font-bold font-serif">Kitchen Printers</h2>
-        <p className="text-sm text-[#6b5d52] mt-1">Auto-print Kitchen Order Tickets (KOTs) to thermal printers. Add each printer, then run the on-prem <b>print agent</b> (download <code>print-agent/</code> from the app repo) on a PC/Raspberry Pi on the same network. See <code>print-agent/README.md</code> for setup.</p>
+        <h2 className="text-2xl font-bold font-serif">Kitchen &amp; Invoice Printers</h2>
+        <p className="text-sm text-[#6b5d52] mt-1">Auto-print <b>Kitchen Order Tickets</b> the moment an order is placed, and the <b>customer bill</b> on demand (the <b>Print Bill</b> button). Add each printer below, then install the <b>Atithi-Setu Print Agent</b> on your billing PC — one agent drives all printers. USB printers print through Windows by name; network printers over IP. See <code>print-agent/README.md</code> (one-click Windows installer included).</p>
       </div>
 
       <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
@@ -47122,12 +47122,42 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
       <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm space-y-3">
         <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{editing ? 'Edit printer' : 'Add a printer'}</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div><label className="text-[11px] text-[#6b5d52]">Name</label><input className={input} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Kitchen printer" /></div>
-          <div><label className="text-[11px] text-[#6b5d52]">Station (menu category, or ALL)</label><input className={input} value={form.station} onChange={e => setForm({ ...form, station: e.target.value.toUpperCase() })} placeholder="ALL / TANDOOR / BAR" /></div>
-          <div><label className="text-[11px] text-[#6b5d52]">Printer IP</label><input className={input} value={form.host} onChange={e => setForm({ ...form, host: e.target.value })} placeholder="192.168.1.50" /></div>
-          <div><label className="text-[11px] text-[#6b5d52]">Port</label><input type="number" className={input} value={form.port} onChange={e => setForm({ ...form, port: e.target.value })} placeholder="9100" /></div>
+          <div><label className="text-[11px] text-[#6b5d52]">Name</label><input className={input} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Kitchen printer / Invoice printer" /></div>
+          <div>
+            <label className="text-[11px] text-[#6b5d52]">Station</label>
+            <select className={input} value={['ALL','KITCHEN','INVOICE','BAR','TANDOOR'].includes(String(form.station).toUpperCase()) ? String(form.station).toUpperCase() : '__CUSTOM__'} onChange={e => { const v = e.target.value; setForm({ ...form, station: v === '__CUSTOM__' ? '' : v }); }}>
+              <option value="ALL">ALL — print the whole order (single-printer shops)</option>
+              <option value="KITCHEN">KITCHEN — food KOT for the chef</option>
+              <option value="INVOICE">INVOICE — customer bill (Print Bill button)</option>
+              <option value="BAR">BAR</option>
+              <option value="TANDOOR">TANDOOR</option>
+              <option value="__CUSTOM__">Other menu category…</option>
+            </select>
+            {!['ALL','KITCHEN','INVOICE','BAR','TANDOOR'].includes(String(form.station).toUpperCase()) && (
+              <input className={input + ' mt-2'} value={form.station} onChange={e => setForm({ ...form, station: e.target.value.toUpperCase() })} placeholder="Menu category e.g. CHINESE" />
+            )}
+          </div>
+          <div>
+            <label className="text-[11px] text-[#6b5d52]">Connection</label>
+            <select className={input} value={String(form.conn_type).toUpperCase()} onChange={e => setForm({ ...form, conn_type: e.target.value })}>
+              <option value="USB">USB — plugged into the billing PC</option>
+              <option value="NETWORK">Network — LAN / Wi-Fi (IP address)</option>
+            </select>
+          </div>
+          {String(form.conn_type).toUpperCase() === 'USB' ? (
+            <div>
+              <label className="text-[11px] text-[#6b5d52]">Windows printer name</label>
+              <input className={input} value={form.host} onChange={e => setForm({ ...form, host: e.target.value })} placeholder="POS-80" />
+              <p className="text-[10px] text-[#9c8e85] mt-1">Exact name from Windows → <b>Printers &amp; scanners</b> (copy it verbatim).</p>
+            </div>
+          ) : (
+            <>
+              <div><label className="text-[11px] text-[#6b5d52]">Printer IP</label><input className={input} value={form.host} onChange={e => setForm({ ...form, host: e.target.value })} placeholder="192.168.1.50" /></div>
+              <div><label className="text-[11px] text-[#6b5d52]">Port</label><input type="number" className={input} value={form.port} onChange={e => setForm({ ...form, port: e.target.value })} placeholder="9100" /></div>
+            </>
+          )}
           <div><label className="text-[11px] text-[#6b5d52]">Copies</label><input type="number" min={1} className={input} value={form.copies} onChange={e => setForm({ ...form, copies: e.target.value })} /></div>
-          <label className="flex items-center gap-2 mt-6 text-sm"><input type="checkbox" checked={!!form.is_default} onChange={e => setForm({ ...form, is_default: e.target.checked ? 1 : 0 })} /> Default printer</label>
+          <label className="flex items-center gap-2 mt-6 text-sm"><input type="checkbox" checked={!!form.is_default} onChange={e => setForm({ ...form, is_default: e.target.checked ? 1 : 0 })} /> Default printer <span className="text-[10px] text-[#9c8e85]">(gets the bill if no INVOICE printer set)</span></label>
         </div>
         <div className="flex gap-2">
           <button onClick={save} disabled={busy} className="px-4 py-2 rounded-xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">{editing ? 'Update' : 'Add printer'}</button>
@@ -47145,7 +47175,7 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
               <tr key={p.id} className="border-b border-[#f1ece3]">
                 <td className="py-2 font-medium">{p.name}{p.is_default ? <span className="ml-1 text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">DEFAULT</span> : ''}{!p.is_active ? <span className="ml-1 text-[9px] bg-[#faf7f2] text-[#9c8e85] px-1.5 py-0.5 rounded-full">OFF</span> : ''}</td>
                 <td className="text-[#6b5d52]">{p.station}</td>
-                <td className="font-mono text-xs">{p.host || '—'}:{p.port}</td>
+                <td className="font-mono text-xs">{String(p.conn_type).toUpperCase() === 'USB' ? `USB · ${p.host || '—'}` : `${p.host || '—'}:${p.port}`}</td>
                 <td>{p.copies}</td>
                 <td className="text-right whitespace-nowrap"><button onClick={() => edit(p)} className="text-xs font-bold text-[#cc5a16] hover:underline mr-3">Edit</button><button onClick={() => del(p.id)} className="text-xs font-bold text-red-500 hover:underline">Delete</button></td>
               </tr>))}</tbody>
@@ -57485,6 +57515,42 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     }
   };
 
+  // Print Bill → queue the customer invoice to the on-prem INVOICE thermal
+  // printer via the print agent (no browser dialog). Sends exactly the bill this
+  // modal is showing; the server stamps restaurant identity + routes it.
+  const queueInvoicePrint = async () => {
+    if (!session || activeOrders.length === 0) return;
+    try {
+      const bill = {
+        invoice_no: session.invoice_number || `TBL-${(session.session_token || '').slice(-6).toUpperCase()}`,
+        date: new Date().toISOString(),
+        table: table.name,
+        customer: session.customer_name || null,
+        items: activeOrders.flatMap((o: any) => (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
+          name: it.name || 'Item', qty: Number(it.quantity || 1), price: Number(it.price || 0),
+          amount: Number(it.price || 0) * Number(it.quantity || 1),
+        }))),
+        subtotal: rawSubtotal,
+        discount: discount > 0 ? discount : 0,
+        service_charge: svcAmt > 0 ? svcAmt : 0,
+        service_charge_pct: svcPct > 0 ? svcPct : null,
+        taxes: (usedServerPreview
+          ? previewTaxLines.map((l: any) => ({ label: l.label, amount: Number(l.amount || 0) }))
+          : (applyGst && gstAmt > 0 ? [{ label: `GST ${gstPct}%`, amount: gstAmt }] : [])),
+        total: grandTotal,
+        payment_method: payMethod === 'CHARGE_TO_ROOM' ? 'Charge to Room' : payMethod,
+      };
+      const r = await fetch(`/api/restaurant/${restaurantId}/print-jobs/invoice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ bill }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.success) toast.success(`Bill sent to ${(d.printers || []).join(', ') || 'printer'}`);
+      else toast.error(d.error || 'Could not queue the bill. Add an INVOICE printer in Kitchen Printers.');
+    } catch { toast.error('Could not reach the print service.'); }
+  };
+
   const handleCloseSession = async () => {
     if (!session || closing) return;
     setClosing(true);
@@ -58065,11 +58131,19 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
             {/* Print + Close buttons */}
             <div className="flex gap-2">
               <button
-                onClick={handlePrint}
+                onClick={queueInvoicePrint}
+                title="Print the bill on your thermal invoice printer (via the print agent)"
                 className="flex items-center justify-center gap-1.5 px-4 py-3 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold uppercase tracking-widest hover:bg-[#cc5a16]/5 transition-all"
               >
                 <Printer size={14} />
-                Print
+                Print Bill
+              </button>
+              <button
+                onClick={handlePrint}
+                title="Open a printable receipt in the browser (no thermal printer needed)"
+                className="flex items-center justify-center gap-1.5 px-3 py-3 rounded-xl border border-[#cc5a16]/15 text-[#9c8e85] text-xs font-bold uppercase tracking-widest hover:bg-[#cc5a16]/5 transition-all"
+              >
+                Preview
               </button>
 
               {payMethod === 'CHARGE_TO_ROOM' ? (
