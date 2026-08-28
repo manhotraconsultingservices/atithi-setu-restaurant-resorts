@@ -48789,8 +48789,10 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/tables/live", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
+      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_role TEXT").catch(() => {});
 
-      // All tables + assigned waiter name
+      // All tables + assigned role + the specific waiter name (null when the whole
+      // role serves the table). `t.*` carries assigned_role + assigned_waiter_id.
       const tables = await db.query(
         `SELECT t.*, s.name AS assigned_waiter_name
          FROM tables t
@@ -48950,20 +48952,22 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const role = req.user!.role;
 
-      // Owner / Manager act on any table. EVERY OTHER floor staff member (the
-      // built-in WAITER *and*, after the move to custom-roles-only, any CUSTOM
-      // floor role) may only toggle the table ASSIGNED to them — unless the tenant
-      // runs shared-floor mode (any waiter serves any table). Generalised from the
-      // old `role === 'WAITER'` check, which 403'd custom-role waiters entirely and
-      // dropped the per-waiter restriction. `restaurantStaff` + requireTabAccess('QR')
-      // already gated who reaches here; this enforces the table-ownership rule.
+      // Owner / Manager act on any table. Every other floor staff member acts only
+      // on a table assigned to THEM — where "assigned" is two-step: the table is
+      // served by a ROLE (any user in that role qualifies) optionally narrowed to a
+      // specific PERSON. Shared-floor mode lets any waiter serve any table. Legacy
+      // person-only assignments (no role) still work. Unassigned tables stay
+      // owner/manager-only. requireTabAccess('QR') already gated who reaches here.
       if (!['OWNER', 'MANAGER'].includes(role)) {
         const _rest: any = await centralDb.get("SELECT waiter_shared_floor FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
         const sharedFloor = Number(_rest?.waiter_shared_floor) === 1;
         if (!sharedFloor) {
-          const table = await db.get("SELECT assigned_waiter_id FROM tables WHERE id = ?", [req.params.tableId]);
+          const table: any = await db.get("SELECT assigned_role, assigned_waiter_id FROM tables WHERE id = ?", [req.params.tableId]);
           if (!table) return res.status(404).json({ error: "Table not found" });
-          if (table.assigned_waiter_id !== req.user!.id) {
+          const anyAssignment = !!(table.assigned_role || table.assigned_waiter_id);
+          const roleOk   = table.assigned_role ? String(table.assigned_role).toUpperCase() === String(req.user!.role || '').toUpperCase() : true;
+          const personOk = table.assigned_waiter_id ? String(table.assigned_waiter_id) === String(req.user!.id) : true;
+          if (!anyAssignment || !roleOk || !personOk) {
             return res.status(403).json({ error: "You are not assigned to this table." });
           }
         }
@@ -49007,11 +49011,15 @@ ${data.tenant.name}`;
       if (!['OWNER', 'MANAGER'].includes(req.user!.role)) {
         return res.status(403).json({ error: "Access denied" });
       }
-      const { waiter_id } = req.body; // null to unassign
+      // Two-step assignment: a table is served by a ROLE (all users in that role
+      // get access) optionally narrowed to a SPECIFIC PERSON. waiter_id null/'' = ALL
+      // in the role. role null/'' + waiter_id set = legacy person-only. Both null = unassign.
+      const { role, waiter_id } = req.body;
       const db = await getTenantDb(req.params.id);
+      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_role TEXT").catch(() => {});
       await db.run(
-        "UPDATE tables SET assigned_waiter_id = ? WHERE id = ?",
-        [waiter_id || null, req.params.tableId]
+        "UPDATE tables SET assigned_role = ?, assigned_waiter_id = ? WHERE id = ?",
+        [role || null, waiter_id || null, req.params.tableId]
       );
       res.json({ success: true });
     } catch (err) {
@@ -49028,11 +49036,14 @@ ${data.tenant.name}`;
       if (!['OWNER', 'MANAGER'].includes(req.user!.role)) {
         return res.status(403).json({ error: "Access denied" });
       }
-      const { waiter_id } = req.body; // null / '' to unassign every table
+      // Assign a ROLE (+ optional specific person, null = ALL in the role) to EVERY
+      // table at once. role + waiter_id both null/'' clears all assignments.
+      const { role, waiter_id } = req.body;
       const db = await getTenantDb(req.params.id);
-      await db.run("UPDATE tables SET assigned_waiter_id = ?", [waiter_id || null]);
+      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_role TEXT").catch(() => {});
+      await db.run("UPDATE tables SET assigned_role = ?, assigned_waiter_id = ?", [role || null, waiter_id || null]);
       const cnt: any = await db.get("SELECT COUNT(*) AS c FROM tables").catch(() => ({ c: 0 }));
-      res.json({ success: true, updated: Number(cnt?.c || 0), waiter_id: waiter_id || null });
+      res.json({ success: true, updated: Number(cnt?.c || 0), role: role || null, waiter_id: waiter_id || null });
     } catch (err) {
       console.error("Bulk assign waiter error:", err);
       res.status(500).json({ error: "Failed to assign waiter to all tables" });
@@ -50833,7 +50844,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-audit-complete',
+    commit_marker: 'table-assign-role-then-person',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

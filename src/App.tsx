@@ -13294,12 +13294,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
 
-  const assignWaiter = async (tableId: string, waiterId: string | null) => {
+  // Two-step assignment value = `<roleId>|<personId>` (personId empty = ALL in the
+  // role). Parse and send { role, waiter_id } — waiter_id null means the whole role.
+  const _parseAssign = (value: string | null) => {
+    const [role, pid] = String(value || '').split('|');
+    return { role: role || null, waiter_id: pid || null };
+  };
+  const assignWaiter = async (tableId: string, value: string | null) => {
     try {
       await fetch(`/api/restaurant/${restaurantId}/tables/${tableId}/assign-waiter`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ waiter_id: waiterId })
+        body: JSON.stringify(_parseAssign(value))
       });
       fetchLiveTables();
     } catch (err) {
@@ -13307,18 +13313,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
 
-  // Bulk-assign one waiter (or clear all) across EVERY table in a single call.
-  const assignAllWaiters = async (waiterId: string | null) => {
+  // Bulk-assign a role (+ optional person, or ALL) across EVERY table in one call.
+  const assignAllWaiters = async (value: string | null) => {
     try {
+      const body = _parseAssign(value);
       const r = await fetch(`/api/restaurant/${restaurantId}/tables/assign-waiter-bulk`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ waiter_id: waiterId })
+        body: JSON.stringify(body)
       });
       const d = await r.json().catch(() => ({}));
       if (r.ok) {
-        const who = waiterId ? (staff.find((s: any) => s.id === waiterId)?.name || 'waiter') : null;
-        toast.success(who ? `Assigned ${who} to all ${d.updated ?? ''} tables`.trim() : `Cleared waiter from all tables`);
+        const roleLabel = body.role ? ((customRoles as any[]).find(c => String(c.id).toUpperCase() === String(body.role).toUpperCase())?.name || body.role) : null;
+        const who = body.waiter_id ? (staff.find((s: any) => s.id === body.waiter_id)?.name || 'staff')
+                  : roleLabel ? `all ${roleLabel}` : null;
+        toast.success(who ? `Assigned ${who} to all ${d.updated ?? ''} tables`.trim() : `Cleared assignment from all tables`);
       } else {
         toast.error(d.error || 'Failed to assign all tables');
       }
@@ -13327,6 +13336,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       console.error("Failed to bulk-assign waiter", err);
       toast.error('Failed to assign all tables');
     }
+  };
+
+  // Two-step table-assignment options: floor staff grouped by ROLE. Each role shows
+  // "All · <role>" (everyone in the role serves the table) plus each person in it.
+  // <option> value = `<roleId>|<personId>` (personId empty = ALL in the role).
+  const renderRoleAssignOptions = () => {
+    const groups: Record<string, { label: string; persons: { id: string; name: string }[] }> = {};
+    for (const s of (staff as any[])) {
+      if (!isAssignableFloorStaff(s.role)) continue;
+      const rid = String(s.role || '').toUpperCase();
+      if (!groups[rid]) {
+        const cr = (customRoles as any[]).find(c => String(c.id).toUpperCase() === rid);
+        let label: string;
+        if (cr) label = cr.name;
+        else if (rid.startsWith('CUSTOM_')) {
+          const parts = rid.split('_').slice(1);   // drop the CUSTOM_ prefix
+          if (parts.length > 1) parts.pop();        // drop the trailing unique hash
+          label = parts.join(' ').replace(/\b\w/g, (m: string) => m.toUpperCase()) || rid;
+        } else label = rid.replace(/_/g, ' ').replace(/\b\w/g, (m: string) => m.toUpperCase());
+        groups[rid] = { label, persons: [] };
+      }
+      groups[rid].persons.push({ id: s.id, name: s.name });
+    }
+    return Object.entries(groups).map(([rid, g]) => (
+      <optgroup key={rid} label={g.label}>
+        <option value={`${rid}|`}>All · {g.label}</option>
+        {g.persons.map(p => <option key={p.id} value={`${rid}|${p.id}`}>{p.name}</option>)}
+      </optgroup>
+    ));
   };
 
   const patchWaiterCall = async (callId: string, body: Record<string, any>) => {
@@ -29697,10 +29735,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 onClick={e => e.stopPropagation()}
                 className="rounded-xl px-3 py-1.5 text-xs bg-white/10 border border-white/15 text-[#f0ede8] outline-none hover:border-[#cc5a16]/40 cursor-pointer"
               >
-                <option value="" className="text-black">Choose a waiter…</option>
-                {staff.filter((s: any) => isAssignableFloorStaff(s.role)).map((s: any) => (
-                  <option key={s.id} value={s.id} className="text-black">{s.name}</option>
-                ))}
+                <option value="" className="text-black">Choose role / person…</option>
+                {renderRoleAssignOptions()}
               </select>
               <button
                 onClick={(e) => { e.stopPropagation(); assignAllWaiters(null); }}
@@ -30142,15 +30178,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             }
                             return (
                               <select
-                                value={t.assigned_waiter_id ?? ''}
+                                value={`${(t as any).assigned_role || ''}|${t.assigned_waiter_id || ''}`}
                                 onChange={e => assignWaiter(t.id, e.target.value || null)}
                                 onClick={e => e.stopPropagation()}
                                 className="w-full min-w-[120px] rounded-lg px-2 py-1.5 text-xs bg-[#faf7f2] border border-[#cc5a16]/10 text-[#3d3128] outline-none hover:border-[#cc5a16]/30 transition-colors cursor-pointer"
                               >
                                 <option value="">— Assign —</option>
-                                {staff.filter((s: any) => isAssignableFloorStaff(s.role)).map((s: any) => (
-                                  <option key={s.id} value={s.id}>{s.name}</option>
-                                ))}
+                                {renderRoleAssignOptions()}
                               </select>
                             );
 
@@ -58228,12 +58262,15 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
       .catch(() => {});
   }, [restaurantId]);
 
-  // Decode JWT to get current user's staff id
+  // Decode JWT to get current user's staff id + role
   const myId: string | null = (() => {
     try {
       const payload = JSON.parse(atob(token.split('.')[1]));
       return payload.id ?? null;
     } catch { return null; }
+  })();
+  const myRole: string | null = (() => {
+    try { return JSON.parse(atob(token.split('.')[1])).role ?? null; } catch { return null; }
   })();
 
   useEffect(() => {
@@ -58322,7 +58359,16 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   // Shared-floor ON → every waiter sees ALL tables (any waiter can serve any
   // table). OFF → only tables assigned to me (legacy behaviour). Natural-sorted
   // so N1 < N2 < N11 (not N1 < N11 < N2).
-  const myTables = (sharedFloor ? liveTables : (myId ? liveTables.filter(t => t.assigned_waiter_id === myId) : []))
+  const myTables = (sharedFloor ? liveTables : liveTables.filter((t: any) => {
+    // Two-step assignment: a table is served by a ROLE (any user in that role
+    // qualifies) optionally narrowed to a specific PERSON. Legacy person-only
+    // tables (no assigned_role) still match on the staff id.
+    if (t.assigned_role) {
+      if (String(t.assigned_role).toUpperCase() !== String(myRole || '').toUpperCase()) return false;
+      return !t.assigned_waiter_id || t.assigned_waiter_id === myId;
+    }
+    return myId ? t.assigned_waiter_id === myId : false;
+  }))
     .slice().sort(byTableName);
   // Search + pagination over the sorted board.
   const tableQuery = tableSearch.trim().toLowerCase();
