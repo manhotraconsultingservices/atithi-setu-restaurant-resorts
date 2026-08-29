@@ -7970,7 +7970,7 @@ function SettlementUploadForm({
 function AccountingView({ restaurantId, token, initialTab, cashierMode }: { restaurantId: string; token: string; initialTab?: string; cashierMode?: boolean }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
     | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
-    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
+    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'BANK_ACCOUNTS' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
   // cashierMode (used by the top-level "Cash" nav item) opens straight on the
   // Cash Drawers panel and hides the rest of the ledger nav, so a cashier reaches
   // their till + shift handover in one click without the owner-only accounting tabs.
@@ -7982,6 +7982,13 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [cashBook, setCashBook] = useState<any>(null);
   const [tdsRows, setTdsRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  // Bank Accounts registry (Phase 1 — multi-bank)
+  const ACCT_INPUT = "w-full text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white";
+  const bankBlank = { label: '', bank_name: '', account_number: '', account_type: 'CURRENT', opening_balance: '', opening_date: '', is_default: 0 };
+  const [bankAccounts, setBankAccounts] = useState<any[]>([]);
+  const [bankForm, setBankForm] = useState<any>(bankBlank);
+  const [bankEditing, setBankEditing] = useState<string | null>(null);
+  const [bankBusy, setBankBusy] = useState(false);
 
   const nowD = new Date();
   const fyStart = nowD.getMonth() >= 3 ? `${nowD.getFullYear()}-04-01` : `${nowD.getFullYear() - 1}-04-01`;
@@ -8060,6 +8067,34 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   useEffect(() => { if (acctTab === 'GST') loadGst(); }, [acctTab, loadGst]);
   useEffect(() => { if (acctTab === 'CASHBOOK') loadCashBook(); }, [acctTab, loadCashBook]);
   useEffect(() => { if (acctTab === 'TDS') loadTds(); }, [acctTab, loadTds]);
+
+  // Bank Accounts registry
+  const loadBanks = useCallback(() => {
+    setLoading(true);
+    acctApi('/accounting/bank-accounts')
+      .then(d => { if (Array.isArray(d)) setBankAccounts(d); })
+      .finally(() => setLoading(false));
+  }, [acctApi]);
+  useEffect(() => { if (acctTab === 'BANK_ACCOUNTS') loadBanks(); }, [acctTab, loadBanks]);
+  const saveBank = async () => {
+    if (!String(bankForm.label || '').trim()) return;
+    setBankBusy(true);
+    try {
+      const body = JSON.stringify({ ...bankForm, opening_balance: Number(bankForm.opening_balance) || 0, is_default: bankForm.is_default ? 1 : 0 });
+      const r = bankEditing
+        ? await acctApi(`/accounting/bank-accounts/${bankEditing}`, { method: 'PATCH', body })
+        : await acctApi('/accounting/bank-accounts', { method: 'POST', body });
+      if (r && r.error) { alert(r.error); }
+      else { setBankForm(bankBlank); setBankEditing(null); loadBanks(); }
+    } finally { setBankBusy(false); }
+  };
+  const editBank = (a: any) => { setBankEditing(a.id); setBankForm({ label: a.label || '', bank_name: a.bank_name || '', account_number: a.account_number || '', account_type: a.account_type || 'CURRENT', opening_balance: '', opening_date: '', is_default: a.is_default || 0 }); };
+  const delBank = async (a: any) => {
+    if (!window.confirm(`Remove "${a.label}"? (Only allowed when its balance is zero.)`)) return;
+    const r = await acctApi(`/accounting/bank-accounts/${a.id}`, { method: 'DELETE' });
+    if (r && r.error) alert(r.error);
+    loadBanks();
+  };
 
   // ── Phase 2: GL-derived statements, GST returns, aging, controls ──────────
   const [pnl, setPnl] = useState<any>(null);
@@ -8387,6 +8422,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     PNL: 'Profit & Loss', BALANCESHEET: 'Balance Sheet', CASHFLOW: 'Cash Flow',
     GST: 'GST Outstanding', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
     CASHBOOK: 'Cash Book', AGING_AR: 'AR Aging', AGING_AP: 'AP Aging', BANKREC: 'Bank Reconciliation',
+    BANK_ACCOUNTS: 'Bank Accounts',
     TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
     EXPENSES: 'Expenses & Payments', LOANS: 'Loans / EMI',
   };
@@ -8394,7 +8430,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     { key: 'LEDGER', label: 'Ledger', tabs: ['TRIAL', 'GL', 'DAYBOOK', 'JOURNAL'] },
     { key: 'STATEMENTS', label: 'Statements', tabs: ['PNL', 'BALANCESHEET', 'CASHFLOW'] },
     { key: 'GST', label: 'GST', tabs: ['GST', 'GSTR1', 'GSTR3B'] },
-    { key: 'WORKING', label: 'Working Capital', tabs: ['CASHBOOK', 'AGING_AR', 'AGING_AP', 'BANKREC'] },
+    { key: 'WORKING', label: 'Working Capital', tabs: ['CASHBOOK', 'BANK_ACCOUNTS', 'AGING_AR', 'AGING_AP', 'BANKREC'] },
     { key: 'SPEND', label: 'Expenses & Loans', tabs: ['EXPENSES', 'LOANS'] },
     { key: 'CONTROLS', label: 'Controls', tabs: ['CASHDRAWER', 'CASHCOUNT', 'PERIODS', 'TDS'] },
   ];
@@ -8429,6 +8465,59 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
       )}
 
       {loading && <p className="text-sm text-[#6b5d52] animate-pulse">Loading...</p>}
+
+      {acctTab === 'BANK_ACCOUNTS' && (
+        <div className="space-y-5">
+          <p className="text-sm text-[#6b5d52]">Every bank account the business uses. Each is wired to its own ledger account, so its balance flows to the Balance Sheet and every owner payout / contribution posts against the right account.</p>
+          <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+            <table className="w-full text-sm border-collapse">
+              <thead><tr className="bg-[#f5f0e8] text-left">
+                <th className="px-3 py-2 font-semibold text-[#1a1208]">Account</th>
+                <th className="px-3 py-2 font-semibold text-[#1a1208]">Bank</th>
+                <th className="px-3 py-2 font-semibold text-[#1a1208]">A/C No.</th>
+                <th className="px-3 py-2 font-semibold text-[#1a1208]">Type</th>
+                <th className="px-3 py-2 font-semibold text-[#1a1208]">GL</th>
+                <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Balance</th>
+                <th className="px-3 py-2"></th>
+              </tr></thead>
+              <tbody>
+                {bankAccounts.map(a => (
+                  <tr key={a.id} className="border-t border-[#e8ded0]">
+                    <td className="px-3 py-2 font-medium text-[#1a1208]">{a.label}{a.is_default ? <span className="ml-1 text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full align-middle">DEFAULT</span> : ''}</td>
+                    <td className="px-3 py-2 text-[#6b5d52]">{a.bank_name || '—'}</td>
+                    <td className="px-3 py-2 font-mono text-xs text-[#6b5d52]">{a.account_number ? '····' + String(a.account_number).slice(-4) : '—'}</td>
+                    <td className="px-3 py-2 text-[#6b5d52]">{a.account_type || '—'}</td>
+                    <td className="px-3 py-2 font-mono text-xs text-[#6b5d52]">{a.gl_account_code}</td>
+                    <td className="px-3 py-2 text-right font-mono text-[#1a1208]">₹{Number(a.balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">
+                      <button onClick={() => editBank(a)} className="text-xs font-bold text-[#a0522d] hover:underline mr-3">Edit</button>
+                      {String(a.gl_account_code) !== '1010' && <button onClick={() => delBank(a)} className="text-xs font-bold text-red-500 hover:underline">Remove</button>}
+                    </td>
+                  </tr>
+                ))}
+                {bankAccounts.length === 0 && !loading && <tr><td colSpan={7} className="px-3 py-4 text-center text-[#9c8e85] italic">No bank accounts yet — add one below.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <div className="rounded-lg border border-[#e8ded0] p-4 bg-white space-y-3 max-w-2xl">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{bankEditing ? 'Edit bank account' : 'Add a bank account'}</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div><label className="text-xs text-[#6b5d52]">Account label *</label><input className={ACCT_INPUT} value={bankForm.label} onChange={e => setBankForm({ ...bankForm, label: e.target.value })} placeholder="e.g. HDFC Current" /></div>
+              <div><label className="text-xs text-[#6b5d52]">Bank name</label><input className={ACCT_INPUT} value={bankForm.bank_name} onChange={e => setBankForm({ ...bankForm, bank_name: e.target.value })} placeholder="HDFC Bank" /></div>
+              <div><label className="text-xs text-[#6b5d52]">Account number</label><input className={ACCT_INPUT} value={bankForm.account_number} onChange={e => setBankForm({ ...bankForm, account_number: e.target.value })} placeholder="XXXXXXXX1234" /></div>
+              <div><label className="text-xs text-[#6b5d52]">Type</label><select className={ACCT_INPUT} value={bankForm.account_type} onChange={e => setBankForm({ ...bankForm, account_type: e.target.value })}><option value="CURRENT">Current</option><option value="SAVINGS">Savings</option><option value="OD">Overdraft / CC</option></select></div>
+              {!bankEditing && <div><label className="text-xs text-[#6b5d52]">Opening balance</label><input type="number" className={ACCT_INPUT} value={bankForm.opening_balance} onChange={e => setBankForm({ ...bankForm, opening_balance: e.target.value })} placeholder="0.00" /></div>}
+              {!bankEditing && <div><label className="text-xs text-[#6b5d52]">Opening date</label><input type="date" className={ACCT_INPUT} value={bankForm.opening_date} onChange={e => setBankForm({ ...bankForm, opening_date: e.target.value })} /></div>}
+              <label className="flex items-center gap-2 text-sm mt-5"><input type="checkbox" checked={!!bankForm.is_default} onChange={e => setBankForm({ ...bankForm, is_default: e.target.checked ? 1 : 0 })} /> Default account</label>
+            </div>
+            {!bankEditing && <p className="text-[11px] text-[#9c8e85]">An opening balance posts an on-ledger entry (Dr this bank · Cr Opening Balance Equity), so nothing is off the books.</p>}
+            <div className="flex gap-2">
+              <button onClick={saveBank} disabled={bankBusy} className={AC_BTN}>{bankEditing ? 'Update' : 'Add account'}</button>
+              {bankEditing && <button onClick={() => { setBankEditing(null); setBankForm(bankBlank); }} className="px-3 py-1.5 text-sm rounded border border-[#d4c4a8] text-[#6b5d52]">Cancel</button>}
+            </div>
+          </div>
+        </div>
+      )}
 
       {acctTab === 'TRIAL' && (
         <div className="space-y-4">

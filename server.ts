@@ -51004,7 +51004,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'network-printer-autodetect',
+    commit_marker: 'bank-accounts-registry',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
@@ -51269,6 +51269,121 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const rows = await db.query("SELECT * FROM chart_of_accounts WHERE is_active = 1 ORDER BY display_order, code", []);
       res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── Bank Accounts registry (Phase 1 — multi-bank) ─────────────────────────
+  // Each bank account is wired to its OWN GL asset account so its balance shows
+  // on the Balance Sheet / Trial Balance and every payout/contribution can pick
+  // the account it moved through. The operating "Bank — Main Account" (1010) is
+  // bootstrapped so it appears with its real balance; new accounts get the next
+  // free 103x code, added to chart_of_accounts (type ASSET → auto-classified).
+  const _ensureBankAccounts = async (db: any) => {
+    await db.exec(`CREATE TABLE IF NOT EXISTS bank_accounts (
+      id TEXT PRIMARY KEY, restaurant_id TEXT, label TEXT, bank_name TEXT,
+      account_number TEXT, account_type TEXT, gl_account_code TEXT,
+      opening_balance REAL DEFAULT 0, opening_date TEXT,
+      is_default INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  };
+  const _bankBalance = async (db: any, code: string): Promise<number> => {
+    const r: any = await db.get(
+      "SELECT COALESCE(SUM(dr_amount - cr_amount), 0) AS b FROM gl_entries WHERE account_code = ? AND COALESCE(is_reversed,0) = 0",
+      [code]
+    ).catch(() => ({ b: 0 }));
+    return _acctRound(Number(r?.b || 0));
+  };
+  app.get("/api/restaurant/:id/accounting/bank-accounts", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureBankAccounts(db);
+      // Bootstrap the operating bank account (1010) on first use.
+      const cnt: any = await db.get("SELECT COUNT(*) AS c FROM bank_accounts WHERE is_active = 1").catch(() => ({ c: 0 }));
+      if (Number(cnt?.c || 0) === 0) {
+        await db.run(
+          "INSERT INTO bank_accounts (id, restaurant_id, label, gl_account_code, is_default, is_active) VALUES (?, ?, 'Bank — Main Account', '1010', 1, 1)",
+          [`BANK-${Date.now()}-MAIN`, req.params.id]
+        ).catch(() => {});
+      }
+      const rows: any[] = await db.query("SELECT * FROM bank_accounts WHERE is_active = 1 ORDER BY is_default DESC, label", []);
+      for (const r of rows) r.balance = await _bankBalance(db, r.gl_account_code);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  app.post("/api/restaurant/:id/accounting/bank-accounts", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureBankAccounts(db);
+      const b: any = req.body || {};
+      if (!String(b.label || '').trim()) return res.status(400).json({ error: 'Account label is required.' });
+      // Allocate the next free asset code (103x block — 1010/1020 are reserved).
+      const nx: any = await db.get("SELECT COALESCE(MAX(gl_account_code::int), 1029) + 1 AS next FROM bank_accounts WHERE gl_account_code ~ '^10[3-9][0-9]$'").catch(() => ({ next: 1030 }));
+      let code = String(Math.max(1030, Number(nx?.next || 1030)));
+      while (await db.get("SELECT code FROM chart_of_accounts WHERE code = ?", [code]).catch(() => null)) code = String(Number(code) + 1);
+      const id = `BANK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const label = String(b.label).slice(0, 80);
+      await db.run(
+        "INSERT INTO chart_of_accounts (code, name, type, sub_type, is_system, is_active, display_order) VALUES (?, ?, 'ASSET', 'BANK', 0, 1, 1040) ON CONFLICT (code) DO NOTHING",
+        [code, label]
+      ).catch(() => {});
+      if (Number(b.is_default) === 1) await db.run("UPDATE bank_accounts SET is_default = 0").catch(() => {});
+      await db.run(
+        `INSERT INTO bank_accounts (id, restaurant_id, label, bank_name, account_number, account_type, gl_account_code, opening_balance, opening_date, is_default, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, req.params.id, label, b.bank_name || null, b.account_number ? String(b.account_number) : null, String(b.account_type || 'CURRENT').toUpperCase(), code, _acctRound(b.opening_balance), b.opening_date || null, Number(b.is_default) === 1 ? 1 : 0]
+      );
+      // On-ledger opening balance: Dr <bank>  Cr Opening Balance Equity (3200).
+      const ob = _acctRound(b.opening_balance);
+      if (ob > 0.009) {
+        const seq = await getNextTenantSequence(db, 'bankopening');
+        const ref = `OB-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+        const date = String(b.opening_date || new Date().toISOString().slice(0, 10));
+        await _postGlEntries(db, req.params.id, ref, date, 'BANK_OPENING', id, [
+          { account_code: code,   account_name: label,                    dr_amount: ob, cr_amount: 0,  narration: `Opening balance — ${label}` },
+          { account_code: '3200', account_name: 'Opening Balance Equity', dr_amount: 0,  cr_amount: ob, narration: `Opening balance — ${label}` },
+        ], String(req.user?.id || req.user?.email || 'owner'));
+      }
+      const row: any = await db.get("SELECT * FROM bank_accounts WHERE id = ?", [id]);
+      row.balance = await _bankBalance(db, code);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  app.patch("/api/restaurant/:id/accounting/bank-accounts/:bankId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureBankAccounts(db);
+      const cur: any = await db.get("SELECT * FROM bank_accounts WHERE id = ?", [req.params.bankId]);
+      if (!cur) return res.status(404).json({ error: 'Bank account not found.' });
+      const b: any = req.body || {};
+      const sets: string[] = []; const vals: any[] = [];
+      for (const k of ['label', 'bank_name', 'account_number', 'account_type']) {
+        if (k in b) { let v = b[k]; if (k === 'account_type') v = String(v).toUpperCase(); sets.push(`${k} = ?`); vals.push(v == null ? null : String(v)); }
+      }
+      if ('is_default' in b) { if (Number(b.is_default) === 1) await db.run("UPDATE bank_accounts SET is_default = 0").catch(() => {}); sets.push('is_default = ?'); vals.push(Number(b.is_default) === 1 ? 1 : 0); }
+      if (sets.length) { vals.push(req.params.bankId); await db.run(`UPDATE bank_accounts SET ${sets.join(', ')} WHERE id = ?`, vals); }
+      // Keep the COA account name in step with the label.
+      if ('label' in b && cur.gl_account_code) await db.run("UPDATE chart_of_accounts SET name = ? WHERE code = ? AND is_system = 0", [String(b.label).slice(0, 80), cur.gl_account_code]).catch(() => {});
+      const row: any = await db.get("SELECT * FROM bank_accounts WHERE id = ?", [req.params.bankId]);
+      row.balance = await _bankBalance(db, row.gl_account_code);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  app.delete("/api/restaurant/:id/accounting/bank-accounts/:bankId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureBankAccounts(db);
+      const cur: any = await db.get("SELECT * FROM bank_accounts WHERE id = ?", [req.params.bankId]);
+      if (!cur) return res.status(404).json({ error: 'Bank account not found.' });
+      if (String(cur.gl_account_code) === '1010') return res.status(409).json({ error: 'The main operating bank account cannot be removed.' });
+      const bal = await _bankBalance(db, cur.gl_account_code);
+      if (Math.abs(bal) > 0.01) return res.status(409).json({ error: `This account still has a balance of ${bal}. Move it out before removing.` });
+      await db.run("UPDATE bank_accounts SET is_active = 0 WHERE id = ?", [req.params.bankId]);
+      await db.run("UPDATE chart_of_accounts SET is_active = 0 WHERE code = ? AND is_system = 0", [cur.gl_account_code]).catch(() => {});
+      res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
