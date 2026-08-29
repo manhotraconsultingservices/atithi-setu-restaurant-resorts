@@ -45219,6 +45219,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
   const [loading, setLoading] = useState(false);
   const [pcForm, setPcForm] = useState<any>({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today, module: 'RESTAURANT' });
   const [pcSaving, setPcSaving] = useState(false);
+  const [editingPc, setEditingPc] = useState<string | null>(null);
   const [pcModule, setPcModule] = useState<'ALL' | 'RESTAURANT' | 'HOTEL' | 'SHARED'>('ALL');
   const [expView, setExpView] = useState<'ledger' | 'daily' | 'category' | 'consolidated'>('ledger');
   const [expExtra, setExpExtra] = useState<any>(null);
@@ -45273,20 +45274,37 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
   // belong to the newly-selected group).
   useEffect(() => { setActive(null); setData(null); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [audience]);
 
+  const resetPcForm = () => { setEditingPc(null); setPcForm({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today, module: 'RESTAURANT' }); };
   const addPettyCash = async () => {
     const amt = Number(pcForm.amount);
     if (!(amt > 0)) { toast.error('Enter an amount greater than 0'); return; }
     setPcSaving(true);
     try {
-      await api('/petty-cash', { method: 'POST', body: JSON.stringify({ ...pcForm, amount: amt }) });
+      // Edit (PATCH) re-posts the GL from the new values; create (POST) records fresh.
+      if (editingPc) await api(`/petty-cash/${editingPc}`, { method: 'PATCH', body: JSON.stringify({ ...pcForm, amount: amt }) });
+      else           await api('/petty-cash', { method: 'POST', body: JSON.stringify({ ...pcForm, amount: amt }) });
+      setEditingPc(null);
       setPcForm({ direction: pcForm.direction, amount: '', category: '', notes: '', entry_date: pcForm.entry_date, module: pcForm.module });
       load('expense-journal');
     } catch (e: any) { toast.error('Save failed: ' + (e?.message || 'error')); }
     finally { setPcSaving(false); }
   };
+  // Only manual petty-cash rows (source !== 'GL', not readonly) can be edited — a
+  // sale or a folio settlement that flows through Cash is read-only here.
+  const startEditPc = (r: any) => {
+    setEditingPc(r.id);
+    setPcForm({
+      direction: r.direction || 'OUT',
+      amount: String(r.amount ?? ''),
+      category: r.category === 'Petty Cash' ? '' : (r.category || ''),
+      notes: r.notes || '',
+      entry_date: String(r.entry_date || today).slice(0, 10),
+      module: r.module || 'RESTAURANT',
+    });
+  };
   const deletePettyCash = async (id: string) => {
     if (!await showConfirm({ title: 'Delete this entry?', danger: true })) return;
-    try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load('expense-journal'); }
+    try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); if (editingPc === id) resetPcForm(); load('expense-journal'); }
     catch (e: any) { toast.error('Delete failed: ' + (e?.message || 'error')); }
   };
 
@@ -45534,7 +45552,12 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
               { key: 'category', label: 'Category', sortable: true },
               { key: 'amount', label: 'Amount', sortable: true, align: 'right', getValue: (r: any) => Number(r.amount), render: (r: any) => <span className="font-bold">{cur(r.amount)}</span> },
               { key: 'notes', label: 'Notes', render: (r: any) => <span className="text-[#6b5d52]">{r.notes || '—'}</span> },
-              { key: 'del', label: '', searchable: false, exportValue: () => '', hidden: !canDeletePc, render: (r: any) => <button type="button" onClick={() => deletePettyCash(r.id)} className="text-[10px] text-rose-600 hover:underline">Delete</button> },
+              { key: 'del', label: '', searchable: false, exportValue: () => '', hidden: !canDeletePc, render: (r: any) => r.readonly ? <span className="text-[9px] text-[#b8a99c]" title="Comes from a sale / settlement in another module — edit it there">auto</span> : (
+                <span className="flex gap-2 justify-end">
+                  <button type="button" onClick={() => startEditPc(r)} className="text-[10px] text-[#cc5a16] hover:underline">Edit</button>
+                  <button type="button" onClick={() => deletePettyCash(r.id)} className="text-[10px] text-rose-600 hover:underline">Delete</button>
+                </span>
+              ) },
             ]}
           />
         </>)}
@@ -45593,15 +45616,16 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
 
         {active === 'expense-journal' && (
           <div className="rounded-2xl border border-[#e8dccf] p-3 bg-[#faf7f2]">
-            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Record expense / cash movement</p>
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">{editingPc ? 'Edit cash entry' : 'Record expense / cash movement'}</p>
             <div className="flex flex-wrap items-end gap-2 text-xs">
               <label>Date<input type="date" value={pcForm.entry_date} onChange={e => setPcForm({ ...pcForm, entry_date: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
               <label>Module<select value={pcForm.module} onChange={e => setPcForm({ ...pcForm, module: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="RESTAURANT">Restaurant</option><option value="HOTEL">Hotel</option><option value="SHARED">Shared</option></select></label>
-              <label>Type<select value={pcForm.direction} onChange={e => setPcForm({ ...pcForm, direction: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="OUT">Expense (OUT)</option><option value="IN">Income (IN)</option></select></label>
+              <label>Type<select value={pcForm.direction} onChange={e => setPcForm({ ...pcForm, direction: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="OUT">Expense (OUT)</option><option value="IN">Top-up (IN)</option></select></label>
               <label>Amount<input type="number" value={pcForm.amount} onChange={e => setPcForm({ ...pcForm, amount: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] w-28" /></label>
               <label>Category<input value={pcForm.category} onChange={e => setPcForm({ ...pcForm, category: e.target.value })} placeholder="e.g. Stationery" className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
               <label className="flex-1 min-w-[160px]">Notes<input value={pcForm.notes} onChange={e => setPcForm({ ...pcForm, notes: e.target.value })} className="block mt-1 w-full px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
-              <button type="button" disabled={pcSaving} onClick={addPettyCash} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold disabled:opacity-50">{pcSaving ? 'Saving…' : '+ Add'}</button>
+              <button type="button" disabled={pcSaving} onClick={addPettyCash} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold disabled:opacity-50">{pcSaving ? 'Saving…' : (editingPc ? 'Update' : '+ Add')}</button>
+              {editingPc && <button type="button" onClick={resetPcForm} className="px-3 py-2 rounded-xl bg-white border border-[#e8dccf] text-[#6b5d52] text-xs">Cancel</button>}
             </div>
           </div>
         )}

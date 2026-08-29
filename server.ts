@@ -31396,6 +31396,36 @@ ${data.tenant.name}`;
     await tenantDb.exec("ALTER TABLE petty_cash ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'").catch(() => {});
   };
 
+  // Balanced GL lines for a petty-cash entry — shared by POST (create) and PATCH
+  // (edit re-post) so the two never drift. OUT → Dr <expense by category> / Cr Cash.
+  // IN → Dr Cash / Cr Bank (a till top-up drawn from the bank; NOT income).
+  const _pettyCashGlLines = (direction: string, amount: number, category: string | null, notes: string | null): GlLine[] => {
+    const n = notes || (direction === 'OUT' ? 'Petty cash expense' : 'Petty cash top-up');
+    if (direction === 'OUT') {
+      const expAcct = _glAccountForExpenseCategory(category || '');
+      return [
+        { account_code: expAcct.code, account_name: expAcct.name, dr_amount: amount, cr_amount: 0, narration: n },
+        { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 0, cr_amount: amount, narration: n },
+      ];
+    }
+    return [
+      { account_code: '1000', account_name: 'Cash in Hand', dr_amount: amount, cr_amount: 0, narration: n },
+      { account_code: '1010', account_name: 'Bank — Main Account', dr_amount: 0, cr_amount: amount, narration: n },
+    ];
+  };
+
+  // Hide a manual petty-cash entry's live GL journal(s) so the entry drops out of
+  // the GL-derived ledger, Cash Book and P&L. Keyed on source_id (= the petty_cash
+  // id) so it covers the original post AND any repost from a prior edit. Because
+  // each journal is balanced, hiding it keeps the trial balance balanced.
+  const _hidePettyCashGl = async (tenantDb: any, restaurantId: string, entryId: string) => {
+    await tenantDb.run(
+      `UPDATE gl_entries SET is_reversed = 1
+        WHERE restaurant_id = ? AND source_type = 'PETTY_CASH' AND source_id = ? AND is_reversed = 0`,
+      [restaurantId, entryId]
+    ).catch(() => {});
+  };
+
   app.post("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       // RBAC: mirror the petty-cash edit/delete siblings — owner/manager only.
@@ -31418,18 +31448,9 @@ ${data.tenant.name}`;
         [id, entry_date, direction, req.body?.category || null, amount, req.body?.notes || null,
          req.user?.id || req.user?.email || null, module]
       );
-      // GL: Dr Expense / Cr Cash for OUT; Dr Cash / Cr Other Income for IN
+      // GL: OUT → Dr Expense / Cr Cash;  IN → Dr Cash / Cr Bank (till top-up).
       try {
-        const expAcct = _glAccountForExpenseCategory(req.body?.category || '');
-        const lines: GlLine[] = direction === 'OUT'
-          ? [
-              { account_code: expAcct.code, account_name: expAcct.name, dr_amount: amount, cr_amount: 0, narration: req.body?.notes || 'Petty cash expense' },
-              { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 0, cr_amount: amount, narration: req.body?.notes || 'Petty cash expense' },
-            ]
-          : [
-              { account_code: '1000', account_name: 'Cash in Hand', dr_amount: amount, cr_amount: 0, narration: req.body?.notes || 'Petty cash receipt' },
-              { account_code: '4900', account_name: 'Other Income', dr_amount: 0, cr_amount: amount, narration: req.body?.notes || 'Petty cash receipt' },
-            ];
+        const lines = _pettyCashGlLines(direction, amount, req.body?.category || null, req.body?.notes || null);
         await _postGlEntries(tenantDb, req.params.id, `PC-${id}`, entry_date, 'PETTY_CASH', id, lines, req.user?.id || req.user?.email || null);
       } catch (glErr) { console.error('[GL] petty cash error:', glErr); }
       res.json({ success: true, id });
@@ -31460,15 +31481,30 @@ ${data.tenant.name}`;
         }
       }
       if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
+      const existing: any = await tenantDb.get("SELECT id FROM petty_cash WHERE id = ?", [req.params.entryId]);
+      if (!existing) return res.status(404).json({ error: 'Entry not found' });
       params.push(req.params.entryId);
       await tenantDb.run(`UPDATE petty_cash SET ${updates.join(', ')} WHERE id = ?`, params);
+      // If a money-affecting field changed, re-post the GL so the GL-derived ledger
+      // reflects the edit: hide the old journal(s), then post a fresh one (under a
+      // versioned ref, source_id unchanged) from the row's new values.
+      const glChanged = ['entry_date', 'direction', 'category', 'amount'].some(k => k in req.body);
+      if (glChanged) {
+        try {
+          const row: any = await tenantDb.get("SELECT * FROM petty_cash WHERE id = ?", [req.params.entryId]);
+          await _hidePettyCashGl(tenantDb, req.params.id, req.params.entryId);
+          const lines = _pettyCashGlLines(String(row.direction), Math.abs(Number(row.amount || 0)), row.category, row.notes);
+          const ref = `PC-${req.params.entryId}#${Date.now()}`;
+          await _postGlEntries(tenantDb, req.params.id, ref, String(row.entry_date).slice(0, 10), 'PETTY_CASH', req.params.entryId, lines, req.user?.id || req.user?.email || null);
+        } catch (glErr) { console.error('[GL] petty cash edit re-post error:', glErr); }
+      }
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to update petty cash entry" });
     }
   });
 
-  app.get("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/petty-cash", authenticate, requireTabAccess('EXPENSE_JOURNAL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -31488,19 +31524,44 @@ ${data.tenant.name}`;
       ).catch(() => ({ bal: 0 }));
       const opening = round(Number(openRow?.bal || 0));
       const glRows: any[] = await db.query(
-        `SELECT id, entry_date, source_type, narration, dr_amount, cr_amount, created_at
+        `SELECT id, entry_date, source_type, source_id, narration, dr_amount, cr_amount, created_at
            FROM gl_entries
           WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = ?
             AND entry_date BETWEEN ? AND ?
           ORDER BY entry_date DESC, created_at DESC`,
         [req.params.id, CASH, from, to]
       ).catch(() => []);
+      // Pull back the manual petty-cash rows (by source_id) so the ledger shows the
+      // user's real category — not just the "PETTY_CASH" source type — and hands the
+      // UI the petty_cash id, marking those rows editable/deletable. Every other cash
+      // movement (sales, folio settlements, other-module expenses) stays read-only.
+      const pcIds = [...new Set((glRows || []).filter((r: any) => r.source_type === 'PETTY_CASH' && r.source_id).map((r: any) => r.source_id))];
+      const pcMap: Record<string, any> = {};
+      if (pcIds.length) {
+        const placeholders = pcIds.map(() => '?').join(',');
+        const pcRows: any[] = await db.query(
+          `SELECT id, category, notes, module FROM petty_cash WHERE id IN (${placeholders})`, pcIds
+        ).catch(() => []);
+        for (const p of (pcRows || [])) pcMap[p.id] = p;
+      }
       let totalIn = 0, totalOut = 0;
       const rows = (glRows || []).map((r: any) => {
         const dr = Number(r.dr_amount || 0), cr = Number(r.cr_amount || 0);
         const isIn = dr >= cr;
         const amount = round(isIn ? dr : cr);
         if (isIn) totalIn += amount; else totalOut += amount;
+        const pc = (r.source_type === 'PETTY_CASH' && r.source_id) ? pcMap[r.source_id] : null;
+        if (pc) return {
+          id: r.source_id,                        // the petty_cash id → edit/delete target
+          entry_date: r.entry_date,
+          direction: isIn ? 'IN' : 'OUT',
+          category: pc.category || 'Petty Cash',  // the user's own category
+          amount,
+          notes: (pc.notes ?? r.narration) || null,
+          module: pc.module || 'RESTAURANT',
+          source: 'PETTY_CASH',                   // a manual entry — editable + deletable
+          readonly: false,
+        };
         return {
           id: r.id,
           entry_date: r.entry_date,
@@ -31508,7 +31569,7 @@ ${data.tenant.name}`;
           category: r.source_type || 'CASH',
           amount,
           notes: r.narration || null,
-          source: 'GL',        // GL-derived → read-only (not a manual petty_cash row)
+          source: 'GL',        // derived from another module → read-only
           readonly: true,
         };
       });
@@ -31540,6 +31601,9 @@ ${data.tenant.name}`;
       }
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
+      // Hide the entry's GL journal(s) so it truly leaves the ledger (the list is
+      // GL-derived), then remove the manual row. A no-op for GL-only rows.
+      await _hidePettyCashGl(tenantDb, req.params.id, req.params.entryId);
       await tenantDb.run(`DELETE FROM petty_cash WHERE id = ?`, [req.params.entryId]);
       res.json({ success: true });
     } catch (err: any) {
@@ -31655,7 +31719,7 @@ ${data.tenant.name}`;
 
   // ── EXPENSE REPORTS ──────────────────────────────────────────────────────
   // Daily expense trend: total OUT grouped by date, split by module and category.
-  app.get("/api/restaurant/:id/expense-reports/daily", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/expense-reports/daily", authenticate, requireTabAccess('EXPENSE_JOURNAL'), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
@@ -31684,7 +31748,7 @@ ${data.tenant.name}`;
   });
 
   // Category breakdown: expenses by category + module for trend pie / bar.
-  app.get("/api/restaurant/:id/expense-reports/category", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/expense-reports/category", authenticate, requireTabAccess('EXPENSE_JOURNAL'), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
@@ -31709,7 +31773,7 @@ ${data.tenant.name}`;
   });
 
   // Consolidated: module-level summary with period-over-period comparison.
-  app.get("/api/restaurant/:id/expense-reports/consolidated", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/expense-reports/consolidated", authenticate, requireTabAccess('EXPENSE_JOURNAL'), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
@@ -51061,7 +51125,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'staff-advance-payment-mode',
+    commit_marker: 'petty-cash-unify-source',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

@@ -2961,6 +2961,41 @@ async function testCashDrawer() {
     if (cash.ok && upi.ok) pass('TC-ACCT-STAFFADV-MODE', 'Staff advance books the payout by mode — CASH→Cash(1000), UPI→Bank(1010)');
     else fail('TC-ACCT-STAFFADV-MODE', 'Staff advance payment-mode → GL account', `${cash.detail} | ${upi.detail}`);
   }
+
+  // TC-ACCT-PETTY: unified petty cash — a manual entry is editable and shows the
+  // user's real category; edit re-posts the GL; a top-up (IN) is P&L-neutral; and
+  // delete removes it from the GL-derived ledger. Fully self-cleaning (delete hides
+  // the journal). Also confirms the read gate lets the owner through (not a 403).
+  const revOf = async () => {
+    const tb = await api('GET', `/api/restaurant/${restaurantId}/accounting/trial-balance?from=2020-01-01&to=2027-12-31`);
+    let rev = 0; for (const r of (Array.isArray(tb.data) ? tb.data : [])) { const code = String(r.account_code || ''); const t = String(r.account_type || '').toUpperCase(); if (t === 'REVENUE' || code[0] === '4') rev += Number(r.cr_total || 0) - Number(r.dr_total || 0); }
+    return Math.round(rev * 100) / 100;
+  };
+  const pcRows = async () => { const g = await api('GET', `/api/restaurant/${restaurantId}/petty-cash?from=2020-01-01&to=2027-12-31`); return (g.status === 200 && Array.isArray(g.data?.rows)) ? g.data.rows : null; };
+  const pcTag = 'SMOKE-PC-' + Math.random().toString(36).slice(2, 7);
+  const pc0 = await api('GET', `/api/restaurant/${restaurantId}/petty-cash?from=2020-01-01&to=2027-12-31`);
+  if (pc0.status === 403) {
+    skip('TC-ACCT-PETTY', 'petty-cash unify (CRUD + GL)', 'read gate: role lacks EXPENSE_JOURNAL');
+  } else if (pc0.status !== 200) {
+    fail('TC-ACCT-PETTY', 'petty-cash GET deployed', `HTTP ${pc0.status}`);
+  } else {
+    let okAll = true; const detail = [];
+    const mk = await api('POST', `/api/restaurant/${restaurantId}/petty-cash`, { direction: 'OUT', amount: 123, category: 'Stationery', notes: pcTag, entry_date: '2026-08-29' });
+    const pcId = mk.data?.id;
+    let rows = await pcRows(); let row = (rows || []).find(r => r.notes === pcTag);
+    if (!row || row.category !== 'Stationery' || row.readonly !== false || String(row.id) !== String(pcId)) { okAll = false; detail.push(`create/category/editable: ${JSON.stringify(row)}`); }
+    if (pcId) { await api('PATCH', `/api/restaurant/${restaurantId}/petty-cash/${pcId}`, { amount: 456 }); rows = await pcRows(); row = (rows || []).find(r => r.notes === pcTag); if (!row || Math.abs(Number(row.amount) - 456) > 0.01) { okAll = false; detail.push(`edit not reflected: amount=${row?.amount}`); } }
+    const revB = await revOf();
+    const mkIn = await api('POST', `/api/restaurant/${restaurantId}/petty-cash`, { direction: 'IN', amount: 500, category: 'Top-up', notes: `${pcTag}-IN`, entry_date: '2026-08-29' });
+    const revA = await revOf();
+    if (Math.abs(revA - revB) > 0.01) { okAll = false; detail.push(`IN moved revenue by ${Math.round((revA - revB) * 100) / 100} (should be P&L-neutral)`); }
+    if (pcId) await api('DELETE', `/api/restaurant/${restaurantId}/petty-cash/${pcId}`);
+    if (mkIn.data?.id) await api('DELETE', `/api/restaurant/${restaurantId}/petty-cash/${mkIn.data.id}`);
+    rows = await pcRows(); const leftover = (rows || []).filter(r => String(r.notes || '').startsWith(pcTag));
+    if (leftover.length) { okAll = false; detail.push(`delete left ${leftover.length} row(s) in the ledger`); }
+    if (okAll) pass('TC-ACCT-PETTY', 'Petty cash unified: manual entry editable w/ real category, edit re-posts, IN is P&L-neutral, delete clears it from the GL ledger');
+    else fail('TC-ACCT-PETTY', 'petty-cash unify (CRUD + GL)', detail.join(' | '));
+  }
 }
 
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
