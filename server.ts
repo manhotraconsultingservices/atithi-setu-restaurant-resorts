@@ -51004,7 +51004,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'owner-equity-invest-payout',
+    commit_marker: 'owner-equity-default-bank',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
@@ -51411,11 +51411,17 @@ ${data.tenant.name}`;
     const out: any = await db.get("SELECT COALESCE(SUM(amount),0) AS s FROM owner_transactions WHERE owner_id = ? AND txn_type = 'PAYOUT'", [ownerId]).catch(() => ({ s: 0 }));
     return { invested: _acctRound(Number(inv?.s || 0)), withdrawn: _acctRound(Number(out?.s || 0)) };
   };
-  // Resolve a payment source → GL account. A bank_account_id from Phase 1, or CASH.
+  // Resolve a payment source → GL account. Explicit 'CASH' → cash in hand; a
+  // bank_account_id → that bank; empty ("Default bank" in the UI) → the default
+  // bank account (else the operating 1010) — NOT cash.
   const _resolvePaySource = async (db: any, bankId: any): Promise<{ code: string; name: string }> => {
-    if (!bankId || String(bankId).toUpperCase() === 'CASH') return { code: '1000', name: 'Cash in Hand' };
-    const ba: any = await db.get("SELECT gl_account_code, label FROM bank_accounts WHERE id = ? AND is_active = 1", [bankId]).catch(() => null);
-    return ba ? { code: ba.gl_account_code, name: ba.label } : { code: '1010', name: 'Bank — Main Account' };
+    if (String(bankId || '').toUpperCase() === 'CASH') return { code: '1000', name: 'Cash in Hand' };
+    if (bankId) {
+      const ba: any = await db.get("SELECT gl_account_code, label FROM bank_accounts WHERE id = ? AND is_active = 1", [bankId]).catch(() => null);
+      if (ba) return { code: ba.gl_account_code, name: ba.label };
+    }
+    const def: any = await db.get("SELECT gl_account_code, label FROM bank_accounts WHERE is_active = 1 ORDER BY is_default DESC, created_at LIMIT 1").catch(() => null);
+    return def ? { code: def.gl_account_code, name: def.label } : { code: '1010', name: 'Bank — Main Account' };
   };
   app.get("/api/restaurant/:id/accounting/owners", authenticate, async (req: AuthRequest, res: Response) => {
     if (!_acctOwnerOnly(req, res)) return;
