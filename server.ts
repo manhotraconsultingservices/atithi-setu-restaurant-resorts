@@ -51004,7 +51004,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'owner-equity-default-bank',
+    commit_marker: 'owner-capital-statement',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
@@ -51545,6 +51545,47 @@ ${data.tenant.name}`;
       if (to)   { clauses.push('txn_date <= ?'); params.push(to); }
       const rows = await db.query(`SELECT * FROM owner_transactions WHERE ${clauses.join(' AND ')} ORDER BY txn_date, created_at`, params);
       res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  // Per-owner Capital Account Statement — opening + running ledger + closing for
+  // a date range, ready to print/export and hand to the partner.
+  app.get("/api/restaurant/:id/accounting/owners/:ownerId/statement", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureOwners(db);
+      const owner: any = await db.get("SELECT * FROM owners WHERE id = ?", [req.params.ownerId]);
+      if (!owner) return res.status(404).json({ error: 'Owner not found.' });
+      const rest: any = await centralDb.get("SELECT name, gst_number, city, state FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+      const { from, to } = req.query as Record<string, string>;
+      // Opening = net capital from all transactions strictly before `from`.
+      let opening = 0;
+      if (from) {
+        const op: any = await db.get(
+          "SELECT COALESCE(SUM(CASE WHEN txn_type='INVEST' THEN amount ELSE -amount END), 0) AS b FROM owner_transactions WHERE owner_id = ? AND txn_date < ?",
+          [req.params.ownerId, from]
+        ).catch(() => ({ b: 0 }));
+        opening = _acctRound(Number(op?.b || 0));
+      }
+      const params: any[] = [req.params.ownerId]; const clauses = ['owner_id = ?'];
+      if (from) { clauses.push('txn_date >= ?'); params.push(from); }
+      if (to)   { clauses.push('txn_date <= ?'); params.push(to); }
+      const txns: any[] = await db.query(`SELECT * FROM owner_transactions WHERE ${clauses.join(' AND ')} ORDER BY txn_date, created_at`, params);
+      let bal = opening, invested = 0, withdrawn = 0;
+      const rows = (txns || []).map((t: any) => {
+        const amt = _acctRound(t.amount);
+        if (String(t.txn_type) === 'INVEST') { bal = _acctRound(bal + amt); invested = _acctRound(invested + amt); }
+        else { bal = _acctRound(bal - amt); withdrawn = _acctRound(withdrawn + amt); }
+        return { id: t.id, date: t.txn_date, type: t.txn_type, amount: amt, bank: t.gl_name, note: t.note, journal_ref: t.journal_ref, balance: bal };
+      });
+      const all = await _ownerTotals(db, req.params.ownerId);
+      res.json({
+        business_name: rest?.name || 'Business', gstin: rest?.gst_number || null,
+        owner: { id: owner.id, name: owner.name, ownership_pct: owner.ownership_pct, phone: owner.phone, email: owner.email, capital_gl_code: owner.capital_gl_code },
+        from: from || null, to: to || null,
+        opening, rows, invested, withdrawn, closing: _acctRound(opening + invested - withdrawn),
+        invested_total: all.invested, withdrawn_total: all.withdrawn, net_total: _acctRound(all.invested - all.withdrawn),
+      });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 

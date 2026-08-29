@@ -7999,6 +7999,10 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [txnOwner, setTxnOwner] = useState<any>(null);
   const [txnForm, setTxnForm] = useState<any>(txnBlank);
   const [txnBusy, setTxnBusy] = useState(false);
+  // Per-owner Capital Account Statement (Phase 3)
+  const [stmtOwner, setStmtOwner] = useState<any>(null);
+  const [stmt, setStmt] = useState<any>(null);
+  const [stmtLoading, setStmtLoading] = useState(false);
 
   const nowD = new Date();
   const fyStart = nowD.getMonth() >= 3 ? `${nowD.getFullYear()}-04-01` : `${nowD.getFullYear() - 1}-04-01`;
@@ -8146,6 +8150,33 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     } finally { setTxnBusy(false); }
   };
   const inr = (n: any) => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const loadStatement = useCallback((ownerId: string) => {
+    setStmtLoading(true);
+    acctApi(`/accounting/owners/${ownerId}/statement?from=${tbFrom}&to=${tbTo}`)
+      .then((d: any) => { if (d && !d.error) setStmt(d); })
+      .finally(() => setStmtLoading(false));
+  }, [acctApi, tbFrom, tbTo]);
+  const openStatement = (o: any) => { setStmtOwner(o); setStmt(null); loadStatement(o.id); };
+  const exportStatementCsv = () => {
+    if (!stmt) return;
+    const q = (x: any) => `"${String(x == null ? '' : x).replace(/"/g, '""')}"`;
+    let csv = `Capital Account Statement,${q(stmt.owner.name)}\r\nPeriod,${stmt.from || ''} to ${stmt.to || ''}\r\n\r\nDate,Type,Particulars,Invested,Withdrawn,Balance\r\n`;
+    csv += `,,Opening capital,,,${stmt.opening}\r\n`;
+    for (const r of stmt.rows) csv += `${r.date},${r.type},${q((r.note || '') + ' ' + (r.bank || ''))},${r.type === 'INVEST' ? r.amount : ''},${r.type === 'PAYOUT' ? r.amount : ''},${r.balance}\r\n`;
+    csv += `,,Closing capital,${stmt.invested},${stmt.withdrawn},${stmt.closing}\r\n`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `capital-statement-${String(stmt.owner.name).replace(/\s+/g, '-')}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  const printStatement = (s: any) => {
+    const esc = (x: any) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const m = (n: any) => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const rows = (s.rows || []).map((r: any) => `<tr><td>${esc(r.date)}</td><td>${r.type === 'INVEST' ? 'Investment' : 'Payout / Drawing'}${r.note ? ' — ' + esc(r.note) : ''}<div class="ref">${esc(r.bank || '')} · ${esc(r.journal_ref || '')}</div></td><td class="r">${r.type === 'INVEST' ? m(r.amount) : ''}</td><td class="r">${r.type === 'PAYOUT' ? m(r.amount) : ''}</td><td class="r">${m(r.balance)}</td></tr>`).join('');
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Capital Statement — ${esc(s.owner.name)}</title><style>@page{size:A4;margin:16mm}body{font-family:Arial,Helvetica,sans-serif;color:#1a1208;font-size:12px}h1{font-size:18px;margin:0}h2{font-size:14px;margin:8px 0 0}.muted{color:#666;font-size:11px}table{border-collapse:collapse;width:100%;margin-top:14px;font-size:12px}th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f2ede4}.r{text-align:right;white-space:nowrap}.ref{color:#999;font-size:10px}.tot td{font-weight:bold;background:#faf7f2}.sum{margin-top:14px;display:flex;gap:28px}.sum b{display:block;font-size:15px}</style></head><body><h1>${esc(s.business_name)}</h1>${s.gstin ? `<div class="muted">GSTIN: ${esc(s.gstin)}</div>` : ''}<h2>Capital Account Statement</h2><div class="muted">${esc(s.owner.name)}${s.owner.ownership_pct ? ' · Ownership ' + s.owner.ownership_pct + '%' : ''}${s.owner.phone ? ' · ' + esc(s.owner.phone) : ''}</div><div class="muted">Period: ${esc(s.from || '—')} to ${esc(s.to || '—')}</div><table><thead><tr><th>Date</th><th>Particulars</th><th class="r">Invested</th><th class="r">Withdrawn</th><th class="r">Balance</th></tr></thead><tbody><tr class="tot"><td colspan="4">Opening capital</td><td class="r">${m(s.opening)}</td></tr>${rows || '<tr><td colspan="5" style="text-align:center;color:#888">No transactions in this period.</td></tr>'}<tr class="tot"><td>Closing capital</td><td></td><td class="r">${m(s.invested)}</td><td class="r">${m(s.withdrawn)}</td><td class="r">${m(s.closing)}</td></tr></tbody></table><div class="sum"><div>Invested (period)<b>${m(s.invested)}</b></div><div>Withdrawn (period)<b>${m(s.withdrawn)}</b></div><div>Net capital<b>${m(s.closing)}</b></div></div><div class="muted" style="margin-top:20px">Generated ${new Date().toLocaleString('en-IN')}</div></body></html>`;
+    openThermalPrint(html);
+  };
 
   // ── Phase 2: GL-derived statements, GST returns, aging, controls ──────────
   const [pnl, setPnl] = useState<any>(null);
@@ -8571,7 +8602,53 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
         </div>
       )}
 
-      {acctTab === 'OWNER_EQUITY' && (
+      {acctTab === 'OWNER_EQUITY' && stmtOwner && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={() => { setStmtOwner(null); setStmt(null); }} className="text-sm font-bold text-[#a0522d] hover:underline">← Back to owners</button>
+            <h3 className="text-lg font-bold text-[#1a1208]">{stmtOwner.name} — Capital Account Statement</h3>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">From</label>
+            <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <label className="text-xs text-[#6b5d52]">To</label>
+            <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={() => loadStatement(stmtOwner.id)} className={AC_BTN}>Refresh</button>
+            {stmt && <button onClick={() => printStatement(stmt)} className="px-3 py-1.5 text-sm rounded border border-[#a0522d]/40 text-[#a0522d] font-bold hover:bg-[#a0522d]/5">🖨 Print</button>}
+            {stmt && <button onClick={exportStatementCsv} className="px-3 py-1.5 text-sm rounded border border-[#d4c4a8] text-[#6b5d52] font-bold hover:bg-[#f5f0e8]">Export CSV</button>}
+          </div>
+          {stmtLoading && <p className="text-sm text-[#6b5d52] animate-pulse">Loading…</p>}
+          {stmt && (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left">
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Date</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Particulars</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Invested</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Withdrawn</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Balance</th>
+                </tr></thead>
+                <tbody>
+                  <tr className="bg-[#faf7f2] font-semibold"><td className="px-3 py-2" colSpan={4}>Opening capital</td><td className="px-3 py-2 text-right font-mono">{inr(stmt.opening)}</td></tr>
+                  {(stmt.rows || []).map((r: any) => (
+                    <tr key={r.id} className="border-t border-[#e8ded0]">
+                      <td className="px-3 py-2 text-[#6b5d52] whitespace-nowrap">{r.date}</td>
+                      <td className="px-3 py-2">{r.type === 'INVEST' ? 'Investment' : 'Payout / Drawing'}{r.note ? ` — ${r.note}` : ''}<span className="block text-[10px] text-[#9c8e85]">{r.bank} · {r.journal_ref}</span></td>
+                      <td className="px-3 py-2 text-right font-mono text-emerald-700">{r.type === 'INVEST' ? inr(r.amount) : ''}</td>
+                      <td className="px-3 py-2 text-right font-mono text-red-600">{r.type === 'PAYOUT' ? inr(r.amount) : ''}</td>
+                      <td className="px-3 py-2 text-right font-mono">{inr(r.balance)}</td>
+                    </tr>
+                  ))}
+                  {(stmt.rows || []).length === 0 && <tr><td colSpan={5} className="px-3 py-3 text-center text-[#9c8e85] italic">No transactions in this period.</td></tr>}
+                  <tr className="bg-[#faf7f2] font-bold border-t-2 border-[#d4c4a8]"><td className="px-3 py-2">Closing capital</td><td></td><td className="px-3 py-2 text-right font-mono text-emerald-700">{inr(stmt.invested)}</td><td className="px-3 py-2 text-right font-mono text-red-600">{inr(stmt.withdrawn)}</td><td className="px-3 py-2 text-right font-mono">{inr(stmt.closing)}</td></tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {acctTab === 'OWNER_EQUITY' && !stmtOwner && (
         <div className="space-y-5">
           <p className="text-sm text-[#6b5d52]">Business owners / partners and their capital. <b>Invest</b> records money an owner puts in; <b>Payout</b> records a drawing / withdrawal. Every entry posts to the ledger, so each owner's capital reconciles with the books.</p>
           <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
@@ -8595,6 +8672,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                     <td className="px-3 py-2 text-right whitespace-nowrap">
                       <button onClick={() => openTxn(o, 'INVEST')} className="text-xs font-bold text-emerald-700 hover:underline mr-2">Invest</button>
                       <button onClick={() => openTxn(o, 'PAYOUT')} className="text-xs font-bold text-[#a0522d] hover:underline mr-2">Payout</button>
+                      <button onClick={() => openStatement(o)} className="text-xs font-bold text-indigo-600 hover:underline mr-2">Statement</button>
                       <button onClick={() => editOwner(o)} className="text-xs font-bold text-[#6b5d52] hover:underline mr-2">Edit</button>
                       <button onClick={() => delOwner(o)} className="text-xs font-bold text-red-400 hover:underline">Remove</button>
                     </td>
