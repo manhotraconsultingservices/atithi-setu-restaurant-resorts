@@ -12604,6 +12604,57 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     });
   };
 
+  // Print an invoice from the list. Prefer the on-prem thermal printer via the
+  // agent (raw ESC/POS — never a blank browser page); fall back to the browser
+  // print (openThermalPrint) when the tenant has no printer configured or the
+  // print service can't be reached. Mirrors the Command Centre "Print Bill".
+  const printInvoiceThermal = async (inv: any) => {
+    const markPrinted = () => {
+      const st = String(inv.invoice_status || '').toUpperCase();
+      if (st !== 'PRINTED' && st !== 'PAID') patchInvoiceStatus(inv, 'PRINTED');
+    };
+    const browserFallback = () => { openThermalPrint(buildInvoiceHTML(inv, invoiceTemplate)); markPrinted(); };
+    // Build the bill payload (SESSION → rounds; ORDER → items).
+    const rawItems = (inv.invoice_type === 'SESSION' && Array.isArray(inv.rounds) && inv.rounds.length)
+      ? inv.rounds.flatMap((r: any) => (Array.isArray(r.items) ? r.items : []))
+      : (Array.isArray(inv.items) ? inv.items : []);
+    const items = rawItems.map((it: any) => {
+      const qty = Number(it.qty ?? it.quantity ?? 1), price = Number(it.price || 0);
+      return { name: it.name || 'Item', qty, price, amount: qty * price };
+    });
+    const subtotal = Number(inv.raw_subtotal ?? items.reduce((s: number, it: any) => s + it.amount, 0));
+    const disc     = Number(inv.discount_amount || 0);
+    const svcPct   = Number(inv.service_charge_percent || 0);
+    const svcAmt   = Number((Math.max(0, subtotal - disc) * svcPct / 100).toFixed(2));
+    const taxes    = (Array.isArray(inv.tax_lines) && inv.tax_lines.length)
+      ? inv.tax_lines.filter((l: any) => Number(l.amount) > 0).map((l: any) => ({ label: l.label || 'Tax', amount: Number(l.amount || 0) }))
+      : (Number(inv.gst_amount) > 0 ? [{ label: `GST ${Number(inv.gst_percent || 0)}%`, amount: Number(inv.gst_amount) }] : []);
+    const bill = {
+      invoice_no: inv.invoice_number || (inv.display_number && String(inv.display_number).replace(/^#/, '')) || String(inv.id || '').slice(-8).toUpperCase(),
+      date: inv.created_at || inv.createdAt || new Date().toISOString(),
+      table: inv.table_number || inv.tableNumber || null,
+      customer: inv.customer_name || inv.customerName || null,
+      items, subtotal, discount: disc, service_charge: svcAmt, service_charge_pct: svcPct || null,
+      taxes, total: Number(inv.total_amount || 0), payment_method: inv.payment_method || null,
+    };
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/print-jobs/invoice`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ bill }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.success && Number(d.queued) > 0) {
+        toast.success(`Bill sent to ${(d.printers || []).join(', ') || 'printer'}`);
+        markPrinted();
+        return;
+      }
+      // No printer configured (or nothing queued) → print through the browser.
+      browserFallback();
+    } catch {
+      browserFallback();
+    }
+  };
+
   // ── Invoice Edit helpers ──────────────────────────────────────────────────
 
   const openInvoiceEdit = (inv: any) => {
@@ -20579,13 +20630,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <Edit3 size={11} /> Edit
                                 </button>
                               )}
-                              {/* Print */}
+                              {/* Print — to the thermal printer via the agent (falls
+                                  back to the browser print when no printer is set up) */}
                               <button
-                                onClick={() => {
-                                  const html = buildInvoiceHTML(inv, invoiceTemplate);
-                                  openThermalPrint(html);
-                                  if (invStatus !== 'PRINTED' && invStatus !== 'PAID') patchInvoiceStatus(inv, 'PRINTED');
-                                }}
+                                onClick={() => printInvoiceThermal(inv)}
+                                title="Print the bill on your thermal printer (falls back to the browser if none is set up)"
                                 className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#cc5a16]/10 text-[#cc5a16] hover:bg-[#cc5a16]/20 transition-all whitespace-nowrap flex items-center gap-1"
                               >
                                 <Printer size={11} /> Print
