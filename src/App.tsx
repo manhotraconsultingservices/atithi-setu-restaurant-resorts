@@ -47122,8 +47122,26 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
   const [form, setForm] = useState<any>(blank);
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState<Record<string, string>>({});   // printerId → status text
   const api = (p: string) => `/api/restaurant/${restaurantId}${p}`;
   const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  // Health check: send a test ticket to ONE printer, then poll its job status so
+  // the owner sees Reachable ✅ / Failed ❌ (with the exact error) or "agent not running".
+  const testPrinter = async (p: any) => {
+    setTesting(t => ({ ...t, [p.id]: '⏳ sending…' }));
+    try {
+      const r = await fetch(api(`/kitchen-printers/${p.id}/test`), { method: 'POST', headers: H });
+      const d = await r.json().catch(() => ({} as any));
+      if (!r.ok || !d.jobId) { setTesting(t => ({ ...t, [p.id]: '❌ ' + (d.error || 'could not queue') })); return; }
+      for (let i = 0; i < 10; i++) {
+        await new Promise(res => setTimeout(res, 2000));
+        const s: any = await fetch(api(`/print-jobs/${d.jobId}/status`), { headers: H }).then(x => x.ok ? x.json() : null).catch(() => null);
+        if (s?.status === 'PRINTED') { setTesting(t => ({ ...t, [p.id]: '✅ printed OK' })); return; }
+        if (s?.status === 'FAILED')  { setTesting(t => ({ ...t, [p.id]: '❌ ' + (s.error || 'print failed') })); return; }
+      }
+      setTesting(t => ({ ...t, [p.id]: '⏳ queued — is the print agent running?' }));
+    } catch { setTesting(t => ({ ...t, [p.id]: '❌ could not reach the server' })); }
+  };
   const load = async () => {
     try {
       const [pr, at] = await Promise.all([
@@ -47236,7 +47254,12 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
                 <td className="text-[#6b5d52]">{p.station}</td>
                 <td className="font-mono text-xs">{String(p.conn_type).toUpperCase() === 'USB' ? `USB · ${p.host || '—'}` : `${p.host || '—'}:${p.port}`}</td>
                 <td>{p.copies}</td>
-                <td className="text-right whitespace-nowrap"><button onClick={() => edit(p)} className="text-xs font-bold text-[#cc5a16] hover:underline mr-3">Edit</button><button onClick={() => del(p.id)} className="text-xs font-bold text-red-500 hover:underline">Delete</button></td>
+                <td className="text-right whitespace-nowrap">
+                  {testing[p.id] && <span className="mr-3 text-[11px] font-semibold">{testing[p.id]}</span>}
+                  <button onClick={() => testPrinter(p)} className="text-xs font-bold text-emerald-600 hover:underline mr-3">Test</button>
+                  <button onClick={() => edit(p)} className="text-xs font-bold text-[#cc5a16] hover:underline mr-3">Edit</button>
+                  <button onClick={() => del(p.id)} className="text-xs font-bold text-red-500 hover:underline">Delete</button>
+                </td>
               </tr>))}</tbody>
           </table></div>
         )}
