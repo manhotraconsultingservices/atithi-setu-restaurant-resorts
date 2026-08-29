@@ -136,6 +136,32 @@ WHAT YOU NEED
 
 
 ========================================================================
+ PRINTING BILLS  —  AVOID BLANK PAGES
+========================================================================
+ A bill can print two ways. For a thermal printer, prefer the FIRST — it
+ is the reliable one and never prints a blank page.
+
+ 1. "Print Bill"  (Command Centre > open a table > Print Bill)   [BEST]
+      Sends the bill straight to your thermal printer through this agent.
+      No browser dialog, correct 80mm width, never blank.
+
+ 2. "Print" under  Restaurant > Invoices   (and Preview > Print)
+      This uses your WEB BROWSER's print dialog — intended for saving a
+      PDF or printing to an A4 office printer. If you print to the THERMAL
+      printer this way and get a blank or cut page, set in the browser
+      print dialog:
+         Destination : your thermal printer (e.g. POS-80)
+         Paper size  : 80 x 297 mm   (or "Roll Paper 80mm" / "72mm")
+         Margins     : None
+         Scale       : Default (100%)
+         Options     : tick "Background graphics"
+      then print. Chrome remembers these next time.
+
+ Also set the thermal printer's paper size in Windows:
+   Settings > Bluetooth & devices > Printers & scanners > (your printer)
+   > Printing preferences > Paper size = 80mm.
+
+========================================================================
  MANAGING THE AGENT
 ========================================================================
  * Stop / remove it       :  Service install  ->  Uninstall-Service.bat (as admin)

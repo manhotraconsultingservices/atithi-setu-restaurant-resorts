@@ -47863,10 +47863,15 @@ function buildThermalHTML(d: ThermalReceiptData): string {
  * Same popup-blocker-safe pattern as openThermalPrint, but via iframe.src
  * (document.write can't render PDFs).
  */
-// Off-screen 1×1 positioning: hidden from the user but still rendered by the
-// browser. Pure 0×0 or display:none iframes cause some Chromium builds to
-// skip rendering, which then prints blank.
-const PRINT_IFRAME_STYLE = 'position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+// Off-screen but FULLY RENDERED. Earlier this was a 1×1, opacity:0 iframe —
+// hidden, but several Chromium/thermal-driver combos snapshot such a
+// near-invisible frame as a BLANK page at print time (the reported "Invoice →
+// Print opens a blank page"). Give it real on-screen dimensions and full
+// opacity, pushed off-screen with a left offset, so the browser lays out AND
+// paints the content before print(). White background avoids a transparent
+// composite printing blank. Height is generous; print() paginates by the
+// document's own flow, so a taller receipt is never clipped.
+const PRINT_IFRAME_STYLE = 'position:fixed;left:-10000px;top:0;width:820px;height:1160px;border:0;background:#ffffff;pointer-events:none;';
 
 function printPdfBlob(blob: Blob) {
   const url = URL.createObjectURL(blob);
@@ -47936,21 +47941,28 @@ function openThermalPrint(html: string) {
   const trigger = () => {
     if (triggered) return;
     triggered = true;
-    try {
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-    } catch (err) {
-      console.error('Thermal print failed:', err);
-      alert('Printing failed. Check that a printer is configured as default in Windows.');
-      cleanup();
-      return;
-    }
-    // Let the print stream finish before removing the iframe — thermal
-    // printers over USB/serial can take a couple of seconds after the dialog
-    // closes. Removing too early truncates the receipt.
-    const win = iframe.contentWindow;
-    if (win) { win.onafterprint = () => setTimeout(cleanup, 2000); }
-    setTimeout(cleanup, 60_000);
+    // Wait two animation frames so the freshly-written content is laid out AND
+    // painted before we snapshot it for print. Calling print() synchronously
+    // right after document.write() can capture a BLANK page on some Chromium
+    // builds / thermal drivers.
+    const fire = () => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } catch (err) {
+        console.error('Thermal print failed:', err);
+        alert('Printing failed. Check that a printer is configured as default in Windows.');
+        cleanup();
+        return;
+      }
+      // Let the print stream finish before removing the iframe — thermal
+      // printers over USB/serial can take a couple of seconds after the dialog
+      // closes. Removing too early truncates the receipt.
+      const win = iframe.contentWindow;
+      if (win) { win.onafterprint = () => setTimeout(cleanup, 2000); }
+      setTimeout(cleanup, 60_000);
+    };
+    requestAnimationFrame(() => requestAnimationFrame(fire));
   };
 
   // Chromium fires load for document.write() iframes immediately after
