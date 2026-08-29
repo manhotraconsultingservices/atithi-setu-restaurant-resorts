@@ -7989,6 +7989,9 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [bankForm, setBankForm] = useState<any>(bankBlank);
   const [bankEditing, setBankEditing] = useState<string | null>(null);
   const [bankBusy, setBankBusy] = useState(false);
+  // Card / UPI commission (MDR) config
+  const [mdr, setMdr] = useState<any>({ card_pct: 0, upi_pct: 0, gst_pct: 18 });
+  const [mdrSaving, setMdrSaving] = useState(false);
   // Owners / Partners equity (Phase 2 — invest / payout)
   const [owners, setOwners] = useState<any[]>([]);
   const ownerBlank = { name: '', ownership_pct: '', phone: '', email: '', notes: '' };
@@ -8085,10 +8088,17 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   // Bank Accounts registry
   const loadBanks = useCallback(() => {
     setLoading(true);
-    acctApi('/accounting/bank-accounts')
-      .then(d => { if (Array.isArray(d)) setBankAccounts(d); })
+    Promise.all([acctApi('/accounting/bank-accounts'), acctApi('/accounting/payment-charges')])
+      .then(([d, m]: any[]) => { if (Array.isArray(d)) setBankAccounts(d); if (m && !m.error) setMdr(m); })
       .finally(() => setLoading(false));
   }, [acctApi]);
+  const saveMdr = async () => {
+    setMdrSaving(true);
+    try {
+      const r = await acctApi('/accounting/payment-charges', { method: 'PATCH', body: JSON.stringify({ card_pct: Number(mdr.card_pct) || 0, upi_pct: Number(mdr.upi_pct) || 0, gst_pct: Number(mdr.gst_pct) || 0 }) });
+      if (r && !r.error) setMdr(r);
+    } finally { setMdrSaving(false); }
+  };
   useEffect(() => { if (acctTab === 'BANK_ACCOUNTS') loadBanks(); }, [acctTab, loadBanks]);
   const saveBank = async () => {
     if (!String(bankForm.label || '').trim()) return;
@@ -8552,6 +8562,16 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
       {acctTab === 'BANK_ACCOUNTS' && (
         <div className="space-y-5">
           <p className="text-sm text-[#6b5d52]">Every bank account the business uses. Each is wired to its own ledger account, so its balance flows to the Balance Sheet and every owner payout / contribution posts against the right account.</p>
+          <div className="rounded-lg border border-[#e8ded0] p-4 bg-white space-y-3 max-w-2xl">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Card / UPI processing charges (MDR)</p>
+            <p className="text-[11px] text-[#9c8e85]">On every card/UPI sale the gateway's fee is split off automatically — net to the bank, the fee to <b>Card &amp; UPI Charges</b> (shows in the P&amp;L, so profit is after commission), and the GST on the fee to reclaimable ITC. Set 0 to disable (UPI is usually 0%).</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div><label className="text-xs text-[#6b5d52]">Card fee %</label><input type="number" step="0.01" min="0" className={ACCT_INPUT} value={mdr.card_pct} onChange={e => setMdr({ ...mdr, card_pct: e.target.value })} placeholder="2" /></div>
+              <div><label className="text-xs text-[#6b5d52]">UPI fee %</label><input type="number" step="0.01" min="0" className={ACCT_INPUT} value={mdr.upi_pct} onChange={e => setMdr({ ...mdr, upi_pct: e.target.value })} placeholder="0" /></div>
+              <div><label className="text-xs text-[#6b5d52]">GST on fee %</label><input type="number" step="0.01" min="0" className={ACCT_INPUT} value={mdr.gst_pct} onChange={e => setMdr({ ...mdr, gst_pct: e.target.value })} placeholder="18" /></div>
+            </div>
+            <button onClick={saveMdr} disabled={mdrSaving} className={AC_BTN}>{mdrSaving ? 'Saving…' : 'Save charges'}</button>
+          </div>
           <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
             <table className="w-full text-sm border-collapse">
               <thead><tr className="bg-[#f5f0e8] text-left">

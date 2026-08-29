@@ -4448,11 +4448,11 @@ async function settleFolioForBooking(
           glLines.push({ account_code: '2100', account_name: 'Advances from Guests', dr_amount: applied, cr_amount: 0, narration: `Advance applied ${folio.id}` });
           glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folio.id}` });
         }
+        const mdrFolio = await _mdrConfig(restaurantId);
         for (const p of nonAdv) {
           const amt = Number(p.amount);
           if (amt <= 0) continue;
-          const cashAcct = _glAccountForPaymentMethod(p.payment_method);
-          glLines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method} ${folio.id}` });
+          glLines.push(..._tenderGlLines(mdrFolio, p.payment_method, amt, `${p.payment_method} ${folio.id}`));
           glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
         }
         await _postGlEntries(tenantDb, restaurantId, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null);
@@ -4485,6 +4485,37 @@ function _glAccountForPaymentMethod(method: string): { code: string; name: strin
   return String(method || '').toUpperCase() === 'CASH'
     ? { code: '1000', name: 'Cash in Hand' }
     : { code: '1010', name: 'Bank — Main Account' };
+}
+
+// Per-tenant card/UPI commission (MDR) config, from the restaurants row.
+async function _mdrConfig(tenantId: string): Promise<{ cardPct: number; upiPct: number; gstPct: number }> {
+  const r: any = await centralDb.get("SELECT mdr_card_pct, mdr_upi_pct, mdr_gst_pct FROM restaurants WHERE id = ?", [tenantId]).catch(() => null);
+  return {
+    cardPct: Number(r?.mdr_card_pct || 0),
+    upiPct:  Number(r?.mdr_upi_pct || 0),
+    gstPct:  r?.mdr_gst_pct == null ? 18 : Number(r.mdr_gst_pct),
+  };
+}
+// Tender-side GL lines for a payment. CASH → cash in hand. CARD/UPI → the bank,
+// but split by the acquirer's MDR: NET to bank, the fee to Card & UPI Charges
+// (5510, expense → flows to P&L), and the GST on the fee to ITC (1330,
+// reclaimable). The lines ALWAYS sum to `gross`, so the enclosing journal stays
+// balanced. A 0% rate (e.g. UPI) collapses back to a single gross bank debit.
+function _tenderGlLines(mdr: { cardPct: number; upiPct: number; gstPct: number }, method: string, gross: number, narration: string): GlLine[] {
+  const m = String(method || '').toUpperCase();
+  const g = Math.round(Number(gross || 0) * 100) / 100;
+  if (m === 'CASH') return [{ account_code: '1000', account_name: 'Cash in Hand', dr_amount: g, cr_amount: 0, narration }];
+  const rate = m === 'UPI' ? Number(mdr.upiPct || 0) : Number(mdr.cardPct || 0);   // CARD (+ any other non-cash) → card rate
+  if (!(rate > 0) || g <= 0) return [{ account_code: '1010', account_name: 'Bank — Main Account', dr_amount: g, cr_amount: 0, narration }];
+  const fee = Math.round(g * rate) / 100;                  // g × rate%  (rate is a percentage)
+  const gstOnFee = Math.round(fee * Number(mdr.gstPct || 0)) / 100;
+  const net = Math.round((g - fee - gstOnFee) * 100) / 100;   // residual absorbs rounding → lines sum to g
+  const lines: GlLine[] = [
+    { account_code: '1010', account_name: 'Bank — Main Account', dr_amount: net, cr_amount: 0, narration },
+    { account_code: '5510', account_name: 'Card & UPI Charges',  dr_amount: fee, cr_amount: 0, narration: `${m} MDR ${rate}%` },
+  ];
+  if (gstOnFee > 0.009) lines.push({ account_code: '1330', account_name: 'ITC — Payment Gateway GST', dr_amount: gstOnFee, cr_amount: 0, narration: `GST on ${m} charges` });
+  return lines;
 }
 
 function _glAccountForEntryType(entryType: string): { code: string; name: string } {
@@ -4788,8 +4819,8 @@ async function _postOrderGl(db: any, restaurantId: string, order: any, postedBy:
       // collects); commission is settled separately at aggregator reconciliation.
       lines.push({ account_code: '1010', account_name: 'Bank — Main Account', dr_amount: taxable, cr_amount: 0, narration: `ECO ${order.eco_platform || ''} order ${order.id}`.trim() });
     } else {
-      const cashAcct = _glAccountForPaymentMethod(order.payment_method);
-      lines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: total, cr_amount: 0, narration: `${order.payment_method || 'CASH'} order ${order.id}` });
+      const mdr = await _mdrConfig(restaurantId);
+      lines.push(..._tenderGlLines(mdr, order.payment_method, total, `${order.payment_method || 'CASH'} order ${order.id}`));
     }
     lines.push({ account_code: '4010', account_name: 'F&B Revenue', dr_amount: 0, cr_amount: netRev, narration: `F&B order ${order.id}` });
     if (svcAmt > 0) lines.push({ account_code: '4020', account_name: 'Service Charge Revenue', dr_amount: 0, cr_amount: svcAmt, narration: `Service charge ${order.id}` });
@@ -4846,11 +4877,11 @@ async function _postFolioGl(
       lines.push({ account_code: '2100', account_name: 'Advances from Guests', dr_amount: applied, cr_amount: 0, narration: `Advance applied ${folioId}` });
       lines.push({ account_code: arCode, account_name: arName, dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folioId}` });
     }
+    const mdrF = await _mdrConfig(restaurantId);
     for (const p of nonAdv) {
       const amt = +Number(p.amount || 0).toFixed(2);
       if (amt <= 0) continue;
-      const cashAcct = _glAccountForPaymentMethod(p.payment_method);
-      lines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method || 'CASH'} ${folioId}` });
+      lines.push(..._tenderGlLines(mdrF, p.payment_method, amt, `${p.payment_method || 'CASH'} ${folioId}`));
       lines.push({ account_code: arCode, account_name: arName, dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folioId}` });
     }
     await _postGlEntries(db, restaurantId, journalRef, entryDate, opts.sourceType, folioId, lines, opts.postedBy || null);
@@ -51004,7 +51035,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'owner-capital-statement',
+    commit_marker: 'card-upi-mdr-commission',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
@@ -51586,6 +51617,33 @@ ${data.tenant.name}`;
         opening, rows, invested, withdrawn, closing: _acctRound(opening + invested - withdrawn),
         invested_total: all.invested, withdrawn_total: all.withdrawn, net_total: _acctRound(all.invested - all.withdrawn),
       });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── Card / UPI commission (MDR) config ────────────────────────────────────
+  const _ensureMdrCols = async () => {
+    await centralDb.exec("ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS mdr_card_pct REAL").catch(() => {});
+    await centralDb.exec("ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS mdr_upi_pct REAL").catch(() => {});
+    await centralDb.exec("ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS mdr_gst_pct REAL").catch(() => {});
+  };
+  app.get("/api/restaurant/:id/accounting/payment-charges", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      await _ensureMdrCols();
+      const r: any = await centralDb.get("SELECT mdr_card_pct, mdr_upi_pct, mdr_gst_pct FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+      res.json({ card_pct: Number(r?.mdr_card_pct || 0), upi_pct: Number(r?.mdr_upi_pct || 0), gst_pct: r?.mdr_gst_pct == null ? 18 : Number(r.mdr_gst_pct) });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  app.patch("/api/restaurant/:id/accounting/payment-charges", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      await _ensureMdrCols();
+      const b: any = req.body || {};
+      const card = Math.max(0, Number(b.card_pct) || 0);
+      const upi  = Math.max(0, Number(b.upi_pct) || 0);
+      const gst  = b.gst_pct == null ? 18 : Math.max(0, Number(b.gst_pct));
+      await centralDb.run("UPDATE restaurants SET mdr_card_pct = ?, mdr_upi_pct = ?, mdr_gst_pct = ? WHERE id = ?", [card, upi, gst, req.params.id]);
+      res.json({ success: true, card_pct: card, upi_pct: upi, gst_pct: gst });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
