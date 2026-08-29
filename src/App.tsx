@@ -57233,6 +57233,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   // Charge-to-Room: a walk-in diner who is a checked-in hotel guest can push the
   // whole bill onto their room folio instead of paying now — settled at check-out.
   const [inHouseRooms, setInHouseRooms] = useState<any[]>([]);
+  const [inHouseErr, setInHouseErr] = useState<string>('');
   const [roomSearch, setRoomSearch]     = useState('');
   const [selectedRoom, setSelectedRoom] = useState<any>(null);
   const [charging, setCharging]         = useState(false);
@@ -57306,7 +57307,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => (r.ok ? r.json() : { rooms: [] }))
-      .then(d => setInHouseRooms(Array.isArray(d?.rooms) ? d.rooms : []))
+      .then(d => { setInHouseRooms(Array.isArray(d?.rooms) ? d.rooms : []); setInHouseErr(d?._error || ''); })
       .catch(() => setInHouseRooms([]));
   }, [restaurantId, token]);
 
@@ -58192,7 +58193,13 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                       />
                       <div className="max-h-44 overflow-y-auto space-y-1">
                         {filteredRooms.length === 0 ? (
-                          <p className="text-xs text-[#9c8e85] text-center py-3">No matching in-house guest.</p>
+                          <p className="text-xs text-[#9c8e85] text-center py-3">
+                            {inHouseErr
+                              ? `Couldn't load rooms: ${inHouseErr}`
+                              : inHouseRooms.length === 0
+                                ? 'No checked-in guests. Check the guest in at Front Desk first, then charge the bill to their room.'
+                                : 'No matching in-house guest.'}
+                          </p>
                         ) : filteredRooms.map((r: any) => {
                           const active = selectedRoom?.booking_id === r.booking_id;
                           return (

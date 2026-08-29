@@ -44837,10 +44837,14 @@ ${data.tenant.name}`;
   // (room + guest + open folio). Tolerant: a restaurant-only tenant has no hotel
   // tables → returns an empty list (the option simply doesn't appear).
   app.get("/api/restaurant/:id/hotel/in-house-rooms", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    const db = await getTenantDb(req.params.id);
     try {
-      const db = await getTenantDb(req.params.id);
+      // In-house = the guest is physically staying: checked in and not yet checked
+      // out. Match the canonical status='CHECKED_IN' OR, defensively, any booking
+      // with a check-in timestamp and no checkout that isn't cancelled/checked-out —
+      // so a status-string variation on one tenant can't hide a real in-house guest.
       const rows: any[] = await db.query(
-        `SELECT b.id AS booking_id, b.room_id, b.guest_name,
+        `SELECT b.id AS booking_id, b.room_id, b.guest_name, b.status,
                 r.room_number, r.name AS room_name,
                 (SELECT f.id FROM folios f
                    WHERE f.booking_id = b.id AND f.status = 'open'
@@ -44848,13 +44852,18 @@ ${data.tenant.name}`;
            FROM room_bookings b
       LEFT JOIN rooms r ON r.id = b.room_id
           WHERE UPPER(COALESCE(b.status,'')) = 'CHECKED_IN'
+             OR (b.actual_checkin_at IS NOT NULL AND b.actual_checkout_at IS NULL
+                 AND UPPER(COALESCE(b.status,'')) NOT IN ('CANCELLED','CANCELED','CHECKED_OUT','NO_SHOW'))
        ORDER BY r.room_number`,
         []
       );
       res.json({ rooms: Array.isArray(rows) ? rows : [] });
-    } catch (err) {
-      // No hotel module / tables for this tenant — the picker just stays hidden.
-      res.json({ rooms: [] });
+    } catch (err: any) {
+      // Don't silently swallow — a genuinely restaurant-only tenant (no hotel
+      // tables) is expected, but any other failure must be visible so an empty
+      // room picker can be diagnosed instead of looking like "no guests".
+      console.warn(`[in-house-rooms] ${req.params.id} query failed:`, err?.message);
+      res.json({ rooms: [], _error: String(err?.message || 'query failed') });
     }
   });
 
@@ -50977,7 +50986,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'printer-test-kitchen-catchall',
+    commit_marker: 'in-house-rooms-robust-diag',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
