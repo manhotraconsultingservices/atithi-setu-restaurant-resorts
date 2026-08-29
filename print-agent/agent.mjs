@@ -31,6 +31,10 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+// Package version — bumped with each client release so the site can confirm which
+// build is running (printed in the startup banner). v3 = reliable NETWORK printing.
+const AGENT_VERSION = '3.0.0';
+
 // ── locate a folder we can read a .env / write temp files next to ────────────
 // Under `node agent.mjs` this is the script dir; bundled as an .exe it's the
 // folder the .exe lives in (process.execPath).
@@ -318,6 +322,6 @@ async function tick() {
   }
 }
 
-console.log(`Atithi-Setu print agent — ${BASE_URL} / ${RESTAURANT_ID}, polling every ${POLL_MS}ms`);
+console.log(`Atithi-Setu print agent v${AGENT_VERSION} — ${BASE_URL} / ${RESTAURANT_ID}, polling every ${POLL_MS}ms`);
 tick();
 setInterval(tick, POLL_MS);
