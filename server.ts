@@ -459,6 +459,7 @@ async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string): 
         kind: 'KOT', order_id: order.id, table: order.table_number || null,
         round: order.round_number || 1, customer: order.customer_name || null,
         at: order.created_at, station: p.station || 'ALL',
+        width: Number(p.width_cols) || 32,   // per-printer receipt width (chars)
         items: lines.map(l => ({ name: l.name, qty: l.qty, note: l.note })),
       });
       const jid = `PJ-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -47376,21 +47377,27 @@ ${data.tenant.name}`;
     if (!row) { res.status(403).json({ error: 'invalid print agent token' }); return false; }
     return true;
   };
+  // Receipt width for a printer is stored as CHARACTER COLUMNS (what ESC/POS uses):
+  // 58mm(2-inch)=32, 60mm=35, 72mm=42, 80mm(3-inch)=48. NULL/absent → 32 (legacy
+  // default, unchanged). The agent honours the per-job `width` we derive from this.
+  const _ensureKitchenPrinterCols = async (db: any) =>
+    db.exec("ALTER TABLE kitchen_printers ADD COLUMN IF NOT EXISTS width_cols INTEGER").catch(() => {});
   app.get("/api/restaurant/:id/kitchen-printers", authenticate, async (req: AuthRequest, res: Response) => {
     if (!requireOwnerOrAdmin(req, res)) return;
-    try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM kitchen_printers ORDER BY is_default DESC, name")); }
+    try { const db = await getTenantDb(req.params.id); await _ensureKitchenPrinterCols(db); res.json(await db.query("SELECT * FROM kitchen_printers ORDER BY is_default DESC, name")); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   app.post("/api/restaurant/:id/kitchen-printers", authenticate, async (req: AuthRequest, res: Response) => {
     if (!requireOwnerOrAdmin(req, res)) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const { name, station, conn_type, host, port, copies, is_default } = req.body || {};
+      await _ensureKitchenPrinterCols(db);
+      const { name, station, conn_type, host, port, copies, is_default, width_cols } = req.body || {};
       if (!name) return res.status(400).json({ error: 'name is required' });
       const pid = `KPR-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
       if (Number(is_default) === 1) await db.run("UPDATE kitchen_printers SET is_default = 0").catch(() => {});
-      await db.run("INSERT INTO kitchen_printers (id, name, station, conn_type, host, port, copies, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [pid, String(name), String(station || 'ALL').toUpperCase(), String(conn_type || 'NETWORK').toUpperCase(), host || null, Number(port) || 9100, Number(copies) || 1, Number(is_default) === 1 ? 1 : 0]);
+      await db.run("INSERT INTO kitchen_printers (id, name, station, conn_type, host, port, copies, is_default, width_cols) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [pid, String(name), String(station || 'ALL').toUpperCase(), String(conn_type || 'NETWORK').toUpperCase(), host || null, Number(port) || 9100, Number(copies) || 1, Number(is_default) === 1 ? 1 : 0, Number(width_cols) || null]);
       res.status(201).json(await db.get("SELECT * FROM kitchen_printers WHERE id = ?", [pid]));
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -47398,7 +47405,8 @@ ${data.tenant.name}`;
     if (!requireOwnerOrAdmin(req, res)) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const allowed = ['name', 'station', 'conn_type', 'host', 'port', 'copies', 'is_active', 'is_default'];
+      await _ensureKitchenPrinterCols(db);
+      const allowed = ['name', 'station', 'conn_type', 'host', 'port', 'copies', 'is_active', 'is_default', 'width_cols'];
       const sets: string[] = []; const vals: any[] = [];
       for (const k of allowed) if (k in (req.body || {})) { let v = (req.body as any)[k]; if (k === 'station' || k === 'conn_type') v = String(v).toUpperCase(); sets.push(`${k} = ?`); vals.push(v); }
       if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
@@ -47471,9 +47479,7 @@ ${data.tenant.name}`;
       if (!targets.length) targets = [printers[0]];
 
       const b: any = (req.body && req.body.bill) || req.body || {};
-      const content = JSON.stringify({
-        kind: 'INVOICE',
-        width: Number(req.body?.width) || Number(b.width) || 32,
+      const billBase = {
         restaurant: {
           name:    rest?.name || b?.restaurant?.name || 'TAX INVOICE',
           gstin:   rest?.gst_number || null,
@@ -47497,9 +47503,13 @@ ${data.tenant.name}`;
         total:              Number(b.total || 0),
         payment_method:     b.payment_method || null,
         footer:             b.footer || null,
-      });
+      };
+      const reqWidth = Number(req.body?.width) || Number(b.width) || 0;
       let queued = 0;
       for (const p of targets) {
+        // Per-printer receipt width wins; else the request's width; else 32 (58mm).
+        const width = Number(p.width_cols) || reqWidth || 32;
+        const content = JSON.stringify({ kind: 'INVOICE', width, ...billBase });
         const jid = `PJ-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         await db.run(
           "INSERT INTO print_jobs (id, printer_id, order_id, kind, content, status) VALUES (?, ?, ?, 'INVOICE', ?, 'PENDING')",
@@ -50928,7 +50938,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-print-via-agent',
+    commit_marker: 'restaurant-paper-width',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

@@ -47118,7 +47118,7 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
   const toast = useToast();
   const [printers, setPrinters] = useState<any[]>([]);
   const [agentToken, setAgentToken] = useState<string>('');
-  const blank = { name: '', station: 'ALL', conn_type: 'USB', host: '', port: 9100, copies: 1, is_default: 0 };
+  const blank = { name: '', station: 'ALL', conn_type: 'USB', host: '', port: 9100, copies: 1, is_default: 0, width_cols: 48 };
   const [form, setForm] = useState<any>(blank);
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47147,7 +47147,7 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
       else { setForm(blank); setEditing(null); await load(); toast.success('Saved'); }
     } finally { setBusy(false); }
   };
-  const edit = (p: any) => { setEditing(p.id); setForm({ name: p.name, station: p.station || 'ALL', conn_type: p.conn_type || 'NETWORK', host: p.host || '', port: p.port || 9100, copies: p.copies || 1, is_default: p.is_default || 0 }); };
+  const edit = (p: any) => { setEditing(p.id); setForm({ name: p.name, station: p.station || 'ALL', conn_type: p.conn_type || 'NETWORK', host: p.host || '', port: p.port || 9100, copies: p.copies || 1, is_default: p.is_default || 0, width_cols: Number(p.width_cols) || 32 }); };
   const del = async (id: string) => { if (!window.confirm('Delete this printer?')) return; await fetch(api(`/kitchen-printers/${id}`), { method: 'DELETE', headers: H }); await load(); };
   const rotate = async () => { if (!window.confirm('Rotate the agent token? The running print agent must be updated with the new token.')) return; const r = await fetch(api('/print-agent-token/rotate'), { method: 'POST', headers: H }); const d = await r.json().catch(() => ({})); if (d.token) { setAgentToken(d.token); toast.success('Token rotated'); } };
   const input = "w-full bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20";
@@ -47206,6 +47206,16 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
             </>
           )}
           <div><label className="text-[11px] text-[#6b5d52]">Copies</label><input type="number" min={1} className={input} value={form.copies} onChange={e => setForm({ ...form, copies: e.target.value })} /></div>
+          <div>
+            <label className="text-[11px] text-[#6b5d52]">Paper width</label>
+            <select className={input} value={String(Number(form.width_cols) || 32)} onChange={e => setForm({ ...form, width_cols: Number(e.target.value) })}>
+              <option value="32">58 mm — 2-inch (32 cols)</option>
+              <option value="35">60 mm (35 cols)</option>
+              <option value="42">72 mm (42 cols)</option>
+              <option value="48">80 mm — 3-inch (48 cols)</option>
+            </select>
+            <p className="text-[10px] text-[#9c8e85] mt-1">Match your printer's paper roll.</p>
+          </div>
           <label className="flex items-center gap-2 mt-6 text-sm"><input type="checkbox" checked={!!form.is_default} onChange={e => setForm({ ...form, is_default: e.target.checked ? 1 : 0 })} /> Default printer <span className="text-[10px] text-[#9c8e85]">(gets the bill if no INVOICE printer set)</span></label>
         </div>
         <div className="flex gap-2">
