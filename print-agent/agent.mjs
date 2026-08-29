@@ -164,15 +164,44 @@ function buildEscpos(job) {
 }
 
 // ── delivery: NETWORK (TCP 9100) ─────────────────────────────────────────────
+// Open a TCP socket to the printer and stream the ESC/POS bytes.
+//
+// KEY: we treat the job as PRINTED once the bytes have flushed to the printer —
+// we do NOT wait for the printer to close the connection. Many low-cost 9100 LAN
+// printers (common as a kitchen/KDS unit) accept the data, print, and then just
+// hold the socket open. The old code resolved only on 'close', so those printers
+// tripped the inactivity timeout and every ticket was falsely marked FAILED — then
+// retried (duplicate prints) and finally given up. Errors are mapped to a plain
+// sentence so the health-check (Test button) tells the owner exactly what to fix.
 function sendToNetwork(host, port, buf) {
+  const p = Number(port) || 9100;
   return new Promise((resolve, reject) => {
-    const sock = net.createConnection({ host, port: Number(port) || 9100 }, () => {
-      sock.write(buf, () => sock.end());
-    });
+    let settled = false;
+    const finish = (err) => {
+      if (settled) return; settled = true;
+      try { sock.destroy(); } catch {}
+      err ? reject(err) : resolve();
+    };
+    const sock = net.createConnection({ host, port: p });
+    // Inactivity guard — mainly bounds the CONNECT phase, since we settle ~200ms
+    // after the write. A wrong IP / blocked subnet fails fast with a clear message.
     sock.setTimeout(8000);
-    sock.on('error', reject);
-    sock.on('timeout', () => { sock.destroy(); reject(new Error('printer timeout')); });
-    sock.on('close', () => resolve());
+    sock.on('connect', () => {
+      sock.write(buf, (err) => {
+        if (err) { finish(new Error('write to printer failed: ' + err.message)); return; }
+        sock.end();                         // flush + half-close from our side
+        setTimeout(() => finish(), 200);    // success once bytes are out the door
+      });
+    });
+    sock.on('timeout', () => finish(new Error(`no response from ${host}:${p} — check the IP/port, that the printer is on the same LAN as the billing PC, and that port 9100 is open`)));
+    sock.on('error', (e) => {
+      const code = e && e.code;
+      if (code === 'ECONNREFUSED')                      finish(new Error(`connection refused at ${host}:${p} — printer off, wrong port, or it is not a raw/9100 printer`));
+      else if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') finish(new Error(`${host} is unreachable — the printer is on a different network than the billing PC`));
+      else if (code === 'ETIMEDOUT')                    finish(new Error(`connect timed out to ${host}:${p} — wrong IP or a firewall is blocking it`));
+      else finish(new Error((e && e.message) || 'network error'));
+    });
+    sock.on('close', () => finish());       // well-behaved printer closed first → success
   });
 }
 

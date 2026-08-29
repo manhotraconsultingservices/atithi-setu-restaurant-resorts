@@ -1,6 +1,6 @@
 {
   "name": "atithi-setu-print-agent",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Atithi-Setu on-prem thermal print agent (KOT + invoice) — USB / network ESC/POS.",
   "type": "module",
   "bin": "agent.mjs",
