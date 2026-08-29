@@ -4505,7 +4505,12 @@ function _tenderGlLines(mdr: { cardPct: number; upiPct: number; gstPct: number }
   const m = String(method || '').toUpperCase();
   const g = Math.round(Number(gross || 0) * 100) / 100;
   if (m === 'CASH') return [{ account_code: '1000', account_name: 'Cash in Hand', dr_amount: g, cr_amount: 0, narration }];
-  const rate = m === 'UPI' ? Number(mdr.upiPct || 0) : Number(mdr.cardPct || 0);   // CARD (+ any other non-cash) → card rate
+  // MDR split applies ONLY to explicit card/UPI tenders. Everything else — an
+  // unknown/blank method, BANK_TRANSFER, CHEQUE — books the full amount to the
+  // bank (the original default), so nothing is ever split by accident.
+  let rate = 0;
+  if (m === 'UPI') rate = Number(mdr.upiPct || 0);
+  else if (m === 'CARD' || m === 'CREDIT_CARD' || m === 'DEBIT_CARD') rate = Number(mdr.cardPct || 0);
   if (!(rate > 0) || g <= 0) return [{ account_code: '1010', account_name: 'Bank — Main Account', dr_amount: g, cr_amount: 0, narration }];
   const fee = Math.round(g * rate) / 100;                  // g × rate%  (rate is a percentage)
   const gstOnFee = Math.round(fee * Number(mdr.gstPct || 0)) / 100;
@@ -44810,10 +44815,21 @@ ${data.tenant.name}`;
         // S2 fix (15 Jun 2026): NEVER touch cancelled orders. Without this guard
         // the close marked cancelled rounds PAID *and* overwrote their CANCELLED
         // status back to 'DELIVERED' — un-cancelling them and billing the guest.
-        await db.run(
-          "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED' WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'",
-          [session.id]
-        );
+        // Stamp the tender method onto each order too (COALESCE keeps any method
+        // an order already carries) so the GL posts to the right account — cash to
+        // Cash, and card/UPI through the MDR split. Dine-in orders were left null,
+        // which defaulted every settled order to Bank regardless of how it was paid.
+        if (payment_method) {
+          await db.run(
+            "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED', payment_method = COALESCE(payment_method, ?) WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'",
+            [payment_method, session.id]
+          );
+        } else {
+          await db.run(
+            "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED' WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'",
+            [session.id]
+          );
+        }
         // CMD-CENTER-2: centralised free-table helper; logs on failure instead
         // of swallowing (the previous silent .catch hid every "stuck table"
         // bug for months).
@@ -51035,7 +51051,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'card-upi-mdr-commission',
+    commit_marker: 'mdr-tender-method-gl-fix',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
