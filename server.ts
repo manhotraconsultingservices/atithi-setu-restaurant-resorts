@@ -31418,12 +31418,26 @@ ${data.tenant.name}`;
   // the GL-derived ledger, Cash Book and P&L. Keyed on source_id (= the petty_cash
   // id) so it covers the original post AND any repost from a prior edit. Because
   // each journal is balanced, hiding it keeps the trial balance balanced.
-  const _hidePettyCashGl = async (tenantDb: any, restaurantId: string, entryId: string) => {
-    await tenantDb.run(
-      `UPDATE gl_entries SET is_reversed = 1
-        WHERE restaurant_id = ? AND source_type = 'PETTY_CASH' AND source_id = ? AND is_reversed = 0`,
-      [restaurantId, entryId]
-    ).catch(() => {});
+  const _hidePettyCashGl = async (tenantDb: any, restaurantId: string, entryId: string, exceptRef?: string) => {
+    const params: any[] = [restaurantId, entryId];
+    let sql = `UPDATE gl_entries SET is_reversed = 1
+        WHERE restaurant_id = ? AND source_type = 'PETTY_CASH' AND source_id = ? AND is_reversed = 0`;
+    if (exceptRef) { sql += ` AND journal_ref <> ?`; params.push(exceptRef); }
+    await tenantDb.run(sql, params).catch(() => {});
+  };
+
+  // Read gate for the Expense Journal / cash ledger. Sensitive (it exposes the full
+  // cash position), so it fails CLOSED: owner/management + front desk (the money-ops
+  // audience) always read; any other role needs an explicit EXPENSE_JOURNAL grant.
+  // requireTabAccess is not enough here — it fail-opens for a role with no matrix
+  // row, which is exactly how a plain waiter could read the whole ledger.
+  const _canReadExpenseJournal = async (req: AuthRequest, res: Response): Promise<boolean> => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER', 'FRONT_DESK'].includes(role)) return true;
+    const perms = await getTabPermissionsForRole(req.params.id, role).catch(() => null);
+    if (perms && Number((perms as any)['EXPENSE_JOURNAL'] || 0) >= 1) return true;
+    res.status(403).json({ error: 'Your role does not have access to the Expense Journal.' });
+    return false;
   };
 
   app.post("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
@@ -31491,11 +31505,15 @@ ${data.tenant.name}`;
       const glChanged = ['entry_date', 'direction', 'category', 'amount'].some(k => k in req.body);
       if (glChanged) {
         try {
-          const row: any = await tenantDb.get("SELECT * FROM petty_cash WHERE id = ?", [req.params.entryId]);
-          await _hidePettyCashGl(tenantDb, req.params.id, req.params.entryId);
+          // TO_CHAR: read the date back as a clean YYYY-MM-DD string (a raw DATE comes
+          // back as a JS Date, which stringifies to a locale form the GL INSERT rejects).
+          const row: any = await tenantDb.get("SELECT direction, amount, category, notes, TO_CHAR(entry_date,'YYYY-MM-DD') AS entry_date FROM petty_cash WHERE id = ?", [req.params.entryId]);
           const lines = _pettyCashGlLines(String(row.direction), Math.abs(Number(row.amount || 0)), row.category, row.notes);
           const ref = `PC-${req.params.entryId}#${Date.now()}`;
-          await _postGlEntries(tenantDb, req.params.id, ref, String(row.entry_date).slice(0, 10), 'PETTY_CASH', req.params.entryId, lines, req.user?.id || req.user?.email || null);
+          // Post the new journal FIRST; only retire the old one(s) once it lands, so a
+          // failed re-post never leaves the entry with no live journal.
+          const posted = await _postGlEntries(tenantDb, req.params.id, ref, String(row.entry_date).slice(0, 10), 'PETTY_CASH', req.params.entryId, lines, req.user?.id || req.user?.email || null);
+          if (posted?.ok) await _hidePettyCashGl(tenantDb, req.params.id, req.params.entryId, ref);
         } catch (glErr) { console.error('[GL] petty cash edit re-post error:', glErr); }
       }
       res.json({ success: true });
@@ -31504,8 +31522,9 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/petty-cash", authenticate, requireTabAccess('EXPENSE_JOURNAL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _canReadExpenseJournal(req, res))) return;
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
@@ -31719,8 +31738,9 @@ ${data.tenant.name}`;
 
   // ── EXPENSE REPORTS ──────────────────────────────────────────────────────
   // Daily expense trend: total OUT grouped by date, split by module and category.
-  app.get("/api/restaurant/:id/expense-reports/daily", authenticate, requireTabAccess('EXPENSE_JOURNAL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/expense-reports/daily", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _canReadExpenseJournal(req, res))) return;
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
@@ -31748,8 +31768,9 @@ ${data.tenant.name}`;
   });
 
   // Category breakdown: expenses by category + module for trend pie / bar.
-  app.get("/api/restaurant/:id/expense-reports/category", authenticate, requireTabAccess('EXPENSE_JOURNAL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/expense-reports/category", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _canReadExpenseJournal(req, res))) return;
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
@@ -31773,8 +31794,9 @@ ${data.tenant.name}`;
   });
 
   // Consolidated: module-level summary with period-over-period comparison.
-  app.get("/api/restaurant/:id/expense-reports/consolidated", authenticate, requireTabAccess('EXPENSE_JOURNAL'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/expense-reports/consolidated", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _canReadExpenseJournal(req, res))) return;
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
       const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
@@ -51125,7 +51147,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'petty-cash-unify-source',
+    commit_marker: 'petty-cash-unify-fix2',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
