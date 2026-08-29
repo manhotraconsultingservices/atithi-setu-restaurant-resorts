@@ -7970,7 +7970,7 @@ function SettlementUploadForm({
 function AccountingView({ restaurantId, token, initialTab, cashierMode }: { restaurantId: string; token: string; initialTab?: string; cashierMode?: boolean }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
     | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
-    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'BANK_ACCOUNTS' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
+    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'BANK_ACCOUNTS' | 'OWNER_EQUITY' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
   // cashierMode (used by the top-level "Cash" nav item) opens straight on the
   // Cash Drawers panel and hides the rest of the ledger nav, so a cashier reaches
   // their till + shift handover in one click without the owner-only accounting tabs.
@@ -7989,6 +7989,16 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [bankForm, setBankForm] = useState<any>(bankBlank);
   const [bankEditing, setBankEditing] = useState<string | null>(null);
   const [bankBusy, setBankBusy] = useState(false);
+  // Owners / Partners equity (Phase 2 — invest / payout)
+  const [owners, setOwners] = useState<any[]>([]);
+  const ownerBlank = { name: '', ownership_pct: '', phone: '', email: '', notes: '' };
+  const [ownerForm, setOwnerForm] = useState<any>(ownerBlank);
+  const [ownerEditing, setOwnerEditing] = useState<string | null>(null);
+  const [ownerBusy, setOwnerBusy] = useState(false);
+  const txnBlank = { txn_type: 'INVEST', amount: '', txn_date: new Date().toISOString().slice(0, 10), bank_account_id: '', note: '' };
+  const [txnOwner, setTxnOwner] = useState<any>(null);
+  const [txnForm, setTxnForm] = useState<any>(txnBlank);
+  const [txnBusy, setTxnBusy] = useState(false);
 
   const nowD = new Date();
   const fyStart = nowD.getMonth() >= 3 ? `${nowD.getFullYear()}-04-01` : `${nowD.getFullYear() - 1}-04-01`;
@@ -8095,6 +8105,47 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     if (r && r.error) alert(r.error);
     loadBanks();
   };
+
+  // Owners / Partners equity
+  const loadOwners = useCallback(() => {
+    setLoading(true);
+    Promise.all([acctApi('/accounting/owners'), acctApi('/accounting/bank-accounts')])
+      .then(([o, b]: any[]) => { if (Array.isArray(o)) setOwners(o); if (Array.isArray(b)) setBankAccounts(b); })
+      .finally(() => setLoading(false));
+  }, [acctApi]);
+  useEffect(() => { if (acctTab === 'OWNER_EQUITY') loadOwners(); }, [acctTab, loadOwners]);
+  const saveOwner = async () => {
+    if (!String(ownerForm.name || '').trim()) return;
+    setOwnerBusy(true);
+    try {
+      const body = JSON.stringify({ ...ownerForm, ownership_pct: Number(ownerForm.ownership_pct) || 0 });
+      const r = ownerEditing
+        ? await acctApi(`/accounting/owners/${ownerEditing}`, { method: 'PATCH', body })
+        : await acctApi('/accounting/owners', { method: 'POST', body });
+      if (r && r.error) alert(r.error);
+      else { setOwnerForm(ownerBlank); setOwnerEditing(null); loadOwners(); }
+    } finally { setOwnerBusy(false); }
+  };
+  const editOwner = (o: any) => { setOwnerEditing(o.id); setOwnerForm({ name: o.name || '', ownership_pct: o.ownership_pct || '', phone: o.phone || '', email: o.email || '', notes: o.notes || '' }); };
+  const delOwner = async (o: any) => {
+    if (!window.confirm(`Remove "${o.name}"? (Only allowed when their capital is zero.)`)) return;
+    const r = await acctApi(`/accounting/owners/${o.id}`, { method: 'DELETE' });
+    if (r && r.error) alert(r.error);
+    loadOwners();
+  };
+  const openTxn = (o: any, type: string) => { setTxnOwner(o); setTxnForm({ ...txnBlank, txn_type: type }); };
+  const recordTxn = async () => {
+    if (!txnOwner) return;
+    const amt = Number(txnForm.amount);
+    if (!(amt > 0)) { alert('Enter an amount greater than zero.'); return; }
+    setTxnBusy(true);
+    try {
+      const r = await acctApi(`/accounting/owners/${txnOwner.id}/transactions`, { method: 'POST', body: JSON.stringify({ ...txnForm, amount: amt }) });
+      if (r && r.error) alert(r.error);
+      else { setTxnOwner(null); setTxnForm(txnBlank); loadOwners(); }
+    } finally { setTxnBusy(false); }
+  };
+  const inr = (n: any) => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   // ── Phase 2: GL-derived statements, GST returns, aging, controls ──────────
   const [pnl, setPnl] = useState<any>(null);
@@ -8422,7 +8473,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     PNL: 'Profit & Loss', BALANCESHEET: 'Balance Sheet', CASHFLOW: 'Cash Flow',
     GST: 'GST Outstanding', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
     CASHBOOK: 'Cash Book', AGING_AR: 'AR Aging', AGING_AP: 'AP Aging', BANKREC: 'Bank Reconciliation',
-    BANK_ACCOUNTS: 'Bank Accounts',
+    BANK_ACCOUNTS: 'Bank Accounts', OWNER_EQUITY: 'Owners & Equity',
     TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
     EXPENSES: 'Expenses & Payments', LOANS: 'Loans / EMI',
   };
@@ -8432,6 +8483,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     { key: 'GST', label: 'GST', tabs: ['GST', 'GSTR1', 'GSTR3B'] },
     { key: 'WORKING', label: 'Working Capital', tabs: ['CASHBOOK', 'BANK_ACCOUNTS', 'AGING_AR', 'AGING_AP', 'BANKREC'] },
     { key: 'SPEND', label: 'Expenses & Loans', tabs: ['EXPENSES', 'LOANS'] },
+    { key: 'OWNERSHIP', label: 'Ownership', tabs: ['OWNER_EQUITY'] },
     { key: 'CONTROLS', label: 'Controls', tabs: ['CASHDRAWER', 'CASHCOUNT', 'PERIODS', 'TDS'] },
   ];
   const activeGroup = ACCT_GROUPS.find(g => g.tabs.includes(acctTab)) || ACCT_GROUPS[0];
@@ -8514,6 +8566,79 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <div className="flex gap-2">
               <button onClick={saveBank} disabled={bankBusy} className={AC_BTN}>{bankEditing ? 'Update' : 'Add account'}</button>
               {bankEditing && <button onClick={() => { setBankEditing(null); setBankForm(bankBlank); }} className="px-3 py-1.5 text-sm rounded border border-[#d4c4a8] text-[#6b5d52]">Cancel</button>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {acctTab === 'OWNER_EQUITY' && (
+        <div className="space-y-5">
+          <p className="text-sm text-[#6b5d52]">Business owners / partners and their capital. <b>Invest</b> records money an owner puts in; <b>Payout</b> records a drawing / withdrawal. Every entry posts to the ledger, so each owner's capital reconciles with the books.</p>
+          <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+            <table className="w-full text-sm border-collapse">
+              <thead><tr className="bg-[#f5f0e8] text-left">
+                <th className="px-3 py-2 font-semibold text-[#1a1208]">Owner</th>
+                <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Share %</th>
+                <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Invested</th>
+                <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Withdrawn</th>
+                <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Net Capital</th>
+                <th className="px-3 py-2"></th>
+              </tr></thead>
+              <tbody>
+                {owners.map(o => (
+                  <tr key={o.id} className="border-t border-[#e8ded0]">
+                    <td className="px-3 py-2 font-medium text-[#1a1208]">{o.name}{o.phone ? <span className="block text-[11px] text-[#9c8e85]">{o.phone}</span> : null}</td>
+                    <td className="px-3 py-2 text-right text-[#6b5d52]">{Number(o.ownership_pct || 0)}%</td>
+                    <td className="px-3 py-2 text-right font-mono text-emerald-700">{inr(o.invested)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-red-600">{inr(o.withdrawn)}</td>
+                    <td className="px-3 py-2 text-right font-mono font-bold text-[#1a1208]">{inr(o.net)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">
+                      <button onClick={() => openTxn(o, 'INVEST')} className="text-xs font-bold text-emerald-700 hover:underline mr-2">Invest</button>
+                      <button onClick={() => openTxn(o, 'PAYOUT')} className="text-xs font-bold text-[#a0522d] hover:underline mr-2">Payout</button>
+                      <button onClick={() => editOwner(o)} className="text-xs font-bold text-[#6b5d52] hover:underline mr-2">Edit</button>
+                      <button onClick={() => delOwner(o)} className="text-xs font-bold text-red-400 hover:underline">Remove</button>
+                    </td>
+                  </tr>
+                ))}
+                {owners.length === 0 && !loading && <tr><td colSpan={6} className="px-3 py-4 text-center text-[#9c8e85] italic">No owners yet — add one below.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+
+          {txnOwner && (
+            <div className="rounded-lg border-2 border-[#a0522d]/30 p-4 bg-[#fdf8f0] space-y-3 max-w-2xl">
+              <p className="text-sm font-bold text-[#1a1208]">{txnForm.txn_type === 'INVEST' ? 'Record investment' : 'Record payout / withdrawal'} — {txnOwner.name}</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div><label className="text-xs text-[#6b5d52]">Amount *</label><input type="number" className={ACCT_INPUT} value={txnForm.amount} onChange={e => setTxnForm({ ...txnForm, amount: e.target.value })} placeholder="0.00" /></div>
+                <div><label className="text-xs text-[#6b5d52]">Date</label><input type="date" className={ACCT_INPUT} value={txnForm.txn_date} onChange={e => setTxnForm({ ...txnForm, txn_date: e.target.value })} /></div>
+                <div><label className="text-xs text-[#6b5d52]">{txnForm.txn_type === 'INVEST' ? 'Deposited into' : 'Paid from'}</label>
+                  <select className={ACCT_INPUT} value={txnForm.bank_account_id} onChange={e => setTxnForm({ ...txnForm, bank_account_id: e.target.value })}>
+                    <option value="">Default bank</option>
+                    {bankAccounts.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+                    <option value="CASH">Cash in hand</option>
+                  </select>
+                </div>
+                <div><label className="text-xs text-[#6b5d52]">Note</label><input className={ACCT_INPUT} value={txnForm.note} onChange={e => setTxnForm({ ...txnForm, note: e.target.value })} placeholder="optional" /></div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={recordTxn} disabled={txnBusy} className={AC_BTN}>{txnBusy ? 'Recording…' : (txnForm.txn_type === 'INVEST' ? 'Record investment' : 'Record payout')}</button>
+                <button onClick={() => { setTxnOwner(null); setTxnForm(txnBlank); }} className="px-3 py-1.5 text-sm rounded border border-[#d4c4a8] text-[#6b5d52]">Cancel</button>
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-[#e8ded0] p-4 bg-white space-y-3 max-w-2xl">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{ownerEditing ? 'Edit owner' : 'Add an owner / partner'}</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div><label className="text-xs text-[#6b5d52]">Name *</label><input className={ACCT_INPUT} value={ownerForm.name} onChange={e => setOwnerForm({ ...ownerForm, name: e.target.value })} placeholder="Partner name" /></div>
+              <div><label className="text-xs text-[#6b5d52]">Ownership %</label><input type="number" className={ACCT_INPUT} value={ownerForm.ownership_pct} onChange={e => setOwnerForm({ ...ownerForm, ownership_pct: e.target.value })} placeholder="e.g. 50" /></div>
+              <div><label className="text-xs text-[#6b5d52]">Phone</label><input className={ACCT_INPUT} value={ownerForm.phone} onChange={e => setOwnerForm({ ...ownerForm, phone: e.target.value })} /></div>
+              <div><label className="text-xs text-[#6b5d52]">Email</label><input className={ACCT_INPUT} value={ownerForm.email} onChange={e => setOwnerForm({ ...ownerForm, email: e.target.value })} /></div>
+              <div className="md:col-span-2"><label className="text-xs text-[#6b5d52]">Notes</label><input className={ACCT_INPUT} value={ownerForm.notes} onChange={e => setOwnerForm({ ...ownerForm, notes: e.target.value })} /></div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={saveOwner} disabled={ownerBusy} className={AC_BTN}>{ownerEditing ? 'Update' : 'Add owner'}</button>
+              {ownerEditing && <button onClick={() => { setOwnerEditing(null); setOwnerForm(ownerBlank); }} className="px-3 py-1.5 text-sm rounded border border-[#d4c4a8] text-[#6b5d52]">Cancel</button>}
             </div>
           </div>
         </div>

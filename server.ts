@@ -51004,7 +51004,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bank-accounts-registry',
+    commit_marker: 'owner-equity-invest-payout',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
@@ -51384,6 +51384,161 @@ ${data.tenant.name}`;
       await db.run("UPDATE bank_accounts SET is_active = 0 WHERE id = ?", [req.params.bankId]);
       await db.run("UPDATE chart_of_accounts SET is_active = 0 WHERE code = ? AND is_system = 0", [cur.gl_account_code]).catch(() => {});
       res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── Owners / Partners equity (Phase 2 — invest / payout) ──────────────────
+  // Each owner has their own Capital account (equity, 301x). Investments credit
+  // it (money in), payouts/drawings debit it (money out); the net is their stake.
+  // Every txn posts through _postGlEntries AND is logged to owner_transactions so
+  // the per-owner statement can show gross invested vs withdrawn.
+  const _ensureOwners = async (db: any) => {
+    await db.exec(`CREATE TABLE IF NOT EXISTS owners (
+      id TEXT PRIMARY KEY, restaurant_id TEXT, name TEXT, ownership_pct REAL DEFAULT 0,
+      phone TEXT, email TEXT, capital_gl_code TEXT, is_active INTEGER DEFAULT 1,
+      notes TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+    await db.exec(`CREATE TABLE IF NOT EXISTS owner_transactions (
+      id TEXT PRIMARY KEY, restaurant_id TEXT, owner_id TEXT, txn_type TEXT,
+      amount REAL, txn_date TEXT, bank_account_id TEXT, gl_code TEXT, gl_name TEXT,
+      journal_ref TEXT, note TEXT, created_by TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  };
+  const _ownerCapital = async (db: any, code: string): Promise<number> => {
+    const r: any = await db.get("SELECT COALESCE(SUM(cr_amount - dr_amount), 0) AS b FROM gl_entries WHERE account_code = ? AND COALESCE(is_reversed,0) = 0", [code]).catch(() => ({ b: 0 }));
+    return _acctRound(Number(r?.b || 0));
+  };
+  const _ownerTotals = async (db: any, ownerId: string) => {
+    const inv: any = await db.get("SELECT COALESCE(SUM(amount),0) AS s FROM owner_transactions WHERE owner_id = ? AND txn_type = 'INVEST'", [ownerId]).catch(() => ({ s: 0 }));
+    const out: any = await db.get("SELECT COALESCE(SUM(amount),0) AS s FROM owner_transactions WHERE owner_id = ? AND txn_type = 'PAYOUT'", [ownerId]).catch(() => ({ s: 0 }));
+    return { invested: _acctRound(Number(inv?.s || 0)), withdrawn: _acctRound(Number(out?.s || 0)) };
+  };
+  // Resolve a payment source → GL account. A bank_account_id from Phase 1, or CASH.
+  const _resolvePaySource = async (db: any, bankId: any): Promise<{ code: string; name: string }> => {
+    if (!bankId || String(bankId).toUpperCase() === 'CASH') return { code: '1000', name: 'Cash in Hand' };
+    const ba: any = await db.get("SELECT gl_account_code, label FROM bank_accounts WHERE id = ? AND is_active = 1", [bankId]).catch(() => null);
+    return ba ? { code: ba.gl_account_code, name: ba.label } : { code: '1010', name: 'Bank — Main Account' };
+  };
+  app.get("/api/restaurant/:id/accounting/owners", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureOwners(db);
+      const rows: any[] = await db.query("SELECT * FROM owners WHERE is_active = 1 ORDER BY ownership_pct DESC, name", []);
+      for (const o of rows) {
+        o.capital_balance = await _ownerCapital(db, o.capital_gl_code);
+        const t = await _ownerTotals(db, o.id);
+        o.invested = t.invested; o.withdrawn = t.withdrawn; o.net = _acctRound(t.invested - t.withdrawn);
+      }
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  app.post("/api/restaurant/:id/accounting/owners", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureOwners(db);
+      const b: any = req.body || {};
+      if (!String(b.name || '').trim()) return res.status(400).json({ error: 'Owner name is required.' });
+      // Allocate the next free equity code (301x block — 3000/3100/3200 reserved).
+      const nx: any = await db.get("SELECT COALESCE(MAX(capital_gl_code::int), 3009) + 1 AS next FROM owners WHERE capital_gl_code ~ '^30[1-9][0-9]$'").catch(() => ({ next: 3010 }));
+      let code = String(Math.max(3010, Number(nx?.next || 3010)));
+      while (await db.get("SELECT code FROM chart_of_accounts WHERE code = ?", [code]).catch(() => null)) code = String(Number(code) + 1);
+      const id = `OWNER-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const name = String(b.name).slice(0, 80);
+      await db.run(
+        "INSERT INTO chart_of_accounts (code, name, type, sub_type, is_system, is_active, display_order) VALUES (?, ?, 'EQUITY', 'OWNER_CAPITAL', 0, 1, 3010) ON CONFLICT (code) DO NOTHING",
+        [code, `${name} — Capital`]
+      ).catch(() => {});
+      await db.run(
+        "INSERT INTO owners (id, restaurant_id, name, ownership_pct, phone, email, capital_gl_code, notes, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        [id, req.params.id, name, _acctRound(b.ownership_pct), b.phone || null, b.email || null, code, b.notes || null]
+      );
+      const row: any = await db.get("SELECT * FROM owners WHERE id = ?", [id]);
+      row.capital_balance = 0; row.invested = 0; row.withdrawn = 0; row.net = 0;
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  app.patch("/api/restaurant/:id/accounting/owners/:ownerId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureOwners(db);
+      const cur: any = await db.get("SELECT * FROM owners WHERE id = ?", [req.params.ownerId]);
+      if (!cur) return res.status(404).json({ error: 'Owner not found.' });
+      const b: any = req.body || {};
+      const sets: string[] = []; const vals: any[] = [];
+      if ('name' in b)          { sets.push('name = ?'); vals.push(String(b.name).slice(0, 80)); }
+      if ('ownership_pct' in b) { sets.push('ownership_pct = ?'); vals.push(_acctRound(b.ownership_pct)); }
+      if ('phone' in b)         { sets.push('phone = ?'); vals.push(b.phone || null); }
+      if ('email' in b)         { sets.push('email = ?'); vals.push(b.email || null); }
+      if ('notes' in b)         { sets.push('notes = ?'); vals.push(b.notes || null); }
+      if (sets.length) { vals.push(req.params.ownerId); await db.run(`UPDATE owners SET ${sets.join(', ')} WHERE id = ?`, vals); }
+      if ('name' in b && cur.capital_gl_code) await db.run("UPDATE chart_of_accounts SET name = ? WHERE code = ? AND is_system = 0", [`${String(b.name).slice(0, 80)} — Capital`, cur.capital_gl_code]).catch(() => {});
+      const row: any = await db.get("SELECT * FROM owners WHERE id = ?", [req.params.ownerId]);
+      row.capital_balance = await _ownerCapital(db, row.capital_gl_code);
+      const t = await _ownerTotals(db, row.id); row.invested = t.invested; row.withdrawn = t.withdrawn; row.net = _acctRound(t.invested - t.withdrawn);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  app.delete("/api/restaurant/:id/accounting/owners/:ownerId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureOwners(db);
+      const cur: any = await db.get("SELECT * FROM owners WHERE id = ?", [req.params.ownerId]);
+      if (!cur) return res.status(404).json({ error: 'Owner not found.' });
+      const bal = await _ownerCapital(db, cur.capital_gl_code);
+      if (Math.abs(bal) > 0.01) return res.status(409).json({ error: `This owner still holds capital of ${bal}. Pay it out / settle it before removing.` });
+      await db.run("UPDATE owners SET is_active = 0 WHERE id = ?", [req.params.ownerId]);
+      await db.run("UPDATE chart_of_accounts SET is_active = 0 WHERE code = ? AND is_system = 0", [cur.capital_gl_code]).catch(() => {});
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  // Record an owner INVEST (contribution) or PAYOUT (drawing/withdrawal).
+  app.post("/api/restaurant/:id/accounting/owners/:ownerId/transactions", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureOwners(db); await _ensureBankAccounts(db);
+      const owner: any = await db.get("SELECT * FROM owners WHERE id = ? AND is_active = 1", [req.params.ownerId]);
+      if (!owner) return res.status(404).json({ error: 'Owner not found.' });
+      const b: any = req.body || {};
+      const type = String(b.txn_type || '').toUpperCase();
+      if (type !== 'INVEST' && type !== 'PAYOUT') return res.status(400).json({ error: "txn_type must be INVEST or PAYOUT." });
+      const amount = _acctRound(b.amount);
+      if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than zero.' });
+      const src = await _resolvePaySource(db, b.bank_account_id);
+      const date = String(b.txn_date || new Date().toISOString().slice(0, 10));
+      const txnId = `OWTX-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const seq = await getNextTenantSequence(db, 'ownerequity');
+      const ref = `OWN-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+      const capName = `${owner.name} — Capital`;
+      // INVEST: Dr bank/cash · Cr owner capital.  PAYOUT: Dr owner capital · Cr bank/cash.
+      const lines: GlLine[] = type === 'INVEST'
+        ? [{ account_code: src.code, account_name: src.name, dr_amount: amount, cr_amount: 0, narration: `${owner.name} capital introduced` },
+           { account_code: owner.capital_gl_code, account_name: capName, dr_amount: 0, cr_amount: amount, narration: `${owner.name} capital introduced` }]
+        : [{ account_code: owner.capital_gl_code, account_name: capName, dr_amount: amount, cr_amount: 0, narration: `${owner.name} drawings / payout` },
+           { account_code: src.code, account_name: src.name, dr_amount: 0, cr_amount: amount, narration: `${owner.name} drawings / payout` }];
+      const result = await _postGlEntries(db, req.params.id, ref, date, type === 'INVEST' ? 'OWNER_INVEST' : 'OWNER_PAYOUT', txnId, lines, String(req.user?.id || req.user?.email || 'owner'));
+      if (!result.ok && result.dropped) return res.status(400).json({ error: `Could not post (${result.reason}).` });
+      await db.run(
+        "INSERT INTO owner_transactions (id, restaurant_id, owner_id, txn_type, amount, txn_date, bank_account_id, gl_code, gl_name, journal_ref, note, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [txnId, req.params.id, owner.id, type, amount, date, (b.bank_account_id || null), src.code, src.name, ref, b.note || null, String(req.user?.id || req.user?.email || 'owner')]
+      );
+      const t = await _ownerTotals(db, owner.id);
+      res.status(201).json({ success: true, id: txnId, journal_ref: ref, invested: t.invested, withdrawn: t.withdrawn, net: _acctRound(t.invested - t.withdrawn), capital_balance: await _ownerCapital(db, owner.capital_gl_code) });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+  app.get("/api/restaurant/:id/accounting/owners/:ownerId/transactions", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureOwners(db);
+      const { from, to } = req.query as Record<string, string>;
+      const params: any[] = [req.params.ownerId]; const clauses = ['owner_id = ?'];
+      if (from) { clauses.push('txn_date >= ?'); params.push(from); }
+      if (to)   { clauses.push('txn_date <= ?'); params.push(to); }
+      const rows = await db.query(`SELECT * FROM owner_transactions WHERE ${clauses.join(' AND ')} ORDER BY txn_date, created_at`, params);
+      res.json(rows);
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
