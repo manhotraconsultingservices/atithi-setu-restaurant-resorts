@@ -2914,6 +2914,27 @@ async function testCashDrawer() {
   } else {
     fail('TC-ACCT-SPA-EVT-DAYBOOK', 'spa/event Day Book filter', `HTTP spa=${spaGl.status} evt=${evtGl.status}`);
   }
+
+  // TC-ACCT-MDR-CFG: Card/UPI commission (MDR) config endpoint deployed + round-trips.
+  // Fields are card_pct/upi_pct/gst_pct (NOT mdr_-prefixed); PATCH is a full replace.
+  // Read-only w.r.t. the GL — the deep split proof (cash→Cash, card→5510+1330 split)
+  // lives in scratchpad/mdr_e2e.mjs to avoid posting settlements on every smoke run.
+  const pcGet = await api('GET', `/api/restaurant/${restaurantId}/accounting/payment-charges`);
+  if (pcGet.status === 403) {
+    skip('TC-ACCT-MDR-CFG', 'payment-charges (MDR) config', 'not owner');
+  } else if (pcGet.status !== 200 || pcGet.data == null || typeof pcGet.data.card_pct === 'undefined') {
+    fail('TC-ACCT-MDR-CFG', 'payment-charges (MDR) config deployed', `HTTP ${pcGet.status} data=${JSON.stringify(pcGet.data).slice(0, 120)}`);
+  } else {
+    const orig = { card_pct: Number(pcGet.data.card_pct || 0), upi_pct: Number(pcGet.data.upi_pct || 0), gst_pct: pcGet.data.gst_pct == null ? 18 : Number(pcGet.data.gst_pct) };
+    const probe = { card_pct: 1.75, upi_pct: 0.9, gst_pct: 18 };
+    await api('PATCH', `/api/restaurant/${restaurantId}/accounting/payment-charges`, probe);
+    const back = await api('GET', `/api/restaurant/${restaurantId}/accounting/payment-charges`);
+    const rt = back.status === 200 && Number(back.data.card_pct) === 1.75 && Number(back.data.upi_pct) === 0.9 && Number(back.data.gst_pct) === 18;
+    // restore the tenant's original rates no matter what the assertion found
+    await api('PATCH', `/api/restaurant/${restaurantId}/accounting/payment-charges`, orig);
+    if (rt) pass('TC-ACCT-MDR-CFG', 'MDR payment-charges config deployed + round-trips (card/upi/gst), original rates restored');
+    else fail('TC-ACCT-MDR-CFG', 'MDR payment-charges config round-trip', `PATCH did not persist — got ${JSON.stringify(back.data).slice(0, 120)}`);
+  }
 }
 
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
