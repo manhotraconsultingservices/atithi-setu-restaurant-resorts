@@ -4,3 +4,8 @@ dist/
 .env
 # pkg / npm scratch
 node_modules/
+# NSSM download scratch — keep only the small public-domain nssm.exe (bundled in the client package)
+vendor/*
+!vendor/nssm.exe
+# runtime log written next to the service
+agent.log

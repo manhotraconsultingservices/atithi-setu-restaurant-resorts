@@ -66,24 +66,52 @@ WHAT YOU NEED
 ========================================================================
  PART B — INSTALL THE AGENT ON THE BILLING PC   (about 5 minutes)
 ========================================================================
- 1. Copy the "AtithiSetuPrintAgent" folder onto the billing PC
-    (e.g. the Desktop, or  C:\AtithiSetu\ ).
-    If you received a .zip: right-click it > Extract All first.
+ First, copy the "AtithiSetuPrintAgent" folder onto the billing PC
+ (e.g.  C:\AtithiSetu\ ). If you received a .zip: right-click > Extract All.
+ Everything needed is inside the folder — nothing else to download or install.
 
- 2. Double-click   Setup.bat
+ Then pick ONE of the two install methods below.
 
-    If Windows shows "Windows protected your PC":
-        click  "More info"  >  "Run anyway"   (normal for a new program).
+ ----------------------------------------------------------------------
+ OPTION 1 (RECOMMENDED)  —  Install as a Windows SERVICE
+ ----------------------------------------------------------------------
+ Best for a shop PC: starts at BOOT before anyone logs in, keeps running
+ after logout, and restarts itself automatically if it ever stops.
 
- 3. When asked, type:
-        Server URL     : press Enter to accept  https://erp.atithi-setu.com
-        Restaurant ID  : e.g.  RESTO-1234
-        Print agent token : paste the token you copied in Part A
+   1. RIGHT-CLICK  Install-Service.bat  >  "Run as administrator".
+      (Or just double-click it and click YES on the Windows security prompt.)
+      If Windows shows "Windows protected your PC": More info > Run anyway.
+   2. When asked, type:
+        Server URL        : press Enter to accept https://erp.atithi-setu.com
+        Restaurant ID     : e.g.  RESTO-1234
+        Print agent token : paste the token from Part A
+   3. It installs the "Atithi-Setu Print Agent" service and starts it.
+      Done — it now runs by itself forever, including after reboots.
 
- 4. It saves the settings and installs the agent to start AUTOMATICALLY
-    every time the PC is switched on (running in the background, no window).
+   Requirement: your printer must be installed in Windows for ALL users
+   (the normal way — it shows in Printers & scanners for everyone). USB
+   thermal printers installed with their driver already are. If a test
+   print later fails with "OpenPrinter", use OPTION 2 instead.
 
- 5. Done.
+   To remove it later:  right-click  Uninstall-Service.bat > Run as admin.
+
+ ----------------------------------------------------------------------
+ OPTION 2 (SIMPLE)  —  Start automatically at login
+ ----------------------------------------------------------------------
+ No admin rights needed. The agent starts when someone logs into Windows
+ (fine if this PC auto-logs-in to one account during service).
+
+   1. Double-click   Setup.bat
+      If Windows shows "Windows protected your PC": More info > Run anyway.
+   2. Type the same three values (Server URL / Restaurant ID / token).
+   3. Done — it starts now and every time you log in, hidden in the
+      background.
+
+   To remove it later:  double-click  Uninstall.bat
+
+ ----------------------------------------------------------------------
+ Not sure which? Use OPTION 1 (Service). Use OPTION 2 only if the service
+ can't see your printer, or you can't run things as administrator.
 
 
 ========================================================================
@@ -110,10 +138,13 @@ WHAT YOU NEED
 ========================================================================
  MANAGING THE AGENT
 ========================================================================
- * Stop / remove it       :  double-click  Uninstall.bat
+ * Stop / remove it       :  Service install  ->  Uninstall-Service.bat (as admin)
+                              Login install    ->  Uninstall.bat
  * Add / change printers   :  do it in the app (Restaurant > Kitchen
                               Printers). No change needed on the PC.
- * Token changed/rotated   :  run Setup.bat again and paste the new token.
+ * Token changed/rotated   :  re-run Install-Service.bat (or Setup.bat) and
+                              paste the new token.
+ * See what it is doing    :  open  agent.log  in the folder (service install).
 
 
 ========================================================================
