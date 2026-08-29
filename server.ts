@@ -31433,9 +31433,17 @@ ${data.tenant.name}`;
   // row, which is exactly how a plain waiter could read the whole ledger.
   const _canReadExpenseJournal = async (req: AuthRequest, res: Response): Promise<boolean> => {
     const role = String(req.user?.role || '').toUpperCase();
+    // Money-ops audience always reads.
     if (['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER', 'FRONT_DESK'].includes(role)) return true;
-    const perms = await getTabPermissionsForRole(req.params.id, role).catch(() => null);
-    if (perms && Number((perms as any)['EXPENSE_JOURNAL'] || 0) >= 1) return true;
+    // The full cash ledger is management-grade — never expose it to floor / kitchen /
+    // housekeeping roles even when the tenant's default matrix over-grants the tab
+    // (a fresh WAITER lands with EXPENSE_JOURNAL granted). Any OTHER role (e.g. a
+    // custom Accountant) still needs an explicit EXPENSE_JOURNAL grant.
+    const NEVER = ['WAITER', 'CHEF', 'KITCHEN', 'HOUSEKEEPING', 'ROOM_SERVICE', 'SECURITY', 'CONCIERGE', 'THERAPIST', 'STAFF'];
+    if (!NEVER.includes(role)) {
+      const perms = await getTabPermissionsForRole(req.params.id, role).catch(() => null);
+      if (perms && Number((perms as any)['EXPENSE_JOURNAL'] || 0) >= 1) return true;
+    }
     res.status(403).json({ error: 'Your role does not have access to the Expense Journal.' });
     return false;
   };
@@ -51147,7 +51155,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'petty-cash-unify-fix2',
+    commit_marker: 'petty-cash-unify-fix3',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
