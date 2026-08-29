@@ -48840,6 +48840,11 @@ ${data.tenant.name}`;
       );
     `).catch(() => {});
     await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_payroll_period ON staff_payroll(staff_id, period)`).catch(() => {});
+    // Two-step accrual: a run is ACCRUED at finalize (expense booked in the earned
+    // month, Cr Salaries Payable) then PAID later (Dr Salaries Payable / Cr bank on
+    // the real payout date). pay_method/pay_reference capture how the payout was made.
+    await db.exec(`ALTER TABLE staff_payroll ADD COLUMN IF NOT EXISTS pay_method TEXT`).catch(() => {});
+    await db.exec(`ALTER TABLE staff_payroll ADD COLUMN IF NOT EXISTS pay_reference TEXT`).catch(() => {});
   };
 
   const payrollGate = (req: AuthRequest) => STAFF_MGMT_ROLES.includes(req.user?.role ?? '');
@@ -48976,7 +48981,14 @@ ${data.tenant.name}`;
         advance: round2(rows.reduce((a, r) => a + r.advance_deducted, 0)),
         net: round2(rows.reduce((a, r) => a + r.net, 0)),
       };
-      res.json({ period, start, end, rows, totals });
+      // Run-level workflow state for the two-step accrual: DRAFT → ACCRUED → PAID.
+      const exStatuses = existing.map((e: any) => String(e.status || 'DRAFT').toUpperCase());
+      const run_status = exStatuses.length === 0 ? 'DRAFT'
+        : exStatuses.every((s: string) => s === 'PAID') ? 'PAID'
+        : exStatuses.some((s: string) => s === 'PAID' || s === 'ACCRUED') ? 'ACCRUED' : 'DRAFT';
+      const payable = round2(existing.filter((e: any) => String(e.status).toUpperCase() === 'ACCRUED').reduce((a: number, e: any) => a + Number(e.net || 0), 0));
+      const paidRow = existing.find((e: any) => String(e.status).toUpperCase() === 'PAID');
+      res.json({ period, start, end, rows, totals, run_status, payable, paid_at: paidRow?.paid_at || null, pay_method: paidRow?.pay_method || null });
     } catch (err: any) { console.error("payroll compute error:", err); res.status(500).json({ error: "Failed to compute payroll" }); }
   });
 
@@ -48991,6 +49003,9 @@ ${data.tenant.name}`;
       const { period } = monthRange(String(req.body?.month || ''));
       const rows: any[] = Array.isArray(req.body?.rows) ? req.body.rows : [];
       if (!rows.length) return res.status(400).json({ error: "No payroll rows supplied" });
+      // A re-finalize must not silently un-pay a period that has already been paid.
+      const paidJournal = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ? AND is_reversed = 0", [`PAYPAID-${period}`]).catch(() => null);
+      if (paidJournal) return res.status(409).json({ error: `Payroll for ${period} is already paid; cannot re-finalize.` });
 
       for (const r of rows) {
         const gross = round2(Number(r.gross || 0));
@@ -48999,13 +49014,13 @@ ${data.tenant.name}`;
         const existing: any = await db.get("SELECT id FROM staff_payroll WHERE staff_id = ? AND period = ?", [r.staff_id, period]);
         if (existing) {
           await db.run(
-            `UPDATE staff_payroll SET pay_type=?, units=?, rate=?, gross=?, advance_deducted=?, net=?, status='PAID', paid_at=CURRENT_TIMESTAMP WHERE id=?`,
+            `UPDATE staff_payroll SET pay_type=?, units=?, rate=?, gross=?, advance_deducted=?, net=?, status='ACCRUED', paid_at=NULL, pay_method=NULL, pay_reference=NULL WHERE id=?`,
             [r.pay_type || null, Number(r.units || 0), Number(r.rate || 0), gross, ded, net, existing.id]
           );
         } else {
           await db.run(
             `INSERT INTO staff_payroll (id, staff_id, period, pay_type, units, rate, gross, advance_deducted, net, status, paid_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PAID', CURRENT_TIMESTAMP)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACCRUED', NULL)`,
             [randomUUID(), r.staff_id, period, r.pay_type || null, Number(r.units || 0), Number(r.rate || 0), gross, ded, net]
           );
         }
@@ -49026,9 +49041,12 @@ ${data.tenant.name}`;
           }
         }
       }
-      // Phase 3.1 — post the aggregate operational-payroll disbursement journal
-      // (Dr Salaries & Wages / Cr Bank net / Cr Advances to Staff recovered).
-      // Idempotent per period (first finalize wins; re-finalize won't re-post).
+      // ACCRUAL journal — books the salary EXPENSE in the earned month (dated the
+      // 1st of the period) and raises the liability, WITHOUT touching cash yet:
+      //   Dr Salaries & Wages (gross)
+      //     Cr Advances to Staff (advances recovered against this run)
+      //     Cr Salaries & Wages Payable (net still owed to staff)
+      // The cash leaves later via POST /payroll/pay. Idempotent per period.
       try {
         let tG = 0, tNet = 0, tDed = 0;
         for (const r of rows) {
@@ -49043,14 +49061,55 @@ ${data.tenant.name}`;
             const lines: GlLine[] = [
               { account_code: '5100', account_name: 'Salaries & Wages', dr_amount: tG, cr_amount: 0, narration: `Operational payroll ${period}` },
             ];
-            if (tNet > 0) lines.push({ account_code: '1010', account_name: 'Bank — Main Account', dr_amount: 0, cr_amount: tNet, narration: `Net wages ${period}` });
             if (tDed > 0) lines.push({ account_code: '1210', account_name: 'Advances to Staff', dr_amount: 0, cr_amount: tDed, narration: `Advance recovered ${period}` });
+            if (tNet > 0) lines.push({ account_code: '2400', account_name: 'Salaries & Wages Payable', dr_amount: 0, cr_amount: tNet, narration: `Salaries payable ${period}` });
             await _postGlEntries(db, targetId, journalRef, `${period}-01`, 'STAFF_PAYROLL', period, lines, req.user?.email || req.user?.id || null);
           }
         }
-      } catch (glErr) { console.error('[GL] operational-payroll capture failed:', glErr); }
-      res.json({ success: true, period, count: rows.length });
+      } catch (glErr) { console.error('[GL] operational-payroll accrual failed:', glErr); }
+      res.json({ success: true, period, count: rows.length, status: 'ACCRUED' });
     } catch (err: any) { console.error("payroll finalize error:", err); res.status(500).json({ error: "Failed to finalize payroll" }); }
+  });
+
+  // Pay a finalized (ACCRUED) payroll run — the second half of the accrual. Clears
+  // the Salaries Payable liability and moves cash out on the ACTUAL payout date
+  // (e.g. the 10th of the next month):
+  //   Dr Salaries & Wages Payable (net)  /  Cr Cash|Bank by method (net)
+  app.post("/api/owner/payroll/pay", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!payrollGate(req)) return res.status(403).json({ error: "Forbidden" });
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
+      const db = await getTenantDb(targetId);
+      await ensurePayrollTables(db);
+      const { period } = monthRange(String(req.body?.month || ''));
+      const payDate = String(req.body?.pay_date || new Date().toISOString().slice(0, 10));
+      const methodRaw = String(req.body?.pay_method || 'BANK').toUpperCase();
+      const method = ['CASH', 'UPI', 'ONLINE', 'BANK', 'OTHERS'].includes(methodRaw) ? methodRaw : 'BANK';
+      const reference = req.body?.pay_reference || null;
+
+      // Must be finalized (accrued) and not already paid.
+      const accrual = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ? AND is_reversed = 0", [`PAYRUN-OPS-${period}`]).catch(() => null);
+      if (!accrual) return res.status(409).json({ error: `Payroll for ${period} is not finalized yet — finalize (accrue) it first.` });
+      const alreadyPaid = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ? AND is_reversed = 0", [`PAYPAID-${period}`]).catch(() => null);
+      if (alreadyPaid) return res.status(409).json({ error: `Payroll for ${period} is already paid.` });
+
+      // Pay exactly what was accrued as payable (Σ net of the ACCRUED rows).
+      const agg: any = await db.get("SELECT COALESCE(SUM(net),0) AS net FROM staff_payroll WHERE period = ? AND status = 'ACCRUED'", [period]);
+      const net = round2(Number(agg?.net || 0));
+      if (!(net > 0)) return res.status(400).json({ error: 'Nothing payable for this period.' });
+
+      const src = method === 'CASH' ? { code: '1000', name: 'Cash in Hand' } : { code: '1010', name: 'Bank — Main Account' };
+      const posted = await _postGlEntries(db, targetId, `PAYPAID-${period}`, payDate, 'STAFF_PAYROLL_PAID', period, [
+        { account_code: '2400', account_name: 'Salaries & Wages Payable', dr_amount: net, cr_amount: 0, narration: `Salaries paid ${period}` },
+        { account_code: src.code, account_name: src.name, dr_amount: 0, cr_amount: net, narration: `Salaries paid ${period} via ${method}` },
+      ], req.user?.email || req.user?.id || null);
+      if (!posted?.ok) return res.status(500).json({ error: 'Failed to post the payment journal.' });
+
+      await db.run("UPDATE staff_payroll SET status='PAID', paid_at=?, pay_method=?, pay_reference=? WHERE period=? AND status='ACCRUED'",
+        [payDate, method, reference, period]);
+      res.json({ success: true, period, paid: net, pay_date: payDate, pay_method: method });
+    } catch (err: any) { console.error("payroll pay error:", err); res.status(500).json({ error: "Failed to record payroll payment" }); }
   });
 
   // Feedback: Request Feedback
@@ -51155,7 +51214,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'petty-cash-unify-fix3',
+    commit_marker: 'payroll-accrual-2step',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

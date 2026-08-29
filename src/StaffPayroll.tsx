@@ -33,12 +33,14 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   const thisMonth = new Date().toISOString().slice(0, 7);
   const [month, setMonth] = useState(thisMonth);
-  const [data, setData] = useState<{ period: string; rows: Row[]; totals: any } | null>(null);
+  const [data, setData] = useState<{ period: string; rows: Row[]; totals: any; run_status?: string; payable?: number; paid_at?: string | null; pay_method?: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [edits, setEdits] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const [advOpen, setAdvOpen] = useState(false);
   const [adv, setAdv] = useState({ staff_id: '', amount: '', advance_date: new Date().toISOString().slice(0, 10), note: '', payment_method: 'CASH', payment_reference: '' });
+  const [payOpen, setPayOpen] = useState(false);
+  const [payForm, setPayForm] = useState({ pay_date: new Date().toISOString().slice(0, 10), pay_method: 'BANK', pay_reference: '' });
 
   const load = async () => {
     setLoading(true);
@@ -70,12 +72,23 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
 
   const finalize = async () => {
     if (!data) return;
-    if (!window.confirm(`Finalize payroll for ${monthLabel(month)} and mark all PAID? Outstanding advances will be recovered.`)) return;
+    if (!window.confirm(`Finalize (accrue) payroll for ${monthLabel(month)}?\n\nThis books the salary EXPENSE in ${monthLabel(month)}'s P&L and raises Salaries Payable — no cash moves yet. Outstanding advances are recovered now. You record the actual payout (e.g. on the 10th) separately.`)) return;
     setBusy(true);
     try {
       const rows = data.rows.map(r => ({ staff_id: r.staff_id, pay_type: r.pay_type, units: r.units, rate: r.rate, gross: r.gross, advance_deducted: ded(r) }));
       const r = await fetch('/api/owner/payroll/finalize', { method: 'POST', headers: auth, body: JSON.stringify({ month, rows }) });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'Failed'); }
+      await load();
+    } catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+  // Second step of the accrual: record the actual payout, clearing Salaries Payable
+  // and moving cash on the real pay date (e.g. the 10th of the next month).
+  const pay = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch('/api/owner/payroll/pay', { method: 'POST', headers: auth, body: JSON.stringify({ month, ...payForm }) });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'Failed'); }
+      setPayOpen(false);
       await load();
     } catch (e: any) { alert(e.message); } finally { setBusy(false); }
   };
@@ -96,7 +109,12 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
   const totalDed = rows.reduce((s, r) => s + ded(r), 0);
   const totalNet = rows.reduce((s, r) => s + net(r), 0);
   const totalOutstanding = rows.reduce((s, r) => s + Number(r.advance_outstanding || 0), 0);
-  const finalized = rows.length > 0 && rows.every(r => r.status === 'PAID');
+  // Two-step accrual state: DRAFT (nothing booked) → ACCRUED (expense booked,
+  // Salaries Payable raised, not yet paid) → PAID (cash out, liability cleared).
+  const runStatus = String(data?.run_status || 'DRAFT').toUpperCase();
+  const accrued = runStatus === 'ACCRUED';
+  const paid = runStatus === 'PAID';
+  const payable = Number(data?.payable || 0);
 
   const inp = 'px-2.5 py-1.5 rounded-lg border border-gray-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400';
   const btn = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors';
@@ -122,9 +140,21 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
           {month !== thisMonth && <button className={`${btn} bg-gray-100 text-gray-700 hover:bg-gray-200`} onClick={() => setMonth(thisMonth)}>This month</button>}
           <button className={`${btn} bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100`} onClick={() => setAdvOpen(v => !v)}><Plus size={15} />Record advance</button>
           <button className={`${btn} bg-white text-gray-700 border border-gray-300 hover:bg-gray-50`} onClick={exportCsv}><Download size={15} />Export</button>
-          <button className={`${btn} bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm disabled:opacity-50`} disabled={busy || finalized || !rows.length} onClick={finalize}>
-            <CheckCircle2 size={15} />{finalized ? 'Finalized' : 'Finalize & pay'}
-          </button>
+          {!accrued && !paid && (
+            <button className={`${btn} bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm disabled:opacity-50`} disabled={busy || !rows.length} onClick={finalize}>
+              <CheckCircle2 size={15} />Finalize (accrue)
+            </button>
+          )}
+          {accrued && (
+            <button className={`${btn} bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm disabled:opacity-50`} disabled={busy} onClick={() => setPayOpen(v => !v)}>
+              <Wallet size={15} />Mark paid · {money(payable)}
+            </button>
+          )}
+          {paid && (
+            <span className={`${btn} bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-default`}>
+              <Lock size={14} />Paid{data?.pay_method ? ` · ${data.pay_method}` : ''}
+            </span>
+          )}
         </div>
       </div>
 
@@ -136,7 +166,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
         <Kpi icon={<TrendingDown size={16} />} tone="amber" label="Advances recovered" value={money(totalDed)}
           sub={totalOutstanding > 0 ? `${money(totalOutstanding)} still outstanding` : 'No dues carried'} />
         <Kpi icon={<Wallet size={16} />} tone="emerald" label="Net payout" value={money(totalNet)}
-          sub={finalized ? 'Paid ✓' : 'Draft — not yet paid'} />
+          sub={paid ? `Paid ✓${data?.paid_at ? ' · ' + String(data.paid_at).slice(0, 10) : ''}` : accrued ? `Accrued — ${money(payable)} payable` : 'Draft — not yet accrued'} />
       </div>
 
       {/* ── Record-advance inline form ───────────────────────────────────── */}
@@ -164,9 +194,33 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
         </div>
       )}
 
-      {finalized && !loading && (
-        <div className="mb-3 flex items-center gap-2 text-sm text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-          <Lock size={14} /> <span>Payroll for <b>{monthLabel(month)}</b> is finalized and locked. Advances were recovered.</span>
+      {/* ── Record-payout inline form (second step of the accrual) ───────────── */}
+      {payOpen && accrued && (
+        <div className="mb-4 p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-wrap items-end gap-2.5">
+          <div className="text-sm text-emerald-900 font-semibold w-full sm:w-auto sm:mr-2">Pay {money(payable)} · {monthLabel(month)}</div>
+          <div><label className="block text-xs font-semibold text-gray-600 mb-1">Pay date</label><input type="date" className={inp} value={payForm.pay_date} onChange={e => setPayForm({ ...payForm, pay_date: e.target.value })} /></div>
+          <div><label className="block text-xs font-semibold text-gray-600 mb-1">Mode</label>
+            <select className={inp} value={payForm.pay_method} onChange={e => setPayForm({ ...payForm, pay_method: e.target.value })}>
+              <option value="BANK">Bank</option>
+              <option value="UPI">UPI</option>
+              <option value="ONLINE">Online</option>
+              <option value="CASH">Cash</option>
+              <option value="OTHERS">Others</option>
+            </select></div>
+          <div className="flex-1 min-w-[140px]"><label className="block text-xs font-semibold text-gray-600 mb-1">Reference (optional)</label><input className={`${inp} w-full`} value={payForm.pay_reference} placeholder="UTR / txn ref" onChange={e => setPayForm({ ...payForm, pay_reference: e.target.value })} /></div>
+          <button className={`${btn} bg-emerald-600 text-white hover:bg-emerald-700`} disabled={busy} onClick={pay}>Record payment</button>
+          <button className={`${btn} bg-white text-gray-600 border border-gray-300`} onClick={() => setPayOpen(false)}>Cancel</button>
+        </div>
+      )}
+
+      {accrued && !loading && (
+        <div className="mb-3 flex items-start gap-2 text-sm text-indigo-800 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" /> <span>Payroll for <b>{monthLabel(month)}</b> is <b>accrued</b> — the salary expense is booked in {monthLabel(month)}'s P&amp;L and <b>{money(payable)}</b> sits in Salaries Payable. Record the payout when you actually pay (e.g. the 10th).</span>
+        </div>
+      )}
+      {paid && !loading && (
+        <div className="mb-3 flex items-start gap-2 text-sm text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+          <Lock size={14} className="mt-0.5 shrink-0" /> <span>Payroll for <b>{monthLabel(month)}</b> is <b>paid</b>{data?.paid_at ? ` on ${String(data.paid_at).slice(0, 10)}` : ''}{data?.pay_method ? ` via ${data.pay_method}` : ''}. Expense stayed in the earned month; Salaries Payable cleared.</span>
         </div>
       )}
 
@@ -214,13 +268,13 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
                           {isFull ? <CalendarDays size={10} /> : <Clock size={10} />}{isFull ? 'Full-time' : 'Hourly'}
                         </span>
                         <select className="text-xs bg-transparent text-gray-400 hover:text-gray-700 focus:outline-none cursor-pointer disabled:cursor-default disabled:text-gray-300"
-                          disabled={finalized} value={r.pay_type} onChange={e => patchStaff(r.staff_id, { pay_type: e.target.value })} title="Change pay type">
+                          disabled={accrued || paid} value={r.pay_type} onChange={e => patchStaff(r.staff_id, { pay_type: e.target.value })} title="Change pay type">
                           <option value="HOURLY">↻ Hourly</option><option value="FULL_TIME">↻ Full-time</option>
                         </select>
                       </div>
                     </td>
                     <td className="p-2.5 text-right">
-                      <input type="number" min={0} className={`${inp} w-24 text-right py-1`} disabled={finalized} defaultValue={r.rate}
+                      <input type="number" min={0} className={`${inp} w-24 text-right py-1`} disabled={accrued || paid} defaultValue={r.rate}
                         onBlur={e => { const v = Number(e.target.value); if (v !== r.rate) patchStaff(r.staff_id, isFull ? { monthly_wage: v } : { hourly_rate: v }); }} />
                       <div className="text-[10px] text-gray-400 mt-0.5">{isFull ? 'per month' : 'per hour'}</div>
                     </td>
@@ -228,7 +282,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
                     <td className="p-2.5 text-right tabular-nums text-gray-700">{isFull ? <span className="text-gray-300">—</span> : r.hours}</td>
                     <td className="p-2.5 text-right tabular-nums font-semibold text-gray-900">{money(r.gross)}</td>
                     <td className="p-2.5 text-right">
-                      <input type="number" min={0} max={r.gross} className={`${inp} w-24 text-right py-1`} disabled={finalized} value={ded(r)}
+                      <input type="number" min={0} max={r.gross} className={`${inp} w-24 text-right py-1`} disabled={accrued || paid} value={ded(r)}
                         onChange={e => setEdits({ ...edits, [r.staff_id]: Math.max(0, Math.min(Number(e.target.value) || 0, r.gross)) })} />
                       {r.advance_outstanding > 0 && <div className="text-[10px] text-rose-500 mt-0.5">{money(r.advance_outstanding)} due</div>}
                     </td>

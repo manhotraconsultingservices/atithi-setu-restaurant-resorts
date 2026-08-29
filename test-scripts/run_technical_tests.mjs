@@ -2996,6 +2996,21 @@ async function testCashDrawer() {
     if (okAll) pass('TC-ACCT-PETTY', 'Petty cash unified: manual entry editable w/ real category, edit re-posts, IN is P&L-neutral, delete clears it from the GL ledger');
     else fail('TC-ACCT-PETTY', 'petty-cash unify (CRUD + GL)', detail.join(' | '));
   }
+
+  // TC-ACCT-PAYROLL-ACCRUAL: two-step payroll accrual is deployed. Non-mutating —
+  // GET /payroll exposes the run workflow state, and paying a not-finalized future
+  // period is rejected (409). Full accrual→pay→balanced proof lives in
+  // scratchpad/payroll_accrual.mjs (creates GL, so kept out of the smoke run).
+  const pr = await api('GET', `/api/owner/payroll?month=2099-11`);
+  if (pr.status === 403) {
+    skip('TC-ACCT-PAYROLL-ACCRUAL', 'payroll accrual endpoints', 'not a payroll-manager role');
+  } else if (pr.status !== 200 || !('run_status' in (pr.data || {}))) {
+    fail('TC-ACCT-PAYROLL-ACCRUAL', 'GET /payroll exposes run_status (two-step accrual)', `HTTP ${pr.status} keys=${Object.keys(pr.data || {}).join(',')}`);
+  } else {
+    const payNoAccrual = await api('POST', '/api/owner/payroll/pay', { month: '2099-11', pay_date: '2100-01-10', pay_method: 'BANK' });
+    if (payNoAccrual.status === 409) pass('TC-ACCT-PAYROLL-ACCRUAL', `payroll accrual deployed — GET exposes run_status (${pr.data.run_status}); pay before finalize rejected (409)`);
+    else fail('TC-ACCT-PAYROLL-ACCRUAL', 'pay before finalize must be rejected', `expected 409, got ${payNoAccrual.status}`);
+  }
 }
 
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
