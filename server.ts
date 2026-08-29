@@ -48725,6 +48725,10 @@ ${data.tenant.name}`;
       );
     `).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_staff_adv ON staff_advances(staff_id, status)`).catch(() => {});
+    // Payment mode of the advance payout (CASH → Cash in Hand, everything else →
+    // Bank). payment_reference holds a UPI/online txn ref when relevant.
+    await db.exec(`ALTER TABLE staff_advances ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'CASH'`).catch(() => {});
+    await db.exec(`ALTER TABLE staff_advances ADD COLUMN IF NOT EXISTS payment_reference TEXT`).catch(() => {});
     await db.exec(`
       CREATE TABLE IF NOT EXISTS staff_payroll (
         id               TEXT PRIMARY KEY,
@@ -48777,20 +48781,26 @@ ${data.tenant.name}`;
       if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
       const db = await getTenantDb(targetId);
       await ensurePayrollTables(db);
-      const { staff_id, amount, advance_date, note } = req.body || {};
+      const { staff_id, amount, advance_date, note, payment_method, payment_reference } = req.body || {};
       const amt = Math.round((Number(amount) || 0) * 100) / 100;
       if (!staff_id) return res.status(400).json({ error: "staff_id is required" });
       if (!(amt > 0)) return res.status(400).json({ error: "Amount must be greater than 0" });
+      // Payment mode of the payout: CASH | UPI | ONLINE | OTHERS (default CASH so
+      // existing callers are unchanged). CASH credits Cash in Hand; every other
+      // mode credits the Bank — matching how the advance actually left the till.
+      const methodRaw = String(payment_method || 'CASH').toUpperCase();
+      const method = ['CASH', 'UPI', 'ONLINE', 'OTHERS'].includes(methodRaw) ? methodRaw : 'CASH';
       const id = randomUUID();
       await db.run(
-        `INSERT INTO staff_advances (id, staff_id, amount, advance_date, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?)`,
-        [id, staff_id, amt, advance_date || new Date().toISOString().slice(0, 10), note || null, req.user?.email || null]
+        `INSERT INTO staff_advances (id, staff_id, amount, advance_date, note, recorded_by, payment_method, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, staff_id, amt, advance_date || new Date().toISOString().slice(0, 10), note || null, req.user?.email || null, method, payment_reference || null]
       );
-      // Phase 3.1 — book the advance payout (Dr Advances to Staff / Cr Cash).
+      // Phase 3.1 — book the advance payout (Dr Advances to Staff / Cr Cash-or-Bank by mode).
       try {
+        const src = _glAccountForPaymentMethod(method);   // CASH → 1000; UPI/ONLINE/OTHERS → 1010 Bank
         await _postGlEntries(db, targetId, `SADV-${id}`, (advance_date || new Date().toISOString().slice(0, 10)), 'STAFF_ADVANCE', id, [
           { account_code: '1210', account_name: 'Advances to Staff', dr_amount: amt, cr_amount: 0, narration: `Staff advance ${staff_id}` },
-          { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 0, cr_amount: amt, narration: `Staff advance paid` },
+          { account_code: src.code, account_name: src.name, dr_amount: 0, cr_amount: amt, narration: `Staff advance paid via ${method}` },
         ], req.user?.email || null);
       } catch (glErr) { console.error('[GL] staff-advance capture failed:', glErr); }
       res.status(201).json({ success: true, id });
@@ -51051,7 +51061,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'mdr-tender-method-gl-fix',
+    commit_marker: 'staff-advance-payment-mode',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

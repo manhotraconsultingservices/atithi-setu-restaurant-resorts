@@ -38,7 +38,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
   const [edits, setEdits] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const [advOpen, setAdvOpen] = useState(false);
-  const [adv, setAdv] = useState({ staff_id: '', amount: '', advance_date: new Date().toISOString().slice(0, 10), note: '' });
+  const [adv, setAdv] = useState({ staff_id: '', amount: '', advance_date: new Date().toISOString().slice(0, 10), note: '', payment_method: 'CASH', payment_reference: '' });
 
   const load = async () => {
     setLoading(true);
@@ -64,7 +64,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
     try {
       const r = await fetch('/api/owner/staff-advances', { method: 'POST', headers: auth, body: JSON.stringify({ ...adv, amount }) });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'Failed'); }
-      setAdvOpen(false); setAdv({ staff_id: '', amount: '', advance_date: new Date().toISOString().slice(0, 10), note: '' }); await load();
+      setAdvOpen(false); setAdv({ staff_id: '', amount: '', advance_date: new Date().toISOString().slice(0, 10), note: '', payment_method: 'CASH', payment_reference: '' }); await load();
     } catch (e: any) { alert(e.message); } finally { setBusy(false); }
   };
 
@@ -148,6 +148,16 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
             </select></div>
           <div><label className="block text-xs font-semibold text-gray-600 mb-1">Amount ₹</label><input type="number" className={`${inp} w-32`} value={adv.amount} onChange={e => setAdv({ ...adv, amount: e.target.value })} /></div>
           <div><label className="block text-xs font-semibold text-gray-600 mb-1">Date</label><input type="date" className={inp} value={adv.advance_date} onChange={e => setAdv({ ...adv, advance_date: e.target.value })} /></div>
+          <div><label className="block text-xs font-semibold text-gray-600 mb-1">Mode</label>
+            <select className={inp} value={adv.payment_method} onChange={e => setAdv({ ...adv, payment_method: e.target.value })}>
+              <option value="CASH">Cash</option>
+              <option value="UPI">UPI</option>
+              <option value="ONLINE">Online</option>
+              <option value="OTHERS">Others</option>
+            </select></div>
+          {adv.payment_method !== 'CASH' && (
+            <div><label className="block text-xs font-semibold text-gray-600 mb-1">Ref no.</label><input className={`${inp} w-36`} value={adv.payment_reference} placeholder="txn / ref (optional)" onChange={e => setAdv({ ...adv, payment_reference: e.target.value })} /></div>
+          )}
           <div className="flex-1 min-w-[140px]"><label className="block text-xs font-semibold text-gray-600 mb-1">Note</label><input className={`${inp} w-full`} value={adv.note} onChange={e => setAdv({ ...adv, note: e.target.value })} /></div>
           <button className={`${btn} bg-amber-600 text-white hover:bg-amber-700`} disabled={busy} onClick={recordAdvance}>Save advance</button>
           <button className={`${btn} bg-white text-gray-600 border border-gray-300`} onClick={() => setAdvOpen(false)}>Cancel</button>

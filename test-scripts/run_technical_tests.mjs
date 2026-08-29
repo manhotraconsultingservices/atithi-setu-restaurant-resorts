@@ -2935,6 +2935,32 @@ async function testCashDrawer() {
     if (rt) pass('TC-ACCT-MDR-CFG', 'MDR payment-charges config deployed + round-trips (card/upi/gst), original rates restored');
     else fail('TC-ACCT-MDR-CFG', 'MDR payment-charges config round-trip', `PATCH did not persist — got ${JSON.stringify(back.data).slice(0, 120)}`);
   }
+
+  // TC-ACCT-STAFFADV-MODE: a staff advance records its payment mode and books the
+  // credit to the matching account — CASH → Cash in Hand (1000), UPI/ONLINE/OTHERS
+  // → Bank (1010). Self-cleaning: DELETE reverses each SADV journal.
+  const payr = await api('GET', `/api/owner/payroll?month=${new Date().toISOString().slice(0, 7)}`);
+  const advStaffId = payr.status === 200 ? (payr.data?.rows || [])[0]?.staff_id : null;
+  if (payr.status === 403) {
+    skip('TC-ACCT-STAFFADV-MODE', 'staff-advance payment mode → GL account', 'not a payroll-manager role');
+  } else if (!advStaffId) {
+    skip('TC-ACCT-STAFFADV-MODE', 'staff-advance payment mode → GL account', 'no staff on payroll to advance to');
+  } else {
+    const checkCredit = async (mode, wantCode) => {
+      const mk = await api('POST', '/api/owner/staff-advances', { staff_id: advStaffId, amount: 111, payment_method: mode, note: `SMOKE ${mode}` });
+      const advId = mk.data?.id;
+      if (mk.status !== 201 || !advId) return { ok: false, detail: `POST ${mode} → HTTP ${mk.status}` };
+      const gl = await api('GET', `/api/restaurant/${restaurantId}/accounting/gl-entries?journal_ref=SADV-${advId}`);
+      const lines = Array.isArray(gl.data) ? gl.data : [];
+      const credit = lines.find(l => Number(l.cr_amount) > 0);
+      await api('DELETE', `/api/owner/staff-advances/${advId}`);   // reverses the journal
+      return { ok: !!credit && String(credit.account_code) === wantCode, detail: `${mode} credit → ${credit?.account_code} (want ${wantCode})` };
+    };
+    const cash = await checkCredit('CASH', '1000');
+    const upi  = await checkCredit('UPI', '1010');
+    if (cash.ok && upi.ok) pass('TC-ACCT-STAFFADV-MODE', 'Staff advance books the payout by mode — CASH→Cash(1000), UPI→Bank(1010)');
+    else fail('TC-ACCT-STAFFADV-MODE', 'Staff advance payment-mode → GL account', `${cash.detail} | ${upi.detail}`);
+  }
 }
 
 // ── RBAC Hardening tests (F5/F8/F9) ──────────────────────────────────────
