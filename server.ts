@@ -47490,7 +47490,25 @@ ${data.tenant.name}`;
            FROM print_jobs j LEFT JOIN kitchen_printers p ON p.id = j.printer_id
           WHERE j.status = 'PENDING' AND j.attempts < 6 ORDER BY j.created_at LIMIT 50`
       ).catch(() => []);
-      res.json(jobs);
+      // Normalise the connection so a NETWORK printer prints even if it was saved
+      // as USB with an IP in it (the config form defaults to USB, and it's an easy
+      // mistake to add a network printer without switching Connection). A bare IPv4
+      // — or IP:port — in `host` is unambiguously a network printer (a USB printer
+      // uses a Windows name, never an IP), so route it over TCP regardless of the
+      // stored conn_type, and pull the port out of an "ip:port" host.
+      const IP = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+      const IP_PORT = /^(\d{1,3}(?:\.\d{1,3}){3})\s*:\s*(\d+)$/;
+      const norm = (Array.isArray(jobs) ? jobs : []).map((j: any) => {
+        let host = typeof j.host === 'string' ? j.host.trim() : j.host;
+        let port = j.port;
+        const m = typeof host === 'string' ? host.match(IP_PORT) : null;
+        if (m) { host = m[1]; port = Number(m[2]); }
+        if (typeof host === 'string' && (IP.test(host) || m)) {
+          return { ...j, host, port: Number(port) || 9100, conn_type: 'NETWORK' };
+        }
+        return j;
+      });
+      res.json(norm);
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   // Agent: ack a job (PRINTED clears it; failure retries up to 6, then FAILED).
@@ -50986,7 +51004,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'in-house-rooms-robust-diag',
+    commit_marker: 'network-printer-autodetect',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
