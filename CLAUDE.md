@@ -99,15 +99,15 @@ Counter is shared across all invoice types — manual on-demand, prepaid orders,
 
 Settings UI (Owner Dashboard → Brand & Settings → Invoice Numbering): segmented Random / Sequential choice + prefix text input + yearly-reset toggle, with live "Sample next invoice" preview. Save Settings shows a green "✓ Saved" banner + button state for 3 seconds so the owner has clear feedback.
 
-### **Admin-gated Invoice Deletion** (per-tenant feature flag)
-Default OFF. Only `SUPER_ADMIN` can flip the flag from the `/internal` portal. When ON, the tenant's OWNER can permanently delete invoices (incl. PRINTED) with a typing-confirmation modal (last-6 chars of invoice id + 10-char reason).
+### **Invoice Cancellation & Audit** (MANDATORY — every invoice, every module)
+Invoices are **NEVER hard-deleted**. To void an invoice, **CANCEL** it: this reverses the invoice's GL journal (so revenue, output GST, cash/bank and receivables back out and the **trial balance still balances**), flips the invoice to a cancelled/voided state (the row is kept, never removed), and writes an `INVOICE`/`FOLIO` · `CANCELLED` audit row. A **confirmation with a mandatory reason** is required; **owner/manager only**. All cancel endpoints reuse `_reverseJournal(db, rid, ref, {...})` + `writeObjectAudit`, and are idempotent.
 
-Endpoints:
-* `PATCH /api/admin/restaurants/:id/invoice-delete-flag` (SUPER_ADMIN/CTO only)
-* `DELETE /api/restaurant/:id/invoice/order/:orderId`
-* `DELETE /api/restaurant/:id/invoice/session/:sessionId` (cascades feedback + child orders + session row)
+* **Hotel / Spa / Events** — all are `folios` (`folio_kind` HOTEL|SPA|EVENT), all post `FOLIO-<id>`: **`POST /api/restaurant/:id/folios/:folioId/cancel`** (reverses `FOLIO-<id>` → `status='voided'` + `cancelled_at/by/reason`; never double-reverses a folio already backed out by a credit note / revision). Hotel also keeps credit-note + revise.
+* **Restaurant** — **`POST /api/restaurant/:id/invoices/order/:orderId/cancel`** and **`.../invoices/session/:sessionToken/cancel`** (reverses each `ORDER-<id>`, marks the order(s)/session `CANCELLED`).
 
-Every deletion writes a JSON snapshot to **`central.invoice_deletion_audit`** before the row is removed, preserving a forensic record for compliance.
+**Audit** (`object_audit_log` via `writeObjectAudit`, objectType `INVOICE` / `FOLIO`): every invoice must capture `CREATED`, `PAID`/`SETTLED`, `EDITED`, `PRINTED` (folio invoice-PDF GET + restaurant thermal print), and `CANCELLED` — actor + timestamp. Surfaced in the ObjectDetail **History** tab. When adding a new invoice action, write the audit event too.
+
+**Legacy admin-gated soft-delete (default OFF — leave off).** `restaurants.invoice_delete_enabled` (SUPER_ADMIN-flip via `PATCH /api/admin/restaurants/:id/invoice-delete-flag`) once let the OWNER **soft-delete** a restaurant invoice (`DELETE /invoice/{order,session}/:id` → stamps `deleted_at` + forensic snapshot in `central.invoice_deletion_audit`). It does **NOT** reverse the GL and is **superseded by Cancel**. Do **not** add hard-delete for any invoice/folio/order/session — neither owner nor staff may delete an invoice.
 
 ### Hospitality (Hotel) Module
 Optional `property_type ∈ {RESTAURANT, HOTEL, BOTH}` on `restaurants`. When HOTEL or BOTH:
@@ -1209,9 +1209,32 @@ node scripts/test-invoice-math.cjs             # end-to-end math regression
 * **On-prem agent** — `print-agent/agent.mjs` (zero-dep Node 18+; built-in `fetch` + `net`) runs on a PC/Pi on the printers' LAN, polls the queue, builds an ESC/POS KOT, sends it over TCP (port 9100) to each printer by IP, and acks `PRINTED`/`FAILED` (server retries ≤6×). Config via `.env` (`BASE_URL`/`RESTAURANT_ID`/`AGENT_TOKEN`); see `print-agent/README.md`.
 * **Config UI** — owner-only **Restaurant → Kitchen Printers** tab (`KITCHEN_PRINTERS`, component `PrintersConfig`): agent-token card (copy/rotate), add/edit printer form (name, station, IP, port, copies, default), and the configured-printers table. Verified end-to-end on RESTO-1003 (order → enqueue → agent poll with correct KOT content → ack `PRINTED`; tokenless poll → 401).
 
+## Recent Feature Additions (2026-08 cycle — accounting depth, checklists, print, invoice lifecycle)
+
+Deploy/verify pattern used this cycle: bump `commit_marker` (server.ts `BUILD_VERSION`), push, then poll `GET /api/version` until the marker flips (confirms the VPS rebuilt). Every accounting change was verified to keep the **trial balance balanced** and ran `node test-scripts/run_technical_tests.mjs` (0 new FAILs). Deep proofs live in `scratchpad/*.mjs` (mdr, petty-cash, payroll accrual, invoice cancel, checklist modules).
+
+### Accounting
+* **Card/UPI commission (MDR)** (`mdr-tender-method-gl-fix`) — per-tenant `card_pct/upi_pct/gst_pct` (API fields have **no** `mdr_` prefix). `_tenderGlLines` splits ONLY explicit CARD/UPI at the sale: fee → `5510`, its GST → `1330` ITC, net → Bank — so the P&L is net of commission. Load-bearing: session-close now stamps `payment_method` onto each order (was null → cash wrongly hit Bank / took the card split).
+* **Petty Cash / Expense Journal — unified** (`petty-cash-unify-fix3`) — the list is GL-derived (Cash `1000`) LEFT-joined to the `petty_cash` table so manual rows show the real category + are editable; edit re-posts the GL, delete hides it (`is_reversed`), a cash **IN books Dr Cash / Cr Bank** (a till top-up, NOT income), and reads are gated by `_canReadExpenseJournal` (floor/kitchen roles denied).
+* **Multi-partner owner equity** — per-tenant `bank_accounts` (103x asset codes) + `owners`/`owner_transactions` (301x capital; invest=Cr, payout=Dr) + per-owner printable Capital Statement. All GL-posted, reconciles to trial balance.
+* **Two-step payroll accrual** (`payroll-accrual-2step`) — operational payroll: **finalize ACCRUES** (`Dr Salaries 5100 / Cr Salaries Payable 2400`, dated the 1st of the earned month) then a **separate PAY** (`Dr 2400 / Cr Bank|Cash`, on the real payout date, e.g. the 10th of the next month). `POST /api/owner/payroll/pay`. Salary advances now record a payment mode (Cash→1000, else→1010).
+* **Unpaid purchases reach the P&L** — Supplier Invoices post `Dr expense + ITC / Cr Accounts Payable 2000` at invoice date (accrual); paying later clears AP. A raw PO / GRN alone does not accrue — record the bill.
+
+### Checklists — per-module toggles (`checklist-module-toggles-2`)
+Extended checklists to **Restaurant & Spa** (module-level: the outlet is the single facility) with a per-module ON/OFF **setting** — the owner decides per module, no code change. `checklist_settings(module→enabled)`, `GET/PATCH /checklists/settings` (GET also returns `present`). Hotel/Events default ON (unchanged), Restaurant/Spa opt-in. The daily cron is gated by each toggle + gains Restaurant/Spa branches; manual start accepts `RESTAURANT`/`SPA` (`CHK_FTYPES` includes them). Config UI gets the facility types + a "Where checklists run" toggle panel.
+
+### Invoice lifecycle — Cancel + Audit (`invoice-cancel-audit`)
+See **Invoice Cancellation & Audit** above — every module's invoice is cancel-only (GL-reversing via `_reverseJournal`, fully audited), never deletable.
+
+### On-prem print agent v3 (`print-agent/` v3.0.0)
+Reliable NETWORK (KDS) printing — the agent completes a job once the bytes flush instead of waiting for the printer to close the socket (cheap 9100 LAN printers hold it open → false "printer timeout" → tickets marked FAILED then retried/duped). Clear connection-error messages surfaced by the Test button. Client package: `printer-setup/AtithiSetuPrintAgent-v3.zip`.
+
+### Cash Count reachable from the cashier "Cash" view (`cashier-cash-count-tab`)
+The top-level **Cash** (cashier) view runs `AccountingView` in `cashierMode`, which hides the group nav — so the standalone **Cash Count** tool was unreachable there. Added a `Cash Drawers | Cash Count` switcher for that view (Cash Count also stays under Ledger & Books → Controls for owners).
+
 ## Development Workflow
 
-* **Branch:** `dev` is the canonical branch. Push to `dev` triggers GitHub Actions auto-deploy to the VPS via `.github/workflows/deploy-vps.yml`.
+* **Branch:** `dev` is the canonical branch. Push to `dev` triggers GitHub Actions auto-deploy to the VPS via `.github/workflows/deploy-vps.yml`. (NOTE 2026-08: the live VPS this cycle rebuilt on pushes to `master` — confirm which remote/branch your working copy tracks before relying on either.)
 * **Local TypeScript noise:** `npx tsc --noEmit -p .` produces some pre-existing errors in unrelated files. Filter with `grep -E "src/App\.tsx" | grep -v <known-line>` when verifying that new edits don't introduce new errors.
 * **Vite production build** (`npx vite build`) must succeed cleanly before pushing.
 * **Don't `--no-verify` git pushes** — pre-commit hooks should always run.
