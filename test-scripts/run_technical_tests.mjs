@@ -1717,6 +1717,23 @@ async function testChecklists() {
     await api('POST', `/api/restaurant/${R}/housekeeping/jobs/${jid}/complete`, {});
   };
 
+  // TC-CHK-MODULES — per-module checklist toggle ("small setting") round-trips and
+  // reports which modules the tenant runs. Self-cleaning (restores RESTAURANT).
+  const cs0 = await api('GET', `/api/restaurant/${R}/checklists/settings`);
+  if (cs0.status === 403) { skip('TC-CHK-MODULES', 'per-module checklist toggle', 'need OWNER role'); }
+  else if (cs0.status !== 200 || !cs0.data?.settings || !cs0.data?.present) { fail('TC-CHK-MODULES', 'checklists/settings deployed', `HTTP ${cs0.status} ${JSON.stringify(cs0.data).slice(0,120)}`); }
+  else {
+    const orig = !!cs0.data.settings.RESTAURANT;
+    await api('PATCH', `/api/restaurant/${R}/checklists/settings`, { RESTAURANT: !orig });
+    const cs1 = await api('GET', `/api/restaurant/${R}/checklists/settings`);
+    const flipped = cs1.data?.settings?.RESTAURANT === !orig;
+    await api('PATCH', `/api/restaurant/${R}/checklists/settings`, { RESTAURANT: orig });   // restore
+    const cs2 = await api('GET', `/api/restaurant/${R}/checklists/settings`);
+    const restored = cs2.data?.settings?.RESTAURANT === orig;
+    const hasAll = ['RESTAURANT','HOTEL','SPA','EVENTS'].every(m => m in cs1.data.settings && m in cs1.data.present);
+    (flipped && restored && hasAll ? pass : fail)('TC-CHK-MODULES', 'Per-module checklist toggle round-trips (Restaurant/Hotel/Spa/Events) + present flags', `flipped=${flipped} restored=${restored} keys=${hasAll}`);
+  }
+
   // TC-CHK-CAT — category create + list + deactivate (self-cleaning).
   const catRes = await api('POST', `/api/restaurant/${R}/checklists/categories`, { name: `UAT Cat ${Date.now()}` });
   if (catRes.status === 201 && catRes.data?.id) {

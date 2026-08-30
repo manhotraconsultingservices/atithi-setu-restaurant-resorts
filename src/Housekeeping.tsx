@@ -78,14 +78,22 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
   };
   const startTpl = startTpls.find(t => t.id === startTplId);
   const startIsEvent = startTpl?.facility_type === 'EVENT';
+  // Module-level templates (Restaurant / Spa) have no per-entity facility to pick —
+  // the outlet IS the facility, so the server fills in the id/label.
+  const startIsModule = startTpl?.facility_type === 'RESTAURANT' || startTpl?.facility_type === 'SPA';
   const startFacilities = startIsEvent ? startVenues : startRooms;
   const submitStart = async () => {
-    if (!startTplId || !startFacId) return;
-    const fac = startFacilities.find((f: any) => f.id === startFacId);
-    const label = fac ? (fac.name || (fac.room_number ? `Room ${fac.room_number}` : fac.id)) : startFacId;
+    if (!startTplId) return;
+    if (!startIsModule && !startFacId) return;
     setBusy(true);
     try {
-      await api('/checklists/jobs', { method: 'POST', body: JSON.stringify({ template_id: startTplId, facility_type: startIsEvent ? 'EVENT' : 'ROOM', facility_id: startFacId, facility_label: label }) });
+      if (startIsModule) {
+        await api('/checklists/jobs', { method: 'POST', body: JSON.stringify({ template_id: startTplId, facility_type: startTpl!.facility_type }) });
+      } else {
+        const fac = startFacilities.find((f: any) => f.id === startFacId);
+        const label = fac ? (fac.name || (fac.room_number ? `Room ${fac.room_number}` : fac.id)) : startFacId;
+        await api('/checklists/jobs', { method: 'POST', body: JSON.stringify({ template_id: startTplId, facility_type: startIsEvent ? 'EVENT' : 'ROOM', facility_id: startFacId, facility_label: label }) });
+      }
       setShowStart(false); await load();
     } catch (e: any) { alert(e.message); } finally { setBusy(false); }
   };
@@ -194,7 +202,10 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
               <option value="">Select a template…</option>
               {startTpls.map(t => <option key={t.id} value={t.id}>{t.name} ({t.facility_type})</option>)}
             </select>
-            {startTpl && (
+            {startTpl && startIsModule && (
+              <p className="text-[12px] text-[#6b5d52] bg-[#faf7f2] border border-[#e8dccf] rounded-lg px-3 py-2 mb-3">Runs for the whole <b>{startTpl.facility_type === 'SPA' ? 'Spa & Wellness' : 'Restaurant'}</b> — no specific room/hall to pick.</p>
+            )}
+            {startTpl && !startIsModule && (
               <>
                 <label className="text-[11px] font-semibold text-[#6b5d52] block mb-1">{startIsEvent ? 'Event hall' : 'Room'}</label>
                 <select value={startFacId} onChange={e => setStartFacId(e.target.value)} className="w-full text-sm border border-[#d4c4a8] rounded px-2 py-2 bg-white mb-3">
@@ -205,7 +216,7 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
             )}
             <div className="flex justify-end gap-2">
               <button className={BTN_GHOST} onClick={() => setShowStart(false)}>Cancel</button>
-              <button className={BTN_PRIMARY} onClick={submitStart} disabled={busy || !startTplId || !startFacId}>Start</button>
+              <button className={BTN_PRIMARY} onClick={submitStart} disabled={busy || !startTplId || (!startIsModule && !startFacId)}>Start</button>
             </div>
           </div>
         </div>

@@ -22908,6 +22908,26 @@ ${data.tenant.name}`;
     // Inspection stays 'ALL' — inspections apply to rooms and halls alike.
     await db.run("UPDATE checklist_categories SET facility_type = 'ROOM' WHERE id = 'CAT-SYS-PMS'").catch(() => {});
     await db.run("UPDATE checklist_categories SET facility_type = 'EVENT' WHERE id IN ('CAT-SYS-EVENTHALL', 'CAT-SYS-EVENT')").catch(() => {});
+    // Per-module checklist enablement — the "small setting" so the owner turns
+    // checklists on/off per module (Restaurant / Hotel / Spa / Events) without any
+    // code change. Legacy modules (Hotel/Events) default ON to preserve today's
+    // behaviour; the new module-level ones (Restaurant/Spa) default OFF (opt-in).
+    await db.exec(`CREATE TABLE IF NOT EXISTS checklist_settings (
+      module     TEXT PRIMARY KEY,
+      enabled    INT DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`).catch(() => {});
+    for (const [m, def] of ([['RESTAURANT', 0], ['HOTEL', 1], ['SPA', 0], ['EVENTS', 1]] as [string, number][])) {
+      await db.run("INSERT INTO checklist_settings (module, enabled) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM checklist_settings WHERE module = ?)", [m, def, m]).catch(() => {});
+    }
+  };
+
+  // Load the per-module checklist toggles as { RESTAURANT, HOTEL, SPA, EVENTS } → bool.
+  const loadChecklistSettings = async (db: any): Promise<Record<string, boolean>> => {
+    const rows: any[] = await db.query("SELECT module, enabled FROM checklist_settings").catch(() => []);
+    const out: Record<string, boolean> = { RESTAURANT: false, HOTEL: true, SPA: false, EVENTS: true };
+    for (const r of (rows || [])) out[String(r.module).toUpperCase()] = Number(r.enabled) === 1;
+    return out;
   };
 
   // Resolve the checklist templates that apply to a facility for a trigger.
@@ -23019,24 +23039,37 @@ ${data.tenant.name}`;
   // MID_STAY checklists (per in-house stay) for one tenant. Idempotent via dedupe
   // keys — safe to run repeatedly. Used by the 05:00 cron AND the owner-triggered
   // "run now" endpoint. `ymd` lets callers evaluate the run as of a given date.
-  const runTenantScheduledChecklists = async (db: any, o: { isHotel: boolean; isEvents: boolean; ymd: string }): Promise<number> => {
+  const runTenantScheduledChecklists = async (db: any, o: { isHotel: boolean; isEvents: boolean; isRestaurant?: boolean; isSpa?: boolean; ymd: string }): Promise<number> => {
     let raised = 0;
     await ensureHousekeepingTables(db);
+    const s = await loadChecklistSettings(db);   // per-module owner toggles
     const has: any = await db.get("SELECT (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='DAILY') AS daily, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='MID_STAY') AS midstay, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='CLEANING') AS cleaning").catch(() => ({ daily: 0, midstay: 0, cleaning: 0 }));
     if (Number(has?.daily || 0) === 0 && Number(has?.midstay || 0) === 0 && Number(has?.cleaning || 0) === 0) return 0;
-    if (o.isHotel && Number(has?.daily || 0) > 0) {
+    if (o.isHotel && s.HOTEL && Number(has?.daily || 0) > 0) {
       const rooms: any[] = await db.query("SELECT id, name, room_number, type_id FROM rooms").catch(() => []);
       for (const rm of rooms) {
         const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${o.ymd}`, due_date: o.ymd });
         raised += ids.length;
       }
     }
-    if (o.isEvents && Number(has?.daily || 0) > 0) {
+    if (o.isEvents && s.EVENTS && Number(has?.daily || 0) > 0) {
       const venues: any[] = await db.query("SELECT id, name FROM event_venues WHERE is_active = 1").catch(() => []);
       for (const v of venues) {
         const ids = await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${o.ymd}`, due_date: o.ymd });
         raised += ids.length;
       }
+    }
+    // Module-level daily checklists — the whole outlet is one "facility", for the
+    // verticals that have no per-entity object to hang a checklist on. Gated by the
+    // owner's per-module toggle; a no-op unless an active DAILY template is scoped to
+    // that module (facility_type = the module) or GENERIC.
+    if (o.isRestaurant && s.RESTAURANT && Number(has?.daily || 0) > 0) {
+      const ids = await raiseChecklistJobs(db, { facility_type: 'RESTAURANT', facility_id: 'RESTAURANT', facility_label: 'Restaurant', trigger: 'DAILY', dedupe_key: `DAILY:RESTAURANT:${o.ymd}`, due_date: o.ymd });
+      raised += ids.length;
+    }
+    if (o.isSpa && s.SPA && Number(has?.daily || 0) > 0) {
+      const ids = await raiseChecklistJobs(db, { facility_type: 'SPA', facility_id: 'SPA', facility_label: 'Spa & Wellness', trigger: 'DAILY', dedupe_key: `DAILY:SPA:${o.ymd}`, due_date: o.ymd });
+      raised += ids.length;
     }
     if (o.isHotel && Number(has?.midstay || 0) > 0) {
       const stays: any[] = await db.query("SELECT rb.id, rb.room_id, rb.check_in_date, r.name, r.room_number, r.type_id FROM room_bookings rb JOIN rooms r ON r.id = rb.room_id WHERE rb.status = 'CHECKED_IN'").catch(() => []);
@@ -23554,11 +23587,15 @@ ${data.tenant.name}`;
       const b = req.body || {};
       const template_ids: string[] = Array.isArray(b.template_ids) ? b.template_ids : (b.template_id ? [b.template_id] : []);
       if (!template_ids.length) return res.status(400).json({ error: 'template_id(s) required' });
-      const ft = String(b.facility_type || 'ROOM').toUpperCase();
+      const ftRaw = String(b.facility_type || 'ROOM').toUpperCase();
+      const ft = ['ROOM', 'EVENT', 'RESTAURANT', 'SPA', 'GENERIC'].includes(ftRaw) ? ftRaw : 'ROOM';
+      // Module-level facilities (Restaurant / Spa) are singletons — the outlet IS the
+      // facility — so default the id/label to the module when the caller omits them.
+      const moduleLevel = ft === 'RESTAURANT' || ft === 'SPA';
       const jobIds = await raiseChecklistJobs(db, {
-        facility_type: ft === 'EVENT' ? 'EVENT' : 'ROOM',
-        facility_id: b.facility_id || null,
-        facility_label: b.facility_label || null,
+        facility_type: ft,
+        facility_id: b.facility_id || (moduleLevel ? ft : null),
+        facility_label: b.facility_label || (ft === 'RESTAURANT' ? 'Restaurant' : ft === 'SPA' ? 'Spa & Wellness' : null),
         source_ref: b.source_ref || null,
         guest_label: b.guest_label || null,
         trigger: 'MANUAL',
@@ -23582,14 +23619,50 @@ ${data.tenant.name}`;
     if (!requireOwnerOrAdmin(req, res)) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const rest: any = await centralDb.get("SELECT property_type, events_enabled FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+      const rest: any = await centralDb.get("SELECT property_type, events_enabled, spa_enabled FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
       const isHotel = ['HOTEL', 'BOTH'].includes(String(rest?.property_type || ''));
+      const isRestaurant = ['RESTAURANT', 'BOTH', ''].includes(String(rest?.property_type || '').toUpperCase());
       const isEvents = Number(rest?.events_enabled) === 1;
+      const isSpa = Number(rest?.spa_enabled) === 1;
       const ymd = String(req.body?.as_of || new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10)).slice(0, 10);
-      const raised = await runTenantScheduledChecklists(db, { isHotel, isEvents, ymd });
+      const raised = await runTenantScheduledChecklists(db, { isHotel, isEvents, isRestaurant, isSpa, ymd });
       const overdue_notified = await notifyOverdueChecklists(db, req.params.id, ymd);
       res.json({ raised, overdue_notified, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to run scheduled checklists' }); }
+  });
+
+  // ── Per-module checklist toggles ("small setting", owner-controlled) ──────────
+  // The owner turns checklists on/off per module (Restaurant / Hotel / Spa / Events)
+  // — no code change. GET also returns which modules this tenant actually runs, so
+  // the UI only shows the relevant toggles.
+  app.get("/api/restaurant/:id/checklists/settings", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const settings = await loadChecklistSettings(db);
+      const rest: any = await centralDb.get("SELECT property_type, events_enabled, spa_enabled FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+      const pt = String(rest?.property_type || '').toUpperCase();
+      const present = {
+        RESTAURANT: ['RESTAURANT', 'BOTH', ''].includes(pt),
+        HOTEL: ['HOTEL', 'BOTH'].includes(pt),
+        SPA: Number(rest?.spa_enabled) === 1,
+        EVENTS: Number(rest?.events_enabled) === 1,
+      };
+      res.json({ settings, present });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to load checklist settings' }); }
+  });
+  app.patch("/api/restaurant/:id/checklists/settings", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureHousekeepingTables(db);
+      const b = req.body || {};
+      for (const m of ['RESTAURANT', 'HOTEL', 'SPA', 'EVENTS']) {
+        if (m in b) await db.run("UPDATE checklist_settings SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE module = ?", [b[m] ? 1 : 0, m]).catch(() => {});
+      }
+      res.json({ settings: await loadChecklistSettings(db) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to update checklist settings' }); }
   });
 
   // ── My Checklist ────────────────────────────────────────────────────────────
@@ -51214,7 +51287,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'cashier-cash-count-tab',
+    commit_marker: 'checklist-module-toggles',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
@@ -53783,15 +53856,18 @@ ${data.tenant.name}`;
   cron.schedule('0 5 * * *', async () => {
     try {
       const ymd = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
-      const restaurants = await centralDb.query("SELECT id, property_type, events_enabled FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'");
+      const restaurants = await centralDb.query("SELECT id, property_type, events_enabled, spa_enabled FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'");
       let raised = 0;
       for (const r of restaurants) {
         try {
           const isHotel = ['HOTEL', 'BOTH'].includes(String(r.property_type || ''));
+          const isRestaurant = ['RESTAURANT', 'BOTH', ''].includes(String(r.property_type || '').toUpperCase());
           const isEvents = Number(r.events_enabled) === 1;
-          if (!isHotel && !isEvents) continue;
+          const isSpa = Number(r.spa_enabled) === 1;
+          // Every tenant is at least a restaurant, so we no longer skip non-hotel/
+          // non-events tenants — the module toggles inside decide what actually runs.
           const db = await getTenantDb(r.id);
-          raised += await runTenantScheduledChecklists(db, { isHotel, isEvents, ymd });
+          raised += await runTenantScheduledChecklists(db, { isHotel, isEvents, isRestaurant, isSpa, ymd });
           await notifyOverdueChecklists(db, r.id, ymd);
         } catch (tenantErr) { console.error(`[checklist-cron] tenant ${r.id} error:`, tenantErr); }
       }

@@ -12,7 +12,7 @@ type FacilityScope = 'ROOM' | 'EVENT' | 'ALL';
 type Props = { restaurantId: string; token: string; facilityScope?: FacilityScope };
 
 const scopeTypes = (scope: FacilityScope): string[] =>
-  scope === 'ROOM' ? ['ROOM', 'GENERIC'] : scope === 'EVENT' ? ['EVENT'] : ['ROOM', 'EVENT', 'GENERIC'];
+  scope === 'ROOM' ? ['ROOM', 'GENERIC'] : scope === 'EVENT' ? ['EVENT'] : ['ROOM', 'EVENT', 'RESTAURANT', 'SPA', 'GENERIC'];
 
 // The facility_type a scope maps categories to ('ALL' = the owner / all-modules view).
 const scopeFacilityType = (scope: FacilityScope): string =>
@@ -34,9 +34,9 @@ const TRIGGERS: { v: string; label: string; hint: string; ft: string[] }[] = [
   { v: 'CHECK_OUT', label: 'On check-out', hint: 'Raised when the room is checked out', ft: ['ROOM'] },
   { v: 'MID_STAY', label: 'Mid-stay / overstay (recurring)', hint: 'Every N nights of an in-house stay (owner cadence)', ft: ['ROOM'] },
   { v: 'CLEANING', label: 'Room cleaning (recurring)', hint: 'During a stay at the per-booking cadence the front desk sets at check-in', ft: ['ROOM'] },
-  { v: 'DAILY', label: 'Daily (each morning)', hint: 'Auto-raised every morning per facility', ft: ['ROOM', 'EVENT', 'GENERIC'] },
+  { v: 'DAILY', label: 'Daily (each morning)', hint: 'Auto-raised every morning per facility / module (if that module is enabled)', ft: ['ROOM', 'EVENT', 'RESTAURANT', 'SPA', 'GENERIC'] },
   { v: 'EVENT_COMPLETE', label: 'On event completion', hint: 'Raised when an event is marked complete', ft: ['EVENT'] },
-  { v: 'MANUAL', label: 'Manual / on-demand', hint: 'Started by staff when needed (inspections, audits)', ft: ['ROOM', 'EVENT', 'GENERIC'] },
+  { v: 'MANUAL', label: 'Manual / on-demand', hint: 'Started by staff when needed (inspections, audits)', ft: ['ROOM', 'EVENT', 'RESTAURANT', 'SPA', 'GENERIC'] },
   // Room status changes — all NON-BLOCKING (never gate a business operation)
   { v: 'ROOM_VACANT', label: 'When room → Vacant', hint: 'Raised when the room becomes vacant / ready — non-blocking', ft: ['ROOM'] },
   { v: 'ROOM_OCCUPIED', label: 'When room → Occupied', hint: 'Raised when the room becomes occupied — non-blocking', ft: ['ROOM'] },
@@ -50,7 +50,7 @@ const TRIGGERS: { v: string; label: string; hint: string; ft: string[] }[] = [
   { v: 'VENUE_MAINTENANCE', label: 'When hall → Maintenance', hint: 'Raised when the hall goes to maintenance — non-blocking', ft: ['EVENT'] },
   { v: 'VENUE_BLOCKED', label: 'When hall → Blocked', hint: 'Raised when the hall is blocked — non-blocking', ft: ['EVENT'] },
 ];
-const FTYPES = [{ v: 'ROOM', label: 'Hotel room' }, { v: 'EVENT', label: 'Event hall' }, { v: 'GENERIC', label: 'Generic' }];
+const FTYPES = [{ v: 'ROOM', label: 'Hotel room' }, { v: 'EVENT', label: 'Event hall' }, { v: 'RESTAURANT', label: 'Restaurant' }, { v: 'SPA', label: 'Spa & Wellness' }, { v: 'GENERIC', label: 'Generic' }];
 const trgLabel = (v: string) => TRIGGERS.find(t => t.v === v)?.label || v;
 
 function makeApi(restaurantId: string, token: string) {
@@ -68,6 +68,53 @@ function makeApi(restaurantId: string, token: string) {
 const BTN = 'px-3 py-1.5 bg-[#a0522d] text-white text-sm rounded hover:bg-[#8b4513] disabled:opacity-40';
 const GHOST = 'px-3 py-1.5 border border-[#d4c4a8] text-sm rounded hover:bg-[#f5f0e8]';
 const INPUT = 'text-sm border border-[#d4c4a8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#a0522d]';
+
+// The "small setting": per-module on/off toggles so the owner decides which
+// modules run checklists — no code change. Only shows modules this tenant runs.
+const MODULE_META: { key: string; label: string; desc: string }[] = [
+  { key: 'RESTAURANT', label: 'Restaurant', desc: 'Opening / closing & inspection checklists for the outlet' },
+  { key: 'HOTEL', label: 'Hotel', desc: 'Room check-in / out, daily & mid-stay checklists' },
+  { key: 'SPA', label: 'Spa & Wellness', desc: 'Daily upkeep & inspection checklists for the spa' },
+  { key: 'EVENTS', label: 'Events', desc: 'Venue daily & post-event handover checklists' },
+];
+function ModuleToggles({ api }: { api: (p: string, i?: RequestInit) => Promise<any> }) {
+  const [settings, setSettings] = useState<Record<string, boolean> | null>(null);
+  const [present, setPresent] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState('');
+  useEffect(() => { api('/checklists/settings').then((d: any) => { setSettings(d.settings || {}); setPresent(d.present || {}); }).catch(() => {}); }, [api]);
+  const toggle = async (m: string) => {
+    if (!settings) return;
+    const next = !settings[m];
+    setBusy(m); setSettings({ ...settings, [m]: next });
+    try { const d = await api('/checklists/settings', { method: 'PATCH', body: JSON.stringify({ [m]: next }) }); setSettings(d.settings || {}); }
+    catch { setSettings({ ...settings, [m]: !next }); }
+    finally { setBusy(''); }
+  };
+  if (!settings) return null;
+  const mods = MODULE_META.filter(m => present[m.key]);
+  if (mods.length === 0) return null;
+  return (
+    <div className="rounded-xl border border-[#e8ded0] bg-[#faf7f2] p-4">
+      <p className="text-xs font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Where checklists run</p>
+      <p className="text-[12px] text-[#9c8e85] mb-3">Turn checklists on or off per module. Off = no daily or on-demand checklists are raised for that module.</p>
+      <div className="grid sm:grid-cols-2 gap-2">
+        {mods.map(m => (
+          <div key={m.key} className="flex items-start gap-3 rounded-lg border border-[#e8ded0] bg-white px-3 py-2.5">
+            <button type="button" onClick={() => toggle(m.key)} disabled={busy === m.key} aria-label={`Toggle ${m.label} checklists`}
+              className={`mt-0.5 relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${settings[m.key] ? 'bg-[#a0522d]' : 'bg-[#d4c4a8]'}`}>
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${settings[m.key] ? 'translate-x-4' : 'translate-x-0.5'}`} />
+            </button>
+            <span>
+              <span className="text-sm font-semibold text-[#1a1208]">{m.label}</span>
+              <span className={`ml-2 text-[10px] font-bold ${settings[m.key] ? 'text-emerald-700' : 'text-[#9c8e85]'}`}>{settings[m.key] ? 'ON' : 'OFF'}</span>
+              <span className="block text-[11px] text-[#9c8e85] mt-0.5">{m.desc}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' }: Props) {
   const api = useCallback(makeApi(restaurantId, token), [restaurantId, token]);
@@ -111,6 +158,8 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' 
         <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{heading}</h2>
         <p className="text-sm text-[#6b5d52] mt-1">{subheading}</p>
       </div>
+
+      {facilityScope === 'ALL' && <ModuleToggles api={api} />}
 
       <div className="flex gap-0 border-b border-[#e8ded0]">
         {(['TEMPLATES', 'CATEGORIES'] as const).map(t => (
