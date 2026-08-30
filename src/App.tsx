@@ -8532,8 +8532,8 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{cashierMode ? 'Cash Drawer & Shift Handover' : 'Ledger & Books'}</h2>
-        <p className="text-sm text-[#6b5d52] mt-1">{cashierMode ? 'Open your till · count & close · hand over to the next shift' : 'Double-entry GL · Trial balance · TDS tracker · Manual journals'}</p>
+        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{cashierMode ? (acctTab === 'CASHCOUNT' ? 'Cash Count' : 'Cash Drawer & Shift Handover') : 'Ledger & Books'}</h2>
+        <p className="text-sm text-[#6b5d52] mt-1">{cashierMode ? (acctTab === 'CASHCOUNT' ? 'Count the till and post the over/short variance to the ledger' : 'Open your till · count & close · hand over to the next shift') : 'Double-entry GL · Trial balance · TDS tracker · Manual journals'}</p>
       </div>
 
       {!cashierMode && (
@@ -8555,6 +8555,20 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
           ))}
         </div>
       </div>
+      )}
+
+      {/* Cashier "Cash" view hides the full group nav, but the cashier still needs
+          the standalone Cash Count (count the till → variance) beside the drawer,
+          so give this view its own small Drawer | Cash Count switcher. */}
+      {cashierMode && (
+        <div className="flex gap-0 border-b border-[#e8ded0] overflow-x-auto">
+          {(['CASHDRAWER', 'CASHCOUNT'] as SubTab[]).map(t => (
+            <button key={t} onClick={() => setAcctTab(t)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${acctTab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
+              {TAB_LABEL[t]}
+            </button>
+          ))}
+        </div>
       )}
 
       {loading && <p className="text-sm text-[#6b5d52] animate-pulse">Loading...</p>}
