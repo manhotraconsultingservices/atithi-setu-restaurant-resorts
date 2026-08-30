@@ -9,10 +9,17 @@ type FacilityScope = 'ROOM' | 'EVENT' | 'ALL';
 // facilityScope lets the same editor be mounted per module: hotel/OMS shows ROOM +
 // GENERIC checklists, Events & Convention shows EVENT checklists. 'ALL' = owner/
 // SuperAdmin view (everything). Defaults to 'ALL' for backward compatibility.
-type Props = { restaurantId: string; token: string; facilityScope?: FacilityScope };
+type Props = { restaurantId: string; token: string; facilityScope?: FacilityScope; present?: Record<string, boolean> };
 
 const scopeTypes = (scope: FacilityScope): string[] =>
   scope === 'ROOM' ? ['ROOM', 'GENERIC'] : scope === 'EVENT' ? ['EVENT'] : ['ROOM', 'EVENT', 'RESTAURANT', 'SPA', 'GENERIC'];
+// In the module-agnostic ('ALL') config, only offer facility types for modules the
+// tenant actually runs (GENERIC is always available). Other scopes are unchanged.
+const typesForTenant = (scope: FacilityScope, present?: Record<string, boolean>): string[] => {
+  const base = scopeTypes(scope);
+  if (scope !== 'ALL' || !present) return base;
+  return base.filter(t => t === 'GENERIC' || present[t]);
+};
 
 // The facility_type a scope maps categories to ('ALL' = the owner / all-modules view).
 const scopeFacilityType = (scope: FacilityScope): string =>
@@ -116,7 +123,7 @@ function ModuleToggles({ api }: { api: (p: string, i?: RequestInit) => Promise<a
   );
 }
 
-export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' }: Props) {
+export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL', present }: Props) {
   const api = useCallback(makeApi(restaurantId, token), [restaurantId, token]);
   const [tab, setTab] = useState<'TEMPLATES' | 'CATEGORIES'>('TEMPLATES');
   const [cats, setCats] = useState<any[]>([]);
@@ -125,10 +132,12 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' 
   const [editing, setEditing] = useState<any | null>(null); // full template (with steps/assignments) or a NEW blank
   const [err, setErr] = useState('');
 
-  const allowed = scopeTypes(facilityScope);
+  const allowed = typesForTenant(facilityScope, present);
   const shown = templates.filter(t => allowed.includes(String(t.facility_type)));
-  const defaultFType = facilityScope === 'EVENT' ? 'EVENT' : 'ROOM';
-  const defaultTrigger = facilityScope === 'EVENT' ? 'EVENT_COMPLETE' : 'CHECK_OUT';
+  const defaultFType = facilityScope === 'EVENT' ? 'EVENT'
+    : facilityScope === 'ROOM' ? 'ROOM'
+    : (allowed.find(t => t !== 'GENERIC') || 'GENERIC');   // ALL: first module the tenant runs
+  const defaultTrigger = defaultFType === 'EVENT' ? 'EVENT_COMPLETE' : defaultFType === 'ROOM' ? 'CHECK_OUT' : 'MANUAL';
   const heading = facilityScope === 'EVENT' ? 'Event Checklist Templates'
     : facilityScope === 'ROOM' ? 'Hotel Checklist Templates' : 'Checklist Templates';
   const subheading = facilityScope === 'EVENT'
@@ -226,7 +235,7 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL' 
       )}
 
       {tab === 'TEMPLATES' && editing && (
-        <TemplateEditor api={api} cats={cats} restaurantId={restaurantId} token={token} facilityScope={facilityScope}
+        <TemplateEditor api={api} cats={cats} restaurantId={restaurantId} token={token} facilityScope={facilityScope} present={present}
           initial={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} onError={setErr} />
       )}
     </div>
@@ -269,10 +278,10 @@ function CategoriesPanel({ api, cats, reload, facilityScope = 'ALL' }: { api: an
 }
 
 // ── Template editor (fields + steps + assignments) ───────────────────────────
-function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL', initial, onClose, onSaved, onError }:
-  { api: any; cats: any[]; restaurantId: string; token: string; facilityScope?: FacilityScope; initial: any; onClose: () => void; onSaved: () => void; onError: (s: string) => void }) {
+function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL', present, initial, onClose, onSaved, onError }:
+  { api: any; cats: any[]; restaurantId: string; token: string; facilityScope?: FacilityScope; present?: Record<string, boolean>; initial: any; onClose: () => void; onSaved: () => void; onError: (s: string) => void }) {
   const isNew = !!initial.__new;
-  const ftypeOpts = FTYPES.filter(f => scopeTypes(facilityScope).includes(f.v));
+  const ftypeOpts = FTYPES.filter(f => typesForTenant(facilityScope, present).includes(f.v));
   const [form, setForm] = useState<any>({
     name: initial.name || '', category_id: initial.category_id || (cats.filter(c => catInScope(c, facilityScope))[0]?.id || ''),
     facility_type: initial.facility_type || (facilityScope === 'EVENT' ? 'EVENT' : 'ROOM'), trigger_event: initial.trigger_event || 'CHECK_OUT',

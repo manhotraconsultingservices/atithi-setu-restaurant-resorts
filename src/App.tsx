@@ -15412,6 +15412,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // Manager/owner cockpit over every checklist in the property. Always
               // present; isVisible() gates it (owner / MANAGER / explicit grant).
               { id: 'CHECKLIST_BOARD', label: 'Checklist Board' },
+              // Owner/manager config — module-agnostic checklist templates
+              // (Restaurant / Hotel / Spa / Events) + the per-module on/off toggle.
+              // isVisible() gates it (owner / explicit grant).
+              { id: 'CHECKLISTS', label: 'Checklist Templates' },
             ],
           },
           {
@@ -15443,7 +15447,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FRONT_OFFICE_REPORTS', label: 'Hotel Reports' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
               { id: 'HOUSEKEEPING',         label: 'Housekeeping' },
-              { id: 'CHECKLISTS',           label: 'Checklist Templates' },
               { id: 'SERVICES',             label: 'Service Catalogue' },
               { id: 'FOLIOS',               label: 'Guest Bills' },
               { id: 'COMPLIANCE',           label: 'Guest Compliance' },
@@ -15492,7 +15495,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_CATERING',   label: 'Catering Menus' },
               { id: 'EVENTS_QUOTATIONS', label: 'Quotations' },
               { id: 'EVENTS_HOUSEKEEPING', label: 'Cleaning Checklist' },
-              { id: 'EVENTS_CHECKLISTS', label: 'Checklist Templates' },
               { id: 'EVENTS_REPORTS',    label: 'Events Reports' },
               ...(isPlatformAdmin ? [{ id: 'EVENTS_MIGRATION', label: 'Data Migration' } as NavTab] : []),
               { id: 'EVENTS_SETTINGS',   label: 'Public Page Settings' },
@@ -16376,7 +16378,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       ) : activeTab === 'KITCHEN_PRINTERS' ? (
         <div className="p-1"><PrintersConfig restaurantId={restaurantId!} token={token!} /></div>
       ) : activeTab === 'CHECKLISTS' ? (
-        <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="ROOM" /></div>
+        <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="ALL" present={{ ROOM: isHotelEnabled, EVENT: isEventsEnabled, RESTAURANT: isRestaurantEnabled, SPA: isSpaEnabled }} /></div>
       ) : activeTab === 'EVENTS_CHECKLISTS' && isEventsEnabled ? (
         <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="EVENT" /></div>
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
@@ -27261,7 +27263,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'SERVICES',          label: 'Hotel Services',          description: 'Configure room-service offerings (Extra towels, AC repair, etc.) and pricing.', hotelOnly: true },
               { id: 'SERVICE_REQUESTS',  label: 'Service Requests',        description: 'Live queue of guest requests — housekeeping / maintenance acknowledge here.', hotelOnly: true },
               { id: 'HOUSEKEEPING',      label: 'Housekeeping',            description: 'Cleaning checklists, the cleaning worklist (tick tasks + release rooms/venues), and the cleaning log. Configure the checklist as owner/manager.', hotelOnly: true },
-              { id: 'CHECKLISTS',        label: 'Checklist Templates',     description: 'Build reusable checklist templates by category, set their trigger (check-in / check-out / daily / mid-stay / inspection), and assign them to all or specific rooms / halls. Grant to let a role VIEW the templates in the PMS nav; creating / editing / deleting stays owner-only.', hotelOnly: true },
+              { id: 'CHECKLISTS',        label: 'Checklist Templates',     description: 'Module-agnostic checklist config (under the Checklists nav): turn checklists on/off per module (Restaurant / Hotel / Spa / Events), build reusable templates by category, set their trigger (check-in / check-out / daily / inspection), and assign them to all or specific rooms / halls / the outlet. Grant to let a role VIEW the templates; creating / editing / deleting stays owner-only.' },
               { id: 'FOLIOS',            label: 'Guest Bills',             description: 'View / settle guest bills, add F&B charges, apply promos, credit notes.', hotelOnly: true },
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
