@@ -1483,6 +1483,17 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/beo.pdf`, token)}><ClipboardList size={13} />{t('events.bookings.beo')}</button>
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/invoice.pdf${gstQuery()}`, token)}><FileText size={13} />{t('events.bookings.invoice')}</button>
         <button className={BTN_GHOST} onClick={() => setEmailInvoice(true)}><Send size={13} />{t('events.bookings.emailInvoice')}</button>
+        {['CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CHECKED_OUT'].includes(bk.status) && ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase()) && (
+          <button className={`${BTN_GHOST} !text-rose-700 !border-rose-200 hover:!bg-rose-50`} disabled={busy} title="Cancel the invoice — reverses it in the accounts (the booking stays)" onClick={async () => {
+            const reason = window.prompt('Cancel this event invoice?\n\nThis reverses it in the accounts (banquet revenue, GST). The booking stays; the invoice is voided and kept for audit.\n\nEnter a reason (required):');
+            if (reason === null) return;
+            if (reason.trim().length < 3) { alert('A cancellation reason is required.'); return; }
+            setBusy(true);
+            try { await api(`/events/bookings/${bookingId}/invoice/cancel`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }); await load(); alert('Invoice cancelled and reversed in the accounts.'); }
+            catch (e: any) { alert('Cancel failed: ' + (e?.message || 'error')); }
+            finally { setBusy(false); }
+          }}>Cancel Invoice</button>
+        )}
         {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout', undefined, gstBody())}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_GHOST} disabled={busy} onClick={() => act('complete')}>{t('events.bookings.complete')}</button>}

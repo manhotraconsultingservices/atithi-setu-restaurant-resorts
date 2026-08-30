@@ -26,7 +26,7 @@ import {
   QrCode, 
   Plus, 
   Minus,
-  Trash2, 
+  Trash2, Ban,
   CheckCircle2, 
   Clock, 
   BarChart3,
@@ -12811,6 +12811,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
 
+  // Cancel an invoice (the GL-reversing, audited action — never a delete). Confirms
+  // with a mandatory reason, then reverses the order/session GL and marks it cancelled.
+  const cancelInvoice = async (inv: any) => {
+    const reason = window.prompt('Cancel this invoice?\n\nThis reverses it in the accounts (revenue, GST, cash) — the P&L and reports update automatically. The invoice is NOT deleted; a cancelled record is kept for audit.\n\nEnter a reason (required):');
+    if (reason === null) return;
+    if (reason.trim().length < 3) { toast.error('A cancellation reason is required.'); return; }
+    try {
+      const isSession = inv.invoice_type === 'SESSION';
+      const url = isSession
+        ? `/api/restaurant/${restaurantId}/invoices/session/${inv.session_token || inv.session_db_id || inv.id}/cancel`
+        : `/api/restaurant/${restaurantId}/invoices/order/${inv.id}/cancel`;
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ reason: reason.trim() }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Failed (${res.status})`);
+      toast.success('Invoice cancelled and reversed in the accounts.');
+      fetchInvoices();
+    } catch (e: any) { toast.error('Cancel failed: ' + (e?.message || 'error')); }
+  };
+
   // Update invoice status — routes to session or order endpoint by type
   const patchInvoiceStatus = async (inv: any, status: 'DRAFT'|'APPROVED'|'PRINTED') => {
     if (inv.invoice_type === 'SESSION') {
@@ -20983,6 +21002,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   title="Open to mark as paid"
                                 >
                                   ₹ Paid
+                                </button>
+                              )}
+                              {/* Cancel (GL-reversing + audited; never deletes) — owner/manager, not already cancelled */}
+                              {['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase())
+                                && String(inv.status || '').toUpperCase() !== 'CANCELLED'
+                                && String(inv.invoice_status || '').toUpperCase() !== 'CANCELLED' && (
+                                <button
+                                  onClick={() => cancelInvoice(inv)}
+                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-50 text-amber-700 hover:bg-amber-100 transition-all whitespace-nowrap flex items-center gap-1"
+                                  title="Cancel this invoice — reverses it in the accounts (never deletes it)"
+                                >
+                                  <Ban size={11} /> Cancel
                                 </button>
                               )}
                               {/* Delete (admin-gated, per-tenant flag) — restaurant
@@ -36016,6 +36047,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     }}
                     className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-amber-600/30 text-amber-700 text-xs font-bold hover:bg-amber-50"
                   ><RefreshCw size={13}/> Revise Invoice</button>
+                )}
+                {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'settled' && (
+                  <button
+                    onClick={async () => {
+                      const r = await promptPayment({
+                        title: 'Cancel Invoice',
+                        fields: [{ name: 'reason', label: 'Reason for cancellation (mandatory)', type: 'text', placeholder: 'e.g. Booking cancelled, billed in error', required: true }],
+                        confirmLabel: 'Cancel Invoice',
+                      });
+                      if (!r) return;
+                      const reason = String(r.reason || '').trim();
+                      if (reason.length < 3) { toast.error('A cancellation reason is required'); return; }
+                      try {
+                        const res = await fetch(`/api/restaurant/${restaurantId}/folios/${viewFolio.id}/cancel`, {
+                          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({ reason }),
+                        });
+                        const body = await res.json();
+                        if (!res.ok) throw new Error(body.error || 'Failed to cancel');
+                        toast.success('Invoice cancelled and reversed in the accounts');
+                        setRevisionHistory(null);
+                        await loadFolio(viewFolio.id);
+                      } catch (err: any) { toast.error(err.message); }
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-rose-600/30 text-rose-700 text-xs font-bold hover:bg-rose-50"
+                  ><Ban size={13}/> Cancel Invoice</button>
                 )}
               </div>
               {/* Revision / superseded badges */}

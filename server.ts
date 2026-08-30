@@ -25786,6 +25786,32 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel booking" }); }
   });
 
+  // POST /events/bookings/:bid/invoice/cancel — cancel just the event INVOICE (folio),
+  // leaving the booking. Reverses FOLIO-<id> so banquet revenue/GST back out, voids the
+  // folio, audits FOLIO CANCELLED + EVENT_BOOKING INVOICE_CANCELLED. Owner/manager only.
+  app.post("/api/restaurant/:id/events/bookings/:bid/invoice/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return res.status(403).json({ error: 'Only an owner or manager can cancel an invoice.' });
+    const reason = String(req.body?.reason || '').trim();
+    if (reason.length < 3) return res.status(400).json({ error: 'A cancellation reason is required (for the audit trail).' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP").catch(() => {});
+      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancelled_by TEXT").catch(() => {});
+      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancel_reason TEXT").catch(() => {});
+      const folio: any = await db.get("SELECT * FROM folios WHERE folio_kind = 'EVENT' AND event_booking_id = ? AND status NOT IN ('voided','cancelled') ORDER BY created_at DESC LIMIT 1", [req.params.bid]);
+      if (!folio) return res.status(404).json({ error: 'No active invoice for this booking' });
+      const by = req.user?.email || req.user?.id || null;
+      const cnChild = await db.get("SELECT id FROM folios WHERE parent_folio_id = ? AND doc_type = 'CREDIT_NOTE' LIMIT 1", [folio.id]).catch(() => null);
+      let rev: any = { reversed: 0, reversalRef: null };
+      if (!cnChild) rev = await _reverseJournal(db, req.params.id, `FOLIO-${folio.id}`, { sourceType: 'FOLIO_CANCELLED', sourceId: folio.id, reason: `Invoice cancelled — ${reason}`, postedBy: by });
+      await db.run("UPDATE folios SET status = 'voided', cancelled_at = NOW(), cancelled_by = ?, cancel_reason = ? WHERE id = ?", [by, reason, folio.id]);
+      await writeObjectAudit(db, req, { objectType: 'FOLIO', objectId: folio.id, action: 'CANCELLED', summary: `Event invoice ${folio.invoice_number || folio.id} cancelled — ${reason}${rev?.reversed ? ` · GL reversed (${rev.reversalRef})` : ''}`, before: { status: folio.status }, after: { status: 'voided' } }).catch(() => {});
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICE_CANCELLED', summary: `Invoice ${folio.invoice_number || folio.id} cancelled — ${reason}` }).catch(() => {});
+      res.json({ success: true, folio_id: folio.id, status: 'voided', gl_reversed: !!rev?.reversed });
+    } catch (err: any) { console.error('[event-invoice-cancel] error:', err); res.status(500).json({ error: err?.message || 'Failed to cancel invoice' }); }
+  });
+
   // ─── PAYMENT SCHEDULE (staged deposits) ────────────────────────────────────
   app.get("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
@@ -51386,7 +51412,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-cancel-audit',
+    commit_marker: 'invoice-cancel-ui',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

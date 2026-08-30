@@ -927,6 +927,18 @@ function SpaFolios({ restaurantId, token }: Props) {
   };
   useEffect(() => { load(); }, []);
 
+  // Cancel an invoice — reverses the spa settlement in the GL (never deletes it).
+  const cancelFolio = async (f: any) => {
+    const reason = window.prompt('Cancel this invoice?\n\nThis reverses it in the accounts (spa revenue, GST, cash). It is NOT deleted — a cancelled record is kept for audit.\n\nEnter a reason (required):');
+    if (reason === null) return;
+    if (reason.trim().length < 3) { alert('A cancellation reason is required.'); return; }
+    setBusy(true);
+    try { await api(`/folios/${f.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }); await load(); }
+    catch (e: any) { alert('Cancel failed: ' + (e?.message || 'error')); }
+    finally { setBusy(false); }
+  };
+  const canCancelSpa = ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase());
+
   const dOnly = (v: any) => v ? new Date(v).toLocaleDateString('en-IN') : '—';
   const outOf = (f: any) => Math.max(0, Number(f.outstanding || 0));
   const statusOf = (f: any) => f.status === 'closed' || outOf(f) <= 0.01 ? 'PAID' : (Number(f.paid_amount || 0) > 0 ? 'PART-PAID' : 'UNPAID');
@@ -1024,6 +1036,9 @@ function SpaFolios({ restaurantId, token }: Props) {
                         {open && <button className={BTN_GHOST} onClick={() => openPromo(f)}><Tag size={12} /> Promo</button>}
                         <button className={BTN_GHOST} onClick={() => downloadPdf(f)}><FileText size={12} /> Invoice</button>
                         <button className={BTN_GHOST} title="Audit log — who changed this invoice" onClick={() => setHistory({ id: f.id, meta: { title: f.invoice_number || f.id, subtitle: [statusOf(f), f.client_name].filter(Boolean).join(' · '), facts: [['Invoice #', f.invoice_number], ['Client', f.client_name], ['Service', f.service_name], ['Total', money(f.grand_total)], ['Paid', money(f.paid_amount)], ['Outstanding', open ? money(outOf(f)) : '—']] } })}><History size={12} /></button>
+                        {canCancelSpa && !['voided', 'cancelled'].includes(String(f.status || '').toLowerCase()) && (
+                          <button className={`${BTN_GHOST} !text-rose-700 !border-rose-200 hover:!bg-rose-50`} title="Cancel this invoice — reverses it in the accounts (never deletes it)" disabled={busy} onClick={() => cancelFolio(f)}>Cancel</button>
+                        )}
                       </div>
                     </td>
                   </tr>
