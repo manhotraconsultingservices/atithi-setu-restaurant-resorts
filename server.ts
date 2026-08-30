@@ -23348,7 +23348,7 @@ ${data.tenant.name}`;
     'BOOKING_NEW', 'BOOKING_ASSIGNED',
     'ROOM_VACANT', 'ROOM_OCCUPIED', 'ROOM_CLEANING', 'ROOM_MAINTENANCE', 'ROOM_BLOCKED',
     'VENUE_VACANT', 'VENUE_OCCUPIED', 'VENUE_CLEANING', 'VENUE_MAINTENANCE', 'VENUE_BLOCKED'];
-  const CHK_FTYPES = ['ROOM', 'EVENT', 'GENERIC'];
+  const CHK_FTYPES = ['ROOM', 'EVENT', 'RESTAURANT', 'SPA', 'GENERIC'];
 
   // ── Categories ───────────────────────────────────────────────────────────
   app.get("/api/restaurant/:id/checklists/categories", authenticate, checklistViewStaff, async (req: AuthRequest, res: Response) => {
@@ -23440,7 +23440,7 @@ ${data.tenant.name}`;
       const ft = String(b.facility_type || '').toUpperCase();
       const trg = String(b.trigger_event || '').toUpperCase();
       if (!name) return res.status(400).json({ error: 'name is required' });
-      if (!CHK_FTYPES.includes(ft)) return res.status(400).json({ error: 'facility_type must be ROOM, EVENT or GENERIC' });
+      if (!CHK_FTYPES.includes(ft)) return res.status(400).json({ error: `facility_type must be one of ${CHK_FTYPES.join(', ')}` });
       if (!CHK_TRIGGERS.includes(trg)) return res.status(400).json({ error: `trigger_event must be one of ${CHK_TRIGGERS.join(', ')}` });
       const recur = trg === 'MID_STAY' ? Math.max(1, Number(b.recurrence_nights) || 1) : (Number(b.recurrence_nights) || 0);
       if (trg === 'MID_STAY' && recur < 1) return res.status(400).json({ error: 'MID_STAY requires recurrence_nights >= 1' });
@@ -51287,7 +51287,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-module-toggles',
+    commit_marker: 'checklist-module-toggles-2',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
