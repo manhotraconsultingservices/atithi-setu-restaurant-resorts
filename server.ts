@@ -27984,6 +27984,7 @@ ${data.tenant.name}`;
            LEFT JOIN spa_clients c ON c.id = a.client_id
           WHERE f.id = ? AND f.folio_kind = 'SPA'`, [req.params.fid]);
       if (!folio) return res.status(404).json({ error: "Spa folio not found" });
+      writeObjectAudit(db, req, { objectType: 'FOLIO', objectId: folio.id, action: 'PRINTED', summary: `Spa invoice ${folio.invoice_number || folio.id} printed / downloaded` }).catch(() => {});
       const entries: any[] = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC", [req.params.fid]);
       const hotel = check.restaurant;
       const out = await getFolioOutstanding(db, folio.id).catch(() => null);
@@ -43076,6 +43077,8 @@ ${data.tenant.name}`;
          WHERE f.id = ?`, [req.params.folioId]
       );
       if (!folio) return res.status(404).json({ error: "Folio not found" });
+      // Audit each print/download of the invoice (who + when) for the history trail.
+      writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: folio.id, action: 'PRINTED', summary: `Invoice ${folio.invoice_number || folio.id} printed / downloaded` }).catch(() => {});
       const entries: any[] = await tenantDb.query(
         "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
         [req.params.folioId]
@@ -43513,6 +43516,42 @@ ${data.tenant.name}`;
       console.error("Folio revise error:", err);
       res.status(500).json({ error: err?.message || "Failed to create revision" });
     }
+  });
+
+  // POST /api/restaurant/:id/folios/:folioId/cancel  — UNIFIED invoice cancel for
+  // Hotel / Spa / Events folios (every folio_kind posts FOLIO-<id>). Reverses the
+  // settlement journal so revenue + output GST + AR/cash back out of the accounts in
+  // the period the cancel is issued, voids the folio, and writes a FOLIO · CANCELLED
+  // audit. Reason mandatory (audit trail). Idempotent; never double-reverses a folio
+  // already backed out by a credit note or revision. Owner/manager only.
+  app.post("/api/restaurant/:id/folios/:folioId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return res.status(403).json({ error: 'Only an owner or manager can cancel an invoice.' });
+    try {
+      const reason = String(req.body?.reason || '').trim();
+      if (reason.length < 3) return res.status(400).json({ error: 'A cancellation reason is required (for the audit trail).' });
+      const db = await getTenantDb(req.params.id);
+      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP").catch(() => {});
+      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancelled_by TEXT").catch(() => {});
+      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancel_reason TEXT").catch(() => {});
+      const folio: any = await db.get("SELECT * FROM folios WHERE id = ?", [req.params.folioId]);
+      if (!folio) return res.status(404).json({ error: 'Invoice not found' });
+      if (['voided', 'cancelled'].includes(String(folio.status))) return res.json({ success: true, already: true, id: folio.id, status: folio.status });
+      if (String(folio.status) === 'superseded') return res.status(409).json({ error: 'This invoice was superseded by a revision — cancel the current revision instead.' });
+      const by = req.user?.email || req.user?.id || null;
+      // Don't double-reverse: a credit note already backed this settlement out under a
+      // different ref; _reverseJournal itself dedupes REV-FOLIO-<id> for revise/re-cancel.
+      const cnChild = await db.get("SELECT id FROM folios WHERE parent_folio_id = ? AND doc_type = 'CREDIT_NOTE' LIMIT 1", [folio.id]).catch(() => null);
+      let rev: any = { reversed: 0, reversalRef: null };
+      if (!cnChild) {
+        rev = await _reverseJournal(db, req.params.id, `FOLIO-${folio.id}`, {
+          sourceType: 'FOLIO_CANCELLED', sourceId: folio.id, reason: `Invoice cancelled — ${reason}`, postedBy: by,
+        });
+      }
+      await db.run("UPDATE folios SET status = 'voided', cancelled_at = NOW(), cancelled_by = ?, cancel_reason = ? WHERE id = ?", [by, reason, folio.id]);
+      await writeObjectAudit(db, req, { objectType: 'FOLIO', objectId: folio.id, action: 'CANCELLED', summary: `Invoice ${folio.invoice_number || folio.id} cancelled — ${reason}${rev?.reversed ? ` · GL reversed (${rev.reversalRef})` : (cnChild ? ' · GL already reversed by credit note' : '')}`, before: { status: folio.status }, after: { status: 'voided', cancel_reason: reason } }).catch(() => {});
+      res.json({ success: true, id: folio.id, status: 'voided', gl_reversed: !!rev?.reversed, reversal_ref: rev?.reversalRef || null, kind: folio.folio_kind || 'HOTEL' });
+    } catch (err: any) { console.error('[folio-cancel] error:', err); res.status(500).json({ error: err?.message || 'Failed to cancel invoice' }); }
   });
 
   // GET /hotel/folios/:folioId/revisions
@@ -46055,6 +46094,62 @@ ${data.tenant.name}`;
     return null;
   };
 
+  // ── Cancel a RESTAURANT invoice (the primary, GL-reversing action). Unlike the
+  // admin-flag-gated soft-delete below, cancel reverses the order's GL (ORDER-<id>),
+  // marks it CANCELLED (never deleted), and writes an INVOICE · CANCELLED audit.
+  // Owner/manager only; reason mandatory. Handles a single order/manual invoice and
+  // a whole table-session invoice (all its rounds).
+  const _cancelRestGate = (req: AuthRequest, res: Response, reason: string): boolean => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) { res.status(403).json({ error: 'Only an owner or manager can cancel an invoice.' }); return false; }
+    if (String(reason || '').trim().length < 3) { res.status(400).json({ error: 'A cancellation reason is required (for the audit trail).' }); return false; }
+    return true;
+  };
+  const _ensureRestCancelCols = async (db: any) => {
+    await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP").catch(() => {});
+    await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT").catch(() => {});
+    await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP").catch(() => {});
+    await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS cancel_reason TEXT").catch(() => {});
+  };
+  app.post("/api/restaurant/:id/invoices/order/:orderId/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    const reason = String(req.body?.reason || '').trim();
+    if (!_cancelRestGate(req, res, reason)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureRestCancelCols(db);
+      const order: any = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.orderId]);
+      if (!order) return res.status(404).json({ error: 'Invoice not found' });
+      if (String(order.status).toUpperCase() === 'CANCELLED') return res.json({ success: true, already: true, id: order.id });
+      const by = req.user?.email || req.user?.id || null;
+      const rev = await _reverseJournal(db, req.params.id, `ORDER-${order.id}`, { sourceType: 'FNB_ORDER_CANCELLED', sourceId: order.id, reason: `Invoice cancelled — ${reason}`, postedBy: by });
+      await db.run("UPDATE orders SET status = 'CANCELLED', invoice_status = 'CANCELLED', cancelled_at = NOW(), cancel_reason = ? WHERE id = ?", [reason, order.id]);
+      await writeObjectAudit(db, req, { objectType: 'INVOICE', objectId: order.id, action: 'CANCELLED', summary: `Invoice ${order.invoice_number || order.id} cancelled — ${reason}${rev?.reversed ? ` · GL reversed (${rev.reversalRef})` : ''}`, before: { status: order.status }, after: { status: 'CANCELLED', cancel_reason: reason } }).catch(() => {});
+      res.json({ success: true, id: order.id, status: 'CANCELLED', gl_reversed: !!rev?.reversed, reversal_ref: rev?.reversalRef || null });
+    } catch (err: any) { console.error('[invoice-cancel order] error:', err); res.status(500).json({ error: err?.message || 'Failed to cancel invoice' }); }
+  });
+  app.post("/api/restaurant/:id/invoices/session/:sessionToken/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    const reason = String(req.body?.reason || '').trim();
+    if (!_cancelRestGate(req, res, reason)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureRestCancelCols(db);
+      const sess: any = await db.get("SELECT * FROM table_sessions WHERE session_token = ?", [req.params.sessionToken]);
+      if (!sess) return res.status(404).json({ error: 'Invoice not found' });
+      if (String(sess.status).toLowerCase() === 'cancelled') return res.json({ success: true, already: true, id: sess.id });
+      const by = req.user?.email || req.user?.id || null;
+      const orders: any[] = await db.query("SELECT * FROM orders WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'", [sess.id]).catch(() => []);
+      let reversed = 0;
+      for (const o of (orders || [])) {
+        const rev = await _reverseJournal(db, req.params.id, `ORDER-${o.id}`, { sourceType: 'FNB_ORDER_CANCELLED', sourceId: o.id, reason: `Invoice cancelled — ${reason}`, postedBy: by });
+        if (rev?.reversed) reversed++;
+      }
+      await db.run("UPDATE orders SET status = 'CANCELLED', invoice_status = 'CANCELLED', cancelled_at = NOW(), cancel_reason = ? WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'", [reason, sess.id]);
+      await db.run("UPDATE table_sessions SET status = 'cancelled', cancelled_at = NOW(), cancel_reason = ? WHERE session_token = ?", [reason, req.params.sessionToken]);
+      await writeObjectAudit(db, req, { objectType: 'INVOICE', objectId: String(sess.id), action: 'CANCELLED', summary: `Table invoice ${sess.invoice_number || sess.id} cancelled — ${reason} · ${orders.length} round(s), ${reversed} GL reversal(s)`, before: { status: sess.status }, after: { status: 'cancelled', cancel_reason: reason } }).catch(() => {});
+      res.json({ success: true, id: sess.id, status: 'cancelled', rounds: orders.length, gl_reversals: reversed });
+    } catch (err: any) { console.error('[invoice-cancel session] error:', err); res.status(500).json({ error: err?.message || 'Failed to cancel invoice' }); }
+  });
+
   // DELETE one ORDER invoice (standalone — no session_id)
   app.delete("/api/restaurant/:id/invoice/order/:orderId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
@@ -47784,6 +47879,10 @@ ${data.tenant.name}`;
         payment_method:     b.payment_method || null,
         footer:             b.footer || null,
       };
+      // Audit the print (who + when). Keyed to the order/session id when the client
+      // sends it so it lands on the same INVOICE trail; else the invoice number.
+      const _printId = b.session_id || b.session_token || b.order_id || b.invoice_no || b.invoice_number || null;
+      if (_printId) writeObjectAudit(db, req, { objectType: 'INVOICE', objectId: String(_printId), action: 'PRINTED', summary: `Invoice ${b.invoice_no || b.invoice_number || _printId} printed (thermal)` }).catch(() => {});
       const reqWidth = Number(req.body?.width) || Number(b.width) || 0;
       let queued = 0;
       for (const p of targets) {
@@ -51287,7 +51386,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-module-toggles-2',
+    commit_marker: 'invoice-cancel-audit',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
