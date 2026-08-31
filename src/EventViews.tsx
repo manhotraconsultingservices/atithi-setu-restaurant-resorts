@@ -8,6 +8,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { DataTable } from './components/DataTable';
 import { ObjectDetail } from './components/ObjectDetail';
 import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
+import { prettyRoleLabel } from './roleLabel';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
@@ -953,7 +954,7 @@ function StaffPanel({ restaurantId, token, booking, editable, onChanged }: Props
       {rows.length === 0 ? <p className="text-xs text-[#9d8b7e]">{t('events.staff.none')}</p> : rows.map((r: any) => (
         <div key={r.id} className="flex items-center gap-2 text-xs py-1 border-b border-[#f0e9df]">
           <span className="flex-1 min-w-0 truncate font-medium">{r.staff_name || r.staff_name_snapshot}
-            {(r.staff_role || r.role_snapshot) ? <span className="text-[#9d8b7e]"> · {r.staff_role || r.role_snapshot}</span> : null}</span>
+            {(r.staff_role || r.role_snapshot) ? <span className="text-[#9d8b7e]"> · {prettyRoleLabel(r.staff_role || r.role_snapshot)}</span> : null}</span>
           <span className="w-24 text-right text-[#6b5d52] tabular-nums">{dOnly(r.assigned_date)}</span>
           <span className="w-24 text-right text-[#9d8b7e] tabular-nums">{r.shift_start && r.shift_end ? `${r.shift_start}–${r.shift_end}` : ''}</span>
           {editable && <button onClick={() => remove(r.id)} title={t('common.delete')}><X size={12} className="text-rose-500" /></button>}
@@ -965,7 +966,7 @@ function StaffPanel({ restaurantId, token, booking, editable, onChanged }: Props
             <div><label className={LABEL}>{t('events.staff.staff')}</label>
               <select className={INPUT} value={form.staff_id} onChange={e => setForm({ ...form, staff_id: e.target.value })} autoFocus>
                 <option value="">—</option>
-                {roster.map((s: any) => <option key={s.id} value={s.id}>{s.name}{s.role ? ` (${s.role})` : ''}</option>)}
+                {roster.map((s: any) => <option key={s.id} value={s.id}>{s.name}{s.role ? ` (${prettyRoleLabel(s.role)})` : ''}</option>)}
               </select>
             </div>
             <div><label className={LABEL}>{t('events.staff.date')}</label><input type="date" className={INPUT} value={form.assigned_date} onChange={e => setForm({ ...form, assigned_date: e.target.value })} /></div>

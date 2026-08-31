@@ -15,6 +15,7 @@ import { StatusBoard } from './StatusBoard';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
 import { EventsModule, EventBookingPage } from './EventViews';
+import { prettyRoleLabel } from './roleLabel';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { motion, AnimatePresence } from 'motion/react';
@@ -3436,7 +3437,7 @@ function BrandStaffTransferLog({ token }: { token: string }) {
                     {new Date(r.transferred_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' })}
                   </td>
                   <td className="px-3 py-2 font-bold">{r.staff_name}</td>
-                  <td className="px-3 py-2 text-[10px] uppercase">{r.staff_role || '—'}</td>
+                  <td className="px-3 py-2 text-[10px] uppercase">{prettyRoleLabel(r.staff_role) || '—'}</td>
                   <td className="px-3 py-2 text-[#6b5d52]">
                     <span className="font-mono">{r.from_restaurant_id}</span>
                     <span className="mx-1">→</span>
@@ -3512,7 +3513,7 @@ function StaffTransferModal({ staff, sourceRestaurantId, token, onClose, onTrans
         <div className="p-5 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
           <div>
             <h4 className="font-bold font-serif">Transfer staff</h4>
-            <p className="text-xs text-[#6b5d52]">{staff.name} · {staff.role}</p>
+            <p className="text-xs text-[#6b5d52]">{staff.name} · {prettyRoleLabel(staff.role)}</p>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={18}/></button>
         </div>
@@ -4883,7 +4884,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
                           <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-zinc-200 text-zinc-500 uppercase">Offline</span>
                         )}
                       </div>
-                      <div className="text-[10px] text-[#9c8e85] mt-0.5">{s.role}</div>
+                      <div className="text-[10px] text-[#9c8e85] mt-0.5">{prettyRoleLabel(s.role)}</div>
                     </td>
                     {gridDates.map(date => {
                       const pending = gridPending[s.id]?.[date];
@@ -5144,7 +5145,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
                         <td className="px-8 py-5">
                           <p className="font-bold text-[#1a1208]">{stat.name}</p>
                           {stat.staff_role && (
-                            <p className="text-[11px] uppercase tracking-widest text-[#9c8e85] font-bold">{stat.staff_role}</p>
+                            <p className="text-[11px] uppercase tracking-widest text-[#9c8e85] font-bold">{prettyRoleLabel(stat.staff_role)}</p>
                           )}
                         </td>
                         <td className="px-8 py-5">
@@ -5196,7 +5197,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-zinc-200 text-zinc-500 uppercase tracking-wider">Offline</span>
                         )}
                       </div>
-                      <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest">{staff.role}</p>
+                      <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest">{prettyRoleLabel(staff.role)}</p>
                     </div>
                     <div className="text-right">
                       <label className="block text-[11px] font-bold uppercase text-[#9c8e85] mb-1">Default Hrs</label>
@@ -12224,7 +12225,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (builtin) return builtin;
     const custom = customRoles.find(r => r.id === role);
     if (custom) return { id: role as UserRole, label: custom.name, emoji: custom.emoji, scope: custom.scope as any, chipBg: 'bg-indigo-200', chipText: 'text-indigo-800', cardBg: 'bg-indigo-50' };
-    return { id: role as UserRole, label: role, emoji: '👤', scope: 'BOTH' as const, chipBg: 'bg-zinc-200', chipText: 'text-zinc-700', cardBg: 'bg-zinc-50' };
+    return { id: role as UserRole, label: prettyRoleLabel(role), emoji: '👤', scope: 'BOTH' as const, chipBg: 'bg-zinc-200', chipText: 'text-zinc-700', cardBg: 'bg-zinc-50' };
   };
   const [staffPage, setStaffPage]             = useState(1);
   const [editingStaff, setEditingStaff]       = useState<any | null>(null);
@@ -27878,7 +27879,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <div key={entry.id} className="text-[11px] bg-[#faf7f2] rounded-xl px-3 py-2">
                             <div className="flex items-center justify-between gap-2 flex-wrap">
                               <div>
-                                <span className="font-bold text-[#1a1208]">{entry.role}</span>
+                                <span className="font-bold text-[#1a1208]">{prettyRoleLabel(entry.role)}</span>
                                 <span className="text-[#9c8e85]"> changed by </span>
                                 <span className="font-mono text-[10px] text-[#3d3128]">{actor}</span>
                               </div>
@@ -66046,7 +66047,7 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
               { key: 'name', label: 'Name', sortable: true, getValue: (e: any) => e.name, render: (e: any) => (<div><div className="font-semibold text-[#1a1208]">{e.name}</div><div className="text-[10px] text-[#9c8e85]">{e.phone || '—'}{e.email ? ` · ${e.email}` : ''}</div></div>), exportValue: (e: any) => e.name },
               { key: 'designation', label: 'Designation', sortable: true, render: (e: any) => e.designation || '—' },
               { key: 'department', label: 'Department', sortable: true, render: (e: any) => e.department || '—' },
-              { key: 'role', label: 'Role', sortable: true, render: (e: any) => <span className="text-[10px] uppercase tracking-widest">{e.role}</span> },
+              { key: 'role', label: 'Role', sortable: true, getValue: (e: any) => prettyRoleLabel(e.role), render: (e: any) => <span className="text-[10px] uppercase tracking-widest">{prettyRoleLabel(e.role)}</span> },
               { key: 'joining_date', label: 'Joining', sortable: true, render: (e: any) => e.joining_date ? formatDateForTenant(e.joining_date, restaurant?.date_format) : '—' },
               { key: 'ctc', label: 'CTC / Hourly', sortable: true, align: 'right', getValue: (e: any) => Number(e.ctc || e.hourly_rate || 0), render: (e: any) => <span className="font-mono text-[11px]">{e.ctc ? `₹${Number(e.ctc).toLocaleString('en-IN')}` : e.hourly_rate ? `₹${Number(e.hourly_rate).toFixed(0)}/hr` : '—'}</span>, exportValue: (e: any) => e.ctc ? `${e.ctc}` : e.hourly_rate ? `${e.hourly_rate}/hr` : '' },
               { key: 'hr_status', label: 'Status', sortable: true, align: 'center', render: (e: any) => <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold', STATUS_PILL[e.hr_status || 'ACTIVE'])}>{e.hr_status || 'ACTIVE'}</span> },
@@ -66642,7 +66643,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
                   active ? `${p.bg} text-white` : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/5"
                 )}>
                 <span className={cn("w-2 h-2 rounded-full", active ? "bg-white/80" : p.bg)} />
-                {role}
+                {prettyRoleLabel(role)}
               </button>
             );
           })}
@@ -66730,7 +66731,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
                         <span className={cn("w-2 h-8 rounded-full shrink-0", p.bg)} />
                         <div>
                           <div className="leading-tight">{s.name}</div>
-                          <div className="text-[10px] font-normal text-[#9c8e85] uppercase">{s.role || ''}</div>
+                          <div className="text-[10px] font-normal text-[#9c8e85] uppercase">{prettyRoleLabel(s.role)}</div>
                         </div>
                       </div>
                     </td>
@@ -67099,7 +67100,7 @@ function TimesheetPayrollPanel({ restaurantId, token, start, end, onApprovalChan
                 {payroll.by_staff.map((s: any) => (
                   <tr key={s.staff_id} className="border-t border-[#cc5a16]/5">
                     <td className="px-3 py-2 font-bold">{s.name || s.staff_id}</td>
-                    <td className="px-3 py-2 text-[#6b5d52] uppercase text-[10px]">{s.role || ''}</td>
+                    <td className="px-3 py-2 text-[#6b5d52] uppercase text-[10px]">{prettyRoleLabel(s.role)}</td>
                     <td className="px-3 py-2 text-right font-mono">{Number(s.actual_hours || 0).toFixed(1)} / {Number(s.planned_hours || 0).toFixed(1)}</td>
                     <td className="px-3 py-2 text-right font-mono text-orange-700">{Number(s.overtime_hours || 0).toFixed(1)}</td>
                     <td className="px-3 py-2 text-right font-mono text-red-600">{Number(s.no_shows || 0)}</td>
@@ -67509,7 +67510,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
                           <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-zinc-200 text-zinc-500 uppercase">Offline</span>
                         )}
                       </div>
-                      <div className="text-[10px] text-[#9c8e85]">{s.role}</div>
+                      <div className="text-[10px] text-[#9c8e85]">{prettyRoleLabel(s.role)}</div>
                     </td>
                     {tsDates.map(date => {
                       const saved = tsRowMap[s.id]?.[date];
@@ -67592,7 +67593,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
                 {(summary?.by_staff || []).map((s: any) => (
                   <tr key={s.staff_id} className="border-t border-[#cc5a16]/5">
                     <td className="px-3 py-2 font-bold">{s.name || s.staff_id}</td>
-                    <td className="px-3 py-2 text-[#6b5d52] uppercase text-[10px]">{s.role || ''}</td>
+                    <td className="px-3 py-2 text-[#6b5d52] uppercase text-[10px]">{prettyRoleLabel(s.role)}</td>
                     <td className="px-3 py-2 text-right font-mono">{Number(s.planned || 0).toFixed(1)}</td>
                     <td className="px-3 py-2 text-right font-mono">{Number(s.actual || 0).toFixed(1)}</td>
                     <td className={cn("px-3 py-2 text-right font-mono",
