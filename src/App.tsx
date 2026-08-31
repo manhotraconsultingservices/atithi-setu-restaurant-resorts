@@ -12192,13 +12192,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     .filter(r =>
       r.scope === 'BOTH' ||
       (r.scope === 'RESTAURANT' && isRestaurantEnabled) ||
-      (r.scope === 'HOTEL'      && isHotelEnabled)
+      (r.scope === 'HOTEL'      && isHotelEnabled) ||
+      (r.scope === 'SPA'        && isSpaEnabled) ||
+      (r.scope === 'EVENTS'     && isEventsEnabled)
     )
     .map(r => ({
       id: r.id as UserRole,
       label: r.name,
       emoji: r.emoji,
-      scope: r.scope as 'BOTH' | 'RESTAURANT' | 'HOTEL',
+      scope: r.scope as 'BOTH' | 'RESTAURANT' | 'HOTEL' | 'SPA' | 'EVENTS',
       chipBg: 'bg-indigo-200', chipText: 'text-indigo-800', cardBg: 'bg-indigo-50',
     }));
   const _builtinStaffRoles = STAFF_ROLE_META.filter(r =>
@@ -19888,9 +19890,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       onChange={e => setCustomRoleForm(f => ({ ...f, scope: e.target.value }))}
                       className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
                     >
-                      <option value="BOTH">Both (Hotel + Restaurant)</option>
-                      <option value="HOTEL">Hotel only</option>
-                      <option value="RESTAURANT">Restaurant only</option>
+                      <option value="BOTH">All modules</option>
+                      {isRestaurantEnabled && <option value="RESTAURANT">Restaurant only</option>}
+                      {isHotelEnabled && <option value="HOTEL">Hotel / Front Desk only</option>}
+                      {isSpaEnabled && <option value="SPA">Spa &amp; Wellness only</option>}
+                      {isEventsEnabled && <option value="EVENTS">Events only</option>}
                     </select>
                   </div>
                   <div className="flex gap-2">
