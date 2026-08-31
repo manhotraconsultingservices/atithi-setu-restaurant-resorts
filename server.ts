@@ -5761,23 +5761,15 @@ const serviceRequestStaff = requireModuleAccess(['SERVICE_REQUESTS'], [...HOTEL_
 const WORKFORCE_TAB_IDS = ['HR_PAYROLL', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL'];
 const workforceStaff = requireModuleAccess(WORKFORCE_TAB_IDS, ['MANAGER'], 'Workforce');
 
-// Sensible STARTING permissions for a custom role, keyed off its scope. Without
-// this, a custom role has no permission row at all → the assigned user either
-// sees everything (fail-open) or, once the owner saves an all-None column for
-// it, sees NO menus (getTabPermissionsForRole returns an all-zero map →
-// /my-permissions emits the hide-all __perm_v3__ marker). This gives the role a
-// usable operational baseline the owner can refine in Settings → Staff Access.
-function defaultCustomRolePerms(scope?: string | null): TabPerms {
-  const s = String(scope || 'BOTH').toUpperCase();
-  const base: TabPerms = { MY_CHECKLIST: 1 };
-  const HOTEL: TabPerms = { HOTEL_BOOKINGS: 2, ROOMS: 1, SERVICE_REQUESTS: 2, SERVICES: 1, FOLIOS: 2, HOUSEKEEPING: 2, FRONT_OFFICE_REPORTS: 1 };
-  const EVENTS: TabPerms = { EVENTS_DASHBOARD: 1, EVENTS_CALENDAR: 1, EVENTS_BOOKINGS: 2, EVENTS_VENUES: 1, EVENTS_RENTALS: 1, EVENTS_SERVICES: 1, EVENTS_CATERING: 1, EVENTS_QUOTATIONS: 2, EVENTS_REPORTS: 1 };
-  const REST: TabPerms = { MENU: 1, INVOICES: 2, QR: 2, INVENTORY: 1, LOYALTY: 1 };
-  if (s === 'HOTEL') return { ...base, ...HOTEL };
-  if (s === 'EVENTS') return { ...base, ...EVENTS };
-  if (s === 'RESTAURANT') return { ...base, ...REST };
-  return { ...base, ...HOTEL, ...EVENTS, ...REST }; // BOTH / unknown
-}
+// DENY-BY-DEFAULT (owner request, 2026-08): a NEW custom role gets NO module
+// access. It is seeded with only the authoritative-empty '__complete__' sentinel
+// (see POST /custom-roles), and every "heal" path below re-asserts that sentinel
+// rather than granting a module baseline — so an unconfigured custom role hides
+// every menu (Home / My Checklist only) until the owner EXPLICITLY grants tabs
+// in Settings → Staff Access. The sentinel (not a missing row) is what prevents
+// fail-open. (Previously defaultCustomRolePerms seeded a cross-module baseline,
+// which surfaced as "custom roles auto-get access to other modules".)
+const _DENY_BY_DEFAULT_PERMS = { __complete__: 1 };
 
 // Built-in / system roles that must NEVER be auto-healed to a baseline — the
 // owner controls these explicitly, and an all-None here can be deliberate.
@@ -5826,11 +5818,14 @@ async function _healZeroAccessCustomRoles(tenantId: string): Promise<string[]> {
       const perms = await getTabPermissionsForRole(tenantId, roleKey);
       const hasAny = !!perms && Object.keys(perms).some(k => (perms![k] ?? 0) >= 1);
       if (hasAny) continue;
+      // DENY-BY-DEFAULT: only guarantee the authoritative-empty sentinel so the
+      // role hides every menu instead of fail-opening (missing row). We never
+      // grant a module here — the owner grants tabs in Settings → Staff Access.
       await centralDb.run(
         `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
          VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
          ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
-        [tenantId, roleKey, JSON.stringify(defaultCustomRolePerms(r.scope))]
+        [tenantId, roleKey, JSON.stringify(_DENY_BY_DEFAULT_PERMS)]
       );
       healed.push(roleKey);
     }
@@ -7781,12 +7776,11 @@ async function startServer() {
     try {
       const userRole = req.user?.role;
       let perms = await getTabPermissionsForRole(req.params.id, userRole || '');
-      // Self-heal a CUSTOM role that has no usable grants — either no matrix row
-      // at all (fail-open: would show every menu) or an all-None row saved by the
-      // owner UI (locks the user out of every menu, the reported "created a user
-      // in a custom role but they see nothing" bug, abc @ manhotra-consulting).
-      // Seed the scope-based default so the assigned user gets a working baseline
-      // on their next login, with no owner action required. "Is this a custom
+      // DENY-BY-DEFAULT: a CUSTOM role with no usable grants must HIDE every menu,
+      // not fail-open. A missing matrix row would fail-open (show everything), so
+      // we re-assert the authoritative-empty '__complete__' sentinel — the role
+      // then sees only Home / My Checklist until the owner EXPLICITLY grants tabs
+      // in Settings → Staff Access. We do NOT seed any module baseline. "Is this a custom
       // role?" is resolved from the tenant custom_roles table (by id OR name), NOT
       // just the CUSTOM_ id prefix — a role assigned to a user may be stored under
       // any id. Built-in / system roles are never touched, and a custom role with
@@ -7804,12 +7798,14 @@ async function startServer() {
       // role. scope comes from custom_roles when resolvable, else BOTH.
       if (roleKey && !hasAnyView && !_SYSTEM_ROLE_SET.has(roleKey)) {
         try {
-          const scope = (await _lookupCustomRoleScope(req.params.id, roleKey)) || 'BOTH';
+          // DENY-BY-DEFAULT: a custom role with no usable grant gets the
+          // authoritative-empty '__complete__' sentinel (hide every menu, NOT
+          // fail-open) — never a module baseline. Owner grants in Staff Access.
           await centralDb.run(
             `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions, updated_at)
              VALUES (?, ?, '[]', ?, CURRENT_TIMESTAMP)
              ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
-            [req.params.id, roleKey, JSON.stringify(defaultCustomRolePerms(scope))]
+            [req.params.id, roleKey, JSON.stringify(_DENY_BY_DEFAULT_PERMS)]
           );
           invalidateTabCacheForTenant(req.params.id);
           perms = await getTabPermissionsForRole(req.params.id, userRole || '');
@@ -31968,9 +31964,10 @@ ${data.tenant.name}`;
       // IGNORE so a re-created id never clobbers an existing configured row.
       try {
         await centralDb.run(
-          `INSERT OR IGNORE INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions)
-           VALUES (?, ?, '[]', ?)`,
-          [req.params.id, id, JSON.stringify({ __complete__: 1 })]
+          `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions)
+           VALUES (?, ?, '[]', ?)
+           ON CONFLICT (restaurant_id, role) DO NOTHING`,
+          [req.params.id, id, JSON.stringify(_DENY_BY_DEFAULT_PERMS)]
         );
         invalidateTabCacheForTenant(req.params.id);
       } catch (seedErr) {
@@ -51675,7 +51672,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ootb-login-cleanup',
+    commit_marker: 'custom-role-deny-default',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

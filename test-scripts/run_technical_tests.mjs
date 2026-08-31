@@ -3416,13 +3416,12 @@ async function testRBACHardening() {
     if (uid) { try { await api('DELETE', `/api/owner/staff/${uid}`); } catch {} }
   }
 
-  // ── Custom-role DEFAULT permission baseline (the "created a user in a custom
-  //    role but they see no menus" fix) ──────────────────────────────────────
-  // A custom role created via POST /custom-roles must get a seeded permission
-  // row (seed-on-create) so a user assigned to it can actually see menus; and a
-  // custom role whose matrix was saved all-None must SELF-HEAL on the user's
-  // next /my-permissions call. Both guard against /my-permissions returning the
-  // hide-everything __perm_v3__ marker (full lockout) or null (fail-open leak).
+  // ── Custom-role DENY-BY-DEFAULT (owner request 2026-08) ────────────────────
+  // A custom role created via POST /custom-roles must get an AUTHORITATIVE row
+  // but NO granted module tab — the assigned user sees no modules until the owner
+  // grants them in Staff Access. It must NOT fail-open (see everything) and must
+  // NOT auto-heal to a module baseline. These guard against the "custom roles
+  // auto-get access to other modules" leak while still preventing fail-open.
   {
     const dIds = ['TC-RBAC-CUSTOM-SEED', 'TC-RBAC-CUSTOM-MYPERM', 'TC-RBAC-CUSTOM-HEAL'];
     const tag = Date.now();
@@ -3431,13 +3430,15 @@ async function testRBACHardening() {
     if (!roleId) {
       dIds.forEach(id => skip(id, 'Custom-role default baseline', `could not create custom role (status=${cr.status})`));
     } else {
-      // TC-RBAC-CUSTOM-SEED — the create seeded a non-empty central matrix row.
+      // TC-RBAC-CUSTOM-SEED — DENY-BY-DEFAULT: a new custom role gets an
+      // authoritative row but NO granted module tab (the owner grants explicitly).
       const rp = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
       const seeded = (rp.data && typeof rp.data === 'object') ? rp.data[roleId] : null;
-      if (seeded && typeof seeded === 'object' && Object.values(seeded).some(v => Number(v) >= 1)) {
-        pass('TC-RBAC-CUSTOM-SEED', 'New custom role gets a seeded (non-empty) permission baseline on creation', `HOTEL_BOOKINGS=${seeded.HOTEL_BOOKINGS}`);
+      const grantedTabs = (seeded && typeof seeded === 'object') ? Object.entries(seeded).filter(([k, v]) => k !== '__complete__' && Number(v) >= 1).map(([k]) => k) : null;
+      if (grantedTabs && grantedTabs.length === 0) {
+        pass('TC-RBAC-CUSTOM-SEED', 'New custom role is DENY-BY-DEFAULT — no module access until the owner grants it', `row=${JSON.stringify(seeded)}`);
       } else {
-        fail('TC-RBAC-CUSTOM-SEED', 'New custom role must be seeded with a default permission row', `matrix row for ${roleId} = ${JSON.stringify(seeded)}`);
+        fail('TC-RBAC-CUSTOM-SEED', 'New custom role must have NO granted tabs (deny-by-default)', `granted=${JSON.stringify(grantedTabs)}`);
       }
 
       // Create a user assigned to this custom role and log in as them.
@@ -3454,26 +3455,27 @@ async function testRBACHardening() {
         skip('TC-RBAC-CUSTOM-MYPERM', 'Custom-role user /my-permissions', `could not create/login custom-role user (create=${mk.status})`);
         skip('TC-RBAC-CUSTOM-HEAL', 'Custom-role self-heal', 'no token');
       } else {
-        // TC-RBAC-CUSTOM-MYPERM — the assigned user sees a real menu, not the
-        // hide-all marker and not null.
+        // TC-RBAC-CUSTOM-MYPERM — DENY-BY-DEFAULT: the assigned user must NOT
+        // auto-get module tabs (no cross-module leak) and must not fail-open to all.
         const mp = await api('GET', `/api/restaurant/${restaurantId}/my-permissions`, null, tok);
         const at = mp.data?.allowed_tabs;
-        const menuOk = Array.isArray(at) && at.length > 0 && !at.includes('__perm_v3__') && at.includes('HOTEL_BOOKINGS');
-        if (menuOk) pass('TC-RBAC-CUSTOM-MYPERM', 'Custom-role user /my-permissions returns a usable menu (not lockout, not fail-open)', `${at.length} tabs incl HOTEL_BOOKINGS`);
-        else fail('TC-RBAC-CUSTOM-MYPERM', 'Custom-role user must see menus via /my-permissions', `allowed_tabs=${JSON.stringify(at)}`);
+        const noModuleLeak = Array.isArray(at) && !at.includes('HOTEL_BOOKINGS') && !at.includes('EVENTS_BOOKINGS') && !at.includes('MENU') && !at.includes('FOLIOS');
+        if (noModuleLeak) pass('TC-RBAC-CUSTOM-MYPERM', 'Custom-role user is DENY-BY-DEFAULT — no module tabs until the owner grants (no auto-access)', `tabs=${JSON.stringify(at)}`);
+        else fail('TC-RBAC-CUSTOM-MYPERM', 'Custom-role user must NOT auto-get module access', `allowed_tabs=${JSON.stringify(at)}`);
 
-        // TC-RBAC-CUSTOM-HEAL — force the matrix to all-None (owner-saved-empty
-        // trap), then confirm /my-permissions self-heals back to a usable menu.
+        // TC-RBAC-CUSTOM-HEAL — DENY-BY-DEFAULT persistence: force the matrix to
+        // all-None, then confirm /my-permissions does NOT auto-grant a module menu
+        // (the owner's restriction sticks — no fail-open, no auto-baseline).
         const c = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
         const m = (c.data && typeof c.data === 'object' && !Array.isArray(c.data)) ? { ...c.data } : {};
         m[roleId] = { HOTEL_BOOKINGS: 0, ROOMS: 0, FOLIOS: 0, MY_CHECKLIST: 0, HOUSEKEEPING: 0 };
         await api('POST', `/api/restaurant/${restaurantId}/role-permissions`, m);
-        // TTL cache is 30s; the self-heal invalidates on write, so read directly.
+        // TTL cache is 30s; writes invalidate it, so read directly.
         const mp2 = await api('GET', `/api/restaurant/${restaurantId}/my-permissions`, null, tok);
         const at2 = mp2.data?.allowed_tabs;
-        const healed = Array.isArray(at2) && at2.length > 0 && !at2.includes('__perm_v3__');
-        if (healed) pass('TC-RBAC-CUSTOM-HEAL', 'All-None custom role self-heals to a usable menu on next /my-permissions', `${at2.length} tabs after heal`);
-        else fail('TC-RBAC-CUSTOM-HEAL', 'All-None custom role must self-heal (not stay locked out)', `allowed_tabs=${JSON.stringify(at2)}`);
+        const staysDeny = Array.isArray(at2) && !at2.includes('HOTEL_BOOKINGS') && !at2.includes('FOLIOS') && !at2.includes('MENU');
+        if (staysDeny) pass('TC-RBAC-CUSTOM-HEAL', 'Owner-restricted (all-None) custom role STAYS deny-by-default — no auto-grant of modules', `tabs=${JSON.stringify(at2)}`);
+        else fail('TC-RBAC-CUSTOM-HEAL', 'All-None custom role must stay restricted (not auto-healed to a module menu)', `allowed_tabs=${JSON.stringify(at2)}`);
       }
       if (uid) { try { await api('DELETE', `/api/owner/staff/${uid}`); } catch {} }
       try { await api('DELETE', `/api/restaurant/${restaurantId}/custom-roles/${roleId}`); } catch {}
