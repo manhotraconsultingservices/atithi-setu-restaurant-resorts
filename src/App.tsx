@@ -4302,9 +4302,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
                   value={selectedRole}
                   onChange={e => setSelectedRole(e.target.value as UserRole)}
                 >
-                  <option value="OWNER">Business Owner</option>
-                  <option value="CHEF">Chef</option>
-                  <option value="WAITER">Waiter / Attender</option>
+                  <option value="OWNER">Business Owner / Staff</option>
                   <option value="SUPER_ADMIN">ERP Admin</option>
                   <option value="CTO">CTO</option>
                   <option value="SALES_REP">Sales Representative</option>
@@ -13677,8 +13675,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const printKitchenOrder = async (o: any) => {
-    const tableData = liveTables.find(lt => lt.name === String(o.tableNumber) || lt.name === o.table_name);
-    const waiterName = tableData?.assigned_waiter_name || '';
     const dt = new Date(o.createdAt || o.created_at);
     const timeStr = dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
     // Hide legacy garbage customer_name (front-desk "Posted by <id>" room charges).
@@ -13706,7 +13702,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       // Safety fallback to the legacy slip if the template path ever throws.
       openThermalPrint(buildKitchenSlipHTML({
         orderId: String(o.id), tableNumber: tableLabel || 'TAKEAWAY', roundNumber: o.round_number,
-        customerName: custName, waiterName, chefName: o.chef_name, eta: o.eta, orderTime: timeStr,
+        customerName: custName, orderTime: timeStr,
         items: items.map((it: any) => ({ name: it.name, quantity: it.qty })), restaurantName: restaurant?.name,
       }));
     }
