@@ -3487,6 +3487,45 @@ async function testRBACHardening() {
       } catch {}
     }
   }
+
+  // ── Custom-role NAME shown, never the raw CUSTOM_ id (marker rbac-role-name-display) ──
+  // Every tenant role is custom now (stored as CUSTOM_<slug>_<ts>); the UI and
+  // exports must show the friendly name, not the id. The one server-rendered
+  // surface is the timesheet CSV export, which COALESCEs custom_roles.name.
+  // Seed a custom-roled staff + one timesheet day, export, and assert the row
+  // carries the NAME and no raw CUSTOM_ id. Self-cleaning.
+  {
+    const tag = Math.random().toString(36).slice(2, 8);
+    const roleName = `Waiter ${tag}`;
+    const cr = await api('POST', `/api/restaurant/${restaurantId}/custom-roles`, { name: roleName, emoji: '🧾', scope: 'RESTAURANT' });
+    const roleId = cr.data?.id || null;
+    if (!roleId) {
+      skip('TC-RBAC-ROLE-NAME', 'Custom-role name shown in timesheet CSV', `could not create custom role (status=${cr.status})`);
+    } else {
+      const loginId = `rolename_${tag}`, pwd = `Rn!${tag}xZ`;
+      const staffName = `RoleName User ${tag}`;
+      const mk = await api('POST', '/api/owner/staff', { name: staffName, role: roleId, loginId, password: pwd, employee_type: 'LOGIN' });
+      const uid = mk.data?.id || mk.data?.staff?.id || null;
+      if (!uid) {
+        skip('TC-RBAC-ROLE-NAME', 'Custom-role name shown in timesheet CSV', `could not create staff (status=${mk.status})`);
+      } else {
+        const day = new Date().toISOString().slice(0, 10);
+        const seed = await api('POST', `/api/restaurant/${restaurantId}/timesheet/bulk-hours`, { entries: [{ staffId: uid, date: day, actual_hours: 4 }] });
+        const csv = await api('GET', `/api/restaurant/${restaurantId}/timesheet/export.csv?start=${day}&end=${day}`);
+        const body = typeof csv.data === 'string' ? csv.data : '';
+        const row = body.split('\n').find(l => l.includes(staffName)) || '';
+        if (csv.status === 200 && row.includes(roleName) && !row.includes('CUSTOM_')) {
+          pass('TC-RBAC-ROLE-NAME', 'Timesheet CSV shows the custom-role NAME, never the raw CUSTOM_ id', `role="${roleName}"`);
+        } else if (seed.status !== 200 || !row) {
+          skip('TC-RBAC-ROLE-NAME', 'Custom-role name in timesheet CSV', `could not seed/find timesheet row (seed=${seed.status}, csv=${csv.status})`);
+        } else {
+          fail('TC-RBAC-ROLE-NAME', 'Timesheet CSV must show the custom-role name, not the CUSTOM_ id', `row="${row.trim()}"`);
+        }
+      }
+      if (uid) { try { await api('DELETE', `/api/owner/staff/${uid}`); } catch {} }
+      try { await api('DELETE', `/api/restaurant/${restaurantId}/custom-roles/${roleId}`); } catch {}
+    }
+  }
 }
 
 // ── Summary report ─────────────────────────────────────────────────────────
