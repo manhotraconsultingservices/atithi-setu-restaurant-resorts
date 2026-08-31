@@ -115,6 +115,18 @@ function AuditChangeDiff({ beforeJson, afterJson }: { beforeJson?: string; after
 }
 
 // ── Audit log node (smart table) ─────────────────────────────────────────────
+// Humanize an audit code for display: ADVANCE_RECORDED → "Advance Recorded".
+const humanizeAction = (s?: string): string =>
+  String(s || '').split(/[_\s]+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+// A custom-role id (CUSTOM_<slug>_<base36ts>) → its friendly name; a built-in
+// role id → Title Case. So "CUSTOM_MANAGER_MTGS99CJ" shows as "Manager".
+const prettyRole = (role?: string): string => {
+  const r = String(role || '').trim();
+  if (!r) return '';
+  const m = r.match(/^CUSTOM_(.+)_[A-Za-z0-9]+$/);
+  return humanizeAction(m ? m[1] : r);
+};
+
 function AuditView({ url, token, nonce }: { url: string; token: string; nonce?: number }) {
   const [rows, setRows] = useState<any[] | null>(null);
   const [err, setErr] = useState('');
@@ -128,9 +140,9 @@ function AuditView({ url, token, nonce }: { url: string; token: string; nonce?: 
 
   const columns: ColDef<any>[] = [
     { key: 'when', label: 'When', sortable: true, getValue: r => r.created_at || '', render: r => <span className="text-[11px] text-[#6b5d52] whitespace-nowrap">{timeAgo(r.created_at)}</span> },
-    { key: 'action', label: 'Action', sortable: true, filterable: true, filterType: 'select', getValue: r => r.action || '', render: r => <span className="text-xs font-bold text-[#14110c]">{r.action}</span> },
+    { key: 'action', label: 'Action', sortable: true, filterable: true, filterType: 'select', getValue: r => humanizeAction(r.action), render: r => <span className="text-xs font-bold text-[#14110c]">{humanizeAction(r.action)}</span> },
     { key: 'summary', label: 'Details', sortable: true, searchable: true, getValue: r => r.summary || '', render: r => <span className="text-xs text-[#3d3128]">{r.summary || '—'}</span> },
-    { key: 'actor', label: 'By', sortable: true, filterable: true, filterType: 'text', getValue: r => r.actor_email || 'system', render: r => <span className="text-[11px] text-[#6b5d52]">{r.actor_email || 'system'}{r.actor_role ? ` · ${r.actor_role}` : ''}</span> },
+    { key: 'actor', label: 'By', sortable: true, filterable: true, filterType: 'text', getValue: r => (r.actor_name || r.actor_email || 'system') + (r.actor_role ? ' · ' + prettyRole(r.actor_role) : ''), render: r => <span className="text-[11px] text-[#6b5d52]">{r.actor_name || r.actor_email || 'system'}{r.actor_role ? ` · ${prettyRole(r.actor_role)}` : ''}</span> },
     { key: 'changes', label: 'Changes', searchable: false, noExport: true, render: r => (r.before_json || r.after_json) ? <button className="text-[11px] text-[#cc5a16] font-semibold" onClick={() => setOpenId(openId === r.id ? null : r.id)}>{openId === r.id ? 'Hide' : 'View'}</button> : <span className="text-[#c9bcae]">—</span> },
   ];
 
