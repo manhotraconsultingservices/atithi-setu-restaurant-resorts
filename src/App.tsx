@@ -8,7 +8,7 @@ import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { HousekeepingModule } from './Housekeeping';
 import { ChecklistTemplates } from './ChecklistTemplates';
-import { PrintTemplateStudio } from './PrintTemplateStudio';
+import { PrintTemplateStudio, renderKot as renderKotTemplate, DEFAULT_KOT as KOT_TEMPLATE_DEFAULT, PTS_CSS } from './PrintTemplateStudio';
 import { MyChecklists } from './MyChecklists';
 import { ChecklistBoard } from './ChecklistBoard';
 import { StatusBoard } from './StatusBoard';
@@ -13676,29 +13676,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
 
-  const printKitchenOrder = (o: any) => {
-    // Look up waiter from liveTables by matching table name
+  const printKitchenOrder = async (o: any) => {
     const tableData = liveTables.find(lt => lt.name === String(o.tableNumber) || lt.name === o.table_name);
     const waiterName = tableData?.assigned_waiter_name || '';
     const dt = new Date(o.createdAt || o.created_at);
     const timeStr = dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
-    const html = buildKitchenSlipHTML({
-      orderId:      String(o.id),
-      tableNumber:  o.tableNumber || o.table_number,
-      roundNumber:  o.round_number,
-      customerName: o.customerName || o.customer_name,
-      waiterName,
-      chefName:     o.chef_name,
-      eta:          o.eta,
-      orderTime:    timeStr,
-      items:        (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
-        name:     it.name || it.item_name || '',
-        quantity: Number(it.quantity || 1),
-        size:     it.size || it.item_size || '',
-      })),
-      restaurantName: restaurant?.name,
-    });
-    openThermalPrint(html);
+    // Hide legacy garbage customer_name (front-desk "Posted by <id>" room charges).
+    const rawCust = String(o.customerName || o.customer_name || '').trim();
+    const custName = (/^posted by/i.test(rawCust) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawCust)) ? '' : rawCust;
+    const tableLabel = o.tableNumber || o.table_number || (o.room_id ? 'Room service' : '');
+    const items = (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
+      name: it.name || it.item_name || '', qty: Number(it.quantity || 1), note: it.notes || it.note || it.special_instructions || '',
+    }));
+    // Load this tenant's KOT template so the browser print matches what the owner
+    // designed — the SAME block spec as the Print Template Studio + thermal ESC/POS.
+    let cfg: any = KOT_TEMPLATE_DEFAULT;
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/print-templates`, { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) { const d = await r.json(); if (d?.KOT) cfg = { ...KOT_TEMPLATE_DEFAULT, ...d.KOT }; }
+    } catch { /* fall back to the default template */ }
+    const data = {
+      name: restaurant?.name || '', station: 'KITCHEN', orderNo: String(o.id),
+      table: tableLabel, token: o.token_number || o.tokenNumber || '', time: timeStr,
+      customer: custName, items, footer: cfg.footerText || '',
+    };
+    try {
+      openThermalPrint(buildKotPrintDoc(cfg, data));
+    } catch {
+      // Safety fallback to the legacy slip if the template path ever throws.
+      openThermalPrint(buildKitchenSlipHTML({
+        orderId: String(o.id), tableNumber: tableLabel || 'TAKEAWAY', roundNumber: o.round_number,
+        customerName: custName, waiterName, chefName: o.chef_name, eta: o.eta, orderTime: timeStr,
+        items: items.map((it: any) => ({ name: it.name, quantity: it.qty })), restaurantName: restaurant?.name,
+      }));
+    }
   };
 
   const updateTableStatus = async (tableId: string, status: TableStatus) => {
@@ -48501,7 +48512,22 @@ function openThermalPrint(html: string) {
   }
 }
 
-// ─── Kitchen Order Slip (KOT) ────────────────────────────────────────────────
+// Print-ready KOT that reuses the SAME renderer as the Print Template Studio
+// preview — so the browser "Print KOT" is identical to what the owner designed
+// (and to the thermal ESC/POS). `cfg` = the tenant's saved KOT block spec.
+function buildKotPrintDoc(cfg: any, data: any): string {
+  const inner = renderKotTemplate(cfg || KOT_TEMPLATE_DEFAULT, data);
+  const paper = Number(cfg?.paper) === 58 ? '58mm' : '80mm';
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>KOT - ${orderLocationLabel(data?.table)}</title><style>
+    @page { size: ${paper} auto; margin: 0; }
+    html, body { margin: 0; padding: 0; background: #fff; }
+    body { padding: 2mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .pts-receipt { background: #fff !important; box-shadow: none !important; width: auto !important; padding: 2mm 1mm !important; }
+    ${PTS_CSS}
+  </style></head><body>${inner}</body></html>`;
+}
+
+// ─── Kitchen Order Slip (KOT) — legacy fallback slip ─────────────────────────
 function buildKitchenSlipHTML(d: {
   orderId: string;
   tableNumber: string | number;
@@ -48550,7 +48576,7 @@ function buildKitchenSlipHTML(d: {
 <body>
   <div class="header">
     <div class="kot-label">KITCHEN ORDER TICKET</div>
-    <div class="table-name">${String(d.tableNumber).toUpperCase()}</div>
+    <div class="table-name">${(d.tableNumber != null && String(d.tableNumber).trim() !== '') ? String(d.tableNumber).toUpperCase() : 'TAKEAWAY'}</div>
     ${d.roundNumber && d.roundNumber > 1 ? `<div class="round-badge">ROUND ${d.roundNumber}</div>` : ''}
   </div>
 

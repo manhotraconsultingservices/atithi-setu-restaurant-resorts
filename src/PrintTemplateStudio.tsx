@@ -11,7 +11,7 @@ import React, { useEffect, useState } from 'react';
 type DocType = 'INVOICE' | 'KOT';
 type Cfg = Record<string, any>;
 
-const DEFAULT_INVOICE: Cfg = {
+export const DEFAULT_INVOICE: Cfg = {
   paper: 80, logo: false, name: true, nameSize: 'big', gstin: true, address: true, phone: true,
   customer: true, mobile: true,
   date: true, cashier: true, orderType: true, billNo: true, token: true,
@@ -19,7 +19,7 @@ const DEFAULT_INVOICE: Cfg = {
   totalQty: true, charges: true, tax: 'split', roundOff: true, grandBig: true,
   footer: true, footerText: 'Thank you! Visit again.',
 };
-const DEFAULT_KOT: Cfg = {
+export const DEFAULT_KOT: Cfg = {
   paper: 80, name: true, station: true,
   orderNo: true, table: true, token: true, time: true, customer: true,
   notes: true, bigItems: true, footer: false, footerText: '',
@@ -110,7 +110,7 @@ const SCHEMA: Record<DocType, Group[]> = {
 const esc = (s: any) => String(s ?? '').replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as any)[m]);
 const money = (n: any) => Number(n || 0).toFixed(2);
 
-function renderInvoice(c: Cfg, d: any): string {
+export function renderInvoice(c: Cfg, d: any): string {
   let H = '';
   if (c.logo) H += '<div class="pts-logo">' + d.logo + '</div>';
   if (c.name) H += '<div class="pts-c pts-b ' + (c.nameSize === 'big' ? 'pts-big' : 'pts-lg') + '">' + esc(d.name) + '</div>';
@@ -148,7 +148,7 @@ function renderInvoice(c: Cfg, d: any): string {
   if (c.footer) H += '<div class="pts-c pts-b">' + esc(c.footerText || d.footer) + '</div>';
   return H;
 }
-function renderKot(c: Cfg, d: any): string {
+export function renderKot(c: Cfg, d: any): string {
   let H = '<div class="pts-c pts-b pts-big">KOT</div>';
   if (c.station) H += '<div class="pts-c pts-b">' + esc(d.station) + '</div>';
   if (c.name) H += '<div class="pts-c pts-muted">' + esc(d.name) + '</div>';
@@ -318,7 +318,7 @@ function Switch({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
   );
 }
 
-const PTS_CSS = `
+export const PTS_CSS = `
 .pts-stage{background:repeating-linear-gradient(45deg,transparent,transparent 11px,rgba(124,114,103,.06) 11px,rgba(124,114,103,.06) 12px),#faf7f2;border:1px solid #e7e0d5;border-radius:16px;padding:26px 10px;display:flex;justify-content:center;min-height:360px}
 .pts-receipt{background:#fcfbf6;color:#1a1610;box-shadow:0 1px 2px rgba(40,30,15,.05),0 8px 30px rgba(40,30,15,.08);font-family:"Courier New",ui-monospace,monospace;font-size:12.5px;line-height:1.5;padding:16px 14px 14px}
 .pts-c{text-align:center}.pts-r{text-align:right}.pts-b{font-weight:700}

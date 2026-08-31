@@ -37838,7 +37838,10 @@ ${data.tenant.name}`;
          VALUES (?, NULL, ?, ?, 0, 'CONFIRMED', 'CHARGE_TO_ROOM', 'manual_fnb', ?, ?, ?)`,
         [syntheticOrderId, JSON.stringify(items), totalAmount,
          folio.room_id, folio.booking_id,
-         (req.body?.note || `Posted by ${req.user?.id || 'staff'}`).slice(0, 120)]
+         // customer_name holds the GUEST name (or null) — never the audit note.
+         // Writing `Posted by <userId>` here leaked a UUID onto the KOT's
+         // CUSTOMER line; a real typed note is kept, the auto-default is dropped.
+         req.body?.note ? String(req.body.note).slice(0, 120) : null]
       );
 
       const result = await postOrderToFolio(req.params.id, {
@@ -47915,6 +47918,32 @@ ${data.tenant.name}`;
     try { const db = await getTenantDb(req.params.id); await _ensureKitchenPrinterCols(db); res.json(await db.query("SELECT * FROM kitchen_printers ORDER BY is_default DESC, name")); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
+  // ── Print-agent self-update (v3.3+) ─────────────────────────────────────────
+  // Public manifest: the on-prem agent polls this; if `latest` > its running
+  // version it downloads `url`, verifies `sha256`, and swaps itself (service
+  // restart). Published via env (AGENT_LATEST_VERSION / AGENT_SHA256 /
+  // AGENT_DOWNLOAD_URL / AGENT_RELEASE_NOTES) so ops can cut a release WITHOUT a
+  // code change; returns nulls (= "no update") until those are set, so shipping
+  // this is inert until a release is deliberately published.
+  app.get("/api/print-agent/manifest", (_req: Request, res: Response) => {
+    res.json({
+      latest: process.env.AGENT_LATEST_VERSION || null,
+      sha256: process.env.AGENT_SHA256 || null,
+      url:    process.env.AGENT_DOWNLOAD_URL || null,
+      notes:  process.env.AGENT_RELEASE_NOTES || null,
+    });
+  });
+  // Stream the current agent .exe (public binary — the SAME exe for every tenant;
+  // only its .env differs). Host the file on the box at AGENT_EXE_PATH and point
+  // AGENT_DOWNLOAD_URL at this route (or set AGENT_DOWNLOAD_URL to any CDN URL).
+  app.get("/api/print-agent/download", (_req: Request, res: Response) => {
+    const p = process.env.AGENT_EXE_PATH || '';
+    if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'agent binary not published on this server' });
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="AtithiSetuPrintAgent.exe"');
+    res.sendFile(path.resolve(p));
+  });
+
   // ── Print Templates — owner-designed KOT + INVOICE format (Print Studio) ────
   // GET returns both docs' saved configs (or defaults) + the defaults so the
   // Studio can offer "reset". PUT saves one doc-type's block spec. The server
@@ -51646,7 +51675,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'configurable-print-templates',
+    commit_marker: 'kot-fix-selfupdate',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

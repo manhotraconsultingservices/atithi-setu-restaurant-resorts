@@ -28,12 +28,13 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 // Package version — bumped with each client release so the site can confirm which
 // build is running (printed in the startup banner). v3 = reliable NETWORK printing.
-const AGENT_VERSION = '3.2.0';
+const AGENT_VERSION = '3.3.0';
 
 // ── locate a folder we can read a .env / write temp files next to ────────────
 // Under `node agent.mjs` this is the script dir; bundled as an .exe it's the
@@ -337,6 +338,106 @@ async function tick() {
   }
 }
 
-console.log(`Atithi-Setu print agent v${AGENT_VERSION} — ${BASE_URL} / ${RESTAURANT_ID}, polling every ${POLL_MS}ms`);
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.3 — SELF-UPDATE. The agent periodically asks the server for the latest
+// build (GET /api/print-agent/manifest → {latest, sha256, url}). If `latest` is
+// newer, it downloads the .exe, VERIFIES its sha256, then hands off to a tiny
+// detached updater (.cmd) that stops the service, backs up the current exe to
+// .bak, swaps in the new one, and starts the service again.
+//
+// Trust + safety: the manifest and binary come from BASE_URL over HTTPS (the
+// owner-configured server), and the downloaded bytes MUST match the manifest
+// sha256 or the update is aborted and the current version keeps running. Any
+// failure (download, hash, disk) is logged and non-fatal — the agent never
+// bricks itself; the .bak plus re-running Install-Service.bat always recover.
+// Set AGENT_AUTO_UPDATE=0 to disable. Only acts on the Windows service .exe.
+// ─────────────────────────────────────────────────────────────────────────────
+const AUTO_UPDATE = String(process.env.AGENT_AUTO_UPDATE ?? '1') !== '0';
+const UPDATE_CHECK_MS = Math.max(15 * 60 * 1000, Number(process.env.AGENT_UPDATE_MS) || 6 * 60 * 60 * 1000); // 6h default, 15m floor
+const SVC_NAME = 'AtithiSetuPrintAgent';
+
+function _semverGt(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) { if ((pa[i] || 0) > (pb[i] || 0)) return true; if ((pa[i] || 0) < (pb[i] || 0)) return false; }
+  return false;
+}
+function _sha256File(p) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    const s = fs.createReadStream(p);
+    s.on('data', d => h.update(d));
+    s.on('end', () => resolve(h.digest('hex')));
+    s.on('error', reject);
+  });
+}
+async function _downloadTo(url, dest) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`download HTTP ${r.status}`);
+  fs.writeFileSync(dest, Buffer.from(await r.arrayBuffer()));
+}
+let _updating = false;
+async function checkForUpdate() {
+  if (!AUTO_UPDATE || _updating) return;
+  const exePath = process.execPath;
+  // Only self-update the bundled Windows .exe (never a `node agent.mjs` dev run).
+  if (process.platform !== 'win32' || !/atithi.*print/i.test(path.basename(exePath))) return;
+  try {
+    const r = await fetch(`${BASE_URL}/api/print-agent/manifest`, { headers });
+    if (!r.ok) return;
+    const m = await r.json().catch(() => ({}));
+    if (!m || !m.latest || !_semverGt(m.latest, AGENT_VERSION)) return;
+    if (!m.url || !m.sha256) { console.error(`update v${m.latest} offered but manifest is missing url/sha256 — skipping`); return; }
+    _updating = true;
+    console.log(`update available: v${m.latest} (current v${AGENT_VERSION}) — downloading...`);
+    const dir = path.dirname(exePath);
+    const newExe = path.join(dir, 'AtithiSetuPrintAgent.new.exe');
+    try { fs.unlinkSync(newExe); } catch { /* stale */ }
+    await _downloadTo(m.url, newExe);
+    const got = await _sha256File(newExe);
+    if (got.toLowerCase() !== String(m.sha256).toLowerCase()) {
+      console.error(`update ABORTED — sha256 mismatch (got ${got.slice(0, 12)}… expected ${String(m.sha256).slice(0, 12)}…). Keeping v${AGENT_VERSION}.`);
+      try { fs.unlinkSync(newExe); } catch {}
+      _updating = false;
+      return;
+    }
+    console.log(`v${m.latest} verified (sha256 ok) — applying; the service will stop and restart on the new build.`);
+    _applyUpdate(dir);   // hands off; the updater stops THIS service, swaps, restarts
+  } catch (e) {
+    console.error('update check/apply failed (keeping current version):', e.message);
+    _updating = false;
+  }
+}
+function _applyUpdate(dir) {
+  const q = (p) => `"${p}"`;
+  const exe = path.join(dir, 'AtithiSetuPrintAgent.exe');
+  const nwe = path.join(dir, 'AtithiSetuPrintAgent.new.exe');
+  const bak = path.join(dir, 'AtithiSetuPrintAgent.exe.bak');
+  const nssm = path.join(dir, 'nssm.exe');
+  const useNssm = fs.existsSync(nssm);
+  const stop = useNssm ? `${q(nssm)} stop ${SVC_NAME}` : `sc stop ${SVC_NAME}`;
+  const start = useNssm ? `${q(nssm)} start ${SVC_NAME}` : `sc start ${SVC_NAME}`;
+  const cmdPath = path.join(dir, 'atithi-update.cmd');
+  const script = [
+    '@echo off',
+    'timeout /t 2 /nobreak >nul',
+    stop,                                   // manual stop → NSSM does NOT auto-restart the old exe
+    'timeout /t 3 /nobreak >nul',
+    `if exist ${q(exe)} copy /y ${q(exe)} ${q(bak)} >nul`,   // recovery backup
+    `move /y ${q(nwe)} ${q(exe)} >nul`,     // swap in the verified new build
+    start,                                  // service comes back on the new exe
+    '',
+  ].join('\r\n');
+  fs.writeFileSync(cmdPath, script);
+  const child = spawn('cmd.exe', ['/c', cmdPath], { detached: true, stdio: 'ignore', windowsHide: true });
+  child.unref();
+  // We keep running until the updater stops this service in a few seconds.
+}
+
+console.log(`Atithi-Setu print agent v${AGENT_VERSION} — ${BASE_URL} / ${RESTAURANT_ID}, polling every ${POLL_MS}ms` + (AUTO_UPDATE ? ' · auto-update on' : ' · auto-update OFF'));
 tick();
 setInterval(tick, POLL_MS);
+if (AUTO_UPDATE) {
+  setTimeout(checkForUpdate, 60 * 1000);          // ~1 min after start
+  setInterval(checkForUpdate, UPDATE_CHECK_MS);   // then periodically
+}
