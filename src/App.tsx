@@ -11808,25 +11808,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   }, [activeTab, isOwnerOrAdmin, isPlatformAdmin]);
 
-  const [showTemplatePanel, setShowTemplatePanel]     = useState(false);
   const [showOnDemandModal, setShowOnDemandModal]     = useState(false);
   const [printPreviewHtml, setPrintPreviewHtml]       = useState<string|null>(null);
   const [loadingInvoices, setLoadingInvoices]         = useState(false);
-  const [invoiceTemplate, setInvoiceTemplate] = useState<{
-    showGSTIN: boolean; showCity: boolean; showCustomerPhone: boolean;
-    showPaymentMethod: boolean; showItemBreakdown: boolean; showDiscountLine: boolean;
-    showThankYouNote: boolean; footerText: string;
-  }>(() => {
-    try { return JSON.parse(localStorage.getItem('as-invoice-tpl') || 'null') || {
-      showGSTIN: true, showCity: true, showCustomerPhone: true,
-      showPaymentMethod: true, showItemBreakdown: true, showDiscountLine: true,
-      showThankYouNote: true, footerText: 'Thank you for your business!',
-    }; } catch { return {
-      showGSTIN: true, showCity: true, showCustomerPhone: true,
-      showPaymentMethod: true, showItemBreakdown: true, showDiscountLine: true,
-      showThankYouNote: true, footerText: 'Thank you for your business!',
-    }; }
-  });
+  // Legacy invoice display flags — now only referenced by the buildThermalHTML
+  // fallback (used for the split second before the Print Template Studio config
+  // loads, or if that endpoint is unreachable). The owner configures the invoice
+  // in Restaurant → Print Format; the old localStorage editor panel was removed,
+  // so this is a fixed sensible default.
+  const invoiceTemplate = {
+    showGSTIN: true, showCity: true, showCustomerPhone: true,
+    showPaymentMethod: true, showItemBreakdown: true, showDiscountLine: true,
+    showThankYouNote: true, footerText: 'Thank you for your business!',
+  };
   // Server-side INVOICE print template (Print Template Studio) — the single
   // source of truth for the bill layout. Loaded once per tenant; buildInvoiceHTML
   // renders through it when present (else falls back to the legacy thermal HTML).
@@ -20818,12 +20812,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <h2 className="text-3xl font-bold font-serif">Invoice Management</h2>
             <div className="flex items-center gap-2 flex-wrap">
-              <button
-                onClick={() => setShowTemplatePanel(true)}
-                className="flex items-center gap-2 px-4 py-2 rounded-2xl border border-[#cc5a16]/20 text-[#6b5d52] hover:bg-[#faf7f2] text-xs font-bold uppercase tracking-widest transition-all"
-              >
-                <Settings size={14} /> Template
-              </button>
               <button
                 onClick={() => { setShowOnDemandModal(true); setOdInvoiceItems([{name:'',qty:1,price:0}]); setOdCustomer({name:'',phone:'',reference:''}); setOdDiscount(0); setOdSvcPct(0); setOdGstPct(restaurant?.is_gst_enabled ? (restaurant?.gst_percentage ?? 0) : 0); setOdApplyGst(Boolean(restaurant?.is_gst_enabled)); }}
                 className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] transition-all shadow-sm"
@@ -37708,70 +37696,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     sandbox="allow-same-origin"
                   />
                 </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── Template Settings Panel ── */}
-        {showTemplatePanel && (
-          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm">
-              <div className="flex items-center justify-between px-6 py-4 border-b border-[#cc5a16]/10">
-                <h3 className="font-bold text-[#1a1208] flex items-center gap-2"><Settings size={16} className="text-[#cc5a16]" /> Invoice Template</h3>
-                <button onClick={() => setShowTemplatePanel(false)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] transition-all"><X size={16} /></button>
-              </div>
-              <div className="px-6 py-5 space-y-4">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Choose what appears on customer invoices</p>
-                {([
-                  { key: 'showGSTIN',           label: 'Show GSTIN number'        },
-                  { key: 'showCity',             label: 'Show restaurant city'     },
-                  { key: 'showCustomerPhone',    label: 'Show customer phone'      },
-                  { key: 'showPaymentMethod',    label: 'Show payment method'      },
-                  { key: 'showItemBreakdown',    label: 'Show itemized breakdown'  },
-                  { key: 'showDiscountLine',     label: 'Show discount line'       },
-                  { key: 'showThankYouNote',     label: 'Show thank-you note'      },
-                ] as const).map(({ key, label }) => (
-                  <label key={key} className="flex items-center justify-between cursor-pointer group">
-                    <span className="text-sm font-medium text-[#3d3128] group-hover:text-[#1a1208] transition-colors">{label}</span>
-                    <button
-                      onClick={() => {
-                        const next = { ...invoiceTemplate, [key]: !invoiceTemplate[key] };
-                        setInvoiceTemplate(next);
-                        localStorage.setItem('as-invoice-tpl', JSON.stringify(next));
-                      }}
-                      className={cn(
-                        "relative w-10 h-5 rounded-full transition-all duration-200 shrink-0",
-                        invoiceTemplate[key] ? "bg-[#cc5a16]" : "bg-[#0d0a07]/15"
-                      )}
-                    >
-                      <span className={cn(
-                        "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all duration-200",
-                        invoiceTemplate[key] ? "left-5" : "left-0.5"
-                      )} />
-                    </button>
-                  </label>
-                ))}
-                <div className="pt-2">
-                  <label className="block text-xs font-bold text-[#6b5d52] uppercase tracking-widest mb-1.5">Footer Text</label>
-                  <input
-                    type="text"
-                    value={invoiceTemplate.footerText}
-                    onChange={e => {
-                      const next = { ...invoiceTemplate, footerText: e.target.value };
-                      setInvoiceTemplate(next);
-                      localStorage.setItem('as-invoice-tpl', JSON.stringify(next));
-                    }}
-                    placeholder="Thank you for your business!"
-                    className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
-                  />
-                </div>
-              </div>
-              <div className="px-6 pb-5">
-                <button
-                  onClick={() => setShowTemplatePanel(false)}
-                  className="w-full py-3 rounded-2xl bg-[#cc5a16] text-white font-bold text-sm hover:bg-[#a84612] transition-all"
-                >Done</button>
               </div>
             </div>
           </div>
