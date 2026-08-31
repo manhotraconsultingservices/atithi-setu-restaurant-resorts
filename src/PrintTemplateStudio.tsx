@@ -29,6 +29,7 @@ const SAMPLE: Record<DocType, any> = {
   INVOICE: {
     logo: '🍜', name: 'THE HOUSE OF BOWLS', gstin: '29AARFT9486A1ZG',
     address: 'Opp. Shell Petrol Pump, Keshwapur, Hubli', phone: '0836-3595532',
+    taxInvoice: true, sac: '996331',
     customer: '', mobile: '0000000000',
     date: '31/08/26', cashier: 'biller', orderType: 'Dine In: Parcel 1', billNo: '9352', token: '01',
     items: [{ name: 'Alfredo [White Sauce Pasta]', qty: 1, price: 330, amount: 330, note: '' }],
@@ -117,9 +118,12 @@ export function renderInvoice(c: Cfg, d: any): string {
   if (c.gstin) H += '<div class="pts-c pts-muted">GSTIN : ' + esc(d.gstin) + '</div>';
   if (c.address) H += '<div class="pts-c pts-muted">' + esc(d.address) + '</div>';
   if (c.phone) H += '<div class="pts-c pts-muted">Ph: ' + esc(d.phone) + '</div>';
-  if (c.logo || c.name || c.gstin || c.address || c.phone) H += '<hr class="pts-hr">';
-  if (c.customer) {
-    let nm = 'Name: ' + esc(d.customer || ''); if (c.mobile) nm += '  (M: ' + esc(d.mobile) + ')';
+  // GST compliance: a registered supplier's bill is a TAX INVOICE — an auto legal
+  // label, never an owner toggle.
+  if (d.taxInvoice) H += '<div class="pts-c pts-b" style="letter-spacing:1px;margin-top:2px">TAX INVOICE</div>';
+  if (c.logo || c.name || c.gstin || c.address || c.phone || d.taxInvoice) H += '<hr class="pts-hr">';
+  if (c.customer && (d.customer || d.mobile)) {
+    let nm = 'Name: ' + esc(d.customer || ''); if (c.mobile && d.mobile) nm += '  (M: ' + esc(d.mobile) + ')';
     H += '<div>' + nm + '</div><hr class="pts-hr">';
   }
   let meta = '';
@@ -138,13 +142,22 @@ export function renderInvoice(c: Cfg, d: any): string {
       (c.notes && it.note ? '<span class="pts-note">&raquo; ' + esc(it.note) + '</span>' : '') + '</div>';
   });
   H += '<hr class="pts-hr">';
-  if (c.totalQty) H += '<div class="pts-rrow"><span class="pts-muted">Total Qty: ' + d.totalQty + '</span><span class="pts-b">Sub Total ' + money(d.subtotal) + '</span></div>';
-  else H += trow('Sub Total', money(d.subtotal));
-  if (c.charges) (d.charges || []).forEach((x: any) => { H += trow(x.label, money(x.amount)); });
+  // GST compliance (auto for a tax invoice): SAC + reverse-charge, and the
+  // subtotal reads "Taxable value" as a tax invoice requires.
+  if (d.taxInvoice) {
+    H += '<div class="pts-muted">SAC: ' + esc(d.sac || '996331') + ' &middot; Restaurant service</div>';
+    H += '<div class="pts-muted">Reverse charge: No</div>';
+  }
+  const subLbl = d.taxInvoice ? 'Taxable value' : 'Sub Total';
+  if (c.totalQty) H += '<div class="pts-rrow"><span class="pts-muted">Total Qty: ' + d.totalQty + '</span><span class="pts-b">' + subLbl + ' ' + money(d.subtotal) + '</span></div>';
+  else H += trow(subLbl, money(d.subtotal));
+  if (Number(d.discount)) H += trow(esc(d.discountLabel || 'Discount'), '-' + money(d.discount));
+  if (c.charges) (d.charges || []).forEach((x: any) => { H += trow(esc(x.label), money(x.amount)); });
   if (c.tax === 'split') (d.taxSplit || []).forEach((x: any) => { H += trow(x.label, money(x.amount)); });
   else if (c.tax === 'single') (d.taxSingle || []).forEach((x: any) => { H += trow(x.label, money(x.amount)); });
   if (c.roundOff) H += trow('Round off', '+' + money(d.roundOff));
   H += '<hr class="pts-hr"><div class="pts-rrow pts-b ' + (c.grandBig ? 'pts-big' : '') + '"><span>' + (c.grandBig ? 'GRAND TOTAL' : 'Grand Total') + '</span><span>' + d.cur + ' ' + money(d.grand) + '</span></div><hr class="pts-hr">';
+  if (d.payment_method) H += '<div class="pts-c">Paid via <b>' + esc(d.payment_method) + '</b></div>';
   if (c.footer) H += '<div class="pts-c pts-b">' + esc(c.footerText || d.footer) + '</div>';
   return H;
 }

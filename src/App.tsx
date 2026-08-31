@@ -8,7 +8,7 @@ import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { HousekeepingModule } from './Housekeeping';
 import { ChecklistTemplates } from './ChecklistTemplates';
-import { PrintTemplateStudio, renderKot as renderKotTemplate, DEFAULT_KOT as KOT_TEMPLATE_DEFAULT, PTS_CSS } from './PrintTemplateStudio';
+import { PrintTemplateStudio, renderKot as renderKotTemplate, renderInvoice as renderInvoiceTemplate, DEFAULT_KOT as KOT_TEMPLATE_DEFAULT, DEFAULT_INVOICE as INVOICE_TEMPLATE_DEFAULT, PTS_CSS } from './PrintTemplateStudio';
 import { MyChecklists } from './MyChecklists';
 import { ChecklistBoard } from './ChecklistBoard';
 import { StatusBoard } from './StatusBoard';
@@ -11827,6 +11827,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       showThankYouNote: true, footerText: 'Thank you for your business!',
     }; }
   });
+  // Server-side INVOICE print template (Print Template Studio) — the single
+  // source of truth for the bill layout. Loaded once per tenant; buildInvoiceHTML
+  // renders through it when present (else falls back to the legacy thermal HTML).
+  const [invoicePrintCfg, setInvoicePrintCfg] = useState<any | null>(null);
+  useEffect(() => {
+    if (!restaurantId || !token) return;
+    let cancelled = false;
+    fetch(`/api/restaurant/${restaurantId}/print-templates`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled && d?.INVOICE) setInvoicePrintCfg({ ...INVOICE_TEMPLATE_DEFAULT, ...d.INVOICE }); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [restaurantId, token]);
   // On-demand invoice form state
   const [odInvoiceItems, setOdInvoiceItems]   = useState<{name:string;qty:number;price:number}[]>([{name:'',qty:1,price:0}]);
   const [odCustomer, setOdCustomer]           = useState({name:'',phone:'',reference:''});
@@ -12955,7 +12968,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       || String(inv.id || '').slice(-8).toUpperCase()
     );
 
-    return buildThermalHTML({
+    const legacy = {
       restaurantName:       restaurant?.name || 'Restaurant',
       gstin:                tpl.showGSTIN ? restaurant?.gst_number : undefined,
       gstEnabled:           applyGst,
@@ -12977,7 +12990,51 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       total,
       paymentMethod:        tpl.showPaymentMethod ? (inv.paymentMethod || inv.payment_method || undefined) : undefined,
       footerNote:           tpl.showThankYouNote ? (tpl.footerText || 'Thank you!') : undefined,
-    });
+    };
+
+    // Prefer the owner's Print Template Studio format — the SINGLE source of truth
+    // for every surface (browser bill, preview, thermal ESC/POS). GST-compliance
+    // lines (TAX INVOICE / SAC / reverse-charge / Taxable value) are auto for a
+    // registered supplier. Falls back to the legacy thermal HTML until it loads.
+    if (invoicePrintCfg) {
+      const isTax = !!(applyGst && restaurant?.gst_number && restaurant.gst_number !== '0');
+      const half = Math.round((gstAmt / 2) * 100) / 100;
+      const halfRate = gstPct / 2;
+      const taxSplit = parsedTaxLines.length > 0
+        ? parsedTaxLines.map(l => ({ label: `${l.label} @ ${Number(l.rate || 0).toFixed(2)}%`, amount: Number(l.amount || 0) }))
+        : (gstAmt > 0 ? [{ label: `CGST @ ${halfRate.toFixed(2)}%`, amount: half }, { label: `SGST @ ${halfRate.toFixed(2)}%`, amount: Number((gstAmt - half).toFixed(2)) }] : []);
+      const taxSingle = gstAmt > 0 ? [{ label: `GST @ ${gstPct}%`, amount: gstAmt }] : [];
+      const r: any = restaurant || {};
+      const mapped = {
+        name: r.name || 'Restaurant',
+        gstin: r.gst_number || '',
+        address: [r.address_line1, r.city, r.state, r.pincode].filter(Boolean).join(', ') || r.business_location || '',
+        phone: r.phone || r.contact_number || r.mobile || '',
+        customer: inv.customerName || inv.customer_name || '',
+        mobile: inv.customerPhone || inv.customer_phone || '',
+        date: dateStr + (timeStr ? ' ' + timeStr : ''),
+        cashier: inv.served_by || inv.cashier || '',
+        orderType: (inv.tableNumber || inv.table_number) ? ('Table: ' + (inv.tableNumber || inv.table_number)) : '',
+        billNo: billIdStr,
+        token: inv.token_number || '',
+        items: rounds.flatMap(rnd => (rnd.items || []).map(it => ({ name: it.name, qty: it.qty, price: it.price, amount: Number(it.price) * Number(it.qty), note: '' }))),
+        totalQty: rounds.reduce((s, rnd) => s + (rnd.items || []).reduce((rs, it) => rs + Number(it.qty || 0), 0), 0),
+        subtotal: rawSubtotal,
+        discount: disc > 0 ? disc : 0,
+        discountLabel: loyaltyLabel || 'Discount',
+        charges: svcAmt > 0 ? [{ label: `Service Charge (${svcPct}%)`, amount: svcAmt }] : [],
+        taxSplit, taxSingle,
+        roundOff: 0,
+        grand: total,
+        cur: '₹',
+        payment_method: inv.paymentMethod || inv.payment_method || '',
+        footer: invoicePrintCfg.footerText || tpl.footerText || 'Thank you for your business!',
+        taxInvoice: isTax,
+        sac: inv.sac_code || '996331',
+      };
+      return buildInvoiceDocFromTemplate(invoicePrintCfg, mapped);
+    }
+    return buildThermalHTML(legacy);
   };
 
   // Print an invoice from the list. Prefer the on-prem thermal printer via the
@@ -48519,6 +48576,22 @@ function buildKotPrintDoc(cfg: any, data: any): string {
   const inner = renderKotTemplate(cfg || KOT_TEMPLATE_DEFAULT, data);
   const paper = Number(cfg?.paper) === 58 ? '58mm' : '80mm';
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>KOT - ${orderLocationLabel(data?.table)}</title><style>
+    @page { size: ${paper} auto; margin: 0; }
+    html, body { margin: 0; padding: 0; background: #fff; }
+    body { padding: 2mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .pts-receipt { background: #fff !important; box-shadow: none !important; width: auto !important; padding: 2mm 1mm !important; }
+    ${PTS_CSS}
+  </style></head><body>${inner}</body></html>`;
+}
+
+// Print-ready INVOICE that reuses the Print Template Studio renderer
+// (renderInvoice), so the browser bill matches the owner's saved format AND the
+// thermal ESC/POS. GST-compliance lines (TAX INVOICE / SAC / reverse-charge /
+// Taxable value) render automatically when data.taxInvoice is set.
+function buildInvoiceDocFromTemplate(cfg: any, data: any): string {
+  const inner = renderInvoiceTemplate(cfg || INVOICE_TEMPLATE_DEFAULT, data);
+  const paper = Number(cfg?.paper) === 58 ? '58mm' : '80mm';
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Invoice ${data?.billNo || ''}</title><style>
     @page { size: ${paper} auto; margin: 0; }
     html, body { margin: 0; padding: 0; background: #fff; }
     body { padding: 2mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
