@@ -1,7 +1,13 @@
 {
-  "latest": "3.3.0",
-  "sha256": "07c9b5dace9272bd56cb4a35b42da78056a075e4c6b0d5ca9fb5aa5a3dea670c",
-  "url": "https://erp.atithi-setu.com/api/print-agent/download",
-  "notes": "v3.3 - owner-designed print formats (Restaurant > Print Format) + pickup/parcel token + agent self-update. Extract over the agent folder and re-run Install-Service.bat (press Enter to keep your saved token).",
-  "_howto": "To cut a new agent release: (1) bump AGENT_VERSION in agent.mjs + version in package.json, (2) npm run build:exe (needs @yao-pkg/pkg), (3) host the new .exe where 'url' points (the /api/print-agent/download endpoint serves AGENT_EXE_PATH, or set 'url' to any HTTPS host), (4) put its sha256sum + the new version here, (5) git push. v3.3+ agents auto-update within ~6h. Env vars AGENT_LATEST_VERSION / AGENT_SHA256 / AGENT_DOWNLOAD_URL / AGENT_RELEASE_NOTES override this file if set on the VPS."
+  "latest": null,
+  "sha256": null,
+  "url": null,
+  "notes": null,
+  "_status": "DORMANT by owner request (2026-08-31). The manifest offers NO update, so no on-prem agent will EVER self-update until this is deliberately re-armed. The v3.3 print-agent code + server endpoints stay in place but do nothing.",
+  "_to_activate_3_3_0": {
+    "version": "3.3.0",
+    "sha256": "07c9b5dace9272bd56cb4a35b42da78056a075e4c6b0d5ca9fb5aa5a3dea670c",
+    "url": "https://erp.atithi-setu.com/api/print-agent/download",
+    "how": "Copy these into the top-level latest/sha256/url (or set AGENT_LATEST_VERSION / AGENT_SHA256 / AGENT_DOWNLOAD_URL on the VPS) AND host the .exe at that url. To ship a NEWER build later: bump AGENT_VERSION in agent.mjs + version in package.json, run npm run build:exe, host the exe, and put the new version + its sha256sum here."
+  }
 }
