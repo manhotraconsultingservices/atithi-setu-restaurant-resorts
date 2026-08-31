@@ -11837,6 +11837,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // On-demand invoice form state
   const [odInvoiceItems, setOdInvoiceItems]   = useState<{name:string;qty:number;price:number}[]>([{name:'',qty:1,price:0}]);
   const [odCustomer, setOdCustomer]           = useState({name:'',phone:'',reference:''});
+  const [odToken, setOdToken]                 = useState('');   // optional pickup/parcel token, printed on the bill
   const [odDiscount, setOdDiscount]           = useState(0);
   const [odSvcPct, setOdSvcPct]               = useState(0);
   const [odGstPct, setOdGstPct]               = useState(0);
@@ -20813,7 +20814,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <h2 className="text-3xl font-bold font-serif">Invoice Management</h2>
             <div className="flex items-center gap-2 flex-wrap">
               <button
-                onClick={() => { setShowOnDemandModal(true); setOdInvoiceItems([{name:'',qty:1,price:0}]); setOdCustomer({name:'',phone:'',reference:''}); setOdDiscount(0); setOdSvcPct(0); setOdGstPct(restaurant?.is_gst_enabled ? (restaurant?.gst_percentage ?? 0) : 0); setOdApplyGst(Boolean(restaurant?.is_gst_enabled)); }}
+                onClick={() => { setShowOnDemandModal(true); setOdInvoiceItems([{name:'',qty:1,price:0}]); setOdCustomer({name:'',phone:'',reference:''}); setOdToken(''); setOdDiscount(0); setOdSvcPct(0); setOdGstPct(restaurant?.is_gst_enabled ? (restaurant?.gst_percentage ?? 0) : 0); setOdApplyGst(Boolean(restaurant?.is_gst_enabled)); }}
                 className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] transition-all shadow-sm"
               >
                 <Plus size={14} /> New Invoice
@@ -37923,7 +37924,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                     <h3 className="font-bold font-serif text-lg text-[#1a1208]">New Invoice</h3>
                   </div>
-                  <div className="grid grid-cols-3 gap-2 flex-1 sm:max-w-xl">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 flex-1 sm:max-w-2xl">
                     <input
                       type="text" placeholder="Customer name"
                       value={odCustomer.name}
@@ -37940,6 +37941,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       type="text" placeholder="Table / ref"
                       value={odCustomer.reference}
                       onChange={e => setOdCustomer(p => ({ ...p, reference: e.target.value }))}
+                      className="border border-[#cc5a16]/20 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                    <input
+                      type="text" placeholder="Token #"
+                      value={odToken}
+                      onChange={e => setOdToken(e.target.value)}
                       className="border border-[#cc5a16]/20 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
                     />
                   </div>
@@ -38570,6 +38577,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         id: `PRV-${Date.now()}`,
                         customerName: odCustomer.name, customerPhone: odCustomer.phone,
                         tableNumber: odCustomer.reference || 'Manual',
+                        token_number: odToken.trim() || undefined,
                         items: validItems.map(it => ({ name: it.name, quantity: it.qty, price: it.price })),
                         totalAmount: Number(p.grandTotal || 0),
                         discount_amount: Number(p.totalDiscount || 0),
@@ -38621,6 +38629,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           body: JSON.stringify({
                             customer_name: odCustomer.name, customer_phone: odCustomer.phone,
                             reference: odCustomer.reference,
+                            token_number: odToken.trim() || undefined,
                             items: validItems.map(it => ({ name: it.name, quantity: it.qty, price: it.price })),
                             // Charge-to-room zeroes the restaurant adjustments (the folio owns
                             // the tax). The backend enforces this too; we keep the payload honest.

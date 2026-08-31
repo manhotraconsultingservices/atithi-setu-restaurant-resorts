@@ -113,7 +113,7 @@ const money = (n: any) => Number(n || 0).toFixed(2);
 
 export function renderInvoice(c: Cfg, d: any): string {
   let H = '';
-  if (c.logo) H += '<div class="pts-logo">' + d.logo + '</div>';
+  if (c.logo && d.logo) H += '<div class="pts-logo">' + d.logo + '</div>';
   if (c.name) H += '<div class="pts-c pts-b ' + (c.nameSize === 'big' ? 'pts-big' : 'pts-lg') + '">' + esc(d.name) + '</div>';
   if (c.gstin) H += '<div class="pts-c pts-muted">GSTIN : ' + esc(d.gstin) + '</div>';
   if (c.address) H += '<div class="pts-c pts-muted">' + esc(d.address) + '</div>';
@@ -129,7 +129,7 @@ export function renderInvoice(c: Cfg, d: any): string {
   let meta = '';
   if (c.date || c.orderType) meta += rrow(c.date ? 'Date: ' + d.date : '', c.orderType ? d.orderType : '', true);
   if (c.cashier || c.billNo) meta += rrow(c.cashier ? 'Cashier: ' + d.cashier : '', c.billNo ? 'Bill No.: ' + d.billNo : '', false);
-  if (c.token) meta += '<div class="pts-rrow pts-b"><span>Token: ' + esc(d.token) + '</span><span></span></div>';
+  if (c.token && d.token) meta += '<div class="pts-rrow pts-b"><span>Token: ' + esc(d.token) + '</span><span></span></div>';
   if (meta) H += meta + '<hr class="pts-hr">';
   const gt = '1fr' + (c.colQty ? ' 30px' : '') + (c.colPrice ? ' 52px' : '') + (c.colAmount ? ' 58px' : '');
   H += '<div class="pts-items-h" style="grid-template-columns:' + gt + '"><span>Item</span>' +
@@ -165,11 +165,13 @@ export function renderKot(c: Cfg, d: any): string {
   let H = '<div class="pts-c pts-b pts-big">KOT</div>';
   if (c.station) H += '<div class="pts-c pts-b">' + esc(d.station) + '</div>';
   if (c.name) H += '<div class="pts-c pts-muted">' + esc(d.name) + '</div>';
+  // Token prints in BOLD right under the business name (a prominent pickup #),
+  // and only when one was entered.
+  if (c.token && d.token) H += '<div class="pts-c pts-b pts-big" style="margin-top:2px">TOKEN: ' + esc(d.token) + '</div>';
   H += '<hr class="pts-hr">';
   if (c.orderNo) H += '<div>Order: ' + esc(d.orderNo) + '</div>';
   const l2: string[] = []; if (c.table) l2.push('Table: ' + d.table); if (c.time) l2.push(d.time);
   if (l2.length) H += '<div class="pts-rrow"><span>' + esc(l2[0]) + '</span><span>' + esc(l2[1] || '') + '</span></div>';
-  if (c.token) H += '<div class="pts-b pts-lg">Token: ' + esc(d.token) + '</div>';
   if (c.customer && d.customer) H += '<div>Guest: ' + esc(d.customer) + '</div>';
   H += '<hr class="pts-hr">';
   (d.items || []).forEach((it: any) => {
