@@ -28,21 +28,58 @@ echo  First add your printers in the app:  Restaurant ^> Kitchen Printers
 echo  and copy the "Print agent token" shown there.
 echo(
 
-set "BASE_URL=https://erp.atithi-setu.com"
-set /p BASE_URL=  Server URL [%BASE_URL%]:
+rem ---- read the EXISTING .env so a re-run KEEPS the current settings ----
+rem  On a re-install just press Enter at each prompt to keep the saved value;
+rem  type something only to CHANGE it. This is what makes "your .env is
+rem  preserved" actually true when you re-run this installer (an earlier build
+rem  blanked these and forced re-entry, which knocked printers offline if the
+rem  token was retyped wrong).
+set "CUR_BASE_URL="
+set "CUR_RESTAURANT_ID="
+set "CUR_AGENT_TOKEN="
+set "CUR_POLL_MS="
+if exist "%DIR%\.env" (
+  for /f "usebackq tokens=1,* delims==" %%A in ("%DIR%\.env") do (
+    if /I "%%A"=="BASE_URL"      set "CUR_BASE_URL=%%B"
+    if /I "%%A"=="RESTAURANT_ID" set "CUR_RESTAURANT_ID=%%B"
+    if /I "%%A"=="AGENT_TOKEN"   set "CUR_AGENT_TOKEN=%%B"
+    if /I "%%A"=="POLL_MS"       set "CUR_POLL_MS=%%B"
+  )
+)
+if not defined CUR_BASE_URL set "CUR_BASE_URL=https://erp.atithi-setu.com"
+if not defined CUR_POLL_MS  set "CUR_POLL_MS=3000"
+
+rem ---- Server URL (Enter = keep the shown value) ----
+set "BASE_URL=%CUR_BASE_URL%"
+set /p BASE_URL=  Server URL [%CUR_BASE_URL%]:
+
+rem ---- Restaurant ID (required; Enter keeps current when one is saved) ----
 :ask_rid
-set "RESTAURANT_ID="
+set "RESTAURANT_ID=%CUR_RESTAURANT_ID%"
+if defined CUR_RESTAURANT_ID goto rid_have
 set /p RESTAURANT_ID=  Restaurant ID (e.g. RESTO-1003):
+goto rid_check
+:rid_have
+set /p RESTAURANT_ID=  Restaurant ID [%CUR_RESTAURANT_ID%]:
+:rid_check
 if "%RESTAURANT_ID%"=="" ( echo   ^> Restaurant ID is required. & goto ask_rid )
+
+rem ---- Print agent token (required; Enter keeps current when one is saved) ----
+if defined CUR_AGENT_TOKEN ( set "TOKMASK=%CUR_AGENT_TOKEN:~0,8%..." ) else ( set "TOKMASK=" )
 :ask_tok
-set "AGENT_TOKEN="
+set "AGENT_TOKEN=%CUR_AGENT_TOKEN%"
+if defined CUR_AGENT_TOKEN goto tok_have
 set /p AGENT_TOKEN=  Print agent token (pat_...):
+goto tok_check
+:tok_have
+set /p AGENT_TOKEN=  Print agent token [keep current %TOKMASK%]:
+:tok_check
 if "%AGENT_TOKEN%"=="" ( echo   ^> Token is required. & goto ask_tok )
 
 > "%DIR%\.env" echo BASE_URL=%BASE_URL%
 >>"%DIR%\.env" echo RESTAURANT_ID=%RESTAURANT_ID%
 >>"%DIR%\.env" echo AGENT_TOKEN=%AGENT_TOKEN%
->>"%DIR%\.env" echo POLL_MS=3000
+>>"%DIR%\.env" echo POLL_MS=%CUR_POLL_MS%
 echo(
 echo  Saved settings to .env
 echo  Installing the Windows service...

@@ -427,6 +427,160 @@ async function resolvePublicTenantParam(req: any, res: any, next: any): Promise<
   next();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIGURABLE PRINT TEMPLATES — per-tenant, owner-designed KOT + INVOICE.
+// The owner's block spec (saved from the Print Template Studio) is rendered to
+// ESC/POS HERE on the server; the v3.2+ on-prem agent just prints the bytes we
+// hand it (content.escpos, base64). Agents older than v3.2 IGNORE that field
+// and fall back to their built-in layout using the structured fields we keep
+// alongside — so this is safe to ship before the agent is updated at a site.
+// The SAME block spec drives the browser preview (Print Template Studio), so
+// what an owner designs is exactly what prints.
+// ═══════════════════════════════════════════════════════════════════════════
+const PTPL_ESC = '\x1B', PTPL_GS = '\x1D';
+const PTPL = {
+  init: PTPL_ESC + '@',
+  boldOn: PTPL_ESC + 'E\x01', boldOff: PTPL_ESC + 'E\x00',
+  center: PTPL_ESC + 'a\x01', left: PTPL_ESC + 'a\x00', right: PTPL_ESC + 'a\x02',
+  big: PTPL_GS + '!\x11', tall: PTPL_GS + '!\x01', normal: PTPL_GS + '!\x00',
+  cut: '\n\n\n' + PTPL_GS + 'V\x42\x00',
+};
+const _ptplMoney = (n: any) => Number(n || 0).toFixed(2);
+const _ptplB64 = (s: string) => Buffer.from(s, 'binary').toString('base64');
+// two-column line: label left, value right-justified within `w` cols; wraps a
+// too-long label onto its own line with the value right-aligned beneath.
+function _ptplLr(left: string, right: string, w: number): string {
+  left = String(left ?? ''); right = String(right ?? '');
+  const pad = w - left.length - right.length;
+  if (pad >= 1) return left + ' '.repeat(pad) + right + '\n';
+  return left + '\n' + ' '.repeat(Math.max(0, w - right.length)) + right + '\n';
+}
+function _ptplDate(x: any): string {
+  try {
+    const dt = x ? new Date(x) : new Date();
+    if (isNaN(dt.getTime())) return String(x || '');
+    return dt.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+  } catch { return String(x || ''); }
+}
+function _ptplWidth(cfg: any, printerCols?: number): number {
+  if (printerCols && Number(printerCols) > 0) return Number(printerCols);
+  return Number(cfg?.paper) === 58 ? 32 : 48;
+}
+// item line with fixed-width numeric columns; name column takes the remainder
+// and wraps if it overflows (numbers then sit right-aligned on the line below).
+function _ptplItemRow(cfg: any, name: string, qty: string, price: string, amt: string, W: number): string {
+  const wQty = cfg.colQty ? 4 : 0, wPrice = cfg.colPrice ? 8 : 0, wAmt = cfg.colAmount ? 9 : 0;
+  const wName = Math.max(6, W - wQty - wPrice - wAmt);
+  const nums = (cfg.colQty ? String(qty).padStart(wQty) : '') +
+               (cfg.colPrice ? String(price).padStart(wPrice) : '') +
+               (cfg.colAmount ? String(amt).padStart(wAmt) : '');
+  if (name.length <= wName) return name.padEnd(wName) + nums + '\n';
+  return name + '\n' + ' '.repeat(wName) + nums + '\n';
+}
+
+// Default templates — mirror the Print Template Studio "House of Bowls" preset.
+const DEFAULT_INVOICE_TPL: any = {
+  paper: 80, logo: false, name: true, nameSize: 'big', gstin: true, address: true, phone: true,
+  customer: true, mobile: true,
+  date: true, cashier: true, orderType: true, billNo: true, token: true,
+  colQty: true, colPrice: true, colAmount: true, notes: true,
+  totalQty: true, charges: true, tax: 'split', roundOff: true, grandBig: true,
+  footer: true, footerText: 'Thank you! Visit again.',
+};
+const DEFAULT_KOT_TPL: any = {
+  paper: 80, name: true, station: true,
+  orderNo: true, table: true, token: true, time: true, customer: true,
+  notes: true, bigItems: true, footer: false, footerText: '',
+};
+
+async function _ensurePrintTemplatesTable(db: any): Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS print_templates (
+    doc_type   TEXT PRIMARY KEY,
+    config     TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+}
+async function getPrintTemplate(db: any, docType: 'INVOICE' | 'KOT'): Promise<any> {
+  const dflt = docType === 'KOT' ? DEFAULT_KOT_TPL : DEFAULT_INVOICE_TPL;
+  try {
+    await _ensurePrintTemplatesTable(db);
+    const row: any = await db.get("SELECT config FROM print_templates WHERE doc_type = ?", [docType]);
+    if (row?.config) { try { return { ...dflt, ...JSON.parse(row.config) }; } catch { /* fall through */ } }
+  } catch { /* ignore — use default */ }
+  return { ...dflt };
+}
+
+// Render a KOT (kitchen ticket) to ESC/POS from the owner's block spec.
+function renderKotEscpos(cfg: any, d: any, W: number): string {
+  let o = PTPL.init + PTPL.center + PTPL.boldOn + PTPL.big + 'KOT\n' + PTPL.normal + PTPL.boldOff;
+  if (cfg.station && d.station) o += PTPL.center + PTPL.boldOn + `${d.station}\n` + PTPL.boldOff;
+  if (cfg.name && d.name) o += PTPL.center + `${d.name}\n`;
+  o += PTPL.left + '-'.repeat(W) + '\n';
+  if (cfg.orderNo && d.orderNo) o += `Order: ${d.orderNo}\n`;
+  const l2: string[] = [];
+  if (cfg.table && d.table) l2.push(`Table: ${d.table}`);
+  if (cfg.time && d.time) l2.push(String(d.time));
+  if (l2.length) o += _ptplLr(l2[0], l2[1] || '', W);
+  if (cfg.token && d.token) o += PTPL.boldOn + PTPL.tall + `TOKEN: ${d.token}\n` + PTPL.normal + PTPL.boldOff;
+  if (cfg.customer && d.customer) o += `Guest: ${d.customer}\n`;
+  o += '-'.repeat(W) + '\n';
+  for (const it of (Array.isArray(d.items) ? d.items : [])) {
+    const head = cfg.bigItems ? PTPL.boldOn + PTPL.tall : PTPL.boldOn;
+    const tail = cfg.bigItems ? PTPL.normal + PTPL.boldOff : PTPL.boldOff;
+    o += head + `${String(it.qty || 1)} x ${it.name || 'Item'}\n` + tail;
+    if (cfg.notes && it.note) o += `     >> ${it.note}\n`;
+  }
+  o += '-'.repeat(W) + '\n';
+  if (cfg.footer && (cfg.footerText || d.footer)) o += PTPL.center + `${cfg.footerText || d.footer}\n` + PTPL.left;
+  o += PTPL.cut;
+  return o;
+}
+
+// Render an INVOICE (customer bill) to ESC/POS from the owner's block spec.
+function renderInvoiceEscpos(cfg: any, d: any, W: number): string {
+  const r = d.restaurant || {};
+  const line = '-'.repeat(W) + '\n';
+  let o = PTPL.init;
+  if (cfg.name && r.name) o += PTPL.center + PTPL.boldOn + (cfg.nameSize === 'big' ? PTPL.big : PTPL.tall) + `${r.name}\n` + PTPL.normal + PTPL.boldOff;
+  if (cfg.gstin && r.gstin) o += PTPL.center + `GSTIN : ${r.gstin}\n`;
+  if (cfg.address && r.address) o += PTPL.center + `${r.address}\n`;
+  if (cfg.phone && r.phone) o += PTPL.center + `Ph: ${r.phone}\n`;
+  o += PTPL.left + line;
+  if (cfg.customer) {
+    let nm = `Name: ${d.customer || ''}`;
+    if (cfg.mobile && d.mobile) nm += `  (M: ${d.mobile})`;
+    o += nm + '\n' + line;
+  }
+  if (cfg.date || cfg.orderType) o += _ptplLr(cfg.date ? `Date: ${_ptplDate(d.date)}` : '', cfg.orderType && d.orderType ? String(d.orderType) : '', W);
+  if (cfg.cashier || cfg.billNo) o += _ptplLr(cfg.cashier && d.cashier ? `Cashier: ${d.cashier}` : '', cfg.billNo && d.billNo ? `Bill No.: ${d.billNo}` : '', W);
+  if (cfg.token && d.token) o += PTPL.boldOn + `Token: ${d.token}\n` + PTPL.boldOff;
+  o += line;
+  o += PTPL.boldOn + _ptplItemRow(cfg, 'Item', 'Qty', 'Price', 'Amt', W) + PTPL.boldOff;
+  for (const it of (Array.isArray(d.items) ? d.items : [])) {
+    const qty = Number(it.qty || 1), price = Number(it.price || 0);
+    const amt = it.amount != null ? Number(it.amount) : qty * price;
+    o += _ptplItemRow(cfg, String(it.name || 'Item'), String(qty), _ptplMoney(price), _ptplMoney(amt), W);
+    if (cfg.notes && it.note) o += `   >> ${it.note}\n`;
+  }
+  o += line;
+  const totalQty = d.totalQty != null ? d.totalQty : (Array.isArray(d.items) ? d.items.reduce((s: number, it: any) => s + Number(it.qty || 0), 0) : 0);
+  if (cfg.totalQty) o += _ptplLr(`Total Qty: ${totalQty}`, `Sub Total ${_ptplMoney(d.subtotal)}`, W);
+  else o += _ptplLr('Sub Total', _ptplMoney(d.subtotal), W);
+  if (Number(d.discount)) o += _ptplLr('Discount', '-' + _ptplMoney(d.discount), W);
+  if (cfg.charges && Array.isArray(d.charges)) for (const c of d.charges) if (Number(c.amount)) o += _ptplLr(c.label || 'Charge', _ptplMoney(c.amount), W);
+  if (cfg.charges && Number(d.service_charge)) o += _ptplLr(`Service Chg${d.service_charge_pct ? ' ' + d.service_charge_pct + '%' : ''}`, _ptplMoney(d.service_charge), W);
+  if (cfg.tax !== 'none' && Array.isArray(d.taxes)) for (const t of d.taxes) if (Number(t.amount)) o += _ptplLr(t.label || 'Tax', _ptplMoney(t.amount), W);
+  if (cfg.roundOff && Number(d.roundOff)) o += _ptplLr('Round off', (Number(d.roundOff) >= 0 ? '+' : '') + _ptplMoney(d.roundOff), W);
+  o += line;
+  const gw = cfg.grandBig ? Math.floor(W / 2) : W;
+  o += (cfg.grandBig ? PTPL.big : '') + PTPL.boldOn + _ptplLr(cfg.grandBig ? 'GRAND TOTAL' : 'Grand Total', (d.cur || 'Rs') + ' ' + _ptplMoney(d.total), gw) + PTPL.boldOff + PTPL.normal;
+  o += line;
+  if (d.payment_method) o += PTPL.center + `Paid via ${d.payment_method}\n` + PTPL.left;
+  if (cfg.footer && (cfg.footerText || d.footer)) o += PTPL.center + `${cfg.footerText || d.footer}\n` + PTPL.left;
+  o += PTPL.cut;
+  return o;
+}
+
 // Thermal KOT auto-print: enqueue print jobs for a just-placed order. Groups the
 // order's items by menu category and routes to each active printer whose `station`
 // matches (or station='ALL' → the whole order). Fire-and-forget — NEVER blocks or
@@ -437,10 +591,15 @@ async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string): 
     const printers: any[] = await db.query("SELECT * FROM kitchen_printers WHERE is_active = 1").catch(() => []);
     if (!printers || printers.length === 0) return;               // no printers configured → no-op
     const order: any = await db.get(
-      "SELECT id, table_number, items, customer_name, round_number, created_at FROM orders WHERE id = ?",
+      "SELECT id, table_number, items, customer_name, round_number, created_at, token_number, invoice_number FROM orders WHERE id = ?",
       [orderId]
     );
     if (!order) return;
+    // Owner's KOT format + business name — rendered to ESC/POS server-side so
+    // the format is fully configurable without touching the on-prem agent.
+    const kotCfg = await getPrintTemplate(db, 'KOT');
+    let bizName: string | null = null;
+    try { const rr: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]); bizName = rr?.name || null; } catch { /* ignore */ }
     let items: any[] = [];
     try { items = JSON.parse(order.items || '[]'); } catch { items = []; }
     if (!Array.isArray(items) || items.length === 0) return;
@@ -459,12 +618,28 @@ async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string): 
       // literally equals "KITCHEN" (≈ never) → the kitchen printer printed nothing.
       const lines = (station === 'ALL' || station === 'KITCHEN') ? all : all.filter(it => it.category === station);
       if (lines.length === 0) continue;
+      const width = _ptplWidth(kotCfg, Number(p.width_cols));   // per-printer receipt width (chars)
+      const kotItems = lines.map(l => ({ name: l.name, qty: l.qty, note: l.note }));
+      // Server-rendered ESC/POS from the owner's template (v3.2+ agents print it
+      // verbatim); structured fields kept for older agents' built-in layout.
+      const kd = {
+        name: bizName, station: p.station || 'KITCHEN',
+        orderNo: order.id, table: order.table_number || null,
+        token: order.token_number || null,
+        time: order.created_at ? new Date(order.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '',
+        customer: order.customer_name || null,
+        items: kotItems,
+      };
+      let escpos: string | null = null;
+      try { escpos = _ptplB64(renderKotEscpos(kotCfg, kd, width)); } catch { escpos = null; }
       const content = JSON.stringify({
-        kind: 'KOT', order_id: order.id, table: order.table_number || null,
+        kind: 'KOT', escpos,
+        order_id: order.id, table: order.table_number || null,
         round: order.round_number || 1, customer: order.customer_name || null,
+        token: order.token_number || null,
         at: order.created_at, station: p.station || 'ALL',
-        width: Number(p.width_cols) || 32,   // per-printer receipt width (chars)
-        items: lines.map(l => ({ name: l.name, qty: l.qty, note: l.note })),
+        width,
+        items: kotItems,
       });
       const jid = `PJ-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
@@ -46533,6 +46708,8 @@ ${data.tenant.name}`;
         // payment_method='CHARGE_TO_ROOM' is the explicit opt-in signal.
         room_id, roomId,
         booking_id, bookingId,
+        // Staff-entered pickup / queue token (Print Template Studio: token block)
+        token_number, tokenNumber,
       } = req.body;
 
       const db = await getTenantDb(req.params.id);
@@ -46586,6 +46763,7 @@ ${data.tenant.name}`;
       // with null values succeed unchanged.
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS token_number TEXT").catch(() => {});
 
       // Resolve restaurant checkout_mode (body overrides, then DB, then default)
       let checkoutMode = bodyCheckoutMode;
@@ -46606,6 +46784,7 @@ ${data.tenant.name}`;
       const finalCustomerName = customer_name || customerName;
       const finalCustomerPhone= customer_phone || customerPhone;
       const finalCustomerEmail= customer_email || customerEmail;
+      const finalTokenNumber  = (token_number ?? tokenNumber ?? '').toString().trim() || null;
       const finalPaymentMethod= payment_method || paymentMethod;
       // Cloud-kitchen structured address fields (snake_case wins over camelCase fallback)
       const finalAddrLine1    = customer_address_line1 || customerAddressLine1 || null;
@@ -46863,8 +47042,8 @@ ${data.tenant.name}`;
            gst_percent, apply_gst, invoice_status,
            customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark,
            room_id, booking_id,
-           currency_snapshot, tax_label_snapshot)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           currency_snapshot, tax_label_snapshot, token_number)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         id,
         finalTableNumber || null,
@@ -46893,6 +47072,7 @@ ${data.tenant.name}`;
         finalBookingId,
         _snap.currency_snapshot,
         _snap.tax_label_snapshot,
+        finalTokenNumber,
       ]);
 
       // ──────────────────────────────────────────────────────────────────
@@ -47735,6 +47915,33 @@ ${data.tenant.name}`;
     try { const db = await getTenantDb(req.params.id); await _ensureKitchenPrinterCols(db); res.json(await db.query("SELECT * FROM kitchen_printers ORDER BY is_default DESC, name")); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
+  // ── Print Templates — owner-designed KOT + INVOICE format (Print Studio) ────
+  // GET returns both docs' saved configs (or defaults) + the defaults so the
+  // Studio can offer "reset". PUT saves one doc-type's block spec. The server
+  // renders these to ESC/POS at print time (see getPrintTemplate / render*Escpos).
+  app.get("/api/restaurant/:id/print-templates", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const [inv, kot] = await Promise.all([getPrintTemplate(db, 'INVOICE'), getPrintTemplate(db, 'KOT')]);
+      res.json({ INVOICE: inv, KOT: kot, defaults: { INVOICE: DEFAULT_INVOICE_TPL, KOT: DEFAULT_KOT_TPL } });
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'failed to load templates' }); }
+  });
+  app.put("/api/restaurant/:id/print-templates/:docType", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const docType = String(req.params.docType || '').toUpperCase();
+      if (docType !== 'INVOICE' && docType !== 'KOT') return res.status(400).json({ error: 'docType must be INVOICE or KOT' });
+      const cfg = (req.body && (req.body.config || req.body)) || {};
+      const db = await getTenantDb(req.params.id);
+      await _ensurePrintTemplatesTable(db);
+      const json = JSON.stringify(cfg);
+      const existing: any = await db.get("SELECT doc_type FROM print_templates WHERE doc_type = ?", [docType]);
+      if (existing) await db.run("UPDATE print_templates SET config = ?, updated_at = CURRENT_TIMESTAMP WHERE doc_type = ?", [json, docType]);
+      else await db.run("INSERT INTO print_templates (doc_type, config) VALUES (?, ?)", [docType, json]);
+      res.json({ success: true, docType, config: cfg });
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'failed to save template' }); }
+  });
+
   app.post("/api/restaurant/:id/kitchen-printers", authenticate, async (req: AuthRequest, res: Response) => {
     if (!requireOwnerOrAdmin(req, res)) return;
     try {
@@ -47910,11 +48117,38 @@ ${data.tenant.name}`;
       const _printId = b.session_id || b.session_token || b.order_id || b.invoice_no || b.invoice_number || null;
       if (_printId) writeObjectAudit(db, req, { objectType: 'INVOICE', objectId: String(_printId), action: 'PRINTED', summary: `Invoice ${b.invoice_no || b.invoice_number || _printId} printed (thermal)` }).catch(() => {});
       const reqWidth = Number(req.body?.width) || Number(b.width) || 0;
+      // Owner's invoice format → rendered to ESC/POS server-side (v3.2+ agents
+      // print it verbatim; older agents fall back to structured billBase fields).
+      const invCfg = await getPrintTemplate(db, 'INVOICE');
+      const invData: any = {
+        restaurant: billBase.restaurant,
+        date: billBase.date,
+        cashier: b.cashier || billBase.served_by || null,
+        orderType: b.order_type || b.dine_type || null,
+        billNo: billBase.invoice_no,
+        token: b.token || b.token_number || null,
+        customer: billBase.customer,
+        mobile: b.mobile || b.customer_phone || null,
+        items: billBase.items,
+        subtotal: billBase.subtotal,
+        discount: billBase.discount,
+        charges: Array.isArray(b.charges) ? b.charges : [],
+        service_charge: billBase.service_charge,
+        service_charge_pct: billBase.service_charge_pct,
+        taxes: billBase.taxes,
+        roundOff: Number(b.round_off ?? b.roundOff ?? 0),
+        total: billBase.total,
+        cur: 'Rs',
+        payment_method: billBase.payment_method,
+        footer: billBase.footer,
+      };
       let queued = 0;
       for (const p of targets) {
-        // Per-printer receipt width wins; else the request's width; else 32 (58mm).
-        const width = Number(p.width_cols) || reqWidth || 32;
-        const content = JSON.stringify({ kind: 'INVOICE', width, ...billBase });
+        // Per-printer receipt width wins; else the request's width; else the template's paper size.
+        const width = Number(p.width_cols) || reqWidth || _ptplWidth(invCfg);
+        let escpos: string | null = null;
+        try { escpos = _ptplB64(renderInvoiceEscpos(invCfg, invData, width)); } catch { escpos = null; }
+        const content = JSON.stringify({ kind: 'INVOICE', escpos, width, ...billBase });
         const jid = `PJ-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         await db.run(
           "INSERT INTO print_jobs (id, printer_id, order_id, kind, content, status) VALUES (?, ?, ?, 'INVOICE', ?, 'PENDING')",
@@ -51412,7 +51646,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-templates-own-nav',
+    commit_marker: 'configurable-print-templates',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

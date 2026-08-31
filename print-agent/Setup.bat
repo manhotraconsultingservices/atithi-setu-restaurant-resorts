@@ -14,24 +14,52 @@ echo     Restaurant  ^>  Kitchen Printers
 echo  and copy the "Print agent token" shown there.
 echo(
 
-set "BASE_URL=https://erp.atithi-setu.com"
-set /p BASE_URL=  Server URL [%BASE_URL%]:
+rem ---- read the EXISTING .env so a re-run KEEPS the current settings ----
+rem  Press Enter at each prompt to keep the saved value; type only to change it.
+set "CUR_BASE_URL="
+set "CUR_RESTAURANT_ID="
+set "CUR_AGENT_TOKEN="
+set "CUR_POLL_MS="
+if exist "%~dp0.env" (
+  for /f "usebackq tokens=1,* delims==" %%A in ("%~dp0.env") do (
+    if /I "%%A"=="BASE_URL"      set "CUR_BASE_URL=%%B"
+    if /I "%%A"=="RESTAURANT_ID" set "CUR_RESTAURANT_ID=%%B"
+    if /I "%%A"=="AGENT_TOKEN"   set "CUR_AGENT_TOKEN=%%B"
+    if /I "%%A"=="POLL_MS"       set "CUR_POLL_MS=%%B"
+  )
+)
+if not defined CUR_BASE_URL set "CUR_BASE_URL=https://erp.atithi-setu.com"
+if not defined CUR_POLL_MS  set "CUR_POLL_MS=3000"
+
+set "BASE_URL=%CUR_BASE_URL%"
+set /p BASE_URL=  Server URL [%CUR_BASE_URL%]:
 
 :ask_rid
-set "RESTAURANT_ID="
+set "RESTAURANT_ID=%CUR_RESTAURANT_ID%"
+if defined CUR_RESTAURANT_ID goto rid_have
 set /p RESTAURANT_ID=  Restaurant ID (e.g. RESTO-1003):
+goto rid_check
+:rid_have
+set /p RESTAURANT_ID=  Restaurant ID [%CUR_RESTAURANT_ID%]:
+:rid_check
 if "%RESTAURANT_ID%"=="" ( echo   ^> Restaurant ID is required. & goto ask_rid )
 
+if defined CUR_AGENT_TOKEN ( set "TOKMASK=%CUR_AGENT_TOKEN:~0,8%..." ) else ( set "TOKMASK=" )
 :ask_tok
-set "AGENT_TOKEN="
+set "AGENT_TOKEN=%CUR_AGENT_TOKEN%"
+if defined CUR_AGENT_TOKEN goto tok_have
 set /p AGENT_TOKEN=  Print agent token (pat_...):
+goto tok_check
+:tok_have
+set /p AGENT_TOKEN=  Print agent token [keep current %TOKMASK%]:
+:tok_check
 if "%AGENT_TOKEN%"=="" ( echo   ^> Token is required. & goto ask_tok )
 
 > ".env" echo # Atithi-Setu Print Agent - written by Setup.bat
 >>".env" echo BASE_URL=%BASE_URL%
 >>".env" echo RESTAURANT_ID=%RESTAURANT_ID%
 >>".env" echo AGENT_TOKEN=%AGENT_TOKEN%
->>".env" echo POLL_MS=3000
+>>".env" echo POLL_MS=%CUR_POLL_MS%
 
 echo(
 echo  Saved settings to .env

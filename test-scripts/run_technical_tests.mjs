@@ -1707,6 +1707,30 @@ async function testHousekeeping() {
 }
 
 // ── Configurable Checklist Templates ─────────────────────────────────────────
+async function testPrintTemplates() {
+  section('PRINT TEMPLATES — owner-configurable KOT + invoice format');
+  if (!restaurantId) { skip('TC-PRINT-*', 'All print-template tests', 'no restaurantId'); return; }
+  const R = restaurantId;
+
+  // TC-PRINT-GET — both docs load (saved config or seeded defaults) + defaults block.
+  const g = await api('GET', `/api/restaurant/${R}/print-templates`);
+  if (g.status !== 200 || !g.data?.INVOICE || !g.data?.KOT || !g.data?.defaults) {
+    fail('TC-PRINT-GET', 'GET print-templates returns INVOICE + KOT + defaults', `HTTP ${g.status} ${JSON.stringify(g.data).slice(0, 120)}`);
+    return;
+  }
+  pass('TC-PRINT-GET', 'GET print-templates returns INVOICE + KOT configs + defaults', `invoice.tax=${g.data.INVOICE.tax}`);
+
+  // TC-PRINT-SAVE — save a KOT config change; it round-trips, then self-restores.
+  const orig = g.data.KOT;
+  const put = await api('PUT', `/api/restaurant/${R}/print-templates/KOT`, { config: { ...orig, footer: true, footerText: 'UAT-PT-TEST' } });
+  if (put.status === 403) { skip('TC-PRINT-SAVE', 'save print template', 'need OWNER/admin role'); return; }
+  if (put.status !== 200) { fail('TC-PRINT-SAVE', 'save KOT template', `HTTP ${put.status} ${JSON.stringify(put.data).slice(0, 120)}`); return; }
+  const g2 = await api('GET', `/api/restaurant/${R}/print-templates`);
+  const ok = g2.data?.KOT?.footerText === 'UAT-PT-TEST';
+  await api('PUT', `/api/restaurant/${R}/print-templates/KOT`, { config: orig });   // restore
+  (ok ? pass : fail)('TC-PRINT-SAVE', 'KOT template save round-trips (self-restoring)', `footerText=${g2.data?.KOT?.footerText}`);
+}
+
 async function testChecklists() {
   section('CHECKLISTS — configurable templates / assignments / manual start');
   if (!restaurantId) { skip('TC-CHK-*', 'All checklist tests', 'no restaurantId'); return; }
@@ -4365,6 +4389,7 @@ async function main() {
   await testEvents();
   await testHousekeeping();
   await testChecklists();
+  await testPrintTemplates();
   await testChannelManager();
   await testReports();
   await testPublicBooking();

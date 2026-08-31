@@ -8,6 +8,7 @@ import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { HousekeepingModule } from './Housekeeping';
 import { ChecklistTemplates } from './ChecklistTemplates';
+import { PrintTemplateStudio } from './PrintTemplateStudio';
 import { MyChecklists } from './MyChecklists';
 import { ChecklistBoard } from './ChecklistBoard';
 import { StatusBoard } from './StatusBoard';
@@ -9926,6 +9927,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ROSTER' | 'TIMESHEET' | 'STAFF_PAYROLL'    // shift roster + planned-vs-actual + operational payroll (Phase 3)
     | 'ROOMS' | 'ROOM_SETUP' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1 (ROOMS=availability board, ROOM_SETUP=owner-only setup)
     | 'KITCHEN_PRINTERS'   // owner-only thermal KOT printer config
+    | 'PRINT_TEMPLATES'    // owner-only configurable KOT + invoice print format
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE' | 'HOTEL_INVENTORY'  // hospitality Phase 2 & 3
     | 'HOUSEKEEPING'                             // cleaning checklist worklist + config + log
     | 'EVENTS_HOUSEKEEPING'                      // event-scoped cleaning checklist under the Events nav
@@ -11797,6 +11799,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'KITCHEN_PRINTERS' && !isOwnerOrAdmin) {
       setActiveTab('MONITOR');
     }
+    if (activeTab === 'PRINT_TEMPLATES' && !isOwnerOrAdmin) {
+      setActiveTab('MONITOR');
+    }
     // Data Migration is a SUPER-ADMIN activity — bounce a tenant owner/staff who
     // reaches ?tab=EVENTS_MIGRATION via a deep-link or cached activeTab (the nav
     // entry is hidden for them, this covers the URL/cache edge cases).
@@ -12173,28 +12178,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     { id: 'MAINTENANCE',  label: 'Maintenance',  emoji: '🔧',   scope: 'HOTEL',      chipBg: 'bg-slate-200',  chipText: 'text-slate-800',  cardBg: 'bg-slate-50' },
     { id: 'CONCIERGE',    label: 'Concierge',    emoji: '🎩',   scope: 'HOTEL',      chipBg: 'bg-rose-200',   chipText: 'text-rose-800',   cardBg: 'bg-rose-50' },
   ];
-  // Roles visible in this tenant — built-ins filtered by active module,
-  // plus any owner-defined custom roles (also filtered by their scope).
-  const visibleStaffRoles = [
-    ...STAFF_ROLE_META.filter(r =>
+  // Roles OFFERED in this tenant's staff pickers (Add / Bulk-Add / Edit / filter).
+  //
+  // Product decision (2026-08): tenants run on **Business Owner + their own
+  // custom roles**. So once a tenant has defined ANY custom role, ONLY those
+  // custom roles are offered — the legacy built-in roles (Chef / Waiter /
+  // Front Desk / Housekeeping / …) disappear from every picker, killing the
+  // confusing duplicate list (e.g. a built-in "Manager" next to a custom
+  // "Manager"). The built-in set is kept ONLY as a bootstrap fallback for a
+  // tenant that has not created any custom role yet, so Add-Staff is never an
+  // empty dropdown. NOTE: display of EXISTING staff still resolves built-in
+  // labels/emojis via `staffRoleMetaFor` below, so anyone already assigned a
+  // legacy role keeps rendering correctly.
+  const _customStaffRoles = customRoles
+    .filter(r =>
       r.scope === 'BOTH' ||
       (r.scope === 'RESTAURANT' && isRestaurantEnabled) ||
       (r.scope === 'HOTEL'      && isHotelEnabled)
-    ),
-    ...customRoles
-      .filter(r =>
-        r.scope === 'BOTH' ||
-        (r.scope === 'RESTAURANT' && isRestaurantEnabled) ||
-        (r.scope === 'HOTEL'      && isHotelEnabled)
-      )
-      .map(r => ({
-        id: r.id as UserRole,
-        label: r.name,
-        emoji: r.emoji,
-        scope: r.scope as 'BOTH' | 'RESTAURANT' | 'HOTEL',
-        chipBg: 'bg-indigo-200', chipText: 'text-indigo-800', cardBg: 'bg-indigo-50',
-      })),
-  ];
+    )
+    .map(r => ({
+      id: r.id as UserRole,
+      label: r.name,
+      emoji: r.emoji,
+      scope: r.scope as 'BOTH' | 'RESTAURANT' | 'HOTEL',
+      chipBg: 'bg-indigo-200', chipText: 'text-indigo-800', cardBg: 'bg-indigo-50',
+    }));
+  const _builtinStaffRoles = STAFF_ROLE_META.filter(r =>
+    r.scope === 'BOTH' ||
+    (r.scope === 'RESTAURANT' && isRestaurantEnabled) ||
+    (r.scope === 'HOTEL'      && isHotelEnabled)
+  );
+  const visibleStaffRoles = _customStaffRoles.length > 0
+    ? _customStaffRoles
+    : _builtinStaffRoles;
   const staffRoleMetaFor = (role: string) => {
     const builtin = STAFF_ROLE_META.find(r => r.id === role);
     if (builtin) return builtin;
@@ -12223,6 +12239,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Restaurant-only tenants will pick Chef/Waiter; hotel-only tenants will
   // pick Front Desk / Housekeeping / etc.
   const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'MANAGER' as UserRole, phone: '', email: '', hourly_rate: 0, payroll_id: '', employee_type: 'LOGIN' as 'LOGIN' | 'OFFLINE' });
+  // Keep the Add-Staff / Bulk-Add default role valid. Those states seed with the
+  // built-in 'MANAGER', but once the tenant's custom roles load that id is no
+  // longer offered (see visibleStaffRoles) — so snap any out-of-list selection
+  // to the first available role. Without this the dropdown would DISPLAY the
+  // first custom role while state still held 'MANAGER', silently creating a
+  // mis-roled staff on submit. Edit-Staff is exempt (it surfaces the existing
+  // role explicitly so legacy staff remain editable).
+  useEffect(() => {
+    const ids = visibleStaffRoles.map(r => r.id);
+    if (!ids.length) return;
+    const valid = new Set(ids);
+    setNewStaff(s => valid.has(s.role) ? s : { ...s, role: ids[0] as UserRole });
+    setBulkRows(rs => rs.every(r => valid.has(r.role)) ? rs : rs.map(r => valid.has(r.role) ? r : { ...r, role: ids[0] as UserRole }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleStaffRoles.map(r => r.id).join(',')]);
   const [newItem, setNewItem] = useState<{
     name: string,
     description: string,
@@ -15464,6 +15495,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'BOOKINGS',  label: 'Table Bookings' },
               { id: 'DELIVERY',           label: 'Delivery Partners' },
               ...(isOwnerOrAdmin ? [{ id: 'KITCHEN_PRINTERS', label: 'Kitchen Printers' } as NavTab] : []),
+              ...(isOwnerOrAdmin ? [{ id: 'PRINT_TEMPLATES', label: 'Print Format' } as NavTab] : []),
               { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports' },
             ],
           },
@@ -15606,6 +15638,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // STAFF_ACCESS gate: owners always see it; everyone else never does.
           if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
           if (id === 'KITCHEN_PRINTERS') return isOwnerOrAdmin;
+          if (id === 'PRINT_TEMPLATES') return isOwnerOrAdmin;
           // Checklist Templates: owner/admin always, PLUS any role the owner grants
           // "Checklist Templates" in Staff Access (honor the grant). Editing stays
           // owner-only server-side (write endpoints are requireOwnerOrAdmin) — a
@@ -16377,6 +16410,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="p-1"><StatusBoard restaurantId={restaurantId} token={token!} isEventsEnabled={isEventsEnabled} onOpenRoom={(rm) => setRoomDetailTarget(rm)} /></div>
       ) : activeTab === 'KITCHEN_PRINTERS' ? (
         <div className="p-1"><PrintersConfig restaurantId={restaurantId!} token={token!} /></div>
+      ) : activeTab === 'PRINT_TEMPLATES' ? (
+        <div className="p-1"><PrintTemplateStudio restaurantId={restaurantId!} token={token!} /></div>
       ) : activeTab === 'CHECKLISTS' ? (
         <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="ALL" present={{ ROOM: isHotelEnabled, EVENT: isEventsEnabled, RESTAURANT: isRestaurantEnabled, SPA: isSpaEnabled }} /></div>
       ) : activeTab === 'EVENTS_CHECKLISTS' && isEventsEnabled ? (
@@ -20281,7 +20316,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
                 <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-zinc-100">
                   <button type="button"
-                    onClick={() => setBulkRows(rs => [...rs, { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' }])}
+                    onClick={() => setBulkRows(rs => [...rs, { name: '', role: (visibleStaffRoles[0]?.id || 'MANAGER') as UserRole, loginId: '', password: '', phone: '', email: '' }])}
                     className="px-4 py-2 rounded-xl border-2 border-[#cc5a16]/20 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5">
                     + Add Row
                   </button>
@@ -55470,6 +55505,9 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
   const [panelTab, setPanelTab] = useState<'MENU' | 'BILL'>('MENU');
   const [selectedCat, setSelectedCat] = useState('All');
   const [isPlacing, setIsPlacing] = useState(false);
+  // Optional staff-entered pickup / parcel token → printed on the KOT + invoice
+  // when the "Token" block is enabled in the Print Template Studio.
+  const [orderToken, setOrderToken] = useState('');
   const [isRequestingBill, setIsRequestingBill] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -55584,11 +55622,13 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
           items: cart.map(c => ({ name: c.name, price: c.price, quantity: c.quantity })),
           totalAmount: sub + gst, gstAmount: gst,
           paymentMethod: 'TABLE', session_token: session.session_token,
+          token_number: orderToken.trim() || undefined,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to place order');
       setCart([]);
+      setOrderToken('');
       await loadData();
       setPanelTab('BILL');
     } catch (e: any) { setError(e.message); }
@@ -55721,6 +55761,17 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
           {/* Cart summary */}
           {cart.length > 0 && (
             <div className="sticky bottom-0 bg-white border-t border-[#cc5a16]/10 px-4 py-3 space-y-2">
+              {/* Optional pickup / parcel token — prints on the KOT + invoice */}
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] shrink-0">Token #</label>
+                <input
+                  type="text"
+                  value={orderToken}
+                  onChange={e => setOrderToken(e.target.value)}
+                  placeholder="optional — parcel / pickup no."
+                  className="flex-1 bg-[#faf7f2] border border-[#cc5a16]/10 rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                />
+              </div>
               {cart.map(c => (
                 <div key={c.name} className="flex items-center justify-between text-sm">
                   <span className="truncate flex-1">{c.name}</span>

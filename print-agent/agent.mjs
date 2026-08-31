@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 
 // Package version — bumped with each client release so the site can confirm which
 // build is running (printed in the startup banner). v3 = reliable NETWORK printing.
-const AGENT_VERSION = '3.0.0';
+const AGENT_VERSION = '3.2.0';
 
 // ── locate a folder we can read a .env / write temp files next to ────────────
 // Under `node agent.mjs` this is the script dir; bundled as an .exe it's the
@@ -165,6 +165,21 @@ function buildInvoiceEscpos(job) {
 function buildEscpos(job) {
   const kind = String(job.kind || 'KOT').toUpperCase();
   return kind === 'INVOICE' ? buildInvoiceEscpos(job) : buildKotEscpos(job);
+}
+
+// v3.2 — the server now renders each ticket from the tenant's OWN print template
+// (Print Template Studio) and ships the ESC/POS in content.escpos (base64). We
+// print those bytes verbatim, so the format is fully owner-configurable with no
+// agent change ever again. Falls back to the built-in layout for older jobs (or
+// if the server didn't attach escpos), so nothing regresses mid-rollout.
+function bufForJob(job) {
+  try {
+    const c = JSON.parse(job.content || '{}');
+    if (c && typeof c.escpos === 'string' && c.escpos.length) {
+      return Buffer.from(c.escpos, 'base64');
+    }
+  } catch { /* fall through to the built-in renderer */ }
+  return buildEscpos(job);
 }
 
 // ── delivery: NETWORK (TCP 9100) ─────────────────────────────────────────────
@@ -307,7 +322,7 @@ async function tick() {
       const conn = String(job.conn_type || 'NETWORK').toUpperCase();
       if (conn !== 'USB' && !job.host) { await ack(job.id, 'FAILED', 'printer has no host/IP configured'); continue; }
       try {
-        const buf = buildEscpos(job);
+        const buf = bufForJob(job);
         const copies = Math.max(1, Number(job.copies) || 1);
         for (let i = 0; i < copies; i++) await sendJob(job, buf);
         await ack(job.id, 'PRINTED');
