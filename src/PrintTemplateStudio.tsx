@@ -30,7 +30,7 @@ const SAMPLE: Record<DocType, any> = {
     logo: '🍜', name: 'THE HOUSE OF BOWLS', gstin: '29AARFT9486A1ZG',
     address: 'Opp. Shell Petrol Pump, Keshwapur, Hubli', phone: '0836-3595532',
     taxInvoice: true, sac: '996331',
-    customer: '', mobile: '0000000000',
+    customer: 'Rahul Sharma', mobile: '0000000000',
     date: '31/08/26', cashier: 'biller', orderType: 'Dine In: Parcel 1', billNo: '9352', token: '01',
     items: [{ name: 'Alfredo [White Sauce Pasta]', qty: 1, price: 330, amount: 330, note: '' }],
     totalQty: 1, subtotal: 330,
@@ -42,7 +42,7 @@ const SAMPLE: Record<DocType, any> = {
   },
   KOT: {
     logo: '🍜', name: 'THE HOUSE OF BOWLS', station: 'KITCHEN',
-    orderNo: '9352', table: 'Parcel 1', token: '01', time: '8:42 PM', customer: '',
+    orderNo: '9352', table: 'Parcel 1', token: '01', time: '8:42 PM', customer: 'Rahul Sharma',
     items: [{ name: 'Alfredo [White Sauce Pasta]', qty: 1, note: 'Less spicy' },
             { name: 'Garlic Bread', qty: 2, note: '' }],
     footer: '** KITCHEN COPY **',
