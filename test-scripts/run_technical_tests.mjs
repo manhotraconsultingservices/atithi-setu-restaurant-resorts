@@ -4435,6 +4435,73 @@ async function testRbacBackfill() {
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
+// KOT/table client-feedback features: cancel KOT, table/dish move, cancel-with-password.
+async function testMoveCancelFeatures() {
+  section('KOT — Cancel KOT · Table/Dish move · Cancel-with-password');
+  if (!restaurantId) { skip('TC-KOT-FEAT', 'KOT feature tests', 'no restaurantId'); return; }
+  const pat = (await api('GET', `/api/restaurant/${restaurantId}/print-agent-token`)).data?.token;
+  const pend = async () => (await api('GET', `/api/restaurant/${restaurantId}/print-jobs/pending?agent_token=${encodeURIComponent(pat)}`)).data || [];
+  const ackAll = async () => { for (const j of (await pend())) await api('POST', `/api/restaurant/${restaurantId}/print-jobs/${j.id}/ack?agent_token=${encodeURIComponent(pat)}`, { status: 'PRINTED' }).catch(() => {}); };
+  const headingFor = async (oid) => { await new Promise(r => setTimeout(r, 1000)); const j = (await pend()).find(x => x.order_id === oid && x.kind === 'KOT'); try { return JSON.parse(j?.content || '{}').heading; } catch { return null; } };
+  const anyHeading = async (h) => (await pend()).some(j => { try { return JSON.parse(j.content).heading === h; } catch { return false; } });
+  const tag = Math.random().toString(36).slice(2, 7);
+  await ackAll();
+
+  // TC-KOT-CANCEL-KOT — cancelling an order fires a CANCELLED KOT
+  try {
+    const o = await api('POST', `/api/restaurant/${restaurantId}/orders`, { tableNumber: `CK-${tag}`, items: [{ name: 'CK Dish', price: 100, quantity: 1 }], total_amount: 100, checkout_mode: 'postpaid' });
+    const oid = o.data?.id; await new Promise(r => setTimeout(r, 600)); await ackAll();
+    const cx = await api('PATCH', `/api/orders/${oid}`, { status: 'CANCELLED' });
+    const h = await headingFor(oid);
+    (cx.status === 200 && /CANCELLED KOT/.test(String(h))) ? pass('TC-KOT-CANCEL-KOT', 'Order cancel fires a CANCELLED KOT to the kitchen', `heading=${h}`) : fail('TC-KOT-CANCEL-KOT', 'cancel should fire a CANCELLED KOT', `cancel=${cx.status} heading=${h}`);
+    await ackAll();
+  } catch (e) { skip('TC-KOT-CANCEL-KOT', 'cancel KOT', e?.message || e); }
+
+  const tbls = (await api('GET', `/api/restaurant/${restaurantId}/tables`)).data;
+  const two = (Array.isArray(tbls) ? tbls : []).slice(0, 2);
+  if (two.length < 2) { skip('TC-KOT-MOVE-TABLE', 'move tests', 'need >= 2 tables'); skip('TC-KOT-MOVE-DISH', 'move tests', 'need >= 2 tables'); }
+  else {
+    const [T1, T2] = two;
+    try { // TC-KOT-MOVE-TABLE — whole session moves T1 -> T2
+      const s = (await api('POST', `/api/restaurant/${restaurantId}/sessions`, { table_id: T1.id, table_name: T1.name })).data;
+      await api('POST', `/api/restaurant/${restaurantId}/orders`, { session_id: s.id, session_token: s.session_token, tableNumber: T1.name, items: [{ name: `MvA-${tag}`, price: 80, quantity: 1 }], total_amount: 80, checkout_mode: 'postpaid' });
+      await new Promise(r => setTimeout(r, 600)); await ackAll();
+      const mv = await api('POST', `/api/restaurant/${restaurantId}/tables/move`, { source_session_token: s.session_token, target_table_id: T2.id });
+      await new Promise(r => setTimeout(r, 1000));
+      const kot = await anyHeading('*** TABLE MOVED ***');
+      const t2 = (await api('GET', `/api/restaurant/${restaurantId}/tables/${T2.id}/active-session`)).data?.session;
+      const onT2 = t2 && (t2.orders || []).some(o => (o.items || []).some(it => it.name === `MvA-${tag}`));
+      (mv.status === 200 && onT2 && kot) ? pass('TC-KOT-MOVE-TABLE', 'Whole table moves to T2 + TABLE MOVED KOT') : fail('TC-KOT-MOVE-TABLE', 'whole table move', `mv=${mv.status} onT2=${onT2} kot=${kot}`);
+      await ackAll();
+    } catch (e) { skip('TC-KOT-MOVE-TABLE', 'table move', e?.message || e); }
+    try { // TC-KOT-MOVE-DISH — partial dish split
+      const s = (await api('POST', `/api/restaurant/${restaurantId}/sessions`, { table_id: T1.id, table_name: T1.name })).data;
+      const o = await api('POST', `/api/restaurant/${restaurantId}/orders`, { session_id: s.id, session_token: s.session_token, tableNumber: T1.name, items: [{ name: `Cof-${tag}`, price: 30, quantity: 2 }, { name: `Tea-${tag}`, price: 20, quantity: 1 }], total_amount: 80, checkout_mode: 'postpaid' });
+      const srcOid = o.data?.id; await new Promise(r => setTimeout(r, 600)); await ackAll();
+      const mv = await api('POST', `/api/restaurant/${restaurantId}/tables/move`, { source_session_token: s.session_token, target_table_id: T2.id, items: [{ order_id: srcOid, name: `Cof-${tag}`, quantity: 1 }] });
+      await new Promise(r => setTimeout(r, 1000));
+      const kot = await anyHeading('*** DISH MOVED ***');
+      const src = ((await api('GET', `/api/restaurant/${restaurantId}/orders`)).data || []).find(x => x.id === srcOid);
+      let items = []; try { items = typeof src?.items === 'string' ? JSON.parse(src.items) : (src?.items || []); } catch {}
+      const cof = items.find(i => i.name === `Cof-${tag}`)?.quantity;
+      (mv.status === 200 && kot && Number(cof) === 1) ? pass('TC-KOT-MOVE-DISH', 'Dish split: source reduced + DISH MOVED KOT', `srcCof=${cof}`) : fail('TC-KOT-MOVE-DISH', 'dish move', `mv=${mv.status} dishKot=${kot} srcCof=${cof}`);
+      await ackAll();
+    } catch (e) { skip('TC-KOT-MOVE-DISH', 'dish move', e?.message || e); }
+  }
+
+  try { // TC-CANCEL-PWD — opt-in password gate on bill cancel
+    await api('PATCH', `/api/restaurant/${restaurantId}/cancel-password-setting`, { enabled: true });
+    const inv = await api('POST', `/api/restaurant/${restaurantId}/invoices/manual`, { customer_name: 'Pwd', items: [{ name: 'P', quantity: 1, price: 50 }] });
+    const oid = inv.data?.id;
+    const no = await api('POST', `/api/restaurant/${restaurantId}/invoices/order/${oid}/cancel`, { reason: 'pwd test cancel' });
+    const bad = await api('POST', `/api/restaurant/${restaurantId}/invoices/order/${oid}/cancel`, { reason: 'pwd test cancel', password: 'wrong-xyz' });
+    const ok = await api('POST', `/api/restaurant/${restaurantId}/invoices/order/${oid}/cancel`, { reason: 'pwd test cancel', password: PASSWORD });
+    await api('PATCH', `/api/restaurant/${restaurantId}/cancel-password-setting`, { enabled: false });
+    (no.status === 428 && bad.status === 401 && ok.status === 200) ? pass('TC-CANCEL-PWD', 'Bill cancel gated by password (428 none / 401 wrong / 200 correct); flag restored OFF') : fail('TC-CANCEL-PWD', 'cancel password gate', `none=${no.status} wrong=${bad.status} ok=${ok.status}`);
+    await ackAll();
+  } catch (e) { skip('TC-CANCEL-PWD', 'cancel password', e?.message || e); }
+}
+
 async function main() {
   console.log('\n' + '═'.repeat(60));
   console.log('  ATITHI-SETU — E2E TECHNICAL TEST RUNNER');
@@ -4477,6 +4544,7 @@ async function main() {
   await testChargeToRoom();
   await testCashDrawer();
   await testRBACHardening();
+  await testMoveCancelFeatures();
 
   const failures = generateReport();
   process.exit(failures > 0 ? 1 : 0);
