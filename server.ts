@@ -5740,6 +5740,22 @@ async function getAllowedTabsForRole(tenantId: string, role: string): Promise<st
   return tabs.length > 0 ? tabs : null;
 }
 
+// In-handler permission probe for endpoints whose access can't be a route
+// middleware (they had a hardcoded OWNER/MANAGER role check inline). Returns true
+// for OWNER/platform-admin, or any role the owner granted the given tab at
+// >= minLevel in Staff Access. This is what lets a CUSTOM "Manager" the owner
+// granted ROSTER / TIMESHEET / ATTENDANCE / PROCUREMENT actually perform the
+// action instead of being 403'd by a built-in-role allowlist.
+async function _roleHasTab(req: AuthRequest, tabId: string, minLevel = 1): Promise<boolean> {
+  const role = String(req.user?.role || '').toUpperCase();
+  if (role === 'OWNER' || role === 'SUPER_ADMIN' || role === 'CTO') return true;
+  try {
+    const perms = await getTabPermissionsForRole(req.params.id || (req.user as any)?.restaurantId, role);
+    if (perms && Number((perms as any)[tabId] || 0) >= minLevel) return true;
+  } catch { /* fall through to deny */ }
+  return false;
+}
+
 // Bust the cache after a write to restaurant_role_permissions so the new
 // matrix takes effect immediately instead of waiting 30s for TTL.
 function invalidateTabCacheForTenant(tenantId: string) {
@@ -13922,7 +13938,7 @@ async function startServer() {
 
   app.post("/api/restaurant/:id/shift-templates", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
       }
       const db = await getTenantDb(req.params.id);
@@ -13950,7 +13966,7 @@ async function startServer() {
 
   app.delete("/api/restaurant/:id/shift-templates/:tid", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
       }
       const db = await getTenantDb(req.params.id);
@@ -14000,7 +14016,7 @@ async function startServer() {
   // SHIFT_UPDATED notifications via triggerNotification.
   app.post("/api/restaurant/:id/roster", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
       }
       const tenantId = req.params.id;
@@ -14068,7 +14084,7 @@ async function startServer() {
 
   app.delete("/api/restaurant/:id/roster/:slotId", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
       }
       const tenantId = req.params.id;
@@ -14106,7 +14122,7 @@ async function startServer() {
   // publishing (no notifications fire until publish).
   app.post("/api/restaurant/:id/roster/copy", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
       }
       const { from_start, from_end, to_start } = req.body || {};
@@ -14368,7 +14384,7 @@ async function startServer() {
   // Approve or reject a single timesheet row. Sets status, who, when, notes.
   app.patch("/api/restaurant/:id/timesheet/:staffId/:date/approval", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) {
         return res.status(403).json({ error: "Insufficient permission" });
       }
       const status = String(req.body?.status || '').toUpperCase();
@@ -14402,7 +14418,7 @@ async function startServer() {
   // (e.g. festival day, training, sick leave handled out-of-band).
   app.post("/api/restaurant/:id/timesheet/bulk-approval", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) {
         return res.status(403).json({ error: "Insufficient permission" });
       }
       const status = String(req.body?.status || '').toUpperCase();
@@ -14435,7 +14451,7 @@ async function startServer() {
   app.patch("/api/restaurant/:id/timesheet/:staffId/:date/hours", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const role = req.user?.role ?? '';
-      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) {
         return res.status(403).json({ error: "Only OWNER or MANAGER can override timesheet hours" });
       }
       const { actual_hours, notes } = req.body;
@@ -14483,7 +14499,7 @@ async function startServer() {
   app.post("/api/restaurant/:id/timesheet/bulk-hours", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const role = req.user?.role ?? '';
-      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) {
         return res.status(403).json({ error: "Forbidden" });
       }
       const { entries } = req.body; // [{ staffId, date, actual_hours, notes? }]
@@ -14667,7 +14683,7 @@ async function startServer() {
 
   app.put("/api/restaurant/:id/timesheet-config", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) {
         return res.status(403).json({ error: "Insufficient permission" });
       }
       const sets: string[] = [];
@@ -21621,7 +21637,7 @@ ${data.tenant.name}`;
   // Create supplier invoice
   app.post("/api/restaurant/:id/procurement/supplier-invoices", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
-    if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
+    if (!(await _roleHasTab(req, 'PROCUREMENT'))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const db = await getTenantDb(req.params.id);
       const { supplier_id, invoice_number, invoice_date, due_date, po_id, grn_id, module,
@@ -21674,7 +21690,7 @@ ${data.tenant.name}`;
   // Update invoice (edit before payment)
   app.patch("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
-    if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
+    if (!(await _roleHasTab(req, 'PROCUREMENT'))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const db = await getTenantDb(req.params.id);
       const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
@@ -21738,7 +21754,7 @@ ${data.tenant.name}`;
   // Record payment against an invoice (or standalone advance)
   app.post("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId/payments", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
-    if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
+    if (!(await _roleHasTab(req, 'PROCUREMENT'))) return res.status(403).json({ error: 'Forbidden' });
     try {
       const db = await getTenantDb(req.params.id);
       const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
@@ -49432,7 +49448,7 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/attendance/staff/:staffId", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const role = req.user?.role ?? '';
-      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+      if (!(await _roleHasTab(req, 'ATTENDANCE'))) {
         return res.status(403).json({ error: "Only OWNER or MANAGER can mark attendance for staff" });
       }
       const { id: restaurantId, staffId } = req.params;
@@ -49465,7 +49481,7 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/attendance/bulk", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const role = req.user?.role ?? '';
-      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+      if (!(await _roleHasTab(req, 'ATTENDANCE'))) {
         return res.status(403).json({ error: "Only OWNER or MANAGER can bulk-mark attendance" });
       }
       const { entries } = req.body; // [{ staffId, date, type, hours, note }]
@@ -49499,7 +49515,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/attendance/staff", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const role = req.user?.role ?? '';
-      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+      if (!(await _roleHasTab(req, 'ATTENDANCE'))) {
         return res.status(403).json({ error: "Forbidden" });
       }
       const start = String(req.query.start || '').trim();
@@ -52157,7 +52173,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-custom-role-gates',
+    commit_marker: 'rbac-custom-role-gates-2',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
