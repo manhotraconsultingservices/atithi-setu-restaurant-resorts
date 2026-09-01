@@ -13730,6 +13730,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const printKitchenOrder = async (o: any) => {
+    // Prefer the on-prem thermal KITCHEN printer via the agent — the SAME routing
+    // + safety net as the auto-KOT on order placement. Only fall back to a browser
+    // print when the tenant has NO kitchen printer configured (or the print
+    // service is unreachable), so a printer-less shop still gets a slip.
+    try {
+      const pr = await fetch(`/api/restaurant/${restaurantId}/orders/${o.id}/print-kot`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+      });
+      if (pr.ok) {
+        const pd = await pr.json().catch(() => ({}));
+        if (Array.isArray(pd.printers) && pd.printers.length > 0) {
+          toast.success(`KOT sent to ${pd.printers.join(', ')}`);
+          return;
+        }
+      }
+    } catch { /* fall through to the browser print below */ }
+
     const dt = new Date(o.createdAt || o.created_at);
     const timeStr = dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
     // Hide legacy garbage customer_name (front-desk "Posted by <id>" room charges).
