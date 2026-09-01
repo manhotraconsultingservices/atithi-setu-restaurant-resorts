@@ -12399,7 +12399,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // component definition).
     let clockTick: ReturnType<typeof setInterval> | undefined;
     if (activeTab === 'MONITOR') {
-      clockTick = setInterval(() => setLiveNow(Date.now()), 1000);
+      // 30s cadence: liveNow now only drives the >60-min colour + the duration
+      // sort (both fine at 30s). Per-second displays self-tick (LiveClock /
+      // LiveElapsed), so the whole board no longer re-renders every second.
+      clockTick = setInterval(() => setLiveNow(Date.now()), 30000);
     }
 
     return () => {
@@ -30304,9 +30307,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <span className="font-mono font-bold text-sm text-[#f0ede8] px-3 py-2 backdrop-blur-md bg-white/5 rounded-xl border border-white/10">
-                {new Date(liveNow).toLocaleTimeString()}
-              </span>
+              <LiveClock className="font-mono font-bold text-sm text-[#f0ede8] px-3 py-2 backdrop-blur-md bg-white/5 rounded-xl border border-white/10" />
               <button
                 onClick={fetchLiveTables}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl backdrop-blur-md bg-[#cc5a16]/15 border border-[#cc5a16]/40 text-[#f4b07a] text-xs font-bold uppercase tracking-widest hover:bg-[#cc5a16]/25 transition-all"
@@ -30771,10 +30772,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const isOccupied      = t.status === 'OCCUPIED';
                       const isUnavail       = t.status === 'NOT_AVAILABLE';
                       const isBillRequested = t.session_status === 'bill_requested';
-                      const elapsedMs       = t.session_opened_at ? liveNow - new Date(t.session_opened_at).getTime() : 0;
-                      const timerStr        = isOccupied && t.session_opened_at
-                        ? `${String(Math.floor(elapsedMs / 60000)).padStart(2, '0')}:${String(Math.floor((elapsedMs % 60000) / 1000)).padStart(2, '0')}`
-                        : null;
 
                       const cellFor = (key: string): React.ReactNode => {
                         switch (key) {
@@ -30811,8 +30808,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               : <span className="text-[#c5b9b2] text-xs">—</span>;
 
                           case 'duration':
-                            return timerStr
-                              ? <span className="font-mono font-bold text-amber-600 tabular-nums">{timerStr}</span>
+                            return (isOccupied && t.session_opened_at)
+                              ? <LiveElapsed openedAt={t.session_opened_at} className="font-mono font-bold text-amber-600 tabular-nums" />
                               : <span className="text-[#c5b9b2] text-xs">—</span>;
 
                           case 'bill':
@@ -48663,6 +48660,26 @@ function openThermalPrint(html: string) {
 // Print-ready KOT that reuses the SAME renderer as the Print Template Studio
 // preview — so the browser "Print KOT" is identical to what the owner designed
 // (and to the thermal ESC/POS). `cfg` = the tenant's saved KOT block spec.
+// Self-ticking live clock — updates every second WITHOUT re-rendering its parent,
+// so the heavy Command Centre board no longer repaints on the timer (kills the
+// per-second flicker; the board now re-renders only when its data changes).
+function LiveClock({ className }: { className?: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
+  return <span className={className}>{new Date(now).toLocaleTimeString()}</span>;
+}
+// Self-ticking elapsed timer from a session's opened_at. 'clock' → MM:SS (per
+// second); 'mins' → "Nm". Isolated so only this span re-renders each tick.
+function LiveElapsed({ openedAt, format = 'clock', className }: { openedAt: string | number | Date; format?: 'clock' | 'mins'; className?: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), format === 'mins' ? 15000 : 1000); return () => clearInterval(id); }, [format]);
+  const ms = Math.max(0, now - new Date(openedAt).getTime());
+  const text = format === 'mins'
+    ? `${Math.floor(ms / 60000)}m`
+    : `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`;
+  return <span className={className}>{text}</span>;
+}
+
 function buildKotPrintDoc(cfg: any, data: any): string {
   const inner = renderKotTemplate(cfg || KOT_TEMPLATE_DEFAULT, data);
   const paper = Number(cfg?.paper) === 58 ? '58mm' : '80mm';
@@ -59245,7 +59262,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
     if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     fetchData();
     const interval = setInterval(fetchData, 6000);  // waiter near-live order status (was 30s)
-    const clock    = setInterval(() => setLiveNow(Date.now()), 1000);
+    const clock    = setInterval(() => setLiveNow(Date.now()), 30000);  // per-second displays self-tick (LiveElapsed)
     return () => { clearInterval(interval); clearInterval(clock); };
   }, [restaurantId]);
 
@@ -59670,10 +59687,6 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
                   {pagedTables.map(t => {
                     const isOccupied = t.status === 'OCCUPIED';
                     const isUnavail  = t.status === 'NOT_AVAILABLE';
-                    const elapsedMs  = t.session_opened_at ? liveNow - new Date(t.session_opened_at).getTime() : 0;
-                    const timerStr   = isOccupied && t.session_opened_at
-                      ? `${String(Math.floor(elapsedMs/60000)).padStart(2,'0')}:${String(Math.floor((elapsedMs%60000)/1000)).padStart(2,'0')}`
-                      : null;
 
                     return (
                       <div key={t.id} className={cn(
@@ -59694,7 +59707,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
                         {isOccupied && t.customer_name && (
                           <div className="flex justify-between text-xs text-[#3d3128]">
                             <span>{t.customer_name}</span>
-                            {timerStr && <span className="font-mono font-bold text-amber-600">{timerStr}</span>}
+                            {t.session_opened_at && <LiveElapsed openedAt={t.session_opened_at} className="font-mono font-bold text-amber-600" />}
                           </div>
                         )}
                         {t.session_status === 'bill_requested' && (
