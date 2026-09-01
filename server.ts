@@ -49912,6 +49912,12 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_role TEXT").catch(() => {});
+      // Floor plan (Phase 2): position + section + shape — so t.* below carries
+      // them for the map renderer. Idempotent.
+      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_x INTEGER DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_y INTEGER DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS section_id TEXT").catch(() => {});
+      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS shape TEXT DEFAULT 'square'").catch(() => {});
 
       // All tables + assigned role + the specific waiter name (null when the whole
       // role serves the table). `t.*` carries assigned_role + assigned_waiter_id.
@@ -49990,6 +49996,81 @@ ${data.tenant.name}`;
       console.error("Live tables error:", err);
       res.status(500).json({ error: "Failed to fetch live table data" });
     }
+  });
+
+  // ── Floor plan (Phase 2): sections/areas + saved table layout ─────────────
+  const _ensureFloorPlanCols = async (db: any) => {
+    await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_x INTEGER DEFAULT 0").catch(() => {});
+    await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_y INTEGER DEFAULT 0").catch(() => {});
+    await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS section_id TEXT").catch(() => {});
+    await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS shape TEXT DEFAULT 'square'").catch(() => {});
+    await db.exec("CREATE TABLE IF NOT EXISTS table_sections (id TEXT PRIMARY KEY, name TEXT NOT NULL, sort_order INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)").catch(() => {});
+  };
+  // List sections (any staff — powers the map's section tabs).
+  app.get("/api/restaurant/:id/tables/sections", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureFloorPlanCols(db);
+      res.json(await db.query("SELECT * FROM table_sections ORDER BY sort_order, name").catch(() => []));
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Create a section (owner).
+  app.post("/api/restaurant/:id/tables/sections", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureFloorPlanCols(db);
+      const name = String(req.body?.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'name is required' });
+      const id = `SEC-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await db.run("INSERT INTO table_sections (id, name, sort_order) VALUES (?, ?, ?)", [id, name, Number(req.body?.sort_order) || 0]);
+      res.status(201).json(await db.get("SELECT * FROM table_sections WHERE id = ?", [id]));
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Rename / reorder a section (owner).
+  app.patch("/api/restaurant/:id/tables/sections/:sid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureFloorPlanCols(db);
+      const sets: string[] = []; const vals: any[] = [];
+      if (typeof req.body?.name === 'string') { sets.push("name = ?"); vals.push(String(req.body.name).trim()); }
+      if (req.body?.sort_order !== undefined) { sets.push("sort_order = ?"); vals.push(Number(req.body.sort_order) || 0); }
+      if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+      vals.push(req.params.sid);
+      await db.run(`UPDATE table_sections SET ${sets.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM table_sections WHERE id = ?", [req.params.sid]));
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Delete a section (owner) — its tables fall back to "Unsectioned" (never orphaned).
+  app.delete("/api/restaurant/:id/tables/sections/:sid", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureFloorPlanCols(db);
+      await db.run("UPDATE tables SET section_id = NULL WHERE section_id = ?", [req.params.sid]).catch(() => {});
+      await db.run("DELETE FROM table_sections WHERE id = ?", [req.params.sid]);
+      res.json({ success: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  // Bulk-save the arranged layout (owner): { tables: [{ id, pos_x, pos_y, section_id, shape }] }
+  app.put("/api/restaurant/:id/tables/layout", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureFloorPlanCols(db);
+      const items: any[] = Array.isArray(req.body?.tables) ? req.body.tables : (Array.isArray(req.body) ? req.body : []);
+      let saved = 0;
+      for (const t of items) {
+        if (!t?.id) continue;
+        await db.run(
+          "UPDATE tables SET pos_x = ?, pos_y = ?, section_id = ?, shape = COALESCE(?, shape) WHERE id = ?",
+          [Number(t.pos_x) || 0, Number(t.pos_y) || 0, t.section_id || null, t.shape || null, String(t.id)]
+        ).catch(() => {});
+        saved++;
+      }
+      res.json({ success: true, saved });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
   // Cloud Kitchen: Active orders for the dedicated C&C panel
@@ -52006,7 +52087,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'cc-flicker-fix',
+    commit_marker: 'floorplan-phase2',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

@@ -11,6 +11,7 @@ import { ChecklistTemplates } from './ChecklistTemplates';
 import { PrintTemplateStudio, renderKot as renderKotTemplate, renderInvoice as renderInvoiceTemplate, DEFAULT_KOT as KOT_TEMPLATE_DEFAULT, DEFAULT_INVOICE as INVOICE_TEMPLATE_DEFAULT, PTS_CSS } from './PrintTemplateStudio';
 import { MyChecklists } from './MyChecklists';
 import { ChecklistBoard } from './ChecklistBoard';
+import { FloorPlanMap } from './FloorPlanMap';
 import { StatusBoard } from './StatusBoard';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
@@ -30634,50 +30635,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               )}
             </div>
 
-            {/* ── MAP VIEW — Phase 1 floor plan: auto-flow tiles over the live feed ── */}
-            {monitorView === 'MAP' && (() => {
-              let mrows = [...liveTables];
-              if (monitorStatusFilter !== 'ALL') mrows = mrows.filter(t => monitorStatusFilter === 'BILL_REQUESTED' ? t.session_status === 'bill_requested' : t.status === monitorStatusFilter);
-              if (monitorSearch.trim()) { const q = monitorSearch.trim().toLowerCase(); mrows = mrows.filter(t => t.name?.toLowerCase().includes(q) || t.customer_name?.toLowerCase().includes(q) || (t as any).customer_phone?.toLowerCase().includes(q)); }
-              const rank = (t: any) => t.session_status === 'bill_requested' ? 0 : t.status === 'OCCUPIED' ? 1 : t.status === 'NOT_AVAILABLE' ? 2 : 3;
-              mrows.sort((a, b) => (rank(a) - rank(b)) || naturalCompare(a.name, b.name));
-              if (mrows.length === 0) return <div className="py-16 text-center text-[#9c8e85] text-sm italic">{liveTables.length === 0 ? 'No tables found · Add tables in QR Management first' : 'No tables match your search / filter'}</div>;
-              return (
-                <div className="p-4 grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))' }}>
-                  {mrows.map(t => {
-                    const occ = t.status === 'OCCUPIED', bill = t.session_status === 'bill_requested', unavail = t.status === 'NOT_AVAILABLE';
-                    const mins = t.session_opened_at ? Math.floor((liveNow - new Date(t.session_opened_at).getTime()) / 60000) : 0;
-                    const late = occ && mins >= 60;
-                    const cls = bill ? 'border-orange-400 bg-orange-50 text-orange-900'
-                      : late ? 'border-rose-400 bg-rose-50 text-rose-900'
-                      : occ ? 'border-[#cc5a16]/55 bg-[#cc5a16]/8 text-[#1a1208]'
-                      : unavail ? 'border-zinc-200 bg-zinc-50 text-zinc-400'
-                      : 'border-dashed border-[#cc5a16]/25 bg-transparent text-[#9c8e85]';
-                    return (
-                      <button key={t.id} onClick={() => setViewBillTable({ id: t.id, name: t.name })}
-                        className={cn('text-left rounded-2xl border-2 p-3 min-h-[94px] flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-md', cls, bill && 'alert-pulse')}>
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold text-[15px] tracking-tight leading-none">{t.name}</span>
-                          {occ && <span className="font-mono text-[10px] opacity-70">{mins}m</span>}
-                        </div>
-                        {occ || bill ? (
-                          <div>
-                            <div className="font-mono font-bold text-[16px] text-[#1a1208] leading-none">₹{Number(t.bill_amount || 0).toFixed(0)}</div>
-                            <div className="flex items-center gap-1.5 mt-1.5 font-mono text-[10px] opacity-75 truncate">
-                              {t.order_count ? <span>{t.order_count} KOT</span> : null}
-                              {t.assigned_waiter_name ? <span className="truncate">· {t.assigned_waiter_name}</span> : null}
-                              {bill ? <span className="font-bold">· BILL</span> : null}
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="font-mono text-[10px] opacity-70 uppercase tracking-widest">{unavail ? 'N / A' : 'Vacant'}</div>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              );
-            })()}
+            {/* ── MAP VIEW — Phase 2 floor plan: sections + positioned tiles + arrange editor ── */}
+            {monitorView === 'MAP' && (
+              <FloorPlanMap
+                tables={liveTables}
+                restaurantId={restaurantId!}
+                token={token!}
+                isOwner={isOwnerOrAdmin}
+                statusFilter={monitorStatusFilter}
+                search={monitorSearch}
+                now={liveNow}
+                onTileClick={(t) => setViewBillTable(t)}
+                onRefetch={fetchLiveTables}
+              />
+            )}
 
             {/* Table (list view) */}
             <div className="overflow-x-auto" style={{ display: monitorView === 'MAP' ? 'none' : undefined }}>

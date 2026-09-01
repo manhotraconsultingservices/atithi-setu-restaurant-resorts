@@ -4502,6 +4502,48 @@ async function testMoveCancelFeatures() {
   } catch (e) { skip('TC-CANCEL-PWD', 'cancel password', e?.message || e); }
 }
 
+async function testFloorPlan() {
+  section('Floor Plan — sections CRUD · table layout persistence');
+  if (!restaurantId) { skip('TC-FLOORPLAN', 'floor plan tests', 'no restaurantId'); return; }
+  const tag = Math.random().toString(36).slice(2, 6);
+  let sid = null;
+  const tbls = (await api('GET', `/api/restaurant/${restaurantId}/tables`)).data;
+  const two = (Array.isArray(tbls) ? tbls : []).slice(0, 2);
+
+  try { // TC-FLOORPLAN-SECTION — create / list / rename a section
+    const c = await api('POST', `/api/restaurant/${restaurantId}/tables/sections`, { name: `Zone-${tag}` });
+    sid = c.data?.id;
+    const listed = ((await api('GET', `/api/restaurant/${restaurantId}/tables/sections`)).data || []).some(s => s.id === sid);
+    const pr = await api('PATCH', `/api/restaurant/${restaurantId}/tables/sections/${sid}`, { name: `Zone-${tag}-R` });
+    const renamed = pr.data?.name === `Zone-${tag}-R`;
+    (c.status === 201 && sid && listed && renamed) ? pass('TC-FLOORPLAN-SECTION', 'Section create + list + rename', `sid=${sid}`) : fail('TC-FLOORPLAN-SECTION', 'section CRUD', `create=${c.status} listed=${listed} renamed=${renamed}`);
+  } catch (e) { skip('TC-FLOORPLAN-SECTION', 'section CRUD', e?.message || e); }
+
+  if (two.length < 1) { skip('TC-FLOORPLAN-LAYOUT', 'layout save', 'no tables'); }
+  else {
+    try { // TC-FLOORPLAN-LAYOUT — PUT layout persists pos/section/shape onto /tables/live
+      const t0 = two[0];
+      const put = await api('PUT', `/api/restaurant/${restaurantId}/tables/layout`, {
+        tables: [{ id: t0.id, pos_x: 120, pos_y: 80, section_id: sid, shape: 'circle' }],
+      });
+      const live = ((await api('GET', `/api/restaurant/${restaurantId}/tables/live`)).data || []).find(t => t.id === t0.id);
+      const okPos = Number(live?.pos_x) === 120 && Number(live?.pos_y) === 80 && live?.section_id === sid && live?.shape === 'circle';
+      (put.status === 200 && okPos) ? pass('TC-FLOORPLAN-LAYOUT', 'Layout PUT persists pos_x/pos_y/section_id/shape', `x=${live?.pos_x} y=${live?.pos_y} shape=${live?.shape}`) : fail('TC-FLOORPLAN-LAYOUT', 'layout persistence', `put=${put.status} pos=${live?.pos_x},${live?.pos_y} sec=${live?.section_id} shape=${live?.shape}`);
+      // cleanup: reset the table back to unpositioned / unsectioned
+      await api('PUT', `/api/restaurant/${restaurantId}/tables/layout`, { tables: [{ id: t0.id, pos_x: 0, pos_y: 0, section_id: null, shape: 'square' }] });
+    } catch (e) { skip('TC-FLOORPLAN-LAYOUT', 'layout save', e?.message || e); }
+  }
+
+  try { // TC-FLOORPLAN-DELETE — deleting a section orphans nothing (tables fall back to NULL)
+    if (!sid) { skip('TC-FLOORPLAN-DELETE', 'section delete', 'no section created'); }
+    else {
+      const del = await api('DELETE', `/api/restaurant/${restaurantId}/tables/sections/${sid}`);
+      const gone = !((await api('GET', `/api/restaurant/${restaurantId}/tables/sections`)).data || []).some(s => s.id === sid);
+      (del.status === 200 && gone) ? pass('TC-FLOORPLAN-DELETE', 'Section delete removes it; tables not deleted', `sid=${sid}`) : fail('TC-FLOORPLAN-DELETE', 'section delete', `del=${del.status} gone=${gone}`);
+    }
+  } catch (e) { skip('TC-FLOORPLAN-DELETE', 'section delete', e?.message || e); }
+}
+
 async function main() {
   console.log('\n' + '═'.repeat(60));
   console.log('  ATITHI-SETU — E2E TECHNICAL TEST RUNNER');
@@ -4545,6 +4587,7 @@ async function main() {
   await testCashDrawer();
   await testRBACHardening();
   await testMoveCancelFeatures();
+  await testFloorPlan();
 
   const failures = generateReport();
   process.exit(failures > 0 ? 1 : 0);
