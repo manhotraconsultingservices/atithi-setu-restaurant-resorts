@@ -57738,6 +57738,12 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const [loyaltyTier, setLoyaltyTier] = useState<{ name: string; discount_percent: number; spend_remaining?: number; next_tier_name?: string } | null>(null);
   const [loyaltyAutoApplied, setLoyaltyAutoApplied] = useState(false);
 
+  // Bill preview (Command Centre "Preview"): render the bill through the owner's
+  // saved INVOICE template so the on-screen preview matches the thermal ESC/POS
+  // and every other invoice surface — shown in a modal, not a blind print dialog.
+  const [billPreviewHtml, setBillPreviewHtml] = useState<string | null>(null);
+  const [invTpl, setInvTpl] = useState<any>(INVOICE_TEMPLATE_DEFAULT);
+
   // ── Fetch session ──────────────────────────────────────────────────────────
   useEffect(() => {
     setLoading(true); setFetchErr('');
@@ -57791,6 +57797,15 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       .then(r => (r.ok ? r.json() : []))
       .then(d => setMenuItems(Array.isArray(d) ? d.filter((m: any) => m?.available !== false) : []))
       .catch(() => setMenuItems([]));
+  }, [restaurantId, token]);
+
+  // Load the tenant's saved INVOICE template so the bill preview matches the
+  // owner's format (falls back to the default if none saved).
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/print-templates`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d?.INVOICE) setInvTpl({ ...INVOICE_TEMPLATE_DEFAULT, ...d.INVOICE }); })
+      .catch(() => { /* keep default */ });
   }, [restaurantId, token]);
 
   // Load checked-in rooms once. Empty for restaurant-only tenants (the endpoint
@@ -58048,52 +58063,61 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   });
   const newQtyFor = (name: string) => editItems.filter(l => l._isNew && l.name === name).reduce((s, l) => s + Number(l.quantity || 1), 0);
 
+  // "Preview" → render the bill through the owner's saved INVOICE template (the
+  // SAME renderer as the thermal ESC/POS + every other invoice surface) and show
+  // it in a modal. Printing happens from the preview via printPreviewedBill().
   const handlePrint = () => {
     if (!session || activeOrders.length === 0) return;
-    const dt = new Date(session.opened_at || Date.now());
-    // Only print active (non-cancelled) orders
-    const roundData = activeOrders.map((o: any, idx: number) => ({
-      label: activeOrders.length > 1 ? `── Round ${o.round_number || idx + 1} ──` : undefined,
-      items: (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
-        name: it.name || '', qty: Number(it.quantity || 1), price: Number(it.price || 0),
-      })),
-    }));
-    // Phase L1 — label the discount line "Silver discount (5%)" etc. when
-    // the loyalty auto-apply matches the displayed discount amount (so the
-    // customer sees on the receipt WHY they got the discount).
+    const r: any = restaurant || {};
+    const items = activeOrders.flatMap((o: any) => (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
+      name: it.name || 'Item', qty: Number(it.quantity || 1), price: Number(it.price || 0),
+      amount: Number(it.price || 0) * Number(it.quantity || 1), note: '',
+    })));
+    // Discount label — "Silver discount (5%)" when loyalty is the binding discount.
     const expectedLoyaltyDiscount = loyaltyTier
-      ? Math.round(rawSubtotal * Number(loyaltyTier.discount_percent) / 100 * 100) / 100
-      : 0;
-    const loyaltyLabel = loyaltyTier && discount > 0 && Math.abs(discount - expectedLoyaltyDiscount) < 0.5
-      ? `${loyaltyTier.name} discount (${loyaltyTier.discount_percent}%)`
-      : undefined;
-    const html = buildThermalHTML({
-      restaurantName: restaurant?.name || 'Restaurant',
-      gstin: restaurant?.gst_number,
-      gstEnabled: applyGst,
-      gstPercent: gstPct,
-      billId: `TBL-${(session.session_token || '').slice(-6).toUpperCase()}`,
-      tableName: table.name,
-      customerName: session.customer_name || undefined,
-      customerPhone: session.customer_phone || undefined,
-      date: dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-      time: dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
-      rounds: roundData,
+      ? Math.round(rawSubtotal * Number(loyaltyTier.discount_percent) / 100 * 100) / 100 : 0;
+    const discountLabel = loyaltyTier && discount > 0 && Math.abs(discount - expectedLoyaltyDiscount) < 0.5
+      ? `${loyaltyTier.name} discount (${loyaltyTier.discount_percent}%)` : 'Discount';
+    // Tax lines: prefer the multi-tax server preview; else CGST/SGST split.
+    const taxLinesArr = usedServerPreview ? previewTaxLines : (applyGst && gstAmt > 0 ? [{ label: `GST @ ${gstPct}%`, rate: gstPct, amount: gstAmt }] : []);
+    const half = Number((gstAmt / 2).toFixed(2)); const halfRate = Number(gstPct) / 2;
+    const taxSplit = (taxLinesArr && taxLinesArr.length)
+      ? taxLinesArr.map((l: any) => ({ label: l.label || `GST @ ${Number(l.rate || 0).toFixed(2)}%`, amount: Number(l.amount || 0) }))
+      : (gstAmt > 0 ? [{ label: `CGST @ ${halfRate.toFixed(2)}%`, amount: half }, { label: `SGST @ ${halfRate.toFixed(2)}%`, amount: Number((gstAmt - half).toFixed(2)) }] : []);
+    const taxSingle = gstAmt > 0 ? [{ label: `GST @ ${gstPct}%`, amount: gstAmt }] : [];
+    const isTax = !!(r.gst_number && applyGst && Number(gstPct) > 0);
+    const mapped = {
+      name: r.name || 'Restaurant',
+      gstin: r.gst_number || '',
+      address: [r.address_line1, r.city, r.state, r.pincode].filter(Boolean).join(', ') || r.business_location || '',
+      phone: r.phone || r.contact_number || r.mobile || '',
+      customer: session.customer_name || '',
+      mobile: session.customer_phone || '',
+      date: new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }),
+      cashier: '',
+      orderType: table?.name ? `Table: ${table.name}` : '',
+      billNo: session.invoice_number || `TBL-${(session.session_token || '').slice(-6).toUpperCase()}`,
+      token: '',
+      items,
+      totalQty: items.reduce((s: number, it: any) => s + Number(it.qty || 0), 0),
       subtotal: rawSubtotal,
-      discountAmount: discount > 0 ? discount : undefined,
-      loyaltyDiscountLabel: loyaltyLabel,
-      serviceChargeAmount: svcAmt > 0 ? svcAmt : undefined,
-      serviceChargePercent: svcPct > 0 ? svcPct : undefined,
-      gstAmount: gstAmt,
-      total: grandTotal,
-      paymentMethod: payMethod || session.payment_method || undefined,
-      footerNote: 'Thank you for dining with us!',
-    });
-    openThermalPrint(html);
-    // Mark the session (and its child orders, via server cascade) as PRINTED
-    // so the orders leave the Live Kitchen Orders list — owner is done with
-    // them once the invoice has been printed. Fire-and-forget; print is the
-    // primary action and shouldn't be blocked by a slow PATCH.
+      discount: discount > 0 ? discount : 0,
+      discountLabel,
+      charges: svcAmt > 0 ? [{ label: `Service Charge (${svcPct}%)`, amount: svcAmt }] : [],
+      taxSplit, taxSingle, roundOff: 0,
+      grand: grandTotal, cur: '₹',
+      payment_method: payMethod || session.payment_method || '',
+      footer: invTpl.footerText || 'Thank you for dining with us!',
+      taxInvoice: isTax, sac: '996331',
+    };
+    setBillPreviewHtml(buildInvoiceDocFromTemplate(invTpl, mapped));
+  };
+
+  // Print the previewed bill (browser thermal iframe) + mark the session PRINTED
+  // so its orders leave the Live Kitchen Orders list. Fire-and-forget PATCH.
+  const printPreviewedBill = () => {
+    if (!billPreviewHtml) return;
+    openThermalPrint(billPreviewHtml);
     if (session?.session_token) {
       fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/invoice-status`, {
         method: 'PATCH',
@@ -58101,6 +58125,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
         body: JSON.stringify({ invoice_status: 'PRINTED' }),
       }).catch(() => {});
     }
+    setBillPreviewHtml(null);
   };
 
   // Print Bill → queue the customer invoice to the on-prem INVOICE thermal
@@ -58765,6 +58790,24 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                 </button>
               )}
             </div>
+
+            {billPreviewHtml && (
+              <div className="fixed inset-0 z-[130] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setBillPreviewHtml(null)}>
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm max-h-[90vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-[#cc5a16]/10 shrink-0">
+                    <h4 className="font-bold font-serif text-sm text-[#1a1208]">Bill Preview</h4>
+                    <button onClick={() => setBillPreviewHtml(null)} className="p-1 hover:bg-[#faf7f2] rounded-lg text-[#9c8e85]"><X size={16} /></button>
+                  </div>
+                  <iframe title="Bill preview" srcDoc={billPreviewHtml} className="flex-1 w-full min-h-[45vh] bg-white border-0" />
+                  <div className="flex gap-2 p-3 border-t border-[#cc5a16]/10 shrink-0">
+                    <button onClick={printPreviewedBill} className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] transition-all">
+                      <Printer size={14} /> Print
+                    </button>
+                    <button onClick={() => setBillPreviewHtml(null)} className="px-4 py-2.5 rounded-xl border border-[#cc5a16]/20 text-[#6b5d52] text-xs font-bold uppercase tracking-widest hover:bg-[#faf7f2] transition-all">Close</button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {confirmClose && !closing && (
               <button
