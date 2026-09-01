@@ -11065,8 +11065,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [monitorColOpen,      setMonitorColOpen]      = useState(false);
   // Command Centre table view — spatial MAP (Petpooja-style floor plan, Phase 1:
   // auto-flow from the live feed) vs the dense LIST. Choice persists per browser.
+  // Default LIST (no surprise for existing tenants); the Map toggle is one click
+  // + persists. Flip this default to 'MAP' once the map look is signed off.
   const [monitorView,         setMonitorView]         = useState<'MAP'|'LIST'>(() => {
-    try { return (localStorage.getItem('cc_table_view') as 'MAP'|'LIST') || 'MAP'; } catch { return 'MAP'; }
+    try { return (localStorage.getItem('cc_table_view') as 'MAP'|'LIST') || 'LIST'; } catch { return 'LIST'; }
   });
   const setMonitorViewPersist = (v: 'MAP'|'LIST') => { setMonitorView(v); try { localStorage.setItem('cc_table_view', v); } catch { /* ignore */ } };
   const monitorCols = useColumnConfig('monitor', MONITOR_COL_DEFAULTS);
