@@ -3705,6 +3705,41 @@ async function testDineInTableFlow() {
       }
     }
 
+    // ── STEP 3b: KOT carries the staff-entered token on BOTH agent paths ──────
+    // Captain app sends token_number; the server must (a) put it in the ESC/POS
+    // as a bold TOKEN header (v3.2+ agents print this), and (b) fold it into the
+    // structured guest line so agents older than v3.2 — which ignore the ESC/POS
+    // and use their built-in layout (no token field) — still print it.
+    if (!havePrinter || !created.patToken) {
+      skip('TC-DINE-KDS-TOKEN', 'KOT carries the order token', 'no station printer / agent token');
+    } else {
+      const tk = `T-${tag}`;
+      // Use a throwaway table (NOT the shared dine test table) so this extra
+      // order doesn't join that session and skew downstream bill aggregation.
+      const ot = await api('POST', `/api/restaurant/${restaurantId}/orders`, {
+        table_number: `KOTTOK-${tag}`,
+        items: [{ name: `Token Roll ${tag}`, price: 90, quantity: 1, category: 'ALL' }],
+        total_amount: 90, checkout_mode: 'postpaid', customer_name: 'Token Guest', token_number: tk,
+      }, tokA);
+      const tOid = ot.data?.id || ot.data?.orderId || null;
+      if (tOid) created.orderIds.push(tOid);
+      const pend2 = await api('GET', `/api/restaurant/${restaurantId}/print-jobs/pending?agent_token=${encodeURIComponent(created.patToken)}`);
+      const jobs2 = Array.isArray(pend2.data) ? pend2.data : [];
+      const kot = jobs2.find(j => j.order_id === tOid);
+      let c = {}; try { c = JSON.parse(kot?.content || '{}'); } catch {}
+      const esc = c.escpos ? Buffer.from(c.escpos, 'base64').toString('binary') : '';
+      const headerOk = new RegExp(`TOKEN: ${tk}`).test(esc);        // v3.2+ ESC/POS header
+      const foldOk = String(c.customer || '').includes(tk);         // older-agent structured guest line
+      if (kot && headerOk && foldOk) {
+        pass('TC-DINE-KDS-TOKEN', 'KOT prints the token — bold ESC/POS header (v3.2+) AND folded into the guest line (older agents)', `token=${tk}`);
+      } else {
+        fail('TC-DINE-KDS-TOKEN', 'KOT must carry the order token on both agent paths', `kot=${!!kot} escposHeader=${headerOk} guestFold=${foldOk} customer=${JSON.stringify(c.customer)}`);
+      }
+      for (const j of jobs2.filter(j => j.order_id === tOid)) {
+        await api('POST', `/api/restaurant/${restaurantId}/print-jobs/${j.id}/ack?agent_token=${encodeURIComponent(created.patToken)}`, { status: 'PRINTED' }).catch(() => {});
+      }
+    }
+
     // ── STEP 4: chef accepts (atomic) → preparing → ready → waiter delivers ──
     if (!orderIdA) {
       skip('TC-DINE-LIFECYCLE', 'Order lifecycle accept→prepare→ready→serve', 'order was not created');
