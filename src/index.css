@@ -113,3 +113,11 @@ h1, h2, h3, h4 {
 .folio-slide-in {
   animation: folio-slide-in 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
 }
+
+/* Command Centre (MONITOR tab) full-width — the dashboard toggles
+   body.monitor-fullwidth so the live table view uses the WHOLE screen on wide PC
+   displays instead of being capped/offset to one side. Every other page keeps
+   the app's max-w-[1700px] cap. */
+body.monitor-fullwidth main {
+  max-width: none;
+}

@@ -512,7 +512,10 @@ async function getPrintTemplate(db: any, docType: 'INVOICE' | 'KOT'): Promise<an
 
 // Render a KOT (kitchen ticket) to ESC/POS from the owner's block spec.
 function renderKotEscpos(cfg: any, d: any, W: number): string {
-  let o = PTPL.init + PTPL.center + PTPL.boldOn + PTPL.big + 'KOT\n' + PTPL.normal + PTPL.boldOff;
+  // Title: normally "KOT"; a cancel/move ticket overrides it (e.g. "CANCELLED
+  // KOT", "TABLE MOVED"). Optional sub-heading under it (e.g. "T1 -> T2").
+  let o = PTPL.init + PTPL.center + PTPL.boldOn + PTPL.big + `${d.heading || 'KOT'}\n` + PTPL.normal + PTPL.boldOff;
+  if (d.subheading) o += PTPL.center + PTPL.boldOn + `${d.subheading}\n` + PTPL.boldOff;
   if (cfg.station && d.station) o += PTPL.center + PTPL.boldOn + `${d.station}\n` + PTPL.boldOff;
   if (cfg.name && d.name) o += PTPL.center + `${d.name}\n`;
   // Token prints BOLD + large right under the business name (prominent pickup #).
@@ -528,7 +531,7 @@ function renderKotEscpos(cfg: any, d: any, W: number): string {
   for (const it of (Array.isArray(d.items) ? d.items : [])) {
     const head = cfg.bigItems ? PTPL.boldOn + PTPL.tall : PTPL.boldOn;
     const tail = cfg.bigItems ? PTPL.normal + PTPL.boldOff : PTPL.boldOff;
-    o += head + `${String(it.qty || 1)} x ${it.name || 'Item'}\n` + tail;
+    o += head + `${d.strike ? 'X ' : ''}${String(it.qty || 1)} x ${it.name || 'Item'}\n` + tail;
     if (cfg.notes && it.note) o += `     >> ${it.note}\n`;
   }
   o += '-'.repeat(W) + '\n';
@@ -595,7 +598,7 @@ function renderInvoiceEscpos(cfg: any, d: any, W: number): string {
 // order's items by menu category and routes to each active printer whose `station`
 // matches (or station='ALL' → the whole order). Fire-and-forget — NEVER blocks or
 // fails order placement. The on-prem print agent pulls PENDING jobs + prints them.
-async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string, itemsOverride?: any[]): Promise<void> {
+async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string, opts?: { items?: any[]; heading?: string; subheading?: string; strike?: boolean }): Promise<void> {
   try {
     const db = await getTenantDb(restaurantId);
     const printers: any[] = await db.query("SELECT * FROM kitchen_printers WHERE is_active = 1").catch(() => []);
@@ -611,14 +614,17 @@ async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string, i
     let bizName: string | null = null;
     try { const rr: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]); bizName = rr?.name || null; } catch { /* ignore */ }
     let items: any[] = [];
-    if (Array.isArray(itemsOverride) && itemsOverride.length) {
-      // Explicit item set (e.g. only the NEWLY-ADDED lines from an invoice edit)
-      // — print a KOT for just these, not the whole order.
-      items = itemsOverride;
+    if (Array.isArray(opts?.items) && opts!.items!.length) {
+      // Explicit item set (e.g. the NEWLY-ADDED lines from an invoice edit, or the
+      // moved lines on a table/dish move) — print a KOT for just these.
+      items = opts!.items!;
     } else {
       try { items = JSON.parse(order.items || '[]'); } catch { items = []; }
     }
     if (!Array.isArray(items) || items.length === 0) return;
+    const _heading = opts?.heading || null;       // e.g. "CANCELLED KOT" / "TABLE MOVED"
+    const _subheading = opts?.subheading || null; // e.g. "T1 -> T2"
+    const _strike = !!opts?.strike;               // mark items (cancels)
     const norm = (it: any) => ({
       name: it.name || it.menuName || 'Item',
       qty: Number(it.quantity ?? it.qty ?? 1),
@@ -634,6 +640,7 @@ async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string, i
       // verbatim); structured fields kept for older agents' built-in layout.
       const kd = {
         name: bizName, station: p.station || 'KITCHEN',
+        heading: _heading, subheading: _subheading, strike: _strike,
         orderNo: order.id, table: order.table_number || null,
         token: order.token_number || null,
         time: order.created_at ? new Date(order.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '',
@@ -655,11 +662,17 @@ async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string, i
       // both toggles via renderKotEscpos.)
       const _showCust = kotCfg.customer !== false && !!order.customer_name;
       const _showTok  = kotCfg.token !== false && !!order.token_number;
-      const custForLegacy = _showTok
+      const _custBase = _showTok
         ? `Token ${order.token_number}${_showCust ? ' · ' + order.customer_name : ''}`
         : (_showCust ? order.customer_name : null);
+      // Older agents hard-code the "KOT" title + can't strike items, so surface the
+      // cancel/move heading on the guest line (a field they DO render) as a marker.
+      const custForLegacy = _heading
+        ? [_heading, _custBase].filter(Boolean).join(' · ')
+        : _custBase;
       const content = JSON.stringify({
         kind: 'KOT', escpos,
+        heading: _heading, subheading: _subheading, strike: _strike,
         order_id: order.id, table: order.table_number || null,
         round: order.round_number || 1, customer: custForLegacy,
         token: order.token_number || null,
@@ -6302,6 +6315,11 @@ async function startServer() {
     VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (id) DO NOTHING
   `, ["SYSTEM", "RestoFlow System", "SYSTEM-ADMIN", "N/A", "N/A", 1, new Date().toISOString()]);
+
+  // Cancel-with-password: per-tenant opt-in flag (staff re-enter their own
+  // password to cancel a bill/order). Default OFF so no tenant is affected until
+  // the owner turns it on in settings.
+  await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS cancel_requires_password INTEGER DEFAULT 0`).catch(() => {});
 
   // ====== Per-tenant subdomain: slug column migration + backfill ======
   try {
@@ -45661,6 +45679,8 @@ ${data.tenant.name}`;
         console.warn(`[inventory] customer-cancel reversal failed for order ${req.params.orderId}:`, err));
       reverseOrderFolioPosting(req.params.id, req.params.orderId, 'Cancelled by guest', 'CUSTOMER').catch(err =>
         console.warn(`[folio] customer-cancel reversal failed for order ${req.params.orderId}:`, err));
+      // Print a CANCELLED KOT so the kitchen stops/discards this order.
+      enqueuePrintJobsForOrder(req.params.id, req.params.orderId, { heading: '*** CANCELLED KOT ***', strike: true }).catch(() => {});
       // Broadcast so the kitchen / command centre drop it from the live view.
       const updatedOrder: any = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.orderId]);
       if (updatedOrder) {
@@ -45678,6 +45698,151 @@ ${data.tenant.name}`;
     } catch (err: any) {
       console.error('customer order cancel error:', err);
       res.status(500).json({ error: 'Failed to cancel order' });
+    }
+  });
+
+  // ── Move whole tables / orders / dishes between tables (client feedback #2/#3/#4) ──
+  // Body: { source_session_token, target_table_id, items?: [{ order_id, name, quantity }] }
+  //   • no `items` (or covering everything) → the WHOLE table moves (T1 → T2).
+  //   • a subset of items                   → just those dishes move (dish move).
+  // Whole orders are repointed intact (order id + KOT trail preserved); a partial
+  // move splits the order (source reduced, a new order opened on the target). ONE
+  // TRANSFER KOT prints for the moved lines under the target table so the kitchen
+  // knows. Nothing is deleted; totals recompute; the source table frees when empty.
+  app.post("/api/restaurant/:id/tables/move", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { source_session_token, target_table_id } = req.body || {};
+      const reqItems: any[] = Array.isArray(req.body?.items) ? req.body.items : [];
+      if (!source_session_token || !target_table_id) {
+        return res.status(400).json({ error: 'source_session_token and target_table_id are required.' });
+      }
+      const srcSession: any = await db.get(
+        "SELECT * FROM table_sessions WHERE session_token = ? AND status IN ('open','bill_requested')",
+        [source_session_token]
+      );
+      if (!srcSession) return res.status(404).json({ error: 'The source table has no open session.' });
+      const tgtTable: any = await db.get("SELECT * FROM tables WHERE id = ?", [target_table_id]);
+      if (!tgtTable) return res.status(404).json({ error: 'Target table not found.' });
+      if (String(tgtTable.id) === String(srcSession.table_id)) {
+        return res.status(400).json({ error: 'Source and target tables are the same.' });
+      }
+      const srcTable: any = await db.get("SELECT * FROM tables WHERE id = ?", [srcSession.table_id]).catch(() => null);
+      const srcTableName = srcSession.table_name || srcTable?.name || 'Table';
+
+      // Target session — reuse an open one on T2, else open a fresh session on T2.
+      let tgtSession: any = await db.get(
+        "SELECT * FROM table_sessions WHERE table_id = ? AND status IN ('open','bill_requested') ORDER BY opened_at DESC LIMIT 1",
+        [target_table_id]
+      );
+      if (!tgtSession) {
+        const tsId = `TS-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const tsTok = `SESSION-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+        await db.run(
+          "INSERT INTO table_sessions (id, session_token, table_id, table_name, status, customer_name, customer_phone, opened_at) VALUES (?, ?, ?, ?, 'open', ?, ?, CURRENT_TIMESTAMP)",
+          [tsId, tsTok, tgtTable.id, tgtTable.name, srcSession.customer_name || null, srcSession.customer_phone || null]
+        );
+        tgtSession = await db.get("SELECT * FROM table_sessions WHERE id = ?", [tsId]);
+      }
+
+      const srcOrders: any[] = await db.query("SELECT * FROM orders WHERE session_id = ? AND status != 'CANCELLED'", [srcSession.id]);
+      const parseItems = (o: any) => { try { return Array.isArray(o.items) ? o.items : JSON.parse(o.items || '[]'); } catch { return []; } };
+      const wantAll = reqItems.length === 0;                 // no explicit items → whole table
+      const want: Record<string, Record<string, number>> = {};
+      for (const it of reqItems) {
+        const oid = String(it.order_id || ''); const nm = String(it.name || '').trim();
+        const q = Math.max(0, Math.floor(Number(it.quantity ?? it.qty ?? 0)));
+        if (!oid || !nm || q <= 0) continue;
+        (want[oid] = want[oid] || {})[nm] = (want[oid][nm] || 0) + q;
+      }
+
+      const r2 = (n: number) => Math.round(n * 100) / 100;
+      const movedForKot: any[] = [];
+      const newTargetItems: any[] = [];
+      let repointedFirstOrderId: string | null = null;
+      let movedAnything = false;
+
+      for (const o of srcOrders) {
+        const its = parseItems(o).map((x: any) => ({
+          name: x.name || x.menuName || 'Item',
+          quantity: Math.max(0, Math.floor(Number(x.quantity ?? x.qty ?? 1))),
+          price: Number(x.price ?? x.unit_price ?? x.unitPrice ?? 0),
+          note: x.note || x.notes || '', category: x.category || '',
+        })).filter((x: any) => x.quantity > 0);
+        if (!its.length) continue;
+        const orderWant = wantAll ? null : (want[String(o.id)] || {});
+        const staying: any[] = []; const moving: any[] = [];
+        for (const line of its) {
+          const moveQty = wantAll ? line.quantity : Math.min(line.quantity, orderWant![line.name] || 0);
+          if (moveQty > 0) moving.push({ ...line, quantity: moveQty });
+          const stayQty = line.quantity - moveQty;
+          if (stayQty > 0) staying.push({ ...line, quantity: stayQty });
+        }
+        if (!moving.length) continue;
+        movedAnything = true;
+        movedForKot.push(...moving.map((m: any) => ({ name: m.name, qty: m.quantity, note: m.note, category: m.category })));
+        if (staying.length === 0) {
+          // WHOLE order moves → repoint it intact (preserves order id + KOT trail).
+          await db.run("UPDATE orders SET session_id = ?, table_number = ? WHERE id = ?", [tgtSession.id, tgtTable.name, o.id]);
+          if (!repointedFirstOrderId) repointedFirstOrderId = o.id;
+        } else {
+          // PARTIAL move → shrink the source order to the staying lines, recompute.
+          const newTotal = r2(staying.reduce((s: number, x: any) => s + x.price * x.quantity, 0));
+          const ratio = Number(o.total_amount) > 0 ? Number(o.gst_amount || 0) / Number(o.total_amount) : 0;
+          await db.run("UPDATE orders SET items = ?, total_amount = ?, gst_amount = ? WHERE id = ?",
+            [JSON.stringify(staying), newTotal, r2(newTotal * ratio), o.id]);
+          newTargetItems.push(...moving);
+        }
+      }
+      if (!movedAnything) return res.status(400).json({ error: 'No matching items to move.' });
+
+      // Create ONE new target order for any partially-split items.
+      let newTargetOrderId: string | null = null;
+      if (newTargetItems.length) {
+        const nid = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const nTotal = r2(newTargetItems.reduce((s: number, x: any) => s + x.price * x.quantity, 0));
+        await db.run(
+          "INSERT INTO orders (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone, session_id, checkout_mode, round_number, kitchen_status, created_at) VALUES (?, ?, ?, ?, 0, 'CONFIRMED', ?, ?, ?, 'postpaid', 1, 'queued', CURRENT_TIMESTAMP)",
+          [nid, tgtTable.name, JSON.stringify(newTargetItems.map((m: any) => ({ name: m.name, quantity: m.quantity, price: m.price, note: m.note, category: m.category }))), nTotal,
+           tgtSession.customer_name || srcSession.customer_name || null, tgtSession.customer_phone || srcSession.customer_phone || null, tgtSession.id]
+        );
+        newTargetOrderId = nid;
+      }
+
+      // ONE TRANSFER KOT for all moved lines, under the TARGET table.
+      const kotOrderId = newTargetOrderId || repointedFirstOrderId;
+      if (kotOrderId && movedForKot.length) {
+        enqueuePrintJobsForOrder(req.params.id, kotOrderId, {
+          items: movedForKot,
+          heading: wantAll ? '*** TABLE MOVED ***' : '*** DISH MOVED ***',
+          subheading: `${srcTableName} -> ${tgtTable.name}`,
+        }).catch(() => {});
+      }
+
+      // Free the source table if its session has no live orders left; occupy target.
+      const remaining: any = await db.get("SELECT COUNT(*) AS c FROM orders WHERE session_id = ? AND status != 'CANCELLED'", [srcSession.id]);
+      const sourceFreed = Number(remaining?.c || 0) === 0;
+      if (sourceFreed) {
+        await db.run("UPDATE table_sessions SET status = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = ?", [srcSession.id]);
+        if (srcSession.table_id) await db.run("UPDATE tables SET status = 'AVAILABLE' WHERE id = ?", [srcSession.table_id]);
+      }
+      await db.run("UPDATE tables SET status = 'OCCUPIED' WHERE id = ?", [tgtTable.id]);
+
+      writeObjectAudit(db, req, {
+        objectType: 'INVOICE', objectId: String(kotOrderId || tgtSession.id),
+        action: wantAll ? 'TABLE_MOVED' : 'DISH_MOVED',
+        summary: `${wantAll ? 'Table' : 'Dish(es)'} moved ${srcTableName} -> ${tgtTable.name} (${movedForKot.length} line${movedForKot.length !== 1 ? 's' : ''})`,
+        after: { source_table: srcTableName, target_table: tgtTable.name, items: movedForKot },
+      }).catch(() => {});
+      try {
+        const wss = (global as any).__wss;
+        if (wss) wss.clients.forEach((c: any) => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'TABLE_MOVE', restaurantId: req.params.id, data: { source: srcTableName, target: tgtTable.name } })); });
+      } catch { /* ignore */ }
+
+      res.json({ success: true, moved: movedForKot.length, target_table: tgtTable.name, target_session_token: tgtSession.session_token, source_freed: sourceFreed });
+    } catch (err: any) {
+      console.error('table move error:', err);
+      res.status(500).json({ error: 'Failed to move.' });
     }
   });
 
@@ -46384,6 +46549,40 @@ ${data.tenant.name}`;
     if (String(reason || '').trim().length < 3) { res.status(400).json({ error: 'A cancellation reason is required (for the audit trail).' }); return false; }
     return true;
   };
+  // Verify the CURRENT (JWT) user's OWN password — for the cancel-with-password
+  // gate. Checks the stores a login can come from (central users, tenant staff,
+  // owner accounts), all keyed by the JWT `id`.
+  const _verifyOwnPassword = async (req: AuthRequest, password: string): Promise<boolean> => {
+    if (!password || typeof password !== 'string') return false;
+    const uid = req.user?.id;
+    if (!uid) return false;
+    try { const u: any = await centralDb.get("SELECT password FROM users WHERE id = ?", [uid]); if (u?.password && await bcrypt.compare(password, u.password)) return true; } catch { /* ignore */ }
+    try { const db = await getTenantDb(req.user?.restaurantId || req.params.id); const s: any = await db.get("SELECT password FROM attendance_staff WHERE id = ?", [uid]); if (s?.password && await bcrypt.compare(password, s.password)) return true; } catch { /* ignore */ }
+    try { const o: any = await centralDb.get("SELECT password_hash FROM owner_accounts WHERE id = ?", [uid]); if (o?.password_hash && await bcrypt.compare(password, o.password_hash)) return true; } catch { /* ignore */ }
+    return false;
+  };
+  // Per-tenant "cancel needs a password" gate (opt-in flag). When ON, the actor
+  // must re-enter their OWN account password (req.body.password) to cancel a bill
+  // or an order. Returns true to proceed; sends 428/401 + returns false to block.
+  const _cancelPasswordOk = async (req: AuthRequest, res: Response): Promise<boolean> => {
+    let required = false;
+    try { const rr: any = await centralDb.get("SELECT cancel_requires_password FROM restaurants WHERE id = ?", [req.user?.restaurantId || req.params.id]); required = Number(rr?.cancel_requires_password || 0) === 1; } catch { /* column may not exist yet → off */ }
+    if (!required) return true;
+    const pwd = String(req.body?.password || '');
+    if (!pwd) { res.status(428).json({ error: 'Enter your password to confirm this cancellation.', code: 'PASSWORD_REQUIRED' }); return false; }
+    if (!(await _verifyOwnPassword(req, pwd))) { res.status(401).json({ error: 'Incorrect password. Cancellation not authorised.', code: 'PASSWORD_INVALID' }); return false; }
+    return true;
+  };
+  // Owner: toggle the per-tenant cancel-with-password gate.
+  app.patch("/api/restaurant/:id/cancel-password-setting", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      await centralDb.run("ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS cancel_requires_password INTEGER DEFAULT 0").catch(() => {});
+      const enabled = req.body?.enabled ? 1 : 0;
+      await centralDb.run("UPDATE restaurants SET cancel_requires_password = ? WHERE id = ?", [enabled, req.params.id]);
+      res.json({ success: true, cancel_requires_password: enabled });
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to update setting' }); }
+  });
   const _ensureRestCancelCols = async (db: any) => {
     await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP").catch(() => {});
     await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT").catch(() => {});
@@ -46393,6 +46592,7 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/invoices/order/:orderId/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     const reason = String(req.body?.reason || '').trim();
     if (!_cancelRestGate(req, res, reason)) return;
+    if (!(await _cancelPasswordOk(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureRestCancelCols(db);
@@ -46409,6 +46609,7 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/invoices/session/:sessionToken/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     const reason = String(req.body?.reason || '').trim();
     if (!_cancelRestGate(req, res, reason)) return;
+    if (!(await _cancelPasswordOk(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureRestCancelCols(db);
@@ -48327,6 +48528,10 @@ ${data.tenant.name}`;
 
       const { status, payment_status, payment_method, kitchen_status, chef_id, chef_name, eta, items } = req.body;
 
+      // Cancel-with-password gate (opt-in per tenant): cancelling an order/item
+      // requires the actor to re-enter their own account password.
+      if (String(status || '').toUpperCase() === 'CANCELLED' && !(await _cancelPasswordOk(req, res))) return;
+
       // S3 (17 Jun 2026): staff can MODIFY an order's items (change qty / remove
       // a line) while it is still QUEUED — not yet being prepared and not paid.
       // Totals are recomputed from the new items; GST is scaled by the order's
@@ -48446,6 +48651,10 @@ ${data.tenant.name}`;
         // negative mirror entries + recomputes); a no-op if nothing was posted.
         reverseOrderFolioPosting(req.user!.restaurantId, req.params.id, 'Order cancelled', req.user?.id || 'STAFF')
           .catch(err => console.warn(`[folio] cancel-reversal failed for order ${req.params.id}:`, err));
+        // Print a CANCELLED KOT (heading + marked items) so the kitchen stops or
+        // discards this order. Reuses the KOT engine (kitchen printers only, never
+        // the invoice printer). Fire-and-forget; no-op without a kitchen printer.
+        enqueuePrintJobsForOrder(req.user!.restaurantId, req.params.id, { heading: '*** CANCELLED KOT ***', strike: true }).catch(() => {});
       }
 
       // Broadcast ORDER_UPDATE via WebSocket so customers/monitors get live status
@@ -50228,7 +50437,7 @@ ${data.tenant.name}`;
             return delta > 0 ? { ...it, name: nm, quantity: delta } : null;
           })
           .filter(Boolean) as any[];
-        if (addedItems.length) enqueuePrintJobsForOrder(req.params.id, req.params.orderId, addedItems).catch(() => {});
+        if (addedItems.length) enqueuePrintJobsForOrder(req.params.id, req.params.orderId, { items: addedItems }).catch(() => {});
       } catch { /* non-fatal */ }
 
       res.json({ success: true, subtotal: afterDiscount, discount_amount: Number(discount_amount), service_charge_amount: svcAmt, gst_amount: gstAmount, total });
@@ -51797,7 +52006,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-edit-fires-kot',
+    commit_marker: 'kot-move-cancel-features',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

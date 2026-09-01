@@ -11809,6 +11809,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   }, [activeTab, isOwnerOrAdmin, isPlatformAdmin]);
 
+  // Command Centre (MONITOR) uses the FULL screen width so the table view isn't
+  // squeezed to one side on a wide PC display; every other page stays capped at
+  // max-w-[1700px]. Toggle a body class the global CSS (index.css) widens on.
+  useEffect(() => {
+    const on = activeTab === 'MONITOR';
+    document.body.classList.toggle('monitor-fullwidth', on);
+    return () => { document.body.classList.remove('monitor-fullwidth'); };
+  }, [activeTab]);
+
   const [showOnDemandModal, setShowOnDemandModal]     = useState(false);
   const [printPreviewHtml, setPrintPreviewHtml]       = useState<string|null>(null);
   const [loadingInvoices, setLoadingInvoices]         = useState(false);
