@@ -5828,6 +5828,13 @@ const serviceRequestStaff = requireModuleAccess(['SERVICE_REQUESTS'], [...HOTEL_
 const WORKFORCE_TAB_IDS = ['HR_PAYROLL', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL'];
 const workforceStaff = requireModuleAccess(WORKFORCE_TAB_IDS, ['MANAGER'], 'Workforce');
 
+// Procurement & AP (suppliers, supplier-invoices, payments, AP aging). Was gated
+// by the fixed-allowlist restaurantStaff, which 403'd every CUSTOM role the owner
+// granted the PROCUREMENT tab ("Manager has Full access to Procurement & AP but
+// cannot add a supplier / create a supplier invoice"). Now permission-aware: the
+// per-tab requireTabAccess('PROCUREMENT') still runs on top for the exact grant.
+const procurementStaff = requireModuleAccess(['PROCUREMENT'], ['MANAGER'], 'Procurement & AP');
+
 // DENY-BY-DEFAULT (owner request, 2026-08): a NEW custom role gets NO module
 // access. It is seeded with only the authoritative-empty '__complete__' sentinel
 // (see POST /custom-roles), and every "heal" path below re-asserts that sentinel
@@ -13913,7 +13920,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/shift-templates", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/shift-templates", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -13941,7 +13948,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/shift-templates/:tid", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/shift-templates/:tid", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -21562,7 +21569,7 @@ ${data.tenant.name}`;
   // ── Supplier Invoices ────────────────────────────────────────────────────
 
   // List invoices with filters
-  app.get("/api/restaurant/:id/procurement/supplier-invoices", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/supplier-invoices", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { module, status, supplier_id, from, to, search } = req.query as Record<string, string>;
@@ -21594,7 +21601,7 @@ ${data.tenant.name}`;
   });
 
   // GET /api/restaurant/:id/procurement/supplier-invoices/:invoiceId — single invoice with payments
-  app.get("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -21612,7 +21619,7 @@ ${data.tenant.name}`;
   });
 
   // Create supplier invoice
-  app.post("/api/restaurant/:id/procurement/supplier-invoices", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/procurement/supplier-invoices", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21665,7 +21672,7 @@ ${data.tenant.name}`;
   });
 
   // Update invoice (edit before payment)
-  app.patch("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21705,7 +21712,7 @@ ${data.tenant.name}`;
   });
 
   // Delete invoice (only DRAFT/UNPAID with zero payments)
-  app.delete("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21729,7 +21736,7 @@ ${data.tenant.name}`;
   // ── Supplier Payments ────────────────────────────────────────────────────
 
   // Record payment against an invoice (or standalone advance)
-  app.post("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId/payments", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId/payments", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21812,7 +21819,7 @@ ${data.tenant.name}`;
   });
 
   // List all payments (across all invoices) for this tenant
-  app.get("/api/restaurant/:id/procurement/payments", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/payments", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { supplier_id, from, to } = req.query as Record<string, string>;
@@ -21839,7 +21846,7 @@ ${data.tenant.name}`;
   });
 
   // Delete a payment (reversal — re-opens the invoice)
-  app.delete("/api/restaurant/:id/procurement/payments/:paymentId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/procurement/payments/:paymentId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21878,7 +21885,7 @@ ${data.tenant.name}`;
   // ── Supplier Ledger ──────────────────────────────────────────────────────
 
   // Per-supplier ledger: all invoices + payments + running balance + aging
-  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId/ledger", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId/ledger", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as Record<string, string>;
@@ -21920,7 +21927,7 @@ ${data.tenant.name}`;
   // ── Procurement Reports ──────────────────────────────────────────────────
 
   // Outstanding payables summary (all suppliers with unpaid invoices)
-  app.get("/api/restaurant/:id/procurement/reports/payables", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/reports/payables", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const today = new Date().toISOString().slice(0,10);
@@ -21951,7 +21958,7 @@ ${data.tenant.name}`;
   });
 
   // Monthly spend report: by supplier and by module
-  app.get("/api/restaurant/:id/procurement/reports/spending", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/reports/spending", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { months = '6' } = req.query as Record<string, string>;
@@ -21990,7 +21997,7 @@ ${data.tenant.name}`;
   });
 
   // GET /api/restaurant/:id/procurement/suppliers — supplier directory with AP summary
-  app.get("/api/restaurant/:id/procurement/suppliers", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/suppliers", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(`
@@ -22014,7 +22021,7 @@ ${data.tenant.name}`;
   });
 
   // GET /api/restaurant/:id/procurement/suppliers/:supplierId — single supplier with AP summary
-  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(`
@@ -22036,7 +22043,7 @@ ${data.tenant.name}`;
   });
 
   // POST /api/restaurant/:id/procurement/suppliers — create supplier (no INVENTORY gate)
-  app.post("/api/restaurant/:id/procurement/suppliers", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/procurement/suppliers", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const {
         name, contact_name, phone, email, address, gst_number,
@@ -22074,7 +22081,7 @@ ${data.tenant.name}`;
   });
 
   // PATCH /api/restaurant/:id/procurement/suppliers/:supplierId — update supplier (includes bank + credit_days)
-  app.patch("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const ALLOWED = [
         'name', 'contact_name', 'phone', 'email', 'address', 'gst_number',
@@ -22099,7 +22106,7 @@ ${data.tenant.name}`;
   });
 
   // DELETE /api/restaurant/:id/procurement/suppliers/:supplierId — soft delete
-  app.delete("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("UPDATE suppliers SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.supplierId]);
@@ -22110,7 +22117,7 @@ ${data.tenant.name}`;
   });
 
   // POST /api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc — compliance doc upload
-  app.post("/api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc", authenticate, restaurantStaff, upload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), upload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       const docType = String(req.query.type || '').toUpperCase();
       if (!['PAN', 'MSME', 'GST'].includes(docType)) return res.status(400).json({ error: "type must be PAN, MSME or GST" });
@@ -22126,7 +22133,7 @@ ${data.tenant.name}`;
   });
 
   // GET /api/restaurant/:id/procurement/suppliers/:supplierId/scorecard — performance metrics (last 90d)
-  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId/scorecard", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId/scorecard", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const sid = req.params.supplierId;
@@ -22205,7 +22212,7 @@ ${data.tenant.name}`;
   });
 
   // GET /api/restaurant/:id/procurement/reports/po-stats — PO status breakdown + recent activity
-  app.get("/api/restaurant/:id/procurement/reports/po-stats", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/procurement/reports/po-stats", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const byStatus: any[] = await db.query(`
@@ -23018,9 +23025,24 @@ ${data.tenant.name}`;
   // granted in Staff Access is honored: owner/platform admin + the same built-in
   // ops roles hkStaff allowed, PLUS any CUSTOM role the owner granted CHECKLISTS or
   // EVENTS_CHECKLISTS (≥View). Replaces the old fixed requireRole() allowlist that
-  // 403'd every granted custom role. Template CREATE/EDIT/DELETE stay owner-only
-  // (requireOwnerOrAdmin inside each write handler) — granted roles VIEW, not edit.
+  // 403'd every granted custom role.
   const checklistViewStaff = requireModuleAccess(['CHECKLISTS', 'EVENTS_CHECKLISTS'], ['MANAGER', 'FRONT_DESK', 'CONCIERGE', 'HOUSEKEEPING', 'MAINTENANCE', 'EVENTS_MANAGER'], 'Checklists');
+  // WRITE gate for the Checklist Templates config (create / edit / delete templates,
+  // categories, steps, assignments, module toggles). Previously owner-only
+  // (requireOwnerOrAdmin), which 403'd a custom "Manager" the owner granted FULL
+  // Checklist Templates access (the reported "Full access but cannot create a
+  // template"). Now: owner/platform admin always; any role granted ≥Edit on
+  // CHECKLISTS or EVENTS_CHECKLISTS; View-only and everyone else denied.
+  const _canManageChecklists = async (req: AuthRequest, res: Response): Promise<boolean> => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (role === 'OWNER' || role === 'SUPER_ADMIN' || role === 'CTO') return true;
+    try {
+      const perms = await getTabPermissionsForRole(req.params.id, role);
+      if (perms && (Number((perms as any)['CHECKLISTS'] || 0) >= 2 || Number((perms as any)['EVENTS_CHECKLISTS'] || 0) >= 2)) return true;
+    } catch { /* fall through to deny */ }
+    res.status(403).json({ error: 'You need Edit or Full access to Checklist Templates to manage them. Ask the property owner to grant it in Staff Access.' });
+    return false;
+  };
 
   const ensureHousekeepingTables = async (db: any) => {
     await db.exec(`CREATE TABLE IF NOT EXISTS housekeeping_tasks (
@@ -23610,7 +23632,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load categories" }); }
   });
   app.post("/api/restaurant/:id/checklists/categories", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -23627,7 +23649,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to add category" }); }
   });
   app.patch("/api/restaurant/:id/checklists/categories/:cid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {}; const fields: string[] = []; const vals: any[] = [];
@@ -23641,7 +23663,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update category" }); }
   });
   app.delete("/api/restaurant/:id/checklists/categories/:cid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const cat: any = await db.get("SELECT is_system FROM checklist_categories WHERE id = ?", [req.params.cid]);
@@ -23682,7 +23704,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load template" }); }
   });
   app.post("/api/restaurant/:id/checklists/templates", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -23713,7 +23735,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create template" }); }
   });
   app.patch("/api/restaurant/:id/checklists/templates/:tid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const tpl: any = await db.get("SELECT * FROM checklist_templates WHERE id = ?", [req.params.tid]);
@@ -23740,7 +23762,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update template" }); }
   });
   app.delete("/api/restaurant/:id/checklists/templates/:tid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const tpl: any = await db.get("SELECT is_system FROM checklist_templates WHERE id = ?", [req.params.tid]);
@@ -23750,7 +23772,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to delete template" }); }
   });
   app.post("/api/restaurant/:id/checklists/templates/:tid/steps", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const label = String(req.body?.label || '').trim();
@@ -23763,7 +23785,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to add step" }); }
   });
   app.patch("/api/restaurant/:id/checklists/templates/:tid/steps/:sid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {}; const fields: string[] = []; const vals: any[] = [];
@@ -23778,7 +23800,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update step" }); }
   });
   app.delete("/api/restaurant/:id/checklists/templates/:tid/steps/:sid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("DELETE FROM checklist_template_steps WHERE id = ?", [req.params.sid]);
@@ -23800,7 +23822,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load assignments" }); }
   });
   app.post("/api/restaurant/:id/checklists/assignments", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -23822,7 +23844,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create assignment" }); }
   });
   app.delete("/api/restaurant/:id/checklists/assignments/:aid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("DELETE FROM checklist_assignments WHERE id = ?", [req.params.aid]);
@@ -23867,7 +23889,7 @@ ${data.tenant.name}`;
   // Idempotent (dedupe keys). Optional { as_of: 'YYYY-MM-DD' } evaluates the mid-stay
   // night math as of that date — handy for testing an overstay checklist on demand.
   app.post("/api/restaurant/:id/checklists/run-scheduled", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const rest: any = await centralDb.get("SELECT property_type, events_enabled, spa_enabled FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
@@ -23887,7 +23909,7 @@ ${data.tenant.name}`;
   // — no code change. GET also returns which modules this tenant actually runs, so
   // the UI only shows the relevant toggles.
   app.get("/api/restaurant/:id/checklists/settings", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -23904,7 +23926,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to load checklist settings' }); }
   });
   app.patch("/api/restaurant/:id/checklists/settings", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!requireOwnerOrAdmin(req, res)) return;
+    if (!(await _canManageChecklists(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -31814,11 +31836,10 @@ ${data.tenant.name}`;
 
   app.post("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      // RBAC: mirror the petty-cash edit/delete siblings — owner/manager only.
-      const role = String(req.user?.role || '').toUpperCase();
-      if (!['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role)) {
-        return res.status(403).json({ error: 'Only an owner or manager can record a petty-cash entry.' });
-      }
+      // RBAC: permission-aware — owner/management/front-desk + any role the owner
+      // granted the EXPENSE_JOURNAL tab (fixes "Manager has Full Expense Journal
+      // access but cannot add an entry"). Floor/kitchen stay hard-denied.
+      if (!(await _canReadExpenseJournal(req, res))) return;
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
       const direction = String(req.body?.direction || '').toUpperCase() === 'OUT' ? 'OUT' : 'IN';
@@ -31847,10 +31868,8 @@ ${data.tenant.name}`;
 
   app.patch("/api/restaurant/:id/petty-cash/:entryId", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const role = String(req.user?.role || '').toUpperCase();
-      if (!['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role)) {
-        return res.status(403).json({ error: 'Only an owner or manager can edit a petty-cash entry.' });
-      }
+      // RBAC: permission-aware — owner/management/front-desk + any EXPENSE_JOURNAL-granted role.
+      if (!(await _canReadExpenseJournal(req, res))) return;
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
       const allowed = ['entry_date', 'direction', 'category', 'amount', 'notes', 'module'];
@@ -52138,7 +52157,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'floorplan-phase3',
+    commit_marker: 'rbac-custom-role-gates',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
@@ -52391,14 +52410,29 @@ ${data.tenant.name}`;
 
   // ─── Accounting API endpoints ───────────────────────────────────────────────
 
-  const _acctOwnerOnly = (req: AuthRequest, res: Response): boolean => {
-    const role = String(req.user?.role || '');
-    if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) { res.status(403).json({ error: 'Forbidden' }); return false; }
-    return true;
+  // Finance & Accounts module tabs (the grantable Staff-Access pages the Ledger
+  // & Books / GST / P&L / Cash-Flow / Aging / Expense endpoints serve). Excludes
+  // CASH_DRAWER (cashier-tier, gated by _acctStaff) and PROCUREMENT (its own gate).
+  const FINANCE_MODULE_TABS = ['ACCOUNTING', 'ACCOUNTS_PNL', 'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'EXPENSE_JOURNAL', 'RECEIVABLES'];
+  // Permission-aware finance gate. Was owner-only, which 403'd every CUSTOM role
+  // the owner granted a Finance & Accounts tab (the reported "Manager has Full
+  // access to Ledger & Books / GST but nothing loads"). Now: OWNER/SUPER_ADMIN/CTO
+  // always pass; any role granted ≥View on a finance tab passes; everyone else 403s
+  // (custom / restricted roles stay denied — no fail-open). Name kept for the
+  // 44 call sites; it is no longer owner-only.
+  const _acctOwnerOnly = async (req: AuthRequest, res: Response): Promise<boolean> => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (['OWNER', 'SUPER_ADMIN', 'CTO'].includes(role)) return true;
+    try {
+      const perms = await getTabPermissionsForRole(req.params.id, role);
+      if (perms && FINANCE_MODULE_TABS.some(t => Number((perms as any)[t] || 0) >= 1)) return true;
+    } catch { /* fall through to deny */ }
+    res.status(403).json({ error: 'Forbidden — Finance & Accounts access required. Ask the property owner to grant it in Staff Access.' });
+    return false;
   };
 
   app.get("/api/restaurant/:id/accounting/chart-of-accounts", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query("SELECT * FROM chart_of_accounts WHERE is_active = 1 ORDER BY display_order, code", []);
@@ -52428,7 +52462,7 @@ ${data.tenant.name}`;
     return _acctRound(Number(r?.b || 0));
   };
   app.get("/api/restaurant/:id/accounting/bank-accounts", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureBankAccounts(db);
@@ -52446,7 +52480,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.post("/api/restaurant/:id/accounting/bank-accounts", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureBankAccounts(db);
@@ -52485,7 +52519,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.patch("/api/restaurant/:id/accounting/bank-accounts/:bankId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureBankAccounts(db);
@@ -52506,7 +52540,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.delete("/api/restaurant/:id/accounting/bank-accounts/:bankId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureBankAccounts(db);
@@ -52558,7 +52592,7 @@ ${data.tenant.name}`;
     return def ? { code: def.gl_account_code, name: def.label } : { code: '1010', name: 'Bank — Main Account' };
   };
   app.get("/api/restaurant/:id/accounting/owners", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -52572,7 +52606,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.post("/api/restaurant/:id/accounting/owners", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -52598,7 +52632,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.patch("/api/restaurant/:id/accounting/owners/:ownerId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -52620,7 +52654,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.delete("/api/restaurant/:id/accounting/owners/:ownerId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -52635,7 +52669,7 @@ ${data.tenant.name}`;
   });
   // Record an owner INVEST (contribution) or PAYOUT (drawing/withdrawal).
   app.post("/api/restaurant/:id/accounting/owners/:ownerId/transactions", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db); await _ensureBankAccounts(db);
@@ -52669,7 +52703,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.get("/api/restaurant/:id/accounting/owners/:ownerId/transactions", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -52684,7 +52718,7 @@ ${data.tenant.name}`;
   // Per-owner Capital Account Statement — opening + running ledger + closing for
   // a date range, ready to print/export and hand to the partner.
   app.get("/api/restaurant/:id/accounting/owners/:ownerId/statement", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -52730,7 +52764,7 @@ ${data.tenant.name}`;
     await centralDb.exec("ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS mdr_gst_pct REAL").catch(() => {});
   };
   app.get("/api/restaurant/:id/accounting/payment-charges", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       await _ensureMdrCols();
       const r: any = await centralDb.get("SELECT mdr_card_pct, mdr_upi_pct, mdr_gst_pct FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
@@ -52738,7 +52772,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.patch("/api/restaurant/:id/accounting/payment-charges", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       await _ensureMdrCols();
       const b: any = req.body || {};
@@ -52751,7 +52785,7 @@ ${data.tenant.name}`;
   });
 
   app.get("/api/restaurant/:id/accounting/gl-entries", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to, account, source_type, journal_ref } = req.query as Record<string, string>;
@@ -52777,7 +52811,7 @@ ${data.tenant.name}`;
   });
 
   app.get("/api/restaurant/:id/accounting/trial-balance", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as Record<string, string>;
@@ -52811,7 +52845,7 @@ ${data.tenant.name}`;
   // gl_entries) — it never writes, posts, or changes any accounting figure, so
   // it cannot affect existing books. Owner-only, like every accounting view.
   app.get("/api/restaurant/:id/accounting/gst-outstanding", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as Record<string, string>;
@@ -52856,7 +52890,7 @@ ${data.tenant.name}`;
   // day; in/out = the day's debits/credits; closing = opening + in − out.
   // Expenses = the day's EXPENSE-account activity. Strictly read-only.
   app.get("/api/restaurant/:id/accounting/cash-book", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const date = String(req.query.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
@@ -52925,7 +52959,7 @@ ${data.tenant.name}`;
   // DERIVED snapshot only — it is NOT posted to the GL (restaurant revenue is
   // recognised at settlement), so it never affects the trial balance.
   app.get("/api/restaurant/:id/accounting/open-tables-receivable", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -52953,7 +52987,7 @@ ${data.tenant.name}`;
 
   // ── Loans / EMI (full loan tracking) ───────────────────────────────────────
   app.get("/api/restaurant/:id/accounting/loans", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query("SELECT * FROM loans WHERE restaurant_id = ? ORDER BY status, created_at DESC", [req.params.id]).catch(() => []);
@@ -52965,7 +52999,7 @@ ${data.tenant.name}`;
   // Cr Loan Payable) or OPENING (pre-existing balance → Dr Opening Balance
   // Equity, Cr Loan Payable). outstanding starts = principal.
   app.post("/api/restaurant/:id/accounting/loans", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53005,7 +53039,7 @@ ${data.tenant.name}`;
 
   // ── Expenses & Payments (rent, electricity, salary, staff advance, EMI, …) ──
   app.get("/api/restaurant/:id/accounting/expense-payments", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as Record<string, string>;
@@ -53020,7 +53054,7 @@ ${data.tenant.name}`;
   // Record an expense/payment. Auto-posts the correct double-entry: Dr the
   // expense/advance/loan account(s), Cr Cash (1000) or Bank (1010) by method.
   app.post("/api/restaurant/:id/accounting/expense-payments", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53086,7 +53120,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/journal-entries", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { entry_date, narration, lines } = req.body;
@@ -53115,7 +53149,7 @@ ${data.tenant.name}`;
   // GL exceptions — journals that _postGlEntries REFUSED because they did not
   // balance. Owner-visible so nothing money-related is ever silently lost.
   app.get("/api/restaurant/:id/accounting/gl-exceptions", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query(
@@ -53138,7 +53172,7 @@ ${data.tenant.name}`;
   // writing. Spa/Event folios use their own posting paths + revenue accounts and are
   // out of scope here.
   app.post("/api/restaurant/:id/accounting/backfill-gl", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const from = String(req.query.from || req.body?.from || '2000-01-01');
@@ -53189,7 +53223,7 @@ ${data.tenant.name}`;
   });
 
   app.get("/api/restaurant/:id/accounting/tds-payable", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { status } = req.query as Record<string, string>;
@@ -53203,7 +53237,7 @@ ${data.tenant.name}`;
   });
 
   app.patch("/api/restaurant/:id/accounting/tds-payable/:tdsId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { challan_number, challan_date, bsr_code, status } = req.body;
@@ -53230,7 +53264,7 @@ ${data.tenant.name}`;
 
   // ── Profit & Loss (GL-derived) ─────────────────────────────────────────────
   app.get("/api/restaurant/:id/accounting/profit-loss", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as Record<string, string>;
@@ -53273,7 +53307,7 @@ ${data.tenant.name}`;
   // Retained Earnings = LIFETIME Σ(Revenue cr−dr) − Σ(Expense dr−cr) up to asOf
   // (no closing entries are ever posted, so P&L accounts carry lifetime balances).
   app.get("/api/restaurant/:id/accounting/balance-sheet", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53322,7 +53356,7 @@ ${data.tenant.name}`;
   // equity counter-account). Buckets are a partition of Σ(dr−cr), so they always
   // reconcile to closing − opening.
   app.get("/api/restaurant/:id/accounting/cash-flow-gl", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53379,7 +53413,7 @@ ${data.tenant.name}`;
   // F&B 18%) and A-4 (inclusive-slab value-of-supply) on every deploy WITHOUT creating
   // bookings/orders on a live tenant. Owner-only; read-only; no DB writes/reads.
   app.get("/api/restaurant/:id/accounting/gst/selftest", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     // Canonical current-regime slabs: ≤₹1,000→12, ≤₹7,500→12, >₹7,500→18.
     const cfg: HotelTaxConfig = { slab1Max: 1000, slab1Rate: 12, slab2Max: 7500, slab2Rate: 12, slab3Rate: 18, serviceChargePct: 0 };
     const scenarios: { id: string; area: string; desc: string; expected: number; actual: number; pass: boolean }[] = [];
@@ -53423,7 +53457,7 @@ ${data.tenant.name}`;
   });
 
   app.get("/api/restaurant/:id/accounting/gst/gstr1", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53556,7 +53590,7 @@ ${data.tenant.name}`;
 
   // ── GSTR-3B summary (output tax − ITC = net payable) ───────────────────────
   app.get("/api/restaurant/:id/accounting/gst/gstr3b", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53611,7 +53645,7 @@ ${data.tenant.name}`;
   // side lots with the total decreasing-side (FIFO), then bucket the survivors by
   // age. Bucket total reconciles to the control account's trial-balance net.
   app.get("/api/restaurant/:id/accounting/aging", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53656,7 +53690,7 @@ ${data.tenant.name}`;
   // Closing a period NEVER blocks or alters posting; _postGlEntries is untouched.
   // The exceptions endpoint surfaces any entry dated inside a closed period.
   app.get("/api/restaurant/:id/accounting/periods", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query("SELECT * FROM accounting_periods ORDER BY from_date DESC", []).catch(() => []);
@@ -53665,7 +53699,7 @@ ${data.tenant.name}`;
   });
 
   app.get("/api/restaurant/:id/accounting/periods/exceptions", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query(
@@ -53684,7 +53718,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/periods/close", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { period_key, from_date, to_date, note } = req.body || {};
@@ -53703,7 +53737,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/periods/reopen", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { period_key } = req.body || {};
@@ -53716,7 +53750,7 @@ ${data.tenant.name}`;
 
   // ── Physical cash count + optional variance journal ────────────────────────
   app.get("/api/restaurant/:id/accounting/cash-count", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53728,7 +53762,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/cash-count", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53773,13 +53807,41 @@ ${data.tenant.name}`;
   const _MANAGER_ROLES = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'];
   const _isMgr = (req: AuthRequest) => _MANAGER_ROLES.includes(String(req.user?.role || ''));
   const _drawerUserId = (req: AuthRequest) => String((req.user as any)?.id || (req.user as any)?.email || '');
+  // Per-viewer handover flags so the UI shows "Accept & Sign" ONLY to the person
+  // who may actually accept (the incoming recipient, matched by id — or a manager
+  // who is not the outgoing party). Mirrors the accept endpoint's gate exactly, so
+  // the outgoing initiator never sees an accept action they cannot use (bug: a
+  // custom "Manager 1" saw Accept & Sign on their own handover; "Manager 2", the
+  // incoming person, saw nothing because to_cashier_id was never set).
+  const _withHandoverFlags = (rows: any[], req: AuthRequest) => {
+    const me = _drawerUserId(req);
+    const mgr = _isMgr(req);
+    return rows.map((h: any) => {
+      const isOutgoing = String(h.from_signed_by) === me || String(h.from_cashier_id) === me;
+      return {
+        ...h,
+        is_outgoing: isOutgoing,
+        is_incoming: !!h.to_cashier_id && String(h.to_cashier_id) === me,
+        can_accept: String(h.status) === 'PENDING_ACCEPT' && !isOutgoing && (!!h.to_cashier_id && String(h.to_cashier_id) === me || mgr),
+      };
+    });
+  };
   const _acctStaff = (req: AuthRequest, res: Response): boolean => {
     if (_NON_STAFF_ROLES.has(String(req.user?.role || ''))) { res.status(403).json({ error: 'Forbidden' }); return false; }
     return true;
   };
-  const _acctManager = (req: AuthRequest, res: Response): boolean => {
-    if (!_isMgr(req)) { res.status(403).json({ error: 'Only a manager or owner can do this.' }); return false; }
-    return true;
+  const _acctManager = async (req: AuthRequest, res: Response): Promise<boolean> => {
+    if (_isMgr(req)) return true;
+    // A custom role the owner granted Full Cash Drawer (or ≥Edit Ledger & Books)
+    // acts as manager for drawer approve/reject/lock — otherwise a custom "Manager"
+    // could never approve a handover or lock the day despite the grant.
+    const role = String(req.user?.role || '').toUpperCase();
+    try {
+      const perms = await getTabPermissionsForRole(req.params.id, role);
+      if (perms && (Number((perms as any)['CASH_DRAWER'] || 0) >= 3 || Number((perms as any)['ACCOUNTING'] || 0) >= 2)) return true;
+    } catch { /* fall through to deny */ }
+    res.status(403).json({ error: 'Only a manager or owner (or a role granted Full Cash Drawer access) can do this.' });
+    return false;
   };
   const _dayLocked = async (db: any, restaurantId: string, date: string): Promise<boolean> => {
     const row: any = await db.get("SELECT status FROM cash_day_locks WHERE restaurant_id=? AND business_date=?", [restaurantId, date]).catch(() => null);
@@ -53891,7 +53953,7 @@ ${data.tenant.name}`;
   // 1010 Bank or 1005 Cash in Transit) and, if requested, a variance journal
   // (1000 <-> 6010 Cash Over/Short). status -> APPROVED.
   app.post("/api/restaurant/:id/accounting/cash-drawers/:drawerId/approve", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctManager(req, res)) return;
+    if (!(await _acctManager(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const d: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
@@ -53935,7 +53997,7 @@ ${data.tenant.name}`;
 
   // Reject a pending drawer back for recount (manager). status -> REJECTED.
   app.post("/api/restaurant/:id/accounting/cash-drawers/:drawerId/reject", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctManager(req, res)) return;
+    if (!(await _acctManager(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const d: any = await db.get("SELECT status FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
@@ -54006,7 +54068,7 @@ ${data.tenant.name}`;
       if (status) { clauses.push('status = ?'); params.push(String(status).toUpperCase()); }
       if (!_isMgr(req)) { const u = _drawerUserId(req); clauses.push('(from_cashier_id = ? OR to_cashier_id = ?)'); params.push(u, u); }
       const rows = await db.query(`SELECT * FROM cash_handovers WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC LIMIT 500`, params);
-      res.json(Array.isArray(rows) ? rows : []);
+      res.json(_withHandoverFlags(Array.isArray(rows) ? rows : [], req));
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
@@ -54020,10 +54082,18 @@ ${data.tenant.name}`;
       if (!h) return res.status(404).json({ error: 'Handover not found.' });
       if (String(h.status) !== 'PENDING_ACCEPT') return res.status(409).json({ error: `Handover is already ${String(h.status).toLowerCase()}.` });
       const me = _drawerUserId(req);
+      // Dual control: the OUTGOING person can NEVER accept their own handover —
+      // acceptance belongs to the incoming side. No manager override here, or a
+      // manager who initiated the handover could self-accept and defeat the
+      // second-signature purpose (the reported "outgoing Manager 1 sees & can use
+      // Accept & Sign"). Blocks whether they are the drawer's cashier or the signer.
+      if (String(h.from_signed_by) === me || String(h.from_cashier_id) === me) {
+        return res.status(403).json({ error: 'The outgoing cashier cannot accept their own handover — the incoming person must Accept & Sign.' });
+      }
+      // The intended recipient (matched by id) accepts; a manager who is NOT the
+      // outgoing party may accept on their behalf (oversight/override).
       const isIncoming = h.to_cashier_id && String(h.to_cashier_id) === me;
       if (!isIncoming && !_isMgr(req)) return res.status(403).json({ error: 'Only the incoming cashier (or a manager) can accept this handover.' });
-      // A real second person must sign; a manager may override (they are the control).
-      if (String(h.from_signed_by) === me && !_isMgr(req)) return res.status(403).json({ error: 'The outgoing cashier cannot also accept — a second person must sign.' });
       if (await _dayLocked(db, req.params.id, h.business_date)) return res.status(409).json({ error: 'This business day is locked.' });
       const from: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [h.from_drawer_id, req.params.id]);
       if (!from) return res.status(404).json({ error: 'Outgoing drawer not found.' });
@@ -54153,7 +54223,7 @@ ${data.tenant.name}`;
         locked: String(lockRow?.status || '') === 'LOCKED',
         lock: lockRow || null,
         drawers: Array.isArray(drawers) ? drawers : [],
-        handovers: Array.isArray(handovers) ? handovers : [],
+        handovers: _withHandoverFlags(Array.isArray(handovers) ? handovers : [], req),
         totals,
         gl_cash: { opening: cashOpening, in: cashIn, out: cashOut, closing: _acctRound(cashOpening + cashIn - cashOut) },
         tender,
@@ -54166,7 +54236,7 @@ ${data.tenant.name}`;
 
   // Lock a business day (manager) — requires every drawer APPROVED.
   app.post("/api/restaurant/:id/accounting/day-close/lock", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctManager(req, res)) return;
+    if (!(await _acctManager(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const date = String(req.body?.business_date || new Date().toISOString().slice(0, 10));
@@ -54185,7 +54255,7 @@ ${data.tenant.name}`;
 
   // Unlock a business day (owner only).
   app.post("/api/restaurant/:id/accounting/day-close/unlock", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const date = String(req.body?.business_date || new Date().toISOString().slice(0, 10));
@@ -54196,7 +54266,7 @@ ${data.tenant.name}`;
 
   // ── Bank reconciliation (manual clear) ─────────────────────────────────────
   app.get("/api/restaurant/:id/accounting/bank-reconciliation", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -54223,7 +54293,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/bank-reconciliation", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctOwnerOnly(req, res)) return;
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;

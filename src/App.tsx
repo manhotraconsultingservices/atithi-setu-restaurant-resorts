@@ -8035,6 +8035,13 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(opts?.headers ?? {}) },
     }).then(r => r.json()), [restaurantId, token]);
 
+  // Staff directory for the handover recipient picker — so a handover is routed to
+  // the incoming person by ID (not a free-text name that never resolves), which is
+  // what lets them see it + Accept & Sign in their own portal.
+  useEffect(() => {
+    acctApi('/attendance/staff').then(d => { if (Array.isArray(d)) setHoStaff(d.filter((s: any) => s?.is_active !== 0 && s?.is_active !== false)); }).catch(() => {});
+  }, [acctApi]);
+
   useEffect(() => {
     acctApi('/accounting/chart-of-accounts').then(d => { if (Array.isArray(d)) setCoa(d); }).catch(() => {});
   }, [acctApi]);
@@ -8251,6 +8258,8 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   // Shift handover (joint count + dual sign-off)
   const [handoverDrawer, setHandoverDrawer] = useState<any>(null);
   const [hoTo, setHoTo] = useState('');
+  const [hoToId, setHoToId] = useState('');       // incoming cashier's staff id — routes the handover to them
+  const [hoStaff, setHoStaff] = useState<any[]>([]);
   const [hoDenomQty, setHoDenomQty] = useState<Record<number, string>>({});
   const [hoDeposit, setHoDeposit] = useState('');
   const [hoDepositTo, setHoDepositTo] = useState('SAFE');
@@ -8278,8 +8287,8 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     setCdMsg(null);
     const denominations = DENOMS.map(dn => ({ denom: dn, qty: parseInt(hoDenomQty[dn] || '0', 10) || 0 })).filter(x => x.qty > 0);
     const deposit_amount = parseFloat(hoDeposit) || 0;
-    const res = await acctApi(`/accounting/cash-drawers/${handoverDrawer.id}/handover`, { method: 'POST', body: JSON.stringify({ to_cashier_name: hoTo.trim(), denominations, counted_cash: hoCountedTotal, deposit_amount, carry_over_float: hoCountedTotal - deposit_amount, deposit_to: hoDepositTo, shift_label: hoShift || null }) });
-    if (res && !res.error) { setHandoverDrawer(null); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoShift(''); setCdMsg({ type: 'ok', text: `Handover to ${res.to_cashier_name} started — awaiting their sign-off` }); loadDayClose(); }
+    const res = await acctApi(`/accounting/cash-drawers/${handoverDrawer.id}/handover`, { method: 'POST', body: JSON.stringify({ to_cashier_name: hoTo.trim(), to_cashier_id: hoToId || null, denominations, counted_cash: hoCountedTotal, deposit_amount, carry_over_float: hoCountedTotal - deposit_amount, deposit_to: hoDepositTo, shift_label: hoShift || null }) });
+    if (res && !res.error) { setHandoverDrawer(null); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoToId(''); setHoShift(''); setCdMsg({ type: 'ok', text: `Handover to ${res.to_cashier_name} started — awaiting their sign-off` }); loadDayClose(); }
     else setCdMsg({ type: 'err', text: res?.error || 'Failed to start handover' });
   };
   const acceptHandover = async (h: any) => { setCdMsg(null); const res = await acctApi(`/accounting/cash-handovers/${h.id}/accept`, { method: 'POST', body: JSON.stringify({}) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: `Handover accepted — ${h.to_cashier_name}'s drawer opened with ${fmtAmt(h.carry_over_float)}` }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Failed to accept handover' }); };
@@ -9439,7 +9448,13 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                       <td className={`py-1.5 text-right tabular-nums ${Math.abs(Number(h.variance || 0)) >= 0.01 ? 'text-rose-700 font-semibold' : ''}`}>{fmtAmt(h.variance)}</td>
                       <td className="py-1.5"><span className={`text-xs rounded-full px-2 py-0.5 whitespace-nowrap ${h.status === 'ACCEPTED' ? 'bg-emerald-100 text-emerald-800' : h.status === 'PENDING_ACCEPT' ? 'bg-amber-100 text-amber-800' : 'bg-stone-200 text-stone-700'}`}>{String(h.status).replace(/_/g, ' ')}</span></td>
                       <td className="py-1.5 whitespace-nowrap">
-                        {h.status === 'PENDING_ACCEPT' && !dayClose.locked && (<span className="flex gap-2"><button onClick={() => acceptHandover(h)} className="text-xs text-emerald-700 underline">Accept &amp; sign</button><button onClick={() => cancelHandover(h)} className="text-xs text-rose-700 underline">Cancel</button></span>)}
+                        {h.status === 'PENDING_ACCEPT' && !dayClose.locked && (
+                          <span className="flex gap-2 items-center">
+                            {h.can_accept && <button onClick={() => acceptHandover(h)} className="text-xs text-emerald-700 underline">Accept &amp; sign</button>}
+                            {(h.is_outgoing || h.can_accept) && <button onClick={() => cancelHandover(h)} className="text-xs text-rose-700 underline">Cancel</button>}
+                            {h.is_outgoing && !h.can_accept && <span className="text-[11px] text-amber-700 italic">Awaiting {h.to_cashier_name || 'incoming cashier'} to accept</span>}
+                          </span>
+                        )}
                         {h.status === 'ACCEPTED' && <span className="text-[11px] font-mono text-[#9c8e85]">{h.deposit_journal_ref || '✓'}</span>}
                       </td>
                     </tr>
@@ -9487,7 +9502,21 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
               <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 space-y-3 max-h-[90vh] overflow-y-auto">
                 <h3 className="text-lg font-bold text-[#1a1208]">Shift handover — {handoverDrawer.cashier_name}</h3>
                 <p className="text-xs text-[#6b5d52]">Count the drawer <span className="font-semibold">together</span> with the incoming cashier, then split it into the float they keep and the cash you submit. You sign now; they sign on accept.</p>
-                <div><label className="text-xs text-[#6b5d52] block">Incoming cashier</label><input value={hoTo} onChange={e => setHoTo(e.target.value)} placeholder="Name of the next cashier" className={`${AC_INPUT} mt-1 w-full`} /></div>
+                <div><label className="text-xs text-[#6b5d52] block">Incoming cashier</label>
+                  {hoStaff.length > 0 ? (
+                    <select
+                      value={hoToId}
+                      onChange={e => { const id = e.target.value; setHoToId(id); const s = hoStaff.find((x: any) => String(x.id) === id); setHoTo(s ? (s.name || s.staff_name || '') : ''); }}
+                      className={`${AC_INPUT} mt-1 w-full`}
+                    >
+                      <option value="">Select the next cashier…</option>
+                      {hoStaff.map((s: any) => <option key={s.id} value={s.id}>{s.name || s.staff_name}{s.role ? ` · ${prettyRoleLabel(s.role)}` : ''}</option>)}
+                    </select>
+                  ) : (
+                    <input value={hoTo} onChange={e => setHoTo(e.target.value)} placeholder="Name of the next cashier" className={`${AC_INPUT} mt-1 w-full`} />
+                  )}
+                  <p className="text-[11px] text-[#9c8e85] mt-1">Pick the person taking over — the pending handover shows up in <span className="font-semibold">their</span> portal to Accept &amp; Sign.</p>
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   {DENOMS.map(dn => (
                     <div key={dn} className="flex items-center gap-2">
@@ -15816,10 +15845,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           }
           // Spa Billing — module-gated AND permissionable (was hard-forced visible).
           if (id === 'SPA_BILLING') return isSpaEnabled && (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs));
-          // The Events-module cleaning tab reuses the shared HOUSEKEEPING
-          // permission (the backend housekeeping endpoints are RBAC-keyed on
-          // 'HOUSEKEEPING'), so it shows for whoever can access Housekeeping.
-          if (id === 'EVENTS_HOUSEKEEPING') return isTabVisible('HOUSEKEEPING', effectiveAllowedTabs);
+          // The Events-module cleaning tab reuses the shared HOUSEKEEPING permission
+          // (the backend housekeeping endpoints are RBAC-keyed on 'HOUSEKEEPING'),
+          // BUT it lives under the Events nav — so it must ALSO require Events access.
+          // Otherwise a hotel role with Housekeeping but Events = N/A saw this tab,
+          // which pulled the whole "Events & Convention" group into view (a module
+          // group renders when it has ≥1 visible tab). Reported: "Events set to N/A
+          // but the module is still visible with Cleaning Checklist accessible."
+          // Now: owner/admin (with Housekeeping) always; any other role needs BOTH
+          // some Events grant AND Housekeeping. A role with no Events access never
+          // pulls the Events group in via this tab.
+          if (id === 'EVENTS_HOUSEKEEPING') {
+            if (isOwnerOrAdmin) return isTabVisible('HOUSEKEEPING', effectiveAllowedTabs);
+            const hasEventsAccess = Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.some(t => String(t).startsWith('EVENTS_'));
+            return hasEventsAccess && isTabVisible('HOUSEKEEPING', effectiveAllowedTabs);
+          }
           return isTabVisible(id, effectiveAllowedTabs);
         };
         // A page shows when RBAC allows it AND the tenant has the relevant
