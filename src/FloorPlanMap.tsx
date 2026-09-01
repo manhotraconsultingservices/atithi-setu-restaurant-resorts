@@ -57,6 +57,22 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
   const [activeSection, setActiveSection] = useState<string>('ALL'); // 'ALL' | sectionId | 'NONE'
   const [arrange, setArrange] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Per-tenant turn-time thresholds (minutes): amber past warn, red past alert.
+  const [warnMins, setWarnMins] = useState(45);
+  const [alertMins, setAlertMins] = useState(90);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch(`/api/restaurant/${restaurantId}`);
+        if (r.ok) {
+          const d = await r.json();
+          setWarnMins(Number.isFinite(+d.turn_warn_mins) ? Number(d.turn_warn_mins) : 45);
+          setAlertMins(Number.isFinite(+d.turn_alert_mins) ? Number(d.turn_alert_mins) : 90);
+        }
+      } catch { /* keep defaults */ }
+    })();
+  }, [restaurantId]);
 
   const loadSections = async () => {
     try {
@@ -102,13 +118,16 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
     const bill = t.session_status === 'bill_requested';
     const unavail = t.status === 'NOT_AVAILABLE';
     const mins = t.session_opened_at ? Math.floor((now - new Date(t.session_opened_at).getTime()) / 60000) : 0;
-    const late = occ && mins >= 60;
+    const over = occ && alertMins > 0 && mins >= alertMins;          // red — slow turn
+    const warn = occ && !over && warnMins > 0 && mins >= warnMins;   // amber — watch
+    const covers = Number(t.covers || 0);
     const cls = bill ? 'border-orange-400 bg-orange-50 text-orange-900'
-      : late ? 'border-rose-400 bg-rose-50 text-rose-900'
+      : over ? 'border-rose-400 bg-rose-50 text-rose-900'
+      : warn ? 'border-amber-400 bg-amber-50 text-amber-900'
       : occ ? 'border-[#cc5a16]/55 bg-[#cc5a16]/8 text-[#1a1208]'
       : unavail ? 'border-zinc-200 bg-zinc-50 text-zinc-400'
       : 'border-dashed border-[#cc5a16]/25 bg-white text-[#9c8e85]';
-    return { occ, bill, unavail, late, mins, cls };
+    return { occ, bill, unavail, over, warn, mins, covers, cls, pulse: bill || over };
   };
 
   const shapeRadius = (shape?: string) =>
@@ -119,9 +138,12 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
     const s = tileStatus(t);
     return (
       <>
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center justify-between gap-1.5">
           <span className="font-bold text-[14px] tracking-tight leading-none truncate">{t.name}</span>
-          {s.occ && <span className="font-mono text-[10px] opacity-70">{s.mins}m</span>}
+          <div className="flex items-center gap-1 shrink-0">
+            {s.covers > 0 && <span className="font-mono text-[10px] font-bold px-1 rounded bg-black/5 leading-none py-0.5" title={`${s.covers} guests`}>{s.covers}p</span>}
+            {s.occ && <span className="font-mono text-[10px] opacity-70">{s.mins}m</span>}
+          </div>
         </div>
         {!compact && (s.occ || s.bill ? (
           <div>
@@ -129,7 +151,7 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
             <div className="flex items-center gap-1.5 mt-1 font-mono text-[10px] opacity-75 truncate">
               {t.order_count ? <span>{t.order_count} KOT</span> : null}
               {t.assigned_waiter_name ? <span className="truncate">· {t.assigned_waiter_name}</span> : null}
-              {s.bill ? <span className="font-bold">· BILL</span> : null}
+              {s.bill ? <span className="font-bold">· BILL</span> : s.over ? <span className="font-bold">· SLOW</span> : null}
             </div>
           </div>
         ) : (
@@ -194,7 +216,7 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
             const s = tileStatus(t);
             return (
               <button key={t.id} onClick={() => onTileClick({ id: t.id, name: t.name })}
-                className={cx('text-left border-2 p-3 min-h-[94px] flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-md', s.cls, s.bill && 'alert-pulse')}
+                className={cx('text-left border-2 p-3 min-h-[94px] flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-md', s.cls, s.pulse && 'alert-pulse')}
                 style={{ borderRadius: shapeRadius(t.shape) }}>
                 <TileBody t={t} />
               </button>
@@ -218,7 +240,7 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
               const s = tileStatus(t);
               return (
                 <button key={t.id} onClick={() => onTileClick({ id: t.id, name: t.name })}
-                  className={cx('absolute text-left border-2 p-2.5 flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-md', s.cls, s.bill && 'alert-pulse')}
+                  className={cx('absolute text-left border-2 p-2.5 flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-md', s.cls, s.pulse && 'alert-pulse')}
                   style={{ left: Number(t.pos_x) || 0, top: Number(t.pos_y) || 0, width: TILE_W, height: TILE_H, borderRadius: shapeRadius(t.shape) }}>
                   <TileBody t={t} />
                   {t.section_id && <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white" style={{ background: sectionColor(t.section_id) }} title={sectionName(t.section_id)} />}
@@ -235,7 +257,7 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
                 const s = tileStatus(t);
                 return (
                   <button key={t.id} onClick={() => onTileClick({ id: t.id, name: t.name })}
-                    className={cx('text-left border-2 p-3 min-h-[94px] flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-md', s.cls, s.bill && 'alert-pulse')}
+                    className={cx('text-left border-2 p-3 min-h-[94px] flex flex-col justify-between transition-transform hover:-translate-y-0.5 hover:shadow-md', s.cls, s.pulse && 'alert-pulse')}
                     style={{ borderRadius: shapeRadius(t.shape) }}>
                     <TileBody t={t} />
                   </button>

@@ -4534,6 +4534,32 @@ async function testFloorPlan() {
     } catch (e) { skip('TC-FLOORPLAN-LAYOUT', 'layout save', e?.message || e); }
   }
 
+  try { // TC-FLOORPLAN-COVERS — seating with N guests surfaces covers=N on the live tile (+ PATCH edit)
+    const liveNow = (await api('GET', `/api/restaurant/${restaurantId}/tables/live`)).data || [];
+    const freeT = (Array.isArray(liveNow) ? liveNow : []).find(t => t.status === 'AVAILABLE' && !t.session_id) || two[0];
+    if (!freeT) { skip('TC-FLOORPLAN-COVERS', 'covers', 'no free table'); }
+    else {
+      const s = (await api('POST', `/api/restaurant/${restaurantId}/sessions`, { table_id: freeT.id, table_name: freeT.name, covers: 3 })).data;
+      const live1 = ((await api('GET', `/api/restaurant/${restaurantId}/tables/live`)).data || []).find(t => t.id === freeT.id);
+      const patched = await api('PATCH', `/api/restaurant/${restaurantId}/sessions/${s.session_token}/covers`, { covers: 5 });
+      const live2 = ((await api('GET', `/api/restaurant/${restaurantId}/tables/live`)).data || []).find(t => t.id === freeT.id);
+      (Number(live1?.covers) === 3 && patched.status === 200 && Number(live2?.covers) === 5)
+        ? pass('TC-FLOORPLAN-COVERS', 'Seating covers=3 surfaces on live tile; PATCH updates to 5', `c1=${live1?.covers} c2=${live2?.covers}`)
+        : fail('TC-FLOORPLAN-COVERS', 'covers surface', `c1=${live1?.covers} patch=${patched.status} c2=${live2?.covers}`);
+      // cleanup: close the session so the table returns to AVAILABLE (no orders → no GL)
+      await api('PATCH', `/api/restaurant/${restaurantId}/sessions/${s.session_token}/close`, {}).catch(() => {});
+    }
+  } catch (e) { skip('TC-FLOORPLAN-COVERS', 'covers', e?.message || e); }
+
+  try { // TC-FLOORPLAN-TURNTIME — per-tenant thresholds persist; red clamped to >= amber
+    const set = await api('PATCH', `/api/restaurant/${restaurantId}/turn-time-setting`, { warn_mins: 30, alert_mins: 20 });
+    const okGuard = set.status === 200 && Number(set.data?.turn_warn_mins) === 30 && Number(set.data?.turn_alert_mins) === 30;
+    const g = (await api('GET', `/api/restaurant/${restaurantId}`)).data;
+    const persisted = Number(g?.turn_warn_mins) === 30 && Number(g?.turn_alert_mins) === 30;
+    await api('PATCH', `/api/restaurant/${restaurantId}/turn-time-setting`, { warn_mins: 45, alert_mins: 90 }); // restore defaults
+    (okGuard && persisted) ? pass('TC-FLOORPLAN-TURNTIME', 'Turn-time thresholds persist; red clamps up to amber', 'warn=30 alert=30(clamped)') : fail('TC-FLOORPLAN-TURNTIME', 'turn-time setting', `set=${set.status} warn=${set.data?.turn_warn_mins} alert=${set.data?.turn_alert_mins} persisted=${persisted}`);
+  } catch (e) { skip('TC-FLOORPLAN-TURNTIME', 'turn-time', e?.message || e); }
+
   try { // TC-FLOORPLAN-DELETE — deleting a section orphans nothing (tables fall back to NULL)
     if (!sid) { skip('TC-FLOORPLAN-DELETE', 'section delete', 'no section created'); }
     else {

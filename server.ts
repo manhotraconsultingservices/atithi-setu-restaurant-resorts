@@ -6321,6 +6321,13 @@ async function startServer() {
   // the owner turns it on in settings.
   await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS cancel_requires_password INTEGER DEFAULT 0`).catch(() => {});
 
+  // Floor plan (Phase 3): per-tenant turn-time thresholds (minutes). A seated
+  // table goes amber past `turn_warn_mins` and red past `turn_alert_mins` on the
+  // Command Centre map, surfacing slow-turning tables. Sensible defaults so the
+  // colour escalation works out-of-the-box; owners can tune them in settings.
+  await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS turn_warn_mins INTEGER DEFAULT 45`).catch(() => {});
+  await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS turn_alert_mins INTEGER DEFAULT 90`).catch(() => {});
+
   // ====== Per-tenant subdomain: slug column migration + backfill ======
   try {
     // Add slug column if missing (idempotent)
@@ -44657,10 +44664,18 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/sessions", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const { table_id, table_name, session_token, customer_name, customer_phone } = req.body;
+      const covers = Math.max(0, parseInt(req.body?.covers, 10) || 0);
       const db = await getTenantDb(req.params.id);
+      // Floor plan (Phase 3): guest count column — idempotent, so INSERT/UPDATE below never fail.
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS covers INTEGER DEFAULT 0").catch(() => {});
 
       // Helper to load and return a session with its orders
       const returnSession = async (sess: any) => {
+        // If staff supplied a guest count on (re)seating and the session has
+        // none yet, capture it — covers should never regress to 0 on resume.
+        if (covers > 0 && !Number(sess?.covers)) {
+          try { await db.run("UPDATE table_sessions SET covers = ? WHERE id = ?", [covers, sess.id]); sess.covers = covers; } catch { /* non-fatal */ }
+        }
         // S1/S5 fix (15 Jun 2026): exclude CANCELLED orders so the customer's
         // running bill + order list never include a cancelled round. The
         // invoice / request-bill (line ~29825) already excludes them — this
@@ -44759,9 +44774,9 @@ ${data.tenant.name}`;
       const newToken = randomUUID().replace(/-/g, '');
       await db.run(
         `INSERT INTO table_sessions
-           (id, session_token, table_id, table_name, customer_name, customer_phone, status, round_count, bill_amount)
-         VALUES (?, ?, ?, ?, ?, ?, 'open', 0, 0)`,
-        [newId, newToken, table_id || null, table_name || null, customer_name || null, customer_phone || null]
+           (id, session_token, table_id, table_name, customer_name, customer_phone, status, round_count, bill_amount, covers)
+         VALUES (?, ?, ?, ?, ?, ?, 'open', 0, 0, ?)`,
+        [newId, newToken, table_id || null, table_name || null, customer_name || null, customer_phone || null, covers]
       );
       // Mark the physical table as OCCUPIED.
       // CMD-CENTER-FIX: removed the blanket .catch(() => {}) — a failed
@@ -44775,10 +44790,26 @@ ${data.tenant.name}`;
           console.error(`[sessions-create] FAILED to flip table ${table_id} OCCUPIED:`, occErr);
         }
       }
-      res.json({ id: newId, session_token: newToken, table_id, table_name, status: 'open', round_count: 0, bill_amount: 0, orders: [] });
+      res.json({ id: newId, session_token: newToken, table_id, table_name, status: 'open', round_count: 0, bill_amount: 0, covers, orders: [] });
     } catch (err) {
       console.error("Create session error:", err);
       res.status(500).json({ error: "Failed to create session" });
+    }
+  });
+
+  // Floor plan (Phase 3): update the guest count (covers) on a live session.
+  // Staff-only — the count feeds the map tile + turn-time / per-cover analytics.
+  app.patch("/api/restaurant/:id/sessions/:token/covers", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS covers INTEGER DEFAULT 0").catch(() => {});
+      const covers = Math.max(0, parseInt(req.body?.covers, 10) || 0);
+      const sess = await db.get("SELECT id FROM table_sessions WHERE session_token = ? AND status IN ('open','bill_requested') AND deleted_at IS NULL", [req.params.token]);
+      if (!sess) return res.status(404).json({ error: 'No active session for this table' });
+      await db.run("UPDATE table_sessions SET covers = ? WHERE id = ?", [covers, sess.id]);
+      res.json({ success: true, covers });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || 'Failed to update covers' });
     }
   });
 
@@ -46581,6 +46612,23 @@ ${data.tenant.name}`;
       const enabled = req.body?.enabled ? 1 : 0;
       await centralDb.run("UPDATE restaurants SET cancel_requires_password = ? WHERE id = ?", [enabled, req.params.id]);
       res.json({ success: true, cancel_requires_password: enabled });
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to update setting' }); }
+  });
+  // Owner: set the per-tenant turn-time thresholds (minutes) for the map's
+  // amber/red escalation. Dedicated endpoint (the main restaurant PATCH assigns
+  // core fields directly and would blank them) — see the settings-PATCH note.
+  app.patch("/api/restaurant/:id/turn-time-setting", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      await centralDb.run("ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS turn_warn_mins INTEGER DEFAULT 45").catch(() => {});
+      await centralDb.run("ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS turn_alert_mins INTEGER DEFAULT 90").catch(() => {});
+      let warn  = Math.max(0, parseInt(req.body?.warn_mins, 10));
+      let alert = Math.max(0, parseInt(req.body?.alert_mins, 10));
+      if (!Number.isFinite(warn))  warn = 45;
+      if (!Number.isFinite(alert)) alert = 90;
+      if (alert > 0 && warn > 0 && alert < warn) alert = warn; // red can't precede amber
+      await centralDb.run("UPDATE restaurants SET turn_warn_mins = ?, turn_alert_mins = ? WHERE id = ?", [warn, alert, req.params.id]);
+      res.json({ success: true, turn_warn_mins: warn, turn_alert_mins: alert });
     } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to update setting' }); }
   });
   const _ensureRestCancelCols = async (db: any) => {
@@ -49918,6 +49966,8 @@ ${data.tenant.name}`;
       await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_y INTEGER DEFAULT 0").catch(() => {});
       await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS section_id TEXT").catch(() => {});
       await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS shape TEXT DEFAULT 'square'").catch(() => {});
+      // Floor plan (Phase 3): guest count (covers) captured at seating.
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS covers INTEGER DEFAULT 0").catch(() => {});
 
       // All tables + assigned role + the specific waiter name (null when the whole
       // role serves the table). `t.*` carries assigned_role + assigned_waiter_id.
@@ -49981,6 +50031,7 @@ ${data.tenant.name}`;
           live_total:          liveTotal,
           session_status:      sess?.status        ?? null,
           order_count:         sess ? (countBySession[sess.id] ?? 0) : 0,
+          covers:              Number(sess?.covers || 0),
         };
       });
 
@@ -52087,7 +52138,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'floorplan-phase2',
+    commit_marker: 'floorplan-phase3',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

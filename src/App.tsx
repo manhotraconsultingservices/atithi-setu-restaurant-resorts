@@ -30026,6 +30026,49 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </label>
             </div>
 
+            {/* ── Turn-time thresholds (Command Centre map colour escalation) ── */}
+            <div className="space-y-3">
+              <div>
+                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Table Turn-Time Alerts</label>
+                <p className="text-[11px] text-[#9c8e85] mt-1">
+                  On the Command Centre map a seated table turns <span className="text-amber-600 font-semibold">amber</span> after the first threshold and <span className="text-rose-600 font-semibold">red</span> after the second — so slow-turning tables stand out at a glance. Set 0 to disable a stage.
+                </p>
+              </div>
+              <div className="flex items-center gap-3 flex-wrap">
+                {([
+                  { key: 'turn_warn_mins',  label: 'Amber after', dflt: 45 },
+                  { key: 'turn_alert_mins', label: 'Red after',   dflt: 90 },
+                ] as const).map(f => (
+                  <label key={f.key} className="flex items-center gap-2 bg-[#faf7f2] rounded-2xl px-4 py-3">
+                    <span className="text-sm font-bold text-[#1a1208]">{f.label}</span>
+                    <input
+                      type="number" min={0} max={600}
+                      value={Number((restaurant as any)?.[f.key] ?? f.dflt)}
+                      onChange={e => setRestaurant(prev => prev ? ({ ...prev, [f.key]: Math.max(0, parseInt(e.target.value, 10) || 0) } as any) : null)}
+                      onBlur={async () => {
+                        try {
+                          const r = await fetch(`/api/restaurant/${restaurantId}/turn-time-setting`, {
+                            method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                            body: JSON.stringify({
+                              warn_mins:  Number((restaurant as any)?.turn_warn_mins ?? 45),
+                              alert_mins: Number((restaurant as any)?.turn_alert_mins ?? 90),
+                            }),
+                          });
+                          if (r.ok) {
+                            const d = await r.json();
+                            setRestaurant(prev => prev ? ({ ...prev, turn_warn_mins: d.turn_warn_mins, turn_alert_mins: d.turn_alert_mins } as any) : null);
+                            toast.success('Turn-time alerts updated.');
+                          } else { toast.error('Could not update turn-time alerts.'); }
+                        } catch { toast.error('Could not update turn-time alerts.'); }
+                      }}
+                      className="w-20 text-sm border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 bg-white font-mono text-right"
+                    />
+                    <span className="text-xs text-[#9c8e85]">min</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
             <div className="space-y-4">
               <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Menu Watermark</label>
               <div className="flex items-center gap-4">
@@ -57896,6 +57939,22 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const [billPreviewHtml, setBillPreviewHtml] = useState<string | null>(null);
   const [invTpl, setInvTpl] = useState<any>(INVOICE_TEMPLATE_DEFAULT);
 
+  // Floor plan (Phase 3): guest count (covers) for this session. Feeds the map
+  // tile + per-cover analytics. Staff set it here; PATCH is fire-and-forget.
+  const [covers, setCovers] = useState<number>(0);
+  const saveCovers = async (n: number) => {
+    const val = Math.max(0, Math.min(99, n));
+    setCovers(val);
+    if (!session?.session_token) return;
+    try {
+      await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/covers`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ covers: val }),
+      });
+    } catch { /* non-fatal — tile just won't update until next edit */ }
+  };
+
   // ── Fetch session ──────────────────────────────────────────────────────────
   useEffect(() => {
     setLoading(true); setFetchErr('');
@@ -57911,6 +57970,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
           setOrders(sess.orders || []);
           setRestaurant(rest);
           setDiscount(Number(sess.discount_amount || 0));
+          setCovers(Number(sess.covers || 0));
           // Phase H3 — sess.service_charge_percent already comes pre-defaulted
           // from restaurants.service_charge_percent by the /active-session
           // endpoint when the session is still 'open' AND has no svc % of
@@ -58433,6 +58493,18 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                   {session.status === 'bill_requested' && session.payment_method
                     ? ` · Requested: ${session.payment_method}` : ''}
                 </p>
+              )}
+              {session && (
+                <div className="mt-1.5 flex items-center gap-2">
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Guests</span>
+                  <div className="inline-flex items-center rounded-lg border border-[#cc5a16]/20 bg-white overflow-hidden">
+                    <button type="button" onClick={() => saveCovers(covers - 1)} disabled={covers <= 0}
+                      className="px-2.5 py-1 text-[#cc5a16] font-bold hover:bg-[#cc5a16]/5 disabled:opacity-30 disabled:cursor-not-allowed">−</button>
+                    <span className="px-2.5 min-w-[2.5ch] text-center font-mono font-bold text-sm text-[#1a1208]">{covers || '—'}</span>
+                    <button type="button" onClick={() => saveCovers(covers + 1)}
+                      className="px-2.5 py-1 text-[#cc5a16] font-bold hover:bg-[#cc5a16]/5">+</button>
+                  </div>
+                </div>
               )}
             </div>
             <button onClick={onClose}
