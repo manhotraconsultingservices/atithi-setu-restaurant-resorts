@@ -12866,13 +12866,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const reason = window.prompt('Cancel this invoice?\n\nThis reverses it in the accounts (revenue, GST, cash) — the P&L and reports update automatically. The invoice is NOT deleted; a cancelled record is kept for audit.\n\nEnter a reason (required):');
     if (reason === null) return;
     if (reason.trim().length < 3) { toast.error('A cancellation reason is required.'); return; }
+    const isSession = inv.invoice_type === 'SESSION';
+    const url = isSession
+      ? `/api/restaurant/${restaurantId}/invoices/session/${inv.session_token || inv.session_db_id || inv.id}/cancel`
+      : `/api/restaurant/${restaurantId}/invoices/order/${inv.id}/cancel`;
+    const post = async (password?: string) => {
+      const body: any = { reason: reason.trim() };
+      if (password) body.password = password;
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+      return { res, data: await res.json().catch(() => ({})) };
+    };
     try {
-      const isSession = inv.invoice_type === 'SESSION';
-      const url = isSession
-        ? `/api/restaurant/${restaurantId}/invoices/session/${inv.session_token || inv.session_db_id || inv.id}/cancel`
-        : `/api/restaurant/${restaurantId}/invoices/order/${inv.id}/cancel`;
-      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ reason: reason.trim() }) });
-      const data = await res.json().catch(() => ({}));
+      let { res, data } = await post();
+      // Cancel-with-password gate: 428 → prompt for the actor's own password, retry.
+      if (res.status === 428 || data?.code === 'PASSWORD_REQUIRED') {
+        const pw = window.prompt('This action needs authorisation.\n\nEnter YOUR account password to cancel this bill:');
+        if (!pw) return;
+        ({ res, data } = await post(pw));
+      }
+      if (res.status === 401 || data?.code === 'PASSWORD_INVALID') { toast.error('Incorrect password — cancellation not authorised.'); return; }
       if (!res.ok) throw new Error(data.error || `Failed (${res.status})`);
       toast.success('Invoice cancelled and reversed in the accounts.');
       fetchInvoices();
@@ -13726,12 +13738,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const patchLiveOrder = async (id: string, body: Record<string, any>) => {
+    const isCancel = String(body.status || '').toUpperCase() === 'CANCELLED';
+    const post = (extra?: Record<string, any>) => fetch(`/api/orders/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ ...body, ...extra }),
+    });
     try {
-      await fetch(`/api/orders/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify(body)
-      });
+      let res = await post();
+      // Cancel-with-password gate: only fires for a cancel when the tenant enabled it.
+      if (isCancel && res.status === 428) {
+        const pw = window.prompt('This action needs authorisation.\n\nEnter YOUR account password to cancel:');
+        if (!pw) return;
+        res = await post({ password: pw });
+      }
+      if (isCancel && res.status === 401) { toast.error('Incorrect password — cancellation not authorised.'); return; }
       fetchLiveTables();
     } catch (err) {
       console.error("Failed to patch order", err);
@@ -29946,6 +29967,45 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     type="checkbox"
                     checked={(restaurant as any)?.waiter_shared_floor === 1 || (restaurant as any)?.waiter_shared_floor === true}
                     onChange={e => setRestaurant(prev => prev ? ({...prev, waiter_shared_floor: e.target.checked ? 1 : 0} as any) : null)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-[#9c8e85]/30 rounded-full peer-checked:bg-[#cc5a16] transition-colors"></div>
+                  <div className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform peer-checked:translate-x-5"></div>
+                </div>
+              </label>
+            </div>
+
+            {/* ── Cancel-with-password toggle (opt-in security gate) ──────────── */}
+            <div className="space-y-3">
+              <div>
+                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Cancellation Security</label>
+                <p className="text-[11px] text-[#9c8e85] mt-1">
+                  Require staff to re-enter their OWN account password before cancelling a bill or an order/item — prevents unauthorised voids. Off by default.
+                </p>
+              </div>
+              <label className="flex items-center justify-between gap-4 bg-[#faf7f2] rounded-2xl px-4 py-3 cursor-pointer">
+                <div className="flex items-center gap-3">
+                  <span className="text-lg">🔒</span>
+                  <div>
+                    <div className="text-sm font-bold text-[#1a1208]">Password to cancel a bill / item</div>
+                    <div className="text-[11px] text-[#6b5d52]">Staff re-enter their password to authorise any cancellation</div>
+                  </div>
+                </div>
+                <div className="relative">
+                  <input
+                    type="checkbox"
+                    checked={(restaurant as any)?.cancel_requires_password === 1 || (restaurant as any)?.cancel_requires_password === true}
+                    onChange={async e => {
+                      const enabled = e.target.checked;
+                      setRestaurant(prev => prev ? ({ ...prev, cancel_requires_password: enabled ? 1 : 0 } as any) : null);
+                      try {
+                        await fetch(`/api/restaurant/${restaurantId}/cancel-password-setting`, {
+                          method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({ enabled }),
+                        });
+                        toast.success(enabled ? 'Cancellations now require a password.' : 'Password requirement turned off.');
+                      } catch { toast.error('Could not update the setting.'); }
+                    }}
                     className="sr-only peer"
                   />
                   <div className="w-11 h-6 bg-[#9c8e85]/30 rounded-full peer-checked:bg-[#cc5a16] transition-colors"></div>
@@ -57738,6 +57798,13 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const [payMethod, setPayMethod]     = useState<'CASH' | 'CARD' | 'UPI' | 'CHARGE_TO_ROOM'>('CASH');
   const [expanded, setExpanded]       = useState<Record<number, boolean>>({});
 
+  // Move / transfer — tick dishes (or all) → target table → TRANSFER KOT.
+  const [showMove, setShowMove]           = useState(false);
+  const [moveTargetId, setMoveTargetId]   = useState('');
+  const [moveSel, setMoveSel]             = useState<Record<string, number>>({}); // `${orderId}|${name}` -> qty to move
+  const [movePlacing, setMovePlacing]     = useState(false);
+  const [allTablesForMove, setAllTablesForMove] = useState<any[]>([]);
+
   // Item editing (add/remove lines on the table bill, manual-invoice style).
   // editItems is a FLAT consolidated list across active rounds; each line keeps
   // an _orderId so it persists back to the right round on save.
@@ -58152,6 +58219,40 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       }).catch(() => {});
     }
     setBillPreviewHtml(null);
+  };
+
+  // Load the tables once the Move dialog opens (for the target-table picker).
+  useEffect(() => {
+    if (!showMove) return;
+    fetch(`/api/restaurant/${restaurantId}/tables`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : []))
+      .then(d => setAllTablesForMove(Array.isArray(d) ? d : []))
+      .catch(() => setAllTablesForMove([]));
+  }, [showMove, restaurantId, token]);
+
+  // Move ticked dishes (or the whole table) to another table. Sends empty items
+  // when everything is selected at full qty (whole-table move → "TABLE MOVED"),
+  // else the picked lines (dish move → "DISH MOVED"). The server prints a
+  // TRANSFER KOT under the target table.
+  const doMove = async () => {
+    if (!moveTargetId || !session) return;
+    const allLines = activeOrders.flatMap((o: any) => (Array.isArray(o.items) ? o.items : []).map((it: any) => ({ order_id: o.id, name: it.name || 'Item', qty: Number(it.quantity || 1) })));
+    const picked = allLines.filter((l: any) => (moveSel[`${l.order_id}|${l.name}`] || 0) > 0)
+      .map((l: any) => ({ order_id: l.order_id, name: l.name, quantity: Math.min(l.qty, moveSel[`${l.order_id}|${l.name}`]) }));
+    if (picked.length === 0) { toast.error('Pick at least one dish to move.'); return; }
+    const allSelectedFull = allLines.length > 0 && allLines.every((l: any) => (moveSel[`${l.order_id}|${l.name}`] || 0) >= l.qty);
+    setMovePlacing(true);
+    try {
+      const body: any = { source_session_token: session.session_token, target_table_id: moveTargetId };
+      if (!allSelectedFull) body.items = picked;
+      const r = await fetch(`/api/restaurant/${restaurantId}/tables/move`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.success) { toast.success(`Moved to ${d.target_table} — transfer KOT sent.`); setShowMove(false); onClose(); }
+      else toast.error(d.error || 'Move failed.');
+    } catch { toast.error('Could not reach the print/move service.'); }
+    finally { setMovePlacing(false); }
   };
 
   // Print Bill → queue the customer invoice to the on-prem INVOICE thermal
@@ -58790,6 +58891,13 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
               >
                 Preview
               </button>
+              <button
+                onClick={() => { setMoveSel({}); setMoveTargetId(''); setShowMove(true); }}
+                title="Move this table or specific dishes to another table (prints a transfer KOT)"
+                className="flex items-center justify-center gap-1.5 px-3 py-3 rounded-xl border border-[#cc5a16]/15 text-[#9c8e85] text-xs font-bold uppercase tracking-widest hover:bg-[#cc5a16]/5 transition-all"
+              >
+                <span className="text-sm leading-none">⇄</span> Move
+              </button>
 
               {payMethod === 'CHARGE_TO_ROOM' ? (
                 <button
@@ -58816,6 +58924,58 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                 </button>
               )}
             </div>
+
+            {showMove && (() => {
+              const allLines = activeOrders.flatMap((o: any) => (Array.isArray(o.items) ? o.items : []).map((it: any) => ({ order_id: o.id, name: it.name || 'Item', qty: Number(it.quantity || 1) })));
+              const anySel = Object.values(moveSel).some((v: any) => v > 0);
+              return (
+                <div className="fixed inset-0 z-[130] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setShowMove(false)}>
+                  <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-[#cc5a16]/10 shrink-0">
+                      <h4 className="font-bold font-serif text-sm text-[#1a1208]">Move / Transfer — {table.name}</h4>
+                      <button onClick={() => setShowMove(false)} className="p-1 hover:bg-[#faf7f2] rounded-lg text-[#9c8e85]"><X size={16} /></button>
+                    </div>
+                    <div className="p-4 space-y-3 overflow-y-auto">
+                      <div>
+                        <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Move to table</label>
+                        <select value={moveTargetId} onChange={e => setMoveTargetId(e.target.value)} className="w-full border border-[#cc5a16]/20 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                          <option value="">Select a table…</option>
+                          {allTablesForMove.filter((t: any) => t.id !== table.id).map((t: any) => (
+                            <option key={t.id} value={t.id}>{t.name}{String(t.status).toUpperCase() === 'OCCUPIED' ? ' — occupied (merge)' : ''}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Dishes to move</span>
+                        <button onClick={() => setMoveSel(Object.fromEntries(allLines.map((l: any) => [`${l.order_id}|${l.name}`, l.qty])))} className="text-[11px] font-bold text-[#cc5a16] hover:underline">Select all (whole table)</button>
+                      </div>
+                      <div className="space-y-1.5 max-h-[40vh] overflow-y-auto">
+                        {allLines.length === 0 && <p className="text-xs text-[#9c8e85]">No dishes to move.</p>}
+                        {allLines.map((l: any) => {
+                          const key = `${l.order_id}|${l.name}`; const sel = (moveSel[key] || 0) > 0;
+                          return (
+                            <div key={key} className="flex items-center gap-2 text-sm py-1">
+                              <input type="checkbox" checked={sel} onChange={e => setMoveSel(m => ({ ...m, [key]: e.target.checked ? l.qty : 0 }))} className="w-4 h-4 accent-[#cc5a16]" />
+                              <span className="flex-1 truncate">{l.name}</span>
+                              <span className="text-[#9c8e85] text-xs">×{l.qty}</span>
+                              {sel && l.qty > 1 && (
+                                <input type="number" min={1} max={l.qty} value={moveSel[key]} onChange={e => setMoveSel(m => ({ ...m, [key]: Math.max(1, Math.min(l.qty, Number(e.target.value) || 1)) }))} className="w-14 border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-xs" />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="flex gap-2 p-3 border-t border-[#cc5a16]/10 shrink-0">
+                      <button onClick={doMove} disabled={!moveTargetId || !anySel || movePlacing} className="flex-1 py-2.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] disabled:opacity-40 transition-all">
+                        {movePlacing ? '…Moving' : 'Move + print KOT'}
+                      </button>
+                      <button onClick={() => setShowMove(false)} className="px-4 py-2.5 rounded-xl border border-[#cc5a16]/20 text-[#6b5d52] text-xs font-bold uppercase tracking-widest hover:bg-[#faf7f2]">Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {billPreviewHtml && (
               <div className="fixed inset-0 z-[130] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setBillPreviewHtml(null)}>
