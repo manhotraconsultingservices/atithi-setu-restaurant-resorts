@@ -595,7 +595,7 @@ function renderInvoiceEscpos(cfg: any, d: any, W: number): string {
 // order's items by menu category and routes to each active printer whose `station`
 // matches (or station='ALL' → the whole order). Fire-and-forget — NEVER blocks or
 // fails order placement. The on-prem print agent pulls PENDING jobs + prints them.
-async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string): Promise<void> {
+async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string, itemsOverride?: any[]): Promise<void> {
   try {
     const db = await getTenantDb(restaurantId);
     const printers: any[] = await db.query("SELECT * FROM kitchen_printers WHERE is_active = 1").catch(() => []);
@@ -611,7 +611,13 @@ async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string): 
     let bizName: string | null = null;
     try { const rr: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]); bizName = rr?.name || null; } catch { /* ignore */ }
     let items: any[] = [];
-    try { items = JSON.parse(order.items || '[]'); } catch { items = []; }
+    if (Array.isArray(itemsOverride) && itemsOverride.length) {
+      // Explicit item set (e.g. only the NEWLY-ADDED lines from an invoice edit)
+      // — print a KOT for just these, not the whole order.
+      items = itemsOverride;
+    } else {
+      try { items = JSON.parse(order.items || '[]'); } catch { items = []; }
+    }
     if (!Array.isArray(items) || items.length === 0) return;
     const norm = (it: any) => ({
       name: it.name || it.menuName || 'Item',
@@ -50205,6 +50211,26 @@ ${data.tenant.name}`;
         before: beforeRow ? { items: beforeItems, discount_amount: Number(beforeRow.discount_amount || 0), service_charge_percent: Number(beforeRow.service_charge_percent || 0), gst_percent: Number(beforeRow.gst_percent || 0), apply_gst: Number(beforeRow.apply_gst || 0), total_amount: Number(beforeRow.total_amount || 0) } : undefined,
         after: { items: cleanItems, discount_amount: Number(discount_amount), service_charge_percent: Number(service_charge_percent), gst_percent: Number(gst_percent), apply_gst: apply_gst ? 1 : 0, total_amount: total, table: _ctxE.table, waiter: _ctxE.waiter },
       }).catch(() => {});
+      // Fire a KOT for the NEWLY-ADDED items (or increased quantities) so the
+      // kitchen prepares what was added during the edit. Existing lines are NOT
+      // re-sent (no duplicate tickets). Fire-and-forget; the edit still succeeds
+      // if there's no kitchen printer.
+      try {
+        const _beforeQty: Record<string, number> = {};
+        for (const it of (Array.isArray(beforeItems) ? beforeItems : [])) {
+          const nm = String(it?.name || '').trim();
+          if (nm) _beforeQty[nm] = (_beforeQty[nm] || 0) + Number(it?.quantity ?? it?.qty ?? 1);
+        }
+        const addedItems = cleanItems
+          .map((it: any) => {
+            const nm = String(it?.name || '').trim();
+            const delta = Number(it?.quantity ?? it?.qty ?? 1) - (_beforeQty[nm] || 0);
+            return delta > 0 ? { ...it, name: nm, quantity: delta } : null;
+          })
+          .filter(Boolean) as any[];
+        if (addedItems.length) enqueuePrintJobsForOrder(req.params.id, req.params.orderId, addedItems).catch(() => {});
+      } catch { /* non-fatal */ }
+
       res.json({ success: true, subtotal: afterDiscount, discount_amount: Number(discount_amount), service_charge_amount: svcAmt, gst_amount: gstAmount, total });
     } catch (err: any) {
       console.error("Invoice update error:", err);
@@ -51771,7 +51797,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'kot-customer-toggle-fix',
+    commit_marker: 'invoice-edit-fires-kot',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
