@@ -43214,6 +43214,7 @@ const CheckInWizardModal: React.FC<{
                 ))}
               </div>
             )}
+            {error && <p className="text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2 mb-1">{error}</p>}
             <div className="flex gap-2 pt-3 mt-1 border-t border-[#cc5a16]/10">
               <button
                 onClick={() => setStep(1)}

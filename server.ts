@@ -23986,12 +23986,33 @@ ${data.tenant.name}`;
   // specific user. "My Checklist" is the pull view: every staff member sees the
   // checklists assigned to them or their role, and can tick tasks + complete them
   // without needing the HOUSEKEEPING tab. Managers see the whole team's queue.
-  const _checklistOwns = (req: AuthRequest, job: any): boolean => {
+  const _checklistOwns = async (req: AuthRequest, job: any): Promise<boolean> => {
     const role = String(req.user?.role || '').toUpperCase();
     if (HK_MANAGER_ROLES.includes(role)) return true;
     const me = String(req.user?.email || req.user?.id || '').toLowerCase();
     if (job.assigned_to_user && String(job.assigned_to_user).toLowerCase() === me) return true;
     if (job.assigned_to_role && String(job.assigned_to_role).toUpperCase() === role) return true;
+    // Permission-aware fallback. Auto-raised jobs are assigned a literal built-in
+    // role (e.g. CHECK_IN jobs → 'FRONT_DESK'), but every tenant role is now CUSTOM,
+    // so the assigned_to_role match above never fires for the actual front-desk
+    // staffer — the check-in wizard's checklist ticks 403'd ("not assigned to you").
+    // Instead, let whoever can perform the workflow that RAISED the checklist tick it:
+    //   • anyone granted HOUSEKEEPING (the checklist ops audience — same as the
+    //     Housekeeping page, which has no ownership gate);
+    //   • ROOM / check-in-family jobs → anyone granted Hotel Bookings or Rooms
+    //     (they're exactly who checks the guest in);
+    //   • EVENT jobs → anyone granted Event Bookings.
+    try {
+      const perms = await getTabPermissionsForRole(req.params.id, role);
+      if (perms) {
+        if (Number((perms as any)['HOUSEKEEPING'] || 0) >= 1) return true;
+        const ft = String(job.facility_type || '').toUpperCase();
+        const trig = String(job.trigger_event || '').toUpperCase();
+        if ((ft === 'ROOM' || /CHECK_IN|CHECK_OUT|MID_STAY|DAILY/.test(trig)) &&
+            (Number((perms as any)['HOTEL_BOOKINGS'] || 0) >= 1 || Number((perms as any)['ROOMS'] || 0) >= 1)) return true;
+        if (ft === 'EVENT' && Number((perms as any)['EVENTS_BOOKINGS'] || 0) >= 1) return true;
+      }
+    } catch { /* fall through to deny */ }
     return false;
   };
 
@@ -24051,7 +24072,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
       if (!job) return res.status(404).json({ error: 'Checklist not found' });
-      if (!_checklistOwns(req, job)) return res.status(403).json({ error: 'This checklist is not assigned to you.' });
+      if (!(await _checklistOwns(req, job))) return res.status(403).json({ error: 'This checklist is not assigned to you.' });
       if (job.status !== 'OPEN') return res.status(409).json({ error: 'This checklist is already closed.' });
       const actor = req.user?.email || req.user?.id || null;
       // Body may carry is_done (tick/untick) and/or remark (free-text note). Both optional.
@@ -24073,7 +24094,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
       if (!job) return res.status(404).json({ error: 'Checklist not found' });
-      if (!_checklistOwns(req, job)) return res.status(403).json({ error: 'This checklist is not assigned to you.' });
+      if (!(await _checklistOwns(req, job))) return res.status(403).json({ error: 'This checklist is not assigned to you.' });
       if (job.status !== 'OPEN') return res.json({ success: true, already: true });
       const pend: any = await db.get("SELECT COUNT(*)::int AS c FROM housekeeping_job_tasks WHERE job_id = ? AND is_mandatory = 1 AND is_done = 0", [req.params.jid]);
       if (Number(pend?.c || 0) > 0) return res.status(400).json({ error: `${pend.c} mandatory task(s) still pending.`, pending_mandatory: pend.c });
@@ -52274,7 +52295,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'superadmin-print-agent-dashboard',
+    commit_marker: 'checkin-checklist-tick-fix',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
