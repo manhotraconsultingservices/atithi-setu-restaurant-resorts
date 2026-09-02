@@ -88,6 +88,11 @@ h1, h2, h3, h4 {
   animation: alert-pulse 1.3s ease-in-out infinite;
   border-width: 2px;
 }
+/* Respect the OS "reduce motion" setting — no pulsing/flashing for users who
+   are sensitive to motion; the static red/orange border still conveys urgency. */
+@media (prefers-reduced-motion: reduce) {
+  .alert-pulse, .alert-title-pulse { animation: none !important; }
+}
 
 /* When the whole tab gets a NEW alert, briefly flash the document title indicator */
 @keyframes alert-title-flash {
