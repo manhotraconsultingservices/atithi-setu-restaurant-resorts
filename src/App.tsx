@@ -22589,12 +22589,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Services Catalogue</h2>
               <p className="text-sm text-[#6b5d52] mt-1">Configure what guests can request from their room.</p>
             </div>
+            {canDo('SERVICES', 'CREATE') ? (
             <button
               onClick={() => { setEditingService({}); setShowServiceModal(true); }}
               className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20"
             >
               <Plus size={16} /> Add Service
             </button>
+            ) : (
+              <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] px-3 py-2 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/10">View only</span>
+            )}
           </div>
           {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
@@ -22628,8 +22632,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </td>
                       <td className="px-4 py-3 text-center">{svc.is_active ? <Check size={16} className="text-emerald-600 mx-auto" /> : <X size={16} className="text-[#9c8e85] mx-auto" />}</td>
                       <td className="px-4 py-3 text-right">
-                        <button onClick={() => { setEditingService(svc); setShowServiceModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[11px] font-bold hover:bg-[#cc5a16]/10 mr-2">Edit</button>
-                        <button onClick={() => deleteService(svc.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Delete</button>
+                        {canDo('SERVICES', 'UPDATE') && <button onClick={() => { setEditingService(svc); setShowServiceModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[11px] font-bold hover:bg-[#cc5a16]/10 mr-2">Edit</button>}
+                        {canDo('SERVICES', 'DELETE') && <button onClick={() => deleteService(svc.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Delete</button>}
+                        {!canDo('SERVICES', 'UPDATE') && !canDo('SERVICES', 'DELETE') && <span className="text-[11px] text-[#9c8e85] italic">View only</span>}
                       </td>
                     </tr>
                   ))}
