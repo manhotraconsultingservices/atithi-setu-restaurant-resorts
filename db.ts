@@ -1261,6 +1261,9 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     printed_at TIMESTAMP
   )`).catch(() => {});
+  // Retry backoff — a failed job is deferred (not re-fetched every 800ms poll),
+  // so a down printer stops burning the connect-timeout on every tick.
+  await db.exec("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ").catch(() => {});
   await db.exec("CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs (status, created_at)").catch(() => {});
 
   // T1-L1: Soft-delete columns on orders + table_sessions (BCG audit, Tier 1)
