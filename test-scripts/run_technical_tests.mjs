@@ -1822,6 +1822,40 @@ async function testChecklists() {
       const again = await api('POST', `/api/restaurant/${R}/checklists/jobs`, { template_id: tplId, facility_type: 'ROOM', facility_id: roomId, facility_label: 'UAT Room' });
       const sameJob = again.status === 201 && Array.isArray(again.data?.job_ids) && again.data.job_ids.length === 1 && again.data.job_ids[0] === jid;
       (sameJob ? pass : fail)('TC-CHK-DEDUPE', 'Re-starting the same checklist for the same room does not create a duplicate open job', `job_ids=${JSON.stringify(again.data?.job_ids)} vs ${jid}`);
+
+      // TC-CHK-OWN-CHECKIN — check-in checklist ownership fix: a custom role that can
+      // run the workflow (HOTEL_BOOKINGS on a ROOM/check-in job) may TICK the checklist
+      // even though the job's literal assigned role differs; a role without a relevant
+      // module tab stays 403 (no over-grant). Regression for "check-in staff can't
+      // complete the check-in checklist" (jobs are auto-assigned literal built-in roles
+      // like FRONT_DESK/MAINTENANCE, but every tenant role is custom).
+      const ciTask = job.data?.tasks?.[0]?.id;
+      if (ciTask) {
+        const mkTok = async (nm, grantTab) => {
+          const t2 = Date.now() + Math.floor(Math.random() * 1000);
+          const cr = await api('POST', `/api/restaurant/${R}/custom-roles`, { name: nm, emoji: '🧪', scope: 'HOTEL' });
+          const rid = cr.data?.id; if (!rid) return { rid: null, sid: null, tok: '' };
+          const cur = await api('GET', `/api/restaurant/${R}/role-permissions`);
+          const map = (cur.data && typeof cur.data === 'object' && !Array.isArray(cur.data)) ? { ...cur.data } : {}; map[rid] = { [grantTab]: 3 };
+          await api('POST', `/api/restaurant/${R}/role-permissions`, map);
+          const lid = `chkci_${t2}`, pw = `Ck!${t2}xZ`;
+          const mk = await api('POST', '/api/owner/staff', { name: nm, role: rid, loginId: lid, password: pw, employee_type: 'LOGIN' });
+          const lg = await api('POST', '/api/auth/login', { loginId: lid, password: pw, restaurantId: R });
+          return { rid, sid: mk.data?.id, tok: lg.data?.jwt_token || lg.data?.token || '' };
+        };
+        const cleanRole = async (o) => {
+          try { if (o.sid) await api('DELETE', `/api/owner/staff/${o.sid}`); } catch {}
+          try { const c = await api('GET', `/api/restaurant/${R}/role-permissions`); const m = (c.data && typeof c.data === 'object') ? { ...c.data } : {}; if (o.rid) m[o.rid] = {}; await api('POST', `/api/restaurant/${R}/role-permissions`, m); } catch {}
+          try { if (o.rid) await api('DELETE', `/api/restaurant/${R}/custom-roles/${o.rid}`); } catch {}
+        };
+        const fd = await mkTok('CHK CI FD', 'HOTEL_BOOKINGS');
+        const mo = await mkTok('CHK CI MO', 'MONITOR');
+        const fdTick = fd.tok ? await api('PATCH', `/api/restaurant/${R}/checklists/my/jobs/${jid}/tasks/${ciTask}`, { is_done: true }, fd.tok) : { status: 0 };
+        const moTick = mo.tok ? await api('PATCH', `/api/restaurant/${R}/checklists/my/jobs/${jid}/tasks/${ciTask}`, { is_done: true }, mo.tok) : { status: 0 };
+        (fdTick.status !== 403 && fdTick.status !== 0 && moTick.status === 403 ? pass : fail)('TC-CHK-OWN-CHECKIN', 'Hotel-bookings role can tick a room/check-in checklist; monitor-only stays 403', `fd=${fdTick.status} monitor=${moTick.status}`);
+        await api('PATCH', `/api/restaurant/${R}/checklists/my/jobs/${jid}/tasks/${ciTask}`, { is_done: false });
+        await cleanRole(fd); await cleanRole(mo);
+      }
       await cleanupJob(jid);
     } else { fail('TC-CHK-MANUAL', 'Manual start', `HTTP ${started.status} — ${JSON.stringify(started.data)}`); }
 
