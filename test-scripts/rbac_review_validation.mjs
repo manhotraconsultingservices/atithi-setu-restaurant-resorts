@@ -55,7 +55,8 @@ async function main() {
   const M = lg.data?.jwt_token || lg.data?.token || '';
   // ungranted control role (MONITOR only)
   const crD = await api('POST', `/api/restaurant/${RID}/custom-roles`, { name: 'QA Ops Deny', emoji: '🚫', scope: 'RESTAURANT' }, ownerTok);
-  const denyId = crD.data?.id; if (denyId) { const m2 = { ...(cur.data || {}) }; m2[denyId] = { MONITOR: 3 }; await api('POST', `/api/restaurant/${RID}/role-permissions`, m2, ownerTok); }
+  const denyId = crD.data?.id;
+  if (denyId) { const fresh = await api('GET', `/api/restaurant/${RID}/role-permissions`, null, ownerTok); const m2 = { ...(fresh.data || {}) }; m2[denyId] = { MONITOR: 3 }; await api('POST', `/api/restaurant/${RID}/role-permissions`, m2, ownerTok); }
   const dmk = denyId ? await api('POST', '/api/owner/staff', { name: `QA Deny ${tag}`, role: denyId, loginId: `qad_${tag}`, password: pwd, employee_type: 'LOGIN' }, ownerTok) : { data: {} };
   const denyStaffId = dmk.data?.id;
   const dlg = denyStaffId ? await api('POST', '/api/auth/login', { loginId: `qad_${tag}`, password: pwd, restaurantId: RID }) : { data: {} };
