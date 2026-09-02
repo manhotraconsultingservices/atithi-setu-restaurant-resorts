@@ -16,6 +16,9 @@ backups/
 # Claude Code internal files
 .claude/
 
+# Test scripts — kept local, never tracked in git (owner preference)
+test-scripts/
+
 # Temp / generated / local files
 unpacked_catalog/
 catalog_content.txt
