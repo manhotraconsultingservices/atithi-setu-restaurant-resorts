@@ -493,12 +493,15 @@ const DEFAULT_KOT_TPL: any = {
   notes: true, bigItems: true, footer: false, footerText: '',
 };
 
+const _printTplReady = new WeakSet<any>();
 async function _ensurePrintTemplatesTable(db: any): Promise<void> {
+  if (_printTplReady.has(db)) return;   // once per tenant, not on every KOT enqueue
   await db.exec(`CREATE TABLE IF NOT EXISTS print_templates (
     doc_type   TEXT PRIMARY KEY,
     config     TEXT NOT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`).catch(() => {});
+  _printTplReady.add(db);
 }
 async function getPrintTemplate(db: any, docType: 'INVOICE' | 'KOT'): Promise<any> {
   const dflt = docType === 'KOT' ? DEFAULT_KOT_TPL : DEFAULT_INVOICE_TPL;
@@ -592,6 +595,40 @@ function renderInvoiceEscpos(cfg: any, d: any, W: number): string {
   if (cfg.footer && (cfg.footerText || d.footer)) o += PTPL.center + `${cfg.footerText || d.footer}\n` + PTPL.left;
   o += PTPL.cut;
   return o;
+}
+
+// Per-tenant-once column ensures. These replace the per-REQUEST
+// `ALTER TABLE … ADD COLUMN IF NOT EXISTS` blocks that used to run on every order /
+// session / KDS poll. In PostgreSQL, ADD COLUMN IF NOT EXISTS still takes a brief
+// ACCESS EXCLUSIVE lock on the table even when it no-ops, so under concurrent load
+// they serialized against live reads and writes (the "not fit for scale" symptom).
+// The columns are created in db.ts _initTenantDb; these run ONCE per tenant per
+// process — keyed on the cached tenant-db object (getTenantDb returns one per
+// tenant) — as a self-heal against a transient init failure, then every subsequent
+// request skips the DDL entirely.
+const _orderColsEnsured = new WeakSet<any>();
+async function _ensureOrderCols(db: any): Promise<void> {
+  if (_orderColsEnsured.has(db)) return;
+  _orderColsEnsured.add(db);
+  for (const c of [
+    "customer_email TEXT", "session_id TEXT", "checkout_mode TEXT DEFAULT 'postpaid'",
+    "round_number INTEGER DEFAULT 1", "kitchen_status TEXT DEFAULT 'queued'",
+    "chef_id TEXT", "chef_name TEXT", "eta TEXT", "invoice_number TEXT",
+    "customer_address_line1 TEXT", "customer_address_line2 TEXT", "customer_city TEXT",
+    "customer_pincode TEXT", "customer_landmark TEXT", "gst_percent FLOAT DEFAULT 0",
+    "apply_gst INTEGER DEFAULT 1", "invoice_status TEXT DEFAULT 'DRAFT'",
+    "currency_snapshot TEXT", "tax_label_snapshot TEXT", "room_id TEXT",
+    "booking_id TEXT", "token_number TEXT",
+  ]) await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS ${c}`).catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT").catch(() => {});
+}
+const _tableFloorColsEnsured = new WeakSet<any>();
+async function _ensureTableFloorCols(db: any): Promise<void> {
+  if (_tableFloorColsEnsured.has(db)) return;
+  _tableFloorColsEnsured.add(db);
+  for (const c of ["assigned_role TEXT", "pos_x INTEGER DEFAULT 0", "pos_y INTEGER DEFAULT 0", "section_id TEXT", "shape TEXT DEFAULT 'square'"])
+    await db.exec(`ALTER TABLE tables ADD COLUMN IF NOT EXISTS ${c}`).catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS covers INTEGER DEFAULT 0").catch(() => {});
 }
 
 // Thermal KOT auto-print: enqueue print jobs for a just-placed order. Groups the
@@ -44751,8 +44788,7 @@ ${data.tenant.name}`;
       const { table_id, table_name, session_token, customer_name, customer_phone } = req.body;
       const covers = Math.max(0, parseInt(req.body?.covers, 10) || 0);
       const db = await getTenantDb(req.params.id);
-      // Floor plan (Phase 3): guest count column — idempotent, so INSERT/UPDATE below never fail.
-      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS covers INTEGER DEFAULT 0").catch(() => {});
+      await _ensureTableFloorCols(db);   // once per tenant, not per scan (ensures `covers`)
 
       // Helper to load and return a session with its orders
       const returnSession = async (sess: any) => {
@@ -45980,12 +46016,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/orders/live", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      // Ensure new columns exist
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_id TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_name TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'").catch(() => {});
+      await _ensureOrderCols(db);   // once per tenant, not per poll (was 5 ADD-COLUMN locks/poll)
 
       // Exclude orders whose invoice has been PRINTED — the bill is closed,
       // no further kitchen action is expected. This matters especially for
@@ -46979,7 +47010,12 @@ ${data.tenant.name}`;
 
   // ─── Waiter Calls ──────────────────────────────────────────────────────────
 
+  // Run the waiter_calls DDL ONCE per tenant per process (was every /waiter-calls
+  // poll — a CREATE TABLE IF NOT EXISTS on the hot poll path). Keyed on the cached
+  // tenant-db object (getTenantDb caches one per tenant).
+  const _waiterCallsReady = new WeakSet<any>();
   const ensureWaiterCallsTable = async (db: any) => {
+    if (_waiterCallsReady.has(db)) return;
     await db.exec(`
       CREATE TABLE IF NOT EXISTS waiter_calls (
         id TEXT PRIMARY KEY,
@@ -46995,6 +47031,10 @@ ${data.tenant.name}`;
         resolved_at TIMESTAMPTZ
       )
     `).catch(() => {});
+    // Polled continuously by the waiter / Command-Centre UI; without this the
+    // query seq-scanned every resolved call forever (table had no secondary index).
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_waiter_calls_status_created ON waiter_calls (status, created_at)`).catch(() => {});
+    _waiterCallsReady.add(db);
   };
 
   const broadcastWs = (type: string, data: any, restaurantId: string) => {
@@ -47130,56 +47170,10 @@ ${data.tenant.name}`;
 
       const db = await getTenantDb(req.params.id);
 
-      // Migration: Ensure new columns exist
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_email TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS session_id TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_mode TEXT DEFAULT 'postpaid'");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_id TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_name TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT");
-      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT");
-      // Cloud-kitchen / online-delivery: structured address (idempotent)
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line1 TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line2 TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_city TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_pincode TEXT");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_landmark TEXT");
-      // GST persistence on the ORDER row — the manual-invoice and invoice-edit
-      // endpoints already migrate these, but a fresh tenant whose first traffic
-      // is a customer order would hit a 500 because the columns referenced in
-      // the INSERT below didn't exist yet. Adding them here closes that gap.
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1");
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'");
-
-      // QR-FIX (BCG follow-up): defensive idempotent ALTERs for snapshot
-      // columns the M-1 INSERT below references. The tenant-init migration in
-      // db.ts ships these too — but the in-memory cache means that if
-      // _initTenantDb partially ran (e.g. an upstream statement transiently
-      // failed before reaching the M-1 block) the cached DbInterface is
-      // returned anyway and the missing columns surface here as
-      // "Failed to create order". This block belts-and-braces the gap.
-      // Same pattern as the gst_percent / apply_gst / invoice_status block
-      // above (Phase H tenants who never hit /invoices/manual).
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS currency_snapshot TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT").catch(() => {});
-
-      // QR-FIX-2 (live customer screenshot): room_id + booking_id are
-      // Sprint-RS columns the INSERT references unconditionally (the room-
-      // service path passes them when CHARGE_TO_ROOM; restaurant flow passes
-      // null). They're added by createHotelTables() in db.ts:5442-5445 —
-      // but that helper is ONLY called for HOTEL / BOTH property_type
-      // tenants. A pure-RESTAURANT tenant (e.g. Vivek's Cafe RESTO-1003)
-      // never had createHotelTables() run, so room_id/booking_id columns
-      // don't exist, and the INSERT 500s with "column does not exist".
-      // Add the columns defensively for every tenant; nullable so writes
-      // with null values succeed unchanged.
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS token_number TEXT").catch(() => {});
+      // Columns are ensured ONCE per tenant per process (db.ts _initTenantDb + this
+      // self-heal), NOT on every order — see _ensureOrderCols. Per-request ADD-COLUMN
+      // DDL took an ACCESS EXCLUSIVE lock on `orders` on the hottest write path.
+      await _ensureOrderCols(db);
 
       // Resolve restaurant checkout_mode (body overrides, then DB, then default)
       let checkoutMode = bodyCheckoutMode;
@@ -48706,11 +48700,7 @@ ${data.tenant.name}`;
   app.patch("/api/orders/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
-      // Ensure chef/eta columns exist (in case migration hasn't run yet for this tenant)
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_id TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_name TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta TEXT").catch(() => {});
-      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'").catch(() => {});
+      await _ensureOrderCols(db);   // once per tenant, not per KDS status update
 
       const { status, payment_status, payment_method, kitchen_status, chef_id, chef_name, eta, items } = req.body;
 
@@ -50116,15 +50106,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/tables/live", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_role TEXT").catch(() => {});
-      // Floor plan (Phase 2): position + section + shape — so t.* below carries
-      // them for the map renderer. Idempotent.
-      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_x INTEGER DEFAULT 0").catch(() => {});
-      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_y INTEGER DEFAULT 0").catch(() => {});
-      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS section_id TEXT").catch(() => {});
-      await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS shape TEXT DEFAULT 'square'").catch(() => {});
-      // Floor plan (Phase 3): guest count (covers) captured at seating.
-      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS covers INTEGER DEFAULT 0").catch(() => {});
+      await _ensureTableFloorCols(db);   // once per tenant, not per C&C poll (was 6 ADD-COLUMN locks/poll on `tables`)
 
       // All tables + assigned role + the specific waiter name (null when the whole
       // role serves the table). `t.*` carries assigned_role + assigned_waiter_id.
@@ -52295,9 +52277,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'floorplan-remount-flicker-fix',
+    commit_marker: 'perf-scale-db-ddl-indexes',
     code_features: [
-      'floorplan-remount-flicker-fix',               //BUGFIX (the REAL Command Centre Map flicker — persisted in incognito after the alert-pulse fix). Root cause: FloorPlanMap defined its sub-views (SectionTabs, ViewMode [the whole tile grid], ArrangeMode, TileBody) as components INSIDE the component body and rendered them as JSX elements `<ViewMode/>`. A nested component definition gets a NEW function identity on every render, so React treats it as a different component TYPE and UNMOUNTS + REMOUNTS the entire subtree on EVERY FloorPlanMap re-render — i.e. the whole tile grid was destroyed + recreated on every 30s live-refresh AND every parent (App) re-render → visible flicker (and it restarted the tile animations too). Fix: invoke them as plain functions — `{ViewMode()}`, `{SectionTabs()}`, `{ArrangeMode()}`, `{TileBody({t})}` — so their JSX inlines into FloorPlanMap's render and React reconciles the key={t.id} tiles across renders instead of remounting. Safe because none of them call hooks (all hooks are at FloorPlanMap's top level; ArrangeMode's drag state draft/selId/refs live at component scope so they're shared, not internal). This is the exact nested-component-definition anti-pattern the codebase was already burned by on the Analytics KPI cards (App.tsx ~12482 comment). Complements the prior `command-centre-flicker-fix` (slow tables no longer pulse) — that removed the animation, this removes the remount. tsc + vite build clean.                  //BUGFIX (Command Centre "screen is flickering" on the Map view). Root cause: the Floor Plan map tagged every SLOW-turn table (over the turn-time alert threshold) with the `alert-pulse` CSS animation (src/index.css — a 1.3s infinite red glow/border pulse meant for TRANSIENT "act now" alerts like waiter-calls). A slow turn is a PERSISTENT status (a table can sit slow for hours), so with several slow tables the whole board pulsed in sync = perceived flicker. Fix: (1) FloorPlanMap tileStatus `pulse: bill || over` → `pulse: bill` — only a bill-request (transient, needs staff action) pulses; a slow table keeps its solid red border + "SLOW" label, no animation. (2) `TileBody` was a component defined INSIDE FloorPlanMap and rendered as `<TileBody/>` — the nested-component-definition anti-pattern (new identity each render → React remounts the tile inner content on every 30s refresh); now invoked as a plain function `{TileBody({t})}` so it inlines (no remount). (3) Added a `@media (prefers-reduced-motion: reduce)` guard that disables `.alert-pulse`/`.alert-title-pulse` for motion-sensitive users. Restaurant LIST view was unaffected (it only pulses PENDING service requests, the intended transient use). tsc + vite build clean.
+      'perf-scale-db-ddl-indexes',                   //PERF/SCALE (Phase 1 of the Balaji-Inn "not fit for scale" + slow-print review — server-side, all tenants). Grounded in a 3-part code review. (1) DB LAYER (db.ts): withClient issued `SET search_path` before EVERY query = 2 round-trips per read/write; now tags each pooled connection with its schema and skips the redundant SET → ~1 round-trip (verified: the only SET is withClient, no pool 'connect' handler, so no cross-tenant pollution). exec ran `CREATE SCHEMA IF NOT EXISTS` on every call → now once per schema per process (_schemaEnsured Set). Pool `max` was unset (pg default 10) → now 20 (PG_POOL_MAX) + idle/connect timeouts. (2) PER-REQUEST DDL: POST /orders ran 23 `ALTER TABLE ADD COLUMN IF NOT EXISTS` (+CREATE) on the hottest write path; /orders/live 5/poll, PATCH /orders 4/update, /tables/live 6/poll, /sessions 1/scan, /waiter-calls a CREATE TABLE/poll, and enqueue a CREATE TABLE/order. In PG, ADD COLUMN IF NOT EXISTS takes an ACCESS EXCLUSIVE lock even when it no-ops → lock storms serializing against live reads/writes = the "freeze under load" symptom. All moved to db.ts _initTenantDb + guarded once-per-tenant helpers (_ensureOrderCols/_ensureTableFloorCols/WeakSets) → 0 DDL per hot request after warmup. (3) MISSING INDEXES (db.ts _initTenantDb): orders.session_id was UNINDEXED (QR-scan running bill + /tables/live aggregate + resume subquery all seq-scanned full order history) → idx_orders_session; + idx_orders_live_kitchen (partial, KDS board), idx_table_sessions_status, idx_table_sessions_table_status, idx_waiter_calls_status_created (table had zero secondary indexes). Net: an order placement drops from ~90+ PG round-trips (most table-locking DDL) to a handful of indexed statements. tsc + vite build clean. PHASE 2 (separate): on-prem agent rewrite (decouple poll from print so one slow printer can't freeze all; eager USB worker; 8s→2s timeout; drop 200ms post-write; fire-and-forget ACK) + print-job retry backoff + agent-token auth cache + collapse the 5x central `restaurants` reads on the order path.               //BUGFIX (the REAL Command Centre Map flicker — persisted in incognito after the alert-pulse fix). Root cause: FloorPlanMap defined its sub-views (SectionTabs, ViewMode [the whole tile grid], ArrangeMode, TileBody) as components INSIDE the component body and rendered them as JSX elements `<ViewMode/>`. A nested component definition gets a NEW function identity on every render, so React treats it as a different component TYPE and UNMOUNTS + REMOUNTS the entire subtree on EVERY FloorPlanMap re-render — i.e. the whole tile grid was destroyed + recreated on every 30s live-refresh AND every parent (App) re-render → visible flicker (and it restarted the tile animations too). Fix: invoke them as plain functions — `{ViewMode()}`, `{SectionTabs()}`, `{ArrangeMode()}`, `{TileBody({t})}` — so their JSX inlines into FloorPlanMap's render and React reconciles the key={t.id} tiles across renders instead of remounting. Safe because none of them call hooks (all hooks are at FloorPlanMap's top level; ArrangeMode's drag state draft/selId/refs live at component scope so they're shared, not internal). This is the exact nested-component-definition anti-pattern the codebase was already burned by on the Analytics KPI cards (App.tsx ~12482 comment). Complements the prior `command-centre-flicker-fix` (slow tables no longer pulse) — that removed the animation, this removes the remount. tsc + vite build clean.                  //BUGFIX (Command Centre "screen is flickering" on the Map view). Root cause: the Floor Plan map tagged every SLOW-turn table (over the turn-time alert threshold) with the `alert-pulse` CSS animation (src/index.css — a 1.3s infinite red glow/border pulse meant for TRANSIENT "act now" alerts like waiter-calls). A slow turn is a PERSISTENT status (a table can sit slow for hours), so with several slow tables the whole board pulsed in sync = perceived flicker. Fix: (1) FloorPlanMap tileStatus `pulse: bill || over` → `pulse: bill` — only a bill-request (transient, needs staff action) pulses; a slow table keeps its solid red border + "SLOW" label, no animation. (2) `TileBody` was a component defined INSIDE FloorPlanMap and rendered as `<TileBody/>` — the nested-component-definition anti-pattern (new identity each render → React remounts the tile inner content on every 30s refresh); now invoked as a plain function `{TileBody({t})}` so it inlines (no remount). (3) Added a `@media (prefers-reduced-motion: reduce)` guard that disables `.alert-pulse`/`.alert-title-pulse` for motion-sensitive users. Restaurant LIST view was unaffected (it only pulses PENDING service requests, the intended transient use). tsc + vite build clean.
       'cashier-therapist-misroute-fix',              //BUGFIX (same root as staffaccess-prefill-no-escalation, plus router hardening). Reported: a custom Cashier role ("Incoming/Outgoing Cashier") logs in and lands on the therapist "My Schedule" page with "Your account is not yet linked to a therapist profile. Ask the manager to set your Staff ID in the Therapist settings." Root cause: the Home dashboard router (App.tsx ~16057) routed any CUSTOM role holding SPA_CALENDAR/SPA_APPOINTMENTS to <TherapistDashboard>. The grid-prefill bug (see staffaccess-prefill-no-escalation) had injected+persisted SPA_* into the Cashier role; since a pure cashier lacks MONITOR/ORDERS/QR (Waiter branch) and the hotel tabs (HotelStaff branch), it fell through to the spa branch → therapist dead-end (a page that requires a linked therapist profile it will never have). FIX: the spa->Therapist home route now also requires the role to NOT hold any clearly-non-spa operational tab (CASH_DRAWER/INVOICES/MENU/DELIVERY/BOOKINGS/ORDERS/MONITOR/QR/PROCUREMENT/EXPENSE_JOURNAL/ACCOUNTING) — a genuine spa-only therapist role still lands on My Schedule, a cashier/restaurant/finance role with a stray spa tab falls through to the launchpad. Verified (pure routing sim): polluted cashier OLD→Therapist / NEW→Launchpad; genuine therapist unchanged. Regression TC-XLSX-THERAPIST-ROUTE-GUARD. The forward prefill fix stops NEW spa pollution; this router change fixes ALREADY-polluted cashier roles immediately without waiting on a matrix cleanup. tsc + vite build clean.
       'staffaccess-prefill-no-escalation',           //SECURITY FIX (privilege-escalation-on-save). Root cause of "PCC/Security has NO Events access but Quotations / Cleaning Checklist / Event Reports are still visible": the Staff Access grid prefill (App.tsx fetchStaffAccess) injected EVENTS_CHECKLISTS, PROCUREMENT, EXPENSE_JOURNAL, CHECKLISTS (+ HOTEL_INVENTORY/SPA_*) to Full(3) into EVERY role's in-memory matrix, and saveStaffAccess POSTs the WHOLE object — so opening + saving the matrix silently PERSISTED those grants for roles the owner set to N/A. Once EVENTS_CHECKLISTS was saved, hasEventsGrant flipped true → the Events group + "Cleaning Checklist" (EVENTS_HOUSEKEEPING, which reuses the HOUSEKEEPING perm) appeared in the nav AND the role passed the eventsStaff module gate (requireModuleAccess over EVENTS_TAB_IDS) → live Events API read access (/events/bookings 200). The frontend prefill list had drifted from server RBAC_NEWLY_ADDED, which deliberately DROPPED all four to stop this exact leak. Verified on RESTO-1003: the OLD prefill would have leaked 597 sensitive-tab grants across 212 roles on the next Save; NEW logic leaks 0. Fix (fetchStaffAccess): (1) prefill list realigned to server RBAC_NEWLY_ADDED (HOTEL_INVENTORY + MY_CHECKLIST + CHECKLIST_BOARD + SPA_* only — no finance/checklist/events tabs); (2) NEVER prefill an AUTHORITATIVE role (id startsWith CUSTOM_, or matrix carries __complete__) — its saved matrix is the owner's exact intent, so injecting + persisting would grant N/A tabs. A truly no-Events custom role (repro Scenario A) shows none of the three tabs and gets 403 on /events/bookings. Regression: TC-XLSX-RBAC-GRID-PREFILL (source-guards no-sensitive-prefill + authoritative-skip). NOTE: this stops FUTURE pollution; a role whose matrix was already polluted by a PRIOR save still carries the stray grant (it loads from the saved matrix) until the owner sets those tabs to N/A in Staff Access and re-saves — which now sticks. tsc + vite build clean.
       'sw-self-purge-passthrough',                   //ROOT-CAUSE FIX (recurring "client still sees the old bug after we deployed the fix"). The PWA service worker (public/sw.js) cached JS/CSS "cache-first" into a cache ('atithi-setu-v1') that was NEVER invalidated across deploys (activate only deleted OTHER cache names, and the name never changed) and pre-cached the HTML shell '/' once at install, which the navigation handler fell back to on any network hiccup — so a client could keep loading an OLD app bundle even after a hard reload, and freshly-deployed RBAC/nav fixes never reached them (the repeated Ankur "Events Cleaning Checklist still visible" reports were this, not a code bug — the deployed code was already correct). New sw.js is a SELF-PURGING PASS-THROUGH: no fetch handler (every request hits the network with normal HTTP-cache semantics — hash-named assets stay cacheable via headers, index.html max-age=0 is always fresh, nothing is served from a worker cache so nothing goes stale), and on activate it deletes EVERY cache and force-reloads (once) any client still holding the poisoned cache so it lands on current code immediately. Future sw.js changes won't force-reload anyone (a pass-through worker creates no caches). PWA installability (manifest) intact.

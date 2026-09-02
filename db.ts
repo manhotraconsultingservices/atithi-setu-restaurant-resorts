@@ -3,7 +3,18 @@ import { Pool, PoolClient } from "pg";
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgresql://${process.env.PGUSER || 'postgres'}:${process.env.PGPASSWORD || 'postgres'}@${process.env.PGHOST || 'localhost'}:${process.env.PGPORT || '5432'}/${process.env.PGDATABASE || 'restoflow'}`,
   ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
+  // Pool size — was pg's default of 10, a hard ceiling for a multi-tenant server
+  // under concurrent ordering/polling. Overridable via PG_POOL_MAX. Keep below the
+  // Postgres server's max_connections (default 100).
+  max: Math.max(4, Number(process.env.PG_POOL_MAX) || 20),
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
+
+// Schemas whose CREATE has already been ensured this process. `exec()` used to run
+// `CREATE SCHEMA IF NOT EXISTS` on EVERY call (an extra round-trip per exec); the
+// schema only needs creating once per tenant per process.
+const _schemaEnsured = new Set<string>(['public']);
 
 export interface DbInterface {
   query: (sql: string, params?: any[]) => Promise<any[]>;
@@ -29,10 +40,18 @@ class PostgresDb implements DbInterface {
   private async withClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {
-      // Always reset search_path to prevent pool connection pollution
-      // (a connection previously used by a tenant schema would otherwise
-      // keep that schema in its search_path when reused by centralDb)
-      await client.query(`SET search_path TO "${this.schema}"`);
+      // Set search_path only when this pooled connection isn't ALREADY on our
+      // schema. pg reuses physical connections; issuing `SET search_path` before
+      // every query doubled the round-trips to Postgres on every read/write —
+      // the single biggest per-query tax at scale. We tag the connection with its
+      // current schema, so a reuse on the SAME schema skips the extra round-trip
+      // while a reuse by a different tenant (or centralDb='public') still resets
+      // it — so there is no cross-tenant search_path pollution. A connection that
+      // errors is discarded by the pool; its replacement has no tag → SET runs.
+      if ((client as any).__atithiSchema !== this.schema) {
+        await client.query(`SET search_path TO "${this.schema}"`);
+        (client as any).__atithiSchema = this.schema;
+      }
       return await fn(client);
     } finally {
       client.release();
@@ -59,8 +78,12 @@ class PostgresDb implements DbInterface {
   }
 
   async exec(sql: string): Promise<void> {
-    if (this.schema !== 'public') {
+    // Create the tenant schema once per process (was every exec = an extra
+    // round-trip on the hot path). getTenantDb runs the tenant migration before
+    // any request touches the schema, so first-exec creation is still guaranteed.
+    if (!_schemaEnsured.has(this.schema)) {
       await this.pool.query(`CREATE SCHEMA IF NOT EXISTS "${this.schema}"`);
+      _schemaEnsured.add(this.schema);
     }
     await this.withClient(async (client) => {
       // Strip "--" line comments BEFORE splitting on ";". A semicolon
@@ -1163,6 +1186,17 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   //
   // Migrations for existing tenant schemas — table monitoring
   await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_waiter_id TEXT").catch(() => {});
+  // Floor-plan (Map view) + staff-token columns — previously ALTER-ed lazily on
+  // EVERY /tables/live, /sessions and POST /orders request (per-request DDL that
+  // briefly ACCESS-EXCLUSIVE-locked the hot tables). Ensured ONCE here so those
+  // handlers can drop the per-request ALTERs.
+  await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_role TEXT").catch(() => {});
+  await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_x INTEGER DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS pos_y INTEGER DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS section_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS shape TEXT DEFAULT 'square'").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS covers INTEGER DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS token_number TEXT").catch(() => {});
 
   // Migrations for existing tenant schemas — orders (prepaid/postpaid/cloud_kitchen)
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS session_id TEXT").catch(() => {});
@@ -1251,6 +1285,18 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_by_role TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_reason TEXT").catch(() => {});
   await db.exec("CREATE INDEX IF NOT EXISTS idx_orders_active ON orders (created_at DESC) WHERE deleted_at IS NULL").catch(() => {});
+  // ── Hot-path indexes (perf review 2026-09) — these back the QR-scan running-bill
+  // load, the Command-Centre / KDS live polls and the resume-by-table lookup, all
+  // of which were seq-scanning the tenant's FULL history on every request. ──────
+  // orders.session_id: join key for the running bill (returnSession, /tables/live
+  // aggregate, resume EXISTS subquery) — was UNINDEXED. Highest-impact single index.
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_orders_session ON orders (session_id)").catch(() => {});
+  // /orders/live (KDS board): active, non-deleted orders — partial index so the
+  // poll doesn't seq-scan + sort the whole non-deleted history each time.
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_orders_live_kitchen ON orders (created_at) WHERE deleted_at IS NULL AND status NOT IN ('DELIVERED','CANCELLED')").catch(() => {});
+  // table_sessions live-session scans (/tables/live) + resume-by-table (POST /sessions).
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_table_sessions_status ON table_sessions (status) WHERE deleted_at IS NULL").catch(() => {});
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_table_sessions_table_status ON table_sessions (table_id, status)").catch(() => {});
   await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP").catch(() => {});
   await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_user_id TEXT").catch(() => {});
   await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_role TEXT").catch(() => {});
