@@ -4172,6 +4172,15 @@ function checkIssueXlsxSourceFixes() {
       'Staff Access grid prefill excludes sensitive tabs AND skips authoritative/custom roles (no privilege-escalation-on-save)',
       (noSensitivePrefill && skipsAuthoritative) ? '' : `noSensitivePrefill=${noSensitivePrefill} skipsAuthoritative=${skipsAuthoritative}`);
 
+    // A custom cashier/restaurant/finance role that merely carries a stray spa
+    // tab must NOT be routed to the therapist "My Schedule" dead-end (which needs
+    // a linked therapist profile). The spa->Therapist home route excludes roles
+    // holding a clearly-non-spa operational tab (CASH_DRAWER, ORDERS, …).
+    const therapistRouteGuard = /allowedTabs\.includes\('SPA_APPOINTMENTS'\)\)[\s\S]{0,700}!allowedTabs\.some\([\s\S]{0,160}'CASH_DRAWER'[\s\S]{0,320}<TherapistDashboard/.test(app);
+    (therapistRouteGuard ? pass : fail)('TC-XLSX-THERAPIST-ROUTE-GUARD',
+      'Custom cashier/restaurant role with a stray spa tab is not dumped on the therapist My-Schedule dead-end',
+      therapistRouteGuard ? '' : 'spa->TherapistDashboard home route missing the non-spa-tab exclusion');
+
     // GST — Edit-Invoice zeroing effect bails for legacy single-GST tenants.
     const gstFix = /if \(p\.usedLegacyGst\) return;/.test(app);
     (gstFix ? pass : fail)('TC-XLSX-GST-NO-RESET',

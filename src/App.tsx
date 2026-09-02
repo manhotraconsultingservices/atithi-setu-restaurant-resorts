@@ -16055,7 +16055,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               && (allowedTabs.includes('HOTEL_BOOKINGS') || allowedTabs.includes('SERVICE_REQUESTS') || allowedTabs.includes('ROOMS') || allowedTabs.includes('FOLIOS'))) ? (
           <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={currentRole} />
         ) : (!!currentRole && currentRole.toUpperCase().startsWith('CUSTOM_') && Array.isArray(allowedTabs)
-              && (allowedTabs.includes('SPA_CALENDAR') || allowedTabs.includes('SPA_APPOINTMENTS'))) ? (
+              && (allowedTabs.includes('SPA_CALENDAR') || allowedTabs.includes('SPA_APPOINTMENTS'))
+              // …only when spa is the role's PRIMARY function. The therapist "My
+              // Schedule" home demands a linked therapist profile — a cashier /
+              // restaurant / finance role that merely carries a stray spa tab (e.g.
+              // a legacy grid-prefill grant) must NOT be dumped on that dead-end
+              // ("Ask the manager to set your Staff ID in Therapist settings").
+              // Reported: a custom Cashier ("Incoming/Outgoing Cashier") saw it.
+              // Any clearly-non-spa operational grant → fall through to the launchpad.
+              && !allowedTabs.some((t: string) => ['CASH_DRAWER', 'INVOICES', 'MENU', 'DELIVERY', 'BOOKINGS', 'ORDERS', 'MONITOR', 'QR', 'PROCUREMENT', 'EXPENSE_JOURNAL', 'ACCOUNTING'].includes(t))) ? (
           <TherapistDashboard restaurantId={restaurantId!} token={token!} />
         ) : (
         <HotelHomeLaunchpad
