@@ -5560,15 +5560,27 @@ function requireRole(allowedRoles: string[]) {
 const RESTAURANT_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'CASHIER', 'WAITER', 'CHEF'];
 const RESTAURANT_ADMIN_ROLES       = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'];
 
-const restaurantStaff = requireRole(RESTAURANT_OPERATIONAL_ROLES);
-const restaurantAdmin = requireRole(RESTAURANT_ADMIN_ROLES);
+// Restaurant-side grantable tabs. `restaurantStaff` / `restaurantAdmin` were plain
+// requireRole() allowlists, so a tenant CUSTOM role (every "Manager"/staff role is
+// custom now) was 403'd BEFORE any requireTabAccess ran — the reported "Full access
+// but can't edit menu / accept a KDS ticket / close a bill / add inventory". They are
+// now PERMISSION-AWARE module gates (mirroring hotelStaff/eventsStaff): OWNER/CTO/
+// SUPER_ADMIN + the built-in operational roles + any custom role the owner granted a
+// restaurant tab pass the coarse gate; the per-endpoint requireTabAccess('X') still
+// enforces the exact tab on top. requireModuleAccess resolves the tenant from
+// req.user.restaurantId (so it also works on the /api/orders/:id, /api/menu/:id,
+// /api/inventory/... routes that carry no :id tenant param).
+const RESTAURANT_TAB_IDS = ['MONITOR', 'ORDERS', 'MENU', 'INVOICES', 'INVENTORY', 'LOYALTY', 'QR', 'DELIVERY', 'BOOKINGS', 'FEEDBACK', 'RESTAURANT_REPORTS', 'HOTEL_INVENTORY', 'SETTINGS'];
+const restaurantStaff = requireModuleAccess(RESTAURANT_TAB_IDS, RESTAURANT_OPERATIONAL_ROLES, 'Restaurant');
+const restaurantAdmin = requireModuleAccess(['SETTINGS'], RESTAURANT_ADMIN_ROLES, 'Settings & Admin');
 
-// Spa mutations: open to all operational roles from both modules.
-// Hotel front-desk / concierge can book spa appointments for hotel guests;
-// restaurant cashiers handle spa checkout. Tab-level permissions (SPA_*) do
-// the fine-grained access control on top.
+// Spa mutations: open to all operational roles from both modules PLUS any custom
+// role the owner granted a Spa tab. Hotel front-desk / concierge can book spa
+// appointments for hotel guests; restaurant cashiers handle spa checkout. Tab-level
+// permissions (SPA_*) do the fine-grained access control on top.
 const SPA_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'WAITER', 'CHEF', 'THERAPIST'];
-const spaStaff = requireRole(SPA_OPERATIONAL_ROLES);
+const SPA_TAB_IDS = ['SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_BILLING', 'SPA_SETTINGS', 'SPA_INVENTORY'];
+const spaStaff = requireModuleAccess(SPA_TAB_IDS, SPA_OPERATIONAL_ROLES, 'Spa & Wellness');
 
 // Events & Convention mutations: open to operational roles plus the dedicated
 // EVENTS_MANAGER role. Tab-level permissions (EVENTS_*) refine access on top.
@@ -5750,7 +5762,9 @@ async function _roleHasTab(req: AuthRequest, tabId: string, minLevel = 1): Promi
   const role = String(req.user?.role || '').toUpperCase();
   if (role === 'OWNER' || role === 'SUPER_ADMIN' || role === 'CTO') return true;
   try {
-    const perms = await getTabPermissionsForRole(req.params.id || (req.user as any)?.restaurantId, role);
+    // Prefer the staff token's tenant — some routes (e.g. /api/orders/:id) have no
+    // :id tenant param, so req.params.id would be an order id, not the tenant.
+    const perms = await getTabPermissionsForRole((req.user as any)?.restaurantId || req.params.id, role);
     if (perms && Number((perms as any)[tabId] || 0) >= minLevel) return true;
   } catch { /* fall through to deny */ }
   return false;
@@ -5808,8 +5822,12 @@ function requireModuleAccess(moduleTabs: string[], operationalRoles: string[], m
     if (!role) return res.status(401).json({ error: 'Authentication required' });
     if (role === 'SUPER_ADMIN' || role === 'CTO' || role === 'OWNER') return next();
     if (opSet.has(role)) return next();
+    // Resolve the tenant from the staff token first — several routes gated by this
+    // (e.g. /api/orders/:id, /api/menu/:id, /api/inventory/ingredients/:id) carry no
+    // :id tenant param, so req.params.id would be an order/menu/ingredient id.
+    const gateTenant = (req.user as any)?.restaurantId || req.params.id;
     let perms: TabPerms | null = null;
-    try { perms = await getTabPermissionsForRole(req.params.id, role); } catch { perms = null; }
+    try { perms = await getTabPermissionsForRole(gateTenant, role); } catch { perms = null; }
     if (perms && moduleTabs.some(t => (perms![t] ?? 0) >= 1)) return next();
     return res.status(403).json({
       error: `Your role (${role}) has no access to the ${moduleLabel} module. Ask the property owner to grant it in Settings → Staff Access.`,
@@ -13819,8 +13837,8 @@ async function startServer() {
   // replace tax_config rows, fall back on error.
   app.put("/api/restaurant/:id/tax-config", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'SUPER_ADMIN') {
-        return res.status(403).json({ error: "Only owners can edit tax config" });
+      if (!(await _roleHasTab(req, 'SETTINGS', 2))) {
+        return res.status(403).json({ error: "You need Edit access to Settings to change tax config." });
       }
       const tenantId = req.params.id;
       const {
@@ -13875,8 +13893,8 @@ async function startServer() {
   // Owner picks a country in the Settings UI; this seeds the matching rows.
   app.post("/api/restaurant/:id/tax-config/apply-preset", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'SUPER_ADMIN') {
-        return res.status(403).json({ error: "Only owners can apply presets" });
+      if (!(await _roleHasTab(req, 'SETTINGS', 2))) {
+        return res.status(403).json({ error: "You need Edit access to Settings to apply a tax preset." });
       }
       const tenantId = req.params.id;
       const presetId = String(req.body?.preset_id || '').trim();
@@ -23035,7 +23053,10 @@ ${data.tenant.name}`;
     return role ? role.replace(/\b\w/g, (c: string) => c.toUpperCase()) : 'Staff';
   };
   const HK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const hkStaff = requireRole(['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'HOUSEKEEPING', 'MAINTENANCE', 'EVENTS_MANAGER']);
+  // Permission-aware (was a fixed requireRole allowlist that 403'd custom roles the
+  // owner granted HOUSEKEEPING). Built-in housekeeping ops roles + any custom role
+  // granted the tab; requireTabAccess('HOUSEKEEPING') enforces the exact grant on top.
+  const hkStaff = requireModuleAccess(['HOUSEKEEPING'], ['MANAGER', 'FRONT_DESK', 'CONCIERGE', 'HOUSEKEEPING', 'MAINTENANCE', 'EVENTS_MANAGER'], 'Housekeeping');
   // Read gate for the Checklist Templates CONFIG endpoints (categories / templates
   // / assignments). PERMISSION-AWARE (mirrors hotelStaff), so "Checklist Templates"
   // granted in Staff Access is honored: owner/platform admin + the same built-in
@@ -24319,8 +24340,8 @@ ${data.tenant.name}`;
 
   app.put("/api/restaurant/:id/settings/language", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      if (!['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'].includes(String(req.user?.role))) {
-        return res.status(403).json({ error: "Only owners and managers can change the language setting" });
+      if (!(await _roleHasTab(req, 'SETTINGS', 2))) {
+        return res.status(403).json({ error: "You need Edit access to Settings to change the language." });
       }
       // Empty string / null clears the secondary language (English-only).
       const lang = req.body?.secondary_language ? String(req.body.secondary_language).slice(0, 8) : null;
@@ -41648,9 +41669,11 @@ ${data.tenant.name}`;
   });
 
   // Owner-only writes for everything below. Mirrors hotel/settings RBAC.
-  const requireTariffOwner = (req: AuthRequest, res: Response, next: () => void) => {
-    if (req.user?.role !== 'OWNER' && req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
-      return res.status(403).json({ error: "Owner only" });
+  const requireTariffOwner = async (req: AuthRequest, res: Response, next: () => void) => {
+    // Permission-aware: owner/admin OR a role the owner granted Edit access to Settings
+    // (the tariff model is hotel Settings). Was owner-only, which 403'd a granted role.
+    if (!(await _roleHasTab(req, 'SETTINGS', 2))) {
+      return res.status(403).json({ error: "You need Edit access to Settings to edit the tariff model." });
     }
     if (req.user?.restaurantId !== req.params.id
         && req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
@@ -44996,8 +45019,8 @@ ${data.tenant.name}`;
   // KOT printers), so the added items show as their own round on the bill.
   app.post("/api/restaurant/:id/sessions/:token/adjustment", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
-      if (!['OWNER', 'MANAGER'].includes(req.user!.role)) {
-        return res.status(403).json({ error: "Access denied — manager or owner only" });
+      if (!(await _roleHasTab(req, 'ORDERS', 2))) {
+        return res.status(403).json({ error: "You need Edit access to Orders to adjust a bill." });
       }
       const db = await getTenantDb(req.params.id);
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_adjustment INTEGER DEFAULT 0").catch(() => {});
@@ -46609,9 +46632,11 @@ ${data.tenant.name}`;
   // marks it CANCELLED (never deleted), and writes an INVOICE · CANCELLED audit.
   // Owner/manager only; reason mandatory. Handles a single order/manual invoice and
   // a whole table-session invoice (all its rounds).
-  const _cancelRestGate = (req: AuthRequest, res: Response, reason: string): boolean => {
-    const role = String(req.user?.role || '').toUpperCase();
-    if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) { res.status(403).json({ error: 'Only an owner or manager can cancel an invoice.' }); return false; }
+  const _cancelRestGate = async (req: AuthRequest, res: Response, reason: string): Promise<boolean> => {
+    // Permission-aware: owner/admin OR a role granted Edit access to Invoices
+    // (was owner/manager-only, which 403'd a granted custom role). The optional
+    // cancel-with-password gate still runs on top when the tenant enables it.
+    if (!(await _roleHasTab(req, 'INVOICES', 2))) { res.status(403).json({ error: 'You need Edit access to Invoices to cancel one.' }); return false; }
     if (String(reason || '').trim().length < 3) { res.status(400).json({ error: 'A cancellation reason is required (for the audit trail).' }); return false; }
     return true;
   };
@@ -46674,7 +46699,7 @@ ${data.tenant.name}`;
   };
   app.post("/api/restaurant/:id/invoices/order/:orderId/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     const reason = String(req.body?.reason || '').trim();
-    if (!_cancelRestGate(req, res, reason)) return;
+    if (!(await _cancelRestGate(req, res, reason))) return;
     if (!(await _cancelPasswordOk(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
@@ -46691,7 +46716,7 @@ ${data.tenant.name}`;
   });
   app.post("/api/restaurant/:id/invoices/session/:sessionToken/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     const reason = String(req.body?.reason || '').trim();
-    if (!_cancelRestGate(req, res, reason)) return;
+    if (!(await _cancelRestGate(req, res, reason))) return;
     if (!(await _cancelPasswordOk(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
@@ -50317,8 +50342,8 @@ ${data.tenant.name}`;
   // Tables: Assign Waiter  (OWNER / MANAGER only)
   app.patch("/api/restaurant/:id/tables/:tableId/assign-waiter", authenticate, restaurantStaff, requireTabAccess('QR'), async (req: AuthRequest, res: Response) => {
     try {
-      if (!['OWNER', 'MANAGER'].includes(req.user!.role)) {
-        return res.status(403).json({ error: "Access denied" });
+      if (!(await _roleHasTab(req, 'QR', 2))) {
+        return res.status(403).json({ error: "You need Edit access to QR / Table Management to assign a waiter." });
       }
       // Two-step assignment: a table is served by a ROLE (all users in that role
       // get access) optionally narrowed to a SPECIFIC PERSON. waiter_id null/'' = ALL
@@ -50342,8 +50367,8 @@ ${data.tenant.name}`;
   // /tables/:tableId/...) so it never collides with the :tableId routes above.
   app.post("/api/restaurant/:id/tables/assign-waiter-bulk", authenticate, restaurantStaff, requireTabAccess('QR'), async (req: AuthRequest, res: Response) => {
     try {
-      if (!['OWNER', 'MANAGER'].includes(req.user!.role)) {
-        return res.status(403).json({ error: "Access denied" });
+      if (!(await _roleHasTab(req, 'QR', 2))) {
+        return res.status(403).json({ error: "You need Edit access to QR / Table Management to assign waiters." });
       }
       // Assign a ROLE (+ optional specific person, null = ALL in the role) to EVERY
       // table at once. role + waiter_id both null/'' clears all assignments.
@@ -52173,7 +52198,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-custom-role-gates-2',
+    commit_marker: 'rbac-coarse-gates-permission-aware',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
