@@ -14391,17 +14391,33 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (res.ok) {
         const raw: Record<string, Record<string, number>> = await res.json() || {};
         // Tabs added to the product after the matrix first shipped — pre-fill at
-        // Full(3) for any role that doesn't have them configured yet. This prevents
-        // an owner from accidentally revoking access simply by opening the matrix
-        // and saving before explicitly setting a level for these new tabs.
-        // STATUS_BOARD removed (2026-08-27): prefilling it to Full leaked the
-        // hotel/events status grid into restaurant roles (Waiter) — its nav
-        // visibility is now role-gated in isVisible, not matrix-injected.
-        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'CHECKLISTS', 'EVENTS_CHECKLISTS', 'MY_CHECKLIST', 'CHECKLIST_BOARD',
-          // Spa operational tabs — grantable in Staff Access from now on; prefill Full
-          // so spa staff on tenants that pre-configured the matrix aren't locked out.
+        // Full(3) for a LEGACY BUILT-IN role that relies on the backend's
+        // RBAC_NEWLY_ADDED inject, so opening the matrix and saving doesn't
+        // accidentally revoke access it holds only via that inject.
+        //
+        // TWO HARD RULES (a violation is a privilege-escalation-on-save bug):
+        //  (1) This list MUST match server `RBAC_NEWLY_ADDED` exactly. The backend
+        //      deliberately dropped PROCUREMENT / EXPENSE_JOURNAL (finance),
+        //      HOUSEKEEPING, STATUS_BOARD, the Events tabs, and CHECKLISTS /
+        //      EVENTS_CHECKLISTS from its inject to stop leaks — prefilling them
+        //      here and persisting on save re-grants them.
+        //  (2) NEVER prefill an AUTHORITATIVE role — a custom role (`CUSTOM_*`, its
+        //      matrix is the owner's exact intent) or a seeded built-in carrying the
+        //      `__complete__` sentinel. `saveStaffAccess` POSTs the whole matrix, so
+        //      an injected level here is SAVED, silently granting a tab the owner set
+        //      to N/A. Reported: "PCC/Security has no Events access but Cleaning
+        //      Checklist is visible" — EVENTS_CHECKLISTS was prefilled + saved →
+        //      hasEventsGrant → the Events group + Cleaning Checklist appeared AND the
+        //      role passed the eventsStaff module gate (Events API read access).
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'MY_CHECKLIST', 'CHECKLIST_BOARD',
+          // Spa operational tabs — module-gated, so harmless on non-spa tenants;
+          // prefill Full so spa staff on tenants that pre-configured the matrix
+          // aren't locked out. (Matches server RBAC_NEWLY_ADDED.)
           'SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_INVENTORY'];
         for (const roleId of Object.keys(raw)) {
+          const authoritative = String(roleId).toUpperCase().startsWith('CUSTOM_')
+            || !!(raw[roleId] && (raw[roleId] as any).__complete__);
+          if (authoritative) continue; // exact matrix — never inject (would persist on save)
           for (const tab of NEWLY_ADDED) {
             if (!(tab in (raw[roleId] || {}))) raw[roleId] = { ...(raw[roleId] || {}), [tab]: 3 };
           }

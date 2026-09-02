@@ -4154,6 +4154,24 @@ function checkIssueXlsxSourceFixes() {
       'Staff dashboard header shows a friendly role label (prettyRoleLabel), never the raw CUSTOM_ id',
       roleLabelHeader ? '' : 'HotelStaffDashboard ROLE_META fallback does not use prettyRoleLabel(userRole)');
 
+    // Staff Access grid prefill (fetchStaffAccess) must NOT re-grant sensitive tabs
+    // and MUST skip authoritative/custom roles — else opening + saving the matrix
+    // (saveStaffAccess POSTs the whole object) silently persists Full grants for
+    // Procurement / Expense Journal / Checklists / Event Checklists to roles the
+    // owner set to N/A (the "PCC/Security has no Events access but Cleaning
+    // Checklist is visible" privilege escalation). The prefill list must stay in
+    // sync with server RBAC_NEWLY_ADDED (which excludes all four).
+    const prefillMatch = app.match(/const NEWLY_ADDED = \[([\s\S]*?)\];/);
+    const prefillBody = prefillMatch ? prefillMatch[1] : '';
+    const noSensitivePrefill = !!prefillMatch
+      && !/'EXPENSE_JOURNAL'/.test(prefillBody) && !/'PROCUREMENT'/.test(prefillBody)
+      && !/'EVENTS_CHECKLISTS'/.test(prefillBody) && !/'CHECKLISTS'/.test(prefillBody);
+    const skipsAuthoritative = /const authoritative =[\s\S]{0,180}startsWith\('CUSTOM_'\)[\s\S]{0,100}__complete__/.test(app)
+      && /if \(authoritative\) continue;/.test(app);
+    (noSensitivePrefill && skipsAuthoritative ? pass : fail)('TC-XLSX-RBAC-GRID-PREFILL',
+      'Staff Access grid prefill excludes sensitive tabs AND skips authoritative/custom roles (no privilege-escalation-on-save)',
+      (noSensitivePrefill && skipsAuthoritative) ? '' : `noSensitivePrefill=${noSensitivePrefill} skipsAuthoritative=${skipsAuthoritative}`);
+
     // GST — Edit-Invoice zeroing effect bails for legacy single-GST tenants.
     const gstFix = /if \(p\.usedLegacyGst\) return;/.test(app);
     (gstFix ? pass : fail)('TC-XLSX-GST-NO-RESET',
