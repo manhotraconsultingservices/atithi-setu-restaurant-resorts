@@ -521,6 +521,37 @@ implementation: `requireTabAccess('HOUSEKEEPING')` on every route, a manager-rol
 check (`HK_MANAGER_ROLES`) on config/override writes, a `PERMISSIBLE_TABS` row, and
 `HOUSEKEEPING` in `RBAC_NEWLY_ADDED`.
 
+**Current gate helpers (2026-09).** Coarse `requireRole([...])` allowlists silently
+403 custom roles — every tenant role is CUSTOM now (`CUSTOM_<NAME>_<ts>`), so a
+hard-coded allowlist that omits them is a defect. Prefer **`requireModuleAccess(tabIds,
+opRoles, label)`** as the route gate (admits OWNER/CTO/SUPER_ADMIN + built-in op roles
++ any role granted ≥View on one of `tabIds`), and inside a handler use
+**`_roleHasTab(req, 'TAB_ID', minLevel)`** (level ≥2 for writes, ≥3 for
+owner-grade/delete) instead of an inline `role === 'OWNER' || role === 'MANAGER'`
+check. Both resolve the tenant as `(req.user).restaurantId || req.params.id`. Do NOT
+re-introduce `requireRole` allowlists or inline `MANAGER` string checks for gating.
+
+**Nav visibility is single-sourced — `src/navVisibility.ts` (`computeTabVisibility`).**
+`isVisible()` in `App.tsx` delegates to it; the headless `test-scripts/nav_visibility_audit.ts`
+imports it. Any tab whose visibility is *derived* from something other than its own
+grant — owner-only, always-on, role-shortcut, or (the dangerous case) a tab surfaced
+under a second nav group that borrows another module's permission — MUST have its rule
+added **there**, and a scenario added to the audit. A pure `/my-permissions` check
+cannot see these leaks (the leaking tab id is not in the granted list). The Events
+`EVENTS_HOUSEKEEPING` (borrows `HOUSEKEEPING`, lives under Events → must also require an
+`EVENTS_*` grant) is the reference for the cross-permission case.
+
+**`RBAC_NEWLY_ADDED` / `NEWLY_ADDED` inject-to-Full is for BENIGN tabs only.** It exists
+so an existing tenant isn't locked out of a newly-shipped tab — but injecting a
+**sensitive** tab to Full leaks it to restricted custom roles (the source of the "Waiter
+can see Status Board / Finance without permission" reports). A sensitive tab must NOT be
+in `RBAC_NEWLY_ADDED`/`NEWLY_ADDED`; instead **hard-gate it in `computeTabVisibility`**
+(owner/manager/explicit-grant, using strict `.includes` not the grandfather-aware
+predicate so it can't leak under a fail-open null list) and rely on the
+`__perm_complete__` deny-by-default for custom roles. `STATUS_BOARD` and the finance
+group are the reference. **After any RBAC/tab/role change, run `run-access-audit.bat`
+before reporting done.**
+
 ---
 
 ## Smart tables — MANDATORY for every list/grid of records
@@ -1155,6 +1186,8 @@ node scripts/test-invoice-math.cjs             # end-to-end math regression
 ### Mandatory Pre-Deploy Checklist
 - [ ] `npx tsc --noEmit` — 0 errors
 - [ ] `npx vite build` — succeeds
+- [ ] `node test-scripts/run_technical_tests.mjs` — 0 **new** FAIL (a small known-baseline of accounting-rounding fails is acceptable; skips are benign)
+- [ ] `run-access-audit.bat` — "ALL CLEAR" (mandatory if RBAC, a nav tab, or a role changed; catches nav leaks + isolation gaps before a client does)
 - [ ] All relevant `qa_*.mjs` scripts pass (run the ones touching changed modules)
 - [ ] Technical test round executed (see `test-scripts/`)
 - [ ] Business test round executed (see `test-scripts/`)
@@ -1232,9 +1265,34 @@ Reliable NETWORK (KDS) printing — the agent completes a job once the bytes flu
 ### Cash Count reachable from the cashier "Cash" view (`cashier-cash-count-tab`)
 The top-level **Cash** (cashier) view runs `AccountingView` in `cashierMode`, which hides the group nav — so the standalone **Cash Count** tool was unreachable there. Added a `Cash Drawers | Cash Count` switcher for that view (Cash Count also stays under Ledger & Books → Controls for owners).
 
+## Recent Feature Additions (2026-09 cycle — RBAC hardening, stale-cache root cause, access audit, print agent v3.4.1)
+
+> Deploy this cycle = commit + **push `origin master`** (remote `origin` = `github.com/manhotraconsultingservices/atithi-setu-restaurant-resorts`); the VPS rebuilds (`vite build` + `tsx server.ts`, `dist/` is server-built) and flips `BUILD_VERSION.commit_marker`. Verify by polling `GET /api/version` until the marker matches. Tenant RESTO-1003 = **"Manhotra Consulting"** (event + hotel + restaurant) is the RBAC/isolation proving ground.
+
+### Service worker — stale-bundle root cause FIXED (marker `sw-purge-navvis-audit`)
+The recurring **"client still sees the old bug after we deployed the fix"** was NOT a code bug — it was the PWA service worker. The old `public/sw.js` cached JS/CSS **cache-first** into a cache (`atithi-setu-v1`) that was **never invalidated across deploys** (activate only deleted OTHER cache names, and the name never changed) and pre-cached the HTML shell `/` once, which navigation fell back to on any hiccup. So clients kept loading an OLD bundle even after a hard reload; freshly-deployed RBAC/nav fixes never reached them (the repeated Ankur "Events Cleaning Checklist still visible" reports were exactly this — the deployed code was already correct). **`public/sw.js` is now a self-purging pass-through:** no `fetch` handler (network + normal HTTP-cache; hash-named assets cache via headers, `index.html` is `max-age=0`/DYNAMIC so always fresh, nothing served from a worker cache), and on `activate` it deletes EVERY cache and force-reloads once any client still holding the poison. Registered from `src/main.tsx` (https-only). **When a client reports a bug the deployed code already fixes, suspect the client cache first — don't re-diagnose the code.**
+
+### Nav visibility — single source + one-shot access audit (marker `sw-purge-navvis-audit`)
+The `isVisible()` nav decision (owner-only tabs, hard-gated finance/HR, and the Events "Cleaning Checklist" `EVENTS_HOUSEKEEPING` that borrows the `HOUSEKEEPING` permission but lives under the Events group) was an 80-line closure inside `src/App.tsx` — untestable except in front of a client. Extracted **verbatim into a pure, unit-tested single source `src/navVisibility.ts` (`computeTabVisibility`)**; `App.tsx` delegates to it. New headless test `test-scripts/nav_visibility_audit.ts` asserts the EXACT visible tab set for 9 real roles — catching derived/cross-permission leaks a pure `/my-permissions` API check can't see. It already found + fixed a defense-in-depth gap: `STAFF_ACCESS` was only kept safe by being dropped from the nav array; it now hard-gates to owner inside `computeTabVisibility`. **One-command pre-demo gate:** `run-access-audit.bat` (or `node test-scripts/access_audit.mjs`) runs nav-visibility + RBAC isolation (`--full` adds manager-grants + review sweeps) sequentially with one verdict — "ALL CLEAR — safe to demo" or which suite failed.
+
+### Systemic RBAC fix — custom "Manager"/staff roles no longer blocked or leaking
+Custom roles (every tenant role is CUSTOM now) were 403'd by fixed `requireRole` allowlists + inline `OWNER`/`MANAGER` checks across Finance/Procurement/Workforce/Orders/Menu/Inventory/Settings/Housekeeping/Spa (11 reported bugs). Coarse gates (`restaurantStaff`/`restaurantAdmin`/`spaStaff`/`hkStaff`/`procurementStaff`) converted to **`requireModuleAccess(tabIds, opRoles, label)`** (admits OWNER/CTO/SUPER_ADMIN + built-in op roles + any role granted ≥View on a module tab); inline checks converted to the in-handler helper **`_roleHasTab(req, tabId, minLevel)`**; finance gates are async permission-aware (`_acctOwnerOnly`/`_acctManager`). Both resolve tenant as `(req.user).restaurantId || req.params.id`. Cash-handover accept blocks outgoing even for managers; a names-only `GET /api/restaurant/:id/staff-picker` (authenticate-only) feeds pickers without exposing the full directory. Sensitive owner actions (staff create/delete, PO delete, invoice soft-delete) honor a Full (level-3) tab grant via `_roleHasTab(...,3)`. Validated by `test-scripts/rbac_manager_validation.mjs` (23), `rbac_review_validation.mjs` (10), `rbac_isolation_validation.mjs` (15) — all green on RESTO-1003.
+
+### Floor Plan Map (markers `floorplan-phase2` / `floorplan-phase3`)
+Command Centre spatial **Map** view (opt-in beside LIST) — sections + saved table positions + owner drag-arrange editor (`src/FloorPlanMap.tsx`, `/tables/sections` CRUD + `PUT /tables/layout`), `covers` guest count (`/sessions/:token/covers`), per-tenant turn-time colour escalation (`turn_warn_mins`/`turn_alert_mins` + `/turn-time-setting`). Additive — touches NO print code. Tests `TC-FLOORPLAN-*`.
+
+### On-prem print agent v3.4.1 + self-update + SuperAdmin dashboard
+Balaji-Inn "printing is slow" root-caused: the agent spawned a fresh PowerShell and recompiled the USB raw-print helper **per job** (~1-3s each). v3.4.1 adds a **persistent USB worker** (compile once at startup, stdin loop → milliseconds/job after the first), shorter poll (800ms default), and parallel-by-printer printing. Self-update **re-armed** (`print-agent/release.json` latest=3.4.1 + sha256; served by `GET /api/print-agent/download`) so agents on v3.3+ auto-update within ~6h. New SuperAdmin **Print Agents** dashboard (`GET /api/admin/print-agents`, `_agentHeartbeats` from the `X-Agent-Version` header) shows each tenant's agent version / online / up-to-date. Ready-to-run installer folder lives OUTSIDE the repo at `../printer-setup/AtithiSetuPrintAgent/`. Also a **`NewBuildBanner`** (App.tsx) that polls index.html and prompts a reload when the bundle hash changes.
+
+### Small UX/RBAC fixes
+* **Role label on staff dashboards** (marker `role-label-dashboard-header`) — `HotelStaffDashboard`'s `ROLE_META` fallback showed the raw `CUSTOM_MANAGER_<ts>` id ("CUSTOM_MANAGER_MTGS99CJ Dashboard"); routed through `prettyRoleLabel` → "Manager Dashboard". `TC-XLSX-ROLE-LABEL-DASHBOARD`. **Rule: never render a raw role id — always `prettyRoleLabel(role)` (single source `src/roleLabel.ts`).**
+* **Hotel Services view-only** (marker `services-view-only-buttons`) — Add/Edit/Delete gated on `canDo('SERVICES', …)` with a "View only" fallback.
+* **Check-in checklist tickable** from the Check-In screen for a workflow role (`_checklistOwns` made async permission-aware). `TC-CHK-OWN-CHECKIN`.
+
 ## Development Workflow
 
-* **Branch:** `dev` is the canonical branch. Push to `dev` triggers GitHub Actions auto-deploy to the VPS via `.github/workflows/deploy-vps.yml`. (NOTE 2026-08: the live VPS this cycle rebuilt on pushes to `master` — confirm which remote/branch your working copy tracks before relying on either.)
+* **Branch / deploy (confirmed 2026-09):** the live VPS rebuilds on push to **`master` on remote `origin`** (`manhotraconsultingservices/atithi-setu-restaurant-resorts`). Commit + `git push origin master`, then poll `GET /api/version` until `commit_marker` flips. (`dev` + `.github/workflows/deploy-vps.yml` is a legacy path; `origin master` is what this VPS tracks. The `.claude/worktrees/*` stubs are stale — build/commit/deploy from the MAIN repo dir on `master`.)
+* **Pre-demo access gate:** run `run-access-audit.bat` (nav visibility + RBAC isolation) whenever RBAC, a nav tab, or a role changed — one verdict, self-cleaning. See the RBAC-MANDATORY section.
 * **Local TypeScript noise:** `npx tsc --noEmit -p .` produces some pre-existing errors in unrelated files. Filter with `grep -E "src/App\.tsx" | grep -v <known-line>` when verifying that new edits don't introduce new errors.
 * **Vite production build** (`npx vite build`) must succeed cleanly before pushing.
 * **Don't `--no-verify` git pushes** — pre-commit hooks should always run.
