@@ -454,10 +454,16 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
     </div>
   );
 
+  // NB: SectionTabs / ViewMode / ArrangeMode are INLINE render helpers (they close
+  // over this component's state and have no hooks of their own). They are INVOKED
+  // as functions — NOT rendered as <ViewMode/> — on purpose: a nested component
+  // used as a JSX element gets a new identity on every re-render, so React would
+  // unmount + remount the entire tile grid on every 30s live-refresh (and any
+  // parent re-render), which is exactly what made the Command Centre map flicker.
   return (
     <div>
-      {!arrange && <SectionTabs />}
-      {arrange ? <ArrangeMode /> : <ViewMode />}
+      {!arrange && SectionTabs()}
+      {arrange ? ArrangeMode() : ViewMode()}
     </div>
   );
 }
