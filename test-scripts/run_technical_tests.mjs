@@ -4129,10 +4129,17 @@ function checkIssueXlsxSourceFixes() {
       'Leaked module tabs removed from ALWAYS_VISIBLE_TABS (no fail-open grandfather for restricted roles)',
       stillLeaking.length === 0 ? '' : `still grandfathered: ${stillLeaking.join(', ')}`);
 
-    // Status Board no longer force-injected to Full; role-gated in isVisible.
+    // Status Board no longer force-injected to Full; role-gated in the shared
+    // nav-visibility source. The isVisible() decision was extracted from App.tsx
+    // into src/navVisibility.ts (computeTabVisibility) — so the role gate now
+    // lives there (ops-role list renamed HOTEL_EVENTS_OPS -> STATUS_BOARD_OPS_ROLES),
+    // and App.tsx delegates to it.
+    let nav = ''; try { nav = readFileSync(join(__dirname, '..', 'src', 'navVisibility.ts'), 'utf8'); } catch {}
     const backInject  = /RBAC_NEWLY_ADDED = \[[\s\S]*?'STATUS_BOARD'[\s\S]*?\]/.test(srv);
     const frontInject = /NEWLY_ADDED = \[[^\]]*'STATUS_BOARD'/.test(app);
-    const roleGate    = /id === 'STATUS_BOARD'[\s\S]{0,500}HOTEL_EVENTS_OPS/.test(app);
+    const roleGate    = /id === 'STATUS_BOARD'[\s\S]{0,500}STATUS_BOARD_OPS_ROLES/.test(nav)
+                        && /STATUS_BOARD_OPS_ROLES = \[[^\]]*'FRONT_DESK'/.test(nav)
+                        && /computeTabVisibility/.test(app);   // App delegates to the shared source
     const sbOk = !backInject && !frontInject && roleGate;
     (sbOk ? pass : fail)('TC-XLSX-RBAC-STATUSBOARD',
       'Status Board no longer injected to Full; role-gated (owner/manager/hotel-events-ops/explicit-grant)',
