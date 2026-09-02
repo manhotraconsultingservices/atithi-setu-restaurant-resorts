@@ -18341,8 +18341,8 @@ ${data.tenant.name}`;
   app.delete("/api/inventory/purchase-orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const userRole = String(req.user?.role || '').toUpperCase();
-      if (!['OWNER', 'SUPER_ADMIN'].includes(userRole)) {
-        return res.status(403).json({ error: 'Only the business owner can delete purchase orders.' });
+      if (!(await _roleHasTab(req, 'INVENTORY', 3))) {
+        return res.status(403).json({ error: 'You need Full access to Inventory to delete a purchase order.' });
       }
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -46613,8 +46613,10 @@ ${data.tenant.name}`;
   ): Promise<{ status: number; body: any } | null> => {
     const role = req.user?.role || '';
     const isAdminRole = ADMIN_ROLES_FOR_DELETE.has(role);
-    if (role !== 'OWNER' && !isAdminRole) {
-      return { status: 403, body: { error: 'Forbidden — invoice deletion requires OWNER, SUPER_ADMIN or CTO role' } };
+    // Honor a Full Invoices grant (was owner/admin-only). Deletion also stays gated
+    // by the per-tenant invoice_delete_enabled flag below + a mandatory reason.
+    if (!(await _roleHasTab(req, 'INVOICES', 3))) {
+      return { status: 403, body: { error: 'Forbidden — invoice deletion requires Full access to the Invoices tab' } };
     }
     if (!isAdminRole && req.user?.restaurantId !== req.params.id) {
       return { status: 403, body: { error: 'Forbidden — cannot delete another restaurant\'s invoices' } };
@@ -48456,7 +48458,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const jobs: any[] = await db.query(
-        `SELECT j.id, j.order_id, j.kind, j.content, j.attempts,
+        `SELECT j.id, j.order_id, j.kind, j.content, j.attempts, j.created_at,
                 p.name AS printer_name, p.host, p.port, p.conn_type, p.copies
            FROM print_jobs j LEFT JOIN kitchen_printers p ON p.id = j.printer_id
           WHERE j.status = 'PENDING' AND j.attempts < 6 ORDER BY j.created_at LIMIT 50`
@@ -49382,7 +49384,7 @@ ${data.tenant.name}`;
   // Staff: Create Staff
   app.post("/api/owner/staff", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+      if (!(await _roleHasTab(req, 'STAFF', 3))) {
         return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
       }
       const targetId = resolveTargetRestaurantId(req);
@@ -49421,7 +49423,7 @@ ${data.tenant.name}`;
   // Staff: Reset Password
   app.post("/api/owner/staff/:id/reset-password", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+      if (!(await _roleHasTab(req, 'STAFF', 3))) {
         return res.status(403).json({ error: "Forbidden — password reset requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
       }
       const targetId = resolveTargetRestaurantId(req);
@@ -49602,7 +49604,7 @@ ${data.tenant.name}`;
   app.patch("/api/owner/staff/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       // RBAC: mirror the staff create/GET siblings — only tenant admins manage staff.
-      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+      if (!(await _roleHasTab(req, 'STAFF', 3))) {
         return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
       }
       const db = await getTenantDb(req.user!.restaurantId);
@@ -49621,7 +49623,7 @@ ${data.tenant.name}`;
   app.delete("/api/owner/staff/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       // RBAC: mirror the staff create/GET siblings — only tenant admins manage staff.
-      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+      if (!(await _roleHasTab(req, 'STAFF', 3))) {
         return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
       }
       const db = await getTenantDb(req.user!.restaurantId);
@@ -49662,7 +49664,7 @@ ${data.tenant.name}`;
   app.patch("/api/attendance/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       // RBAC: attendance edits are a manager function — mirror the staff-mgmt gate.
-      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+      if (!(await _roleHasTab(req, 'STAFF', 3))) {
         return res.status(403).json({ error: "Forbidden — editing attendance requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
       }
       const { status } = req.body;
@@ -49678,7 +49680,7 @@ ${data.tenant.name}`;
   app.patch("/api/owner/staff/:id/settings", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       // RBAC: mirror the staff create/GET siblings — only tenant admins manage staff.
-      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+      if (!(await _roleHasTab(req, 'STAFF', 3))) {
         return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
       }
       const b = req.body || {};
@@ -52223,7 +52225,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-staff-reads-gated',
+    commit_marker: 'rbac-delegate-plus-printjob-createdat',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
