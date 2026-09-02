@@ -4145,6 +4145,15 @@ function checkIssueXlsxSourceFixes() {
       'Status Board no longer injected to Full; role-gated (owner/manager/hotel-events-ops/explicit-grant)',
       sbOk ? '' : `backInject=${backInject} frontInject=${frontInject} roleGate=${roleGate}`);
 
+    // Custom-role staff dashboard header must show a friendly label, never the
+    // raw CUSTOM_<NAME>_<ts> id ("CUSTOM_MANAGER_MTGS99CJ Dashboard"). The
+    // HotelStaffDashboard ROLE_META fallback routes an unknown role through
+    // prettyRoleLabel (-> "Manager").
+    const roleLabelHeader = /ROLE_META\[userRole\] \|\| \{ label: prettyRoleLabel\(userRole\)/.test(app);
+    (roleLabelHeader ? pass : fail)('TC-XLSX-ROLE-LABEL-DASHBOARD',
+      'Staff dashboard header shows a friendly role label (prettyRoleLabel), never the raw CUSTOM_ id',
+      roleLabelHeader ? '' : 'HotelStaffDashboard ROLE_META fallback does not use prettyRoleLabel(userRole)');
+
     // GST — Edit-Invoice zeroing effect bails for legacy single-GST tenants.
     const gstFix = /if \(p\.usedLegacyGst\) return;/.test(app);
     (gstFix ? pass : fail)('TC-XLSX-GST-NO-RESET',

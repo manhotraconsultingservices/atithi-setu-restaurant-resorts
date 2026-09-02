@@ -47586,7 +47586,9 @@ function HotelStaffDashboard({ restaurantId, token, userRole }: {
     MAINTENANCE:  { label: 'Maintenance',  emoji: '🔧',   color: 'slate' },
     CONCIERGE:    { label: 'Concierge',    emoji: '🎩',  color: 'rose'  },
   };
-  const meta = ROLE_META[userRole] || { label: userRole, emoji: '👤', color: 'gray' };
+  // Custom roles (CUSTOM_<NAME>_<ts>) aren't in ROLE_META — never show the raw
+  // id ("CUSTOM_MANAGER_MTGS99CJ Dashboard"); prettyRoleLabel yields "Manager".
+  const meta = ROLE_META[userRole] || { label: prettyRoleLabel(userRole) || userRole, emoji: '👤', color: 'gray' };
 
   const isFrontDesk = userRole === 'FRONT_DESK';
 
