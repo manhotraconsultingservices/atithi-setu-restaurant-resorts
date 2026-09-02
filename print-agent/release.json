@@ -1,13 +1,11 @@
 {
-  "latest": "3.4.0",
-  "sha256": "6b4b49f643a8e8e2cec680be2c54efa33bd7a15120ad2d6ae07a83f66c497c46",
+  "latest": "3.4.1",
+  "sha256": "e5479a152ab1c20647023f619486d1fe9e6d974ff87f90c4ca4ba287ee78f2cd",
   "url": "https://erp.atithi-setu.com/api/print-agent/download",
-  "notes": "v3.4 — faster thermal printing: shorter poll interval (default 800ms), persistent USB worker (compiles once instead of a PowerShell spawn + C# recompile per job), parallel printing across printers, and print timing logs.",
-  "_status": "ARMED 2026-09-02 — self-update is ON. Every agent on v3.3+ auto-updates to 3.4.0 within ~6h (download -> verify sha256 -> swap -> restart). The binary served by GET /api/print-agent/download is print-agent/dist/AtithiSetuPrintAgent.exe, force-committed so the VPS serves it. To pause self-update again, set latest/sha256/url back to null. NOTE: prefer AGENT_EXE_PATH (VPS disk) or a CDN url for future releases to avoid committing the 57MB binary to git history.",
+  "notes": "v3.4.1 — faster thermal printing (shorter poll, persistent USB worker, parallel printing) + the agent now reports its build to the SuperAdmin Print Agents dashboard.",
+  "_status": "ARMED 2026-09-02 — self-update is ON. Every agent on v3.3+ auto-updates to 3.4.1 within ~6h (download -> verify sha256 -> swap -> restart). The binary served by GET /api/print-agent/download is print-agent/dist/AtithiSetuPrintAgent.exe, force-committed so the VPS serves it. To pause self-update again, set latest/sha256/url back to null. NOTE: prefer AGENT_EXE_PATH (VPS disk) or a CDN url for future releases to avoid committing the ~57MB binary to git history.",
   "_history": {
-    "3.3.0": {
-      "sha256": "07c9b5dace9272bd56cb4a35b42da78056a075e4c6b0d5ca9fb5aa5a3dea670c",
-      "url": "https://erp.atithi-setu.com/api/print-agent/download"
-    }
+    "3.4.0": { "sha256": "6b4b49f643a8e8e2cec680be2c54efa33bd7a15120ad2d6ae07a83f66c497c46", "note": "superseded by 3.4.1 before any agent picked it up" },
+    "3.3.0": { "sha256": "07c9b5dace9272bd56cb4a35b42da78056a075e4c6b0d5ca9fb5aa5a3dea670c" }
   }
 }

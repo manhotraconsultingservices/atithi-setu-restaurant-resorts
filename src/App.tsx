@@ -52432,7 +52432,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
-  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS'>('RESTAURANTS');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS' | 'PRINT_AGENTS'>('RESTAURANTS');
   const [editTenant, setEditTenant] = useState<any | null>(null);
 
   // Subscription billing state (admin Billing tab)
@@ -52446,6 +52446,21 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [alertLoading, setAlertLoading] = useState(false);
   const [alertBusy, setAlertBusy] = useState(false);
   const [alertMsg, setAlertMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  // Print-agent rollout (SuperAdmin): which build each tenant's on-prem agent runs.
+  const [agentRollout, setAgentRollout] = useState<any | null>(null);
+  const [agentRolloutLoading, setAgentRolloutLoading] = useState(false);
+  const [serverBuild, setServerBuild] = useState<any | null>(null);
+  const fetchAgentRollout = async () => {
+    setAgentRolloutLoading(true);
+    try {
+      const [a, v] = await Promise.all([
+        fetch('/api/admin/print-agents', { headers: { Authorization: `Bearer ${token}` } }).then(r => (r.ok ? r.json() : null)).catch(() => null),
+        fetch('/api/version').then(r => (r.ok ? r.json() : null)).catch(() => null),
+      ]);
+      setAgentRollout(a); setServerBuild(v);
+    } finally { setAgentRolloutLoading(false); }
+  };
 
   // SQL Console state
   const [sqlTarget, setSqlTarget] = useState<'tenant' | 'central'>('tenant');
@@ -53445,6 +53460,15 @@ function SuperAdminDashboard({ token }: { token: string }) {
             )}
           >
             <Bell size={16} /> Admin Alerts
+          </button>
+          <button
+            onClick={() => { setViewMode('PRINT_AGENTS'); fetchAgentRollout(); }}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'PRINT_AGENTS' ? "bg-violet-600 text-white shadow-md" : "text-[#1a1208] hover:bg-[#cc5a16]/5"
+            )}
+          >
+            <Printer size={16} /> Print Agents
           </button>
         </div>
       </div>
@@ -55147,6 +55171,69 @@ function SuperAdminDashboard({ token }: { token: string }) {
           {sqlResult && sqlResult.columns.length === 0 && !sqlError && (
             <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-8 text-center text-sm text-[#9c8e85] italic">Query returned 0 rows.</div>
           )}
+        </div>
+      ) : viewMode === 'PRINT_AGENTS' ? (
+        <div className="space-y-5">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h3 className="text-xl font-bold font-serif text-[#1a1208]">Print Agents — Build Rollout</h3>
+              <p className="text-sm text-[#6b5d52]">Which on-prem print-agent build each tenant is running, and whether it&apos;s online.</p>
+            </div>
+            <button onClick={fetchAgentRollout} disabled={agentRolloutLoading}
+              className="px-4 py-2 rounded-xl bg-violet-600 text-white text-sm font-bold hover:bg-violet-700 disabled:opacity-50">
+              {agentRolloutLoading ? 'Refreshing…' : '↻ Refresh'}
+            </button>
+          </div>
+          <div className="grid sm:grid-cols-3 gap-3">
+            <div className="rounded-2xl border border-[#cc5a16]/10 bg-white p-4">
+              <div className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Server build</div>
+              <div className="font-mono font-bold text-[#1a1208] mt-1 truncate">{serverBuild?.commit_marker || '—'}</div>
+              <div className="text-[11px] text-[#6b5d52] mt-1">{Array.isArray(serverBuild?.code_features) ? `${serverBuild.code_features.length} feature markers` : ''}</div>
+            </div>
+            <div className="rounded-2xl border border-[#cc5a16]/10 bg-white p-4">
+              <div className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Latest agent build</div>
+              <div className="font-mono font-bold text-violet-700 mt-1">{agentRollout?.latest || '(self-update off)'}</div>
+              <div className="text-[11px] text-[#6b5d52] mt-1">published via the update manifest</div>
+            </div>
+            <div className="rounded-2xl border border-[#cc5a16]/10 bg-white p-4">
+              <div className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Fleet</div>
+              <div className="flex flex-wrap gap-1.5 mt-1.5 text-[11px] font-bold">
+                {(() => { const s = agentRollout?.summary || {}; const chip = (k: string, label: string, cls: string) => s[k] ? <span key={k} className={`px-2 py-0.5 rounded-full ${cls}`}>{s[k]} {label}</span> : null;
+                  const chips = [chip('up_to_date', 'latest', 'bg-emerald-100 text-emerald-800'), chip('outdated', 'outdated', 'bg-amber-100 text-amber-800'), chip('online_unknown', 'online', 'bg-sky-100 text-sky-800'), chip('offline', 'offline', 'bg-stone-200 text-stone-700'), chip('never', 'no agent', 'bg-stone-100 text-stone-500')].filter(Boolean);
+                  return chips.length ? chips : <span className="text-[#9c8e85]">{agentRolloutLoading ? 'loading…' : 'no data'}</span>; })()}
+              </div>
+            </div>
+          </div>
+          <div className="rounded-2xl border border-[#cc5a16]/10 bg-white overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="bg-[#faf7f2] text-left text-[11px] uppercase tracking-widest text-[#6b5d52]">
+                {['Tenant', 'Agent version', 'Status', 'Last seen'].map(h => <th key={h} className="px-4 py-3 font-bold whitespace-nowrap">{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {(agentRollout?.agents || []).map((a: any) => {
+                  const badge = a.status === 'up_to_date' ? ['🟢 Up to date', 'bg-emerald-100 text-emerald-800']
+                    : a.status === 'outdated' ? ['🟡 Outdated', 'bg-amber-100 text-amber-800']
+                    : a.status === 'online_unknown' ? ['🔵 Online (old build)', 'bg-sky-100 text-sky-800']
+                    : a.status === 'offline' ? ['⚪ Offline', 'bg-stone-200 text-stone-700']
+                    : ['— No agent', 'bg-stone-100 text-stone-500'];
+                  const s = a.seconds_ago;
+                  const seen = s == null ? 'never' : s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+                  return (
+                    <tr key={a.restaurant_id} className="border-t border-[#f0e8d8]">
+                      <td className="px-4 py-2.5"><div className="font-semibold text-[#1a1208]">{a.name || a.restaurant_id}</div><div className="text-[11px] text-[#9c8e85] font-mono">{a.restaurant_id}</div></td>
+                      <td className="px-4 py-2.5 font-mono">{a.version || '—'}</td>
+                      <td className="px-4 py-2.5"><span className={`text-xs font-bold rounded-full px-2.5 py-1 whitespace-nowrap ${badge[1]}`}>{badge[0]}</span></td>
+                      <td className="px-4 py-2.5 text-[#6b5d52] whitespace-nowrap">{seen}</td>
+                    </tr>
+                  );
+                })}
+                {(!agentRollout?.agents || agentRollout.agents.length === 0) && (
+                  <tr><td colSpan={4} className="px-4 py-8 text-center text-[#9c8e85] italic">{agentRolloutLoading ? 'Loading…' : 'No tenants / no agent has checked in yet.'}</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] text-[#9c8e85]">Version is reported by agents on v3.4.1+; older online agents show &quot;Online (old build)&quot; until they self-update. Online = checked in within {agentRollout?.online_window_seconds || 90}s (agents poll about once a second).</p>
         </div>
       ) : viewMode === 'ADMIN_ALERTS' ? (
         <div className="space-y-6">

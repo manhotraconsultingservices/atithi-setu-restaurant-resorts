@@ -48291,6 +48291,13 @@ ${data.tenant.name}`;
 
   // Orders: Update Status
   // ═══ Thermal KOT printing — printer config + print-job queue ════════════════
+  // SuperAdmin rollout visibility: last time each tenant's on-prem print agent
+  // checked in + the version it reported (agents >= 3.4.1 send X-Agent-Version on
+  // every poll). In-memory — agents poll ~once per second, so this repopulates
+  // within a second of a server restart; a tenant whose agent is down simply has a
+  // stale/absent entry (shown as offline). Keyed by restaurant id.
+  const _agentHeartbeats = new Map<string, { version: string | null; lastSeen: number; ip: string }>();
+
   // Auth for the on-prem print AGENT (NOT a JWT user): header X-Print-Agent-Token
   // (or ?agent_token=) must match restaurants.print_agent_token for this tenant.
   const _printAgentAuth = async (req: any, res: any): Promise<boolean> => {
@@ -48298,6 +48305,14 @@ ${data.tenant.name}`;
     if (!tok) { res.status(401).json({ error: 'print agent token required' }); return false; }
     const row: any = await centralDb.get("SELECT id FROM restaurants WHERE id = ? AND print_agent_token = ?", [req.params.id, tok]).catch(() => null);
     if (!row) { res.status(403).json({ error: 'invalid print agent token' }); return false; }
+    // Record the heartbeat (fires on every pending-poll / ack from a valid agent).
+    try {
+      _agentHeartbeats.set(String(req.params.id), {
+        version: (String(req.headers['x-agent-version'] || '').trim() || null),
+        lastSeen: Date.now(),
+        ip: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim(),
+      });
+    } catch { /* non-fatal */ }
     return true;
   };
   // Receipt width for a printer is stored as CHARACTER COLUMNS (what ESC/POS uses):
@@ -48344,6 +48359,40 @@ ${data.tenant.name}`;
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', 'attachment; filename="AtithiSetuPrintAgent.exe"');
     res.sendFile(path.resolve(p));
+  });
+
+  // SuperAdmin: print-agent rollout across ALL tenants. Shows which agent build each
+  // tenant's on-prem agent is running, whether it's online (checked in recently), and
+  // whether it matches the latest published build. Powers the SuperAdmin "Print Agents"
+  // dashboard. Version is known for agents >= 3.4.1 (they send X-Agent-Version); older
+  // agents show as online-unknown until they self-update.
+  app.get("/api/admin/print-agents", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    let rel: any = {};
+    try { const rp = path.join(process.cwd(), 'print-agent', 'release.json'); if (fs.existsSync(rp)) rel = JSON.parse(fs.readFileSync(rp, 'utf8')); } catch { /* fall back to null latest */ }
+    const latest = process.env.AGENT_LATEST_VERSION || rel.latest || null;
+    const rests: any[] = await centralDb.query("SELECT id, name FROM restaurants ORDER BY name").catch(() => []);
+    const now = Date.now();
+    const ONLINE_MS = 90 * 1000;   // seen within 90s → online (agents poll < 1s apart)
+    const agents = (Array.isArray(rests) ? rests : []).map((r: any) => {
+      const hb = _agentHeartbeats.get(String(r.id));
+      const lastSeen = hb ? hb.lastSeen : null;
+      const online = lastSeen != null && (now - lastSeen) < ONLINE_MS;
+      const version = hb?.version || null;
+      const up_to_date = (version && latest) ? (version === latest) : null;
+      let status: string;
+      if (lastSeen == null) status = 'never';          // no agent has ever checked in
+      else if (!online) status = 'offline';            // was seen, now silent
+      else if (!version) status = 'online_unknown';    // online but pre-3.4.1 (no version reported)
+      else status = up_to_date ? 'up_to_date' : 'outdated';
+      return {
+        restaurant_id: r.id, name: r.name, version, latest, online, up_to_date,
+        last_seen_at: lastSeen != null ? new Date(lastSeen).toISOString() : null,
+        seconds_ago: lastSeen != null ? Math.round((now - lastSeen) / 1000) : null,
+        status,
+      };
+    });
+    const summary = agents.reduce((a: any, x: any) => { a[x.status] = (a[x.status] || 0) + 1; return a; }, {});
+    res.json({ latest, online_window_seconds: ONLINE_MS / 1000, count: agents.length, summary, agents });
   });
 
   // ── Print Templates — owner-designed KOT + INVOICE format (Print Studio) ────
@@ -52225,7 +52274,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-delegate-plus-printjob-createdat',
+    commit_marker: 'superadmin-print-agent-dashboard',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.

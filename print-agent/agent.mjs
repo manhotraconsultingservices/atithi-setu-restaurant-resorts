@@ -36,7 +36,9 @@ import { fileURLToPath } from 'node:url';
 // build is running (printed in the startup banner). v3 = reliable NETWORK printing.
 // v3.4 = SPEED: faster poll, persistent USB worker (no per-job PowerShell/compile),
 // parallel printing across printers, queue-age + duration timing logs.
-const AGENT_VERSION = '3.4.0';
+// v3.4.1 = reports its version (X-Agent-Version) so the SuperAdmin console can show
+// which build each tenant is running + whether the agent is online.
+const AGENT_VERSION = '3.4.1';
 
 // ── locate a folder we can read a .env / write temp files next to ────────────
 // Under `node agent.mjs` this is the script dir; bundled as an .exe it's the
@@ -82,7 +84,7 @@ if (!BASE_URL || !RESTAURANT_ID || !AGENT_TOKEN) {
   process.exit(1);
 }
 const api = (p) => `${BASE_URL}/api/restaurant/${RESTAURANT_ID}${p}`;
-const headers = { 'X-Print-Agent-Token': AGENT_TOKEN, 'Content-Type': 'application/json' };
+const headers = { 'X-Print-Agent-Token': AGENT_TOKEN, 'X-Agent-Version': AGENT_VERSION, 'Content-Type': 'application/json' };
 
 // ── ESC/POS helpers ─────────────────────────────────────────────────────────
 const ESC = '\x1B', GS = '\x1D';
