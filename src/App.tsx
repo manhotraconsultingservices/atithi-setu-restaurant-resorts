@@ -2484,6 +2484,8 @@ export default function App() {
         </div>
       </nav>
 
+      <NewBuildBanner />
+
       {/* Billing banner / lock screen for non-admin tenants. Polls hourly. */}
       {restaurantId && restaurantId !== 'SYSTEM' && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && role !== 'OTA' && role !== 'AGENT' && (
         <BillingNotice restaurantId={restaurantId} token={token!} />
@@ -3684,6 +3686,58 @@ function MenuTemplateEditor({ template, onClose, onSave }: {
 // dismissal is stored in localStorage so the same user doesn't see the
 // banner repeatedly after they've dismissed it. The brand admin can
 // globally dismiss via the brand-admin dashboard.
+// Detects when a NEWER frontend build has been deployed while this tab stayed open,
+// and offers a one-click reload — fixes "stale tab" reports (a user keeps the app
+// open across a deploy and misses UI fixes; reported for PCC Security / check-in
+// screens). It compares the hashed bundle filenames referenced by a freshly-fetched
+// index.html against the ones seen at load, so it prompts ONLY when the frontend
+// actually changed (never on backend-only deploys). index.html is served no-cache,
+// so the poll always sees the current build.
+function NewBuildBanner() {
+  const [stale, setStale] = useState(false);
+  const baseline = useRef<string | null>(null);   // asset signature seen at load / last dismiss
+  const latest = useRef<string | null>(null);      // most recent signature polled
+  useEffect(() => {
+    let alive = true;
+    const currentAssets = async (): Promise<string | null> => {
+      try {
+        const r = await fetch(`/index.html?_=${Date.now()}`, { cache: 'no-store' });
+        if (!r.ok) return null;
+        const html = await r.text();
+        const m = html.match(/assets\/index-[A-Za-z0-9_-]+\.(?:js|css)/g);
+        return m && m.length ? Array.from(new Set(m)).sort().join('|') : null;
+      } catch { return null; }
+    };
+    (async () => { baseline.current = await currentAssets(); })();
+    const id = setInterval(async () => {
+      if (!alive) return;
+      const cur = await currentAssets();
+      latest.current = cur;
+      if (alive && cur && baseline.current && cur !== baseline.current) setStale(true);
+    }, 120000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  if (!stale) return null;
+  const dismiss = () => { baseline.current = latest.current || baseline.current; setStale(false); };
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-[300] flex justify-center px-3 pb-4 pointer-events-none">
+      <div className="pointer-events-auto flex items-center gap-3 rounded-2xl border border-[#cc5a16]/20 bg-white shadow-2xl px-4 py-3 max-w-[92vw]">
+        <span className="text-lg" aria-hidden>✨</span>
+        <div className="min-w-0">
+          <p className="text-sm font-bold text-[#1a1208]">A new version is available</p>
+          <p className="text-[11px] text-[#6b5d52]">Reload to get the latest fixes and features.</p>
+        </div>
+        <button onClick={() => window.location.reload()}
+          className="ml-1 shrink-0 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#b34e12] transition-all">
+          Reload
+        </button>
+        <button onClick={dismiss} title="Dismiss for now"
+          className="shrink-0 p-1.5 rounded-lg text-[#9c8e85] hover:bg-[#faf7f2]"><X size={16} /></button>
+      </div>
+    </div>
+  );
+}
+
 function BrandAnnouncementBanner({ restaurantId, token }: { restaurantId: string; token: string }) {
   const [announcements, setAnnouncements] = useState<any[]>([]);
   const [dismissed, setDismissed] = useState<Set<string>>(() => {
