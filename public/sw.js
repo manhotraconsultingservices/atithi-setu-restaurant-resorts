@@ -1,81 +1,54 @@
 /**
- * Atithi Setu — Service Worker
+ * Atithi Setu — Service Worker  (v2 — self-purging pass-through)
  *
- * Strategy:
- *   - Static assets (JS, CSS, fonts, images): cache-first with background revalidation
- *   - API calls (/api/*): network-first, never cached
- *   - Navigation (HTML): network-first, fall back to cached shell
+ * WHY THIS EXISTS
+ *   The previous worker cached JS/CSS "cache-first" into a cache
+ *   ('atithi-setu-v1') that was NEVER invalidated across deploys, and it
+ *   pre-cached the HTML shell '/' once at install. Result: clients could keep
+ *   loading an OLD app bundle even after a hard reload, so freshly-deployed
+ *   fixes (RBAC, nav visibility, …) never reached them and the same bug got
+ *   re-reported. This is a frequently-deployed online ERP — an app-shell cache
+ *   is a liability, not a feature.
+ *
+ * STRATEGY (safe by design)
+ *   - Fetch: PASS-THROUGH. We never call respondWith, so every request goes to
+ *     the network with normal HTTP-cache semantics. Hash-named assets stay
+ *     cacheable via their headers; index.html (max-age=0) is always fresh.
+ *     The worker can no longer serve a stale bundle.
+ *   - Activate: purge EVERY cache (removes the poisoned 'atithi-setu-v1'), and
+ *     for any client that still had a cache, force one clean reload so it lands
+ *     on current code immediately instead of needing a second manual refresh.
+ *     Clients with no cache (already migrated) are never force-reloaded.
+ *
+ *   The worker stays registered (PWA installability intact) but is inert for
+ *   fetches. Future sw.js changes won't force-reload anyone because a
+ *   pass-through worker creates no caches — only the one-time migration off the
+ *   old cache triggers a reload.
  */
 
-const CACHE_NAME = 'atithi-setu-v1';
-const SHELL_URL  = '/';
-
-// Assets we pre-cache at install time (the app shell)
-const PRECACHE_URLS = [
-  '/',
-  '/favicon.svg',
-  '/manifest.json',
-  '/icon-192x192.png',
-  '/icon-512x512.png',
-  '/apple-touch-icon.png',
-];
-
-// ── Install: pre-cache the shell ──────────────────────────────────────────────
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS))
-  );
+self.addEventListener('install', () => {
+  // Take over as soon as possible so the purge below runs on this navigation.
   self.skipWaiting();
 });
 
-// ── Activate: remove old caches ───────────────────────────────────────────────
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    const hadPoison = keys.length > 0;          // old worker left a cache behind
+    await Promise.all(keys.map((k) => caches.delete(k)));
+    await self.clients.claim();
+
+    if (hadPoison) {
+      // One-time: clients still holding the stale cache get a clean reload so
+      // they immediately run current code. Runs at most once per client
+      // (a pass-through worker never creates a cache again).
+      const clients = await self.clients.matchAll({ type: 'window' });
+      for (const client of clients) {
+        try { client.navigate(client.url); } catch (_) { /* best effort */ }
+      }
+    }
+  })());
 });
 
-// ── Fetch: route-based strategy ───────────────────────────────────────────────
-self.addEventListener('fetch', (event) => {
-  const { request } = event;
-  const url = new URL(request.url);
-
-  // Skip non-GET and cross-origin requests
-  if (request.method !== 'GET' || url.origin !== self.location.origin) return;
-
-  // API: always network-first, never cache
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(fetch(request));
-    return;
-  }
-
-  // Static assets (.js, .css, images, fonts): cache-first
-  if (/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf|ico|webp)(\?.*)?$/.test(url.pathname)) {
-    event.respondWith(
-      caches.match(request).then((cached) => {
-        const networkFetch = fetch(request).then((response) => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-          }
-          return response;
-        });
-        return cached || networkFetch;
-      })
-    );
-    return;
-  }
-
-  // Navigation (HTML pages): network-first, fall back to shell
-  if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request).catch(() =>
-        caches.match(SHELL_URL).then((r) => r || caches.match('/'))
-      )
-    );
-    return;
-  }
-});
+// No 'fetch' handler → the browser handles every request normally (network +
+// HTTP cache). Nothing is served from a worker cache, so nothing goes stale.

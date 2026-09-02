@@ -17,6 +17,7 @@ import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { prettyRoleLabel } from './roleLabel';
+import { computeTabVisibility } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { motion, AnimatePresence } from 'motion/react';
@@ -15837,86 +15838,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           : allowedTabs;
         // STAFF_ACCESS hard-gate: owners always see it (it's dropped from
         // the array for non-owners, so this short-circuit is owner-only).
-        const isVisible = (id: string) => {
-          if (id === 'STAFF_ACCESS' && isOwnerOrAdmin) return true;
-          // Room Setup is owner-only (room CRUD + types + tariff). Mirror the
-          // STAFF_ACCESS gate: owners always see it; everyone else never does.
-          if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
-          if (id === 'KITCHEN_PRINTERS') return isOwnerOrAdmin;
-          if (id === 'PRINT_TEMPLATES') return isOwnerOrAdmin;
-          // Checklist Templates: owner/admin always, PLUS any role the owner grants
-          // "Checklist Templates" in Staff Access (honor the grant). Editing stays
-          // owner-only server-side (write endpoints are requireOwnerOrAdmin) — a
-          // granted role VIEWS templates. Built-in staff no longer see it by default
-          // (CHECKLISTS was removed from RBAC_NEWLY_ADDED so the grant is authoritative).
-          if (id === 'CHECKLISTS') return isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs);
-          // Event checklist config — owner OR a granted role; only when Events is enabled.
-          if (id === 'EVENTS_CHECKLISTS') return (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs)) && isEventsEnabled;
-          // Data Migration = super-admin only (hidden from tenant owner/staff).
-          if (id === 'EVENTS_MIGRATION') return isPlatformAdmin && isEventsEnabled;
-          // My Checklist is the personal work queue — visible to every staff member.
-          if (id === 'MY_CHECKLIST') return true;
-          // Checklist Board is the manager/owner cockpit over every checklist instance.
-          // Grantable per-role (owner / MANAGER / explicit grant) — mirrors the finance gate.
-          if (id === 'CHECKLIST_BOARD') return isOwnerOrAdmin || currentRole === 'MANAGER' || (Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id));
-          // Status Board — rooms + halls status grid. Hotel/Events operational
-          // tool: owner/manager always; hotel/events operational roles keep it
-          // (migration safety); restaurant-only roles (Waiter/Chef/Cashier) and
-          // every other role see it ONLY if the owner explicitly grants it —
-          // never via the fail-open null list or the retired inject. Reported:
-          // "Waiter can access Status Board without permission".
-          if (id === 'STATUS_BOARD') {
-            if (!(isHotelEnabled || isEventsEnabled)) return false;
-            if (isOwnerOrAdmin || currentRole === 'MANAGER') return true;
-            const HOTEL_EVENTS_OPS = ['FRONT_DESK', 'HOUSEKEEPING', 'CONCIERGE', 'MAINTENANCE', 'EVENTS_MANAGER'];
-            if (HOTEL_EVENTS_OPS.includes(currentRole || '')) return true;
-            return Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id);
-          }
-          // Finance tabs (Procurement, Expense Journal, Receivables, the
-          // Accounts sub-reports). HARD-gated (2026-08-28): owner/admin OR
-          // MANAGER OR a role the owner EXPLICITLY granted the tab. Previously
-          // this returned true only for the owner and then FELL THROUGH to
-          // isTabVisible for everyone else — so a fail-open (null-list) or
-          // inject-granted operational role saw the finance module. Now finance
-          // never leaks to Waiter/Chef/etc. via the null list or a legacy inject;
-          // a genuine grant still shows it. Mirrors the HR_PAYROLL gate above.
-          if (id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING' || id === 'ACCOUNTING') {
-            return isOwnerOrAdmin || currentRole === 'MANAGER' || (Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id));
-          }
-          // Cash Drawer (till + shift handover) — the underlying endpoints are cashier-
-          // accessible (_acctStaff), so surface it to cash-handling roles directly, plus
-          // any role the owner grants it in Staff Access.
-          if (id === 'CASH_DRAWER') return isOwnerOrAdmin || currentRole === 'MANAGER' || currentRole === 'CASHIER' || currentRole === 'FRONT_DESK' || isTabVisible(id, effectiveAllowedTabs);
-          // HR & Payroll / Staff (operational) Payroll carry sensitive salary + statutory
-          // data. Show them ONLY to owner/admin, MANAGER, or a role EXPLICITLY granted the
-          // tab — NEVER under the fail-open null list (a built-in role with no configured
-          // matrix row resolves to allowed_tabs=null and would otherwise see every tab).
-          // Mirrors the backend workforceStaff gate (requireModuleAccess(['HR_PAYROLL',
-          // 'STAFF_PAYROLL','ROSTER','TIMESHEET'], ['MANAGER'])), so a nav-visible tab is
-          // never API-403. Reported: "HR & Payroll / Staff Payroll visible to Front Desk
-          // without access (nav shows them, clicking 403s)".
-          if (id === 'HR_PAYROLL' || id === 'STAFF_PAYROLL') {
-            return isOwnerOrAdmin || currentRole === 'MANAGER' || (Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(id));
-          }
-          // Spa Billing — module-gated AND permissionable (was hard-forced visible).
-          if (id === 'SPA_BILLING') return isSpaEnabled && (isOwnerOrAdmin || isTabVisible(id, effectiveAllowedTabs));
-          // The Events-module cleaning tab reuses the shared HOUSEKEEPING permission
-          // (the backend housekeeping endpoints are RBAC-keyed on 'HOUSEKEEPING'),
-          // BUT it lives under the Events nav — so it must ALSO require Events access.
-          // Otherwise a hotel role with Housekeeping but Events = N/A saw this tab,
-          // which pulled the whole "Events & Convention" group into view (a module
-          // group renders when it has ≥1 visible tab). Reported: "Events set to N/A
-          // but the module is still visible with Cleaning Checklist accessible."
-          // Now: owner/admin (with Housekeeping) always; any other role needs BOTH
-          // some Events grant AND Housekeeping. A role with no Events access never
-          // pulls the Events group in via this tab.
-          if (id === 'EVENTS_HOUSEKEEPING') {
-            if (isOwnerOrAdmin) return isTabVisible('HOUSEKEEPING', effectiveAllowedTabs);
-            const hasEventsAccess = Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.some(t => String(t).startsWith('EVENTS_'));
-            return hasEventsAccess && isTabVisible('HOUSEKEEPING', effectiveAllowedTabs);
-          }
-          return isTabVisible(id, effectiveAllowedTabs);
-        };
+        // Nav visibility is decided by the shared, unit-tested computeTabVisibility
+        // (src/navVisibility.ts) — the SINGLE source of truth. Derived/leak-prone
+        // rules (owner-only tabs, hard-gated finance/HR, and the Events "Cleaning
+        // Checklist" that borrows the HOUSEKEEPING permission) live there so
+        // test-scripts/nav_visibility_audit.ts can assert the exact visible set
+        // per role headlessly — catching a leak before a client ever sees it.
+        const isVisible = (id: string) => computeTabVisibility(id, {
+          isOwnerOrAdmin,
+          isPlatformAdmin,
+          currentRole,
+          isHotelEnabled,
+          isEventsEnabled,
+          isSpaEnabled,
+          hasEventsGrant: Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.some(t => String(t).startsWith('EVENTS_')),
+          baseTabVisible: (tid: string) => isTabVisible(tid, effectiveAllowedTabs),
+          strictGranted: (tid: string) => Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(tid),
+        });
         // A page shows when RBAC allows it AND the tenant has the relevant
         // side of the business enabled.
         const pageVisible = (t: NavTab) => {
