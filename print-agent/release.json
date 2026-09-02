@@ -1,13 +1,13 @@
 {
-  "latest": null,
-  "sha256": null,
-  "url": null,
-  "notes": null,
-  "_status": "DORMANT by owner request (2026-08-31). The manifest offers NO update, so no on-prem agent will EVER self-update until this is deliberately re-armed. The v3.3 print-agent code + server endpoints stay in place but do nothing.",
-  "_to_activate_3_3_0": {
-    "version": "3.3.0",
-    "sha256": "07c9b5dace9272bd56cb4a35b42da78056a075e4c6b0d5ca9fb5aa5a3dea670c",
-    "url": "https://erp.atithi-setu.com/api/print-agent/download",
-    "how": "Copy these into the top-level latest/sha256/url (or set AGENT_LATEST_VERSION / AGENT_SHA256 / AGENT_DOWNLOAD_URL on the VPS) AND host the .exe at that url. To ship a NEWER build later: bump AGENT_VERSION in agent.mjs + version in package.json, run npm run build:exe, host the exe, and put the new version + its sha256sum here."
+  "latest": "3.4.0",
+  "sha256": "6b4b49f643a8e8e2cec680be2c54efa33bd7a15120ad2d6ae07a83f66c497c46",
+  "url": "https://erp.atithi-setu.com/api/print-agent/download",
+  "notes": "v3.4 — faster thermal printing: shorter poll interval (default 800ms), persistent USB worker (compiles once instead of a PowerShell spawn + C# recompile per job), parallel printing across printers, and print timing logs.",
+  "_status": "ARMED 2026-09-02 — self-update is ON. Every agent on v3.3+ auto-updates to 3.4.0 within ~6h (download -> verify sha256 -> swap -> restart). The binary served by GET /api/print-agent/download is print-agent/dist/AtithiSetuPrintAgent.exe, force-committed so the VPS serves it. To pause self-update again, set latest/sha256/url back to null. NOTE: prefer AGENT_EXE_PATH (VPS disk) or a CDN url for future releases to avoid committing the 57MB binary to git history.",
+  "_history": {
+    "3.3.0": {
+      "sha256": "07c9b5dace9272bd56cb4a35b42da78056a075e4c6b0d5ca9fb5aa5a3dea670c",
+      "url": "https://erp.atithi-setu.com/api/print-agent/download"
+    }
   }
 }
