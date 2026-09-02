@@ -38,7 +38,13 @@ import { fileURLToPath } from 'node:url';
 // parallel printing across printers, queue-age + duration timing logs.
 // v3.4.1 = reports its version (X-Agent-Version) so the SuperAdmin console can show
 // which build each tenant is running + whether the agent is online.
-const AGENT_VERSION = '3.4.1';
+// v3.5 = RESILIENCE/SPEED: polling is fully decoupled from printing — each printer
+// has its own serial queue, so one slow/unreachable printer only backs up ITS OWN
+// tickets instead of freezing the whole shop (the biggest real-world "printing is
+// slow" cause). Also: eager+pre-warmed USB worker (no 1-3s first-ticket compile),
+// 8s→2.5s network connect timeout, 200ms→30ms post-write flush. Pairs with the
+// server-side print-job retry backoff so a down printer stops hammering every poll.
+const AGENT_VERSION = '3.5.0';
 
 // ── locate a folder we can read a .env / write temp files next to ────────────
 // Under `node agent.mjs` this is the script dir; bundled as an .exe it's the
@@ -77,6 +83,13 @@ const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
 // floor 1000 (1.5–3s wait); now default 800 / floor 250 for near-instant tickets.
 // A tiny poll is cheap: the pending query is indexed and returns only PENDING rows.
 const POLL_MS = Math.max(250, Number(process.env.POLL_MS) || 800);
+// Network printer connect timeout (was a fixed 8s — an unreachable printer froze
+// the loop for 8s/attempt). A LAN printer answers in ms; 2.5s is generous.
+const NET_CONNECT_MS = Math.max(800, Number(process.env.NET_CONNECT_MS) || 2500);
+// Delay after the bytes flush before we consider the job done (bounds cheap 9100
+// printers that hold the socket open). Was 200ms; 30ms is plenty and the next
+// ticket for that printer starts sooner.
+const NET_FLUSH_MS = Math.max(10, Number(process.env.NET_FLUSH_MS) || 30);
 
 if (!BASE_URL || !RESTAURANT_ID || !AGENT_TOKEN) {
   console.error('Missing config. Set BASE_URL, RESTAURANT_ID and AGENT_TOKEN (env or .env next to the agent).');
@@ -211,14 +224,14 @@ function sendToNetwork(host, port, buf) {
       err ? reject(err) : resolve();
     };
     const sock = net.createConnection({ host, port: p });
-    // Inactivity guard — mainly bounds the CONNECT phase, since we settle ~200ms
+    // Inactivity guard — mainly bounds the CONNECT phase, since we settle shortly
     // after the write. A wrong IP / blocked subnet fails fast with a clear message.
-    sock.setTimeout(8000);
+    sock.setTimeout(NET_CONNECT_MS);
     sock.on('connect', () => {
       sock.write(buf, (err) => {
         if (err) { finish(new Error('write to printer failed: ' + err.message)); return; }
-        sock.end();                         // flush + half-close from our side
-        setTimeout(() => finish(), 200);    // success once bytes are out the door
+        sock.end();                              // flush + half-close from our side
+        setTimeout(() => finish(), NET_FLUSH_MS); // success once bytes are out the door
       });
     });
     sock.on('timeout', () => finish(new Error(`no response from ${host}:${p} — check the IP/port, that the printer is on the same LAN as the billing PC, and that port 9100 is open`)));
@@ -401,14 +414,57 @@ async function ack(jobId, status, error) {
   } catch (e) { console.error('ack failed:', e.message); }
 }
 
-// Re-entrancy guard: a USB print (Add-Type compile + spooler write) can take a
-// few seconds — longer than POLL_MS. Without this, the next interval would fire
-// while the first tick is still awaiting a print, both would fetch the SAME
-// still-PENDING job, and it would print twice. Skip a tick while one is running.
-let ticking = false;
+// Polling is DECOUPLED from printing. Each physical printer has its own serial
+// queue (`_printerChains`); a poll just dispatches new jobs onto their printer's
+// queue and returns immediately. So a slow or unreachable printer only backs up
+// ITS OWN queue — tickets for healthy printers keep flowing (the old code awaited
+// Promise.all over every printer, so one dead printer froze the whole shop for the
+// full connect/print timeout, repeated on every poll). `_inflight` stops a job that
+// is already queued/printing from being re-dispatched by a later poll (it stays
+// PENDING in the DB until we ACK it PRINTED), so nothing prints twice.
+const _inflight = new Set();
+const _printerChains = new Map();
+function _printerKey(job) {
+  return String(job.conn_type || 'NETWORK').toUpperCase() === 'USB'
+    ? 'usb:' + (job.host || '?')
+    : 'net:' + (job.host || '?') + ':' + (job.port || 9100);
+}
+async function printOne(job) {
+  const conn = String(job.conn_type || 'NETWORK').toUpperCase();
+  if (conn !== 'USB' && !job.host) { await ack(job.id, 'FAILED', 'printer has no host/IP configured'); return; }
+  const t0 = Date.now();
+  try {
+    const buf = bufForJob(job);
+    const copies = Math.max(1, Number(job.copies) || 1);
+    for (let i = 0; i < copies; i++) await sendJob(job, buf);
+    await ack(job.id, 'PRINTED');
+    const dur = Date.now() - t0;
+    let aged = '';
+    if (job.created_at) {
+      const iso = String(job.created_at).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(job.created_at)) ? '' : 'Z');
+      const q = Date.now() - Date.parse(iso);
+      if (q >= 0 && q < 3600000) aged = `, queued ${q}ms`;
+    }
+    console.log(`printed ${job.id} [${job.kind || 'KOT'}] → ${job.printer_name || job.host} in ${dur}ms${aged}`);
+  } catch (e) {
+    await ack(job.id, 'FAILED', e.message);   // server applies exponential backoff before re-offering
+    console.error(`print ${job.id} failed after ${Date.now() - t0}ms:`, e.message);
+  }
+}
+function dispatch(job) {
+  if (_inflight.has(job.id)) return;
+  _inflight.add(job.id);
+  const key = _printerKey(job);
+  const prev = _printerChains.get(key) || Promise.resolve();
+  const next = prev.then(() => printOne(job)).catch(() => {}).finally(() => { _inflight.delete(job.id); });
+  _printerChains.set(key, next);
+}
+// `polling` only guards the POLL fetch (so slow server responses don't stack polls)
+// — it never waits on printing, unlike the old `ticking` guard.
+let polling = false;
 async function tick() {
-  if (ticking) return;
-  ticking = true;
+  if (polling) return;
+  polling = true;
   try {
     let jobs = [];
     try {
@@ -417,44 +473,9 @@ async function tick() {
       if (!r.ok) return;
       jobs = await r.json();
     } catch (e) { console.error('poll failed:', e.message); return; }
-    const list = Array.isArray(jobs) ? jobs : [];
-    // Group by physical printer so DIFFERENT printers print in PARALLEL (a KOT to the
-    // kitchen printer and the INVOICE to the bill printer go at the same time instead
-    // of one-after-another); jobs to the SAME printer stay ordered. A slow/unreachable
-    // printer no longer blocks tickets destined for a healthy one.
-    const groups = new Map();
-    for (const job of list) {
-      const key = String(job.conn_type || 'NETWORK').toUpperCase() === 'USB'
-        ? 'usb:' + (job.host || '?')
-        : 'net:' + (job.host || '?') + ':' + (job.port || 9100);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(job);
-    }
-    const printOne = async (job) => {
-      const conn = String(job.conn_type || 'NETWORK').toUpperCase();
-      if (conn !== 'USB' && !job.host) { await ack(job.id, 'FAILED', 'printer has no host/IP configured'); return; }
-      const t0 = Date.now();
-      try {
-        const buf = bufForJob(job);
-        const copies = Math.max(1, Number(job.copies) || 1);
-        for (let i = 0; i < copies; i++) await sendJob(job, buf);
-        await ack(job.id, 'PRINTED');
-        const dur = Date.now() - t0;
-        let aged = '';
-        if (job.created_at) {
-          const iso = String(job.created_at).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(job.created_at)) ? '' : 'Z');
-          const q = Date.now() - Date.parse(iso);
-          if (q >= 0 && q < 3600000) aged = `, queued ${q}ms`;
-        }
-        console.log(`printed ${job.id} [${job.kind || 'KOT'}] → ${job.printer_name || job.host} in ${dur}ms${aged}`);
-      } catch (e) {
-        await ack(job.id, 'FAILED', e.message);
-        console.error(`print ${job.id} failed after ${Date.now() - t0}ms:`, e.message);
-      }
-    };
-    await Promise.all([...groups.values()].map(async (grp) => { for (const job of grp) await printOne(job); }));
+    for (const job of (Array.isArray(jobs) ? jobs : [])) dispatch(job);
   } finally {
-    ticking = false;
+    polling = false;
   }
 }
 
@@ -555,6 +576,10 @@ function _applyUpdate(dir) {
 }
 
 console.log(`Atithi-Setu print agent v${AGENT_VERSION} — ${BASE_URL} / ${RESTAURANT_ID}, polling every ${POLL_MS}ms` + (AUTO_UPDATE ? ' · auto-update on' : ' · auto-update OFF'));
+// Eagerly spawn the USB worker at startup so the C# raw-print class compiles NOW
+// (~1-3s) instead of on the first KOT of the session. It sits idle until the first
+// USB job; if it dies it respawns lazily on the next job (sendToUsbFast).
+if (process.platform === 'win32' && !_usbWorker) { try { _usbWorker = _startUsbWorker(); } catch { /* falls back per-job */ } }
 tick();
 setInterval(tick, POLL_MS);
 if (AUTO_UPDATE) {
