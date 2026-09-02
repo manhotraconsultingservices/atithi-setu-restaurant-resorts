@@ -1265,6 +1265,9 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // so a down printer stops burning the connect-timeout on every tick.
   await db.exec("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ").catch(() => {});
   await db.exec("CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs (status, created_at)").catch(() => {});
+  // Backs the reconciliation sweep's "does this order already have a live KOT job?"
+  // check (NOT EXISTS on order_id) so no order is left without a kitchen ticket.
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_print_jobs_order ON print_jobs (order_id)").catch(() => {});
 
   // T1-L1: Soft-delete columns on orders + table_sessions (BCG audit, Tier 1)
   // Pre-T1, /invoice/order and /invoice/session endpoints physically DELETEd
