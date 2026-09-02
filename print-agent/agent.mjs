@@ -22,7 +22,7 @@
  *   BASE_URL       e.g. https://erp.atithi-setu.com   (your server origin)
  *   RESTAURANT_ID  e.g. RESTO-1003                     (your tenant id)
  *   AGENT_TOKEN    the "Print agent token" from Settings → Kitchen Printers
- *   POLL_MS        poll interval in ms (default 3000)
+ *   POLL_MS        poll interval in ms (default 800, floor 250)
  */
 import net from 'node:net';
 import fs from 'node:fs';
@@ -34,7 +34,9 @@ import { fileURLToPath } from 'node:url';
 
 // Package version — bumped with each client release so the site can confirm which
 // build is running (printed in the startup banner). v3 = reliable NETWORK printing.
-const AGENT_VERSION = '3.3.0';
+// v3.4 = SPEED: faster poll, persistent USB worker (no per-job PowerShell/compile),
+// parallel printing across printers, queue-age + duration timing logs.
+const AGENT_VERSION = '3.4.0';
 
 // ── locate a folder we can read a .env / write temp files next to ────────────
 // Under `node agent.mjs` this is the script dir; bundled as an .exe it's the
@@ -68,7 +70,11 @@ try {
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '');
 const RESTAURANT_ID = process.env.RESTAURANT_ID || '';
 const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
-const POLL_MS = Math.max(1000, Number(process.env.POLL_MS) || 3000);
+// Poll interval. Every ticket waits on average POLL_MS/2 before the agent even
+// fetches it, so this is the baseline latency on EVERY print. Was default 3000 /
+// floor 1000 (1.5–3s wait); now default 800 / floor 250 for near-instant tickets.
+// A tiny poll is cheap: the pending query is indexed and returns only PENDING rows.
+const POLL_MS = Math.max(250, Number(process.env.POLL_MS) || 800);
 
 if (!BASE_URL || !RESTAURANT_ID || !AGENT_TOKEN) {
   console.error('Missing config. Set BASE_URL, RESTAURANT_ID and AGENT_TOKEN (env or .env next to the agent).');
@@ -261,7 +267,9 @@ public class AtithiRaw {
 [AtithiRaw]::Send($name, [IO.File]::ReadAllBytes($file))
 `;
 
-function sendToUsb(printerName, buf) {
+// One-shot USB print (cold PowerShell + Add-Type compile PER call — ~1-3s). Kept
+// only as the fallback if the persistent worker below can't be started.
+function sendToUsbOneShot(printerName, buf) {
   return new Promise((resolve, reject) => {
     if (process.platform !== 'win32') { reject(new Error('USB printing needs Windows')); return; }
     if (!printerName) { reject(new Error('USB printer: no Windows printer name set (put it in the printer\'s "host" field)')); return; }
@@ -289,6 +297,94 @@ function sendToUsb(printerName, buf) {
       reject(new Error(msg.replace(/^Exception calling "\w+" with "\d+" argument\(s\):\s*/i, '').replace(/^"|"$/g, '').slice(0, 200)));
     });
   });
+}
+
+// ── delivery: USB via a PERSISTENT PowerShell worker (v3.4 speed fix) ─────────
+// The old path spawned powershell.exe AND recompiled the C# P/Invoke class (Add-Type)
+// on EVERY job — a few seconds each, the single biggest per-ticket cost on USB
+// printers. We now keep ONE long-lived PowerShell that compiles the class ONCE at
+// startup, then prints each job fed on its stdin (printerName<TAB>tempfile per line),
+// replying "OK" / "ERR <msg>" per line. Subsequent prints are milliseconds. If the
+// worker can't start (or dies), we fall back to the one-shot spawn so a ticket still
+// prints. Responses are FIFO — PowerShell processes stdin lines in order.
+const PS_WORKER = PS_RAWPRINT
+  .replace('$name=$env:ATITHI_PRN; $file=$env:ATITHI_BIN', '')
+  .replace(
+    '[AtithiRaw]::Send($name, [IO.File]::ReadAllBytes($file))',
+    `[Console]::Out.WriteLine("READY"); [Console]::Out.Flush()
+while ($true) {
+  $line = [Console]::In.ReadLine()
+  if ($line -eq $null) { break }
+  if ($line.Length -eq 0) { continue }
+  $tab = $line.IndexOf([char]9)
+  if ($tab -lt 0) { [Console]::Out.WriteLine("ERR malformed job"); [Console]::Out.Flush(); continue }
+  $prn = $line.Substring(0, $tab)
+  $bin = $line.Substring($tab + 1)
+  try { [AtithiRaw]::Send($prn, [IO.File]::ReadAllBytes($bin)); [Console]::Out.WriteLine("OK") }
+  catch { $m = $_.Exception.Message -replace "\`r|\`n", " "; [Console]::Out.WriteLine("ERR " + $m) }
+  [Console]::Out.Flush()
+}`
+  );
+
+const USB_JOB_TIMEOUT_MS = 20000;   // a single USB print should never take this long
+let _usbWorker = null;
+function _startUsbWorker() {
+  if (process.platform !== 'win32') return null;
+  let proc;
+  try {
+    proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', PS_WORKER], { windowsHide: true });
+  } catch { return null; }
+  const w = { proc, pending: [], buf: '', dead: false };
+  proc.stdout.on('data', (d) => {
+    w.buf += d.toString();
+    let nl;
+    while ((nl = w.buf.indexOf('\n')) >= 0) {
+      const line = w.buf.slice(0, nl).trim(); w.buf = w.buf.slice(nl + 1);
+      if (!line || line === 'READY') continue;
+      const job = w.pending.shift();
+      if (!job) continue;
+      if (line.startsWith('OK')) job.resolve();
+      else job.reject(new Error(line.replace(/^ERR\s*/, '').slice(0, 200) || 'usb print failed'));
+    }
+  });
+  const die = () => { if (w.dead) return; w.dead = true; for (const j of w.pending.splice(0)) j.reject(new Error('usb worker exited')); try { proc.kill(); } catch {} if (_usbWorker === w) _usbWorker = null; };
+  proc.on('exit', die);
+  proc.on('error', die);
+  proc.stdin.on('error', () => {});
+  return w;
+}
+function sendToUsbFast(printerName, buf) {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== 'win32') { reject(new Error('USB printing needs Windows')); return; }
+    if (!printerName) { reject(new Error('USB printer: no Windows printer name set (put it in the printer\'s "host" field)')); return; }
+    if (!_usbWorker || _usbWorker.dead) _usbWorker = _startUsbWorker();
+    const w = _usbWorker;
+    if (!w) { reject(new Error('could not start usb worker')); return; }
+    let tmp;
+    try { tmp = path.join(os.tmpdir(), `atithi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.bin`); fs.writeFileSync(tmp, buf); }
+    catch (e) { reject(e); return; }
+    let settled = false;
+    const entry = {
+      resolve: () => { if (settled) return; settled = true; clearTimeout(to); try { fs.unlinkSync(tmp); } catch {} resolve(); },
+      reject:  (err) => { if (settled) return; settled = true; clearTimeout(to); try { fs.unlinkSync(tmp); } catch {} reject(err); },
+    };
+    // Never let a stuck worker hang the print loop: on timeout, kill it (its
+    // 'exit' respawns fresh next job) and surface a worker error so we fall back.
+    const to = setTimeout(() => { entry.reject(new Error('usb worker exited')); try { w.proc.kill(); } catch {} }, USB_JOB_TIMEOUT_MS);
+    w.pending.push(entry);
+    try { w.proc.stdin.write(String(printerName).replace(/[\t\r\n]/g, ' ') + '\t' + tmp + '\n'); }
+    catch (e) { entry.reject(new Error('could not start usb worker')); }
+  });
+}
+async function sendToUsb(printerName, buf) {
+  try {
+    return await sendToUsbFast(printerName, buf);
+  } catch (e) {
+    // Only fall back for worker-infrastructure failures — a genuine print error
+    // (OpenPrinter/WritePrinter failed) must surface so the job is marked FAILED.
+    if (/could not start usb worker|usb worker exited/i.test(e.message)) return sendToUsbOneShot(printerName, buf);
+    throw e;
+  }
 }
 
 function sendJob(job, buf) {
@@ -319,20 +415,42 @@ async function tick() {
       if (!r.ok) return;
       jobs = await r.json();
     } catch (e) { console.error('poll failed:', e.message); return; }
-    for (const job of (Array.isArray(jobs) ? jobs : [])) {
+    const list = Array.isArray(jobs) ? jobs : [];
+    // Group by physical printer so DIFFERENT printers print in PARALLEL (a KOT to the
+    // kitchen printer and the INVOICE to the bill printer go at the same time instead
+    // of one-after-another); jobs to the SAME printer stay ordered. A slow/unreachable
+    // printer no longer blocks tickets destined for a healthy one.
+    const groups = new Map();
+    for (const job of list) {
+      const key = String(job.conn_type || 'NETWORK').toUpperCase() === 'USB'
+        ? 'usb:' + (job.host || '?')
+        : 'net:' + (job.host || '?') + ':' + (job.port || 9100);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(job);
+    }
+    const printOne = async (job) => {
       const conn = String(job.conn_type || 'NETWORK').toUpperCase();
-      if (conn !== 'USB' && !job.host) { await ack(job.id, 'FAILED', 'printer has no host/IP configured'); continue; }
+      if (conn !== 'USB' && !job.host) { await ack(job.id, 'FAILED', 'printer has no host/IP configured'); return; }
+      const t0 = Date.now();
       try {
         const buf = bufForJob(job);
         const copies = Math.max(1, Number(job.copies) || 1);
         for (let i = 0; i < copies; i++) await sendJob(job, buf);
         await ack(job.id, 'PRINTED');
-        console.log(`printed ${job.id} [${job.kind || 'KOT'}] → ${job.printer_name || job.host}`);
+        const dur = Date.now() - t0;
+        let aged = '';
+        if (job.created_at) {
+          const iso = String(job.created_at).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(job.created_at)) ? '' : 'Z');
+          const q = Date.now() - Date.parse(iso);
+          if (q >= 0 && q < 3600000) aged = `, queued ${q}ms`;
+        }
+        console.log(`printed ${job.id} [${job.kind || 'KOT'}] → ${job.printer_name || job.host} in ${dur}ms${aged}`);
       } catch (e) {
         await ack(job.id, 'FAILED', e.message);
-        console.error(`print ${job.id} failed:`, e.message);
+        console.error(`print ${job.id} failed after ${Date.now() - t0}ms:`, e.message);
       }
-    }
+    };
+    await Promise.all([...groups.values()].map(async (grp) => { for (const job of grp) await printOne(job); }));
   } finally {
     ticking = false;
   }
