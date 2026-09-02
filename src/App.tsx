@@ -4647,7 +4647,8 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
 
   const fetchStaff = async () => {
     try {
-      const res = await fetch('/api/owner/staff', {
+      // names-only picker (grid/dropdown rows) — no STAFF tab required
+      const res = await fetch(`/api/restaurant/${restaurantId}/staff-picker`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (!res.ok) return;
@@ -8039,7 +8040,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   // the incoming person by ID (not a free-text name that never resolves), which is
   // what lets them see it + Accept & Sign in their own portal.
   useEffect(() => {
-    acctApi('/attendance/staff').then(d => { if (Array.isArray(d)) setHoStaff(d.filter((s: any) => s?.is_active !== 0 && s?.is_active !== false)); }).catch(() => {});
+    acctApi('/staff-picker').then(d => { if (Array.isArray(d)) setHoStaff(d); }).catch(() => {});
   }, [acctApi]);
 
   useEffect(() => {
@@ -13279,7 +13280,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         fetch(`/api/restaurant/${restaurantId}/tables/live`,        { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch(`/api/restaurant/${restaurantId}/orders/live`,        { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch(`/api/restaurant/${restaurantId}/waiter-calls`,       { headers: { 'Authorization': `Bearer ${token}` } }),
-        fetch(`/api/owner/staff`,                                   { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch(`/api/restaurant/${restaurantId}/staff-picker`,       { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch(`/api/restaurant/${restaurantId}/cloud-kitchen/active`,{ headers: { 'Authorization': `Bearer ${token}` } }),
       ]);
       if (tablesRes.ok) {
@@ -67618,10 +67619,11 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
 
   const fetchTsStaff = useCallback(async () => {
     try {
-      const res = await fetch('/api/owner/staff', { headers: { 'Authorization': `Bearer ${token}` } });
+      // names-only picker (timesheet grid rows) — no STAFF tab required
+      const res = await fetch(`/api/restaurant/${restaurantId}/staff-picker`, { headers: { 'Authorization': `Bearer ${token}` } });
       if (res.ok) setTsStaff(await res.json());
     } catch {}
-  }, [token]);
+  }, [restaurantId, token]);
 
   useEffect(() => { if (tsTab === 'grid') fetchTsStaff(); }, [tsTab, fetchTsStaff]);
 

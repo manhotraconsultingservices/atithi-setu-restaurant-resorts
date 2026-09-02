@@ -50,6 +50,8 @@ const PROBES = [
   { mod: 'EVENTS', p: `/events/venues` },
   { mod: 'EVENTS', p: `/events/reports/summary` },
   { mod: 'LOYALTY', p: `/loyalty/customers` },
+  { mod: 'ROSTER', p: `/roster?start=${FROM}&end=${TODAY}` },
+  { mod: 'TIMESHEET', p: `/timesheet?start=${FROM}&end=${TODAY}` },
 ];
 // tab grants per role scope + which PROBES modules the role legitimately owns
 const ROLES = {
@@ -111,6 +113,12 @@ async function main() {
       leaked.length === 0
         ? pass(`ISO-${scope}-CROSS`, `denied on every un-granted module (${denied} probes 403, ${na} n/a)`, `owns=[${def.owns.join(',')||'none'}]`)
         : fail(`ISO-${scope}-CROSS`, `role reached data outside its grant (LEAK)`, leaked.join(' '));
+      // 3) staff-list isolation: full directory 403 (no STAFF grant), names-only picker still 200
+      const dir = await api('GET', `/api/owner/staff`, null, R.tok);
+      const pick = await api('GET', `/api/restaurant/${RID}/staff-picker`, null, R.tok);
+      (dir.status === 403 && pick.status === 200)
+        ? pass(`ISO-${scope}-STAFF`, `full staff directory denied (403); names-only picker works (200)`, `dir=${dir.status} picker=${pick.status}`)
+        : fail(`ISO-${scope}-STAFF`, `staff-list gating wrong`, `dir=${dir.status} (want 403) picker=${pick.status} (want 200)`);
     }
   } finally {
     for (const R of created) { try { if (R.staffId) await api('DELETE', `/api/owner/staff/${R.staffId}`, null, ownerTok); } catch {} }

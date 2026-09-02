@@ -14004,6 +14004,7 @@ async function startServer() {
   // Returns slots joined with staff name/role for the grid renderer.
   app.get("/api/restaurant/:id/roster", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'ROSTER'))) return res.status(403).json({ error: 'You need ROSTER access — ask the property owner to grant it in Staff Access.' });
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
       if (!start || !end) return res.status(400).json({ error: "start and end (YYYY-MM-DD) required" });
@@ -14186,6 +14187,7 @@ async function startServer() {
   // Returns the joined planned-vs-actual view for the range.
   app.get("/api/restaurant/:id/timesheet", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) return res.status(403).json({ error: 'You need TIMESHEET access — ask the property owner to grant it in Staff Access.' });
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
       const staffFilter = String(req.query.staff_id || '').trim();
@@ -14211,6 +14213,7 @@ async function startServer() {
   // GET /timesheet/summary — aggregate KPIs for the dashboard cards.
   app.get("/api/restaurant/:id/timesheet/summary", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) return res.status(403).json({ error: 'You need TIMESHEET access — ask the property owner to grant it in Staff Access.' });
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
       if (!start || !end) return res.status(400).json({ error: "start and end required" });
@@ -14259,6 +14262,7 @@ async function startServer() {
   // GET /timesheet/export.csv — owner-friendly export
   app.get("/api/restaurant/:id/timesheet/export.csv", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) return res.status(403).json({ error: 'You need TIMESHEET access — ask the property owner to grant it in Staff Access.' });
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
       if (!start || !end) return res.status(400).send("start and end required");
@@ -14562,6 +14566,7 @@ async function startServer() {
   // Honours approval status — REJECTED rows are excluded from pay.
   app.get("/api/restaurant/:id/timesheet/payroll-summary", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) return res.status(403).json({ error: 'You need TIMESHEET access — ask the property owner to grant it in Staff Access.' });
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
       const onlyApproved = String(req.query.only_approved || '0') === '1';
@@ -14625,6 +14630,7 @@ async function startServer() {
   // (zero for REJECTED rows). Owner can hand this directly to accounts.
   app.get("/api/restaurant/:id/timesheet/payroll-export.csv", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'TIMESHEET'))) return res.status(403).json({ error: 'You need TIMESHEET access — ask the property owner to grant it in Staff Access.' });
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
       if (!start || !end) return res.status(400).send("start and end required");
@@ -49342,8 +49348,12 @@ ${data.tenant.name}`;
   // Staff: Get Staff
   app.get("/api/owner/staff", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
-        return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      // Full staff directory (login ids, contact, employee type) — gated on the
+      // STAFF tab so it's 403 for a role the owner didn't grant it (was a fixed
+      // OWNER/MANAGER allowlist that also 403'd a custom role granted STAFF). UI
+      // dropdowns that only need names use GET /staff-picker instead.
+      if (!(await _roleHasTab(req, 'STAFF'))) {
+        return res.status(403).json({ error: "You need Staff Directory access — ask the property owner to grant it in Staff Access." });
       }
       const targetId = resolveTargetRestaurantId(req);
       if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
@@ -49353,6 +49363,20 @@ ${data.tenant.name}`;
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch staff" });
     }
+  });
+
+  // Lightweight names-only staff list for UI pickers (waiter-assign dropdown, cash
+  // handover recipient, attendance/timesheet grid rows). Any authenticated staff can
+  // read it — it exposes ONLY id/name/role/employee_type, never login id, contact,
+  // salary or attendance. The sensitive surfaces (full directory, roster, timesheet,
+  // attendance) stay tab-gated; this endpoint just keeps the dropdowns populated for
+  // operational roles that were never granted the STAFF/ATTENDANCE tab.
+  app.get("/api/restaurant/:id/staff-picker", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const staff = await db.query("SELECT id, name, role, COALESCE(employee_type, 'LOGIN') AS employee_type FROM attendance_staff WHERE is_active = 1 ORDER BY name").catch(() => []);
+      res.json(Array.isArray(staff) ? staff : []);
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to load staff picker' }); }
   });
 
   // Staff: Create Staff
@@ -49611,6 +49635,7 @@ ${data.tenant.name}`;
   // Attendance: Stats (per-staff monthly summary)
   app.get("/api/owner/attendance/stats", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'ATTENDANCE'))) return res.status(403).json({ error: 'You need ATTENDANCE access — ask the property owner to grant it in Staff Access.' });
       const { month } = req.query;
       const db = await getTenantDb(req.user!.restaurantId);
       const stats = await db.query(`
@@ -52198,7 +52223,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-coarse-gates-permission-aware',
+    commit_marker: 'rbac-staff-reads-gated',
     code_features: [
       'thermal-kot-autoprint-pipeline',              //FEATURE (thermal KOT auto-print — backend + on-prem agent). NEW per-tenant tables `kitchen_printers` (id/name/station/conn_type/host/port/copies/is_default) + `print_jobs` (queue: printer_id/order_id/content/status/attempts), and a per-tenant `restaurants.print_agent_token` (backfilled) that authenticates the agent (header X-Print-Agent-Token, NOT a JWT). On order placement the PUBLIC POST /orders now fire-and-forget enqueues KOTs via enqueuePrintJobsForOrder: items grouped by menu category → routed to each active printer whose `station` matches (or station='ALL' → whole order). Endpoints: owner CRUD /kitchen-printers, owner /print-agent-token[/rotate], and agent-token-auth GET /print-jobs/pending + POST /print-jobs/:jobId/ack (PRINTED clears; failure retries ≤6 then FAILED). The on-prem AGENT (print-agent/agent.mjs, zero-dep Node: built-in fetch+net) polls pending jobs and sends raw ESC/POS to each printer by IP:port, with README + .env.example. Owner chose a self-hosted custom agent over PrintNode. FRONTEND config UI (Settings → Printers) is the remaining piece. tsc + vite build + agent syntax clean.
       'kds-atomic-accept-nearlive',                 //FEATURE (KDS unified queue, near-live via polling per owner choice). The shared tenant-wide kitchen queue + chef accept/start already existed (ChefDashboard fetches GET /orders; PATCH /orders/:id) but "live" was 30s polling and accept had a RACE (PATCH blindly overwrote chef_id → two chefs could both grab a ticket). Added: (1) NEW atomic claim POST /api/orders/:id/accept — conditional UPDATE (WHERE chef_id empty AND kitchen_status='queued') + re-read; returns 409 with the current owner if already taken; stamps chef + accepted_at. ChefDashboard's Accept now calls it and toasts "Already taken by X" on 409. (2) Per-transition timestamps (accepted_at/preparing_at/ready_at/served_at, COALESCE-once) stamped in PATCH for prep-time metrics. (3) ChefDashboard + WaiterDashboard poll dropped 30s→6s for near-live status. (4) Orders schema hardened (chef_id/chef_name/eta promoted from lazy ALTERs + waiter_id/waiter_name + timestamps in db.ts). Real-time WebSocket deferred (owner chose polling; broadcastWs remains a no-op until a WS server is added). tsc + vite build clean.
