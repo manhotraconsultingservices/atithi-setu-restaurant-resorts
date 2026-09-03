@@ -20208,9 +20208,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </span>
                     </div>
                   </div>
-                  <button onClick={() => removeStaff(s.id)} className="text-red-400 hover:text-red-600 p-1">
+                  {canDeleteTab('STAFF') && <button onClick={() => removeStaff(s.id)} className="text-red-400 hover:text-red-600 p-1">
                     <Trash2 size={18} />
-                  </button>
+                  </button>}
                 </div>
                 ); })()}
 
@@ -20251,8 +20251,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   )}
                 </div>
 
-                {/* Actions */}
-                <div className="px-5 pb-5 grid grid-cols-4 gap-2">
+                {/* Actions — every control here is a write; hidden entirely for View roles */}
+                {canWriteTab('STAFF') && <div className="px-5 pb-5 grid grid-cols-4 gap-2">
                   <button onClick={() => setEditingStaff(s)}
                     className="text-[11px] font-bold uppercase tracking-widest text-[#1a1208] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors">
                     ✎ Edit
@@ -20286,7 +20286,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     className="text-[11px] font-bold uppercase tracking-widest text-[#1a1208] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors">
                     🔑 Reset Pwd
                   </button>
-                </div>
+                </div>}
               </div>
                   ))}
                 </div>
@@ -20331,7 +20331,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   </span>
                                 </td>
                                 <td className="px-4 py-3">
-                                  <div className="flex items-center gap-1 flex-wrap">
+                                  {canWriteTab('STAFF') && <div className="flex items-center gap-1 flex-wrap">
                                     <button onClick={() => setEditingStaff(s)} className="text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 border-[#cc5a16]/20 hover:bg-[#cc5a16]/5 transition-colors">Edit</button>
                                     <button onClick={() => setTransferringStaff(s)} className="text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#cc5a16]/5 transition-colors">Transfer</button>
                                     <button onClick={() => toggleStaffActive(s)} className={cn("text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 transition-colors",
@@ -20349,8 +20349,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       if (res.ok) toast.success(`Password updated for ${s.name}`);
                                       else { const d = await res.json().catch(() => ({})); toast.error(d.error || 'Failed to reset password'); }
                                     }} className="text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 border-[#cc5a16]/20 hover:bg-[#cc5a16]/5 transition-colors">🔑 Pwd</button>
-                                    <button onClick={() => removeStaff(s.id)} className="text-red-400 hover:text-red-600 p-1 transition-colors"><Trash2 size={15} /></button>
-                                  </div>
+                                    {canDeleteTab('STAFF') && <button onClick={() => removeStaff(s.id)} className="text-red-400 hover:text-red-600 p-1 transition-colors"><Trash2 size={15} /></button>}
+                                  </div>}
                                 </td>
                               </tr>
                             );
