@@ -26352,7 +26352,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PAYMENTS (receipts) ───────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26944,7 +26944,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/events/quotations/:qid", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/quotations/:qid", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27058,7 +27058,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/events/quotations/:qid/pdf", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/quotations/:qid/pdf", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27294,7 +27294,7 @@ ${data.tenant.name}`;
   });
 
   // ── EVENT QUOTATION ────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/events/quotations/:qid/audit", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/quotations/:qid/audit", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27303,7 +27303,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
   });
 
-  app.get("/api/restaurant/:id/events/quotations/:qid/where-used", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/quotations/:qid/where-used", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27322,7 +27322,7 @@ ${data.tenant.name}`;
   });
 
   // ── EVENT FOLIO (invoice) — overview + audit + where-used ───────────────────
-  app.get("/api/restaurant/:id/events/folios/:fid", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/folios/:fid", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27345,7 +27345,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load folio" }); }
   });
 
-  app.get("/api/restaurant/:id/events/folios/:fid/audit", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/folios/:fid/audit", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27354,7 +27354,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
   });
 
-  app.get("/api/restaurant/:id/events/folios/:fid/where-used", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/folios/:fid/where-used", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -39632,7 +39632,7 @@ ${data.tenant.name}`;
   };
 
   // GET  — master folio state: header + line items + per-room subtotals.
-  app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/master-folio", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/master-folio", authenticate, hotelStaff, requireTabAction('FOLIOS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -43112,7 +43112,7 @@ ${data.tenant.name}`;
   // ─── Sprint 2 BCG: GST OUTPUT REGISTER ───────────────────────────────────
   // GET /hotel/gst-register?period=YYYY-MM&format=summary|detail
   // Returns all GST register rows for the month, with a CGST+SGST+IGST summary.
-  app.get("/api/restaurant/:id/hotel/gst-register", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/gst-register", authenticate, hotelStaff, requireTabAction('FOLIOS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -43197,7 +43197,7 @@ ${data.tenant.name}`;
 
   // ─── Sprint 2 BCG: OTA COMMISSION LEDGER ─────────────────────────────────
   // GET /hotel/ota-commissions?period=YYYY-MM
-  app.get("/api/restaurant/:id/hotel/ota-commissions", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/ota-commissions", authenticate, hotelStaff, requireTabAction('FOLIOS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44332,7 +44332,7 @@ ${data.tenant.name}`;
 
   // ─── COMPLIANCE (Phase 3) ────────────────────────────────────────────────
   // GET /hotel/compliance/foreign-guests — list bookings with foreign nationals
-  app.get("/api/restaurant/:id/hotel/compliance/foreign-guests", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/compliance/foreign-guests", authenticate, hotelStaff, requireTabAccess('COMPLIANCE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44461,7 +44461,7 @@ ${data.tenant.name}`;
   });
 
   // ─── FAQ / KNOWLEDGE-BASE CRUD (Phase 4) ────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/concierge/faqs", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/concierge/faqs", authenticate, hotelStaff, requireTabAction('CONCIERGE_FAQ', 'READ'), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -52434,8 +52434,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-phase2-module-only-writes',
+    commit_marker: 'rbac-phase3a-read-hardening',
     code_features: [
+      'rbac-phase3a-read-hardening',                 //SECURITY (Phase 3a — horizontal over-read, SAFE subset). Module-gated GET reads let a role scoped to ONE module tab read ANOTHER tab's sensitive data. Gated 13 DEDICATED sensitive reads that have NO cross-tab UI dependency (reached only from a detail already requiring the tab, or a dedicated compliance/financial screen): events payments + folios(+audit/where-used) → EVENTS_BOOKINGS; events quotations(+pdf/audit/where-used) → EVENTS_QUOTATIONS; hotel concierge/faqs → CONCIERGE_FAQ; hotel gst-register + ota-commissions + master-folio → FOLIOS; + fixed compliance/foreign-guests wrong-tab (HOTEL_BOOKINGS → COMPLIANCE). DELIBERATELY LEFT module-gated (cross-tab UI dependency, lower severity): events /analytics (Dashboard+Reports share it, EventViews.tsx:1986), /bookings list+detail (Calendar reads them), venue/rental/service/catering catalog + availability (booking pickers), and the ~30 hotel front-office-report reads (a report may feed a non-reports screen — each needs frontend verification). Validated with a SCOPED QA role (some tabs granted, others denied). tsc + vite build clean.
       'rbac-phase2-module-only-writes',              //SECURITY (Phase 2 — module-only-writes + inline allowlists; the highest-severity remainder after Phase 1). Gated 48 endpoints a role with ANY module tab could hit with NO per-tab check: (a) 27 tenant-:id module-only-writes via requireTabAction insertion (restaurant sessions close/invoice/invoice-status/covers/charge-to-room, room-charge approve/decline, tables/move, waiter-calls, print-jobs, logo/watermark/upi-qr/notification-templates; hotel hotel-inventory/gst-register/aiosell-fetch/form-c/concierge-faqs) + settlements (added restaurantStaff + DELIVERY); (b) 12 INLINE _roleHasTab guards for routes whose :id is NOT the tenant (middleware requireTabAction is inert there) — the ★ money/order set PATCH /api/orders/:id (+/payment, /invoice-status, /accept), PATCH+DELETE /api/menu/:id, and /api/owner/bookings + reservation-config (BOOKINGS tab); (c) 8 inline-allowlist → additive fast-path + _roleHasTab conversions (feedback reply/patch → FEEDBACK, housekeeping checklist-tasks/override → HOUSEKEEPING, checklist-assign → CHECKLIST_BOARD, folio-cancel → FOLIOS). Levels: create/update = Edit(2), delete = Full(3). Validated on RESTO-1003 with View/Edit/Full QA roles. tsc + vite build clean.
       'rbac-phase1-inline-cleanup',                  //RBAC (Phase-1 follow-up caught by LIVE validation). The QA harness (View/Edit/Full custom roles on RESTO-1003) probed the converted write endpoints and found loyalty promo-codes PUT+DELETE had a REDUNDANT inline allowlist inside the handler (role !== OWNER && !== MANAGER && !== SUPER_ADMIN) that 403'd even a custom role granted LOYALTY Full — despite the now-correct requireTabAction gate. Removed both inline checks (requireTabAction('LOYALTY','UPDATE'|'DELETE') is authoritative). Scanned all 116 converted endpoints: only these 2 were genuine conflicts (hotel/enable = intentional SUPER_ADMIN/CTO provisioning; hotel/settings + property-profile = tenant-scope guards restaurantId!==params.id; tables/status = per-table waiter-assignment logic — all correct, left as-is). tsc + vite build clean.
       'rbac-events-frontend-view-gating',            //UX (frontend parity with the backend action-level gates). Reported: a View-only "PCC Security 1" role could still click "New Booking", fill the whole form, and only get rejected on Save ("does not have CREATE access to EVENTS_BOOKINGS") — the backend correctly BLOCKS (Phase-1 gate working), but the button shouldn't be shown. Added evTabLevel()/evCanEdit() in EventViews.tsx (reads the tab_perms map App.tsx mirrors to localStorage; owner/SA/CTO=full) and HID the Events write controls for View-level roles: New Booking, the 4 master-data +Add buttons (Venues/Rentals/Services/Catering), and the booking Confirm/Checkout actions → a View role now sees read-only Events. Backend remains the security boundary. NOTE (broader UX pass pending): in-detail write controls and the Hotel/Restaurant frontends still show write buttons to View roles; the server rejects those writes regardless. tsc + vite build clean.
