@@ -28,6 +28,21 @@ function canCancelEventInvoice(): boolean {
   } catch { return false; }
 }
 
+// Frontend permission-level gate for the Events module (mirrors the backend
+// requireTabAction levels: View=1, Edit=2, Full=3). Reads the tab-level map App.tsx
+// mirrors into localStorage so these detached views hide the write controls a role
+// can't use — a View-only user is no longer led into a form the server will reject.
+function evTabLevel(tab: string): number {
+  try {
+    const role = (localStorage.getItem('role') || '').toUpperCase();
+    if (['OWNER', 'SUPER_ADMIN', 'CTO'].includes(role)) return 3;
+    const perms = JSON.parse(localStorage.getItem('tab_perms') || '{}');
+    if (!perms || Object.keys(perms).length === 0) return 3; // no restrictions configured → don't hide
+    return Number(perms[tab] || 0);
+  } catch { return 3; } // fail-open (the backend still enforces); avoids hiding controls on a storage glitch
+}
+const evCanEdit = (tab: string): boolean => evTabLevel(tab) >= 2; // create / update
+
 // ── Image upload (public-page pictures) — mirrors the Hotel upload flow so an
 // events-only tenant can add photos by file, not just paste a URL. ──────────
 async function uploadEventImage(restaurantId: string, token: string, file: File): Promise<string> {
@@ -286,7 +301,7 @@ function EventVenues({ restaurantId, token }: Props) {
   return (
     <div>
       <SectionHeader icon={<Building2 size={18} />} title={t('events.venues.title')} sub={t('events.venues.sub')}
-        action={<button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.venues.add')}</button>} />
+        action={evCanEdit('EVENTS_VENUES') ? <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.venues.add')}</button> : null} />
 
       {showForm && (
         <div className={`${CARD} mb-4`}>
@@ -423,7 +438,7 @@ function EventRentals({ restaurantId, token }: Props) {
   return (
     <div>
       <SectionHeader icon={<Sofa size={18} />} title={t('events.rentals.title')} sub={t('events.rentals.sub')}
-        action={<button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.rentals.add')}</button>} />
+        action={evCanEdit('EVENTS_RENTALS') ? <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.rentals.add')}</button> : null} />
 
       {showForm && (
         <div className={`${CARD} mb-4`}>
@@ -520,7 +535,7 @@ function EventServices({ restaurantId, token }: Props) {
   return (
     <div>
       <SectionHeader icon={<Users size={18} />} title={t('events.services.title')} sub={t('events.services.sub')}
-        action={<button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.services.add')}</button>} />
+        action={evCanEdit('EVENTS_SERVICES') ? <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.services.add')}</button> : null} />
 
       {showForm && (
         <div className={`${CARD} mb-4`}>
@@ -606,7 +621,7 @@ function EventCatering({ restaurantId, token }: Props) {
   return (
     <div>
       <SectionHeader icon={<Sofa size={18} />} title={t('events.catering.title')} sub={t('events.catering.sub')}
-        action={<button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.catering.add')}</button>} />
+        action={evCanEdit('EVENTS_CATERING') ? <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.catering.add')}</button> : null} />
 
       {showForm && (
         <div className={`${CARD} mb-4`}>
@@ -719,7 +734,7 @@ function EventBookings({ restaurantId, token }: Props) {
   return (
     <div>
       <SectionHeader icon={<CalendarRange size={18} />} title={t('events.bookings.title')} sub={t('events.bookings.sub')}
-        action={<div className="flex gap-2"><button className={BTN_GHOST} onClick={load}><RefreshCw size={13} /></button><button className={BTN_PRIMARY} onClick={() => { setForm(blank); setShowNew(true); }}><Plus size={14} />{t('events.bookings.new')}</button></div>} />
+        action={<div className="flex gap-2"><button className={BTN_GHOST} onClick={load}><RefreshCw size={13} /></button>{evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} onClick={() => { setForm(blank); setShowNew(true); }}><Plus size={14} />{t('events.bookings.new')}</button>}</div>} />
 
       {showNew && (
         <div className={`${CARD} mb-4`}>
@@ -1514,8 +1529,8 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             finally { setBusy(false); }
           }}>Cancel Invoice</button>
         )}
-        {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
-        {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout', undefined, gstBody())}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
+        {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
+        {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout', undefined, gstBody())}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_GHOST} disabled={busy} onClick={() => act('complete')}>{t('events.bookings.complete')}</button>}
         {editable && <button className={BTN_DANGER} disabled={busy} onClick={() => setShowCancel(true)}>{t('events.bookings.cancel')}</button>}
       </div>
