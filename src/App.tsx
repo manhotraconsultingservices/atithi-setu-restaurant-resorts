@@ -21468,12 +21468,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     Optional categories used by the Availability Calendar grouping and the Find-Available-Rooms search.
                   </p>
                 </div>
-                <button
+                {canWriteTab('ROOMS') && <button
                   onClick={() => setEditingRoomType({})}
                   className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] transition-all flex items-center gap-1"
                 >
                   <Plus size={12} /> Add Type
-                </button>
+                </button>}
               </div>
               {hotelRoomTypes.length === 0 ? (
                 <p className="text-xs text-[#9c8e85] italic">
@@ -21492,18 +21492,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </p>
                         </div>
                         <div className="flex gap-1 shrink-0">
-                          <button
+                          {canWriteTab('ROOMS') && <button
                             onClick={() => setEditingRoomType(t)}
                             className="text-[10px] font-bold text-[#3d3128] hover:underline"
                           >
                             Edit
-                          </button>
-                          <button
+                          </button>}
+                          {canDeleteTab('ROOMS') && <button
                             onClick={() => deleteRoomType(t.id)}
                             className="text-[10px] font-bold text-[#c13b3b] hover:underline"
                           >
                             Delete
-                          </button>
+                          </button>}
                         </div>
                       </div>
                     );
@@ -22180,11 +22180,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </div>
 
                       <div className="flex justify-end pt-2">
-                        <button
+                        {canWriteTab('ROOMS') && <button
                           type="button"
                           onClick={saveTariffs}
                           className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold uppercase tracking-widest hover:bg-[#a84612]"
-                        >Save Tariff Matrix</button>
+                        >Save Tariff Matrix</button>}
                       </div>
                       <p className="text-[10px] text-[#9c8e85] italic">
                         Each cell is per-night rate or per-night per-person charge. A blank/zero cell means "not configured — fall back to base rate at booking time".
@@ -22461,7 +22461,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <button onClick={() => setRoomQrPreview({ ...room, qrUrl: `${window.location.origin}/${room.qr_code_data || `?r=${restaurantId}&room=${room.id}`}` })} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 mr-1" title="QR code"><QrCode size={12} /></button>
                               {/* Edit / Block / Delete are SETUP-only (owner). The status board
                                   keeps just QR + the status toggle for staff. */}
-                              {isSetup && (<>
+                              {isSetup && canWriteTab('ROOMS') && (<>
                               <button
                                 onClick={() => { if (!locked) { setEditingRoom(room); setShowRoomModal(true); } }}
                                 disabled={locked}
@@ -22469,7 +22469,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 className={cn('px-2 py-1 rounded-lg text-[10px] font-bold mr-1', locked ? 'bg-stone-100 text-stone-400 cursor-not-allowed' : 'bg-[#faf7f2] text-[#3d3128] hover:bg-[#cc5a16]/10')}
                               >Edit</button>
                               <button onClick={() => setBlockingRoom(room)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#b8860b] text-[10px] font-bold hover:bg-[#b8860b]/10 mr-1" title="Block dates"><CalendarClock size={12} /></button>
-                              <button onClick={() => deleteRoom(room.id)} className="px-2 py-1 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[10px] font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={12} /></button>
+                              {canDeleteTab('ROOMS') && <button onClick={() => deleteRoom(room.id)} className="px-2 py-1 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[10px] font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={12} /></button>}
                               </>)}
                             </td>
                           </tr>
@@ -22529,7 +22529,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <button onClick={() => setRoomQrPreview({ ...room, qrUrl })} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/10 flex items-center justify-center gap-1" title="View QR code"><QrCode size={14} /> QR</button>
                         {/* Edit / Block / Delete are SETUP-only (owner). The status board
                             keeps QR + the status toggles above for staff. */}
-                        {isSetup && (<>
+                        {isSetup && canWriteTab('ROOMS') && (<>
                         {/* ROOM-LOCK (revenue-leak prevention): Edit is disabled when the
                             room is OCCUPIED (guest in residence) or BLOCKED (held). Staff
                             could otherwise change base_rate mid-stay and silently affect
@@ -22557,7 +22557,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           );
                         })()}
                         <button onClick={() => setBlockingRoom(room)} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#b8860b] text-xs font-bold hover:bg-[#b8860b]/10 flex items-center justify-center gap-1" title="Block dates"><CalendarClock size={14} /> Block</button>
-                        <button onClick={() => deleteRoom(room.id)} className="px-3 py-2 rounded-xl bg-[#fdf0f0] text-[#c13b3b] text-xs font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={14} /></button>
+                        {canDeleteTab('ROOMS') && <button onClick={() => deleteRoom(room.id)} className="px-3 py-2 rounded-xl bg-[#fdf0f0] text-[#c13b3b] text-xs font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={14} /></button>}
                         </>)}
                       </div>
                     </div>
@@ -62111,12 +62111,12 @@ function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token
       </div>
 
       <div className="flex justify-end">
-        <button
+        {canWriteTab('SETTINGS') && <button
           type="button"
           onClick={save}
           disabled={saving}
           className="px-5 py-2.5 bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest rounded-2xl disabled:opacity-50"
-        >{saving ? 'Saving…' : 'Save Tax & Currency'}</button>
+        >{saving ? 'Saving…' : 'Save Tax & Currency'}</button>}
       </div>
     </div>
   );
@@ -63112,7 +63112,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
               <div className="bg-[#faf7f2] rounded-xl p-3"><div className="text-[11px] text-[#9c8e85]">Auto-sync</div><div className={cn('text-lg font-bold', automation?.live_enabled ? 'text-emerald-700' : 'text-[#6b5d52]')}>{automation?.live_enabled ? 'On' : 'Off'}</div></div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button onClick={pushARI} disabled={pushing || !enabled || mappings.length === 0} className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50 transition-colors">{pushing ? 'Pushing…' : 'Push now'}</button>
+              {canWriteTab('CHANNEL_MANAGER') && <button onClick={pushARI} disabled={pushing || !enabled || mappings.length === 0} className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50 transition-colors">{pushing ? 'Pushing…' : 'Push now'}</button>}
               <button onClick={() => setSection('reservations')} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold text-[#1a1208] hover:bg-[#f5f0ea]">View bookings</button>
               <button onClick={() => setSection('mapping')} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold text-[#1a1208] hover:bg-[#f5f0ea]">Room mapping</button>
               <button onClick={() => setSection('synclog')} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-sm font-bold text-[#1a1208] hover:bg-[#f5f0ea]">Sync log</button>
@@ -63181,9 +63181,9 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
           </div>
 
           <div className="flex gap-2 flex-wrap">
-            <button onClick={saveConfig} disabled={savingCfg} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50 transition-colors">
+            {canWriteTab('CHANNEL_MANAGER') && <button onClick={saveConfig} disabled={savingCfg} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50 transition-colors">
               {savingCfg ? 'Saving…' : 'Save connection'}
-            </button>
+            </button>}
             <button onClick={testConnection} disabled={testing || !platformReady} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-[#1a1208] text-sm font-bold hover:bg-[#f5f0ea] disabled:opacity-50 transition-colors">
               {testing ? 'Testing…' : 'Test connection'}
             </button>
@@ -63217,16 +63217,16 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
           <div className="flex items-center gap-2 shrink-0 flex-wrap">
             {property && (
               <>
-                <button onClick={autoSuggestMappings} disabled={loadingProp || roomTypes.length === 0}
+                {canWriteTab('CHANNEL_MANAGER') && <button onClick={autoSuggestMappings} disabled={loadingProp || roomTypes.length === 0}
                   title="Auto-fill the closest local room type for every unmapped Aiosell room (matched by name + occupancy). Nothing is saved until you review and click Save all mapped."
                   className="px-3 py-2 rounded-xl bg-[#f5f0ea] border border-[#e8e0d8] text-[#1a1208] text-sm font-bold hover:bg-[#efe6da] disabled:opacity-50 transition-colors">
                   ✨ Auto-suggest
-                </button>
-                <button onClick={saveAllMappings} disabled={savingMap === '__all__'}
+                </button>}
+                {canWriteTab('CHANNEL_MANAGER') && <button onClick={saveAllMappings} disabled={savingMap === '__all__'}
                   title="Save every row that has a local room type selected"
                   className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50 transition-colors">
                   {savingMap === '__all__' ? 'Saving…' : 'Save all mapped'}
-                </button>
+                </button>}
               </>
             )}
             <button onClick={fetchProperty} disabled={loadingProp || !platformReady} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors shrink-0">
@@ -63250,7 +63250,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                     <span className="font-mono text-[11px]">{m.external_room_code}{m.external_rate_plan_code ? `/${m.external_rate_plan_code}` : ''}</span>
                     <span className="text-[#9c8e85]">→</span>
                     <span className="font-semibold">{m.local_room_type_name || m.local_room_type_id || '—'}</span>
-                    <button onClick={() => deleteMapping(m)} className="p-1 rounded-full hover:bg-red-100 text-red-500" title="Remove mapping"><Trash2 size={12} /></button>
+                    {canWriteTab('CHANNEL_MANAGER') && <button onClick={() => deleteMapping(m)} className="p-1 rounded-full hover:bg-red-100 text-red-500" title="Remove mapping"><Trash2 size={12} /></button>}
                   </span>
                 ))}
               </div>
@@ -63320,10 +63320,10 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                               </td>
                               <td className="py-2 px-3 text-right whitespace-nowrap">
                                 {saved && <CheckCircle2 size={15} className="inline text-emerald-600 mr-2" />}
-                                <button onClick={() => saveMapping(room, rpn)} disabled={savingMap === key || !d.rt}
+                                {canWriteTab('CHANNEL_MANAGER') && <button onClick={() => saveMapping(room, rpn)} disabled={savingMap === key || !d.rt}
                                   className="px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] disabled:opacity-40 transition-colors">
                                   {savingMap === key ? '…' : saved ? 'Update' : 'Map'}
-                                </button>
+                                </button>}
                               </td>
                             </tr>
                           );
@@ -63532,7 +63532,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
-                <button onClick={saveAutomation} disabled={autoSaving} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors">{autoSaving ? 'Saving…' : 'Save automation'}</button>
+                {canWriteTab('CHANNEL_MANAGER') && <button onClick={saveAutomation} disabled={autoSaving} className="px-4 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-black disabled:opacity-50 transition-colors">{autoSaving ? 'Saving…' : 'Save automation'}</button>}
                 <span className="text-[11px] text-[#9c8e85]">Applies to this property. Guest-facing messages stay in Settings → Notifications.</span>
               </div>
             </>)}
@@ -63978,9 +63978,9 @@ function PartnerLoginsManager({ restaurantId, token }: { restaurantId: string; t
             (OTA → grossed-up so you keep your rate; agent → markup added on top).
           </p>
         </div>
-        <button onClick={openNew} className="bg-[#cc5a16] text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-[#a84612] transition-colors shrink-0">
+        {canWriteTab('CHANNEL_MANAGER') && <button onClick={openNew} className="bg-[#cc5a16] text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-[#a84612] transition-colors shrink-0">
           + Add partner login
-        </button>
+        </button>}
       </div>
 
       {error && <div className="mx-5 mt-3 bg-red-50 border border-red-200 text-red-700 rounded-xl px-3 py-2 text-xs flex items-center gap-2"><AlertCircle size={14} /> {error}</div>}
@@ -64014,8 +64014,8 @@ function PartnerLoginsManager({ restaurantId, token }: { restaurantId: string; t
                     <td className="py-2 pr-3">{a.commission_pct == null ? <span className="text-[#9c8e85] italic">from source</span> : `${a.commission_pct}%`}</td>
                     <td className="py-2 pr-3">{a.is_active ? <span className="text-green-700 text-xs font-semibold">Active</span> : <span className="text-red-500 text-xs">Disabled</span>}</td>
                     <td className="py-2 pr-3 text-right whitespace-nowrap">
-                      <button onClick={() => openEdit(a)} className="text-[#a84612] text-xs font-semibold hover:underline mr-3">Edit</button>
-                      {a.is_active ? <button onClick={() => disableAccount(a)} className="text-red-500 text-xs font-semibold hover:underline">Disable</button> : null}
+                      {canWriteTab('CHANNEL_MANAGER') && <button onClick={() => openEdit(a)} className="text-[#a84612] text-xs font-semibold hover:underline mr-3">Edit</button>}
+                      {canWriteTab('CHANNEL_MANAGER') && a.is_active ? <button onClick={() => disableAccount(a)} className="text-red-500 text-xs font-semibold hover:underline">Disable</button> : null}
                     </td>
                   </tr>
                 ))}
