@@ -42,6 +42,7 @@ function evTabLevel(tab: string): number {
   } catch { return 3; } // fail-open (the backend still enforces); avoids hiding controls on a storage glitch
 }
 const evCanEdit = (tab: string): boolean => evTabLevel(tab) >= 2; // create / update
+const evCanDelete = (tab: string): boolean => evTabLevel(tab) >= 3; // delete (Full)
 
 // ── Image upload (public-page pictures) — mirrors the Hotel upload flow so an
 // events-only tenant can add photos by file, not just paste a URL. ──────────
@@ -399,8 +400,8 @@ function EventVenues({ restaurantId, token }: Props) {
           ) },
           { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
-              <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>
-              <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
+              {evCanEdit('EVENTS_VENUES') && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>}
+              {evCanDelete('EVENTS_VENUES') && <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>}
             </div>
           ) },
         ]}
@@ -496,8 +497,8 @@ function EventRentals({ restaurantId, token }: Props) {
           { key: 'rent_weekly', label: t('events.rentals.rentWeekly'), sortable: true, align: 'right', getValue: (r: any) => Number(r.rent_weekly || 0), render: (r: any) => money(r.rent_weekly) },
           { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
-              <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>
-              <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
+              {evCanEdit('EVENTS_RENTALS') && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>}
+              {evCanDelete('EVENTS_RENTALS') && <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>}
             </div>
           ) },
         ]}
@@ -572,8 +573,8 @@ function EventServices({ restaurantId, token }: Props) {
           { key: 'rate', label: t('events.services.rate'), sortable: true, align: 'right', getValue: (r: any) => Number(r.rate || 0), render: (r: any) => money(r.rate) },
           { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
-              <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>
-              <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
+              {evCanEdit('EVENTS_SERVICES') && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>}
+              {evCanDelete('EVENTS_SERVICES') && <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>}
             </div>
           ) },
         ]}
@@ -668,8 +669,8 @@ function EventCatering({ restaurantId, token }: Props) {
           { key: 'menu_json', label: t('events.catering.sections'), render: (r: any) => { try { const m = JSON.parse(r.menu_json || '[]'); return (m || []).map((s: any) => s.section).join(', ') || '—'; } catch { return '—'; } } },
           { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
-              <button className={BTN_GHOST} onClick={() => openEdit(r)}>{t('common.edit')}</button>
-              <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
+              {evCanEdit('EVENTS_CATERING') && <button className={BTN_GHOST} onClick={() => openEdit(r)}>{t('common.edit')}</button>}
+              {evCanDelete('EVENTS_CATERING') && <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>}
             </div>
           ) },
         ]}
@@ -1554,7 +1555,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               <span className="flex gap-1">
                 {onOpenObject && <button className={BTN_GHOST} onClick={() => onOpenObject('EVENT_QUOTATION', q.id)}>Open</button>}
                 <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, token)}>{t('events.quotes.viewPdf')}</button>
-                <button className={BTN_PRIMARY} onClick={() => setSendQuote({ id: q.id, email: bk.customer_email || '' })}><Send size={12} />{t('events.quotes.send')}</button>
+                {evCanEdit('EVENTS_QUOTATIONS') && <button className={BTN_PRIMARY} onClick={() => setSendQuote({ id: q.id, email: bk.customer_email || '' })}><Send size={12} />{t('events.quotes.send')}</button>}
               </span>
             </div>
           ))}
@@ -1925,7 +1926,7 @@ function EventQuotations({ restaurantId, token }: Props) {
           { key: '_a', label: t('common.actions'), hideable: false, noExport: true, render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${r.id}/pdf`, token)}>{t('events.quotes.viewPdf')}</button>
-              <button className={BTN_PRIMARY} onClick={() => setSendQuote({ id: r.id, email: r.customer_email || '' })}><Send size={12} />{t('events.quotes.send')}</button>
+              {evCanEdit('EVENTS_QUOTATIONS') && <button className={BTN_PRIMARY} onClick={() => setSendQuote({ id: r.id, email: r.customer_email || '' })}><Send size={12} />{t('events.quotes.send')}</button>}
             </div>
           ) },
         ]}
