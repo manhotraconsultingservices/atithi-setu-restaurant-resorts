@@ -9181,6 +9181,15 @@ async function startServer() {
   });
 
   app.post("/api/owner/notification-settings", authenticate, async (req: AuthRequest, res: Response) => {
+    // RBAC — this owner-scoped route has no :id, so requireTabAction can't gate it.
+    // Allow OWNER/MANAGER/SUPER_ADMIN/CTO (trusted built-ins) + any custom role
+    // granted Edit on NOTIFICATIONS; deny View-only and ungranted roles.
+    {
+      const _r = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(_r) && !(await _roleHasTab(req, 'NOTIFICATIONS', 2))) {
+        return res.status(403).json({ error: 'You need Edit access to Notifications to change these settings.' });
+      }
+    }
     const { settings } = req.body;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
@@ -14008,7 +14017,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/shift-templates", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/shift-templates", authenticate, workforceStaff, requireTabAction('ROSTER', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -14036,7 +14045,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/shift-templates/:tid", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/shift-templates/:tid", authenticate, workforceStaff, requireTabAction('ROSTER', 'DELETE'), async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -14087,7 +14096,7 @@ async function startServer() {
   // start_time, end_time, template_id?, status?, notes?}, ...] }.
   // Writes change log rows for every diff and enqueues SHIFT_ASSIGNED /
   // SHIFT_UPDATED notifications via triggerNotification.
-  app.post("/api/restaurant/:id/roster", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/roster", authenticate, workforceStaff, requireTabAction('ROSTER', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -14155,7 +14164,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/roster/:slotId", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/roster/:slotId", authenticate, workforceStaff, requireTabAction('ROSTER', 'DELETE'), async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -14193,7 +14202,7 @@ async function startServer() {
   // from one date range to another, shifted by the same number of days.
   // Each copied slot starts in DRAFT so the owner can review before
   // publishing (no notifications fire until publish).
-  app.post("/api/restaurant/:id/roster/copy", authenticate, workforceStaff, requireTabAccess('ROSTER'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/roster/copy", authenticate, workforceStaff, requireTabAction('ROSTER', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'ROSTER'))) {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -14443,7 +14452,7 @@ async function startServer() {
   }
   (globalThis as any).__recomputeTimesheet = _recomputeTimesheet;
 
-  app.post("/api/restaurant/:id/timesheet/recompute", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/timesheet/recompute", authenticate, workforceStaff, requireTabAction('TIMESHEET', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const start = String(req.body?.start || '').trim();
       const end   = String(req.body?.end   || '').trim();
@@ -14458,7 +14467,7 @@ async function startServer() {
 
   // ── Phase S2 — Payroll & approval endpoints ─────────────────────────
   // Approve or reject a single timesheet row. Sets status, who, when, notes.
-  app.patch("/api/restaurant/:id/timesheet/:staffId/:date/approval", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/timesheet/:staffId/:date/approval", authenticate, workforceStaff, requireTabAction('TIMESHEET', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'TIMESHEET'))) {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -14492,7 +14501,7 @@ async function startServer() {
   // Bulk approve/reject all PENDING rows in a date range. Saves the owner
   // from clicking through every row when variance was a known one-off
   // (e.g. festival day, training, sick leave handled out-of-band).
-  app.post("/api/restaurant/:id/timesheet/bulk-approval", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/timesheet/bulk-approval", authenticate, workforceStaff, requireTabAction('TIMESHEET', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'TIMESHEET'))) {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -14759,7 +14768,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/restaurant/:id/timesheet-config", authenticate, workforceStaff, requireTabAccess('TIMESHEET'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/timesheet-config", authenticate, workforceStaff, requireTabAction('TIMESHEET', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'TIMESHEET'))) {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -14877,7 +14886,7 @@ async function startServer() {
   // Update HR fields. Strictly the HR profile — NOT login fields
   // (role / login_id / password). Those stay on the existing Staff
   // Access endpoint to preserve the RBAC separation.
-  app.put("/api/restaurant/:id/hr/employees/:staffId", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/hr/employees/:staffId", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
@@ -14975,7 +14984,7 @@ async function startServer() {
   // for HR we'd ideally have a dedicated `hr_documents` table but
   // Phase 1 stays minimal: docs are URLs on a JSON column.
   // (Track as a Phase 2 follow-up if multi-doc-per-staff is needed.)
-  app.post("/api/restaurant/:id/hr/employees/:staffId/documents", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/employees/:staffId/documents", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
       const url = `/uploads/${req.file.filename}`;
@@ -15079,7 +15088,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hr/salary-components", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/salary-components", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const id = b.id || randomUUID();
@@ -15112,7 +15121,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hr/salary-components/:componentId", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hr/salary-components/:componentId", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'DELETE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("DELETE FROM salary_components WHERE id = ?", [req.params.componentId]);
@@ -15139,7 +15148,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hr/salary-structures", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/salary-structures", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const staff_id = String(b.staff_id || '').trim();
@@ -15223,7 +15232,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const year = Number(req.body?.year);
       const month = Number(req.body?.month);
@@ -15270,7 +15279,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs/:runId/compute", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs/:runId/compute", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
@@ -15473,7 +15482,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs/:runId/approve", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs/:runId/approve", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -15523,7 +15532,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs/:runId/lock", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs/:runId/lock", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -15543,7 +15552,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/runs/:runId/mark-paid", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/runs/:runId/mark-paid", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -15644,7 +15653,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/payroll/payslips/:payslipId/email", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/payroll/payslips/:payslipId/email", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { data, recipientEmail } = await buildPayslipPdfData(req.params.id, req.params.payslipId);
       const to = String(req.body?.to || recipientEmail || '').trim();
@@ -15983,7 +15992,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const staff_id = String(b.staff_id || '').trim();
@@ -16018,7 +16027,7 @@ You can also view all your payslips in the employee portal.
   });
 
   // Receipt upload (multipart)
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/receipt", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/receipt", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), upload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
       const item_id = String(req.body?.item_id || '').trim();
@@ -16034,7 +16043,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/submit", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/submit", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -16055,7 +16064,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/approve", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/approve", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       // 2-step: SUBMITTED → MANAGER_APPROVED → HR_APPROVED
       // Determine which step from the body OR from the current state
@@ -16105,7 +16114,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/reject", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/reject", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const reason = String(req.body?.reason || '').trim() || 'No reason provided';
       const db = await getTenantDb(req.params.id);
@@ -16128,7 +16137,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/attach-to-run", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/attach-to-run", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const run_id = String(req.body?.payroll_run_id || '').trim();
       if (!run_id) return res.status(400).json({ error: 'payroll_run_id required' });
@@ -16179,7 +16188,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letter-templates", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letter-templates", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const id = b.id || randomUUID();
@@ -16225,7 +16234,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const candidate_name = String(b.candidate_name || '').trim();
@@ -16338,7 +16347,7 @@ You can also view all your payslips in the employee portal.
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/send", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/send", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const data = await buildOfferLetterData(req.params.id, req.params.offerId);
       const to = String(req.body?.to || data.candidate.email || '').trim();
@@ -16374,7 +16383,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/accept", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/accept", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -16395,7 +16404,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/decline", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/decline", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const stamp = new Date().toISOString();
@@ -16416,7 +16425,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/upload-signed", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/upload-signed", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), upload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
       const url = `/uploads/${req.file.filename}`;
@@ -16578,7 +16587,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.put("/api/restaurant/:id/hr/statutory-config", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/hr/statutory-config", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const b = req.body || {};
       const db = await getTenantDb(req.params.id);
@@ -16744,7 +16753,7 @@ ${data.tenant.name}`;
 
   // POST .../test — smoke-test the credentials by calling pushStoreOpenClose(true) then (false).
   // If the adapter returns OK, the credentials work. If it throws, surface the error to the owner.
-  app.post("/api/restaurant/:id/integrations/:channel/test", authenticate, restaurantStaff, requireTabAccess('DELIVERY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/integrations/:channel/test", authenticate, restaurantStaff, requireTabAction('DELIVERY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const channel = String(req.params.channel).toUpperCase() as ChannelId;
       if (!VALID_CHANNELS.has(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
@@ -17578,7 +17587,7 @@ ${data.tenant.name}`;
   });
 
   // Ingredients: create
-  app.post("/api/restaurant/:id/inventory/ingredients", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/ingredients", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const {
         name, item_type, category, unit,
@@ -17905,7 +17914,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/inventory/suppliers", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/suppliers", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const {
         name, contact_name, phone, email, address, gst_number,
@@ -18075,7 +18084,7 @@ ${data.tenant.name}`;
   // Create a PO (status starts as DRAFT). Body:
   //   { supplier_id, expected_delivery_date?, notes?,
   //     items: [{ ingredient_id, qty_ordered, unit, unit_price }, ...] }
-  app.post("/api/restaurant/:id/inventory/purchase-orders", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/purchase-orders", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { supplier_id, expected_delivery_date, notes, items } = req.body;
       if (!supplier_id) return res.status(400).json({ error: "supplier_id is required" });
@@ -18480,7 +18489,7 @@ ${data.tenant.name}`;
   // After all line items: if linked to a PO, recompute PO status:
   //   • all items fully_received → 'RECEIVED'
   //   • any item received → 'PARTIAL'
-  app.post("/api/restaurant/:id/inventory/grn", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/grn", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { po_id, supplier_id, bill_number, notes, items } = req.body;
       if (!supplier_id && !po_id) {
@@ -19167,7 +19176,7 @@ ${data.tenant.name}`;
   // POST /inventory/auto-po/generate — owner-triggered immediate generation
   // for ALL eligible suppliers (ignores reorder_day_of_week — owner is
   // saying "do it now").
-  app.post("/api/restaurant/:id/inventory/auto-po/generate", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/auto-po/generate", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -19203,7 +19212,7 @@ ${data.tenant.name}`;
 
   // PATCH /inventory/suppliers/:supplierId/auto-po — toggle auto-PO + cycle
   // settings on a supplier.
-  app.patch("/api/restaurant/:id/inventory/suppliers/:supplierId/auto-po", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/inventory/suppliers/:supplierId/auto-po", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Insufficient permission" });
@@ -20298,7 +20307,7 @@ ${data.tenant.name}`;
   });
 
   // Log wastage. Atomically: insert the log row, decrement stock, append audit.
-  app.post("/api/restaurant/:id/inventory/wastage", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/wastage", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { ingredient_id, qty, unit, reason, notes } = req.body;
       if (!ingredient_id || qty == null) {
@@ -20393,7 +20402,7 @@ ${data.tenant.name}`;
 
   // Start a new count. Snapshots current ingredient stock as expected_qty per
   // line — owner then walks the kitchen and fills in actual_qty as they count.
-  app.post("/api/restaurant/:id/inventory/counts", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/counts", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { count_date, notes } = req.body;
       const db = await getTenantDb(req.params.id);
@@ -20535,7 +20544,7 @@ ${data.tenant.name}`;
   // }
   //
   // Idempotent if purge_existing=true: re-running with the same config replaces.
-  app.post("/api/restaurant/:id/inventory/admin/seed-consumption-history", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/admin/seed-consumption-history", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const days = Math.max(7, Math.min(120, Number(req.body?.days || 60)));
@@ -20647,7 +20656,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/inventory/admin/purge-corrupt-movements", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/admin/purge-corrupt-movements", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const threshold = Math.max(1, Number(req.body?.threshold || 100));  // |qty_delta| > 100 = absurd for any kg/l ingredient
@@ -20808,7 +20817,7 @@ ${data.tenant.name}`;
   }
 
   // Manual recompute trigger — for QA, demos, and after a big bulk-import
-  app.post("/api/restaurant/:id/inventory/forecast/recompute", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/forecast/recompute", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const r = await recomputeForecastsForTenant(db);
@@ -21321,7 +21330,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/inventory/seasonality", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/seasonality", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { ingredient_id, type, key, multiplier, label } = req.body;
       if (!type || !key || multiplier == null) {
@@ -21500,7 +21509,7 @@ ${data.tenant.name}`;
   });
 
   // ─── Drag-to-reorder ingredients ────────────────────────────────────────
-  app.post("/api/restaurant/:id/inventory/ingredients/reorder", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/ingredients/reorder", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { ordered_ids } = req.body as { ordered_ids: string[] };
       if (!Array.isArray(ordered_ids)) return res.status(400).json({ error: "ordered_ids must be an array" });
@@ -21715,7 +21724,7 @@ ${data.tenant.name}`;
   });
 
   // Create supplier invoice
-  app.post("/api/restaurant/:id/procurement/supplier-invoices", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/procurement/supplier-invoices", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!(await _roleHasTab(req, 'PROCUREMENT'))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21768,7 +21777,7 @@ ${data.tenant.name}`;
   });
 
   // Update invoice (edit before payment)
-  app.patch("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!(await _roleHasTab(req, 'PROCUREMENT'))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21808,7 +21817,7 @@ ${data.tenant.name}`;
   });
 
   // Delete invoice (only DRAFT/UNPAID with zero payments)
-  app.delete("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21832,7 +21841,7 @@ ${data.tenant.name}`;
   // ── Supplier Payments ────────────────────────────────────────────────────
 
   // Record payment against an invoice (or standalone advance)
-  app.post("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId/payments", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId/payments", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!(await _roleHasTab(req, 'PROCUREMENT'))) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -21942,7 +21951,7 @@ ${data.tenant.name}`;
   });
 
   // Delete a payment (reversal — re-opens the invoice)
-  app.delete("/api/restaurant/:id/procurement/payments/:paymentId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/procurement/payments/:paymentId", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
     if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
     try {
@@ -22139,7 +22148,7 @@ ${data.tenant.name}`;
   });
 
   // POST /api/restaurant/:id/procurement/suppliers — create supplier (no INVENTORY gate)
-  app.post("/api/restaurant/:id/procurement/suppliers", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/procurement/suppliers", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const {
         name, contact_name, phone, email, address, gst_number,
@@ -22177,7 +22186,7 @@ ${data.tenant.name}`;
   });
 
   // PATCH /api/restaurant/:id/procurement/suppliers/:supplierId — update supplier (includes bank + credit_days)
-  app.patch("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const ALLOWED = [
         'name', 'contact_name', 'phone', 'email', 'address', 'gst_number',
@@ -22202,7 +22211,7 @@ ${data.tenant.name}`;
   });
 
   // DELETE /api/restaurant/:id/procurement/suppliers/:supplierId — soft delete
-  app.delete("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'DELETE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("UPDATE suppliers SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.supplierId]);
@@ -22213,7 +22222,7 @@ ${data.tenant.name}`;
   });
 
   // POST /api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc — compliance doc upload
-  app.post("/api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'CREATE'), upload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       const docType = String(req.query.type || '').toUpperCase();
       if (!['PAN', 'MSME', 'GST'].includes(docType)) return res.status(400).json({ error: "type must be PAN, MSME or GST" });
@@ -22467,7 +22476,7 @@ ${data.tenant.name}`;
   // Returns suggestions the frontend can drop into the GRN line-items form.
   // Falls back gracefully (returns the saved image + manual-entry hint) when
   // GEMINI_API_KEY isn't configured or the model fails.
-  app.post("/api/restaurant/:id/inventory/receipt-ocr", authenticate, restaurantStaff, requireTabAccess('INVENTORY'), upload.single('bill'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/receipt-ocr", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), upload.single('bill'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No bill file uploaded (field: 'bill')" });
       const billUrl = `/uploads/${req.file.filename}`;
@@ -23598,7 +23607,7 @@ ${data.tenant.name}`;
       res.json({ ...job, tasks });
     } catch (err: any) { res.status(500).json({ error: "Failed to load job" }); }
   });
-  app.patch("/api/restaurant/:id/housekeeping/jobs/:jid/tasks/:tid", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/housekeeping/jobs/:jid/tasks/:tid", authenticate, hkStaff, requireTabAction('HOUSEKEEPING', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
@@ -23626,7 +23635,7 @@ ${data.tenant.name}`;
       await db.run("UPDATE rooms SET status = 'VACANT' WHERE id = ? AND status = 'CLEANING'", [job.facility_id]).catch(() => {});
     }
   };
-  app.post("/api/restaurant/:id/housekeeping/jobs/:jid/complete", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/housekeeping/jobs/:jid/complete", authenticate, hkStaff, requireTabAction('HOUSEKEEPING', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
@@ -23952,7 +23961,7 @@ ${data.tenant.name}`;
   });
 
   // ── Manual / on-demand start (e.g. Electrical Inspection on a specific room) ──
-  app.post("/api/restaurant/:id/checklists/jobs", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/checklists/jobs", authenticate, hkStaff, requireTabAction('HOUSEKEEPING', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -27425,7 +27434,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch services" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/services", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/services", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27447,7 +27456,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create service" }); }
   });
 
-  app.patch("/api/restaurant/:id/spa/services/:sid", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/spa/services/:sid", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27469,7 +27478,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update service" }); }
   });
 
-  app.delete("/api/restaurant/:id/spa/services/:sid", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/spa/services/:sid", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27490,7 +27499,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch add-ons" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/services/:sid/addons", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/services/:sid/addons", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27521,7 +27530,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch consumables" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/services/:sid/consumables", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/services/:sid/consumables", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27537,7 +27546,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to add consumable" }); }
   });
 
-  app.delete("/api/restaurant/:id/spa/consumables/:cid", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/spa/consumables/:cid", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27557,7 +27566,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch resources" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/resources", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/resources", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27573,7 +27582,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create resource" }); }
   });
 
-  app.patch("/api/restaurant/:id/spa/resources/:rid", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/spa/resources/:rid", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27599,7 +27608,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch blocks" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/resource-blocks", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/resource-blocks", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27615,7 +27624,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create block" }); }
   });
 
-  app.delete("/api/restaurant/:id/spa/resource-blocks/:bid", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/spa/resource-blocks/:bid", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27635,7 +27644,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch therapists" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/therapists", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/therapists", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27651,7 +27660,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create therapist" }); }
   });
 
-  app.patch("/api/restaurant/:id/spa/therapists/:tid", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/spa/therapists/:tid", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27678,7 +27687,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch skills" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27695,7 +27704,7 @@ ${data.tenant.name}`;
   });
 
   // PUT is the idiomatic "replace entire skill set" verb — alias to the POST handler
-  app.put("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27720,7 +27729,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch schedules" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27736,7 +27745,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create schedule" }); }
   });
 
-  app.delete("/api/restaurant/:id/spa/schedules/:schedId", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/spa/schedules/:schedId", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27913,7 +27922,7 @@ ${data.tenant.name}`;
   });
 
   // Book — dual-resource conflict guard (therapist + cabin) → 409 on overlap.
-  app.post("/api/restaurant/:id/spa/appointments", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27992,7 +28001,7 @@ ${data.tenant.name}`;
   });
 
   // Reschedule — re-runs the dual-resource guard for the new window/resources.
-  app.put("/api/restaurant/:id/spa/appointments/:aid", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/spa/appointments/:aid", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28045,15 +28054,15 @@ ${data.tenant.name}`;
     return db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]);
   };
 
-  app.post("/api/restaurant/:id/spa/appointments/:aid/confirm", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/confirm", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try { const row = await spaSetStatus(req, res, 'CONFIRMED'); if (row) res.json(row); }
     catch (err: any) { res.status(500).json({ error: "Failed to confirm" }); }
   });
-  app.post("/api/restaurant/:id/spa/appointments/:aid/check-in", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/check-in", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try { const row = await spaSetStatus(req, res, 'CHECKED_IN'); if (row) res.json(row); }
     catch (err: any) { res.status(500).json({ error: "Failed to check in" }); }
   });
-  app.post("/api/restaurant/:id/spa/appointments/:aid/cancel", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/cancel", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const check = await ensureSpaEnabled(req.params.id);
       if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -28069,7 +28078,7 @@ ${data.tenant.name}`;
       res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel" }); }
   });
-  app.post("/api/restaurant/:id/spa/appointments/:aid/no-show", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/no-show", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const check = await ensureSpaEnabled(req.params.id);
       if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -28086,7 +28095,7 @@ ${data.tenant.name}`;
   });
 
   // Complete — deducts service consumables from inventory (stock_movements).
-  app.post("/api/restaurant/:id/spa/appointments/:aid/complete", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/complete", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28125,7 +28134,7 @@ ${data.tenant.name}`;
   // Builds a SPA folio (reusing the hotel folio ledger), posts the service line
   // (or a package redemption), tip, applies a membership discount, and assigns
   // a SPA-<year>-NNNNN invoice number. Payment is a separate step (/payments).
-  app.post("/api/restaurant/:id/spa/appointments/:aid/checkout", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/checkout", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28268,7 +28277,7 @@ ${data.tenant.name}`;
   });
 
   // Record a payment on a spa folio (FINAL by default). Closes folio when paid.
-  app.post("/api/restaurant/:id/spa/folios/:fid/payments", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/folios/:fid/payments", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28327,7 +28336,7 @@ ${data.tenant.name}`;
   });
 
   // Void a spa folio payment (reopens the folio)
-  app.post("/api/restaurant/:id/spa/folios/:fid/payments/:pid/void", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/folios/:fid/payments/:pid/void", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28367,7 +28376,7 @@ ${data.tenant.name}`;
   // Apply a promo code to an OPEN spa folio (mirrors the hotel apply-promo). Uses
   // the shared promo_codes / promo_redemptions tables. Percent then flat, capped
   // at subtotal; bumps folio.discount + recomputes totals + records a redemption.
-  app.post("/api/restaurant/:id/spa/folios/:fid/apply-promo", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/folios/:fid/apply-promo", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28527,7 +28536,7 @@ ${data.tenant.name}`;
     catch (err: any) { res.status(500).json({ error: "Failed to fetch packages" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/packages", authenticate, spaStaff, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/packages", authenticate, spaStaff, requireTabAction('SPA_PACKAGES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28543,7 +28552,7 @@ ${data.tenant.name}`;
   });
 
   // Purchase a package for a client → client package + paid folio/invoice.
-  app.post("/api/restaurant/:id/spa/clients/:cid/packages", authenticate, spaStaff, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/clients/:cid/packages", authenticate, spaStaff, requireTabAction('SPA_PACKAGES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28577,7 +28586,7 @@ ${data.tenant.name}`;
     catch (err: any) { res.status(500).json({ error: "Failed to fetch membership plans" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/memberships", authenticate, spaStaff, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/memberships", authenticate, spaStaff, requireTabAction('SPA_PACKAGES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28593,7 +28602,7 @@ ${data.tenant.name}`;
   });
 
   // Subscribe a client → client membership + paid folio/invoice (first month).
-  app.post("/api/restaurant/:id/spa/clients/:cid/memberships", authenticate, spaStaff, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/clients/:cid/memberships", authenticate, spaStaff, requireTabAction('SPA_PACKAGES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28619,7 +28628,7 @@ ${data.tenant.name}`;
   });
 
   // ─── RETAIL SALE (sell a SPA_RETAIL product, deduct stock, invoice) ──────────
-  app.post("/api/restaurant/:id/spa/retail-sale", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/retail-sale", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28665,7 +28674,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch clients" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/clients", authenticate, spaStaff, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/clients", authenticate, spaStaff, requireTabAction('SPA_CLIENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28697,7 +28706,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch client" }); }
   });
 
-  app.patch("/api/restaurant/:id/spa/clients/:cid", authenticate, spaStaff, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/spa/clients/:cid", authenticate, spaStaff, requireTabAction('SPA_CLIENTS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28722,7 +28731,7 @@ ${data.tenant.name}`;
     catch (err: any) { res.status(500).json({ error: "Failed to fetch forms" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/clients/:cid/forms", authenticate, spaStaff, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/clients/:cid/forms", authenticate, spaStaff, requireTabAction('SPA_CLIENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -31079,7 +31088,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/service-requests/:requestId/status", authenticate, serviceRequestStaff, requireTabAccess('SERVICE_REQUESTS'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/service-requests/:requestId/status", authenticate, serviceRequestStaff, requireTabAction('SERVICE_REQUESTS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33503,7 +33512,7 @@ ${data.tenant.name}`;
   });
 
   // Test-connection: verifies credentials against the live OTA API without persisting them.
-  app.post("/api/restaurant/:id/hotel/channel-credentials/test", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/channel-credentials/test", authenticate, hotelStaff, requireTabAction('SETTINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const { channel, api_key, api_secret, property_id } = req.body || {};
@@ -40442,7 +40451,7 @@ ${data.tenant.name}`;
   //     override_email?: string,   // route to a different email
   //     override_phone?: string }  // route to a different WhatsApp number
   // Returns { ok, sent: ['EMAIL', 'WHATSAPP'], amount, upi_link, breakup }
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/send-payment-link", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/send-payment-link", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -41784,7 +41793,7 @@ ${data.tenant.name}`;
     return next();
   };
 
-  app.patch("/api/restaurant/:id/hotel/tariff/model", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+  app.patch("/api/restaurant/:id/hotel/tariff/model", authenticate, hotelStaff, requireTabAction('SETTINGS', 'UPDATE'),
     (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
     async (req: AuthRequest, res: Response) => {
       const check = await ensureHotelEnabled(req.params.id);
@@ -41799,7 +41808,7 @@ ${data.tenant.name}`;
     }
   );
 
-  app.put("/api/restaurant/:id/hotel/tariff/seasons", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+  app.put("/api/restaurant/:id/hotel/tariff/seasons", authenticate, hotelStaff, requireTabAction('SETTINGS', 'UPDATE'),
     (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
     async (req: AuthRequest, res: Response) => {
       const check = await ensureHotelEnabled(req.params.id);
@@ -41827,7 +41836,7 @@ ${data.tenant.name}`;
     }
   );
 
-  app.put("/api/restaurant/:id/hotel/tariff/season-periods", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+  app.put("/api/restaurant/:id/hotel/tariff/season-periods", authenticate, hotelStaff, requireTabAction('SETTINGS', 'UPDATE'),
     (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
     async (req: AuthRequest, res: Response) => {
       const check = await ensureHotelEnabled(req.params.id);
@@ -41856,7 +41865,7 @@ ${data.tenant.name}`;
     }
   );
 
-  app.put("/api/restaurant/:id/hotel/tariff/meal-plans", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+  app.put("/api/restaurant/:id/hotel/tariff/meal-plans", authenticate, hotelStaff, requireTabAction('SETTINGS', 'UPDATE'),
     (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
     async (req: AuthRequest, res: Response) => {
       const check = await ensureHotelEnabled(req.params.id);
@@ -41921,7 +41930,7 @@ ${data.tenant.name}`;
   //     historical invoices remain readable.
   //   • If unused → hard-delete the plan AND its tariff-matrix +
   //     extra-person config rows (pure configuration, no historical value).
-  app.delete("/api/restaurant/:id/hotel/tariff/meal-plans/:mealPlanId", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+  app.delete("/api/restaurant/:id/hotel/tariff/meal-plans/:mealPlanId", authenticate, hotelStaff, requireTabAction('SETTINGS', 'DELETE'),
     (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
     async (req: AuthRequest, res: Response) => {
       const check = await ensureHotelEnabled(req.params.id);
@@ -41959,7 +41968,7 @@ ${data.tenant.name}`;
     }
   );
 
-  app.put("/api/restaurant/:id/hotel/tariff/room-tariffs", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+  app.put("/api/restaurant/:id/hotel/tariff/room-tariffs", authenticate, hotelStaff, requireTabAction('SETTINGS', 'UPDATE'),
     (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
     async (req: AuthRequest, res: Response) => {
       const check = await ensureHotelEnabled(req.params.id);
@@ -41991,7 +42000,7 @@ ${data.tenant.name}`;
     }
   );
 
-  app.put("/api/restaurant/:id/hotel/tariff/extra-person-charges", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+  app.put("/api/restaurant/:id/hotel/tariff/extra-person-charges", authenticate, hotelStaff, requireTabAction('SETTINGS', 'UPDATE'),
     (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
     async (req: AuthRequest, res: Response) => {
       const check = await ensureHotelEnabled(req.params.id);
@@ -43466,7 +43475,7 @@ ${data.tenant.name}`;
   //   1. body.to override
   //   2. group.contact_email
   //   3. first child booking's guest_email
-  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/email-invoice", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/email-invoice", authenticate, hotelStaff, requireTabAction('FOLIOS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -43667,7 +43676,7 @@ ${data.tenant.name}`;
   // ─── EMAIL INVOICE TO GUEST (Phase 5) ─────────────────────────────────────
   // POST /hotel/folios/:folioId/email-invoice
   // body: { to?: string (override) }
-  app.post("/api/restaurant/:id/hotel/folios/:folioId/email-invoice", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/email-invoice", authenticate, hotelStaff, requireTabAction('FOLIOS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -52434,7 +52443,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-fe-sweep-p13',
+    commit_marker: 'rbac-be-action-p14',
     code_features: [
       'rbac-fe-sweep-p1',                            //UX (Hotel/Restaurant FE sweep, pass 1 — hides write controls a View role can't use; backend enforces). Gated the row-action + create buttons via canWriteTab/canDeleteTab (perm.ts): Menu (Edit/Recipe/Daily-Special/Delete/Availability), Hotel-Inventory (Receive/Use/Edit/Del), Service-Requests (Ack/Start/Complete), Restaurant Invoices (Edit/Print/Mark-Paid), Loyalty (Recompute/Add-tier/Edit/Disable/Enroll), restaurant Reservations (New-Booking + Confirm/Cancel/Re-confirm status actions). Remaining passes: Hotel Bookings, Channel Manager, Settings, Monitor/KDS, Rooms-Setup. tsc + vite build clean.
       'rbac-hotel-restaurant-fe-gating-start',       //UX (Phase 3 — Hotel/Restaurant frontend gating START + Events booking-detail complete; the backend fully enforces from Phases 1-2, so this only hides controls a View role can't use). Added a SHARED helper src/perm.ts (canWriteTab/canDeleteTab — reads the tab_perms localStorage map; works in the main App render AND the many STANDALONE view components where App's canDo isn't in scope — the key blocker a mapping pass surfaced). Gated the PRIMARY create/action buttons across the main surfaces: Menu Add-Item (MENU), New Invoice (INVOICES), Hotel New-Booking (HOTEL_BOOKINGS), Add Room (ROOMS), Add/Edit/Delete FAQ (CONCIERGE_FAQ), Hotel-Inventory Add (HOTEL_INVENTORY). Also FINISHED the Events booking-detail: folded evCanEdit('EVENTS_BOOKINGS') into the editable/canRecordPayment flags so a View role sees the whole detail READ-ONLY (no add/remove lines, hotel rooms, cancel, schedule, record-payment, assign/remove-staff; inline qty/price render as static text). SCOPE: a full sweep is 100+ mostly-multi-line buttons (complete map captured in this session) — this gates the highest-value primary buttons; the long tail of inline toggles / per-row actions is an incremental follow-up (every one already blocked server-side). tsc + vite build clean.
