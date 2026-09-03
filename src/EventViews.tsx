@@ -2654,9 +2654,9 @@ function EventSettings({ restaurantId, token }: Props) {
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div><label className={LABEL}>Turnaround / prep (min)</label><input type="number" min={0} className={INPUT} value={vr.default_turnaround_min} onChange={e => setVr({ ...vr, default_turnaround_min: Number(e.target.value) })} /></div>
-          <div><label className={LABEL}>Morning (AM) window</label><div className="flex items-center gap-1"><input type="time" className={INPUT} value={vr.hd_am_start} onChange={e => setVr({ ...vr, hd_am_start: e.target.value })} /><span className="text-xs">–</span><input type="time" className={INPUT} value={vr.hd_am_end} onChange={e => setVr({ ...vr, hd_am_end: e.target.value })} /></div></div>
-          <div><label className={LABEL}>Evening (PM) window</label><div className="flex items-center gap-1"><input type="time" className={INPUT} value={vr.hd_pm_start} onChange={e => setVr({ ...vr, hd_pm_start: e.target.value })} /><span className="text-xs">–</span><input type="time" className={INPUT} value={vr.hd_pm_end} onChange={e => setVr({ ...vr, hd_pm_end: e.target.value })} /></div></div>
+          <div><label className={LABEL}>Turnaround / prep (min)</label><input type="number" min={0} className={INPUT} disabled={!canEdit} value={vr.default_turnaround_min} onChange={e => setVr({ ...vr, default_turnaround_min: Number(e.target.value) })} /></div>
+          <div><label className={LABEL}>Morning (AM) window</label><div className="flex items-center gap-1"><input type="time" className={INPUT} disabled={!canEdit} value={vr.hd_am_start} onChange={e => setVr({ ...vr, hd_am_start: e.target.value })} /><span className="text-xs">–</span><input type="time" className={INPUT} disabled={!canEdit} value={vr.hd_am_end} onChange={e => setVr({ ...vr, hd_am_end: e.target.value })} /></div></div>
+          <div><label className={LABEL}>Evening (PM) window</label><div className="flex items-center gap-1"><input type="time" className={INPUT} disabled={!canEdit} value={vr.hd_pm_start} onChange={e => setVr({ ...vr, hd_pm_start: e.target.value })} /><span className="text-xs">–</span><input type="time" className={INPUT} disabled={!canEdit} value={vr.hd_pm_end} onChange={e => setVr({ ...vr, hd_pm_end: e.target.value })} /></div></div>
         </div>
         <div>
           <label className={LABEL}>Weekend / peak days</label>
@@ -2664,8 +2664,8 @@ function EventSettings({ restaurantId, token }: Props) {
             {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => {
               const set = String(vr.weekend_days || '').split(',').map((s: string) => s.trim()).filter(Boolean);
               const on = set.includes(String(i));
-              return <button key={d} type="button" onClick={() => { const s = new Set(set); if (on) s.delete(String(i)); else s.add(String(i)); setVr({ ...vr, weekend_days: Array.from(s).sort().join(',') }); }}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${on ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>{d}</button>;
+              return <button key={d} type="button" disabled={!canEdit} onClick={() => { const s = new Set(set); if (on) s.delete(String(i)); else s.add(String(i)); setVr({ ...vr, weekend_days: Array.from(s).sort().join(',') }); }}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border disabled:opacity-60 ${on ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>{d}</button>;
             })}
           </div>
           <p className="text-[11px] text-[#9d8b7e] mt-1">Selected days use the Weekend/Peak column of each hall's price matrix.</p>
@@ -2686,10 +2686,10 @@ function EventSettings({ restaurantId, token }: Props) {
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div><label className={LABEL}>{t('events.settings.monthlyRevenueTarget')} (₹)</label><input type="number" min={0} className={INPUT} value={biz.monthly_revenue_target} onChange={e => setBiz({ ...biz, monthly_revenue_target: Number(e.target.value) })} placeholder="0 = no target" /></div>
-          <div><label className={LABEL}>{t('events.settings.occupancyTarget')} (%)</label><input type="number" min={0} max={100} className={INPUT} value={biz.occupancy_target_pct} onChange={e => setBiz({ ...biz, occupancy_target_pct: Number(e.target.value) })} placeholder="0 = no target" /></div>
-          <div><label className={LABEL}>{t('events.settings.minDeposit')} (%)</label><input type="number" min={0} max={100} className={INPUT} value={biz.min_deposit_pct} onChange={e => setBiz({ ...biz, min_deposit_pct: Number(e.target.value) })} /></div>
-          <div><label className={LABEL}>{t('events.settings.depositDueDays')}</label><input type="number" min={0} className={INPUT} value={biz.deposit_due_days} onChange={e => setBiz({ ...biz, deposit_due_days: Number(e.target.value) })} /></div>
+          <div><label className={LABEL}>{t('events.settings.monthlyRevenueTarget')} (₹)</label><input type="number" min={0} className={INPUT} disabled={!canEdit} value={biz.monthly_revenue_target} onChange={e => setBiz({ ...biz, monthly_revenue_target: Number(e.target.value) })} placeholder="0 = no target" /></div>
+          <div><label className={LABEL}>{t('events.settings.occupancyTarget')} (%)</label><input type="number" min={0} max={100} className={INPUT} disabled={!canEdit} value={biz.occupancy_target_pct} onChange={e => setBiz({ ...biz, occupancy_target_pct: Number(e.target.value) })} placeholder="0 = no target" /></div>
+          <div><label className={LABEL}>{t('events.settings.minDeposit')} (%)</label><input type="number" min={0} max={100} className={INPUT} disabled={!canEdit} value={biz.min_deposit_pct} onChange={e => setBiz({ ...biz, min_deposit_pct: Number(e.target.value) })} /></div>
+          <div><label className={LABEL}>{t('events.settings.depositDueDays')}</label><input type="number" min={0} className={INPUT} disabled={!canEdit} value={biz.deposit_due_days} onChange={e => setBiz({ ...biz, deposit_due_days: Number(e.target.value) })} /></div>
         </div>
         <p className="text-[11px] text-[#9d8b7e]">{t('events.settings.targetsNote')}</p>
         <div className="flex items-center gap-3">
@@ -2713,15 +2713,15 @@ function EventSettings({ restaurantId, token }: Props) {
           </div>
           {splits.map((s, i) => (
             <div key={i} className="flex items-center gap-2">
-              <input className={`${INPUT} flex-1`} value={s.label} onChange={e => setSplit(i, { label: e.target.value })} placeholder={t('events.settings.scheduleStage')} />
-              <input type="number" min={0} max={100} className={`${INPUT} w-20 text-right`} value={s.percent} onChange={e => setSplit(i, { percent: Number(e.target.value) || 0 })} />
-              <input type="number" min={0} className={`${INPUT} w-28 text-right`} value={-s.offsetDays} onChange={e => setSplit(i, { offsetDays: -(Number(e.target.value) || 0) })} title={t('events.settings.scheduleDaysBeforeHint')} />
-              <button onClick={() => delSplit(i)} className="w-6 text-rose-400 hover:text-rose-600" title={t('common.delete')} disabled={splits.length <= 1}><X size={14} /></button>
+              <input className={`${INPUT} flex-1`} disabled={!canEdit} value={s.label} onChange={e => setSplit(i, { label: e.target.value })} placeholder={t('events.settings.scheduleStage')} />
+              <input type="number" min={0} max={100} className={`${INPUT} w-20 text-right`} disabled={!canEdit} value={s.percent} onChange={e => setSplit(i, { percent: Number(e.target.value) || 0 })} />
+              <input type="number" min={0} className={`${INPUT} w-28 text-right`} disabled={!canEdit} value={-s.offsetDays} onChange={e => setSplit(i, { offsetDays: -(Number(e.target.value) || 0) })} title={t('events.settings.scheduleDaysBeforeHint')} />
+              {canEdit && <button onClick={() => delSplit(i)} className="w-6 text-rose-400 hover:text-rose-600" title={t('common.delete')} disabled={splits.length <= 1}><X size={14} /></button>}
             </div>
           ))}
         </div>
         <div className="flex items-center justify-between">
-          <button className={BTN_GHOST} onClick={addSplit}><Plus size={13} />{t('events.settings.scheduleAddStage')}</button>
+          {canEdit && <button className={BTN_GHOST} onClick={addSplit}><Plus size={13} />{t('events.settings.scheduleAddStage')}</button>}
           <span className={`text-xs font-bold tabular-nums ${Math.abs(splitTotal - 100) < 0.5 ? 'text-emerald-600' : 'text-rose-600'}`}>{t('events.settings.scheduleTotal')}: {Math.round(splitTotal)}%</span>
         </div>
         <p className="text-[11px] text-[#9d8b7e]">{t('events.settings.scheduleNote')}</p>
@@ -2732,19 +2732,19 @@ function EventSettings({ restaurantId, token }: Props) {
       </div>
 
       <div className={`${CARD} space-y-3`}>
-        <div><label className={LABEL}>{t('events.settings.heroTitle')}</label><input className={INPUT} value={form.hero_title || ''} onChange={e => setForm({ ...form, hero_title: e.target.value })} /></div>
-        <div><label className={LABEL}>{t('events.settings.tagline')}</label><input className={INPUT} value={form.tagline || ''} onChange={e => setForm({ ...form, tagline: e.target.value })} /></div>
-        <div><label className={LABEL}>{t('events.settings.description')}</label><textarea className={INPUT} rows={3} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} /></div>
+        <div><label className={LABEL}>{t('events.settings.heroTitle')}</label><input className={INPUT} disabled={!canEdit} value={form.hero_title || ''} onChange={e => setForm({ ...form, hero_title: e.target.value })} /></div>
+        <div><label className={LABEL}>{t('events.settings.tagline')}</label><input className={INPUT} disabled={!canEdit} value={form.tagline || ''} onChange={e => setForm({ ...form, tagline: e.target.value })} /></div>
+        <div><label className={LABEL}>{t('events.settings.description')}</label><textarea className={INPUT} rows={3} disabled={!canEdit} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} /></div>
         <div><label className={LABEL}>{t('events.settings.heroImage')}</label>
           <SingleImagePicker restaurantId={restaurantId} token={token} value={form.hero_image_url || ''} onChange={(url) => setForm({ ...form, hero_image_url: url })} /></div>
         <div><label className={LABEL}>{t('events.settings.gallery')}</label>
           <GalleryPicker restaurantId={restaurantId} token={token} images={form.gallery_list || []} onChange={(imgs) => setForm({ ...form, gallery_list: imgs })} />
           <p className="text-[11px] text-[#9d8b7e] mt-1.5">{t('events.settings.galleryHint')}</p></div>
         <div className="grid grid-cols-2 gap-3">
-          <div><label className={LABEL}>{t('common.phone')}</label><input className={INPUT} value={form.contact_phone || ''} onChange={e => setForm({ ...form, contact_phone: e.target.value })} /></div>
-          <div><label className={LABEL}>{t('common.email')}</label><input className={INPUT} value={form.contact_email || ''} onChange={e => setForm({ ...form, contact_email: e.target.value })} /></div>
+          <div><label className={LABEL}>{t('common.phone')}</label><input className={INPUT} disabled={!canEdit} value={form.contact_phone || ''} onChange={e => setForm({ ...form, contact_phone: e.target.value })} /></div>
+          <div><label className={LABEL}>{t('common.email')}</label><input className={INPUT} disabled={!canEdit} value={form.contact_email || ''} onChange={e => setForm({ ...form, contact_email: e.target.value })} /></div>
         </div>
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!form.is_published} onChange={e => setForm({ ...form, is_published: e.target.checked })} />{t('events.settings.published')}</label>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!form.is_published} disabled={!canEdit} onChange={e => setForm({ ...form, is_published: e.target.checked })} />{t('events.settings.published')}</label>
         <div className="flex items-center gap-3">
           {canEdit && <button className={BTN_PRIMARY} onClick={save}>{t('common.save')}</button>}
           {saved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}

@@ -8324,7 +8324,9 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const loadDayClose = useCallback(() => { setLoading(true); acctApi(`/accounting/day-close?date=${dcDate}`).then(d => { if (d && !d.error) setDayClose(d); }).finally(() => setLoading(false)); }, [acctApi, dcDate]);
   const cdCountedTotal = DENOMS.reduce((s, dn) => s + dn * (parseInt(denomQty[dn] || '0', 10) || 0), 0);
   const hoCountedTotal = DENOMS.reduce((s, dn) => s + dn * (parseInt(hoDenomQty[dn] || '0', 10) || 0), 0);
+  const cashGuard = () => { if (!canWriteTab('CASH_DRAWER')) { setCdMsg({ type: 'err', text: 'View-only access — you cannot perform cash drawer actions.' }); return false; } return true; };
   const openDrawer = async () => {
+    if (!cashGuard()) return;
     setCdMsg(null);
     const res = await acctApi('/accounting/cash-drawers', { method: 'POST', body: JSON.stringify({ business_date: dcDate, opening_float: parseFloat(ndFloat) || 0, shift_label: ndShift || null, cashier_name: ndCashier || null }) });
     if (res && !res.error) { setNdFloat(''); setNdShift(''); setNdCashier(''); setCdMsg({ type: 'ok', text: `Drawer opened for ${res.cashier_name}` }); loadDayClose(); }
@@ -8332,6 +8334,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   };
   const submitClose = async () => {
     if (!closingDrawer) return;
+    if (!cashGuard()) return;
     setCdMsg(null);
     const denominations = DENOMS.map(dn => ({ denom: dn, qty: parseInt(denomQty[dn] || '0', 10) || 0 })).filter(x => x.qty > 0);
     const deposit_amount = parseFloat(cdDeposit) || 0;
@@ -8341,6 +8344,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   };
   const submitHandover = async () => {
     if (!handoverDrawer) return;
+    if (!cashGuard()) return;
     setCdMsg(null);
     const denominations = DENOMS.map(dn => ({ denom: dn, qty: parseInt(hoDenomQty[dn] || '0', 10) || 0 })).filter(x => x.qty > 0);
     const deposit_amount = parseFloat(hoDeposit) || 0;
@@ -8348,12 +8352,12 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     if (res && !res.error) { setHandoverDrawer(null); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoToId(''); setHoShift(''); setCdMsg({ type: 'ok', text: `Handover to ${res.to_cashier_name} started — awaiting their sign-off` }); loadDayClose(); }
     else setCdMsg({ type: 'err', text: res?.error || 'Failed to start handover' });
   };
-  const acceptHandover = async (h: any) => { setCdMsg(null); const res = await acctApi(`/accounting/cash-handovers/${h.id}/accept`, { method: 'POST', body: JSON.stringify({}) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: `Handover accepted — ${h.to_cashier_name}'s drawer opened with ${fmtAmt(h.carry_over_float)}` }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Failed to accept handover' }); };
-  const cancelHandover = async (h: any) => { setCdMsg(null); const res = await acctApi(`/accounting/cash-handovers/${h.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Cancelled' }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: 'Handover cancelled' }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Failed to cancel' }); };
-  const approveDrawer = async (d: any) => { const res = await acctApi(`/accounting/cash-drawers/${d.id}/approve`, { method: 'POST', body: JSON.stringify({ post_variance: cdPostVar }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: `Approved ${d.cashier_name}` }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Approve failed' }); };
-  const rejectDrawer = async (d: any) => { const res = await acctApi(`/accounting/cash-drawers/${d.id}/reject`, { method: 'POST', body: JSON.stringify({ reason: 'Recount requested' }) }); if (res && !res.error) loadDayClose(); else setCdMsg({ type: 'err', text: res?.error || 'Reject failed' }); };
-  const lockDay = async () => { const res = await acctApi('/accounting/day-close/lock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: 'Day locked' }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Lock failed' }); };
-  const unlockDay = async () => { const res = await acctApi('/accounting/day-close/unlock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) loadDayClose(); else setCdMsg({ type: 'err', text: res?.error || 'Unlock failed' }); };
+  const acceptHandover = async (h: any) => { if (!cashGuard()) return; setCdMsg(null); const res = await acctApi(`/accounting/cash-handovers/${h.id}/accept`, { method: 'POST', body: JSON.stringify({}) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: `Handover accepted — ${h.to_cashier_name}'s drawer opened with ${fmtAmt(h.carry_over_float)}` }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Failed to accept handover' }); };
+  const cancelHandover = async (h: any) => { if (!cashGuard()) return; setCdMsg(null); const res = await acctApi(`/accounting/cash-handovers/${h.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Cancelled' }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: 'Handover cancelled' }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Failed to cancel' }); };
+  const approveDrawer = async (d: any) => { if (!cashGuard()) return; const res = await acctApi(`/accounting/cash-drawers/${d.id}/approve`, { method: 'POST', body: JSON.stringify({ post_variance: cdPostVar }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: `Approved ${d.cashier_name}` }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Approve failed' }); };
+  const rejectDrawer = async (d: any) => { if (!cashGuard()) return; const res = await acctApi(`/accounting/cash-drawers/${d.id}/reject`, { method: 'POST', body: JSON.stringify({ reason: 'Recount requested' }) }); if (res && !res.error) loadDayClose(); else setCdMsg({ type: 'err', text: res?.error || 'Reject failed' }); };
+  const lockDay = async () => { if (!cashGuard()) return; const res = await acctApi('/accounting/day-close/lock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) { setCdMsg({ type: 'ok', text: 'Day locked' }); loadDayClose(); } else setCdMsg({ type: 'err', text: res?.error || 'Lock failed' }); };
+  const unlockDay = async () => { if (!cashGuard()) return; const res = await acctApi('/accounting/day-close/unlock', { method: 'POST', body: JSON.stringify({ business_date: dcDate }) }); if (res && !res.error) loadDayClose(); else setCdMsg({ type: 'err', text: res?.error || 'Unlock failed' }); };
 
   // Day Book — a single day's journal entries in chronological order (reuses the
   // GL ledger endpoint, filtered from=to=date).
@@ -9415,12 +9419,12 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <input type="date" value={dcDate} onChange={e => setDcDate(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
             <button onClick={loadDayClose} className={AC_BTN}>Load</button>
             {dayClose?.locked
-              ? (<span className="text-xs font-semibold text-rose-700 flex items-center gap-1">🔒 Day locked <button onClick={unlockDay} className="underline">unlock</button></span>)
-              : (dayClose?.can_lock && <button onClick={lockDay} className="px-3 py-1.5 bg-[#1a1208] text-white text-sm rounded hover:bg-black">Lock day</button>)}
+              ? (<span className="text-xs font-semibold text-rose-700 flex items-center gap-1">🔒 Day locked {canWriteTab('CASH_DRAWER') && <button onClick={unlockDay} className="underline">unlock</button>}</span>)
+              : (dayClose?.can_lock && canWriteTab('CASH_DRAWER') && <button onClick={lockDay} className="px-3 py-1.5 bg-[#1a1208] text-white text-sm rounded hover:bg-black">Lock day</button>)}
             {cdMsg && <span className={`text-sm ${cdMsg.type === 'ok' ? 'text-emerald-700' : 'text-rose-700'}`}>{cdMsg.text}</span>}
           </div>
 
-          {!dayClose?.locked && (
+          {!dayClose?.locked && canWriteTab('CASH_DRAWER') && (
             <div className="rounded-lg border border-[#e8ded0] bg-white p-3 flex flex-wrap items-end gap-2">
               <div><label className="text-xs text-[#6b5d52] block">Cashier</label><input value={ndCashier} onChange={e => setNdCashier(e.target.value)} placeholder="Cashier name" className={`${AC_INPUT} mt-1`} /></div>
               <div><label className="text-xs text-[#6b5d52] block">Opening float ₹</label><input type="number" value={ndFloat} onChange={e => setNdFloat(e.target.value)} placeholder="0.00" className={`${AC_INPUT} mt-1 w-28 tabular-nums`} /></div>
@@ -9479,9 +9483,9 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                     <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(d.deposit_amount)}</td>
                     <td className="px-3 py-2"><span className={`text-xs rounded-full px-2 py-0.5 whitespace-nowrap ${d.status === 'APPROVED' ? 'bg-emerald-100 text-emerald-800' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-800' : d.status === 'REJECTED' ? 'bg-rose-100 text-rose-800' : 'bg-sky-100 text-sky-800'}`}>{String(d.status).replace(/_/g, ' ')}</span></td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {(d.status === 'OPEN' || d.status === 'REJECTED') && <button onClick={() => { setClosingDrawer(d); setDenomQty({}); setCdDeposit(''); }} className="text-xs text-[#a0522d] underline">Close &amp; count</button>}
-                      {d.status === 'OPEN' && <button onClick={() => { setHandoverDrawer(d); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoShift(d.shift_label || ''); }} className="text-xs text-sky-700 underline ml-2">Hand over</button>}
-                      {d.status === 'PENDING_APPROVAL' && (dayClose?.can_lock ? (<span className="flex gap-2"><button onClick={() => approveDrawer(d)} className="text-xs text-emerald-700 underline">Approve</button><button onClick={() => rejectDrawer(d)} className="text-xs text-rose-700 underline">Reject</button></span>) : <span className="text-[11px] text-amber-700">awaiting manager approval</span>)}
+                      {(d.status === 'OPEN' || d.status === 'REJECTED') && canWriteTab('CASH_DRAWER') && <button onClick={() => { setClosingDrawer(d); setDenomQty({}); setCdDeposit(''); }} className="text-xs text-[#a0522d] underline">Close &amp; count</button>}
+                      {d.status === 'OPEN' && canWriteTab('CASH_DRAWER') && <button onClick={() => { setHandoverDrawer(d); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoShift(d.shift_label || ''); }} className="text-xs text-sky-700 underline ml-2">Hand over</button>}
+                      {d.status === 'PENDING_APPROVAL' && (dayClose?.can_lock && canWriteTab('CASH_DRAWER') ? (<span className="flex gap-2"><button onClick={() => approveDrawer(d)} className="text-xs text-emerald-700 underline">Approve</button><button onClick={() => rejectDrawer(d)} className="text-xs text-rose-700 underline">Reject</button></span>) : <span className="text-[11px] text-amber-700">awaiting manager approval</span>)}
                       {d.status === 'APPROVED' && <span className="text-[11px] font-mono text-[#9c8e85]">{d.deposit_journal_ref || '✓'}</span>}
                     </td>
                   </tr>
@@ -9505,7 +9509,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                       <td className={`py-1.5 text-right tabular-nums ${Math.abs(Number(h.variance || 0)) >= 0.01 ? 'text-rose-700 font-semibold' : ''}`}>{fmtAmt(h.variance)}</td>
                       <td className="py-1.5"><span className={`text-xs rounded-full px-2 py-0.5 whitespace-nowrap ${h.status === 'ACCEPTED' ? 'bg-emerald-100 text-emerald-800' : h.status === 'PENDING_ACCEPT' ? 'bg-amber-100 text-amber-800' : 'bg-stone-200 text-stone-700'}`}>{String(h.status).replace(/_/g, ' ')}</span></td>
                       <td className="py-1.5 whitespace-nowrap">
-                        {h.status === 'PENDING_ACCEPT' && !dayClose.locked && (
+                        {h.status === 'PENDING_ACCEPT' && !dayClose.locked && canWriteTab('CASH_DRAWER') && (
                           <span className="flex gap-2 items-center">
                             {h.can_accept && <button onClick={() => acceptHandover(h)} className="text-xs text-emerald-700 underline">Accept &amp; sign</button>}
                             {(h.is_outgoing || h.can_accept) && <button onClick={() => cancelHandover(h)} className="text-xs text-rose-700 underline">Cancel</button>}
