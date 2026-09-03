@@ -1239,11 +1239,13 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   };
 
   if (!bk) return <div className="text-sm text-[#6b5d52]">{t('common.loading')}</div>;
-  const editable = bk.status !== 'COMPLETED' && bk.status !== 'CANCELLED';
+  // A View-only role can open a booking to read it but sees NO write controls
+  // (add/remove lines, hotel rooms, cancel, schedule, staff). Backend enforces too.
+  const editable = bk.status !== 'COMPLETED' && bk.status !== 'CANCELLED' && evCanEdit('EVENTS_BOOKINGS');
   // Payments stay collectable after the event is over (customers often settle the
   // balance post-event); only a cancelled booking freezes money-in, matching the
   // backend payment guard.
-  const canRecordPayment = bk.status !== 'CANCELLED';
+  const canRecordPayment = bk.status !== 'CANCELLED' && evCanEdit('EVENTS_BOOKINGS');
   // Bill ledger figures come from the backend breakdown (subtotal / GST / discount
   // / grand). total_amount is now the tax-inclusive grand total; older responses
   // without `bill` fall back to deriving from total_amount (treated as pre-tax).

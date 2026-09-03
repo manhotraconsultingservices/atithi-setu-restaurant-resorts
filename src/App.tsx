@@ -16,6 +16,7 @@ import { StatusBoard } from './StatusBoard';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
 import { EventsModule, EventBookingPage } from './EventViews';
+import { canWriteTab, canDeleteTab } from './perm';
 import { prettyRoleLabel } from './roleLabel';
 import { computeTabVisibility } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
@@ -6661,7 +6662,7 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
               <p className="font-bold text-sm">No items yet</p>
               <p className="text-xs mt-1">Use Quick Setup to seed common hotel supplies, or add items manually.</p>
               <div className="flex gap-2 justify-center mt-4">
-                <button onClick={openAdd} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ Add Item</button>
+                {canWriteTab('HOTEL_INVENTORY') && <button onClick={openAdd} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ Add Item</button>}
                 <button onClick={() => setTab('SETUP')} className="px-4 py-2 rounded-xl bg-[#faf7f2] text-[#cc5a16] text-sm font-bold border border-[#cc5a16]/20">Quick Setup</button>
               </div>
             </div>
@@ -16135,10 +16136,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <Upload size={13}/> Import
                   <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleCsvFileParse(e.target.files[0]); e.target.value=''; }} />
                 </label>
-                <button onClick={() => setIsAddingItem(true)}
+                {canWriteTab('MENU') && <button onClick={() => setIsAddingItem(true)}
                   className="bg-[#cc5a16] text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-[#a84612] transition-all">
                   <Plus size={14}/> Add Item
-                </button>
+                </button>}
               </div>
               {/* Recipe CSV row — bulk-define ingredient mappings for many menu items at once */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -20956,12 +20957,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <h2 className="text-3xl font-bold font-serif">Invoice Management</h2>
             <div className="flex items-center gap-2 flex-wrap">
-              <button
+              {canWriteTab('INVOICES') && <button
                 onClick={() => { setShowOnDemandModal(true); setOdInvoiceItems([{name:'',qty:1,price:0}]); setOdCustomer({name:'',phone:'',reference:''}); setOdToken(''); setOdDiscount(0); setOdSvcPct(0); setOdGstPct(restaurant?.is_gst_enabled ? (restaurant?.gst_percentage ?? 0) : 0); setOdApplyGst(Boolean(restaurant?.is_gst_enabled)); }}
                 className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] transition-all shadow-sm"
               >
                 <Plus size={14} /> New Invoice
-              </button>
+              </button>}
               <button
                 onClick={fetchInvoices}
                 className="flex items-center gap-2 px-4 py-2 rounded-2xl border border-[#cc5a16]/20 text-[#6b5d52] hover:bg-[#faf7f2] text-xs font-bold uppercase tracking-widest transition-all"
@@ -21442,7 +21443,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     : "Live room status board. Tap a room's status to update housekeeping (vacant / occupied / cleaning / etc.)."}
                 </p>
               </div>
-              {isSetup && (
+              {isSetup && canWriteTab('ROOMS') && (
                 <button
                   onClick={() => { setEditingRoom({}); setShowRoomModal(true); }}
                   className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20"
@@ -22744,9 +22745,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <button onClick={openGroupBookingModal} className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/30 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 transition-all flex items-center gap-2">
                 <Plus size={14} /> Group
               </button>
-              <button onClick={() => { setEditingBooking({ check_in_date: new Date().toISOString().slice(0,10), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20">
+              {canWriteTab('HOTEL_BOOKINGS') && <button onClick={() => { setEditingBooking({ check_in_date: new Date().toISOString().slice(0,10), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20">
                 <Plus size={16} /> New Booking
-              </button>
+              </button>}
             </div>
           </div>
           {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
@@ -27394,7 +27395,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <h2 className="text-3xl font-bold font-serif text-[#1a1208]">AI Concierge · Knowledge Base</h2>
               <p className="text-sm text-[#6b5d52] mt-1">Teach the in-room chatbot about your property. Guests chat from the QR-scanner interface.</p>
             </div>
-            <button onClick={() => { setEditingFaq({ category: 'General' }); setShowFaqModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] flex items-center gap-2 shadow-md shadow-[#cc5a16]/20"><Plus size={16}/> Add FAQ</button>
+            {canWriteTab('CONCIERGE_FAQ') && <button onClick={() => { setEditingFaq({ category: 'General' }); setShowFaqModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] flex items-center gap-2 shadow-md shadow-[#cc5a16]/20"><Plus size={16}/> Add FAQ</button>}
           </div>
           <div className="px-4 py-3 rounded-2xl bg-[#eff5fd] border border-[#2563a8]/20 text-[#6b5d52] text-xs">
             <strong className="text-[#2563a8]">Tip:</strong> Add WiFi password, pool hours, breakfast timings, restaurant location, nearby attractions. The chatbot will answer guests in your property's voice, 24/7.
@@ -27421,8 +27422,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <td className="px-4 py-3 align-top"><span className="px-2 py-1 rounded-md bg-[#cc5a16]/10 text-[#cc5a16] text-[10px] font-bold uppercase">{f.category || 'General'}</span></td>
                       <td className="px-4 py-3 align-top text-center">{f.is_active ? <Check size={16} className="text-emerald-600 mx-auto"/> : <X size={16} className="text-[#9c8e85] mx-auto"/>}</td>
                       <td className="px-4 py-3 align-top text-right whitespace-nowrap">
-                        <button onClick={() => { setEditingFaq(f); setShowFaqModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[11px] font-bold hover:bg-[#cc5a16]/10 mr-1">Edit</button>
-                        <button onClick={() => deleteFaq(f.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Delete</button>
+                        {canWriteTab('CONCIERGE_FAQ') && <button onClick={() => { setEditingFaq(f); setShowFaqModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[11px] font-bold hover:bg-[#cc5a16]/10 mr-1">Edit</button>}
+                        {canDeleteTab('CONCIERGE_FAQ') && <button onClick={() => deleteFaq(f.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Delete</button>}
                       </td>
                     </tr>
                   ))}
