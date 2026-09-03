@@ -7551,6 +7551,14 @@ async function startServer() {
 
   // Owner: Update own profile (name, email, phone)
   app.patch("/api/owner/profile", authenticate, async (req: AuthRequest, res: Response) => {
+    // RBAC — the business/owner profile: only OWNER/MANAGER (+ SUPER_ADMIN/CTO)
+    // or a custom role with Edit on SETTINGS may change it. No :id here, so gate inline.
+    {
+      const _r = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(_r) && !(await _roleHasTab(req, 'SETTINGS', 2))) {
+        return res.status(403).json({ error: 'You need Edit access to Settings to change the business profile.' });
+      }
+    }
     const { name, email, phone } = req.body;
     if (!name?.trim() || !email?.trim()) {
       return res.status(400).json({ error: "Name and email are required" });
@@ -9241,6 +9249,7 @@ async function startServer() {
 
   // Owner: fire a test message on a chosen channel to verify credentials/config.
   app.post("/api/owner/notifications/test", authenticate, async (req: AuthRequest, res: Response) => {
+    { const _r = String(req.user?.role || '').toUpperCase(); if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(_r) && !(await _roleHasTab(req, 'NOTIFICATIONS', 2))) return res.status(403).json({ error: 'You need Edit access to Notifications to send test messages.' }); }
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await ensureNotifDeliveries(db, req.user!.restaurantId);
@@ -9281,6 +9290,7 @@ async function startServer() {
   });
 
   app.post("/api/owner/test-notification", authenticate, async (req: AuthRequest, res: Response) => {
+    { const _r = String(req.user?.role || '').toUpperCase(); if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(_r) && !(await _roleHasTab(req, 'NOTIFICATIONS', 2))) return res.status(403).json({ error: 'You need Edit access to Notifications to send test messages.' }); }
     const { eventName, data } = req.body;
     try {
       await triggerNotification(req.user!.restaurantId, eventName, data || { test: "This is a test notification" });
@@ -9292,6 +9302,7 @@ async function startServer() {
 
   // POST /api/owner/test-telegram — send a test message to a specific Telegram chat ID
   app.post("/api/owner/test-telegram", authenticate, async (req: AuthRequest, res: Response) => {
+    { const _r = String(req.user?.role || '').toUpperCase(); if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(_r) && !(await _roleHasTab(req, 'NOTIFICATIONS', 2))) return res.status(403).json({ error: 'You need Edit access to Notifications to send test messages.' }); }
     const { chat_id } = req.body;
     try {
       await sendTelegram(chat_id || null, `✅ *Atithi Setu — Telegram Connected!*\n\nYour restaurant notifications are now active on Telegram.\n\n_Powered by Manhotra Consulting_`);
@@ -14533,7 +14544,7 @@ async function startServer() {
 
   // Manager manually sets actual_hours for any staff on a date (used for offline employees
   // who cannot self-log, and for corrections on login employees with PENDING/AUTO status).
-  app.patch("/api/restaurant/:id/timesheet/:staffId/:date/hours", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/timesheet/:staffId/:date/hours", authenticate, workforceStaff, requireTabAction('TIMESHEET', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const role = req.user?.role ?? '';
       if (!(await _roleHasTab(req, 'TIMESHEET'))) {
@@ -14581,7 +14592,7 @@ async function startServer() {
   });
 
   // Manager bulk-set hours for multiple staff/dates in one call (mass update from grid)
-  app.post("/api/restaurant/:id/timesheet/bulk-hours", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/timesheet/bulk-hours", authenticate, workforceStaff, requireTabAction('TIMESHEET', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const role = req.user?.role ?? '';
       if (!(await _roleHasTab(req, 'TIMESHEET'))) {
@@ -31982,7 +31993,7 @@ ${data.tenant.name}`;
     return false;
   };
 
-  app.post("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/petty-cash", authenticate, requireTabAction('EXPENSE_JOURNAL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       // RBAC: permission-aware — owner/management/front-desk + any role the owner
       // granted the EXPENSE_JOURNAL tab (fixes "Manager has Full Expense Journal
@@ -32014,7 +32025,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/restaurant/:id/petty-cash/:entryId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/petty-cash/:entryId", authenticate, requireTabAction('EXPENSE_JOURNAL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       // RBAC: permission-aware — owner/management/front-desk + any EXPENSE_JOURNAL-granted role.
       if (!(await _canReadExpenseJournal(req, res))) return;
@@ -32151,7 +32162,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.delete("/api/restaurant/:id/petty-cash/:entryId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/petty-cash/:entryId", authenticate, requireTabAction('EXPENSE_JOURNAL', 'DELETE'), async (req: AuthRequest, res: Response) => {
     try {
       const role = String(req.user?.role || '').toUpperCase();
       if (!['OWNER', 'SUPER_ADMIN'].includes(role)) {
@@ -52443,7 +52454,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-be-action-p14',
+    commit_marker: 'rbac-be-action-p15',
     code_features: [
       'rbac-fe-sweep-p1',                            //UX (Hotel/Restaurant FE sweep, pass 1 — hides write controls a View role can't use; backend enforces). Gated the row-action + create buttons via canWriteTab/canDeleteTab (perm.ts): Menu (Edit/Recipe/Daily-Special/Delete/Availability), Hotel-Inventory (Receive/Use/Edit/Del), Service-Requests (Ack/Start/Complete), Restaurant Invoices (Edit/Print/Mark-Paid), Loyalty (Recompute/Add-tier/Edit/Disable/Enroll), restaurant Reservations (New-Booking + Confirm/Cancel/Re-confirm status actions). Remaining passes: Hotel Bookings, Channel Manager, Settings, Monitor/KDS, Rooms-Setup. tsc + vite build clean.
       'rbac-hotel-restaurant-fe-gating-start',       //UX (Phase 3 — Hotel/Restaurant frontend gating START + Events booking-detail complete; the backend fully enforces from Phases 1-2, so this only hides controls a View role can't use). Added a SHARED helper src/perm.ts (canWriteTab/canDeleteTab — reads the tab_perms localStorage map; works in the main App render AND the many STANDALONE view components where App's canDo isn't in scope — the key blocker a mapping pass surfaced). Gated the PRIMARY create/action buttons across the main surfaces: Menu Add-Item (MENU), New Invoice (INVOICES), Hotel New-Booking (HOTEL_BOOKINGS), Add Room (ROOMS), Add/Edit/Delete FAQ (CONCIERGE_FAQ), Hotel-Inventory Add (HOTEL_INVENTORY). Also FINISHED the Events booking-detail: folded evCanEdit('EVENTS_BOOKINGS') into the editable/canRecordPayment flags so a View role sees the whole detail READ-ONLY (no add/remove lines, hotel rooms, cancel, schedule, record-payment, assign/remove-staff; inline qty/price render as static text). SCOPE: a full sweep is 100+ mostly-multi-line buttons (complete map captured in this session) — this gates the highest-value primary buttons; the long tail of inline toggles / per-row actions is an incremental follow-up (every one already blocked server-side). tsc + vite build clean.
