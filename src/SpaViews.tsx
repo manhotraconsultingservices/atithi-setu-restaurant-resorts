@@ -10,6 +10,10 @@ import {
   Calendar, Clock, Plus, Trash2, Check, X, User, Package, Award,
   TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText, History,
 } from 'lucide-react';
+// RBAC — shared frontend gates (View=1, Edit=2, Full=3) reading the tab_perms
+// map App.tsx mirrors into localStorage. These detached Spa views hide write
+// controls a role can't use; the backend remains the security boundary.
+import { canWriteTab, canDeleteTab } from './perm';
 
 // ── Spa History overlay — audit log (who changed what) for an appointment or
 // folio, via the reusable ObjectDetail shell. Opened by a "History" button. ──
@@ -103,6 +107,8 @@ type Props = { restaurantId: string; token: string };
 // ════════════════════════════════════════════════════════════════════════
 function SpaCatalog({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_CATALOG');
+  const canDel = canDeleteTab('SPA_CATALOG');
   const [services, setServices] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -114,6 +120,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
   useEffect(() => { load(); }, []);
 
   const save = async () => {
+    if (!canEdit) { alert('View-only access — you cannot change the service menu.'); return; }
     if (!form.name) return;
     const body = { ...form, duration_min: Number(form.duration_min || 60), buffer_after_min: Number(form.buffer_after_min || 10), price: Number(form.price || 0), gst_percent: Number(form.gst_percent || 18) };
     try {
@@ -122,12 +129,12 @@ function SpaCatalog({ restaurantId, token }: Props) {
       setShowForm(false); setEdit(null); setForm(blank); await load();
     } catch (e: any) { alert(e.message); }
   };
-  const remove = async (id: string) => { if (!window.confirm('Deactivate this service?')) return; try { await api(`/spa/services/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  const remove = async (id: string) => { if (!canDel) { alert('View-only access — you cannot deactivate services.'); return; } if (!window.confirm('Deactivate this service?')) return; try { await api(`/spa/services/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
 
   return (
     <div>
       <SectionHeader icon={<Scissors size={18} />} title="Service Menu" sub="Treatments, durations, pricing & tax"
-        action={<button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} /> Add Service</button>} />
+        action={canEdit ? <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} /> Add Service</button> : null} />
       <div className={CARD}>
         <DataTable
           data={services}
@@ -142,8 +149,8 @@ function SpaCatalog({ restaurantId, token }: Props) {
             { key: 'is_active', label: 'Status', render: (r: any) => r.is_active ? <span className="text-emerald-600 text-xs font-bold">Active</span> : <span className="text-gray-400 text-xs">Inactive</span> },
             { key: '_a', label: '', render: (r: any) => (
               <div className="flex gap-1.5">
-                <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...blank, ...r, duration_min: String(r.duration_min), buffer_after_min: String(r.buffer_after_min), price: String(r.price), gst_percent: String(r.gst_percent), requires_room: !!r.requires_room, requires_therapist: !!r.requires_therapist }); setShowForm(true); }}>Edit</button>
-                <button className={`${BTN} bg-rose-50 text-rose-600 hover:bg-rose-100`} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
+                {canEdit && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...blank, ...r, duration_min: String(r.duration_min), buffer_after_min: String(r.buffer_after_min), price: String(r.price), gst_percent: String(r.gst_percent), requires_room: !!r.requires_room, requires_therapist: !!r.requires_therapist }); setShowForm(true); }}>Edit</button>}
+                {canDel && <button className={`${BTN} bg-rose-50 text-rose-600 hover:bg-rose-100`} onClick={() => remove(r.id)}><Trash2 size={13} /></button>}
               </div>
             ) },
           ]}
@@ -191,6 +198,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaResources({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_RESOURCES');
   const [tab, setTab] = useState<'CABINS' | 'THERAPISTS'>('CABINS');
   const [resources, setResources] = useState<any[]>([]);
   const [therapists, setTherapists] = useState<any[]>([]);
@@ -210,8 +218,8 @@ function SpaResources({ restaurantId, token }: Props) {
   };
   useEffect(() => { load(); }, []);
 
-  const addCabin = async () => { if (!newCabin) return; try { await api('/spa/resources', { method: 'POST', body: JSON.stringify({ name: newCabin }) }); setNewCabin(''); await load(); } catch (e: any) { alert(e.message); } };
-  const addTher = async () => { if (!newTher) return; try { await api('/spa/therapists', { method: 'POST', body: JSON.stringify({ display_name: newTher }) }); setNewTher(''); await load(); } catch (e: any) { alert(e.message); } };
+  const addCabin = async () => { if (!canEdit) { alert('View-only access — you cannot add cabins.'); return; } if (!newCabin) return; try { await api('/spa/resources', { method: 'POST', body: JSON.stringify({ name: newCabin }) }); setNewCabin(''); await load(); } catch (e: any) { alert(e.message); } };
+  const addTher = async () => { if (!canEdit) { alert('View-only access — you cannot add therapists.'); return; } if (!newTher) return; try { await api('/spa/therapists', { method: 'POST', body: JSON.stringify({ display_name: newTher }) }); setNewTher(''); await load(); } catch (e: any) { alert(e.message); } };
 
   const openSched = async (t: any) => {
     setSchedTher(t);
@@ -219,9 +227,11 @@ function SpaResources({ restaurantId, token }: Props) {
     try { const sk = await api(`/spa/therapists/${t.id}/services`); setSkills(sk.map((x: any) => x.service_id)); } catch { setSkills([]); }
   };
   const addSched = async () => {
+    if (!canEdit) { alert('View-only access — you cannot change schedules.'); return; }
     try { await api(`/spa/therapists/${schedTher.id}/schedules`, { method: 'POST', body: JSON.stringify({ weekday: Number(sched.weekday), start_time: sched.start_time, end_time: sched.end_time }) }); setSchedules(await api(`/spa/therapists/${schedTher.id}/schedules`)); } catch (e: any) { alert(e.message); }
   };
   const toggleSkill = async (sid: string) => {
+    if (!canEdit) { alert('View-only access — you cannot change skills.'); return; }
     const next = skills.includes(sid) ? skills.filter(s => s !== sid) : [...skills, sid];
     setSkills(next);
     try { await api(`/spa/therapists/${schedTher.id}/services`, { method: 'POST', body: JSON.stringify({ service_ids: next }) }); } catch (e: any) { alert(e.message); }
@@ -238,10 +248,10 @@ function SpaResources({ restaurantId, token }: Props) {
 
       {tab === 'CABINS' ? (
         <div className={CARD}>
-          <div className="flex gap-2 mb-4">
+          {canEdit && <div className="flex gap-2 mb-4">
             <input className={INPUT} placeholder="New cabin name" value={newCabin} onChange={e => setNewCabin(e.target.value)} />
             <button className={BTN_PRIMARY} onClick={addCabin}><Plus size={14} /> Add</button>
-          </div>
+          </div>}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {resources.map(r => (
               <div key={r.id} className="rounded-xl border border-[#e8dccf] p-3 flex items-center justify-between">
@@ -254,10 +264,10 @@ function SpaResources({ restaurantId, token }: Props) {
         </div>
       ) : (
         <div className={CARD}>
-          <div className="flex gap-2 mb-4">
+          {canEdit && <div className="flex gap-2 mb-4">
             <input className={INPUT} placeholder="New therapist name" value={newTher} onChange={e => setNewTher(e.target.value)} />
             <button className={BTN_PRIMARY} onClick={addTher}><Plus size={14} /> Add</button>
-          </div>
+          </div>}
           <div className="space-y-2">
             {therapists.map(t => (
               <div key={t.id} className="rounded-xl border border-[#e8dccf] p-3 flex items-center justify-between">
@@ -276,20 +286,20 @@ function SpaResources({ restaurantId, token }: Props) {
             <h3 className="text-xl font-bold font-serif mb-1">{schedTher.display_name}</h3>
             <p className="text-xs text-[#6b5d52] mb-4">Weekly availability + services they can deliver</p>
             <h4 className="text-sm font-bold mb-2">Schedule</h4>
-            <div className="flex gap-2 mb-2 items-end">
+            {canEdit && <div className="flex gap-2 mb-2 items-end">
               <div><label className={LABEL}>Day</label><select className={INPUT} value={sched.weekday} onChange={e => setSched({ ...sched, weekday: e.target.value })}>{DOW.map((d, i) => <option key={i} value={i}>{d}</option>)}</select></div>
               <div><label className={LABEL}>From</label><input className={INPUT} type="time" value={sched.start_time} onChange={e => setSched({ ...sched, start_time: e.target.value })} /></div>
               <div><label className={LABEL}>To</label><input className={INPUT} type="time" value={sched.end_time} onChange={e => setSched({ ...sched, end_time: e.target.value })} /></div>
               <button className={BTN_PRIMARY} onClick={addSched}><Plus size={14} /></button>
-            </div>
+            </div>}
             <div className="flex flex-wrap gap-1.5 mb-4">
               {schedules.map(s => <span key={s.id} className="px-2 py-1 rounded-lg bg-[#faf7f2] border border-[#e8dccf] text-[11px]">{DOW[s.weekday]} {s.start_time}–{s.end_time}</span>)}
             </div>
             <h4 className="text-sm font-bold mb-2">Services (skills)</h4>
             <div className="flex flex-wrap gap-1.5">
               {services.map(s => (
-                <button key={s.id} onClick={() => toggleSkill(s.id)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${skills.includes(s.id) ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>
+                <button key={s.id} onClick={() => toggleSkill(s.id)} disabled={!canEdit}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border disabled:opacity-60 ${skills.includes(s.id) ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>
                   {s.name}
                 </button>
               ))}
@@ -307,6 +317,7 @@ function SpaResources({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?: boolean }) {
   const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_APPOINTMENTS');
   const [appts, setAppts] = useState<any[]>([]);
   const [services, setServices] = useState<any[]>([]);
   const [therapists, setTherapists] = useState<any[]>([]);
@@ -349,6 +360,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     catch (e: any) { alert(e.message); setSlots([]); } finally { setSlotLoading(false); }
   };
   const book = async () => {
+    if (!canEdit) { alert('View-only access — you cannot book appointments.'); return; }
     if (!chosenSlot || !bk.client_name) { alert('Pick a slot and enter client name'); return; }
     try {
       await api('/spa/appointments', { method: 'POST', body: JSON.stringify({
@@ -360,6 +372,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     } catch (e: any) { alert(e.message); }
   };
   const transition = async (a: any, action: string) => {
+    if (!canEdit) { alert('View-only access — you cannot change appointment status.'); return; }
     try {
       if (action === 'cancel') await api(`/spa/appointments/${a.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Cancelled by staff' }) });
       else await api(`/spa/appointments/${a.id}/${action}`, { method: 'POST' });
@@ -367,6 +380,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     } catch (e: any) { alert(e.message); }
   };
   const doCheckout = async () => {
+    if (!canEdit) { alert('View-only access — you cannot check out appointments.'); return; }
     try {
       const r = await api(`/spa/appointments/${coAppt.id}/checkout`, { method: 'POST', body: JSON.stringify({
         use_package: coState.use_package, apply_membership: coState.apply_membership, tip_amount: Number(coState.tip_amount || 0),
@@ -401,7 +415,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
             style={{ width: 180 }} />
           {!search.trim() && <input className={INPUT} type="date" value={day} onChange={e => setDay(e.target.value)} style={{ width: 'auto' }} />}
           <button className={BTN_GHOST} onClick={() => load(search)}><RefreshCw size={13} /></button>
-          <button className={BTN_PRIMARY} onClick={() => { setBk({ service_id: services[0]?.id || '', date: day, client_name: '', client_phone: '' }); setShowBook(true); }}><Plus size={14} /> New Appointment</button>
+          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setBk({ service_id: services[0]?.id || '', date: day, client_name: '', client_phone: '' }); setShowBook(true); }}><Plus size={14} /> New Appointment</button>}
         </div>} />
 
       {calendar ? (
@@ -438,12 +452,12 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
               { key: 'status', label: 'Status', render: (r: any) => <Pill status={r.status} /> },
               { key: '_a', label: 'Actions', noExport: true, render: (r: any) => (
                 <div className="flex gap-1 flex-wrap">
-                  {r.status === 'BOOKED' && <button className={BTN_GHOST} onClick={() => transition(r, 'confirm')}>Confirm</button>}
-                  {['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'check-in')}>Check-in</button>}
-                  {['CHECKED_IN', 'IN_PROGRESS', 'CONFIRMED', 'BOOKED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'complete')}><Check size={12} /> Complete</button>}
-                  {r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH' }); }}>Checkout</button>}
+                  {canEdit && r.status === 'BOOKED' && <button className={BTN_GHOST} onClick={() => transition(r, 'confirm')}>Confirm</button>}
+                  {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'check-in')}>Check-in</button>}
+                  {canEdit && ['CHECKED_IN', 'IN_PROGRESS', 'CONFIRMED', 'BOOKED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'complete')}><Check size={12} /> Complete</button>}
+                  {canEdit && r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH' }); }}>Checkout</button>}
                   {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={12} /> Invoice</button>}
-                  {!['COMPLETED', 'CANCELLED', 'NO_SHOW'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
+                  {canEdit && !['COMPLETED', 'CANCELLED', 'NO_SHOW'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
                   <button className={BTN_GHOST} title="Audit log — who changed this appointment" onClick={() => setHistory({ id: r.id, meta: { title: r.service_name || r.id, subtitle: [r.status, r.client_name].filter(Boolean).join(' · '), facts: [['Service', r.service_name], ['Status', r.status], ['Client', r.client_name], ['Time', `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}`], ['Therapist', r.therapist_name], ['Cabin', r.resource_name]] } })}><History size={12} /></button>
                 </div>
               ) },
@@ -540,6 +554,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
 // ════════════════════════════════════════════════════════════════════════
 function SpaClients({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_CLIENTS');
   const [clients, setClients] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [showForm, setShowForm] = useState(false);
@@ -552,15 +567,15 @@ function SpaClients({ restaurantId, token }: Props) {
   useEffect(() => { load(); }, []);
   useEffect(() => { (async () => { try { setPackages(await api('/spa/packages')); } catch {} try { setMemberships(await api('/spa/memberships')); } catch {} })(); }, []);
 
-  const addClient = async () => { if (!form.name) return; try { await api('/spa/clients', { method: 'POST', body: JSON.stringify(form) }); setShowForm(false); setForm({ name: '', phone: '', email: '' }); await load(); } catch (e: any) { alert(e.message); } };
+  const addClient = async () => { if (!canEdit) { alert('View-only access — you cannot add clients.'); return; } if (!form.name) return; try { await api('/spa/clients', { method: 'POST', body: JSON.stringify(form) }); setShowForm(false); setForm({ name: '', phone: '', email: '' }); await load(); } catch (e: any) { alert(e.message); } };
   const openProfile = async (c: any) => { try { setProfile(await api(`/spa/clients/${c.id}`)); } catch (e: any) { alert(e.message); } };
-  const buyPackage = async (pkgId: string) => { try { await api(`/spa/clients/${profile.client.id}/packages`, { method: 'POST', body: JSON.stringify({ package_id: pkgId, payment_method: 'CASH' }) }); await openProfile(profile.client); } catch (e: any) { alert(e.message); } };
-  const subscribe = async (planId: string) => { try { await api(`/spa/clients/${profile.client.id}/memberships`, { method: 'POST', body: JSON.stringify({ plan_id: planId, payment_method: 'CASH' }) }); await openProfile(profile.client); } catch (e: any) { alert(e.message); } };
+  const buyPackage = async (pkgId: string) => { if (!canEdit) { alert('View-only access — you cannot sell packages.'); return; } try { await api(`/spa/clients/${profile.client.id}/packages`, { method: 'POST', body: JSON.stringify({ package_id: pkgId, payment_method: 'CASH' }) }); await openProfile(profile.client); } catch (e: any) { alert(e.message); } };
+  const subscribe = async (planId: string) => { if (!canEdit) { alert('View-only access — you cannot subscribe memberships.'); return; } try { await api(`/spa/clients/${profile.client.id}/memberships`, { method: 'POST', body: JSON.stringify({ plan_id: planId, payment_method: 'CASH' }) }); await openProfile(profile.client); } catch (e: any) { alert(e.message); } };
 
   return (
     <div>
       <SectionHeader icon={<User size={18} />} title="Clients" sub="Profiles, history, packages & memberships"
-        action={<button className={BTN_PRIMARY} onClick={() => setShowForm(true)}><Plus size={14} /> Add Client</button>} />
+        action={canEdit ? <button className={BTN_PRIMARY} onClick={() => setShowForm(true)}><Plus size={14} /> Add Client</button> : null} />
       <div className={CARD}>
         <div className="flex gap-2 mb-4">
           <input className={INPUT} placeholder="Search by name / phone / email" value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && load()} />
@@ -610,19 +625,19 @@ function SpaClients({ restaurantId, token }: Props) {
                   {profile.packages.map((p: any) => <div key={p.id} className="text-xs rounded-lg border border-[#e8dccf] p-2">{p.package_name} — {p.sessions_remaining}/{p.sessions_total} left <span className="text-[10px]">({p.status})</span></div>)}
                   {!profile.packages.length && <p className="text-xs text-[#6b5d52]">None.</p>}
                 </div>
-                <select className={INPUT} onChange={e => e.target.value && buyPackage(e.target.value)} value="">
+                {canEdit && <select className={INPUT} onChange={e => e.target.value && buyPackage(e.target.value)} value="">
                   <option value="">+ Sell a package…</option>
                   {packages.map(p => <option key={p.id} value={p.id}>{p.name} — {money(p.price)}</option>)}
-                </select>
+                </select>}
                 <h4 className="text-sm font-bold mb-2 mt-3">Memberships</h4>
                 <div className="space-y-1.5 mb-2">
                   {profile.memberships.map((m: any) => <div key={m.id} className="text-xs rounded-lg border border-[#e8dccf] p-2">{m.plan_name} <span className="text-[10px]">({m.status})</span></div>)}
                   {!profile.memberships.length && <p className="text-xs text-[#6b5d52]">None.</p>}
                 </div>
-                <select className={INPUT} onChange={e => e.target.value && subscribe(e.target.value)} value="">
+                {canEdit && <select className={INPUT} onChange={e => e.target.value && subscribe(e.target.value)} value="">
                   <option value="">+ Subscribe membership…</option>
                   {memberships.map(m => <option key={m.id} value={m.id}>{m.name} — {money(m.monthly_fee)}/mo</option>)}
-                </select>
+                </select>}
               </div>
             </div>
             <div className="flex justify-end mt-5"><button className={BTN_GHOST} onClick={() => setProfile(null)}>Close</button></div>
@@ -638,6 +653,7 @@ function SpaClients({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaPackages({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_PACKAGES');
   const [packages, setPackages] = useState<any[]>([]);
   const [memberships, setMemberships] = useState<any[]>([]);
   const [pkgForm, setPkgForm] = useState({ name: '', total_sessions: '5', price: '', gst_percent: '18', validity_days: '180' });
@@ -645,8 +661,8 @@ function SpaPackages({ restaurantId, token }: Props) {
 
   const load = async () => { try { setPackages(await api('/spa/packages')); } catch {} try { setMemberships(await api('/spa/memberships')); } catch {} };
   useEffect(() => { load(); }, []);
-  const addPkg = async () => { if (!pkgForm.name) return; try { await api('/spa/packages', { method: 'POST', body: JSON.stringify({ ...pkgForm, total_sessions: Number(pkgForm.total_sessions), price: Number(pkgForm.price || 0), gst_percent: Number(pkgForm.gst_percent), validity_days: Number(pkgForm.validity_days) }) }); setPkgForm({ name: '', total_sessions: '5', price: '', gst_percent: '18', validity_days: '180' }); await load(); } catch (e: any) { alert(e.message); } };
-  const addMem = async () => { if (!memForm.name) return; try { await api('/spa/memberships', { method: 'POST', body: JSON.stringify({ name: memForm.name, monthly_fee: Number(memForm.monthly_fee || 0), gst_percent: Number(memForm.gst_percent), benefits: { discount_pct: Number(memForm.discount_pct || 0) } }) }); setMemForm({ name: '', monthly_fee: '', discount_pct: '10', gst_percent: '18' }); await load(); } catch (e: any) { alert(e.message); } };
+  const addPkg = async () => { if (!canEdit) { alert('View-only access — you cannot add packages.'); return; } if (!pkgForm.name) return; try { await api('/spa/packages', { method: 'POST', body: JSON.stringify({ ...pkgForm, total_sessions: Number(pkgForm.total_sessions), price: Number(pkgForm.price || 0), gst_percent: Number(pkgForm.gst_percent), validity_days: Number(pkgForm.validity_days) }) }); setPkgForm({ name: '', total_sessions: '5', price: '', gst_percent: '18', validity_days: '180' }); await load(); } catch (e: any) { alert(e.message); } };
+  const addMem = async () => { if (!canEdit) { alert('View-only access — you cannot add memberships.'); return; } if (!memForm.name) return; try { await api('/spa/memberships', { method: 'POST', body: JSON.stringify({ name: memForm.name, monthly_fee: Number(memForm.monthly_fee || 0), gst_percent: Number(memForm.gst_percent), benefits: { discount_pct: Number(memForm.discount_pct || 0) } }) }); setMemForm({ name: '', monthly_fee: '', discount_pct: '10', gst_percent: '18' }); await load(); } catch (e: any) { alert(e.message); } };
 
   return (
     <div>
@@ -658,13 +674,13 @@ function SpaPackages({ restaurantId, token }: Props) {
             {packages.map(p => <div key={p.id} className="text-sm rounded-lg border border-[#e8dccf] p-2 flex justify-between"><span>{p.name}</span><span className="text-[#6b5d52]">{p.total_sessions} × · {money(p.price)}</span></div>)}
             {!packages.length && <p className="text-xs text-[#6b5d52]">No packages yet.</p>}
           </div>
-          <div className="grid grid-cols-2 gap-2">
+          {canEdit && <><div className="grid grid-cols-2 gap-2">
             <input className={INPUT} placeholder="Name" value={pkgForm.name} onChange={e => setPkgForm({ ...pkgForm, name: e.target.value })} />
             <input className={INPUT} type="number" placeholder="Sessions" value={pkgForm.total_sessions} onChange={e => setPkgForm({ ...pkgForm, total_sessions: e.target.value })} />
             <input className={INPUT} type="number" placeholder="Price ₹" value={pkgForm.price} onChange={e => setPkgForm({ ...pkgForm, price: e.target.value })} />
             <input className={INPUT} type="number" placeholder="Validity days" value={pkgForm.validity_days} onChange={e => setPkgForm({ ...pkgForm, validity_days: e.target.value })} />
           </div>
-          <button className={BTN_PRIMARY + ' mt-2'} onClick={addPkg}><Plus size={14} /> Add Package</button>
+          <button className={BTN_PRIMARY + ' mt-2'} onClick={addPkg}><Plus size={14} /> Add Package</button></>}
         </div>
         <div className={CARD}>
           <h4 className="font-bold mb-3 flex items-center gap-1.5"><Award size={15} className="text-[#cc5a16]" /> Memberships</h4>
@@ -672,12 +688,12 @@ function SpaPackages({ restaurantId, token }: Props) {
             {memberships.map(m => <div key={m.id} className="text-sm rounded-lg border border-[#e8dccf] p-2 flex justify-between"><span>{m.name}</span><span className="text-[#6b5d52]">{money(m.monthly_fee)}/mo</span></div>)}
             {!memberships.length && <p className="text-xs text-[#6b5d52]">No memberships yet.</p>}
           </div>
-          <div className="grid grid-cols-2 gap-2">
+          {canEdit && <><div className="grid grid-cols-2 gap-2">
             <input className={INPUT} placeholder="Name" value={memForm.name} onChange={e => setMemForm({ ...memForm, name: e.target.value })} />
             <input className={INPUT} type="number" placeholder="Monthly fee ₹" value={memForm.monthly_fee} onChange={e => setMemForm({ ...memForm, monthly_fee: e.target.value })} />
             <input className={INPUT} type="number" placeholder="Discount %" value={memForm.discount_pct} onChange={e => setMemForm({ ...memForm, discount_pct: e.target.value })} />
           </div>
-          <button className={BTN_PRIMARY + ' mt-2'} onClick={addMem}><Plus size={14} /> Add Membership</button>
+          <button className={BTN_PRIMARY + ' mt-2'} onClick={addMem}><Plus size={14} /> Add Membership</button></>}
         </div>
       </div>
     </div>
@@ -771,6 +787,7 @@ function SpaInventory({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaSettings({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_SETTINGS');
   const [profile, setProfile] = useState<any>({ hero_image_url: '', tagline: '', offers: [] });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -782,6 +799,7 @@ function SpaSettings({ restaurantId, token }: Props) {
   })(); }, []);
 
   const save = async () => {
+    if (!canEdit) { alert('View-only access — you cannot change the public page.'); return; }
     setSaving(true); setSaved(false);
     try { await api('/spa/profile', { method: 'PUT', body: JSON.stringify(profile) }); setSaved(true); setTimeout(() => setSaved(false), 2500); }
     catch (e: any) { alert(e.message); } finally { setSaving(false); }
@@ -830,7 +848,7 @@ function SpaSettings({ restaurantId, token }: Props) {
         <div className="space-y-3">
           <div>
             <label className={LABEL}>Background Photo URL</label>
-            <input className={INPUT} value={profile.hero_image_url || ''} onChange={e => setProfile((p: any) => ({ ...p, hero_image_url: e.target.value }))}
+            <input className={INPUT} disabled={!canEdit} value={profile.hero_image_url || ''} onChange={e => setProfile((p: any) => ({ ...p, hero_image_url: e.target.value }))}
               placeholder="https://example.com/spa-hero.jpg — paste any image URL" />
             <p className="text-[11px] text-[#9d8b7e] mt-1">Use a high-quality landscape photo (1920×600px works well). Free options: Unsplash, Pexels.</p>
             {profile.hero_image_url && (
@@ -840,7 +858,7 @@ function SpaSettings({ restaurantId, token }: Props) {
           </div>
           <div>
             <label className={LABEL}>Tagline <span className="font-normal text-[#9d8b7e]">(short phrase below spa name)</span></label>
-            <input className={INPUT} value={profile.tagline || ''} onChange={e => setProfile((p: any) => ({ ...p, tagline: e.target.value }))}
+            <input className={INPUT} disabled={!canEdit} value={profile.tagline || ''} onChange={e => setProfile((p: any) => ({ ...p, tagline: e.target.value }))}
               placeholder="e.g. Unwind. Restore. Glow." maxLength={80} />
           </div>
         </div>
@@ -850,7 +868,7 @@ function SpaSettings({ restaurantId, token }: Props) {
       <div className={CARD}>
         <div className="flex items-center justify-between mb-3">
           <p className="text-sm font-bold text-[#14110c]">Offers & Promotions</p>
-          <button className={BTN_GHOST} onClick={addOffer}><Plus size={13} /> Add Offer</button>
+          {canEdit && <button className={BTN_GHOST} onClick={addOffer}><Plus size={13} /> Add Offer</button>}
         </div>
         {(profile.offers || []).length === 0 && (
           <p className="text-xs text-[#9d8b7e] py-3 text-center">No offers yet. Add one to show a promotional banner on the public page.</p>
@@ -858,7 +876,7 @@ function SpaSettings({ restaurantId, token }: Props) {
         <div className="space-y-4">
           {(profile.offers || []).map((o: any, i: number) => (
             <div key={i} className="rounded-xl border border-[#e8dccf] p-4 relative">
-              <button className="absolute top-3 right-3 text-rose-400 hover:text-rose-600" onClick={() => removeOffer(i)}><X size={14} /></button>
+              {canEdit && <button className="absolute top-3 right-3 text-rose-400 hover:text-rose-600" onClick={() => removeOffer(i)}><X size={14} /></button>}
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className={LABEL}>Badge <span className="font-normal text-[#9d8b7e]">(e.g. SALE, NEW)</span></label>
@@ -891,9 +909,9 @@ function SpaSettings({ restaurantId, token }: Props) {
       </div>
 
       <div className="flex items-center gap-3">
-        <button className={BTN_PRIMARY} onClick={save} disabled={saving}>
+        {canEdit && <button className={BTN_PRIMARY} onClick={save} disabled={saving}>
           {saving ? 'Saving…' : 'Save Changes'}
-        </button>
+        </button>}
         {saved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} /> Saved</span>}
         <a href={publicUrl} target="_blank" rel="noreferrer" className={BTN_GHOST}>Preview Public Page</a>
       </div>
@@ -911,6 +929,7 @@ function SpaSettings({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaFolios({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_BILLING');
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'unpaid' | 'paid'>('all');
@@ -929,6 +948,7 @@ function SpaFolios({ restaurantId, token }: Props) {
 
   // Cancel an invoice — reverses the spa settlement in the GL (never deletes it).
   const cancelFolio = async (f: any) => {
+    if (!canEdit) { alert('View-only access — you cannot cancel invoices.'); return; }
     const reason = window.prompt('Cancel this invoice?\n\nThis reverses it in the accounts (spa revenue, GST, cash). It is NOT deleted — a cancelled record is kept for audit.\n\nEnter a reason (required):');
     if (reason === null) return;
     if (reason.trim().length < 3) { alert('A cancellation reason is required.'); return; }
@@ -960,6 +980,7 @@ function SpaFolios({ restaurantId, token }: Props) {
   };
   const openPay = (f: any) => { setPayForm({ amount: String(outOf(f)), method: 'CASH' }); setPayFor(f); };
   const savePayment = async () => {
+    if (!canEdit) { alert('View-only access — you cannot record payments.'); return; }
     const amount = Math.round(Number(payForm.amount || 0) * 100) / 100;
     if (!(amount > 0)) { alert('Enter an amount greater than 0'); return; }
     setBusy(true);
@@ -968,6 +989,7 @@ function SpaFolios({ restaurantId, token }: Props) {
   };
   const openPromo = (f: any) => { setPromoCode(''); setPromoFor(f); };
   const savePromo = async () => {
+    if (!canEdit) { alert('View-only access — you cannot apply promos.'); return; }
     const code = promoCode.trim();
     if (!code) { alert('Enter a promo code'); return; }
     setBusy(true);
@@ -1032,11 +1054,11 @@ function SpaFolios({ restaurantId, token }: Props) {
                     <td className="px-3 py-2 text-center"><span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${stColor(st)}`}>{st}</span></td>
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                        {open && <button className={BTN_PRIMARY} onClick={() => openPay(f)}><IndianRupee size={12} /> Payment</button>}
-                        {open && <button className={BTN_GHOST} onClick={() => openPromo(f)}><Tag size={12} /> Promo</button>}
+                        {open && canEdit && <button className={BTN_PRIMARY} onClick={() => openPay(f)}><IndianRupee size={12} /> Payment</button>}
+                        {open && canEdit && <button className={BTN_GHOST} onClick={() => openPromo(f)}><Tag size={12} /> Promo</button>}
                         <button className={BTN_GHOST} onClick={() => downloadPdf(f)}><FileText size={12} /> Invoice</button>
                         <button className={BTN_GHOST} title="Audit log — who changed this invoice" onClick={() => setHistory({ id: f.id, meta: { title: f.invoice_number || f.id, subtitle: [statusOf(f), f.client_name].filter(Boolean).join(' · '), facts: [['Invoice #', f.invoice_number], ['Client', f.client_name], ['Service', f.service_name], ['Total', money(f.grand_total)], ['Paid', money(f.paid_amount)], ['Outstanding', open ? money(outOf(f)) : '—']] } })}><History size={12} /></button>
-                        {canCancelSpa && !['voided', 'cancelled'].includes(String(f.status || '').toLowerCase()) && (
+                        {canCancelSpa && canEdit && !['voided', 'cancelled'].includes(String(f.status || '').toLowerCase()) && (
                           <button className={`${BTN_GHOST} !text-rose-700 !border-rose-200 hover:!bg-rose-50`} title="Cancel this invoice — reverses it in the accounts (never deletes it)" disabled={busy} onClick={() => cancelFolio(f)}>Cancel</button>
                         )}
                       </div>

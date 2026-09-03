@@ -8423,6 +8423,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   };
   const reopenPeriod = async (key: string) => { await acctApi('/accounting/periods/reopen', { method: 'POST', body: JSON.stringify({ period_key: key }) }); loadPeriods(); };
   const submitCashCount = async () => {
+    if (!cashGuard()) return;
     setCcMsg(null);
     const res = await acctApi('/accounting/cash-count', { method: 'POST', body: JSON.stringify({ count_date: asOfDate, session: 'CLOSE', counted_amount: parseFloat(ccCounted) || 0, note: '', post_variance: ccPostVar }) });
     if (res && !res.error) { setCcMsg({ type: 'ok', text: `Recorded. Variance ${fmtAmt(res.variance)}${res.variance_journal_ref ? ` · journal ${res.variance_journal_ref}` : ''}` }); setCcCounted(''); loadCashCount(); }
@@ -9382,12 +9383,12 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <div className="rounded-lg border border-[#e8ded0] bg-white p-4 space-y-3">
               <div className="grid sm:grid-cols-3 gap-3 items-end">
                 <div><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Expected (GL Cash 1000)</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashCount.expected_amount)}</p></div>
-                <div><label className="text-xs text-[#6b5d52] block">Physically counted</label><input type="number" value={ccCounted} onChange={e => setCcCounted(e.target.value)} placeholder="0.00" className="mt-1 w-full text-lg font-bold border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums" /></div>
+                <div><label className="text-xs text-[#6b5d52] block">Physically counted</label><input type="number" value={ccCounted} disabled={!canWriteTab('CASH_DRAWER')} onChange={e => setCcCounted(e.target.value)} placeholder="0.00" className="mt-1 w-full text-lg font-bold border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums disabled:opacity-70" /></div>
                 <div><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Variance</p><p className={`text-2xl font-bold mt-1 tabular-nums ${ccCounted !== '' && Math.abs((parseFloat(ccCounted) || 0) - Number(cashCount.expected_amount)) >= 0.01 ? 'text-rose-700' : 'text-emerald-700'}`}>{fmtAmt((parseFloat(ccCounted) || 0) - Number(cashCount.expected_amount))}</p></div>
               </div>
-              <label className="flex items-center gap-2 text-sm text-[#6b5d52]"><input type="checkbox" checked={ccPostVar} onChange={e => setCcPostVar(e.target.checked)} /> Post a balanced variance journal (Cash 1000 ↔ Cash Over/Short 6010)</label>
+              <label className="flex items-center gap-2 text-sm text-[#6b5d52]"><input type="checkbox" checked={ccPostVar} disabled={!canWriteTab('CASH_DRAWER')} onChange={e => setCcPostVar(e.target.checked)} /> Post a balanced variance journal (Cash 1000 ↔ Cash Over/Short 6010)</label>
               <div className="flex items-center gap-3">
-                <button onClick={submitCashCount} disabled={ccCounted === ''} className={AC_BTN}>Record count</button>
+                {canWriteTab('CASH_DRAWER') && <button onClick={submitCashCount} disabled={ccCounted === ''} className={AC_BTN}>Record count</button>}
                 {ccMsg && <span className={`text-sm ${ccMsg.type === 'ok' ? 'text-emerald-700' : 'text-rose-700'}`}>{ccMsg.text}</span>}
               </div>
             </div>
