@@ -1091,8 +1091,14 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
   const addRental = async (itemId: string) => {
     const it = rentals.find(r => r.id === itemId); if (!it) return;
+    // A rental's rate follows the EVENT's basis: an hourly event bills rentals at the
+    // configured HOURLY rate, not the daily rate. (venue_rate_basis is HOURLY | HALF_DAY
+    // | DAILY; rentals have no half-day rate, so HALF_DAY/DAILY both use the daily rate.)
+    const evBasis = String(bk.venue_rate_basis || 'DAILY').toUpperCase();
+    const rateBasis = evBasis === 'HOURLY' ? 'HOURLY' : 'DAILY';
+    const unitRate = rateBasis === 'HOURLY' ? Number(it.rent_hourly || 0) : Number(it.rent_daily || 0);
     const items = (bk.items || []).map((x: any) => ({ rental_item_id: x.rental_item_id, quantity: x.quantity, rate_basis: x.rate_basis, unit_rate: x.unit_rate, duration_units: x.duration_units }));
-    items.push({ rental_item_id: itemId, quantity: 1, rate_basis: 'DAILY', unit_rate: it.rent_daily, duration_units: 1 });
+    items.push({ rental_item_id: itemId, quantity: 1, rate_basis: rateBasis, unit_rate: unitRate, duration_units: 1 });
     await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ items }) });
     await load();
   };
