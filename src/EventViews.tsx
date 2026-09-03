@@ -15,6 +15,19 @@ import {
   AlertTriangle, Mail, Phone, Upload, Image as ImageIcon,
 } from 'lucide-react';
 
+// Cancelling an event invoice is a high-privilege action. Mirrors the backend gate
+// (server.ts events invoice/cancel): built-in owner/manager, OR any custom role the
+// owner granted FULL access to Event Bookings. Reads the tab-level map App.tsx mirrors
+// into localStorage so this detached module can gate without prop-drilling.
+function canCancelEventInvoice(): boolean {
+  try {
+    const role = (localStorage.getItem('role') || '').toUpperCase();
+    if (['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return true;
+    const perms = JSON.parse(localStorage.getItem('tab_perms') || '{}');
+    return Number(perms?.EVENTS_BOOKINGS || 0) >= 3;
+  } catch { return false; }
+}
+
 // ── Image upload (public-page pictures) — mirrors the Hotel upload flow so an
 // events-only tenant can add photos by file, not just paste a URL. ──────────
 async function uploadEventImage(restaurantId: string, token: string, file: File): Promise<string> {
@@ -1484,7 +1497,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/beo.pdf`, token)}><ClipboardList size={13} />{t('events.bookings.beo')}</button>
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/invoice.pdf${gstQuery()}`, token)}><FileText size={13} />{t('events.bookings.invoice')}</button>
         <button className={BTN_GHOST} onClick={() => setEmailInvoice(true)}><Send size={13} />{t('events.bookings.emailInvoice')}</button>
-        {['CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CHECKED_OUT'].includes(bk.status) && ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase()) && (
+        {['CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CHECKED_OUT'].includes(bk.status) && canCancelEventInvoice() && (
           <button className={`${BTN_GHOST} !text-rose-700 !border-rose-200 hover:!bg-rose-50`} disabled={busy} title="Cancel the invoice — reverses it in the accounts (the booking stays)" onClick={async () => {
             const reason = window.prompt('Cancel this event invoice?\n\nThis reverses it in the accounts (banquet revenue, GST). The booking stays; the invoice is voided and kept for audit.\n\nEnter a reason (required):');
             if (reason === null) return;

@@ -12409,6 +12409,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         }
         if (data?.tab_permissions && typeof data.tab_permissions === 'object') {
           setTabPermissions(data.tab_permissions);
+          // Mirror to localStorage so detached module components (e.g. EventViews)
+          // can gate high-privilege controls on tab LEVEL without prop-drilling.
+          try { localStorage.setItem('tab_perms', JSON.stringify(data.tab_permissions)); } catch { /* storage may be unavailable */ }
         }
       })
       .catch(() => {});
