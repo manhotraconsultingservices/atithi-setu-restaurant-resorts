@@ -65842,6 +65842,7 @@ function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: st
 // ─── Salary Structure Editor ───────────────────────────────────────
 function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const toast = useToast();
+  const canEdit = canWriteTab('HR_PAYROLL');
   const [employees, setEmployees] = useState<any[]>([]);
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null);
   const [structure, setStructure] = useState<any>(null);
@@ -65872,6 +65873,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
 
   async function saveStructure() {
     if (!selectedStaffId) return;
+    if (!canEdit) { toast.error('View-only access — you cannot change salary structures.'); return; }
     if (!tolerance) { toast.error('Components sum must match gross monthly (±₹2)'); return; }
     const res = await fetch(`/api/restaurant/${restaurantId}/hr/salary-structures`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -65908,7 +65910,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
             <>
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-bold text-[#1a1208]">Current structure</h3>
-                <button onClick={() => {
+                {canEdit && <button onClick={() => {
                   if (structure) {
                     setForm({
                       effective_from: new Date().toISOString().slice(0, 10),
@@ -65925,7 +65927,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
                   setEditing(true);
                 }} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">
                   {structure ? 'Revise structure' : 'Add structure'}
-                </button>
+                </button>}
               </div>
               {structure ? (
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
@@ -66010,6 +66012,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
 // ─── Payroll Runs ──────────────────────────────────────────────────
 function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const toast = useToast();
+  const canEdit = canWriteTab('HR_PAYROLL');
   const [runs, setRuns] = useState<any[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [payslips, setPayslips] = useState<any[]>([]);
@@ -66029,6 +66032,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
       .catch(() => setPayslips([]));
   }, [selectedRunId, restaurantId, token]);
   async function createRun() {
+    if (!canEdit) { toast.error('View-only access — you cannot create payroll runs.'); return; }
     const now = new Date();
     const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
     const month = now.getMonth() === 0 ? 12 : now.getMonth();
@@ -66048,6 +66052,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
   }
   async function runAction(action: 'compute' | 'approve' | 'lock' | 'mark-paid') {
     if (!selectedRunId) return;
+    if (!canEdit) { setActionError('View-only access — you cannot run payroll actions.'); return; }
     setBusy(true); setActionError('');
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/payroll/runs/${selectedRunId}/${action}`, {
@@ -66115,9 +66120,9 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
       <div className="bg-white rounded-3xl border border-[#e8dccf] p-4">
         <div className="flex justify-between mb-3">
           <h3 className="font-bold text-[#1a1208]">Payroll Runs</h3>
-          <button onClick={createRun} disabled={busy} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">
+          {canEdit && <button onClick={createRun} disabled={busy} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">
             + Create prior-month draft
-          </button>
+          </button>}
         </div>
         {actionError && <p className="text-xs text-red-600 bg-red-50 rounded-xl px-3 py-2 mb-2">{actionError}</p>}
         <div className="space-y-1 max-h-72 overflow-y-auto">
@@ -66149,10 +66154,10 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-bold text-[#1a1208]">Run {run.year}-{String(run.month).padStart(2, '0')} · {run.status}</h3>
             <div className="flex gap-2">
-              {run.status === 'DRAFT' && <button onClick={() => runAction('compute')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">Run compute</button>}
-              {run.status === 'DRAFT' && payslips.length > 0 && <button onClick={() => runAction('approve')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-bold">Approve</button>}
-              {run.status === 'APPROVED' && <button onClick={() => runAction('lock')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-purple-600 text-white text-xs font-bold">Lock</button>}
-              {(run.status === 'APPROVED' || run.status === 'LOCKED') && <button onClick={() => runAction('mark-paid')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-green-600 text-white text-xs font-bold">Mark paid</button>}
+              {canEdit && run.status === 'DRAFT' && <button onClick={() => runAction('compute')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">Run compute</button>}
+              {canEdit && run.status === 'DRAFT' && payslips.length > 0 && <button onClick={() => runAction('approve')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-bold">Approve</button>}
+              {canEdit && run.status === 'APPROVED' && <button onClick={() => runAction('lock')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-purple-600 text-white text-xs font-bold">Lock</button>}
+              {canEdit && (run.status === 'APPROVED' || run.status === 'LOCKED') && <button onClick={() => runAction('mark-paid')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-green-600 text-white text-xs font-bold">Mark paid</button>}
               <a href={`/api/restaurant/${restaurantId}/payroll/runs/${run.id}/export.csv`} target="_blank" rel="noopener" className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">Bank advice CSV</a>
               <button onClick={() => downloadEpfEcr(run.id)} className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">EPF ECR</button>
             </div>
@@ -66197,7 +66202,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
                         <button onClick={() => openPayslipPdf(p.id)} className="text-[10px] text-[#cc5a16] hover:underline">PDF</button>
                       </td>
                       <td className="py-1.5 pl-1">
-                        {['APPROVED','LOCKED','PAID'].includes(run.status) && (
+                        {canEdit && ['APPROVED','LOCKED','PAID'].includes(run.status) && (
                           <button onClick={async () => {
                             const r = await fetch(`/api/restaurant/${restaurantId}/payroll/payslips/${p.id}/email`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
                             if (!r.ok) setActionError('Email send failed');
@@ -66221,6 +66226,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
 
 // ─── Expense Claims ────────────────────────────────────────────────
 function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const canEdit = canWriteTab('HR_PAYROLL');
   const [claims, setClaims] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('SUBMITTED');
   const [rejectingId, setRejectingId] = useState<string | null>(null);
@@ -66236,6 +66242,7 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
   }, [restaurantId, token, statusFilter]);
   useEffect(() => { refresh(); }, [refresh]);
   async function actOn(id: string, action: 'submit' | 'approve' | 'reject', reason?: string) {
+    if (!canEdit) { setActError('View-only access — you cannot approve or reject expense claims.'); return; }
     setActError('');
     try {
       const body: any = {};
@@ -66286,11 +66293,11 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
                       )}>{c.status}</span>
                     </td>
                     <td className="p-3 space-x-1">
-                      {c.status === 'SUBMITTED' && <>
+                      {canEdit && c.status === 'SUBMITTED' && <>
                         <button onClick={() => actOn(c.id, 'approve')} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Mgr OK</button>
                         <button onClick={() => { setRejectingId(c.id); setRejectReason(''); }} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
                       </>}
-                      {c.status === 'MANAGER_APPROVED' && <>
+                      {canEdit && c.status === 'MANAGER_APPROVED' && <>
                         <button onClick={() => actOn(c.id, 'approve')} className="px-2 py-1 rounded bg-green-600 text-white text-[10px]">HR OK</button>
                         <button onClick={() => { setRejectingId(c.id); setRejectReason(''); }} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
                       </>}
@@ -66327,6 +66334,7 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
 // ─── Offer Letters ─────────────────────────────────────────────────
 function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const toast = useToast();
+  const canEdit = canWriteTab('HR_PAYROLL');
   const [offers, setOffers] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState<any>({
@@ -66341,6 +66349,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
   }, [restaurantId, token]);
   useEffect(() => { refresh(); }, [refresh]);
   async function createOffer() {
+    if (!canEdit) { toast.error('View-only access — you cannot create offer letters.'); return; }
     if (!form.candidate_name || !form.designation || !form.joining_date || form.ctc <= 0) {
       toast.error('Name, designation, joining date and CTC are required'); return;
     }
@@ -66357,6 +66366,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
     }
   }
   async function sendOffer(id: string) {
+    if (!canEdit) { toast.error('View-only access — you cannot send offer letters.'); return; }
     await fetch(`/api/restaurant/${restaurantId}/hr/offer-letters/${id}/send`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     });
@@ -66383,7 +66393,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
-        <button onClick={() => setCreating(true)} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">+ New offer</button>
+        {canEdit && <button onClick={() => setCreating(true)} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">+ New offer</button>}
       </div>
       <div className="bg-white rounded-3xl border border-[#e8dccf]">
         {offers.length === 0 ? <p className="p-6 text-xs italic text-[#9c8e85] text-center">No offers yet.</p> :
@@ -66402,7 +66412,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
                   <td className="p-3">{o.status}</td>
                   <td className="p-3 space-x-1">
                     <button onClick={() => openOfferLetterPdf(o.id)} className="text-[10px] text-[#cc5a16] hover:underline">PDF</button>
-                    {(o.status === 'DRAFT' || o.status === 'SENT') && <button onClick={() => sendOffer(o.id)} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Send</button>}
+                    {canEdit && (o.status === 'DRAFT' || o.status === 'SENT') && <button onClick={() => sendOffer(o.id)} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Send</button>}
                   </td>
                 </tr>
               ))}
@@ -66440,6 +66450,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
 // ─── Statutory Config Settings ─────────────────────────────────────
 const STATUTORY_DEFAULTS = { pf_enabled: 1, esi_enabled: 1, pt_state: 'MH', tds_regime_default: 'NEW', pf_wage_ceiling: 15000, esi_wage_ceiling: 21000, pan_employer: '', tan_employer: '', pf_estab_code: '', esi_employer_code: '' };
 function StatutoryConfigEditor({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const canEdit = canWriteTab('HR_PAYROLL');
   const [cfg, setCfg] = useState<any>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -66450,6 +66461,7 @@ function StatutoryConfigEditor({ restaurantId, token }: { restaurantId: string; 
       .catch(() => setCfg(STATUTORY_DEFAULTS));
   }, [restaurantId, token]);
   async function save() {
+    if (!canEdit) { setSaveError('View-only access — you cannot change statutory config.'); return; }
     setSaving(true); setSaveError('');
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/hr/statutory-config`, {
@@ -66468,7 +66480,7 @@ function StatutoryConfigEditor({ restaurantId, token }: { restaurantId: string; 
         <h3 className="font-bold text-[#1a1208]">Statutory configuration</h3>
         <p className="text-[10px] text-[#9c8e85] mt-1">PF, ESI, Professional Tax, TDS regime. Defaults align with Indian FY 2025-26.</p>
       </div>
-      <div className="grid grid-cols-2 gap-3 text-xs">
+      <fieldset disabled={!canEdit} className="grid grid-cols-2 gap-3 text-xs border-0 p-0 m-0 disabled:opacity-70">
         <label className="flex items-center gap-2"><input type="checkbox" checked={!!Number(cfg.pf_enabled)} onChange={e => setCfg({ ...cfg, pf_enabled: e.target.checked ? 1 : 0 })} /> PF enabled</label>
         <label className="flex items-center gap-2"><input type="checkbox" checked={!!Number(cfg.esi_enabled)} onChange={e => setCfg({ ...cfg, esi_enabled: e.target.checked ? 1 : 0 })} /> ESI enabled</label>
         <label>PT state code (MH / KA / WB)
@@ -66497,11 +66509,11 @@ function StatutoryConfigEditor({ restaurantId, token }: { restaurantId: string; 
         <label>ESI Employer Code
           <input value={cfg.esi_employer_code || ''} onChange={e => setCfg({ ...cfg, esi_employer_code: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
         </label>
-      </div>
+      </fieldset>
       {saveError && <p className="text-xs text-red-600 bg-red-50 rounded-xl px-3 py-2">{saveError}</p>}
       <div className="flex justify-end items-center gap-2 pt-3 border-t border-[#e8dccf]">
         {saved && <span className="text-xs text-green-700 font-semibold">✓ Saved</span>}
-        <button onClick={save} disabled={saving} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">{saving ? 'Saving…' : 'Save settings'}</button>
+        {canEdit && <button onClick={save} disabled={saving} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">{saving ? 'Saving…' : 'Save settings'}</button>}
       </div>
     </div>
   );
@@ -66704,6 +66716,7 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
   }
 
   const save = async () => {
+    if (!canWriteTab('HR_PAYROLL')) { toast.error('View-only access — you cannot edit employees.'); return; }
     setSaving(true);
     try {
       const res = await window.fetch(
@@ -66867,14 +66880,14 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
           )}
         </div>
         <div className="sticky bottom-0 bg-white border-t border-[#cc5a16]/10 px-6 py-4 flex items-center justify-end gap-2 rounded-b-3xl">
-          <button onClick={onClose} className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
-          <button
+          <button onClick={onClose} className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Close</button>
+          {canWriteTab('HR_PAYROLL') && <button
             onClick={save}
             disabled={saving}
             className="px-5 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50"
           >
             {saving ? 'Saving…' : 'Save HR profile'}
-          </button>
+          </button>}
         </div>
       </div>
     </div>
