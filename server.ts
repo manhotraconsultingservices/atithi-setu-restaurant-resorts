@@ -10606,6 +10606,7 @@ async function startServer() {
   // Menu: Update Item
   app.patch("/api/menu/:id", authenticate, restaurantStaff, menuImageUpload.single('image'), async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'MENU', 2))) return res.status(403).json({ error: 'Forbidden — requires MENU access.' });
       const db = await getTenantDb(req.user!.restaurantId);
       const updates: Record<string, any> = { ...req.body };
 
@@ -10647,6 +10648,7 @@ async function startServer() {
   // Menu: Delete Item
   app.delete("/api/menu/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'MENU', 3))) return res.status(403).json({ error: 'Forbidden — requires MENU access.' });
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("DELETE FROM menu WHERE id = ?", [req.params.id]);
       res.json({ success: true });
@@ -13065,7 +13067,7 @@ async function startServer() {
   // channel the customer used to submit (if known).
   app.post('/api/restaurant/:id/feedback/:fbId/reply', authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN' && !(await _roleHasTab(req, 'FEEDBACK', 2))) {
         return res.status(403).json({ error: 'Insufficient permission' });
       }
       const reply = String(req.body?.reply || '').trim();
@@ -13105,7 +13107,7 @@ async function startServer() {
   // PATCH feedback (toggle is_public, resolved, etc.)
   app.patch('/api/restaurant/:id/feedback/:fbId', authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN' && !(await _roleHasTab(req, 'FEEDBACK', 2))) {
         return res.status(403).json({ error: 'Insufficient permission' });
       }
       const db = await getTenantDb(req.params.id);
@@ -16822,6 +16824,8 @@ ${data.tenant.name}`;
   app.post(
     "/api/restaurant/:id/integrations/:channel/settlements",
     authenticate,
+    restaurantStaff,
+    requireTabAction('DELIVERY', 'UPDATE'),
     upload.single('file'),
     async (req: AuthRequest, res: Response) => {
       try {
@@ -21364,7 +21368,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.put("/api/restaurant/:id/notification-templates/:event", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/notification-templates/:event", authenticate, restaurantStaff, requireTabAction('SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { subject_template, body_template, enabled } = req.body;
       const db = await getTenantDb(req.params.id);
@@ -21528,7 +21532,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hotel-inventory", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel-inventory", authenticate, restaurantStaff, requireTabAction('HOTEL_INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { name, category, unit, current_stock_qty, par_level, reorder_point, default_unit_price, sku, notes } = req.body;
       if (!name) return res.status(400).json({ error: "name is required" });
@@ -21584,7 +21588,7 @@ ${data.tenant.name}`;
   });
 
   // Stock receive / adjust — updates qty and logs a movement row
-  app.post("/api/restaurant/:id/hotel-inventory/:itemId/stock", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel-inventory/:itemId/stock", authenticate, restaurantStaff, requireTabAction('HOTEL_INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const movement_type = String(req.body?.movement_type || 'RECEIVE').toUpperCase();
@@ -23529,7 +23533,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load checklist" }); }
   });
   app.post("/api/restaurant/:id/housekeeping/checklist/tasks", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Owner or manager only' });
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase()) && !(await _roleHasTab(req, 'HOUSEKEEPING', 2))) return res.status(403).json({ error: 'Owner or manager only' });
     try {
       const db = await getTenantDb(req.params.id);
       await ensureHousekeepingTables(db);
@@ -23545,7 +23549,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to add task" }); }
   });
   app.patch("/api/restaurant/:id/housekeeping/checklist/tasks/:tid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Owner or manager only' });
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase()) && !(await _roleHasTab(req, 'HOUSEKEEPING', 2))) return res.status(403).json({ error: 'Owner or manager only' });
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {}; const fields: string[] = []; const vals: any[] = [];
@@ -23560,7 +23564,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update task" }); }
   });
   app.delete("/api/restaurant/:id/housekeeping/checklist/tasks/:tid", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Owner or manager only' });
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase()) && !(await _roleHasTab(req, 'HOUSEKEEPING', 3))) return res.status(403).json({ error: 'Owner or manager only' });
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("DELETE FROM checklist_template_steps WHERE id = ?", [req.params.tid]);
@@ -23661,7 +23665,7 @@ ${data.tenant.name}`;
   });
   // Manager/owner override — release without completing every task (logged with reason).
   app.post("/api/restaurant/:id/housekeeping/jobs/:jid/override", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Only a manager or owner can override a cleaning checklist.' });
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase()) && !(await _roleHasTab(req, 'HOUSEKEEPING', 2))) return res.status(403).json({ error: 'Only a manager or owner can override a cleaning checklist.' });
     try {
       const db = await getTenantDb(req.params.id);
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
@@ -24162,7 +24166,7 @@ ${data.tenant.name}`;
   // Assign / reassign a checklist instance to a role and/or a specific user, or park
   // it as a DRAFT (manager/owner only). Notifies the assignee when it goes ASSIGNED.
   app.post("/api/restaurant/:id/checklists/jobs/:jid/assign", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase())) return res.status(403).json({ error: 'Only a manager or owner can assign checklists.' });
+    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase()) && !(await _roleHasTab(req, 'CHECKLIST_BOARD', 1))) return res.status(403).json({ error: 'Only a manager or owner can assign checklists.' });
     try {
       const db = await getTenantDb(req.params.id);
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
@@ -30834,7 +30838,7 @@ ${data.tenant.name}`;
   });
 
   // Staff approves — creates order + posts to hotel folio — auth required
-  app.post("/api/restaurant/:id/hotel/room-charge-request/:reqId/approve", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/room-charge-request/:reqId/approve", authenticate, restaurantStaff, requireTabAction('INVOICES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await ensureRoomChargeRequestsTable(tenantDb);
@@ -30961,7 +30965,7 @@ ${data.tenant.name}`;
   });
 
   // Staff declines — auth required
-  app.post("/api/restaurant/:id/hotel/room-charge-request/:reqId/decline", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/room-charge-request/:reqId/decline", authenticate, restaurantStaff, requireTabAction('INVOICES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { reason } = req.body || {};
       const tenantDb = await getTenantDb(req.params.id);
@@ -34414,7 +34418,7 @@ ${data.tenant.name}`;
       res.json({ success: true, automation: cfg });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.post("/api/restaurant/:id/hotel/aiosell/fetch-reservations", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/aiosell/fetch-reservations", authenticate, hotelStaff, requireTabAction('CHANNEL_MANAGER', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
@@ -43153,7 +43157,7 @@ ${data.tenant.name}`;
   // POST /hotel/gst-register/backfill  body: { folio_id: "..." }
   // Runs writeGstRegisterFromFolio synchronously and surfaces any error.
   // Returns { entries_found, rows_written } on success, or { error, detail } on failure.
-  app.post("/api/restaurant/:id/hotel/gst-register/backfill", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/gst-register/backfill", authenticate, hotelStaff, requireTabAction('FOLIOS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -43976,7 +43980,7 @@ ${data.tenant.name}`;
   // already backed out by a credit note or revision. Owner/manager only.
   app.post("/api/restaurant/:id/folios/:folioId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
     const role = String(req.user?.role || '').toUpperCase();
-    if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return res.status(403).json({ error: 'Only an owner or manager can cancel an invoice.' });
+    if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role) && !(await _roleHasTab(req, 'FOLIOS', 3))) return res.status(403).json({ error: 'Only an owner or manager can cancel an invoice.' });
     try {
       const reason = String(req.body?.reason || '').trim();
       if (reason.length < 3) return res.status(400).json({ error: 'A cancellation reason is required (for the audit trail).' });
@@ -44349,7 +44353,7 @@ ${data.tenant.name}`;
   });
 
   // POST /hotel/compliance/form-c/:bookingId — record a Form-C draft
-  app.post("/api/restaurant/:id/hotel/compliance/form-c/:bookingId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/compliance/form-c/:bookingId", authenticate, hotelStaff, requireTabAction('COMPLIANCE', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44480,7 +44484,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/concierge/faqs", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/concierge/faqs", authenticate, hotelStaff, requireTabAction('CONCIERGE_FAQ', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -44501,7 +44505,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/concierge/faqs/:faqId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/concierge/faqs/:faqId", authenticate, hotelStaff, requireTabAction('CONCIERGE_FAQ', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -44525,7 +44529,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/concierge/faqs/:faqId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/concierge/faqs/:faqId", authenticate, hotelStaff, requireTabAction('CONCIERGE_FAQ', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -44776,7 +44780,7 @@ ${data.tenant.name}`;
   });
 
   // Phase 5: Logo upload endpoint (dedicated, uses multer)
-  app.post("/api/restaurant/:id/logo", authenticate, restaurantStaff, upload.single('logo'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/logo", authenticate, restaurantStaff, upload.single('logo'), requireTabAction('SETTINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.restaurantId !== req.params.id && req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
         return res.status(403).json({ error: "Forbidden" });
@@ -44792,7 +44796,7 @@ ${data.tenant.name}`;
   });
 
   // Phase 5: Remove logo
-  app.delete("/api/restaurant/:id/logo", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/logo", authenticate, restaurantStaff, requireTabAction('SETTINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
     try {
       if (req.user?.restaurantId !== req.params.id && req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
         return res.status(403).json({ error: "Forbidden" });
@@ -44955,7 +44959,7 @@ ${data.tenant.name}`;
 
   // Floor plan (Phase 3): update the guest count (covers) on a live session.
   // Staff-only — the count feeds the map tile + turn-time / per-cover analytics.
-  app.patch("/api/restaurant/:id/sessions/:token/covers", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/sessions/:token/covers", authenticate, restaurantStaff, requireTabAction('ORDERS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS covers INTEGER DEFAULT 0").catch(() => {});
@@ -45072,7 +45076,7 @@ ${data.tenant.name}`;
   });
 
   // Sessions: Save postpaid invoice adjustments (discount, service charge, GST)
-  app.patch("/api/restaurant/:id/sessions/:sessionToken/invoice", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/sessions/:sessionToken/invoice", authenticate, restaurantStaff, requireTabAction('INVOICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { discount_amount = 0, service_charge_percent = 0, gst_percent = 0, apply_gst = 1, final_amount } = req.body;
@@ -45457,7 +45461,7 @@ ${data.tenant.name}`;
   }
 
   // Sessions: Close (Owner/Manager confirms payment — accepts final_amount + payment_method override)
-  app.patch("/api/restaurant/:id/sessions/:token/close", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/sessions/:token/close", authenticate, restaurantStaff, requireTabAction('INVOICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { payment_method, final_amount } = req.body || {};
@@ -45604,7 +45608,7 @@ ${data.tenant.name}`;
   // here — F&B revenue is recognised at folio settlement, exactly like every other
   // charge-to-room order). Itemised at the hotel's F&B GST slab (no per-item rate
   // passed) per the product decision.
-  app.post("/api/restaurant/:id/sessions/:token/charge-to-room", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/sessions/:token/charge-to-room", authenticate, restaurantStaff, requireTabAction('INVOICES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const bodyBookingId = req.body?.booking_id ? String(req.body.booking_id) : null;
@@ -45739,7 +45743,7 @@ ${data.tenant.name}`;
   // point), tags it CHARGE_TO_ROOM, and leaves it unpaid (settled with the
   // room at check-out). Hotel-only in effect: a restaurant-only tenant has no
   // CHECKED_IN booking to resolve, so it 404s cleanly.
-  app.post("/api/restaurant/:id/orders/:orderId/charge-to-room", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/orders/:orderId/charge-to-room", authenticate, restaurantStaff, requireTabAction('INVOICES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const bodyBookingId = req.body?.booking_id ? String(req.body.booking_id) : null;
@@ -45896,7 +45900,7 @@ ${data.tenant.name}`;
   // move splits the order (source reduced, a new order opened on the target). ONE
   // TRANSFER KOT prints for the moved lines under the target table so the kitchen
   // knows. Nothing is deleted; totals recompute; the source table frees when empty.
-  app.post("/api/restaurant/:id/tables/move", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/tables/move", authenticate, restaurantStaff, requireTabAction('ORDERS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { source_session_token, target_table_id } = req.body || {};
@@ -46386,6 +46390,7 @@ ${data.tenant.name}`;
   // Invoice status: update on individual ORDER
   app.patch("/api/orders/:id/invoice-status", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'INVOICES', 2))) return res.status(403).json({ error: 'Forbidden — requires INVOICES access.' });
       const { invoice_status, restaurantId: bodyRid } = req.body;
       // Tenant-safety: this path carries no :id, so the global tenant-isolation
       // guard can't apply. Staff act on their OWN tenant (from the JWT); only
@@ -46407,7 +46412,7 @@ ${data.tenant.name}`;
   // (which excludes invoice_status='PRINTED') drops them automatically.
   // Without this cascade, an owner who clicked Print in the BillView would
   // see the order keep cluttering Live Kitchen long after billing.
-  app.patch("/api/restaurant/:id/sessions/:token/invoice-status", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/sessions/:token/invoice-status", authenticate, restaurantStaff, requireTabAction('INVOICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { invoice_status } = req.body;
       const db = await getTenantDb(req.params.id);
@@ -47120,7 +47125,7 @@ ${data.tenant.name}`;
   });
 
   // PATCH /api/restaurant/:id/waiter-calls/:callId — Assign or resolve a call
-  app.patch("/api/restaurant/:id/waiter-calls/:callId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/waiter-calls/:callId", authenticate, restaurantStaff, requireTabAction('MONITOR', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await ensureWaiterCallsTable(db);
@@ -48636,7 +48641,7 @@ ${data.tenant.name}`;
   // (never enqueued OR all-FAILED) — the on-demand version of the 60s reconcile sweep,
   // behind the Command Centre "Retry printing" button. Wider window (2h) than the
   // sweep since this is a deliberate staff action. Never double-prints.
-  app.post("/api/restaurant/:id/print-jobs/retry-failed", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/print-jobs/retry-failed", authenticate, restaurantStaff, requireTabAction('MONITOR', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const orphans: any[] = await db.query(`
@@ -48656,7 +48661,7 @@ ${data.tenant.name}`;
   // — the live order board's "🖨 Print" button. Uses the SAME routing + safety
   // net as the auto-KOT enqueue. Returns the printers targeted so the UI can fall
   // back to a browser print only when NO kitchen printer is configured.
-  app.post("/api/restaurant/:id/orders/:orderId/print-kot", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/orders/:orderId/print-kot", authenticate, restaurantStaff, requireTabAction('MONITOR', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const printers: any[] = await db.query("SELECT name FROM kitchen_printers WHERE is_active = 1").catch(() => []);
@@ -48672,7 +48677,7 @@ ${data.tenant.name}`;
   // and routes to printers with station='INVOICE'. Fallback so a SINGLE-printer
   // shop still works: INVOICE-station → else the default printer → else the
   // first active printer (which also prints KOTs). The on-prem agent renders it.
-  app.post("/api/restaurant/:id/print-jobs/invoice", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/print-jobs/invoice", authenticate, restaurantStaff, requireTabAction('INVOICES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rest: any = await centralDb.get(
@@ -48767,6 +48772,7 @@ ${data.tenant.name}`;
   // returns 409 (with the current owner) if another chef already has it.
   app.post("/api/orders/:id/accept", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'MONITOR', 2))) return res.status(403).json({ error: 'Forbidden — requires MONITOR access.' });
       const db = await getTenantDb(req.user!.restaurantId);
       const chefId = String(req.user?.id || req.user?.email || 'chef');
       const chefName = String(req.body?.chef_name || req.user?.userName || req.user?.email || 'Chef');
@@ -48788,6 +48794,7 @@ ${data.tenant.name}`;
 
   app.patch("/api/orders/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'ORDERS', 2))) return res.status(403).json({ error: 'Forbidden — requires ORDERS access.' });
       const db = await getTenantDb(req.user!.restaurantId);
       await _ensureOrderCols(db);   // once per tenant, not per KDS status update
 
@@ -49217,7 +49224,7 @@ ${data.tenant.name}`;
   });
 
   // Watermark: Upload Watermark
-  app.post("/api/restaurant/:id/watermark", authenticate, restaurantStaff, upload.single('image'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/watermark", authenticate, restaurantStaff, upload.single('image'), requireTabAction('SETTINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       res.json({ success: true, url: req.file ? `/uploads/${req.file.filename}` : null });
     } catch (err) {
@@ -49226,7 +49233,7 @@ ${data.tenant.name}`;
   });
 
   // UPI QR: Upload UPI QR
-  app.post("/api/restaurant/:id/upi-qr", authenticate, restaurantStaff, upload.single('image'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/upi-qr", authenticate, restaurantStaff, upload.single('image'), requireTabAction('SETTINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       res.json({ success: true, url: req.file ? `/uploads/${req.file.filename}` : null });
     } catch (err) {
@@ -50555,6 +50562,7 @@ ${data.tenant.name}`;
   // Orders: Mark Payment
   app.patch("/api/orders/:id/payment", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'INVOICES', 2))) return res.status(403).json({ error: 'Forbidden — requires INVOICES access.' });
       const { status, restaurantId: rId } = req.body;
       // Tenant-safety: this path carries no :id, so the global tenant-isolation
       // guard can't apply. Staff act on their OWN tenant (from the JWT); only
@@ -50728,7 +50736,7 @@ ${data.tenant.name}`;
   });
 
   // ─── Invoice: PATCH update items + discount + service charge + GST
-  app.patch("/api/restaurant/:id/orders/:orderId/invoice", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/orders/:orderId/invoice", authenticate, restaurantStaff, requireTabAction('INVOICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount FLOAT DEFAULT 0").catch(() => {});
@@ -50864,6 +50872,7 @@ ${data.tenant.name}`;
   // Owner: Update Booking Status
   app.post("/api/owner/bookings/:id/status", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'BOOKINGS', 2))) return res.status(403).json({ error: 'Forbidden — requires BOOKINGS access.' });
       const { status } = req.body;
       const db = await getTenantDb(req.user!.restaurantId);
       // Fetch booking before update for notification data
@@ -50892,6 +50901,7 @@ ${data.tenant.name}`;
   // Owner: Cancel (soft-delete) a booking
   app.delete("/api/owner/bookings/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'BOOKINGS', 3))) return res.status(403).json({ error: 'Forbidden — requires BOOKINGS access.' });
       const db = await getTenantDb(req.user!.restaurantId);
       const booking = await db.get("SELECT * FROM bookings WHERE id = ?", [req.params.id]);
       await db.run("UPDATE bookings SET status = 'CANCELLED' WHERE id = ?", [req.params.id]);
@@ -50916,6 +50926,7 @@ ${data.tenant.name}`;
   // Owner: Create booking on behalf of customer (auto-confirmed)
   app.post("/api/owner/bookings", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'BOOKINGS', 2))) return res.status(403).json({ error: 'Forbidden — requires BOOKINGS access.' });
       const { customer_name, customer_phone, customer_email, booking_date, booking_time, guests, notes } = req.body;
       if (!customer_name || !customer_phone || !booking_date || !booking_time || !guests) {
         return res.status(400).json({ error: "customer_name, customer_phone, booking_date, booking_time and guests are required" });
@@ -50946,6 +50957,7 @@ ${data.tenant.name}`;
   // Owner: Upsert reservation day config for a specific date
   app.put("/api/owner/reservation-config/:date", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'BOOKINGS', 2))) return res.status(403).json({ error: 'Forbidden — requires BOOKINGS access.' });
       const { max_tables, time_slots, is_open, notes } = req.body;
       const db = await getTenantDb(req.user!.restaurantId);
       const slotsJson = JSON.stringify(Array.isArray(time_slots) ? time_slots : []);
@@ -50965,6 +50977,7 @@ ${data.tenant.name}`;
   // Owner: Delete reservation day config for a specific date
   app.delete("/api/owner/reservation-config/:date", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'BOOKINGS', 3))) return res.status(403).json({ error: 'Forbidden — requires BOOKINGS access.' });
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("DELETE FROM reservation_day_config WHERE TO_CHAR(config_date, 'YYYY-MM-DD') = ?", [req.params.date]);
       res.json({ success: true });
@@ -50976,6 +50989,7 @@ ${data.tenant.name}`;
   // Owner: Bulk-apply availability config to a date range (with optional day-of-week filter)
   app.post("/api/owner/reservation-config/bulk", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
+      if (!(await _roleHasTab(req, 'BOOKINGS', 2))) return res.status(403).json({ error: 'Forbidden — requires BOOKINGS access.' });
       const { from_date, to_date, day_of_week, max_tables, time_slots, is_open, notes } = req.body;
       if (!from_date || !to_date) return res.status(400).json({ error: "from_date and to_date are required" });
       const db = await getTenantDb(req.user!.restaurantId);
@@ -52420,8 +52434,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-phase1-inline-cleanup',
+    commit_marker: 'rbac-phase2-module-only-writes',
     code_features: [
+      'rbac-phase2-module-only-writes',              //SECURITY (Phase 2 — module-only-writes + inline allowlists; the highest-severity remainder after Phase 1). Gated 48 endpoints a role with ANY module tab could hit with NO per-tab check: (a) 27 tenant-:id module-only-writes via requireTabAction insertion (restaurant sessions close/invoice/invoice-status/covers/charge-to-room, room-charge approve/decline, tables/move, waiter-calls, print-jobs, logo/watermark/upi-qr/notification-templates; hotel hotel-inventory/gst-register/aiosell-fetch/form-c/concierge-faqs) + settlements (added restaurantStaff + DELIVERY); (b) 12 INLINE _roleHasTab guards for routes whose :id is NOT the tenant (middleware requireTabAction is inert there) — the ★ money/order set PATCH /api/orders/:id (+/payment, /invoice-status, /accept), PATCH+DELETE /api/menu/:id, and /api/owner/bookings + reservation-config (BOOKINGS tab); (c) 8 inline-allowlist → additive fast-path + _roleHasTab conversions (feedback reply/patch → FEEDBACK, housekeeping checklist-tasks/override → HOUSEKEEPING, checklist-assign → CHECKLIST_BOARD, folio-cancel → FOLIOS). Levels: create/update = Edit(2), delete = Full(3). Validated on RESTO-1003 with View/Edit/Full QA roles. tsc + vite build clean.
       'rbac-phase1-inline-cleanup',                  //RBAC (Phase-1 follow-up caught by LIVE validation). The QA harness (View/Edit/Full custom roles on RESTO-1003) probed the converted write endpoints and found loyalty promo-codes PUT+DELETE had a REDUNDANT inline allowlist inside the handler (role !== OWNER && !== MANAGER && !== SUPER_ADMIN) that 403'd even a custom role granted LOYALTY Full — despite the now-correct requireTabAction gate. Removed both inline checks (requireTabAction('LOYALTY','UPDATE'|'DELETE') is authoritative). Scanned all 116 converted endpoints: only these 2 were genuine conflicts (hotel/enable = intentional SUPER_ADMIN/CTO provisioning; hotel/settings + property-profile = tenant-scope guards restaurantId!==params.id; tables/status = per-table waiter-assignment logic — all correct, left as-is). tsc + vite build clean.
       'rbac-events-frontend-view-gating',            //UX (frontend parity with the backend action-level gates). Reported: a View-only "PCC Security 1" role could still click "New Booking", fill the whole form, and only get rejected on Save ("does not have CREATE access to EVENTS_BOOKINGS") — the backend correctly BLOCKS (Phase-1 gate working), but the button shouldn't be shown. Added evTabLevel()/evCanEdit() in EventViews.tsx (reads the tab_perms map App.tsx mirrors to localStorage; owner/SA/CTO=full) and HID the Events write controls for View-level roles: New Booking, the 4 master-data +Add buttons (Venues/Rentals/Services/Catering), and the booking Confirm/Checkout actions → a View role now sees read-only Events. Backend remains the security boundary. NOTE (broader UX pass pending): in-detail write controls and the Hotel/Restaurant frontends still show write buttons to View roles; the server rejects those writes regardless. tsc + vite build clean.
       'rbac-hotel-restaurant-write-gates',           //SECURITY (privilege escalation — Phase 1 of a full RBAC sweep, extends events-write-gates to HOTEL + RESTAURANT). A senior-RBAC audit (3 module agents, every endpoint inventoried) found ~140 write endpoints gated by requireTabAccess (= requireTabAction READ, level 1) → a VIEW-level role could POST/PUT/PATCH/DELETE. PHASE 1: mechanically converted the 116 write-at-read-level endpoints (91 hotel + 25 restaurant; all `:id`=tenant so the tab gate is live) to requireTabAction(tab, ACTION) — POST→CREATE, PUT/PATCH→UPDATE (Edit/2), DELETE→DELETE (Full/3): 67 CREATE, 27 UPDATE, 22 DELETE. Also gated events POST /upload-image (was eventsStaff-only) → requireTabAction('EVENTS_SETTINGS','UPDATE'). Validated live on RESTO-1003 with View/Edit/Full QA roles (View⛔ / Edit✓ create+update / Full✓ delete). DEFERRED to Phase 2 (delicate — needs inline _roleHasTab or added gates): ~31 restaurant MODULE-ONLY-WRITES incl. 11 ★ money/order endpoints (settle bill, mark paid, edit invoice totals, charge-to-room; PATCH/DELETE /api/orders|/api/menu/:id where :id≠tenant so requireTabAction is INERT), 8 hotel module-only writes, inline-allowlist gates (feedback reply, folio-cancel, housekeeping tasks/override/assign). PHASE 3: ~90 horizontal-over-read GETs + 4 never-enforced hotel tabs (FRONT_OFFICE_REPORTS/COMPLIANCE/CONCIERGE_FAQ/PUBLIC_BOOKING_PAGE). tsc + vite build clean.
