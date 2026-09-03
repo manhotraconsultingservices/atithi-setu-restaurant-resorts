@@ -22919,7 +22919,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <button type="button" onClick={() => exportGroupsCsv()} className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#cc5a16] text-[11px] font-bold hover:bg-[#faf7f2] flex items-center gap-1">⬇ CSV</button>
                   )}
                   <button type="button" onClick={() => { setGroupsLoading(true); fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.ok ? r.json() : []).then((d: any[]) => setGroupsList(d)).catch(()=>setGroupsList([])).finally(()=>setGroupsLoading(false)); }} className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]">↻ Refresh</button>
-                  <button type="button" onClick={openGroupBookingModal} className="px-4 py-1.5 rounded-lg bg-[#cc5a16] text-white text-[11px] font-bold hover:bg-[#a84612] flex items-center gap-1"><Plus size={12}/> New Group</button>
+                  {canWriteTab('HOTEL_BOOKINGS') && <button type="button" onClick={openGroupBookingModal} className="px-4 py-1.5 rounded-lg bg-[#cc5a16] text-white text-[11px] font-bold hover:bg-[#a84612] flex items-center gap-1"><Plus size={12}/> New Group</button>}
                 </div>
               </div>
               {/* Groups table */}
@@ -23009,20 +23009,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   </td>
                                   <td className="px-3 py-2.5 text-right">
                                     <div className="flex gap-1 justify-end flex-wrap">
-                                      {!settled && g.group_status !== 'CANCELLED' && g.group_status !== 'CONFIRMED' && (
+                                      {!settled && g.group_status !== 'CANCELLED' && g.group_status !== 'CONFIRMED' && canWriteTab('HOTEL_BOOKINGS') && (
                                         <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CONFIRMED'})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg bg-green-600 text-white text-[10px] font-bold hover:bg-green-700">Confirm</button>
                                       )}
-                                      {!settled && g.group_status !== 'CANCELLED' && Number(g.checked_in_count||0) === 0 && (
+                                      {!settled && g.group_status !== 'CANCELLED' && Number(g.checked_in_count||0) === 0 && canWriteTab('HOTEL_BOOKINGS') && (
                                         <button onClick={async () => { const cr = await promptPayment({ title: `Cancel group "${g.name}"?`, fields: [{ name: 'reason', label: 'Reason (optional)', type: 'text', placeholder: 'e.g. guest request' }], confirmLabel: 'Cancel Group' }); if (!cr) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CANCELLED',reason:cr.reason?.trim()||null})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg border border-red-300 text-red-600 text-[10px] font-bold hover:bg-red-50">Cancel</button>
                                       )}
-                                      {hasCheckedIn && (
+                                      {hasCheckedIn && canWriteTab('HOTEL_BOOKINGS') && (
                                         <button onClick={async () => { const sr = await promptPayment({ title: `Settle group "${g.name}"`, body: `${g.checked_in_count} room${g.checked_in_count===1?'':'s'} — choose payment method and optional discount`, fields: [{ name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'},{value:'BANK_TRANSFER',label:'Bank Transfer'}], defaultValue: 'CASH' }, { name: 'discount', label: 'Group discount (₹)', type: 'number', placeholder: '0', defaultValue: '0' }], confirmLabel: 'Settle & Checkout' }); if (!sr) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkout`, {method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({payment_method:sr.method.toUpperCase(),discount:Math.max(0,Number(sr.discount)||0)})}); const data = await res.json(); if (!res.ok) throw new Error(data?.error||'Settle failed'); toast.success(`Settled — Invoice ${data.invoice_number}, ₹${Number(data.total_grand_total||0).toLocaleString('en-IN')}`); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg bg-violet-600 text-white text-[10px] font-bold hover:bg-violet-700">Settle</button>
                                       )}
                                       <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/invoice-pdf`,{headers:{Authorization:`Bearer ${token}`}}); if (!res.ok){const j=await res.json().catch(()=>({}));throw new Error(j?.error||'Download failed');} const blob=await res.blob(); const url=URL.createObjectURL(blob); const a=document.createElement('a');a.href=url;a.download=`GroupInvoice-${g.id}-${(g.name||'group').replace(/[^a-z0-9_-]+/gi,'-')}.pdf`;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000); } catch(err:any){toast.error(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📑 PDF</button>
                                       <button onClick={async () => { const r = await promptPayment({ title: `Email invoice for "${g.name}"`, fields: [{ name: 'to', label: 'Email address', type: 'text', required: true, defaultValue: g.contact_email||'' }], confirmLabel: 'Send' }); if (!r) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({to:r.to.trim()})}); const data=await res.json(); if (!res.ok) throw new Error(data?.error||'Email failed'); toast.success(`Invoice ${data.invoice_number} sent to ${data.sent_to}`); } catch(err:any){toast.error(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📧 Email</button>
                                       <button onClick={async () => { setMasterFolioGroupId(g.id);setMasterFolioData(null);setMasterFolioLoading(true);setMasterFolioAddDesc('');setMasterFolioAddAmt('');setMasterFolioAddGst('0');setMasterFolioAddQty('1');setMasterFolioAddType('SERVICE'); try { const r=await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/master-folio`,{headers:{Authorization:`Bearer ${token}`}}); const d=await r.json(); if (!r.ok) throw new Error(d?.error||'Load failed'); setMasterFolioData(d); } catch(err:any){toast.error(err.message);setMasterFolioGroupId(null);} finally{setMasterFolioLoading(false);} }} className="px-2 py-1 rounded-lg border border-emerald-400 text-emerald-700 text-[10px] font-bold hover:bg-emerald-50">🏦 Master Acct</button>
                                       <button onClick={() => loadGroupDetail(g.id)} className="px-2 py-1 rounded-lg border border-indigo-300 text-indigo-700 text-[10px] font-bold hover:bg-indigo-50">📋 Detail</button>
-                                      {Number(g.booking_count) > Number(g.checked_in_count) + Number(g.checked_out_count) && !g.settled_at && (
+                                      {Number(g.booking_count) > Number(g.checked_in_count) + Number(g.checked_out_count) && !g.settled_at && canWriteTab('HOTEL_BOOKINGS') && (
                                         <button onClick={() => setGroupCheckInWizardTarget({groupId:g.id,groupName:g.name})} className="px-2 py-1 rounded-lg border border-green-400 text-green-700 text-[10px] font-bold hover:bg-green-50">✓ Check In Group</button>
                                       )}
                                     </div>
@@ -23777,20 +23777,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <td className="px-4 py-3 text-right sticky right-0 z-[2] bg-white group-hover:bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.08)]">
                           <div className="flex items-center justify-end gap-1.5" data-booking-action-menu>
                             {/* Primary CTA — the one thing staff must do for this row */}
-                            {b.status === 'BOOKED' && (
+                            {b.status === 'BOOKED' && canWriteTab('HOTEL_BOOKINGS') && (
                               <button
                                 onClick={() => confirmAndCheckIn(b)}
                                 className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600 whitespace-nowrap"
                               >Check In</button>
                             )}
-                            {b.status === 'CHECKED_IN' && (
+                            {b.status === 'CHECKED_IN' && canWriteTab('HOTEL_BOOKINGS') && (
                               <button
                                 onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }}
                                 className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608] whitespace-nowrap"
                               >Check Out</button>
                             )}
                             {/* Group settle — primary group CTA, stays outside overflow */}
-                            {b.group_id && b.status === 'CHECKED_IN' && (
+                            {b.group_id && b.status === 'CHECKED_IN' && canWriteTab('HOTEL_BOOKINGS') && (
                               <button
                                 onClick={async () => {
                                   const r = await promptPayment({
@@ -23825,7 +23825,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             )}
                             {/* ··· overflow menu */}
                             <div className="relative" data-booking-action-menu>
-                              <button
+                              {canWriteTab('HOTEL_BOOKINGS') && <button
                                 type="button"
                                 onClick={(e) => {
                                   if (openActionMenu === b.id) {
@@ -23840,7 +23840,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 className="px-2.5 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[13px] font-bold hover:bg-[#faf7f2] leading-none select-none"
                                 title="More actions"
                                 data-booking-action-menu
-                              >···</button>
+                              >···</button>}
                               {openActionMenu === b.id && (() => {
                                 const docCount = Number(b.document_count || 0);
                                 const needsDocs = hotelSettings.require_id_at_checkin !== false && b.status === 'BOOKED' && docCount === 0;
