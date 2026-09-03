@@ -4462,6 +4462,7 @@ const getDaysInMonth = (monthStr: string) => {
 
 function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, token: string, restaurantId: string }) {
   const toast = useToast();
+  const attCanEdit = canWriteTab('ATTENDANCE');
   const [logs, setLogs] = useState<any[]>([]);
   const [stats, setStats] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -4720,6 +4721,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!attCanEdit) { toast.error('View-only access — you cannot log attendance.'); return; }
     setSubmitting(true);
     try {
       const res = await fetch('/api/attendance', {
@@ -4750,6 +4752,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
   };
 
   const handleBulkSubmit = async () => {
+    if (!attCanEdit) { toast.error('View-only access — you cannot log attendance.'); return; }
     if (selectedDays.length === 0) return;
     setSubmitting(true);
     try {
@@ -12758,6 +12761,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   const handleAddStaff = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canWriteTab('STAFF')) { toast.error('View-only access — you cannot add or edit staff.'); return; }
     try {
       const res = await fetch('/api/owner/staff', {
         method: 'POST',
@@ -12786,6 +12790,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const removeStaff = async (id: string) => {
+    if (!canDeleteTab('STAFF')) { toast?.error?.('View-only access — you cannot remove staff.'); return; }
     if (!await showConfirm({ title: 'Remove this staff member?', danger: true })) return;
     try {
       await fetch(`/api/owner/staff/${id}`, {
@@ -12799,6 +12804,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const toggleStaffActive = async (s: any) => {
+    if (!canWriteTab('STAFF')) { toast.error('View-only access — you cannot change staff status.'); return; }
     const next = s.is_active ? 0 : 1;
     const verb = next ? 'activate' : 'deactivate';
     if (!await showConfirm({ title: `${verb.charAt(0).toUpperCase() + verb.slice(1)} ${s.name}?` })) return;
@@ -19983,18 +19989,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="flex justify-between items-center flex-wrap gap-3">
             <h2 className="text-3xl font-bold font-serif">Staff Management</h2>
             <div className="flex gap-2">
-              <button
+              {canWriteTab('STAFF') && <button
                 onClick={() => setIsBulkAddingStaff(true)}
                 className="bg-white border-2 border-[#cc5a16] text-[#cc5a16] px-5 py-2.5 rounded-full flex items-center gap-2 hover:bg-[#cc5a16]/5 transition-colors font-bold text-sm"
               >
                 <Plus size={18} /> Bulk Add
-              </button>
-              <button
+              </button>}
+              {canWriteTab('STAFF') && <button
                 onClick={() => setIsAddingStaff(true)}
                 className="bg-[#cc5a16] text-white px-6 py-3 rounded-full flex items-center gap-2 hover:bg-[#a84612] transition-colors"
               >
                 <Plus size={20} /> Add New Staff
-              </button>
+              </button>}
             </div>
           </div>
 
@@ -20251,11 +20257,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     className="text-[11px] font-bold uppercase tracking-widest text-[#1a1208] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors">
                     ✎ Edit
                   </button>
-                  <button onClick={() => setTransferringStaff(s)}
+                  {canWriteTab('STAFF') && <button onClick={() => setTransferringStaff(s)}
                     className="text-[11px] font-bold uppercase tracking-widest text-[#cc5a16] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors"
                     title="Move this staff to another of your locations">
                     ↗ Transfer
-                  </button>
+                  </button>}
                   <button onClick={() => toggleStaffActive(s)}
                     className={cn(
                       "text-[11px] font-bold uppercase tracking-widest border-2 rounded-xl py-2 transition-colors",
