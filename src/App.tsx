@@ -66902,6 +66902,7 @@ function SelectField({ label, value, onChange, options }: { label: string; value
 }
 
 function RosterManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const canEdit = canWriteTab('ROSTER');
   const [view, setView] = useState<'WEEK' | 'FORTNIGHT' | 'MONTH'>('WEEK');
   const [anchor, setAnchor] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [staff, setStaff] = useState<any[]>([]);
@@ -67013,6 +67014,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
   const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
   const saveSlot = async (payload: any, opts: { silentNotify?: boolean } = {}) => {
+    if (!canEdit) { setMessage('View-only access — you cannot create or edit shifts.'); return; }
     const res = await fetch(`/api/restaurant/${restaurantId}/roster`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -67028,6 +67030,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
   };
 
   const removeSlot = async (slotId: string) => {
+    if (!canEdit) { setMessage('View-only access — you cannot cancel shifts.'); return; }
     const res = await fetch(`/api/restaurant/${restaurantId}/roster/${slotId}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${token}` },
@@ -67038,6 +67041,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
 
   // "Copy last week" — uses the existing POST /roster/copy endpoint
   const copyLastWeek = async () => {
+    if (!canEdit) { setMessage('View-only access — you cannot modify the roster.'); return; }
     const fromStart = new Date(start + 'T00:00:00');
     fromStart.setDate(fromStart.getDate() - 7);
     const fromEnd = new Date(end + 'T00:00:00');
@@ -67179,10 +67183,10 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
             title="Next"
             className="w-8 h-8 flex items-center justify-center bg-white border border-[#cc5a16]/15 rounded-xl text-sm font-bold hover:bg-[#cc5a16]/5">→</button>
           <div className="w-px h-6 bg-[#cc5a16]/10 mx-1" />
-          <button onClick={copyLastWeek}
+          {canEdit && <button onClick={copyLastWeek}
             className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold text-[#cc5a16] hover:bg-[#cc5a16]/5">
             Copy last week
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -67324,7 +67328,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
                                   draggable={!isCancelled}
                                   onDragStart={e => onSlotDragStart(e, slot)}
                                   onDragEnd={onDragEnd}
-                                  onClick={() => setEditing({ staff_id: s.id, date: d, slot })}
+                                  onClick={() => { if (canEdit) setEditing({ staff_id: s.id, date: d, slot }); }}
                                   title={`${slot.start_time}–${slot.end_time} (${hrs}h) · ${slot.status || 'PUBLISHED'}${slot.notes ? `\n${slot.notes}` : ''}`}
                                   className={cn(
                                     "group relative rounded-lg px-2 py-1 cursor-grab active:cursor-grabbing transition-all",
@@ -67359,7 +67363,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
                               );
                             })}
                             <button
-                              onClick={() => setEditing({ staff_id: s.id, date: d })}
+                              onClick={() => { if (canEdit) setEditing({ staff_id: s.id, date: d }); }}
                               className="mt-auto w-full text-[10px] text-[#9c8e85] hover:text-[#cc5a16] hover:bg-[#cc5a16]/5 rounded-md py-0.5 transition-colors"
                               aria-label={`Add shift for ${s.name} on ${d}`}
                             >+ shift</button>
@@ -67748,6 +67752,7 @@ function TimesheetPayrollPanel({ restaurantId, token, start, end, onApprovalChan
 }
 
 function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const tsCanEdit = canWriteTab('TIMESHEET');
   // Default range: this week (Mon..Sun)
   const initRange = useMemo(() => {
     const now = new Date();
@@ -67804,6 +67809,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
   }, [rows]);
 
   const saveTsHours = async (staffId: string, date: string, hrs: string) => {
+    if (!tsCanEdit) return;
     const num = parseFloat(hrs);
     if (isNaN(num) || num < 0) return;
     await fetch(`/api/restaurant/${restaurantId}/timesheet/${staffId}/${date}/hours`, {
@@ -67830,6 +67836,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
   };
 
   const saveAllTsPending = async () => {
+    if (!tsCanEdit) return;
     setTsGridSaving(true);
     const entries: any[] = [];
     for (const [staffId, dates] of Object.entries(tsGridPending)) {
@@ -67854,6 +67861,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
   };
 
   const applyTsMassUpdate = async () => {
+    if (!tsCanEdit) return;
     if (tsSelectedRows.size === 0) return;
     setTsGridSaving(true);
     const dates = tsMassDate ? [tsMassDate] : getDatesInRange2(start, end);
@@ -67987,18 +67995,18 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
       </div>
       {message && <p className="text-xs text-orange-700 font-bold">{message}</p>}
 
-      {/* Sub-tab toggle */}
+      {/* Sub-tab toggle — "Edit Hours" grid is write-only, hidden for View roles */}
       <div className="flex gap-2 p-1 bg-[#faf7f2] rounded-2xl w-fit">
-        {([['summary', 'Summary'], ['grid', 'Edit Hours']] as const).map(([t, label]) => (
-          <button key={t} onClick={() => setTsTab(t)}
+        {(([['summary', 'Summary'], ...(tsCanEdit ? [['grid', 'Edit Hours']] : [])]) as [string, string][]).map(([t, label]) => (
+          <button key={t} onClick={() => setTsTab(t as any)}
             className={`px-5 py-2 rounded-xl text-sm font-bold transition-all ${tsTab === t ? 'bg-white shadow text-[#cc5a16]' : 'text-[#9c8e85]'}`}>
             {label}
           </button>
         ))}
       </div>
 
-      {/* Excel-style Edit Hours grid */}
-      {tsTab === 'grid' && (
+      {/* Excel-style Edit Hours grid — write-only, hidden for View roles */}
+      {tsTab === 'grid' && tsCanEdit && (
         <div className="bg-white rounded-[32px] shadow-sm border border-[#cc5a16]/10 overflow-hidden">
           {/* Toolbar */}
           <div className="p-4 border-b border-[#cc5a16]/10 flex flex-wrap gap-3 items-center">
@@ -69378,6 +69386,7 @@ function SmartAlertsPanel({ token }: { token: string }) {
 
 function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestaurantEnabled, isSpaEnabled, isEventsEnabled }: { restaurantId: string, token: string, isHotelEnabled?: boolean, isRestaurantEnabled?: boolean, isSpaEnabled?: boolean, isEventsEnabled?: boolean }) {
   const toast = useToast();
+  const canEdit = canWriteTab('NOTIFICATIONS');
   const [settings, setSettings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -69411,6 +69420,7 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
   };
 
   const handleToggle = (eventName: string, role: string, channel: string) => {
+    if (!canEdit) return;
     setSettings(prev => {
       const existing = prev.find(s => s.event_name === eventName && s.role === role);
       if (existing) {
@@ -69434,6 +69444,7 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
   };
 
   const saveSettings = async () => {
+    if (!canEdit) { toast.error('View-only access — you cannot change notification settings.'); return; }
     setSaving(true);
     try {
       const res = await fetch('/api/owner/notification-settings', {
@@ -69453,6 +69464,7 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
   };
 
   const testNotification = async (eventName: string) => {
+    if (!canEdit) { toast.error('View-only access — you cannot send test notifications.'); return; }
     try {
       const res = await fetch('/api/owner/test-notification', {
         method: 'POST',
@@ -69508,14 +69520,14 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
           <h2 className="text-3xl font-bold font-serif">Notification Settings</h2>
           <p className="text-[#6b5d52] mt-1">Toggle alerts for each event and role.</p>
         </div>
-        <button
+        {canEdit && <button
           onClick={saveSettings}
           disabled={saving}
           className="bg-[#cc5a16] text-white px-8 py-3 rounded-2xl font-bold hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center gap-2"
         >
           {saving ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
           Save Changes
-        </button>
+        </button>}
       </div>
 
       {/* Smart Alerts — proactive, metric-driven business alerts */}

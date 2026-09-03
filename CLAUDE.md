@@ -203,6 +203,14 @@ Email (SendGrid), SMS (Twilio), WhatsApp (Meta Cloud API), Telegram. Granular pe
 ### Multi-Tenant Security
 PostgreSQL **schema-based isolation** — every restaurant lives in its own `tenant_{restaurantId}` schema. JWT-based authentication. RBAC across 11 roles.
 
+### CRUD RBAC — MANDATORY for every page, tab, and write control (no exceptions)
+Every feature is governed by a **tab** with per-role **action levels**: `View` = 1 (read only), `Edit` = 2 (create + update), `Full` = 3 (create + update + **delete**). A role granted **View** on a tab must be able to *see* the data but **must not** be able to create, edit, or delete anything on it — the control itself must be hidden or disabled, not merely rejected after the click. Any new page/tab/component you add MUST enforce this on **both** layers:
+
+- **Backend (the security boundary):** gate every mutating endpoint with `requireTabAction(TAB, ACTION)` — `'CREATE'`/`'UPDATE'` for writes, `'DELETE'` for deletes. Plain `requireTabAccess`/`requireTabAction(TAB,'READ')` is READ-level only and lets a View grant write — never use it to guard a write. For non-tenant `:id` routes where `requireTabAction` is inert (e.g. `/api/orders/:id`), use an inline `_roleHasTab(req, TAB, minLevel)` check.
+- **Frontend (so a View user is never led into a 403):** import `canWriteTab(TAB)` / `canDeleteTab(TAB)` from `src/perm.ts` (they read the `tab_perms` map App.tsx mirrors to localStorage; OWNER/SUPER_ADMIN/CTO fast-path to Full). Gate create/update controls on `canWriteTab(TAB)` and delete controls on `canDeleteTab(TAB)` — hide the button or `disabled={!canWriteTab(TAB)}` the input. Detached/module components that don't have App's `canDo` in scope MUST use `perm.ts` (EventViews/SpaViews use their local `evCanEdit`/`canWriteTab`). Add a guard (`if (!canWriteTab(TAB)) return;`) at the top of the save handler too — **never** optimistically mutate local state *before* the server call, or a rejected write lingers in the UI looking applied.
+
+**Landmine:** use the **exact** tab id string. A wrong id makes `tab_perms[wrongId]` undefined → the control hides for MANAGER too (MANAGER is NOT in the OWNER fast-path). Reads that back a picker/dropdown may stay ungated, but every create/update/delete must be gated. Definition of done for a new page includes: a View role sees zero write controls, an Edit role sees create/update but not delete, a Full role sees all.
+
 ---
 
 ## User Roles
