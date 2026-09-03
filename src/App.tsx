@@ -22742,9 +22742,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                 ))}
               </div>
-              <button onClick={openGroupBookingModal} className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/30 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 transition-all flex items-center gap-2">
+              {canWriteTab('HOTEL_BOOKINGS') && <button onClick={openGroupBookingModal} className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/30 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 transition-all flex items-center gap-2">
                 <Plus size={14} /> Group
-              </button>
+              </button>}
               {canWriteTab('HOTEL_BOOKINGS') && <button onClick={() => { setEditingBooking({ check_in_date: new Date().toISOString().slice(0,10), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20">
                 <Plus size={16} /> New Booking
               </button>}
@@ -25045,7 +25045,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 Set rates, manage availability, and sync with OTAs — all from one place.
               </p>
             </div>
-            {activeCmTab === 'rates' && (
+            {activeCmTab === 'rates' && canWriteTab('CHANNEL_MANAGER') && (
               <button
                 onClick={async () => {
                   try {
@@ -25250,6 +25250,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   min="0"
                                   step="50"
                                   value={displayVal}
+                                  disabled={!canWriteTab('CHANNEL_MANAGER')}
                                   onChange={e => {
                                     const v = Number(e.target.value);
                                     setRateGridDirty(prev => ({
@@ -25258,7 +25259,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     }));
                                   }}
                                   className={cn(
-                                    'w-full text-center text-xs py-1 px-1 rounded border focus:ring-1 ring-blue-300 outline-none',
+                                    'w-full text-center text-xs py-1 px-1 rounded border focus:ring-1 ring-blue-300 outline-none disabled:opacity-70 disabled:cursor-not-allowed',
                                     isDirty ? 'border-blue-400 font-bold text-blue-800' : 'border-transparent hover:border-[#e8e0d8]'
                                   )}
                                 />
@@ -25304,7 +25305,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm"
                 >Next 7d ▶</button>
                 <button onClick={() => fetchInvGrid()} className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm">↻</button>
-                {Object.keys(invGridDirty).length > 0 && (
+                {Object.keys(invGridDirty).length > 0 && canWriteTab('CHANNEL_MANAGER') && (
                   <button
                     disabled={invGridSaving}
                     onClick={async () => {
@@ -25381,6 +25382,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   max={rt.total_rooms}
                                   step="1"
                                   value={displayVal}
+                                  disabled={!canWriteTab('CHANNEL_MANAGER')}
                                   onChange={e => {
                                     const v = Math.max(0, Math.min(rt.total_rooms, Number(e.target.value)));
                                     setInvGridDirty(prev => ({
@@ -25389,7 +25391,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     }));
                                   }}
                                   className={cn(
-                                    'w-full text-center text-xs py-1 px-1 rounded border focus:ring-1 ring-blue-300 outline-none',
+                                    'w-full text-center text-xs py-1 px-1 rounded border focus:ring-1 ring-blue-300 outline-none disabled:opacity-70 disabled:cursor-not-allowed',
                                     isDirty ? 'border-blue-400 font-bold text-blue-800'
                                       : isOverridden ? 'border-amber-400 text-amber-800'
                                       : 'border-transparent hover:border-[#e8e0d8] text-[#6b5d52]'
@@ -25566,7 +25568,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 )}
 
-                <button
+                {canWriteTab('CHANNEL_MANAGER') ? <button
                   disabled={
                     bulkRateSaving
                     || !bulkRateForm.room_type_ids.length
@@ -25590,7 +25592,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   className="w-full py-2.5 rounded-xl bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
                 >
                   {bulkRateSaving ? 'Applying…' : `Apply Bulk ${bulkRateForm.type === 'inventory' ? 'Inventory' : 'Rate'} Update`}
-                </button>
+                </button> : <p className="text-xs text-[#9c8e85] italic">View-only access — bulk updates are disabled for your role.</p>}
               </div>
             </div>
           )}
@@ -26638,12 +26640,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <h4 className="text-sm font-bold text-[#1a1208]">Inbound — iCal feeds</h4>
                   <p className="text-[10px] text-[#9c8e85] mt-0.5">Auto-pulls every 30 min · Manual sync available below</p>
                 </div>
-                <button
+                {canWriteTab('CHANNEL_MANAGER') && <button
                   onClick={() => setEditingIcalFeed({ scope: 'ROOM', scope_id: '', channel: 'BOOKING', url: '', label: '', is_enabled: true })}
                   className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] flex items-center gap-1"
                 >
                   <Plus size={12} /> Add iCal Feed
-                </button>
+                </button>}
               </div>
               {icalFeeds.length === 0 ? (
                 <p className="text-xs text-[#9c8e85] italic mt-2">
@@ -26668,15 +26670,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           'text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
                           f.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
                         )}>{f.is_enabled ? 'Active' : 'Paused'}</span>
-                        <button
+                        {canWriteTab('CHANNEL_MANAGER') && <button
                           onClick={() => syncIcalFeedNow(f.id)}
                           disabled={syncingIcalFeedId === f.id}
                           className="text-[10px] font-bold text-[#1a4a6f] hover:underline disabled:opacity-50"
-                        >{syncingIcalFeedId === f.id ? 'Syncing…' : 'Sync now'}</button>
-                        <button
+                        >{syncingIcalFeedId === f.id ? 'Syncing…' : 'Sync now'}</button>}
+                        {canDeleteTab('CHANNEL_MANAGER') && <button
                           onClick={() => deleteIcalFeed(f.id)}
                           className="text-[10px] font-bold text-[#c13b3b] hover:underline"
-                        >Delete</button>
+                        >Delete</button>}
                       </div>
                     </div>
                   ))}
@@ -26775,12 +26777,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     Credentials stored AES-256-GCM at rest. Webhook signing keys are a SEPARATE field per OTA spec.
                   </p>
                 </div>
-                <button
+                {canWriteTab('CHANNEL_MANAGER') && <button
                   onClick={() => setEditingChannelCred({ channel: 'BOOKING', is_enabled: false })}
                   className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] flex items-center gap-1"
                 >
                   <Plus size={12} /> Add Channel
-                </button>
+                </button>}
               </div>
               {channelCredentials.length === 0 ? (
                 <p className="text-xs text-[#9c8e85] italic mt-2">
@@ -26807,14 +26809,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           'text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
                           c.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
                         )}>{c.is_enabled ? 'Enabled' : 'Disabled'}</span>
-                        <button
+                        {canWriteTab('CHANNEL_MANAGER') && <button
                           onClick={() => setEditingChannelCred({ channel: c.channel, api_key: '', api_secret: '', property_id: c.property_id || '', is_enabled: c.is_enabled, commission_pct: c.commission_pct ?? '', webhook_signing_secret: '' })}
                           className="text-[10px] font-bold text-[#3d3128] hover:underline"
-                        >Edit</button>
-                        <button
+                        >Edit</button>}
+                        {canDeleteTab('CHANNEL_MANAGER') && <button
                           onClick={() => deleteChannelCredential(c.channel)}
                           className="text-[10px] font-bold text-[#c13b3b] hover:underline"
-                        >Delete</button>
+                        >Delete</button>}
                       </div>
                     </div>
                   ))}
@@ -26888,10 +26890,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <strong> MEMBER</strong> (special price for loyalty members).
                   You can add custom ones too — they'll show up in the Live Rate Card above.</p>
               </div>
-              <button
+              {canWriteTab('CHANNEL_MANAGER') && <button
                 onClick={() => setEditingRatePlan({ id: '', code: '', name: '', description: '', is_refundable: 1, discount_pct: 0, min_nights: 1, max_nights: null, display_order: 0, is_active: 1 })}
                 className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] flex items-center gap-1"
-              ><Plus size={12} /> Add Rate Plan</button>
+              ><Plus size={12} /> Add Rate Plan</button>}
             </div>
             {ratePlans.length === 0 ? (
               <p className="text-xs text-[#9c8e85] italic mt-2">No rate plans yet — defaults seed on first load.</p>
@@ -26923,8 +26925,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', p.is_active ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700')}>{p.is_active ? 'Active' : 'Off'}</span>
                         </td>
                         <td className="px-3 py-2 text-right">
-                          <button onClick={() => setEditingRatePlan({ ...p })} className="text-[10px] font-bold text-[#3d3128] hover:underline mr-3">Edit</button>
-                          <button onClick={() => deleteRatePlan(p.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Deactivate</button>
+                          {canWriteTab('CHANNEL_MANAGER') && <button onClick={() => setEditingRatePlan({ ...p })} className="text-[10px] font-bold text-[#3d3128] hover:underline mr-3">Edit</button>}
+                          {canDeleteTab('CHANNEL_MANAGER') && <button onClick={() => deleteRatePlan(p.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Deactivate</button>}
                         </td>
                       </tr>
                     ))}
@@ -26980,7 +26982,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <td className="px-3 py-2 text-[11px]">{r.next_retry_at ? new Date(r.next_retry_at).toLocaleString() : '—'}</td>
                         <td className="px-3 py-2 text-[10px] text-[#c13b3b] max-w-[280px] truncate" title={r.error_message}>{r.error_message || '—'}</td>
                         <td className="px-3 py-2 text-right">
-                          {r.status !== 'success' && r.status !== 'dismissed' && (
+                          {r.status !== 'success' && r.status !== 'dismissed' && canWriteTab('CHANNEL_MANAGER') && (
                             <>
                               <button onClick={() => retrySyncQueueRow(r.id)} className="text-[10px] font-bold text-[#1a4a6f] hover:underline mr-3">Retry</button>
                               <button onClick={() => dismissSyncQueueRow(r.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Dismiss</button>
@@ -27008,7 +27010,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Every night we ask each OTA "did we record every booking you sent us?" If anything is missing on either side, you'll see it here BEFORE it causes a double-booking. Click <strong>Run now</strong> if you want to check immediately.</p>
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={runReconciliationNow} disabled={reconciliationRunning} className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] disabled:opacity-50">{reconciliationRunning ? 'Running…' : 'Run now'}</button>
+                {canWriteTab('CHANNEL_MANAGER') && <button onClick={runReconciliationNow} disabled={reconciliationRunning} className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] disabled:opacity-50">{reconciliationRunning ? 'Running…' : 'Run now'}</button>}
                 <button onClick={fetchReconciliationReports} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
               </div>
             </div>
@@ -29140,7 +29142,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </label>
 
                 <div className="pt-4 flex items-center justify-end gap-3 flex-wrap">
-                  <button
+                  {canWriteTab('SETTINGS') && <button
                     type="button"
                     onClick={saveHotelSettings}
                     disabled={hotelSettingsSaving}
@@ -29153,7 +29155,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     )}
                   >
                     {hotelSettingsSaved ? 'Saved ✓' : (hotelSettingsSaving ? 'Saving…' : 'Save Rules')}
-                  </button>
+                  </button>}
                 </div>
               </div>
             </div>
@@ -29173,12 +29175,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     Auto-adjust rates based on occupancy + days-to-check-in. Layered on top of Rate Plans.
                   </p>
                 </div>
-                <button
+                {canWriteTab('SETTINGS') && <button
                   onClick={() => setEditingYieldRule({ mode: 'SUGGEST', multiplier: 1.25 })}
                   className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] flex items-center gap-1"
                 >
                   <Plus size={12} /> Add Rule
-                </button>
+                </button>}
               </div>
 
               {yieldRules.length === 0 ? (
@@ -29220,7 +29222,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             )}>{r.mode}</span>
                           </td>
                           <td className="px-3 py-2 text-right">
-                            <button onClick={() => deleteYieldRule(r.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Delete</button>
+                            {canDeleteTab('SETTINGS') && <button onClick={() => deleteYieldRule(r.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Delete</button>}
                           </td>
                         </tr>
                       ))}
