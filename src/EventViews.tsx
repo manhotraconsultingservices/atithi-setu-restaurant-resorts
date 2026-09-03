@@ -2502,6 +2502,11 @@ function EventReports({ restaurantId, token }: Props) {
 function EventSettings({ restaurantId, token }: Props) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
+  // RBAC — this is the EVENTS_SETTINGS tab; a View-level role must not be able
+  // to change anything here. The app-wide language is enforced server-side on
+  // the SETTINGS tab, so it needs BOTH grants to actually persist.
+  const canEdit = evCanEdit('EVENTS_SETTINGS');
+  const canEditLang = canEdit && evCanEdit('SETTINGS');
   const [form, setForm] = useState<any>({ hero_title: '', tagline: '', description: '', contact_phone: '', contact_email: '', is_published: true });
   const [saved, setSaved] = useState(false);
   const [secLang, setSecLang] = useState<string>('');
@@ -2527,12 +2532,14 @@ function EventSettings({ restaurantId, token }: Props) {
     if (Array.isArray(r.payment_schedule_splits) && r.payment_schedule_splits.length) setSplits(r.payment_schedule_splits.map((s: any) => ({ label: String(s.label || ''), percent: Number(s.percent) || 0, offsetDays: Math.round(Number(s.offsetDays) || 0) })));
   }).catch(() => {}); }, []);
   const saveGst = async () => {
+    if (!canEdit) { alert('View-only access — you cannot change these settings.'); return; }
     try {
       await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ gst_percent: Number(gst.gst_percent) || 0, gst_enabled: gst.gst_enabled, gst_number: gst.gst_number.trim(), invoice_lang_mode: gst.invoice_lang_mode }) });
       setGstSaved(true); setTimeout(() => setGstSaved(false), 1500);
     } catch (e: any) { alert(e.message); }
   };
   const saveBiz = async () => {
+    if (!canEdit) { alert('View-only access — you cannot change these settings.'); return; }
     try {
       await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ monthly_revenue_target: Number(biz.monthly_revenue_target) || 0, occupancy_target_pct: Number(biz.occupancy_target_pct) || 0, min_deposit_pct: Number(biz.min_deposit_pct) || 0, deposit_due_days: Number(biz.deposit_due_days) || 0 }) });
       setBizSaved(true); setTimeout(() => setBizSaved(false), 1500);
@@ -2542,6 +2549,7 @@ function EventSettings({ restaurantId, token }: Props) {
   const addSplit = () => setSplits(s => [...s, { label: `Instalment ${s.length + 1}`, percent: 0, offsetDays: -7 }]);
   const delSplit = (i: number) => setSplits(s => s.filter((_, idx) => idx !== i));
   const saveSplits = async () => {
+    if (!canEdit) { alert('View-only access — you cannot change these settings.'); return; }
     if (Math.abs(splitTotal - 100) > 0.5) { alert(t('events.settings.scheduleTotalErr', { n: Math.round(splitTotal) })); return; }
     try {
       await api('/events/gst-settings', { method: 'PUT', body: JSON.stringify({ payment_schedule_splits: splits }) });
@@ -2552,12 +2560,14 @@ function EventSettings({ restaurantId, token }: Props) {
   const [vrSaved, setVrSaved] = useState(false);
   useEffect(() => { api('/events/venue-settings').then((r: any) => setVr({ default_turnaround_min: Number(r.default_turnaround_min ?? 120), hd_am_start: r.hd_am_start || '08:00', hd_am_end: r.hd_am_end || '14:00', hd_pm_start: r.hd_pm_start || '17:00', hd_pm_end: r.hd_pm_end || '23:00', weekend_days: r.weekend_days || '0,6' })).catch(() => {}); }, []);
   const saveVr = async () => {
+    if (!canEdit) { alert('View-only access — you cannot change these settings.'); return; }
     try {
       await api('/events/venue-settings', { method: 'PUT', body: JSON.stringify(vr) });
       setVrSaved(true); setTimeout(() => setVrSaved(false), 1500);
     } catch (e: any) { alert(e.message); }
   };
   const save = async () => {
+    if (!canEdit) { alert('View-only access — you cannot change these settings.'); return; }
     try {
       const gallery = JSON.stringify((form.gallery_list || []).map((s: string) => String(s).trim()).filter(Boolean));
       const { gallery_list, ...rest } = form;
@@ -2566,8 +2576,10 @@ function EventSettings({ restaurantId, token }: Props) {
     } catch (e: any) { alert(e.message); }
   };
   const saveLang = async (l: string) => {
-    setSecLang(l);
-    try { await api('/settings/language', { method: 'PUT', body: JSON.stringify({ secondary_language: l || null }) }); window.location.reload(); } catch (e: any) { alert(e.message); }
+    if (!canEditLang) { alert('You need Edit access to Settings to change the language.'); return; }
+    const prev = secLang;
+    setSecLang(l); // optimistic — reverted below if the server rejects it
+    try { await api('/settings/language', { method: 'PUT', body: JSON.stringify({ secondary_language: l || null }) }); window.location.reload(); } catch (e: any) { setSecLang(prev); alert(e.message); }
   };
   const publicUrl = `${window.location.origin}/events/${restaurantId}`;
 
@@ -2579,13 +2591,13 @@ function EventSettings({ restaurantId, token }: Props) {
       <div className={`${CARD} mb-4`}>
         <label className={LABEL}>{t('common.language')} — secondary (app-wide)</label>
         <div className="flex items-center gap-2">
-          <select className={`${INPUT} max-w-xs`} value={secLang} onChange={e => saveLang(e.target.value)}>
+          <select className={`${INPUT} max-w-xs`} value={secLang} disabled={!canEditLang} onChange={e => saveLang(e.target.value)}>
             <option value="">English only</option>
             {SECONDARY_LANGUAGE_OPTIONS.map(l => <option key={l} value={l}>{LANGUAGE_NAMES[l] || l}</option>)}
           </select>
-          <span className="text-xs text-[#9d8b7e]">Staff can toggle English ↔ this language.</span>
+          <span className="text-xs text-[#9d8b7e]">{canEditLang ? 'Staff can toggle English ↔ this language.' : 'View-only — you need Edit access to Settings to change this.'}</span>
         </div>
-        {!secLang && gst.suggested_language && (
+        {!secLang && gst.suggested_language && canEditLang && (
           <p className="text-[11px] text-[#9d8b7e] mt-1.5">Suggested for your state: <strong>{LANGUAGE_NAMES[gst.suggested_language] || gst.suggested_language}</strong> — <button className="text-[#cc5a16] font-semibold hover:underline" onClick={() => saveLang(gst.suggested_language)}>Use this</button></p>
         )}
       </div>
@@ -2602,26 +2614,27 @@ function EventSettings({ restaurantId, token }: Props) {
         <div>
           <label className={LABEL}>GSTIN (business GST number)</label>
           <input className={`${INPUT} max-w-md font-mono`} value={gst.gst_number} placeholder="e.g. 27ABCDE1234F1Z5"
+            disabled={!canEdit}
             onChange={e => setGst({ ...gst, gst_number: e.target.value.toUpperCase() })} />
           <p className="text-[11px] text-[#9d8b7e] mt-1">{gst.gst_number ? 'Prints on every event quotation & tax invoice.' : 'Required for a GST-compliant tax invoice — without it the invoice shows no GSTIN.'}</p>
         </div>
         <label className="flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={gst.gst_enabled} onChange={e => setGst({ ...gst, gst_enabled: e.target.checked })} />
+          <input type="checkbox" checked={gst.gst_enabled} disabled={!canEdit} onChange={e => setGst({ ...gst, gst_enabled: e.target.checked })} />
           Charge GST on event invoices
         </label>
         <div className="flex items-end gap-3">
           <div>
             <label className={LABEL}>Default GST %</label>
             <input type="number" min={0} max={28} step={0.5} className={`${INPUT} max-w-[120px]`} value={gst.gst_percent}
-              disabled={!gst.gst_enabled}
+              disabled={!canEdit || !gst.gst_enabled}
               onChange={e => setGst({ ...gst, gst_percent: Number(e.target.value) })} />
           </div>
-          <button className={BTN_PRIMARY} onClick={saveGst}>{t('common.save')}</button>
+          {canEdit && <button className={BTN_PRIMARY} onClick={saveGst}>{t('common.save')}</button>}
           {gstSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
         </div>
         <div>
           <label className={LABEL}>Invoice language</label>
-          <select className={`${INPUT} max-w-xs`} value={gst.invoice_lang_mode} onChange={e => setGst({ ...gst, invoice_lang_mode: e.target.value })}>
+          <select className={`${INPUT} max-w-xs`} value={gst.invoice_lang_mode} disabled={!canEdit} onChange={e => setGst({ ...gst, invoice_lang_mode: e.target.value })}>
             <option value="EN">English only</option>
             <option value="REGIONAL">Regional only</option>
             <option value="BOTH">English + Regional</option>
@@ -2658,7 +2671,7 @@ function EventSettings({ restaurantId, token }: Props) {
           <p className="text-[11px] text-[#9d8b7e] mt-1">Selected days use the Weekend/Peak column of each hall's price matrix.</p>
         </div>
         <div className="flex items-center gap-3">
-          <button className={BTN_PRIMARY} onClick={saveVr}>{t('common.save')}</button>
+          {canEdit && <button className={BTN_PRIMARY} onClick={saveVr}>{t('common.save')}</button>}
           {vrSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
         </div>
       </div>
@@ -2680,7 +2693,7 @@ function EventSettings({ restaurantId, token }: Props) {
         </div>
         <p className="text-[11px] text-[#9d8b7e]">{t('events.settings.targetsNote')}</p>
         <div className="flex items-center gap-3">
-          <button className={BTN_PRIMARY} onClick={saveBiz}>{t('common.save')}</button>
+          {canEdit && <button className={BTN_PRIMARY} onClick={saveBiz}>{t('common.save')}</button>}
           {bizSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
         </div>
       </div>
@@ -2713,7 +2726,7 @@ function EventSettings({ restaurantId, token }: Props) {
         </div>
         <p className="text-[11px] text-[#9d8b7e]">{t('events.settings.scheduleNote')}</p>
         <div className="flex items-center gap-3">
-          <button className={BTN_PRIMARY} onClick={saveSplits} disabled={Math.abs(splitTotal - 100) > 0.5}>{t('common.save')}</button>
+          {canEdit && <button className={BTN_PRIMARY} onClick={saveSplits} disabled={Math.abs(splitTotal - 100) > 0.5}>{t('common.save')}</button>}
           {splitsSaved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
         </div>
       </div>
@@ -2733,7 +2746,7 @@ function EventSettings({ restaurantId, token }: Props) {
         </div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!form.is_published} onChange={e => setForm({ ...form, is_published: e.target.checked })} />{t('events.settings.published')}</label>
         <div className="flex items-center gap-3">
-          <button className={BTN_PRIMARY} onClick={save}>{t('common.save')}</button>
+          {canEdit && <button className={BTN_PRIMARY} onClick={save}>{t('common.save')}</button>}
           {saved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} />{t('common.saved')}</span>}
           <a href={publicUrl} target="_blank" rel="noreferrer" className={BTN_GHOST}>{t('events.settings.preview')}</a>
         </div>

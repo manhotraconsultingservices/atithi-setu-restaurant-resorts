@@ -26449,10 +26449,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   into that agent's statement and aging.
                 </p>
               </div>
-              <button
+              {canWriteTab('CHANNEL_MANAGER') && <button
                 onClick={() => setEditingAgent({ id: '', name: '', type: 'TRAVEL_AGENT', contact_person: '', phone: '', email: '', gstin: '', address: '', commission_pct: 10, payment_terms_days: 30, credit_limit: null, notes: '', is_active: 1 })}
                 className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] flex items-center gap-1"
-              ><Plus size={12} /> Add Agent</button>
+              ><Plus size={12} /> Add Agent</button>}
             </div>
             {travelAgents.length === 0 ? (
               <p className="text-xs text-[#9c8e85] italic mt-2">No travel agents registered yet. Click "Add Agent" to start tagging bookings to a partner.</p>
@@ -26489,8 +26489,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         </td>
                         <td className="px-3 py-2 text-right">
                           <button onClick={() => openPartnerStatement('AGENT', a.id)} className="text-[10px] font-bold text-rose-700 hover:underline mr-3">Statement</button>
-                          <button onClick={() => setEditingAgent({ ...a })} className="text-[10px] font-bold text-[#3d3128] hover:underline mr-3">Edit</button>
-                          <button onClick={() => deleteTravelAgent(a.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Deactivate</button>
+                          {canWriteTab('CHANNEL_MANAGER') && <button onClick={() => setEditingAgent({ ...a })} className="text-[10px] font-bold text-[#3d3128] hover:underline mr-3">Edit</button>}
+                          {canDeleteTab('CHANNEL_MANAGER') && <button onClick={() => deleteTravelAgent(a.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Deactivate</button>}
                         </td>
                       </tr>
                     ))}
@@ -29465,14 +29465,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     e.target.value = '';  // reset so the same file can be reselected
                   }}
                 />
-                <button
+                {canWriteTab('SETTINGS') && <button
                   type="button"
                   onClick={() => (document.getElementById('hotel-logo-input') as HTMLInputElement | null)?.click()}
                   className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] flex items-center gap-2"
                 >
                   <Upload size={14}/> {(restaurant as any)?.logo_url ? 'Replace Logo' : 'Upload Logo'}
-                </button>
-                {(restaurant as any)?.logo_url && (
+                </button>}
+                {(restaurant as any)?.logo_url && canWriteTab('SETTINGS') && (
                   <button
                     type="button"
                     onClick={async () => {
@@ -29531,7 +29531,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   onChange={e => setOwnerProfile(prev => ({ ...prev, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
                 />
               </div>
-              <button
+              {canWriteTab('SETTINGS') && <button
                 type="submit"
                 disabled={profileSaving}
                 className={cn(
@@ -29542,7 +29542,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 )}
               >
                 {profileSaving ? 'Saving…' : profileSaved ? '✓ Profile Saved' : 'Save Profile'}
-              </button>
+              </button>}
             </form>
           </div>
 
@@ -30264,7 +30264,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               )}
             </AnimatePresence>
 
-            <button
+            {canWriteTab('SETTINGS') && <button
               type="submit"
               disabled={settingsSaveStatus === 'saving'}
               className={cn(
@@ -30289,7 +30289,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ) : (
                 <>Save Settings</>
               )}
-            </button>
+            </button>}
           </form>
         </div>
           </>)}
