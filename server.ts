@@ -12232,9 +12232,9 @@ async function startServer() {
   // Create or update a promo code
   app.put("/api/restaurant/:id/loyalty/promo-codes/:codeId", authenticate, restaurantStaff, requireTabAction('LOYALTY', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
-        return res.status(403).json({ error: "Insufficient permission" });
-      }
+      // Access is enforced by requireTabAction('LOYALTY','UPDATE') above — a custom
+      // role the owner granted LOYALTY Edit must pass (the old inline OWNER/MANAGER/
+      // SUPER_ADMIN allowlist wrongly 403'd every custom role; removed for matrix parity).
       const db = await getTenantDb(req.params.id);
       const idParam = String(req.params.codeId || '').trim();
       const code = String(req.body?.code || '').trim().toUpperCase();
@@ -12310,9 +12310,9 @@ async function startServer() {
   // Delete a promo code (soft delete by disabling — we never lose redemption history)
   app.delete("/api/restaurant/:id/loyalty/promo-codes/:codeId", authenticate, restaurantStaff, requireTabAction('LOYALTY', 'DELETE'), async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
-        return res.status(403).json({ error: "Insufficient permission" });
-      }
+      // Access is enforced by requireTabAction('LOYALTY','DELETE') above (Full) — the
+      // old inline OWNER/MANAGER/SUPER_ADMIN allowlist wrongly 403'd every custom role
+      // granted LOYALTY Full; removed for matrix parity.
       const db = await getTenantDb(req.params.id);
       await db.run("UPDATE promo_codes SET is_enabled = 0 WHERE id = ?", [req.params.codeId]);
       res.json({ success: true });
@@ -52420,8 +52420,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-events-frontend-view-gating',
+    commit_marker: 'rbac-phase1-inline-cleanup',
     code_features: [
+      'rbac-phase1-inline-cleanup',                  //RBAC (Phase-1 follow-up caught by LIVE validation). The QA harness (View/Edit/Full custom roles on RESTO-1003) probed the converted write endpoints and found loyalty promo-codes PUT+DELETE had a REDUNDANT inline allowlist inside the handler (role !== OWNER && !== MANAGER && !== SUPER_ADMIN) that 403'd even a custom role granted LOYALTY Full — despite the now-correct requireTabAction gate. Removed both inline checks (requireTabAction('LOYALTY','UPDATE'|'DELETE') is authoritative). Scanned all 116 converted endpoints: only these 2 were genuine conflicts (hotel/enable = intentional SUPER_ADMIN/CTO provisioning; hotel/settings + property-profile = tenant-scope guards restaurantId!==params.id; tables/status = per-table waiter-assignment logic — all correct, left as-is). tsc + vite build clean.
       'rbac-events-frontend-view-gating',            //UX (frontend parity with the backend action-level gates). Reported: a View-only "PCC Security 1" role could still click "New Booking", fill the whole form, and only get rejected on Save ("does not have CREATE access to EVENTS_BOOKINGS") — the backend correctly BLOCKS (Phase-1 gate working), but the button shouldn't be shown. Added evTabLevel()/evCanEdit() in EventViews.tsx (reads the tab_perms map App.tsx mirrors to localStorage; owner/SA/CTO=full) and HID the Events write controls for View-level roles: New Booking, the 4 master-data +Add buttons (Venues/Rentals/Services/Catering), and the booking Confirm/Checkout actions → a View role now sees read-only Events. Backend remains the security boundary. NOTE (broader UX pass pending): in-detail write controls and the Hotel/Restaurant frontends still show write buttons to View roles; the server rejects those writes regardless. tsc + vite build clean.
       'rbac-hotel-restaurant-write-gates',           //SECURITY (privilege escalation — Phase 1 of a full RBAC sweep, extends events-write-gates to HOTEL + RESTAURANT). A senior-RBAC audit (3 module agents, every endpoint inventoried) found ~140 write endpoints gated by requireTabAccess (= requireTabAction READ, level 1) → a VIEW-level role could POST/PUT/PATCH/DELETE. PHASE 1: mechanically converted the 116 write-at-read-level endpoints (91 hotel + 25 restaurant; all `:id`=tenant so the tab gate is live) to requireTabAction(tab, ACTION) — POST→CREATE, PUT/PATCH→UPDATE (Edit/2), DELETE→DELETE (Full/3): 67 CREATE, 27 UPDATE, 22 DELETE. Also gated events POST /upload-image (was eventsStaff-only) → requireTabAction('EVENTS_SETTINGS','UPDATE'). Validated live on RESTO-1003 with View/Edit/Full QA roles (View⛔ / Edit✓ create+update / Full✓ delete). DEFERRED to Phase 2 (delicate — needs inline _roleHasTab or added gates): ~31 restaurant MODULE-ONLY-WRITES incl. 11 ★ money/order endpoints (settle bill, mark paid, edit invoice totals, charge-to-room; PATCH/DELETE /api/orders|/api/menu/:id where :id≠tenant so requireTabAction is INERT), 8 hotel module-only writes, inline-allowlist gates (feedback reply, folio-cancel, housekeeping tasks/override/assign). PHASE 3: ~90 horizontal-over-read GETs + 4 never-enforced hotel tabs (FRONT_OFFICE_REPORTS/COMPLIANCE/CONCIERGE_FAQ/PUBLIC_BOOKING_PAGE). tsc + vite build clean.
       'events-write-gates-view-cannot-edit',         //SECURITY FIX (privilege escalation — a VIEW-level role could WRITE). Reported + confirmed on RESTO_1777732755237_243X0: a "PCC Security 1" staff (Security 3, EVENTS_BOOKINGS at View=1, all events tabs at View) CREATED an event booking (audit EVT-1788424231732-WTF4). Root cause: every events write route was gated with requireTabAccess(tab) = requireTabAction(tab,'READ'), which enforces only View (level 1), so a View grant passed a POST/PUT/PATCH/DELETE. Converted ALL 38 events write endpoints to the ACTION-level gate: POST→CREATE, PUT/PATCH→UPDATE (level 2 = Edit), DELETE→DELETE (level 3 = Full) — matching the existing HOTEL_BOOKINGS pattern. Now View = read only; Edit = create/update; Full = delete. SYSTEMIC (not shipped here — needs a careful pass): requireTabAccess (READ-level) is still on ~300 write endpoints across hotel/spa/restaurant; only HOTEL_BOOKINGS previously used action-level. A blanket method→action change is unsafe because some POSTs are reads (search / report / pdf) that must stay View-accessible, so the sweep must be per-endpoint. tsc + vite build clean.
