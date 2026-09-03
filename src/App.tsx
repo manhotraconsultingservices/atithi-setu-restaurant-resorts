@@ -30538,9 +30538,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 {printHealth.agent_online && (printHealth.oldest_pending_secs || 0) > 120 && <span>{printHealth.pending} ticket{printHealth.pending === 1 ? '' : 's'} waiting (oldest {Math.round((printHealth.oldest_pending_secs || 0) / 60)}m). </span>}
                 <span className="opacity-80">Every order still shows on this board — check the printer (paper / power / cable).</span>
               </span>
-              <button onClick={retryFailedPrints} disabled={printRetrying} className="ml-auto px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest bg-rose-500/25 border border-rose-400/50 text-rose-100 hover:bg-rose-500/35 disabled:opacity-50 transition-all shrink-0">
+              {canWriteTab('MONITOR') && <button onClick={retryFailedPrints} disabled={printRetrying} className="ml-auto px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest bg-rose-500/25 border border-rose-400/50 text-rose-100 hover:bg-rose-500/35 disabled:opacity-50 transition-all shrink-0">
                 {printRetrying ? 'Retrying…' : '↻ Retry printing'}
-              </button>
+              </button>}
             </div>
           )}
 
@@ -30972,7 +30972,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 value={`${(t as any).assigned_role || ''}|${t.assigned_waiter_id || ''}`}
                                 onChange={e => assignWaiter(t.id, e.target.value || null)}
                                 onClick={e => e.stopPropagation()}
-                                className="w-full min-w-[120px] rounded-lg px-2 py-1.5 text-xs bg-[#faf7f2] border border-[#cc5a16]/10 text-[#3d3128] outline-none hover:border-[#cc5a16]/30 transition-colors cursor-pointer"
+                                disabled={!canWriteTab('MONITOR')}
+                                className="w-full min-w-[120px] rounded-lg px-2 py-1.5 text-xs bg-[#faf7f2] border border-[#cc5a16]/10 text-[#3d3128] outline-none hover:border-[#cc5a16]/30 transition-colors cursor-pointer disabled:cursor-default disabled:opacity-70"
                               >
                                 <option value="">— Assign —</option>
                                 {renderRoleAssignOptions()}
@@ -31009,9 +31010,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     <button
                                       key={st}
                                       onClick={() => updateTableStatus(t.id, st)}
-                                      disabled={isActive}
+                                      disabled={isActive || !canWriteTab('MONITOR')}
                                       className={cn(
-                                        "px-2 py-1 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all whitespace-nowrap",
+                                        "px-2 py-1 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all whitespace-nowrap disabled:opacity-60",
                                         isActive
                                           ? st === 'AVAILABLE'    ? 'bg-emerald-500 text-white shadow-sm'
                                             : st === 'OCCUPIED'   ? 'bg-amber-500 text-white shadow-sm'
