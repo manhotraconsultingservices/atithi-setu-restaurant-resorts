@@ -11047,6 +11047,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [liveTables, setLiveTables] = useState<LiveTableView[]>([]);
   const [liveLoading, setLiveLoading] = useState(false);
+  // Print health for the Command Centre indicator (waiting/failed tickets + agent online)
+  const [printHealth, setPrintHealth] = useState<{ has_printer?: boolean; pending?: number; failed?: number; oldest_pending_secs?: number | null; agent_online?: boolean; agent_version?: string | null } | null>(null);
+  const [printRetrying, setPrintRetrying] = useState(false);
   const [liveLastRefresh, setLiveLastRefresh] = useState<Date | null>(null);
   const [liveNow, setLiveNow] = useState(Date.now());
   const [liveOrders, setLiveOrders] = useState<Order[]>([]);
@@ -13364,11 +13367,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         setCloudKitchenOrders([]);
         setCloudKitchenSummary(null);
       }
+      // Print health — best-effort; drives the Command Centre "tickets waiting/failed" indicator.
+      try {
+        const hRes = await fetch(`/api/restaurant/${restaurantId}/print-jobs/health`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (hRes.ok) setPrintHealth(await hRes.json());
+      } catch { /* best-effort */ }
     } catch (err) {
       console.error("Failed to fetch live tables", err);
     } finally {
       setLiveLoading(false);
     }
+  };
+
+  // Command Centre "Retry printing" — re-enqueue every recent order missing a live
+  // kitchen ticket (never enqueued or all-FAILED). Immediate on-demand reconcile.
+  const retryFailedPrints = async () => {
+    if (!restaurantId) return;
+    setPrintRetrying(true);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/print-jobs/retry-failed`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) toast.success(`Re-sent ${d.retried ?? 0} ticket${d.retried === 1 ? '' : 's'} to the kitchen printer`);
+      else toast.error(d?.error || 'Could not retry printing');
+      fetchLiveTables();
+    } catch (e: any) { toast.error(e?.message || 'Could not retry printing'); }
+    finally { setPrintRetrying(false); }
   };
 
   // ─── Inventory fetchers ───────────────────────────────────────────────────
@@ -30483,6 +30506,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             );
           })()}
+
+          {/* ── PRINT HEALTH BANNER ── kitchen tickets waiting / failed (printer trouble) */}
+          {printHealth?.has_printer && (((printHealth.failed || 0) > 0) || (!printHealth.agent_online && (printHealth.pending || 0) > 0) || ((printHealth.oldest_pending_secs || 0) > 120)) && (
+            <div className="px-4 py-3 rounded-2xl flex items-center gap-3 flex-wrap backdrop-blur-md bg-rose-500/15 border border-rose-400/40" style={{ boxShadow: '0 0 30px rgba(244, 63, 94, 0.30)' }}>
+              <span className="relative flex h-2.5 w-2.5 shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-400" />
+              </span>
+              <span className="text-rose-200 text-xs font-bold uppercase tracking-widest shrink-0">🖨 Printing:</span>
+              <span className="text-rose-100 text-sm">
+                {(printHealth.failed || 0) > 0 && <b>{printHealth.failed} ticket{printHealth.failed === 1 ? '' : 's'} failed to print. </b>}
+                {!printHealth.agent_online && (printHealth.pending || 0) > 0 && <b>Print agent offline — {printHealth.pending} ticket{printHealth.pending === 1 ? '' : 's'} waiting. </b>}
+                {printHealth.agent_online && (printHealth.oldest_pending_secs || 0) > 120 && <span>{printHealth.pending} ticket{printHealth.pending === 1 ? '' : 's'} waiting (oldest {Math.round((printHealth.oldest_pending_secs || 0) / 60)}m). </span>}
+                <span className="opacity-80">Every order still shows on this board — check the printer (paper / power / cable).</span>
+              </span>
+              <button onClick={retryFailedPrints} disabled={printRetrying} className="ml-auto px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest bg-rose-500/25 border border-rose-400/50 text-rose-100 hover:bg-rose-500/35 disabled:opacity-50 transition-all shrink-0">
+                {printRetrying ? 'Retrying…' : '↻ Retry printing'}
+              </button>
+            </div>
+          )}
 
           {/* ── BILL REQUESTED BANNER ── orange glass with pulse */}
           {liveTables.some(t => t.session_status === 'bill_requested') && (
