@@ -24449,7 +24449,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch venues" }); }
   });
 
-  app.post("/api/restaurant/:id/events/venues", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/venues", authenticate, eventsStaff, requireTabAction('EVENTS_VENUES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24476,7 +24476,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create venue" }); }
   });
 
-  app.patch("/api/restaurant/:id/events/venues/:vid", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/events/venues/:vid", authenticate, eventsStaff, requireTabAction('EVENTS_VENUES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24496,7 +24496,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update venue" }); }
   });
 
-  app.delete("/api/restaurant/:id/events/venues/:vid", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/venues/:vid", authenticate, eventsStaff, requireTabAction('EVENTS_VENUES', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24509,7 +24509,7 @@ ${data.tenant.name}`;
 
   // Manual hall status board (mirrors room status). Setting it raises any
   // VENUE_<status> checklist the owner configured — NON-BLOCKING, never gates ops.
-  app.patch("/api/restaurant/:id/events/venues/:vid/status", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/events/venues/:vid/status", authenticate, eventsStaff, requireTabAction('EVENTS_VENUES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24540,7 +24540,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch venue blocks" }); }
   });
 
-  app.post("/api/restaurant/:id/events/venue-blocks", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/venue-blocks", authenticate, eventsStaff, requireTabAction('EVENTS_VENUES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24558,7 +24558,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create venue block" }); }
   });
 
-  app.delete("/api/restaurant/:id/events/venue-blocks/:bid", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/venue-blocks/:bid", authenticate, eventsStaff, requireTabAction('EVENTS_VENUES', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24582,7 +24582,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch rental items" }); }
   });
 
-  app.post("/api/restaurant/:id/events/rental-items", authenticate, eventsStaff, requireTabAccess('EVENTS_RENTALS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/rental-items", authenticate, eventsStaff, requireTabAction('EVENTS_RENTALS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24602,7 +24602,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create rental item" }); }
   });
 
-  app.patch("/api/restaurant/:id/events/rental-items/:iid", authenticate, eventsStaff, requireTabAccess('EVENTS_RENTALS'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/events/rental-items/:iid", authenticate, eventsStaff, requireTabAction('EVENTS_RENTALS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24621,7 +24621,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update rental item" }); }
   });
 
-  app.delete("/api/restaurant/:id/events/rental-items/:iid", authenticate, eventsStaff, requireTabAccess('EVENTS_RENTALS'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/rental-items/:iid", authenticate, eventsStaff, requireTabAction('EVENTS_RENTALS', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24642,7 +24642,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch services" }); }
   });
 
-  app.post("/api/restaurant/:id/events/services", authenticate, eventsStaff, requireTabAccess('EVENTS_SERVICES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/services", authenticate, eventsStaff, requireTabAction('EVENTS_SERVICES', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24661,7 +24661,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create service" }); }
   });
 
-  app.patch("/api/restaurant/:id/events/services/:sid", authenticate, eventsStaff, requireTabAccess('EVENTS_SERVICES'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/events/services/:sid", authenticate, eventsStaff, requireTabAction('EVENTS_SERVICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24680,7 +24680,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update service" }); }
   });
 
-  app.delete("/api/restaurant/:id/events/services/:sid", authenticate, eventsStaff, requireTabAccess('EVENTS_SERVICES'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/services/:sid", authenticate, eventsStaff, requireTabAction('EVENTS_SERVICES', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24701,7 +24701,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch catering packages" }); }
   });
 
-  app.post("/api/restaurant/:id/events/catering-packages", authenticate, eventsStaff, requireTabAccess('EVENTS_CATERING'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/catering-packages", authenticate, eventsStaff, requireTabAction('EVENTS_CATERING', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24720,7 +24720,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create catering package" }); }
   });
 
-  app.patch("/api/restaurant/:id/events/catering-packages/:cid", authenticate, eventsStaff, requireTabAccess('EVENTS_CATERING'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/events/catering-packages/:cid", authenticate, eventsStaff, requireTabAction('EVENTS_CATERING', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24740,7 +24740,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update catering package" }); }
   });
 
-  app.delete("/api/restaurant/:id/events/catering-packages/:cid", authenticate, eventsStaff, requireTabAccess('EVENTS_CATERING'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/catering-packages/:cid", authenticate, eventsStaff, requireTabAction('EVENTS_CATERING', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24761,7 +24761,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch profile" }); }
   });
 
-  app.put("/api/restaurant/:id/events/profile", authenticate, eventsStaff, requireTabAccess('EVENTS_SETTINGS'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/events/profile", authenticate, eventsStaff, requireTabAction('EVENTS_SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24817,7 +24817,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch GST settings" }); }
   });
 
-  app.put("/api/restaurant/:id/events/gst-settings", authenticate, eventsStaff, requireTabAccess('EVENTS_SETTINGS'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/events/gst-settings", authenticate, eventsStaff, requireTabAction('EVENTS_SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24888,7 +24888,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch venue settings" }); }
   });
 
-  app.put("/api/restaurant/:id/events/venue-settings", authenticate, eventsStaff, requireTabAccess('EVENTS_SETTINGS'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/events/venue-settings", authenticate, eventsStaff, requireTabAction('EVENTS_SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -25945,7 +25945,7 @@ ${data.tenant.name}`;
     return { rateBasis, eventDate, endDate, venueId, slot, startTime, endTime, bufferMin, venueRate, venue, profile };
   };
 
-  app.post("/api/restaurant/:id/events/bookings", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26006,7 +26006,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.put("/api/restaurant/:id/events/bookings/:bid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/events/bookings/:bid", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26133,7 +26133,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/events/bookings/:bid/cancel", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/cancel", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26247,7 +26247,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load schedule" }); }
   });
 
-  app.post("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26271,7 +26271,7 @@ ${data.tenant.name}`;
   });
 
   // Generate a staged schedule from a template (default 25/50/25 at now / T-30 / T-7).
-  app.post("/api/restaurant/:id/events/bookings/:bid/schedule/generate", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/schedule/generate", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26312,7 +26312,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to generate schedule" }); }
   });
 
-  app.put("/api/restaurant/:id/events/schedule/:sid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/events/schedule/:sid", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26330,7 +26330,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update schedule row" }); }
   });
 
-  app.delete("/api/restaurant/:id/events/schedule/:sid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/schedule/:sid", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26360,7 +26360,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load payments" }); }
   });
 
-  app.post("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26437,7 +26437,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to record payment" }); }
   });
 
-  app.delete("/api/restaurant/:id/events/payments/:pid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/payments/:pid", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26518,7 +26518,7 @@ ${data.tenant.name}`;
   // Assign a roster staff member to a booking for a working date. Blocks a
   // same-date double-booking across live events (409 unless body.force = true),
   // and blocks an exact duplicate assignment on this booking.
-  app.post("/api/restaurant/:id/events/bookings/:bid/staff", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/staff", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26565,7 +26565,7 @@ ${data.tenant.name}`;
   });
 
   // Unassign a staff member from a booking.
-  app.delete("/api/restaurant/:id/events/staff/:asgId", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/staff/:asgId", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26579,7 +26579,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to unassign staff" }); }
   });
 
-  app.post("/api/restaurant/:id/events/bookings/:bid/complete", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/complete", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26695,7 +26695,7 @@ ${data.tenant.name}`;
   });
 
   // Attach a hotel room to the event (QUOTED only — no real booking yet).
-  app.post("/api/restaurant/:id/events/bookings/:bid/rooms", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/rooms", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26730,7 +26730,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to attach room" }); }
   });
 
-  app.delete("/api/restaurant/:id/events/bookings/:bid/rooms/:rid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/events/bookings/:bid/rooms/:rid", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26747,7 +26747,7 @@ ${data.tenant.name}`;
   });
 
   // Edit an attached (QUOTED) room line — override rate / room count.
-  app.put("/api/restaurant/:id/events/bookings/:bid/rooms/:rid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/events/bookings/:bid/rooms/:rid", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26775,7 +26775,7 @@ ${data.tenant.name}`;
   });
 
   // Confirm the event → hold the venue + create the real hotel bookings via API.
-  app.post("/api/restaurant/:id/events/bookings/:bid/confirm", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/confirm", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -26900,7 +26900,7 @@ ${data.tenant.name}`;
     return { lines, subtotal, tax, discount, grand };
   };
 
-  app.post("/api/restaurant/:id/events/bookings/:bid/quotations", authenticate, eventsStaff, requireTabAccess('EVENTS_QUOTATIONS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/quotations", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27152,7 +27152,7 @@ ${data.tenant.name}`;
     } catch (err: any) { console.error("/events invoice pdf error:", err); res.status(500).json({ error: "Failed to generate invoice" }); }
   });
 
-  app.post("/api/restaurant/:id/events/bookings/:bid/invoice/send", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/invoice/send", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27172,7 +27172,7 @@ ${data.tenant.name}`;
     } catch (err: any) { console.error("/events invoice send error:", err); res.status(500).json({ error: "Failed to send invoice" }); }
   });
 
-  app.post("/api/restaurant/:id/events/quotations/:qid/send", authenticate, eventsStaff, requireTabAccess('EVENTS_QUOTATIONS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/quotations/:qid/send", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -27200,7 +27200,7 @@ ${data.tenant.name}`;
   });
 
   // ─── CHECKOUT → folio (folio_kind='EVENT') ─────────────────────────────────
-  app.post("/api/restaurant/:id/events/bookings/:bid/checkout", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/events/bookings/:bid/checkout", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -52420,8 +52420,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-rental-hourly-rate-fix',
+    commit_marker: 'events-write-gates-view-cannot-edit',
     code_features: [
+      'events-write-gates-view-cannot-edit',         //SECURITY FIX (privilege escalation — a VIEW-level role could WRITE). Reported + confirmed on RESTO_1777732755237_243X0: a "PCC Security 1" staff (Security 3, EVENTS_BOOKINGS at View=1, all events tabs at View) CREATED an event booking (audit EVT-1788424231732-WTF4). Root cause: every events write route was gated with requireTabAccess(tab) = requireTabAction(tab,'READ'), which enforces only View (level 1), so a View grant passed a POST/PUT/PATCH/DELETE. Converted ALL 38 events write endpoints to the ACTION-level gate: POST→CREATE, PUT/PATCH→UPDATE (level 2 = Edit), DELETE→DELETE (level 3 = Full) — matching the existing HOTEL_BOOKINGS pattern. Now View = read only; Edit = create/update; Full = delete. SYSTEMIC (not shipped here — needs a careful pass): requireTabAccess (READ-level) is still on ~300 write endpoints across hotel/spa/restaurant; only HOTEL_BOOKINGS previously used action-level. A blanket method→action change is unsafe because some POSTs are reads (search / report / pdf) that must stay View-accessible, so the sweep must be per-endpoint. tsc + vite build clean.
       'event-rental-hourly-rate-fix',                //BUGFIX (event rental billed at the DAILY rate on an HOURLY booking). Adding a rental to an event via EventViews.tsx addRental hard-coded rate_basis:'DAILY' + unit_rate:rent_daily regardless of the event's venue_rate_basis — so an HOURLY event still charged rentals the daily rate (reported: a Gas Cylinder on a 15:00–03:00 hourly booking). Now the rental follows the event basis: HOURLY event → rate_basis HOURLY + unit_rate rent_hourly; HALF_DAY/DAILY → rent_daily (rentals have no half-day rate). Backend insertEventLines now defaults an OMITTED rate_basis to the booking's venue_rate_basis (loads event_bookings.venue_rate_basis) instead of hard-coded 'DAILY', so API callers behave the same. Forward-looking: existing lines keep their stored basis — re-add the item or edit its unit_rate to correct old bookings. tsc + vite build clean.
       'rbac-checklistboard-event-invoicecancel-fix', //RBAC BUGFIX (nav-shows-but-endpoint-blocks — Staff Access matrix parity). Two fixed-role-allowlist gates 403'd custom roles the owner had explicitly granted the tab, while the nav DID show the tab (click → 403). (1) GET /checklists/board gated on the fixed HK_MANAGER_ROLES allowlist → a custom Receptionist granted Full CHECKLIST_BOARD saw "Only a manager or owner can view the checklist board." Now keeps the owner/manager fast-path AND adds `_roleHasTab('CHECKLIST_BOARD')`. (2) POST /events/bookings/:bid/invoice/cancel gated on inline ['OWNER','MANAGER','SUPER_ADMIN','CTO'] → with OOTB roles deprecated that collapses to OWNER-only, locking out a custom banquet-manager granted EVENTS_BOOKINGS Full (who can already create/edit/cancel the whole booking + its GL). Now keeps the fast-path AND adds `_roleHasTab('EVENTS_BOOKINGS',3)`; the frontend Cancel-Invoice button (EventViews.tsx) gates on the same via a canCancelEventInvoice() helper reading a tab_perms map App.tsx now mirrors to localStorage. Issue 6 (Roster View) confirmed NOT a bug — GET /roster already gates on _roleHasTab('ROSTER'); View = can view the schedule (expected). Systemic note: the identical invoice-cancel allowlist exists on hotel/spa/restaurant (deliberately owner/manager per invoice-cancel-audit-map) — flagged for a follow-up matrix-parity pass. tsc clean.
       'print-health-alert-indicator',                //RELIABILITY VISIBILITY (make a printer problem visible to staff + owner, complements the reconcile guarantee). (1) GET /print-jobs/health (restaurantStaff) → { has_printer, pending, failed(30min), oldest_pending_secs, agent_online, agent_version } from print_jobs + _agentHeartbeats. (2) POST /print-jobs/retry-failed (restaurantStaff) → on-demand immediate reconcile: re-enqueue every recent (<2h) order with no live ticket (never enqueued or all-FAILED); never double-prints. (3) Owner push alert in the reconcile sweep: if ≥3 FAILED tickets in the last 10min, fire triggerNotification(PRINT_FAILURE) throttled 30min/tenant (best-effort — delivers only if the tenant configured that event). (4) FRONTEND Command Centre banner (App.tsx): fetchLiveTables also pulls /print-jobs/health; a rose banner shows when tickets failed / agent offline with tickets waiting / oldest pending >2min, with a "↻ Retry printing" button → retry-failed. Messaging reassures 'every order still shows on this board' (the on-screen KDS fallback). tsc + vite build clean.               //RELIABILITY (KDS: guarantee no order is left without a kitchen ticket). enqueuePrintJobsForOrder is fire-and-forget (INSERT .catch swallowed; call sites .catch(()=>{})), so a DB hiccup / restart mid-order could leave a placed order with NO KOT, and a job that exhausts its 6 retries goes FAILED + is abandoned — the kitchen never gets it, no alert. Added a RECONCILIATION SWEEP (setInterval 60s, guarded `__printReconcileStarted`, matches the alert/aiosell cron pattern): for each active tenant WITH an active kitchen_printer, find recent (<30min) non-cancelled orders that have NO LIVE job (no PENDING and no PRINTED — never enqueued OR all-FAILED) and re-enqueue a fresh KOT. So every order keeps getting a live ticket until it actually prints; never double-prints (an order with a PENDING/PRINTED job is skipped → ≤1 live job/order). New idx_print_jobs_order on print_jobs(order_id) backs the NOT-EXISTS check. Also: enqueue INSERT failure now logs (was silent). The on-screen KDS (ChefDashboard reads orders directly) remains the ultimate fallback — the order always shows even if printing fails — plus the '🖨 Print' reprint. tsc + vite build clean.                   //PERF (order hot path). The central (shared, cross-tenant) `restaurants` row was read up to 5x per order placement (checkout_mode + is_gst/gst_percentage + min_margin — plus invoice-numbering + snapshot inside helpers), multiplying central-DB QPS by tenant count for effectively-static per-tenant settings. Added a per-tenant `_getRestaurantSettings` cache (15s TTL) invalidated on the settings PATCH (_invalidateRestaurantSettings); the 3 direct reads in POST /orders now hit the cache. DEFERRED (deliberate): the recipe-SELECT N+1 in deductIngredientsForOrder — it is fire-and-forget AFTER the order response (no user-facing latency) and its per-item DISTINCT ON (ingredient_id, size_variant) + size/versioning semantics are stock-critical, so batching it is higher-risk than its reward; noted for a focused follow-up. tsc + vite build clean.                //PERF (Phase 2a — print reliability + poll load, server-side). (1) PRINT-JOB RETRY BACKOFF: a failed print job went straight back to PENDING and was re-fetched on the very next 800ms poll — so a down/slow printer burned the agent's 8s connect-timeout every tick (and, with the agent's global tick gate, blacked out ALL printing). Added `print_jobs.next_attempt_at` (db.ts); the ack failure path now sets it to NOW() + 2^attempts seconds (cap 60s), and GET /print-jobs/pending filters `next_attempt_at IS NULL OR <= NOW()`. A dead printer now backs off instead of hammering. (2) AGENT-TOKEN AUTH CACHE: every agent poll/ack ran a central-DB `SELECT ... FROM restaurants WHERE print_agent_token=?` (constant cross-tenant load ~1.25/s/tenant even when idle); now a validated (tenant,token) pair is cached 60s in-process. tsc + vite build clean. Still pending: Phase 2b on-prem agent rewrite (decouple poll from print) + collapse the 5x central `restaurants` reads on the order path + batch the recipe-SELECT N+1.                   //PERF/SCALE (Phase 1 of the Balaji-Inn "not fit for scale" + slow-print review — server-side, all tenants). Grounded in a 3-part code review. (1) DB LAYER (db.ts): withClient issued `SET search_path` before EVERY query = 2 round-trips per read/write; now tags each pooled connection with its schema and skips the redundant SET → ~1 round-trip (verified: the only SET is withClient, no pool 'connect' handler, so no cross-tenant pollution). exec ran `CREATE SCHEMA IF NOT EXISTS` on every call → now once per schema per process (_schemaEnsured Set). Pool `max` was unset (pg default 10) → now 20 (PG_POOL_MAX) + idle/connect timeouts. (2) PER-REQUEST DDL: POST /orders ran 23 `ALTER TABLE ADD COLUMN IF NOT EXISTS` (+CREATE) on the hottest write path; /orders/live 5/poll, PATCH /orders 4/update, /tables/live 6/poll, /sessions 1/scan, /waiter-calls a CREATE TABLE/poll, and enqueue a CREATE TABLE/order. In PG, ADD COLUMN IF NOT EXISTS takes an ACCESS EXCLUSIVE lock even when it no-ops → lock storms serializing against live reads/writes = the "freeze under load" symptom. All moved to db.ts _initTenantDb + guarded once-per-tenant helpers (_ensureOrderCols/_ensureTableFloorCols/WeakSets) → 0 DDL per hot request after warmup. (3) MISSING INDEXES (db.ts _initTenantDb): orders.session_id was UNINDEXED (QR-scan running bill + /tables/live aggregate + resume subquery all seq-scanned full order history) → idx_orders_session; + idx_orders_live_kitchen (partial, KDS board), idx_table_sessions_status, idx_table_sessions_table_status, idx_waiter_calls_status_created (table had zero secondary indexes). Net: an order placement drops from ~90+ PG round-trips (most table-locking DDL) to a handful of indexed statements. tsc + vite build clean. PHASE 2 (separate): on-prem agent rewrite (decouple poll from print so one slow printer can't freeze all; eager USB worker; 8s→2s timeout; drop 200ms post-write; fire-and-forget ACK) + print-job retry backoff + agent-token auth cache + collapse the 5x central `restaurants` reads on the order path.               //BUGFIX (the REAL Command Centre Map flicker — persisted in incognito after the alert-pulse fix). Root cause: FloorPlanMap defined its sub-views (SectionTabs, ViewMode [the whole tile grid], ArrangeMode, TileBody) as components INSIDE the component body and rendered them as JSX elements `<ViewMode/>`. A nested component definition gets a NEW function identity on every render, so React treats it as a different component TYPE and UNMOUNTS + REMOUNTS the entire subtree on EVERY FloorPlanMap re-render — i.e. the whole tile grid was destroyed + recreated on every 30s live-refresh AND every parent (App) re-render → visible flicker (and it restarted the tile animations too). Fix: invoke them as plain functions — `{ViewMode()}`, `{SectionTabs()}`, `{ArrangeMode()}`, `{TileBody({t})}` — so their JSX inlines into FloorPlanMap's render and React reconciles the key={t.id} tiles across renders instead of remounting. Safe because none of them call hooks (all hooks are at FloorPlanMap's top level; ArrangeMode's drag state draft/selId/refs live at component scope so they're shared, not internal). This is the exact nested-component-definition anti-pattern the codebase was already burned by on the Analytics KPI cards (App.tsx ~12482 comment). Complements the prior `command-centre-flicker-fix` (slow tables no longer pulse) — that removed the animation, this removes the remount. tsc + vite build clean.                  //BUGFIX (Command Centre "screen is flickering" on the Map view). Root cause: the Floor Plan map tagged every SLOW-turn table (over the turn-time alert threshold) with the `alert-pulse` CSS animation (src/index.css — a 1.3s infinite red glow/border pulse meant for TRANSIENT "act now" alerts like waiter-calls). A slow turn is a PERSISTENT status (a table can sit slow for hours), so with several slow tables the whole board pulsed in sync = perceived flicker. Fix: (1) FloorPlanMap tileStatus `pulse: bill || over` → `pulse: bill` — only a bill-request (transient, needs staff action) pulses; a slow table keeps its solid red border + "SLOW" label, no animation. (2) `TileBody` was a component defined INSIDE FloorPlanMap and rendered as `<TileBody/>` — the nested-component-definition anti-pattern (new identity each render → React remounts the tile inner content on every 30s refresh); now invoked as a plain function `{TileBody({t})}` so it inlines (no remount). (3) Added a `@media (prefers-reduced-motion: reduce)` guard that disables `.alert-pulse`/`.alert-title-pulse` for motion-sensitive users. Restaurant LIST view was unaffected (it only pulses PENDING service requests, the intended transient use). tsc + vite build clean.
