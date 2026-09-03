@@ -6686,10 +6686,10 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
                 { key: 'stock_status', label: 'Status', sortable: true, getValue: (it: any) => stockStatus(it), render: (it: any) => { const st = stockStatus(it); return st === 'critical' ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800">Reorder</span> : st === 'low' ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Low</span> : <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">OK</span>; } },
                 { key: 'actions', label: 'Actions', searchable: false, exportValue: () => '', render: (it: any) => (
                   <div className="flex items-center gap-1">
-                    <button onClick={() => openAdj(it)} className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-[10px] font-bold hover:bg-emerald-100 border border-emerald-200">Receive</button>
-                    <button onClick={() => { setAdjItem(it); setAdjForm({ movement_type: 'CONSUME', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }} className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-[10px] font-bold hover:bg-amber-100 border border-amber-200">Use</button>
-                    <button onClick={() => openEdit(it)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 border border-[#cc5a16]/20">Edit</button>
-                    <button onClick={() => deleteItem(it.id)} className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>
+                    {canWriteTab('HOTEL_INVENTORY') && <button onClick={() => openAdj(it)} className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-[10px] font-bold hover:bg-emerald-100 border border-emerald-200">Receive</button>}
+                    {canWriteTab('HOTEL_INVENTORY') && <button onClick={() => { setAdjItem(it); setAdjForm({ movement_type: 'CONSUME', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }} className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-[10px] font-bold hover:bg-amber-100 border border-amber-200">Use</button>}
+                    {canWriteTab('HOTEL_INVENTORY') && <button onClick={() => openEdit(it)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 border border-[#cc5a16]/20">Edit</button>}
+                    {canDeleteTab('HOTEL_INVENTORY') && <button onClick={() => deleteItem(it.id)} className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>}
                   </div>
                 )},
               ]}
@@ -16291,14 +16291,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   {/* Actions — high-contrast pills so they're easy to scan at a glance */}
                   <div className="flex items-center justify-between pt-3 border-t border-[#cc5a16]/10 gap-2 flex-wrap">
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      <button
+                      {canWriteTab('MENU') && <button
                         onClick={() => setEditingItem(item)}
                         className="text-[11px] font-bold text-[#1a1208] bg-[#faf7f2] hover:bg-[#cc5a16] hover:text-white border border-[#cc5a16]/20 hover:border-[#cc5a16] flex items-center gap-1 px-2.5 py-1.5 rounded-lg transition-all"
                         title="Edit menu item"
                       >
                         <Edit3 size={12}/> Edit
-                      </button>
-                      <button
+                      </button>}
+                      {canWriteTab('MENU') && <button
                         onClick={async () => {
                           // Lazy-fetch ingredients only when builder opens (avoid heavy load on Menu Mgmt)
                           if (inventoryIngredients.length === 0) await fetchInventoryIngredients();
@@ -16308,8 +16308,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         title="Recipe — define ingredients per serving for inventory tracking"
                       >
                         🧾 Recipe
-                      </button>
-                      <button
+                      </button>}
+                      {canWriteTab('MENU') && <button
                         onClick={() => handleToggleDailySpecial(item.id, !item.is_daily_special)}
                         className={cn(
                           'p-1.5 rounded-lg border transition-all',
@@ -16320,16 +16320,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         title={item.is_daily_special ? 'Remove Daily Special' : 'Mark as Daily Special'}
                       >
                         <Star size={14} fill={item.is_daily_special ? 'currentColor' : 'none'} strokeWidth={2.2} />
-                      </button>
-                      <button
+                      </button>}
+                      {canDeleteTab('MENU') && <button
                         onClick={() => handleDeleteItem(item.id)}
                         className="p-1.5 rounded-lg text-[#6b5d52] bg-white border border-[#cc5a16]/20 hover:text-red-600 hover:bg-red-50 hover:border-red-300 transition-all"
                         title="Delete item"
                       >
                         <Trash2 size={13} strokeWidth={2.2}/>
-                      </button>
+                      </button>}
                     </div>
-                    <button
+                    {canWriteTab('MENU') && <button
                       onClick={() => handleToggleAvailability(item.id, !item.available)}
                       className={cn(
                         'flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg border transition-all',
@@ -16341,7 +16341,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     >
                       <div className={cn('w-2 h-2 rounded-full', item.available ? 'bg-emerald-600' : 'bg-red-500')}/>
                       {item.available ? 'Available' : 'Out of Stock'}
-                    </button>
+                    </button>}
                   </div>
                 </div>
               </div>
@@ -21204,7 +21204,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <Eye size={11} /> Preview
                               </button>
                               {/* Edit */}
-                              {!isPaid && (
+                              {!isPaid && canWriteTab('INVOICES') && (
                                 <button
                                   onClick={() => openInvoiceEdit(inv)}
                                   className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#1a1208] transition-all whitespace-nowrap flex items-center gap-1"
@@ -21215,13 +21215,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               )}
                               {/* Print — to the thermal printer via the agent (falls
                                   back to the browser print when no printer is set up) */}
-                              <button
+                              {canWriteTab('INVOICES') && <button
                                 onClick={() => printInvoiceThermal(inv)}
                                 title="Print the bill on your thermal printer (falls back to the browser if none is set up)"
                                 className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#cc5a16]/10 text-[#cc5a16] hover:bg-[#cc5a16]/20 transition-all whitespace-nowrap flex items-center gap-1"
                               >
                                 <Printer size={11} /> Print
-                              </button>
+                              </button>}
                               {/* History — audit log (who changed this invoice), available
                                   straight from the list without opening Edit; works for
                                   paid + unpaid invoices. Opens the same ObjectDetail overlay. */}
@@ -21233,7 +21233,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <History size={11} /> History
                               </button>
                               {/* Mark Paid */}
-                              {!isPaid && (
+                              {!isPaid && canWriteTab('INVOICES') && (
                                 <button
                                   onClick={() => openInvoiceEdit(inv)}
                                   className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-all whitespace-nowrap"
@@ -22702,13 +22702,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                     {r.notes && <p className="text-xs text-[#3d3128] italic mb-3 p-2 bg-[#faf7f2] rounded-xl">"{r.notes}"</p>}
                     <div className="flex gap-2 pt-3 border-t border-[#cc5a16]/10">
-                      {r.status === 'PENDING' && (
+                      {r.status === 'PENDING' && canWriteTab('SERVICE_REQUESTS') && (
                         <button onClick={() => updateRequestStatus(r.id, 'ACKNOWLEDGED')} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#3d3128] text-xs font-bold hover:bg-[#cc5a16]/10">Acknowledge</button>
                       )}
-                      {(r.status === 'PENDING' || r.status === 'ACKNOWLEDGED') && (
+                      {(r.status === 'PENDING' || r.status === 'ACKNOWLEDGED') && canWriteTab('SERVICE_REQUESTS') && (
                         <button onClick={() => updateRequestStatus(r.id, 'IN_PROGRESS')} className="flex-1 px-3 py-2 rounded-xl bg-amber-50 text-amber-700 text-xs font-bold hover:bg-amber-100">Start</button>
                       )}
-                      <button onClick={() => updateRequestStatus(r.id, 'COMPLETED')} className="flex-1 px-3 py-2 rounded-xl bg-emerald-500 text-white text-xs font-bold hover:bg-emerald-600">Complete</button>
+                      {canWriteTab('SERVICE_REQUESTS') && <button onClick={() => updateRequestStatus(r.id, 'COMPLETED')} className="flex-1 px-3 py-2 rounded-xl bg-emerald-500 text-white text-xs font-bold hover:bg-emerald-600">Complete</button>}
                     </div>
                   </div>
                 );
@@ -60484,15 +60484,15 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
               </p>
             </div>
             <div className="flex gap-2">
-              <button
+              {canWriteTab('LOYALTY') && <button
                 type="button"
                 onClick={recomputeAllTiers}
                 className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#faf7f2] hover:bg-amber-50"
                 title="Recalculate every customer's tier based on the current thresholds. Use after editing thresholds."
               >
                 Recompute all
-              </button>
-              <button
+              </button>}
+              {canWriteTab('LOYALTY') && <button
                 type="button"
                 onClick={() =>
                   setEditingTier({
@@ -60508,7 +60508,7 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
                 className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white hover:bg-[#a84612]"
               >
                 + Add tier
-              </button>
+              </button>}
             </div>
           </div>
 
@@ -60553,14 +60553,14 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
                       </td>
                       <td className="py-3 px-3">
                         <div className="flex gap-2">
-                          <button
+                          {canWriteTab('LOYALTY') && <button
                             type="button"
                             onClick={() => setEditingTier({ ...t })}
                             className="px-3 py-1 rounded-lg text-xs font-bold bg-[#faf7f2] hover:bg-[#cc5a16]/10"
                           >
                             Edit
-                          </button>
-                          {t.is_enabled && (
+                          </button>}
+                          {t.is_enabled && canDeleteTab('LOYALTY') && (
                             <button
                               type="button"
                               onClick={() => disableTier(t.id, t.name)}
@@ -60613,12 +60613,12 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
               <span className="text-xs text-[#6b5d52]">
                 {customersTotal} customer{customersTotal === 1 ? '' : 's'}
               </span>
-              <button
+              {canWriteTab('LOYALTY') && <button
                 onClick={() => setShowEnrollModal(true)}
                 className="px-3 py-2 bg-[#cc5a16] text-white rounded-2xl text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] transition-colors"
               >
                 + Enroll Customer
-              </button>
+              </button>}
             </div>
           </div>
 
@@ -68458,7 +68458,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
           <button onClick={() => { fetchBookings(); fetchConfigs(); }} className="p-2 hover:bg-black/5 rounded-full transition-colors" title="Refresh">
             <RefreshCw size={20} />
           </button>
-          {activeSection === 'RESERVATIONS' && (
+          {activeSection === 'RESERVATIONS' && canWriteTab('BOOKINGS') && (
             <button
               onClick={() => setShowNewBooking(true)}
               className="flex items-center gap-2 bg-[#cc5a16] text-white px-4 py-2 rounded-xl text-sm font-bold hover:scale-105 transition-transform"
@@ -68611,7 +68611,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
                       </td>
                       <td className="px-5 py-4">
                         <div className="flex gap-1">
-                          {booking.status === 'PENDING' && (
+                          {booking.status === 'PENDING' && canWriteTab('BOOKINGS') && (
                             <>
                               <button onClick={() => updateStatus(booking.id, 'CONFIRMED')} className="p-2 hover:bg-green-50 text-green-500 rounded-xl transition-colors" title="Confirm">
                                 <Check size={15} />
@@ -68621,12 +68621,12 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
                               </button>
                             </>
                           )}
-                          {booking.status === 'CONFIRMED' && (
+                          {booking.status === 'CONFIRMED' && canWriteTab('BOOKINGS') && (
                             <button onClick={() => updateStatus(booking.id, 'CANCELLED')} className="p-2 hover:bg-red-50 text-red-400 rounded-xl transition-colors" title="Cancel">
                               <X size={15} />
                             </button>
                           )}
-                          {booking.status === 'CANCELLED' && (
+                          {booking.status === 'CANCELLED' && canWriteTab('BOOKINGS') && (
                             <button onClick={() => updateStatus(booking.id, 'CONFIRMED')} className="p-2 hover:bg-green-50 text-green-500 rounded-xl transition-colors" title="Re-confirm">
                               <Check size={15} />
                             </button>
