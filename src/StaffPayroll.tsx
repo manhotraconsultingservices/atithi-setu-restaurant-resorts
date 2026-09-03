@@ -3,6 +3,9 @@ import {
   Wallet, Users, TrendingDown, IndianRupee, ChevronLeft, ChevronRight,
   Download, CheckCircle2, Plus, Lock, Clock, CalendarDays,
 } from 'lucide-react';
+// RBAC — View roles must not write here. Backend enforces; this hides/guards
+// the controls so a View user isn't led into a 403 (see src/perm.ts).
+import { canWriteTab } from './perm';
 
 // Cross-module operational payroll (Hotel / Spa / Restaurant / Events) built on
 // the shared attendance_staff roster. Hourly wages come from the timesheet
@@ -31,6 +34,7 @@ const shiftMonth = (m: string, delta: number) => {
 
 export function StaffPayrollGrid({ token }: { restaurantId: string; token: string }) {
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const canEdit = canWriteTab('STAFF_PAYROLL');
   const thisMonth = new Date().toISOString().slice(0, 7);
   const [month, setMonth] = useState(thisMonth);
   const [data, setData] = useState<{ period: string; rows: Row[]; totals: any; run_status?: string; payable?: number; paid_at?: string | null; pay_method?: string | null } | null>(null);
@@ -53,6 +57,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
   useEffect(() => { load(); }, [month]);
 
   const patchStaff = async (staff_id: string, body: any) => {
+    if (!canEdit) return;
     try { await fetch(`/api/owner/staff/${staff_id}/settings`, { method: 'PATCH', headers: auth, body: JSON.stringify(body) }); await load(); }
     catch { /* */ }
   };
@@ -60,6 +65,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
   const net = (row: Row) => Math.max(0, r2(row.gross - ded(row)));
 
   const recordAdvance = async () => {
+    if (!canEdit) { alert('View-only access — you cannot record advances.'); return; }
     const amount = Number(adv.amount || 0);
     if (!adv.staff_id || !(amount > 0)) { alert('Pick a staff member and enter an amount'); return; }
     setBusy(true);
@@ -72,6 +78,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
 
   const finalize = async () => {
     if (!data) return;
+    if (!canEdit) { alert('View-only access — you cannot finalize payroll.'); return; }
     if (!window.confirm(`Finalize (accrue) payroll for ${monthLabel(month)}?\n\nThis books the salary EXPENSE in ${monthLabel(month)}'s P&L and raises Salaries Payable — no cash moves yet. Outstanding advances are recovered now. You record the actual payout (e.g. on the 10th) separately.`)) return;
     setBusy(true);
     try {
@@ -84,6 +91,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
   // Second step of the accrual: record the actual payout, clearing Salaries Payable
   // and moving cash on the real pay date (e.g. the 10th of the next month).
   const pay = async () => {
+    if (!canEdit) { alert('View-only access — you cannot record payroll payouts.'); return; }
     setBusy(true);
     try {
       const r = await fetch('/api/owner/payroll/pay', { method: 'POST', headers: auth, body: JSON.stringify({ month, ...payForm }) });
@@ -138,14 +146,14 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
             <button className="px-2 py-1.5 hover:bg-gray-50 text-gray-500" title="Next month" onClick={() => setMonth(m => shiftMonth(m, 1))}><ChevronRight size={16} /></button>
           </div>
           {month !== thisMonth && <button className={`${btn} bg-gray-100 text-gray-700 hover:bg-gray-200`} onClick={() => setMonth(thisMonth)}>This month</button>}
-          <button className={`${btn} bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100`} onClick={() => setAdvOpen(v => !v)}><Plus size={15} />Record advance</button>
+          {canEdit && <button className={`${btn} bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100`} onClick={() => setAdvOpen(v => !v)}><Plus size={15} />Record advance</button>}
           <button className={`${btn} bg-white text-gray-700 border border-gray-300 hover:bg-gray-50`} onClick={exportCsv}><Download size={15} />Export</button>
-          {!accrued && !paid && (
+          {canEdit && !accrued && !paid && (
             <button className={`${btn} bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm disabled:opacity-50`} disabled={busy || !rows.length} onClick={finalize}>
               <CheckCircle2 size={15} />Finalize (accrue)
             </button>
           )}
-          {accrued && (
+          {canEdit && accrued && (
             <button className={`${btn} bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm disabled:opacity-50`} disabled={busy} onClick={() => setPayOpen(v => !v)}>
               <Wallet size={15} />Mark paid · {money(payable)}
             </button>
@@ -268,13 +276,13 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
                           {isFull ? <CalendarDays size={10} /> : <Clock size={10} />}{isFull ? 'Full-time' : 'Hourly'}
                         </span>
                         <select className="text-xs bg-transparent text-gray-400 hover:text-gray-700 focus:outline-none cursor-pointer disabled:cursor-default disabled:text-gray-300"
-                          disabled={accrued || paid} value={r.pay_type} onChange={e => patchStaff(r.staff_id, { pay_type: e.target.value })} title="Change pay type">
+                          disabled={accrued || paid || !canEdit} value={r.pay_type} onChange={e => patchStaff(r.staff_id, { pay_type: e.target.value })} title="Change pay type">
                           <option value="HOURLY">↻ Hourly</option><option value="FULL_TIME">↻ Full-time</option>
                         </select>
                       </div>
                     </td>
                     <td className="p-2.5 text-right">
-                      <input type="number" min={0} className={`${inp} w-24 text-right py-1`} disabled={accrued || paid} defaultValue={r.rate}
+                      <input type="number" min={0} className={`${inp} w-24 text-right py-1`} disabled={accrued || paid || !canEdit} defaultValue={r.rate}
                         onBlur={e => { const v = Number(e.target.value); if (v !== r.rate) patchStaff(r.staff_id, isFull ? { monthly_wage: v } : { hourly_rate: v }); }} />
                       <div className="text-[10px] text-gray-400 mt-0.5">{isFull ? 'per month' : 'per hour'}</div>
                     </td>
@@ -282,7 +290,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
                     <td className="p-2.5 text-right tabular-nums text-gray-700">{isFull ? <span className="text-gray-300">—</span> : r.hours}</td>
                     <td className="p-2.5 text-right tabular-nums font-semibold text-gray-900">{money(r.gross)}</td>
                     <td className="p-2.5 text-right">
-                      <input type="number" min={0} max={r.gross} className={`${inp} w-24 text-right py-1`} disabled={accrued || paid} value={ded(r)}
+                      <input type="number" min={0} max={r.gross} className={`${inp} w-24 text-right py-1`} disabled={accrued || paid || !canEdit} value={ded(r)}
                         onChange={e => setEdits({ ...edits, [r.staff_id]: Math.max(0, Math.min(Number(e.target.value) || 0, r.gross)) })} />
                       {r.advance_outstanding > 0 && <div className="text-[10px] text-rose-500 mt-0.5">{money(r.advance_outstanding)} due</div>}
                     </td>
