@@ -26980,7 +26980,18 @@ ${data.tenant.name}`;
       const room: any = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [req.params.rid]);
       if (!room) return res.status(404).json({ error: "Room line not found" });
       if (room.status === 'BOOKED' && room.hotel_booking_id) {
-        return res.status(409).json({ error: "This room is already booked in the hotel. Cancel it from the Hotel module first." });
+        // This line holds a REAL hotel reservation. Release it (cancel the hotel
+        // booking) so removing it here frees the inventory — unless the guest has
+        // already checked in / out, which must be handled in the Hotel module.
+        const hb: any = await db.get("SELECT status FROM room_bookings WHERE id = ?", [room.hotel_booking_id]).catch(() => null);
+        const hbStatus = String(hb?.status || '').toUpperCase();
+        if (hbStatus === 'CHECKED_IN' || hbStatus === 'CHECKED_OUT') {
+          return res.status(409).json({ error: "This room's guest has already checked in — release it from the Hotel module." });
+        }
+        const cancelRes = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings/${room.hotel_booking_id}/cancel`, req.headers.authorization, { reason: `Removed from event ${req.params.bid}` });
+        if (!cancelRes.ok) {
+          return res.status(cancelRes.status && cancelRes.status >= 400 ? cancelRes.status : 409).json({ error: (cancelRes.data as any)?.error || "Couldn't release the hotel room. Handle it in the Hotel module." });
+        }
       }
       await db.run("DELETE FROM event_booking_rooms WHERE id = ?", [req.params.rid]);
       await recomputeEventTotal(db, req.params.bid);
@@ -52957,8 +52968,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-events-slug-resolve',
+    commit_marker: 'event-rooms-grouping-save-p4',
     code_features: [
+      'event-rooms-grouping-save-p4',                //UX (Event booking — hotel rooms card + save clarity). (1) GROUP identical BOOKED rooms into ONE line with a Qty (was N rows for N reserved rooms) — grouped by type/dates/rate/GST; reserved rooms are still stored one-per-row (each keeps its hotel_booking_id) but shown as "Qty 4". (2) A ± STEPPER on each booked line to change the count: + reserves one more (atomic add), − releases one — the DELETE /events/bookings/:bid/rooms/:rid endpoint now CANCELS the underlying hotel booking (unless it's already checked-in/out → 409 "handle in Hotel module") instead of the old flat "cancel from Hotel module first" refusal. (3) New GST% column on each room line (shows the snapshotted room-rent GST). (4) SAVE clarity: the booking detail auto-saves every field on blur (no Save button) — added a persistent "Every change is saved automatically" hint + a fixed "✓ Saved" flash after each inline commit (commitContact/Venue/Discount/Line/Catering + updateRoom). tsc + vite build clean.
       'public-events-slug-resolve',                  //BUGFIX (public Events page "not available"). GET /api/public/restaurant/:id/events + the inquiry POST resolved :id as a raw restaurant id via publicEventsGate (SELECT ... WHERE id=?), but the public URL passes the tenant PUBLIC TOKEN/slug (e.g. /events/W6UdosorsUkt) → 404 → the page rendered "Events page not available." The public MENU route already fixes this with `resolvePublicTenantParam` (rewrites token→internal id); added the SAME middleware to both public events routes. Hotel + Spa public pages happened to survive via a client-side slug-resolve retry (App.tsx ~70393 / SpaViews ~1200) that the events page lacks; the server-side fix is the clean one and benefits every caller. Raw-id URLs still work (resolver matches `public_token=? OR id=?`). Verified 404→200 for the slug.
       'event-add-room-multi-p3b',                    //FIX (Event group rooms — reserve N real rooms, not 1). POST /hotel/bookings books ONE room per call, so both the confirm loop AND the Phase-3 post-confirm add reserved only 1 real hotel room per room-LINE regardless of num_rooms — a num_rooms=3 line billed 3 but reserved 1 (partial phantom). New shared helper reserveEventHotelRooms() loops num_rooms (each POST re-checks availability against the committed ones — no double-pick) + cancelEventHotelRooms() rolls back. POST-CONFIRM ADD is now ATOMIC: reserves all N or, on shortfall, cancels the ones taken + drops the line + 409 ("Only X of N available — none were added"); on success EXPANDS the line into N BOOKED rows (num_rooms=1 each, own hotel_booking_id). CONFIRM loop now reserves num_rooms per QUOTED line + expands into N BOOKED rows, best-effort (a shortfall stays one FAILED row); recomputeEventTotal after; summary/warning use reserved/requested totals. Billing total unchanged (N rows × rate×nights == old rate×N×nights). tsc + vite build clean.
       'hotel-add-room-menu-entry-p2b',               //UX (Add Room discoverability). The Phase-2 individual "Add Room" form lived in the booking DETAIL modal, reachable only via the Booking-ID link — a column hidden by default (def:false) — and clicking a checked-in row opens the folio, not the detail. So the feature was effectively unreachable in normal use. FIX: added an "➕ Add room" entry to the always-visible booking row "···" actions menu (gated canWriteTab('HOTEL_BOOKINGS'), shown for BOOKED/ASSIGNED/CHECKED_IN non-no-show) that opens the booking detail with the Add-Room form pre-expanded (fetches room-types). Group + Events entry points were already discoverable (Groups→Detail→Guests & Rooms→+ Add Room; Events→booking→Hotel Rooms→Add Hotel Rooms). Pure frontend. vite build clean.

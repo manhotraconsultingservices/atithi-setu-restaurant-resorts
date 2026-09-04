@@ -1072,6 +1072,11 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const [emailInvoice, setEmailInvoice] = useState(false);
   const [caterPkgs, setCaterPkgs] = useState<any[]>([]);
   const [nonce, setNonce] = useState(0);
+  // The booking detail auto-saves every field on blur (there is no separate Save
+  // button). Flash a transient "Saved" confirmation so staff see the change stuck.
+  const [justSaved, setJustSaved] = useState(false);
+  const savedTimer = useRef<any>(null);
+  const flashSaved = () => { setJustSaved(true); if (savedTimer.current) clearTimeout(savedTimer.current); savedTimer.current = setTimeout(() => setJustSaved(false), 1600); };
   // Add-ons / Supplements (Phase 3) — an append-only picker gated on EVENTS_ADDONS,
   // separate from the core booking-line editing (which needs EVENTS_BOOKINGS edit).
   const [showAddon, setShowAddon] = useState(false);
@@ -1103,7 +1108,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     if (Number(arr[idx][field]) === num) return;
     arr[idx] = { ...arr[idx], [field]: num };
     await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ catering: arr }) });
-    await load();
+    await load(); flashSaved();
   };
   const removeCatering = async (idx: number) => {
     const arr = cateringArray(); arr.splice(idx, 1);
@@ -1186,7 +1191,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     if (Number(src[idx][field]) === num) return; // no-op, avoids a PUT on every blur
     src[idx] = { ...src[idx], [field]: num };
     await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [kind]: src }) });
-    await load();
+    await load(); flashSaved();
   };
   const commitDiscount = async (value: string) => {
     // Clamp to [0, subtotal] so the discount can never exceed the bill. The
@@ -1198,7 +1203,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     // The server enforces a hard below-cost guard; surface a rejection and revert.
     try {
       await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ discount: num }) });
-      await load();
+      await load(); flashSaved();
     } catch (e: any) { alert(e.message); await load(); }
   };
   // Inline-edit a customer contact field (name / phone / email / GSTIN). The
@@ -1208,7 +1213,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     const v = value.trim();
     if (String(bk[field] || '') === v) return;
     await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [field]: v }) });
-    await load();
+    await load(); flashSaved();
   };
   // Change the venue after creation — the backend re-resolves the venue charge for
   // the new hall (and re-runs the conflict check for held bookings). Surfaces a
@@ -1217,7 +1222,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     if (String(bk.venue_id || '') === String(venueId || '')) return;
     try {
       await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ venue_id: venueId || null }) });
-      await load();
+      await load(); flashSaved();
     } catch (e: any) { alert(e.message); await load(); }
   };
 
@@ -1236,7 +1241,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     } catch (e: any) { alert(e.message); }
   };
   const updateRoom = async (rid: string, patch: any) => {
-    try { await api(`/events/bookings/${bookingId}/rooms/${rid}`, { method: 'PUT', body: JSON.stringify(patch) }); await load(); } catch (e: any) { alert(e.message); }
+    try { await api(`/events/bookings/${bookingId}/rooms/${rid}`, { method: 'PUT', body: JSON.stringify(patch) }); await load(); flashSaved(); } catch (e: any) { alert(e.message); }
   };
   const removeRoom = async (rid: string) => { try { await api(`/events/bookings/${bookingId}/rooms/${rid}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
   const dOnly = (v: any) => String(v || '').slice(0, 10);
@@ -1339,6 +1344,13 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       refreshNonce={nonce}
       overview={
       <div>
+      {/* Auto-save confirmation — a fixed chip so it's visible however far the staff
+          have scrolled (fields commit on blur; this proves the change stuck). */}
+      {justSaved && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[80] px-3.5 py-1.5 rounded-full bg-emerald-600 text-white text-xs font-semibold shadow-lg flex items-center gap-1.5">
+          <Check size={13} /> Saved
+        </div>
+      )}
       {/* Lifecycle bar — advance the booking's status. Surfaced at the TOP so the
           next action (Confirm → Start Event → Checkout → Complete) is easy to find
           without scrolling. Only shown to a role that can edit the booking. */}
@@ -1358,6 +1370,11 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               for the emailed quotation & invoice. */}
           <div>
             <h3 className="text-lg font-bold text-[#14110c]">{bk.customer_name}</h3>
+            {editable && (
+              <p className="mt-0.5 flex items-center gap-1 text-[10px] text-[#9d8b7e]">
+                <Check size={10} className="text-emerald-600" />Every change is saved automatically — there's no separate Save button.
+              </p>
+            )}
             {editable ? (
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-md">
                 <label className="block">
@@ -1532,23 +1549,55 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
         <div className={`${CARD} md:col-span-2`}>
           <div className="flex items-center justify-between mb-2"><h3 className="font-bold text-sm flex items-center gap-1.5"><Hotel size={15} />{t('events.bookings.hotelRooms')}</h3>
             {editable && <button className={BTN_GHOST} onClick={loadHotel}><Plus size={13} />{t('events.bookings.addHotelRooms')}</button>}</div>
-          {(bk.rooms || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.rooms || []).map((rm: any) => {
-            const roomEditable = editable && rm.status !== 'BOOKED';
-            return (
-              <div key={rm.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
-                <span className="flex-1 min-w-0 truncate">{rm.room_type_snapshot} <span className="text-[#9d8b7e]">({dOnly(rm.check_in_date)} → {dOnly(rm.check_out_date)})</span> <Pill status={rm.status} /></span>
-                {roomEditable ? (
-                  <>
-                    <input type="number" min={1} defaultValue={rm.num_rooms} title="Rooms" onBlur={e => updateRoom(rm.id, { num_rooms: Number(e.target.value) })} className="w-11 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
-                    <span className="text-[#9d8b7e]">×₹</span>
-                    <input type="number" min={0} defaultValue={rm.quoted_rate} title="Rate / night" onBlur={e => updateRoom(rm.id, { quoted_rate: Number(e.target.value) })} className="w-16 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
-                  </>
-                ) : <span className="text-[#9d8b7e]">{rm.num_rooms} × {money(rm.quoted_rate)}</span>}
-                <span className="w-16 text-right font-semibold">{money(rm.line_total)}</span>
-                {roomEditable && <button onClick={() => removeRoom(rm.id)}><X size={12} className="text-rose-500" /></button>}
-              </div>
-            );
-          })}
+          {/* Column labels */}
+          {(bk.rooms || []).length > 0 && (
+            <div className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-wide text-[#b3a495] pb-1 border-b border-[#f0e9df]">
+              <span className="flex-1">Room</span><span className="whitespace-nowrap">GST</span><span className="w-[92px] text-center">Qty × rate</span><span className="w-16 text-right">Amount</span><span className="w-3.5" />
+            </div>
+          )}
+          {(bk.rooms || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (() => {
+            // Group identical BOOKED rooms (same type / dates / rate / GST) into ONE
+            // line with a quantity. Reserved rooms are stored one-per-row (each keeps
+            // its own hotel booking for tracking + release), but staff see "Qty 4" —
+            // not four identical rows. QUOTED / FAILED lines stay as-is (a QUOTED line
+            // already carries its own num_rooms).
+            const lines: any[] = []; const grp = new Map<string, any>();
+            for (const rm of (bk.rooms || [])) {
+              if (rm.status === 'BOOKED') {
+                const key = `${rm.room_type_id || rm.room_type_snapshot}|${dOnly(rm.check_in_date)}|${dOnly(rm.check_out_date)}|${rm.quoted_rate}|${rm.gst_percent}`;
+                const g = grp.get(key);
+                if (!g) { const n = { ...rm, ids: [rm.id], qty: 1, line_total: Number(rm.line_total || 0) }; grp.set(key, n); lines.push(n); }
+                else { g.ids.push(rm.id); g.qty += 1; g.line_total += Number(rm.line_total || 0); }
+              } else lines.push({ ...rm, ids: [rm.id], qty: Number(rm.num_rooms || 1) });
+            }
+            return lines.map((ln: any) => {
+              const quotedEditable = editable && ln.status === 'QUOTED';
+              const bookedEditable = editable && ln.status === 'BOOKED';
+              return (
+                <div key={ln.ids[0]} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
+                  <span className="flex-1 min-w-0 truncate">{ln.room_type_snapshot} <span className="text-[#9d8b7e]">({dOnly(ln.check_in_date)} → {dOnly(ln.check_out_date)})</span> <Pill status={ln.status} /></span>
+                  <span className="text-[10px] text-[#9d8b7e] whitespace-nowrap tabular-nums" title="Room rent GST (Hotel slab)">{Number(ln.gst_percent || 0)}%</span>
+                  {quotedEditable ? (
+                    <span className="w-[92px] flex items-center justify-end gap-1">
+                      <input type="number" min={1} defaultValue={ln.num_rooms} title="Rooms" onBlur={e => updateRoom(ln.ids[0], { num_rooms: Number(e.target.value) })} className="w-10 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                      <span className="text-[#9d8b7e]">×₹</span>
+                      <input type="number" min={0} defaultValue={ln.quoted_rate} title="Rate / night" onBlur={e => updateRoom(ln.ids[0], { quoted_rate: Number(e.target.value) })} className="w-14 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                    </span>
+                  ) : bookedEditable ? (
+                    <span className="w-[92px] flex items-center justify-end gap-1">
+                      <button title="Release one room" onClick={() => removeRoom(ln.ids[ln.ids.length - 1])} className="w-5 h-5 rounded border border-[#e8dccf] leading-none text-[#cc5a16] font-bold hover:bg-[#f0e9df]">−</button>
+                      <span className="w-5 text-center font-semibold tabular-nums">{ln.qty}</span>
+                      <button title="Reserve one more room" onClick={() => addRoom(ln.room_type_id, ln.room_type_snapshot, Number(ln.quoted_rate) || 0, 1)} className="w-5 h-5 rounded border border-[#e8dccf] leading-none text-emerald-600 font-bold hover:bg-[#f0e9df]">+</button>
+                    </span>
+                  ) : <span className="w-[92px] text-right text-[#9d8b7e] whitespace-nowrap tabular-nums">{ln.qty} × {money(ln.quoted_rate)}</span>}
+                  <span className="w-16 text-right font-semibold tabular-nums">{money(ln.line_total)}</span>
+                  {quotedEditable
+                    ? <button onClick={() => removeRoom(ln.ids[0])}><X size={12} className="text-rose-500" /></button>
+                    : <span className="w-3.5 flex-none" aria-hidden />}
+                </div>
+              );
+            });
+          })()}
           {showHotel && (
             <div className="mt-2 p-2 rounded-xl bg-[#faf7f2] border border-[#e8dccf]">
               {hotelRooms.length === 0
