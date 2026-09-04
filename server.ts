@@ -29268,7 +29268,7 @@ ${data.tenant.name}`;
     return { ok: true, restaurant: r };
   };
 
-  app.get("/api/public/restaurant/:id/events", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/events", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const gate = await publicEventsGate(req.params.id);
       if (!gate.ok) return res.status(404).json({ error: "Events not available" });
@@ -29289,7 +29289,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load events page" }); }
   });
 
-  app.post("/api/public/restaurant/:id/events/inquiry", async (req: Request, res: Response) => {
+  app.post("/api/public/restaurant/:id/events/inquiry", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const gate = await publicEventsGate(req.params.id);
       if (!gate.ok) return res.status(404).json({ error: "Events not available" });
@@ -52957,8 +52957,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-add-room-multi-p3b',
+    commit_marker: 'public-events-slug-resolve',
     code_features: [
+      'public-events-slug-resolve',                  //BUGFIX (public Events page "not available"). GET /api/public/restaurant/:id/events + the inquiry POST resolved :id as a raw restaurant id via publicEventsGate (SELECT ... WHERE id=?), but the public URL passes the tenant PUBLIC TOKEN/slug (e.g. /events/W6UdosorsUkt) → 404 → the page rendered "Events page not available." The public MENU route already fixes this with `resolvePublicTenantParam` (rewrites token→internal id); added the SAME middleware to both public events routes. Hotel + Spa public pages happened to survive via a client-side slug-resolve retry (App.tsx ~70393 / SpaViews ~1200) that the events page lacks; the server-side fix is the clean one and benefits every caller. Raw-id URLs still work (resolver matches `public_token=? OR id=?`). Verified 404→200 for the slug.
       'event-add-room-multi-p3b',                    //FIX (Event group rooms — reserve N real rooms, not 1). POST /hotel/bookings books ONE room per call, so both the confirm loop AND the Phase-3 post-confirm add reserved only 1 real hotel room per room-LINE regardless of num_rooms — a num_rooms=3 line billed 3 but reserved 1 (partial phantom). New shared helper reserveEventHotelRooms() loops num_rooms (each POST re-checks availability against the committed ones — no double-pick) + cancelEventHotelRooms() rolls back. POST-CONFIRM ADD is now ATOMIC: reserves all N or, on shortfall, cancels the ones taken + drops the line + 409 ("Only X of N available — none were added"); on success EXPANDS the line into N BOOKED rows (num_rooms=1 each, own hotel_booking_id). CONFIRM loop now reserves num_rooms per QUOTED line + expands into N BOOKED rows, best-effort (a shortfall stays one FAILED row); recomputeEventTotal after; summary/warning use reserved/requested totals. Billing total unchanged (N rows × rate×nights == old rate×N×nights). tsc + vite build clean.
       'hotel-add-room-menu-entry-p2b',               //UX (Add Room discoverability). The Phase-2 individual "Add Room" form lived in the booking DETAIL modal, reachable only via the Booking-ID link — a column hidden by default (def:false) — and clicking a checked-in row opens the folio, not the detail. So the feature was effectively unreachable in normal use. FIX: added an "➕ Add room" entry to the always-visible booking row "···" actions menu (gated canWriteTab('HOTEL_BOOKINGS'), shown for BOOKED/ASSIGNED/CHECKED_IN non-no-show) that opens the booking detail with the Add-Room form pre-expanded (fetches room-types). Group + Events entry points were already discoverable (Groups→Detail→Guests & Rooms→+ Add Room; Events→booking→Hotel Rooms→Add Hotel Rooms). Pure frontend. vite build clean.
       'event-add-room-reserve-p3',                   //FEATURE (Add Room to existing booking — Phase 3: EVENT bookings, reserve post-confirm rooms). Closed the phantom-reservation gap: POST /events/bookings/:bid/rooms always inserted status QUOTED, so a room attached AFTER the confirm loop already ran stayed QUOTED forever — billed on the event yet never reserved in the hotel. Now, when the booking is CONFIRMED or IN_PROGRESS (and Hotel is enabled), the attach immediately reserves real inventory by mirroring the confirm loop (callSelfApi POST /hotel/bookings → status BOOKED + hotel_booking_id). If the hotel has no room, the just-inserted line is rolled back (DELETE + recomputeEventTotal) and the attach is REJECTED with the hotel's reason — never bill for an unreservable room (consistent w/ hotel add-room Phases 1&2). Added a lifecycle gate (409 on CANCELLED / COMPLETED). Events-only tenants (no Hotel module) keep the QUOTED billing-quote behavior unchanged. One hotel booking per line (parity with confirm); the FE adds one room per action so billed==reserved. FRONTEND: addRoom now surfaces the reservation error (alert) + refreshes availability counts; the room-line Pill already shows BOOKED/QUOTED/FAILED, and the "Add Hotel Rooms" button already showed for confirmed/in-progress (editable). tsc + vite build clean.
