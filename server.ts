@@ -39482,12 +39482,13 @@ ${data.tenant.name}`;
         if (!roomId) {
           const free: any = await db.get(
             `SELECT ro.id FROM rooms ro
-             WHERE ro.status='available' AND (ro.type=? OR ro.type_id=?)
+             WHERE ro.status NOT IN ('MAINTENANCE','BLOCKED') AND (ro.type_id=? OR ro.type=?)
                AND ro.id NOT IN (SELECT room_id FROM room_bookings
                  WHERE status NOT IN ('CANCELLED','CHECKED_OUT')
                    AND check_in_date < ? AND check_out_date > ? AND room_id IS NOT NULL)
-             LIMIT 1`,
-            [r.room_type_id || r.type_name, r.room_type_id || r.type_name, checkOut, checkIn]
+               AND ro.id NOT IN (SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?)
+             ORDER BY ro.name LIMIT 1`,
+            [r.room_type_id || r.type_name, r.room_type_id || r.type_name, checkOut, checkIn, checkOut, checkIn]
           ).catch(() => null);
           roomId = free?.id || null;
         }
