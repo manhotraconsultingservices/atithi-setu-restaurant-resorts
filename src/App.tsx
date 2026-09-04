@@ -23885,6 +23885,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         📄 Documents{docCount > 0 ? ` (${docCount})` : ''}{needsDocs ? ' ⚠' : ''}
                                       </button>
                                     )}
+                                    {/* Add room — active bookings only (BOOKED / ASSIGNED /
+                                        CHECKED_IN, not no-show). Opens the booking detail with
+                                        the Add-Room form pre-expanded. A standalone booking is
+                                        converted to a group on the server. */}
+                                    {['BOOKED', 'ASSIGNED', 'CHECKED_IN'].includes(String(b.status || '').toUpperCase()) && Number(b.no_show) !== 1 && (
+                                      <button className={menuItemCls} onClick={async () => {
+                                        setOpenActionMenu(null);
+                                        setBookingDetailTarget(b);
+                                        setIndivAddRoom({ open: true, typeId: '', qty: '1', rate: '', busy: false, types: [] });
+                                        try {
+                                          const rr = await fetch(`/api/restaurant/${restaurantId}/hotel/room-types`, { headers: { Authorization: `Bearer ${token}` } });
+                                          if (rr.ok) { const tps = await rr.json(); setIndivAddRoom(s => ({ ...s, types: Array.isArray(tps) ? tps : [] })); }
+                                        } catch { /* */ }
+                                      }}>
+                                        ➕ Add room{b.group_name ? ' to group' : ''}
+                                      </button>
+                                    )}
                                     {/* Advance payment */}
                                     {(b.status === 'BOOKED' || b.status === 'CHECKED_IN') && (
                                       <button className={menuItemCls} onClick={() => { setAdvancePayTarget(b); setAdvanceDraft({ amount: '', method: 'CASH', reference: '' }); setOpenActionMenu(null); }}>
