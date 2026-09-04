@@ -26873,6 +26873,21 @@ ${data.tenant.name}`;
   // Quotations (BEO) — snapshot booking lines, render PDF, email to customer.
   // ══════════════════════════════════════════════════════════════════════════
 
+  // Format an event date (Date object OR ISO/date string) as a clean "04 Sep 2026"
+  // — no time-of-day or timezone noise. UTC so a stored midnight date can't shift a day.
+  const _fmtEvDate = (d: any): string => {
+    if (d === null || d === undefined || d === '') return '';   // new Date(null) is the 1970 epoch — guard it
+    const t = new Date(d);
+    return isNaN(t.getTime())
+      ? String(d).slice(0, 10)
+      : t.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  };
+  // Defensive cleanup for descriptions ALREADY stored on older invoices with a raw
+  // JS Date.toString() baked in — e.g. "Fri Sep 04 2026 00:00:00 GMT+0000 (…)". The
+  // regex matches only that exact shape, so it is a no-op on every other line/format.
+  const _cleanDescDates = (s: any): string =>
+    String(s ?? '').replace(/[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2} \d{4} \d{2}:\d{2}:\d{2} GMT[+-]\d{4} \([^)]*\)/g, (m) => _fmtEvDate(m));
+
   // Assemble quotation lines from a booking's venue + rentals + services + rooms.
   const assembleEventQuoteLines = async (db: any, bk: any, gstOverride?: number) => {
     const lines: any[] = [];
@@ -26911,7 +26926,7 @@ ${data.tenant.name}`;
     }
     const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED' ORDER BY created_at", [bk.id]);
     for (const rm of rooms) {
-      lines.push({ line_type: 'HOTEL_ROOM', description: `${rm.room_type_snapshot} × ${rm.num_rooms} (${rm.check_in_date} → ${rm.check_out_date})`, quantity: rm.num_rooms, unit_rate: rm.quoted_rate, amount: round2(rm.line_total), gst_rate: Number(rm.gst_percent ?? 12), gst_amount: 0 });
+      lines.push({ line_type: 'HOTEL_ROOM', description: `${rm.room_type_snapshot} × ${rm.num_rooms} (${_fmtEvDate(rm.check_in_date)} → ${_fmtEvDate(rm.check_out_date)})`, quantity: rm.num_rooms, unit_rate: rm.quoted_rate, amount: round2(rm.line_total), gst_rate: Number(rm.gst_percent ?? 12), gst_amount: 0 });
     }
     const subtotal = round2(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
     // Discount comes off BEFORE GST — allocate proportionally and tax each line
@@ -27141,12 +27156,12 @@ ${data.tenant.name}`;
     let lines: any[]; let subtotal: number; let tax: number; let discount: number; let grand: number; let invNo: string; let invAt: string;
     if (folio) {
       const fe: any[] = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at", [folio.id]).catch(() => []);
-      lines = fe.map((e: any) => ({ line_type: e.entry_type, description: e.description, quantity: Number(e.quantity), unit_rate: Number(e.unit_price), amount: Number(e.amount), gst_rate: Number(e.gst_rate), gst_amount: Number(e.gst_amount) }));
+      lines = fe.map((e: any) => ({ line_type: e.entry_type, description: _cleanDescDates(e.description), quantity: Number(e.quantity), unit_rate: Number(e.unit_price), amount: Number(e.amount), gst_rate: Number(e.gst_rate), gst_amount: Number(e.gst_amount) }));
       subtotal = Number(folio.subtotal || 0); tax = Number(folio.gst_amount || 0); discount = Number(folio.discount || 0); grand = Number(folio.grand_total || 0);
       invNo = folio.invoice_number || `INV-${String(bid).slice(-6)}`; invAt = folio.created_at || new Date().toISOString();
     } else {
       const a = await assembleEventQuoteLines(db, bk, gstOverride);
-      lines = a.lines.map((l: any) => ({ line_type: l.line_type, description: l.description, quantity: Number(l.quantity), unit_rate: Number(l.unit_rate), amount: Number(l.amount), gst_rate: Number(l.gst_rate), gst_amount: Number(l.gst_amount) }));
+      lines = a.lines.map((l: any) => ({ line_type: l.line_type, description: _cleanDescDates(l.description), quantity: Number(l.quantity), unit_rate: Number(l.unit_rate), amount: Number(l.amount), gst_rate: Number(l.gst_rate), gst_amount: Number(l.gst_amount) }));
       subtotal = a.subtotal; tax = a.tax; discount = a.discount; grand = a.grand;
       invNo = `INV-${String(bid).slice(-6)}`; invAt = new Date().toISOString();
     }
@@ -52454,7 +52469,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-be-action-p15',
+    commit_marker: 'event-invoice-date-only-p16',
     code_features: [
       'rbac-fe-sweep-p1',                            //UX (Hotel/Restaurant FE sweep, pass 1 — hides write controls a View role can't use; backend enforces). Gated the row-action + create buttons via canWriteTab/canDeleteTab (perm.ts): Menu (Edit/Recipe/Daily-Special/Delete/Availability), Hotel-Inventory (Receive/Use/Edit/Del), Service-Requests (Ack/Start/Complete), Restaurant Invoices (Edit/Print/Mark-Paid), Loyalty (Recompute/Add-tier/Edit/Disable/Enroll), restaurant Reservations (New-Booking + Confirm/Cancel/Re-confirm status actions). Remaining passes: Hotel Bookings, Channel Manager, Settings, Monitor/KDS, Rooms-Setup. tsc + vite build clean.
       'rbac-hotel-restaurant-fe-gating-start',       //UX (Phase 3 — Hotel/Restaurant frontend gating START + Events booking-detail complete; the backend fully enforces from Phases 1-2, so this only hides controls a View role can't use). Added a SHARED helper src/perm.ts (canWriteTab/canDeleteTab — reads the tab_perms localStorage map; works in the main App render AND the many STANDALONE view components where App's canDo isn't in scope — the key blocker a mapping pass surfaced). Gated the PRIMARY create/action buttons across the main surfaces: Menu Add-Item (MENU), New Invoice (INVOICES), Hotel New-Booking (HOTEL_BOOKINGS), Add Room (ROOMS), Add/Edit/Delete FAQ (CONCIERGE_FAQ), Hotel-Inventory Add (HOTEL_INVENTORY). Also FINISHED the Events booking-detail: folded evCanEdit('EVENTS_BOOKINGS') into the editable/canRecordPayment flags so a View role sees the whole detail READ-ONLY (no add/remove lines, hotel rooms, cancel, schedule, record-payment, assign/remove-staff; inline qty/price render as static text). SCOPE: a full sweep is 100+ mostly-multi-line buttons (complete map captured in this session) — this gates the highest-value primary buttons; the long tail of inline toggles / per-row actions is an incremental follow-up (every one already blocked server-side). tsc + vite build clean.
