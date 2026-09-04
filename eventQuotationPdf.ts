@@ -48,7 +48,9 @@ export interface EventQuotationData {
   lines: EventQuotationLine[];
   subtotal: number;
   tax_amount: number;
-  discount: number;
+  discount: number;          // total discount (event + hotel)
+  discount_event?: number;   // category split — shown as two lines when both present
+  discount_hotel?: number;
   grand_total: number;
   // Owner-authored policy blocks printed on the quotation AND the invoice.
   policies?: { cancellation?: string; terms?: string; payment?: string };
@@ -313,20 +315,73 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
         doc.moveTo(M, y).lineTo(M + INNER, y).lineWidth(0.5).strokeColor(HAIR).stroke();
       }
 
-      // ── Totals ───────────────────────────────────────────────────────────
+      // ── GST rate-wise summary (left) + Totals (right) ────────────────────
       y += 10;
-      const totX = M + INNER - 220;
-      const totW = 220;
+      // Keep the whole totals block together — never orphan it low on a page.
+      if (y > 660) { doc.addPage(); y = M; }
+      const blockTopY = y;
+      const totX = M + INNER - 210;
+      const totW = 210;
+      // Rate-wise GST breakup, derived from the lines (net taxable per rate = the
+      // GST reversed at that rate; clubs event + room lines that share a %). The
+      // GST-compliant summary that removes any confusion over the tax.
+      const rateMap: Record<string, { taxable: number; gst: number }> = {};
+      for (const ln of data.lines) {
+        const rate = Number(ln.gst_rate || 0);
+        const net = rate > 0 ? Math.round((Number(ln.gst_amount || 0) * 100 / rate) * 100) / 100 : Number(ln.amount || 0);
+        const k = String(rate);
+        (rateMap[k] = rateMap[k] || { taxable: 0, gst: 0 });
+        rateMap[k].taxable = Math.round((rateMap[k].taxable + net) * 100) / 100;
+        rateMap[k].gst = Math.round((rateMap[k].gst + Number(ln.gst_amount || 0)) * 100) / 100;
+      }
+      const rateRows = Object.entries(rateMap).map(([r, v]) => ({ rate: Number(r), taxable: v.taxable, gst: v.gst })).filter(x => x.gst > 0.005).sort((a, b) => a.rate - b.rate);
+      let leftEndY = blockTopY;
+      if (data.tax_amount > 0 && rateRows.length > 0) {
+        let gy = blockTopY;
+        doc.font('Helvetica-Bold').fontSize(8).fillColor(MUTED).text('GST SUMMARY', M, gy); gy += 12;
+        const gcRate = M, gcTax = M + 40, gcCg = M + 110, gcSg = M + 156, gcTot = M + 204;
+        doc.font('Helvetica-Bold').fontSize(7).fillColor(MUTED);
+        doc.text('Rate', gcRate, gy, { width: 36 });
+        doc.text('Taxable', gcTax, gy, { width: 64, align: 'right' });
+        doc.text('CGST', gcCg, gy, { width: 42, align: 'right' });
+        doc.text('SGST', gcSg, gy, { width: 42, align: 'right' });
+        doc.text('GST', gcTot, gy, { width: 44, align: 'right' });
+        gy += 10;
+        doc.moveTo(M, gy).lineTo(M + 248, gy).lineWidth(0.5).strokeColor(HAIR).stroke(); gy += 3;
+        doc.font('Helvetica').fontSize(7.5).fillColor(INK);
+        for (const rr of rateRows) {
+          const cg = Math.round((rr.gst / 2) * 100) / 100; const sg = Math.round((rr.gst - cg) * 100) / 100;
+          doc.fillColor(INK).text(`${rr.rate}%`, gcRate, gy, { width: 36 });
+          doc.fillColor(MUTED).text(fmtMoney(rr.taxable, cur), gcTax, gy, { width: 64, align: 'right' });
+          doc.text(fmtMoney(cg, cur), gcCg, gy, { width: 42, align: 'right' });
+          doc.text(fmtMoney(sg, cur), gcSg, gy, { width: 42, align: 'right' });
+          doc.fillColor(INK).text(fmtMoney(rr.gst, cur), gcTot, gy, { width: 44, align: 'right' });
+          gy += 11;
+        }
+        leftEndY = gy;
+      }
+      // Totals (right column).
+      y = blockTopY;
       const totalRow = (en: string, key: string, val: string, bold = false) => {
         const lbl = L(en, key);
         doc.font(lbl.f || (bold ? 'Helvetica-Bold' : 'Helvetica')).fontSize(bold ? 10.5 : 9).fillColor(INK);
-        doc.text(lbl.t, totX, y, { width: totW - 90, lineBreak: false });
+        doc.text(lbl.t, totX, y, { width: totW - 84, lineBreak: false });
         doc.font(bold ? 'Helvetica-Bold' : 'Helvetica');
-        doc.text(val, totX + totW - 90, y, { width: 90, align: 'right' });
+        doc.text(val, totX + totW - 84, y, { width: 84, align: 'right' });
         y += bold ? 18 : 14;
       };
       totalRow('Subtotal', 'subtotal', fmtMoney(data.subtotal, cur));
-      if (data.discount > 0) totalRow('Discount', 'discount', `- ${fmtMoney(data.discount, cur)}`);
+      // Two discount lines when a hotel-rooms discount is present AND the split
+      // reconciles to the total; otherwise a single Discount line (older docs).
+      const dEvent = Number(data.discount_event ?? 0);
+      const dHotel = Number(data.discount_hotel ?? 0);
+      const splitOk = dHotel > 0 && Math.abs((dEvent + dHotel) - Number(data.discount || 0)) < 1;
+      if (splitOk) {
+        if (dEvent > 0) totalRow('Discount – Event', 'discount', `- ${fmtMoney(dEvent, cur)}`);
+        totalRow('Discount – Rooms', 'discount', `- ${fmtMoney(dHotel, cur)}`);
+      } else if (Number(data.discount || 0) > 0) {
+        totalRow('Discount', 'discount', `- ${fmtMoney(data.discount, cur)}`);
+      }
       // GST-compliant tax presentation: split into CGST + SGST (intra-state) when
       // GST is charged; a zero-GST invoice shows no tax line.
       if (data.tax_amount > 0) {
@@ -338,6 +393,8 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       doc.moveTo(totX, y + 2).lineTo(totX + totW, y + 2).lineWidth(1).strokeColor(ACCENT).stroke();
       y += 6;
       totalRow('Grand Total', 'grandTotal', fmtMoney(data.grand_total, cur), true);
+      // Continue below whichever column ran longer (summary vs totals).
+      y = Math.max(y, leftEndY);
 
       // ── Notes + footer ───────────────────────────────────────────────────
       y += 18;
@@ -366,11 +423,15 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       }
 
       const isInvoice = /INVOICE/i.test(data.docLabel || '');
+      // Footer FOLLOWS the content (was bottom-anchored at y=770, which left a big
+      // white band on short docs). Only break to a new page if it truly won't fit.
+      let footY = y + 10;
+      if (footY > 815) { doc.addPage(); footY = M; }
       doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(
         isInvoice
           ? 'Thank you for your business.'
           : 'This is a quotation, not a tax invoice. Prices are indicative and subject to availability at time of confirmation.',
-        M, Math.max(y, 770), { width: INNER, align: 'center' }
+        M, footY, { width: INNER, align: 'center' }
       );
 
       doc.end();
