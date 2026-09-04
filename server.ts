@@ -52659,8 +52659,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-scope-strip-outofscope-grants',
+    commit_marker: 'rbac-accounting-cashdrawer-write-gates',
     code_features: [
+      'rbac-accounting-cashdrawer-write-gates',       //SECURITY FIX (View-level grant could WRITE — Ledger & Books + Cash Drawer). Reported on RESTO_1777732755237_243X0 "Manager 1" (ACCOUNTING=View, CASH_DRAWER=View): could still post manual journal entries, record expenses/payments (₹25,000), add loans, and open/close/count/hand-over the cash drawer. Root cause: the accounting/cash write endpoints used READ-level inline gates. `_acctOwnerOnly` admits >=View(1) on ANY finance tab — correct for READS, but it guarded 18 WRITE routes (journal-entries, expense-payments, loans, bank-accounts, owner-equity txns, payment-charges, backfill-gl, tds-payable, periods close/reopen, day-close/unlock, bank-reconciliation). `_acctStaff` admits ANY staff role — it guarded 6 cash WRITES (drawer open/close/handover, handover accept/cancel, cash-count). FIX: two new WRITE-level gates — `_acctCanWrite` (OWNER/admin/built-in-MANAGER, or ACCOUNTING>=Edit(2)) on the 17 Ledger writes, and `_acctDrawerWrite` (OWNER/admin + built-in cash roles MANAGER/CASHIER/FRONT_DESK, or CASH_DRAWER>=Edit(2)) on the 6 drawer/cash-count writes. Drawer approve/reject/lock already used the correct write-level `_acctManager` (CASH_DRAWER Full or built-in mgr) — left unchanged. All 30 GET reads keep `_acctOwnerOnly`/`_acctStaff` (>=View is right for reads). A custom Manager set to View is now denied (not built-in MANAGER; ACCOUNTING/CASH_DRAWER level 1 < 2); Edit/Full and owner/cashier keep write access. tsc clean.
       'rbac-scope-strip-outofscope-grants',          //SECURITY FIX (nav + API leak — a scoped custom role saw/accessed a module it has N/A for). Reported + confirmed on RESTO_1777732755237_243X0 (Ankur Cafe): the "Manager 1" custom role (CUSTOM_MANAGER_MTGS99CJ, custom_roles.scope=HOTEL) showed the whole Spa & Wellness module in the sidebar despite every Spa page = N/A in Staff Access. Root cause: the role's stored tab_permissions still CARRIED stray out-of-scope grants (SPA_CALENDAR..SPA_REPORTS + SPA_INVENTORY at level 3, plus EVENTS_CHECKLISTS 3) — polluted by a pre-fix grid save (see staffaccess-prefill-no-escalation) — and the owner can NO LONGER see or clear them: the Staff Access grid renders out-of-scope cells as an immutable "N/A" (App.tsx tabAllowedForRole: a HOTEL-scope role can't be granted spaOnly/eventsOnly/restaurantOnly pages). But getTabPermissionsForRole → /my-permissions + requireTabAction honored the stored grant → Spa group in nav + live Spa API access. FIX: strip out-of-scope grants at the READ boundary (getTabPermissionsForRole), mirroring the frontend tabAllowedForRole EXACTLY via new _HOTEL_ONLY_TABS/_RESTAURANT_ONLY_TABS sets + SPA_/EVENTS_ prefixes (_tabExclusiveModule). For a custom role whose custom_roles.scope is a single module (HOTEL|RESTAURANT|SPA|EVENTS), any granted page exclusive to a DIFFERENT module is dropped; general/shared pages (MONITOR, INVOICES, CASH_DRAWER, ACCOUNTING, CHECKLISTS, ROSTER, finance…) and BOTH/ALL/unknown scopes are untouched, and built-in roles (no custom_roles row) are never touched. This can NEVER revoke an intended grant — an out-of-scope page is one the owner could never have granted through the UI. Scope resolved from the per-tenant custom_roles table, cached 30s (_roleScopeCache) and invalidated with the tab cache. Fixes nav + API together so they match the grid. tsc clean.
       'event-addons-phase1-backend',                 //FEATURE (Event Add-ons / Supplements — Phase 1 backend, APPEND-ONLY). Business ask: during/after a confirmed event a guest requests extras (extra chair/table/room/service); staff with access control may ADD them but must NOT be able to remove/update existing booking lines. Today add/remove/update a line are the SAME capability (one full-array PUT /events/bookings/:bid gated EVENTS_BOOKINGS Edit), so "add-only" can't be expressed. Phase 1 adds an isolated, additive append-only mechanism: (1) NEW table event_booking_addons (eventsService.ts schema-init, NOT a request handler — id/booking_id/category[RENTAL|SERVICE|ROOM|CUSTOM]/ref_id/name_snapshot/description/quantity/unit_rate/gst_percent/line_total/status[ACTIVE|VOID]/added_by/added_at/voided_by/voided_at). SEPARATE table (not the shared line tables) so a full-booking PUT can NEVER clobber add-ons and append-only is enforced by construction. (2) POST /events/bookings/:bid/addons — appends ONE line, gated requireTabAction('EVENTS_ADDONS','CREATE') + live-window status guard (status IN CONFIRMED/IN_PROGRESS); snapshots name/rate/gst from event_rental_items / event_services master for RENTAL/SERVICE (integrity), ad-hoc for ROOM/CUSTOM; flat-priced (qty×unit_rate, no span multiply); stamps added_by. DELETE /addons/:aid = soft-VOID, gated DELETE (Full) so add-only staff can't remove; never hard-deletes. (3) Billing+invoice integration: computeEventBill + assembleEventQuoteLines each add ONE defensive .catch(()=>[]) query pushing ACTIVE add-ons (line_type 'ADDON') into the taxable pool / invoice lines — bookings with no add-ons render byte-identical to before; a missing table can't break billing. (4) booking-detail GET returns addons[]. EVENTS_ADDONS tab not yet in the catalogue (Phase 2) → requireTabAction safely denies configured custom roles + passes OWNER, so Phase 1 is OWNER-testable with zero staff exposure. Phase 2 = wire the EVENTS_ADDONS permission tab; Phase 3 = booking-detail UI. tsc clean.
       'rbac-fe-sweep-p1',                            //UX (Hotel/Restaurant FE sweep, pass 1 — hides write controls a View role can't use; backend enforces). Gated the row-action + create buttons via canWriteTab/canDeleteTab (perm.ts): Menu (Edit/Recipe/Daily-Special/Delete/Availability), Hotel-Inventory (Receive/Use/Edit/Del), Service-Requests (Ack/Start/Complete), Restaurant Invoices (Edit/Print/Mark-Paid), Loyalty (Recompute/Add-tier/Edit/Disable/Enroll), restaurant Reservations (New-Booking + Confirm/Cancel/Re-confirm status actions). Remaining passes: Hotel Bookings, Channel Manager, Settings, Monitor/KDS, Rooms-Setup. tsc + vite build clean.
@@ -52951,6 +52952,42 @@ ${data.tenant.name}`;
     return false;
   };
 
+  // WRITE-level Ledger & Books gate. _acctOwnerOnly above is a READ gate (admits
+  // >= View on ANY finance tab) and must NOT guard writes — it let a role with
+  // Ledger & Books = View(1) post journals / record expenses / add loans (the
+  // reported "View-only can still write" bugs). This requires ACCOUNTING (Ledger
+  // & Books) at >= Edit(2), plus the OWNER / platform-admin / built-in-MANAGER
+  // fast-path. A custom "Manager" role the owner set to View is correctly denied
+  // (it isn't the built-in MANAGER and its ACCOUNTING level is 1 < 2).
+  const _acctCanWrite = async (req: AuthRequest, res: Response): Promise<boolean> => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role)) return true;
+    try {
+      const perms = await getTabPermissionsForRole(req.params.id, role);
+      if (perms && Number((perms as any)['ACCOUNTING'] || 0) >= 2) return true;
+    } catch { /* fall through to deny */ }
+    res.status(403).json({ error: 'Forbidden — Ledger & Books (Accounting) Edit access required. Ask the property owner to grant it in Staff Access.' });
+    return false;
+  };
+  // WRITE-level Cash Drawer gate. _acctStaff (below) admits ANY staff role, so it
+  // let a role with Cash Drawer = View(1) — or none — open / close / count / hand
+  // over a drawer (reported). This requires CASH_DRAWER at >= Edit(2), plus the
+  // OWNER / platform-admin / built-in cash-handling roles (MANAGER / CASHIER /
+  // FRONT_DESK) that the nav already surfaces the drawer to. Drawer approve /
+  // reject / lock stay on _acctManager (supervisory: CASH_DRAWER Full or built-in
+  // manager). A custom "Manager" role set to Cash Drawer View is correctly denied.
+  const _acctDrawerWriteBuiltins = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER', 'CASHIER', 'FRONT_DESK'];
+  const _acctDrawerWrite = async (req: AuthRequest, res: Response): Promise<boolean> => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (_acctDrawerWriteBuiltins.includes(role)) return true;
+    try {
+      const perms = await getTabPermissionsForRole(req.params.id, role);
+      if (perms && Number((perms as any)['CASH_DRAWER'] || 0) >= 2) return true;
+    } catch { /* fall through to deny */ }
+    res.status(403).json({ error: 'Forbidden — Cash Drawer Edit access required. Ask the property owner to grant it in Staff Access.' });
+    return false;
+  };
+
   app.get("/api/restaurant/:id/accounting/chart-of-accounts", authenticate, async (req: AuthRequest, res: Response) => {
     if (!(await _acctOwnerOnly(req, res))) return;
     try {
@@ -53000,7 +53037,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.post("/api/restaurant/:id/accounting/bank-accounts", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureBankAccounts(db);
@@ -53039,7 +53076,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.patch("/api/restaurant/:id/accounting/bank-accounts/:bankId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureBankAccounts(db);
@@ -53060,7 +53097,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.delete("/api/restaurant/:id/accounting/bank-accounts/:bankId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureBankAccounts(db);
@@ -53126,7 +53163,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.post("/api/restaurant/:id/accounting/owners", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -53152,7 +53189,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.patch("/api/restaurant/:id/accounting/owners/:ownerId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -53174,7 +53211,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.delete("/api/restaurant/:id/accounting/owners/:ownerId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db);
@@ -53189,7 +53226,7 @@ ${data.tenant.name}`;
   });
   // Record an owner INVEST (contribution) or PAYOUT (drawing/withdrawal).
   app.post("/api/restaurant/:id/accounting/owners/:ownerId/transactions", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOwners(db); await _ensureBankAccounts(db);
@@ -53292,7 +53329,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
   app.patch("/api/restaurant/:id/accounting/payment-charges", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       await _ensureMdrCols();
       const b: any = req.body || {};
@@ -53519,7 +53556,7 @@ ${data.tenant.name}`;
   // Cr Loan Payable) or OPENING (pre-existing balance → Dr Opening Balance
   // Equity, Cr Loan Payable). outstanding starts = principal.
   app.post("/api/restaurant/:id/accounting/loans", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53574,7 +53611,7 @@ ${data.tenant.name}`;
   // Record an expense/payment. Auto-posts the correct double-entry: Dr the
   // expense/advance/loan account(s), Cr Cash (1000) or Bank (1010) by method.
   app.post("/api/restaurant/:id/accounting/expense-payments", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -53640,7 +53677,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/journal-entries", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { entry_date, narration, lines } = req.body;
@@ -53692,7 +53729,7 @@ ${data.tenant.name}`;
   // writing. Spa/Event folios use their own posting paths + revenue accounts and are
   // out of scope here.
   app.post("/api/restaurant/:id/accounting/backfill-gl", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const from = String(req.query.from || req.body?.from || '2000-01-01');
@@ -53757,7 +53794,7 @@ ${data.tenant.name}`;
   });
 
   app.patch("/api/restaurant/:id/accounting/tds-payable/:tdsId", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { challan_number, challan_date, bsr_code, status } = req.body;
@@ -54238,7 +54275,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/periods/close", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { period_key, from_date, to_date, note } = req.body || {};
@@ -54257,7 +54294,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/periods/reopen", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { period_key } = req.body || {};
@@ -54282,7 +54319,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/cash-count", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctDrawerWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
@@ -54399,7 +54436,7 @@ ${data.tenant.name}`;
   // open on behalf of another cashier. Blocked if the day is locked or the cashier
   // already has an open/pending drawer for that date.
   app.post("/api/restaurant/:id/accounting/cash-drawers", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctStaff(req, res)) return;
+    if (!(await _acctDrawerWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const body = req.body || {};
@@ -54443,7 +54480,7 @@ ${data.tenant.name}`;
   // Close a drawer — submit the denomination count + deposit. Computes the
   // expected snapshot + variance; status -> PENDING_APPROVAL. No GL yet.
   app.post("/api/restaurant/:id/accounting/cash-drawers/:drawerId/close", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctStaff(req, res)) return;
+    if (!(await _acctDrawerWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const d: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
@@ -54538,7 +54575,7 @@ ${data.tenant.name}`;
   // trues up any over/short to 6010, and opens the incoming cashier's drawer with
   // the carry-over float. Nothing on the existing open/close/approve path changes.
   app.post("/api/restaurant/:id/accounting/cash-drawers/:drawerId/handover", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctStaff(req, res)) return;
+    if (!(await _acctDrawerWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const d: any = await db.get("SELECT * FROM cash_drawers WHERE id=? AND restaurant_id=?", [req.params.drawerId, req.params.id]);
@@ -54595,7 +54632,7 @@ ${data.tenant.name}`;
   // Accept a handover (SECOND signature — the incoming cashier or a manager). Runs the
   // whole atomic transfer: variance → deposit → close outgoing → open incoming.
   app.post("/api/restaurant/:id/accounting/cash-handovers/:handoverId/accept", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctStaff(req, res)) return;
+    if (!(await _acctDrawerWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const h: any = await db.get("SELECT * FROM cash_handovers WHERE id=? AND restaurant_id=?", [req.params.handoverId, req.params.id]);
@@ -54676,7 +54713,7 @@ ${data.tenant.name}`;
   // Cancel / dispute a pending handover (a party to it, or a manager). The outgoing
   // drawer stays OPEN so it can be recounted or handed over again.
   app.post("/api/restaurant/:id/accounting/cash-handovers/:handoverId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!_acctStaff(req, res)) return;
+    if (!(await _acctDrawerWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const h: any = await db.get("SELECT * FROM cash_handovers WHERE id=? AND restaurant_id=?", [req.params.handoverId, req.params.id]);
@@ -54775,7 +54812,7 @@ ${data.tenant.name}`;
 
   // Unlock a business day (owner only).
   app.post("/api/restaurant/:id/accounting/day-close/unlock", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const date = String(req.body?.business_date || new Date().toISOString().slice(0, 10));
@@ -54813,7 +54850,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/bank-reconciliation", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctOwnerOnly(req, res))) return;
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
