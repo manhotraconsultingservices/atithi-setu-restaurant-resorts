@@ -26937,10 +26937,11 @@ ${data.tenant.name}`;
   // no way for this role to touch the existing booking lines.
   // ══════════════════════════════════════════════════════════════════════════
 
-  // Which booking statuses accept live add-ons: the event is confirmed and not
-  // yet closed. Blocks additions while still quoting (INQUIRY/QUOTED) or after
-  // the booking is COMPLETED / CANCELLED / CHECKED_OUT.
-  const _ADDON_LIVE_STATUSES = ['CONFIRMED', 'IN_PROGRESS'];
+  // Add-ons are allowed ONLY while the event is actually running — status
+  // IN_PROGRESS. Blocks additions before the event (INQUIRY/QUOTED/CONFIRMED) and
+  // after it closes (COMPLETED / CANCELLED / CHECKED_OUT). Owner policy: a
+  // supplement is a live, in-the-moment guest request during the event itself.
+  const _ADDON_LIVE_STATUSES = ['IN_PROGRESS'];
 
   app.post("/api/restaurant/:id/events/bookings/:bid/addons", authenticate, eventsStaff, requireTabAction('EVENTS_ADDONS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
@@ -26950,7 +26951,7 @@ ${data.tenant.name}`;
       const bk: any = await db.get("SELECT id, status, venue_rate_basis FROM event_bookings WHERE id = ?", [req.params.bid]);
       if (!bk) return res.status(404).json({ error: "Booking not found" });
       if (!_ADDON_LIVE_STATUSES.includes(String(bk.status))) {
-        return res.status(409).json({ error: "Add-ons can only be added to a confirmed, in-progress event." });
+        return res.status(409).json({ error: "Add-ons can only be added while the event is In Progress." });
       }
       const b = req.body || {};
       const category = ['RENTAL', 'SERVICE', 'ROOM', 'CUSTOM'].includes(String(b.category || '').toUpperCase())
@@ -52710,8 +52711,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-addons-phase3-booking-ui',
+    commit_marker: 'event-addons-inprogress-only',
     code_features: [
+      'event-addons-inprogress-only',                //POLICY (owner): Event Add-ons are now allowed ONLY while the event is actually running — booking status IN_PROGRESS. Tightened `_ADDON_LIVE_STATUSES` from ['CONFIRMED','IN_PROGRESS'] → ['IN_PROGRESS'] (server.ts POST /events/bookings/:bid/addons still 409s otherwise, new message "…while the event is In Progress"); frontend `addonLive` (EventViews) now `status === 'IN_PROGRESS'` so the "+ Add supplement" control shows only then + the hint reads "Available only while the event is In Progress." A CONFIRMED (not-yet-started) booking now rejects add-ons. Tests updated: TC-EVT-ADDON-ADD uses an IN_PROGRESS booking; TC-EVT-ADDON-LIVEGATE now asserts CONFIRMED→409. tsc + vite build clean.
       'event-addons-phase3-booking-ui',              //FEATURE (Event Add-ons Phase 3 — booking-detail UI). New "Add-ons / Supplements" card in EventBookingDetail (EventViews.tsx, full-width after the line-items grid, violet left-border): a "+ Add supplement" control (shown only when the booking is live CONFIRMED/IN_PROGRESS AND the role has EVENTS_ADDONS Edit) toggles an inline picker — Type (Rental/Service/Room/Custom); Rental/Service pick from the master catalogs (prefills name+rate, editable override), Room/Custom take a name+rate; qty; → POST /events/bookings/:bid/addons. Each add-on lists as "name · category — added by X · qty × rate = total" with a Void (X) button gated on EVENTS_ADDONS Full → DELETE. The card shows to anyone viewing the booking that HAS add-ons (they're part of the bill) and the add control only to add-capable staff. Uses the Phase-1 endpoints + Phase-2 permission tab; the picker never touches core booking lines. tsc + vite build clean. Add-ons feature COMPLETE (Phases 1-3).
       'event-addons-phase2-permission-tab',          //FEATURE (Event Add-ons Phase 2 — the EVENTS_ADDONS permission tab). Wires the tab (already enforced by the Phase-1 endpoints) into the RBAC catalogue so an owner can GRANT it: backend `EVENTS_TAB_IDS` (+EVENTS_ADDONS → recognized as an events-module tab by requireModuleAccess/eventsStaff + the requireTabAction migration-safety fallback, so a role granted ONLY EVENTS_ADDONS passes the events module gate); frontend `PERMISSIBLE_TABS` (new grantable row "Event Add-ons / Supplements", eventsOnly — shows under the Events sub-tab of Staff Access) + `TAB_MODULE` (EVENTS_ADDONS→EVENTS) + the super-admin per-tenant editor's `EVENTS_TABS`. NOT a nav page (it gates an action inside booking detail, not a sidebar page). Intended grant = EVENTS_ADDONS Edit + EVENTS_BOOKINGS View → "add-only" staff who can append supplements but cannot edit/remove existing booking lines. hasEventsGrant (EVENTS_ prefix) + the scope-strip (EVENTS_ prefix → EVENTS module) already handle it. Phase 3 (booking-detail UI card + tree picker) still pending. tsc + vite build clean.
       'events-booking-venue-phone-mandatory',        //IMPROVEMENT (owner policy): a STAFF-created event booking now REQUIRES a venue + a contact phone. Backend POST /events/bookings rejects a missing venue_id ("Venue is required", 400) or blank customer_phone ("Phone number is required", 400) — the data-integrity boundary (no venue-less booking with no hall/rate, no uncontactable customer). Frontend EventViews New-Booking `create()` guards both + the Phone/Venue labels show a red required asterisk + the venue placeholder reads "Select a venue…". The PUBLIC-page inquiry (a lead) is UNCHANGED — it already requires name+phone and keeps venue optional (the property assigns a venue when quoting). Test: TC-EVT-MANDATORY (400 without venue, 400 without phone, 201 with both); existing booking-creating tests (TC-EVT-CANCEL, TC-EVT-ADDON) updated to pass a venue_id (get-or-create a throwaway venue, cleaned up). tsc clean.

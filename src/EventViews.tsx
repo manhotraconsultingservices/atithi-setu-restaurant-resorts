@@ -1547,7 +1547,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       {/* Add-ons / Supplements — guest-requested extras appended live during the
           event, gated on EVENTS_ADDONS (separate from booking-line editing). */}
       {(() => {
-        const addonLive = bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS';
+        const addonLive = bk.status === 'IN_PROGRESS';
         const canAddAddon = addonLive && evCanEdit('EVENTS_ADDONS');
         const canVoidAddon = evCanDelete('EVENTS_ADDONS');
         const addons = bk.addons || [];
@@ -1559,7 +1559,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               <h3 className="font-bold text-sm flex items-center gap-1.5"><Plus size={15} className="text-[#7c3aed]" />Add-ons / Supplements</h3>
               {canAddAddon && !showAddon && <button className={BTN_GHOST} onClick={() => setShowAddon(true)}><Plus size={13} />Add supplement</button>}
             </div>
-            <p className="text-[11px] text-[#9d8b7e] mb-2">Extras a guest requested during the event — added on top of the booking. The base booking lines are never changed.{!addonLive && ' (Available once the event is confirmed / in progress.)'}</p>
+            <p className="text-[11px] text-[#9d8b7e] mb-2">Extras a guest requested during the event — added on top of the booking. The base booking lines are never changed.{!addonLive && ' (Available only while the event is In Progress.)'}</p>
             {showAddon && canAddAddon && (
               <div className="mb-3 p-3 rounded-xl bg-[#faf7f2] border border-[#e8dccf] grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
                 <div><label className={LABEL}>Type</label>
