@@ -10201,6 +10201,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [groupTransferBusy, setGroupTransferBusy] = useState(false);
   // ADD-ROOM to an existing group (self-contained: room types fetched on open).
   const [groupAddRoom, setGroupAddRoom] = useState<{ open: boolean; typeId: string; qty: string; rate: string; busy: boolean; types: any[] }>({ open: false, typeId: '', qty: '1', rate: '', busy: false, types: [] });
+  // Phase 2 — "Add Room" on an INDIVIDUAL booking detail (converts the booking to a
+  // group on the server, then adds). Same shape as groupAddRoom.
+  const [indivAddRoom, setIndivAddRoom] = useState<{ open: boolean; typeId: string; qty: string; rate: string; busy: boolean; types: any[] }>({ open: false, typeId: '', qty: '1', rate: '', busy: false, types: [] });
   const [groupDateExt, setGroupDateExt] = useState({ check_in_date: '', check_out_date: '' });
   const [groupDateExtBusy, setGroupDateExtBusy] = useState(false);
   const [groupDepositAmt, setGroupDepositAmt] = useState('');
@@ -35324,6 +35327,81 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     )}
                     <button type="button" onClick={() => { setBookingDetailTarget(null); setEditingBooking({ ...bd }); setShowBookingModal(true); }} className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-[12px] font-bold hover:bg-[#a84612]">✎ Edit booking</button>
                   </div>
+                  {/* Add Room — extend a single booking with another room. The server
+                      converts the standalone booking into a group (shared guest + dates),
+                      then adds the room (availability-checked, group total recomputed).
+                      Shown while the stay is still active (BOOKED / ASSIGNED / CHECKED_IN,
+                      not a no-show) and the user can write Hotel Bookings. */}
+                  {canWriteTab('HOTEL_BOOKINGS') && ['BOOKED', 'ASSIGNED', 'CHECKED_IN'].includes(String(bd.status || '').toUpperCase()) && Number(bd.no_show) !== 1 && (
+                    <div className="border border-dashed border-emerald-300 rounded-2xl p-3 bg-emerald-50/50">
+                      <div className="flex items-center justify-between">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-700">{bd.group_name ? 'Add Room to Group' : 'Add Room'}</p>
+                        {!indivAddRoom.open && (
+                          <button
+                            type="button"
+                            className="text-[10px] font-bold px-2 py-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700"
+                            onClick={async () => {
+                              setIndivAddRoom(s => ({ ...s, open: true }));
+                              try {
+                                const rr = await fetch(`/api/restaurant/${restaurantId}/hotel/room-types`, { headers: { Authorization: `Bearer ${token}` } });
+                                if (rr.ok) { const t = await rr.json(); setIndivAddRoom(s => ({ ...s, types: Array.isArray(t) ? t : [] })); }
+                              } catch { /* */ }
+                            }}
+                          >+ Add Room</button>
+                        )}
+                      </div>
+                      {!indivAddRoom.open && !bd.group_name && (
+                        <p className="mt-1 text-[10px] text-emerald-700/80">Adds another room and turns this into a group booking (shared guest &amp; dates).</p>
+                      )}
+                      {indivAddRoom.open && (
+                        <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 items-end">
+                          <div>
+                            <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase">Room Type</label>
+                            <select value={indivAddRoom.typeId} onChange={e => setIndivAddRoom(s => ({ ...s, typeId: e.target.value }))}
+                              className="w-full text-xs border border-emerald-200 rounded-lg px-2 py-1.5 outline-none bg-white">
+                              <option value="">Select…</option>
+                              {indivAddRoom.types.map((rt: any) => <option key={rt.id} value={rt.id}>{rt.name}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase">Qty</label>
+                            <input type="number" min={1} value={indivAddRoom.qty} onChange={e => setIndivAddRoom(s => ({ ...s, qty: e.target.value }))}
+                              className="w-full text-xs border border-emerald-200 rounded-lg px-2 py-1.5 outline-none" />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase">Rate/night</label>
+                            <input type="number" min={0} value={indivAddRoom.rate} onChange={e => setIndivAddRoom(s => ({ ...s, rate: e.target.value }))} placeholder="tariff"
+                              className="w-full text-xs border border-emerald-200 rounded-lg px-2 py-1.5 outline-none" />
+                          </div>
+                          <div className="flex gap-1">
+                            <button
+                              type="button"
+                              disabled={!indivAddRoom.typeId || indivAddRoom.busy}
+                              onClick={async () => {
+                                setIndivAddRoom(s => ({ ...s, busy: true }));
+                                try {
+                                  const body = { rooms: [{ room_type_id: indivAddRoom.typeId, qty: Math.max(1, Number(indivAddRoom.qty) || 1), room_rate: indivAddRoom.rate ? Number(indivAddRoom.rate) : 0 }] };
+                                  const rr = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/add-room`, {
+                                    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                    body: JSON.stringify(body),
+                                  });
+                                  const d = await rr.json().catch(() => ({}));
+                                  if (!rr.ok) throw new Error(d?.error || 'Failed to add room');
+                                  toast.success(`Added ${d.added} room${d.added === 1 ? '' : 's'}${d.converted ? ' — booking is now a group' : ''}.`);
+                                  setIndivAddRoom({ open: false, typeId: '', qty: '1', rate: '', busy: false, types: [] });
+                                  setBookingDetailTarget(null);
+                                  await fetchHotelBookings();
+                                } catch (err: any) { toast.error(err.message); setIndivAddRoom(s => ({ ...s, busy: false })); }
+                              }}
+                              className="text-xs font-bold px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40"
+                            >{indivAddRoom.busy ? 'Adding…' : 'Add'}</button>
+                            <button type="button" onClick={() => setIndivAddRoom(s => ({ ...s, open: false }))}
+                              className="text-xs font-bold px-2 py-1.5 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200">Cancel</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {/* Meta chips — booking-level attributes at a glance */}
                   <div className="flex flex-wrap gap-1.5">
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#efe9e1] text-[#6b5d52]">{bdIsDayUse ? '🕑 Day-use' : '🌙 Overnight'}</span>

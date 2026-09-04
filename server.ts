@@ -39547,6 +39547,74 @@ ${data.tenant.name}`;
     }
   });
 
+  // POST add-room: add a room to an INDIVIDUAL (single-room) booking.
+  // If the booking is standalone (no group_id yet) it is first CONVERTED into a
+  // group — mint a room_booking_groups row seeded from the booking + stamp the
+  // group onto the existing room — so the added room flows through the exact same
+  // group billing / checkout / invoice machinery. The actual room add then
+  // delegates to the hardened group rooms/add above (availability-checked, group
+  // total + num_rooms recomputed), so there is ONE room-add code path, not two.
+  // Allowed throughout the booking lifecycle EXCEPT cancelled / checked-out / no-show.
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/add-room", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { bookingId } = req.params;
+      const rooms = Array.isArray(req.body?.rooms) ? req.body.rooms : [];
+      if (!rooms.length) return res.status(400).json({ error: "rooms array required" });
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM room_bookings WHERE id=?", [bookingId]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const st = String(bk.status || '').toUpperCase();
+      if (['CANCELLED', 'CHECKED_OUT', 'NO_SHOW'].includes(st)) {
+        return res.status(409).json({ error: "Rooms can't be added to a cancelled, checked-out or no-show booking. Create a new booking instead." });
+      }
+      let groupId: string = bk.group_id;
+      let converted = false;
+      if (!groupId) {
+        // Convert the standalone booking into a group so the add + all downstream
+        // group billing/checkout apply. Seed the group from the booking's own details.
+        groupId = `GRP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const groupName = `${bk.guest_name || 'Guest'} — group`;
+        await db.run(
+          `INSERT INTO room_booking_groups
+             (id, name, contact_name, contact_phone, contact_email, num_rooms,
+              check_in_date, check_out_date, total_amount, created_by, group_status, booking_source)
+           VALUES (?,?,?,?,?,?,?,?,?,?, 'TENTATIVE', ?)`,
+          [groupId, groupName, bk.guest_name || 'Guest', bk.guest_phone || null, bk.guest_email || null, 1,
+           bk.check_in_date, bk.check_out_date, Number(bk.total_amount || 0), req.user?.id || null, bk.booking_source || 'DIRECT']
+        );
+        await db.run("UPDATE room_bookings SET group_id=?, group_name=? WHERE id=?", [groupId, groupName, bookingId]);
+        converted = true;
+      }
+      // Delegate to the hardened group rooms/add (availability + per-room rate +
+      // group total/num_rooms recompute). It validates ALL rooms before inserting,
+      // so on 409 nothing was inserted — safe to roll the conversion back.
+      const addRes = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/booking-groups/${groupId}/rooms/add`, req.headers.authorization, { rooms });
+      if (!addRes.ok) {
+        if (converted) {
+          // The add failed after we minted the group; undo the conversion so the
+          // booking's state is exactly as before (no orphan 1-room group).
+          await db.run("UPDATE room_bookings SET group_id=NULL, group_name=NULL WHERE id=?", [bookingId]).catch(() => {});
+          await db.run("DELETE FROM room_booking_groups WHERE id=?", [groupId]).catch(() => {});
+        }
+        return res.status(addRes.status || 500).json(addRes.data || { error: "Failed to add room" });
+      }
+      try {
+        await writeObjectAudit(db, req, {
+          objectType: 'BOOKING', objectId: bookingId,
+          action: converted ? 'CONVERTED_TO_GROUP' : 'ROOM_ADDED',
+          summary: `${converted ? 'Converted booking to a group and added' : 'Added'} ${addRes.data?.added || 0} room(s)`,
+          after: { group_id: groupId, added: addRes.data?.added || 0 },
+        });
+      } catch { /* audit is best-effort */ }
+      return res.status(201).json({ ok: true, group_id: groupId, converted, added: addRes.data?.added || 0, bookings: addRes.data?.bookings || [] });
+    } catch (err) {
+      console.error("/hotel/bookings/:bookingId/add-room error:", err);
+      res.status(500).json({ error: "Failed to add room" });
+    }
+  });
+
   // DELETE rooms/:bookingId: remove (cancel) one room from a group.
   app.delete("/api/restaurant/:id/hotel/booking-groups/:groupId/rooms/:bookingId", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -52781,8 +52849,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-group-add-room-p1',
+    commit_marker: 'hotel-individual-add-room-p2',
     code_features: [
+      'hotel-individual-add-room-p2',                //FEATURE (Add Room to existing booking — Phase 2: INDIVIDUAL hotel bookings, convert-to-group). New POST /hotel/bookings/:bookingId/add-room: if the booking is standalone (group_id NULL) it is first CONVERTED into a group (mint a room_booking_groups row seeded from the booking + stamp group_id/group_name onto the existing room), then the room add DELEGATES to the hardened Phase-1 group rooms/add via callSelfApi — so there is ONE room-add code path (availability guard + per-room rate + group total/num_rooms recompute), not a duplicated one. Lifecycle gate: allowed for any status EXCEPT CANCELLED / CHECKED_OUT / NO_SHOW. On a failed add the conversion is rolled back (group rooms/add validates all rooms before inserting → 409 leaves nothing inserted → safe to delete the just-minted empty group). Best-effort object audit (CONVERTED_TO_GROUP / ROOM_ADDED). FRONTEND: pending. tsc + vite build clean. Phase 3 = event bookings (reserve post-confirm rooms).
       'hotel-group-add-room-p1',                     //FEATURE (Add Room to existing booking — Phase 1: GROUP hotel bookings). Hardened the pre-existing-but-unwired POST /hotel/booking-groups/:groupId/rooms/add: (1) added the AUTHORITATIVE availability guard `validateBookingRequest` per new room (was a weak raw subquery → double-booking risk) — resolves a free room of the type, then validates overlap/holds/capacity/dates, atomically before any INSERT; (2) per-room rate + total via `computeBookingTotalWithExtras` with the same all-in-override rule as group-create (was only storing room_rate, no total_amount); (3) recompute the group's `num_rooms` AND `total_amount` respecting the group discount (old code left total_amount stale → wrong group invoice); (4) lifecycle gate — 409 if the group is already settled (grp.settled_at). New rooms are status BOOKED, dates/guest/booking_type/meal-plan copied from the group. FRONTEND: a new "+ Add Room" form in the group detail modal's Guests & Rooms tab (room-type picker + qty + optional rate, fetches room-types on open), gated canWriteTab('HOTEL_BOOKINGS') + shown only while the group has an active (non-checked-out/cancelled) room → POST rooms/add → reload. Additive; no folio/GL change (each room folio is created at its own check-in). tsc + vite build clean. Phase 2 = individual booking (convert-to-group); Phase 3 = event bookings (reserve post-confirm rooms).
       'event-lifecycle-bar-top',                     //UX (booking lifecycle discoverability). The status-advancing actions (Confirm → Start Event → Checkout → Complete → Cancel) were buried at the BOTTOM of a long booking Overview, so owners couldn't find Checkout. Moved them into a prominent "Lifecycle" bar at the TOP of the booking Overview (EventBookingDetail, first card, shown to EVENTS_BOOKINGS-Edit roles on an actionable booking). Each button keeps its status condition; Checkout tooltip notes it also raises the invoice + moves CONFIRMED→In Progress, and Start Event notes it opens the add-on window without invoicing. The bottom action row now holds only the DOCUMENT actions (Generate Quote / BEO / Invoice PDF / Email / Cancel-Invoice). Pure frontend; no endpoint change. tsc + vite build clean.
       'event-start-button-in-progress',              //FEATURE ("Start Event" button — the missing door into IN_PROGRESS). Add-ons are IN_PROGRESS-only, but the ONLY prior transition to IN_PROGRESS was Checkout (which RAISES the invoice) — so you couldn't enter the live add-on window without billing first. NEW `POST /events/bookings/:bid/start` (gated EVENTS_BOOKINGS UPDATE/Edit, idempotent) moves CONFIRMED → IN_PROGRESS WITHOUT creating a folio/invoice + writes a STATUS_CHANGED audit; a non-CONFIRMED booking 409s. Frontend: a "Start Event" (Play icon) button in the booking-detail lifecycle row, shown when status === 'CONFIRMED' + evCanEdit('EVENTS_BOOKINGS'), calls act('start'). Real flow now: Confirm → (event day) Start Event → staff add live supplements → Checkout at the end bills everything incl. add-ons. Test TC-EVT-START (Start → IN_PROGRESS, no folio). tsc + vite build clean.
