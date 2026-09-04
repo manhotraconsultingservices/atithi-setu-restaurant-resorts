@@ -452,6 +452,32 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
       created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_event_bkg_rooms ON event_booking_rooms(booking_id);
+
+    -- Add-ons / supplements — extra items (chairs, tables, a room, a service)
+    -- that guests request AFTER a booking is confirmed / while the event is
+    -- running. Deliberately a SEPARATE, append-only table from the core booking
+    -- lines above: staff granted the EVENTS_ADDONS tab may APPEND rows here
+    -- without EVENTS_BOOKINGS edit access, and a full-booking PUT can never
+    -- touch them. Priced as a flat line (quantity × unit_rate) — no event-span
+    -- multiplication. status VOID = soft-removed (owner/manager only).
+    CREATE TABLE IF NOT EXISTS event_booking_addons (
+      id                   TEXT PRIMARY KEY,
+      booking_id           TEXT NOT NULL,
+      category             TEXT DEFAULT 'CUSTOM',   -- RENTAL | SERVICE | ROOM | CUSTOM
+      ref_id               TEXT,                    -- master item id (rental/service), nullable
+      name_snapshot        TEXT,
+      description_snapshot  TEXT,
+      quantity             DOUBLE PRECISION DEFAULT 1,
+      unit_rate            DOUBLE PRECISION DEFAULT 0,
+      gst_percent          DOUBLE PRECISION DEFAULT 18,
+      line_total           DOUBLE PRECISION DEFAULT 0,
+      status               TEXT DEFAULT 'ACTIVE',   -- ACTIVE | VOID
+      added_by             TEXT,
+      added_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      voided_by            TEXT,
+      voided_at            TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_bkg_addons ON event_booking_addons(booking_id);
   `);
 
   // ── Quotations (BEO) ────────────────────────────────────────────────────────

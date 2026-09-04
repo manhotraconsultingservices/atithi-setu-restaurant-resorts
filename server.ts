@@ -25132,6 +25132,11 @@ ${data.tenant.name}`;
     // Hotel rooms — already priced per-night; keep their own snapshotted GST.
     for (const rm of (await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId])) || [])
       taxable.push({ amt: round2(Number(rm.line_total || 0)), rate: Number(rm.gst_percent ?? 12) });
+    // Add-ons / supplements — flat-priced lines appended live during the event.
+    // Each carries its own snapshotted GST. Defensive: the table may not exist on
+    // a tenant whose schema predates it, so a missing table must NOT break billing.
+    for (const a of (await db.query("SELECT line_total, gst_percent FROM event_booking_addons WHERE booking_id = ? AND status = 'ACTIVE'", [bookingId]).catch(() => [])) || [])
+      taxable.push({ amt: round2(Number(a.line_total || 0)), rate: Number(a.gst_percent ?? evGst) });
     const subtotal = round2(taxable.reduce((sum, t) => sum + t.amt, 0));
     // Discount comes off BEFORE GST. Allocate it across lines proportionally so
     // each line is taxed on its discounted (net) share.
@@ -25931,13 +25936,16 @@ ${data.tenant.name}`;
       const services = await db.query("SELECT * FROM event_booking_services WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
       const rooms = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
       const catering = await db.query("SELECT * FROM event_booking_catering WHERE booking_id = ? ORDER BY created_at", [req.params.bid]).catch(() => []);
+      // Add-ons / supplements (append-only, added live during the event). Defensive
+      // .catch so an older tenant schema without the table still returns the booking.
+      const addons = await db.query("SELECT * FROM event_booking_addons WHERE booking_id = ? AND status = 'ACTIVE' ORDER BY added_at", [req.params.bid]).catch(() => []);
       const quotations = await db.query("SELECT * FROM event_quotations WHERE booking_id = ? ORDER BY version DESC", [req.params.bid]);
       // Bill breakdown (subtotal / GST / discount / grand) so the UI can show a
       // proper tax-aware ledger instead of deriving it from total_amount. Honors a
       // per-request GST override (?gst_enabled=0 / ?gst_percent=) so the ledger
       // live-previews the Invoice-GST toggle before a quotation/invoice is raised.
       const bill = await computeEventBill(db, req.params.bid, parseEventGstOverride(req.query));
-      res.json({ ...bk, items, services, rooms, catering, quotations, bill });
+      res.json({ ...bk, items, services, rooms, catering, addons, quotations, bill });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch booking" }); }
   });
 
@@ -26798,6 +26806,99 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update room" }); }
   });
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // Add-ons / Supplements — append-only extras a guest requests AFTER the
+  // booking is confirmed / while the event runs (extra chair, table, room, a
+  // service). Gated on the EVENTS_ADDONS tab (NOT EVENTS_BOOKINGS), so the owner
+  // can grant "may add extras" WITHOUT granting "may edit / remove booking
+  // lines". Append + soft-void only — there is deliberately NO update route and
+  // no way for this role to touch the existing booking lines.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Which booking statuses accept live add-ons: the event is confirmed and not
+  // yet closed. Blocks additions while still quoting (INQUIRY/QUOTED) or after
+  // the booking is COMPLETED / CANCELLED / CHECKED_OUT.
+  const _ADDON_LIVE_STATUSES = ['CONFIRMED', 'IN_PROGRESS'];
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/addons", authenticate, eventsStaff, requireTabAction('EVENTS_ADDONS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT id, status, venue_rate_basis FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      if (!_ADDON_LIVE_STATUSES.includes(String(bk.status))) {
+        return res.status(409).json({ error: "Add-ons can only be added to a confirmed, in-progress event." });
+      }
+      const b = req.body || {};
+      const category = ['RENTAL', 'SERVICE', 'ROOM', 'CUSTOM'].includes(String(b.category || '').toUpperCase())
+        ? String(b.category).toUpperCase() : 'CUSTOM';
+      // Snapshot name / rate / GST from the master catalogue for RENTAL and
+      // SERVICE (integrity — a tampered client can't invent a catalogue price);
+      // ROOM / CUSTOM are staff-entered ad-hoc lines. A client-supplied
+      // unit_rate / gst_percent still wins where present (owner override, same
+      // as the booking-line commit path).
+      let name = String(b.name || '').trim();
+      let unitRate: number | null = (b.unit_rate !== undefined && b.unit_rate !== null && b.unit_rate !== '') ? Number(b.unit_rate) : null;
+      let gst: number | null = (b.gst_percent !== undefined && b.gst_percent !== null && b.gst_percent !== '') ? Number(b.gst_percent) : null;
+      if (category === 'RENTAL' && b.ref_id) {
+        const it: any = await db.get("SELECT * FROM event_rental_items WHERE id = ?", [b.ref_id]).catch(() => null);
+        if (it) {
+          if (!name) name = it.name;
+          if (unitRate === null) unitRate = String(bk.venue_rate_basis || 'DAILY').toUpperCase() === 'HOURLY' ? Number(it.rent_hourly || 0) : Number(it.rent_daily || 0);
+          if (gst === null) gst = Number(it.gst_percent ?? 18);
+        }
+      } else if (category === 'SERVICE' && b.ref_id) {
+        const sv: any = await db.get("SELECT * FROM event_services WHERE id = ?", [b.ref_id]).catch(() => null);
+        if (sv) {
+          if (!name) name = sv.name;
+          if (unitRate === null) unitRate = Number(sv.rate || 0);
+          if (gst === null) gst = Number(sv.gst_percent ?? 18);
+        }
+      }
+      if (!name) return res.status(400).json({ error: "An add-on name is required." });
+      if (unitRate === null || !isFinite(unitRate) || unitRate < 0) return res.status(400).json({ error: "A valid unit rate is required." });
+      if (gst === null || !isFinite(gst)) gst = await resolveEventGstRate(db);
+      const qty = Math.max(1, Number(b.quantity || 1) || 1);
+      const lineTotal = round2(qty * unitRate);
+      const id = mkEventId('EBA');
+      await db.run(
+        `INSERT INTO event_booking_addons
+           (id, booking_id, category, ref_id, name_snapshot, description_snapshot, quantity, unit_rate, gst_percent, line_total, status, added_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
+        [id, req.params.bid, category, b.ref_id || null, name, (b.description || b.notes || null),
+         qty, unitRate, gst, lineTotal, (req.user?.email || req.user?.userName || null)]
+      );
+      await recomputeEventTotal(db, req.params.bid);
+      const row = await db.get("SELECT * FROM event_booking_addons WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) {
+      console.error("/events/bookings addons add error:", err);
+      res.status(500).json({ error: "Failed to add supplement" });
+    }
+  });
+
+  // Void (soft-remove) an add-on. DELETE-level (Full) — the add-only staff role
+  // cannot reach this; corrections stay with owner / manager. Never hard-deletes
+  // so the audit trail (who added it, who voided it) survives.
+  app.delete("/api/restaurant/:id/events/bookings/:bid/addons/:aid", authenticate, eventsStaff, requireTabAction('EVENTS_ADDONS', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const row: any = await db.get("SELECT * FROM event_booking_addons WHERE id = ? AND booking_id = ?", [req.params.aid, req.params.bid]);
+      if (!row) return res.status(404).json({ error: "Add-on not found" });
+      if (String(row.status) === 'VOID') return res.json({ success: true });
+      await db.run("UPDATE event_booking_addons SET status = 'VOID', voided_by = ?, voided_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [(req.user?.email || req.user?.userName || null), req.params.aid]);
+      await recomputeEventTotal(db, req.params.bid);
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error("/events/bookings addons void error:", err);
+      res.status(500).json({ error: "Failed to remove supplement" });
+    }
+  });
+
   // Confirm the event → hold the venue + create the real hotel bookings via API.
   app.post("/api/restaurant/:id/events/bookings/:bid/confirm", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
@@ -26932,6 +27033,14 @@ ${data.tenant.name}`;
     const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED' ORDER BY created_at", [bk.id]);
     for (const rm of rooms) {
       lines.push({ line_type: 'HOTEL_ROOM', description: `${rm.room_type_snapshot} × ${rm.num_rooms} (${_fmtEvDate(rm.check_in_date)} to ${_fmtEvDate(rm.check_out_date)})`, quantity: rm.num_rooms, unit_rate: rm.quoted_rate, amount: round2(rm.line_total), gst_rate: Number(rm.gst_percent ?? 12), gst_amount: 0 });
+    }
+    // Add-ons / supplements — appended live during the event (chairs, tables, a
+    // room, a service). Flat-priced (quantity × unit_rate), own snapshotted GST.
+    // Defensive: a missing table (older tenant schema) must NOT break invoicing.
+    const addons: any[] = await db.query("SELECT * FROM event_booking_addons WHERE booking_id = ? AND status = 'ACTIVE' ORDER BY added_at", [bk.id]).catch(() => []);
+    for (const a of addons) {
+      const d = a.description_snapshot ? ` — ${a.description_snapshot}` : '';
+      lines.push({ line_type: 'ADDON', description: `${a.name_snapshot} × ${a.quantity}${d}`, quantity: a.quantity, unit_rate: a.unit_rate, amount: round2(a.line_total), gst_rate: Number(a.gst_percent ?? evGst), gst_amount: 0 });
     }
     const subtotal = round2(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
     // Discount comes off BEFORE GST — allocate proportionally and tax each line
@@ -52474,8 +52583,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-invoice-date-only-p17',
+    commit_marker: 'event-addons-phase1-backend',
     code_features: [
+      'event-addons-phase1-backend',                 //FEATURE (Event Add-ons / Supplements — Phase 1 backend, APPEND-ONLY). Business ask: during/after a confirmed event a guest requests extras (extra chair/table/room/service); staff with access control may ADD them but must NOT be able to remove/update existing booking lines. Today add/remove/update a line are the SAME capability (one full-array PUT /events/bookings/:bid gated EVENTS_BOOKINGS Edit), so "add-only" can't be expressed. Phase 1 adds an isolated, additive append-only mechanism: (1) NEW table event_booking_addons (eventsService.ts schema-init, NOT a request handler — id/booking_id/category[RENTAL|SERVICE|ROOM|CUSTOM]/ref_id/name_snapshot/description/quantity/unit_rate/gst_percent/line_total/status[ACTIVE|VOID]/added_by/added_at/voided_by/voided_at). SEPARATE table (not the shared line tables) so a full-booking PUT can NEVER clobber add-ons and append-only is enforced by construction. (2) POST /events/bookings/:bid/addons — appends ONE line, gated requireTabAction('EVENTS_ADDONS','CREATE') + live-window status guard (status IN CONFIRMED/IN_PROGRESS); snapshots name/rate/gst from event_rental_items / event_services master for RENTAL/SERVICE (integrity), ad-hoc for ROOM/CUSTOM; flat-priced (qty×unit_rate, no span multiply); stamps added_by. DELETE /addons/:aid = soft-VOID, gated DELETE (Full) so add-only staff can't remove; never hard-deletes. (3) Billing+invoice integration: computeEventBill + assembleEventQuoteLines each add ONE defensive .catch(()=>[]) query pushing ACTIVE add-ons (line_type 'ADDON') into the taxable pool / invoice lines — bookings with no add-ons render byte-identical to before; a missing table can't break billing. (4) booking-detail GET returns addons[]. EVENTS_ADDONS tab not yet in the catalogue (Phase 2) → requireTabAction safely denies configured custom roles + passes OWNER, so Phase 1 is OWNER-testable with zero staff exposure. Phase 2 = wire the EVENTS_ADDONS permission tab; Phase 3 = booking-detail UI. tsc clean.
       'rbac-fe-sweep-p1',                            //UX (Hotel/Restaurant FE sweep, pass 1 — hides write controls a View role can't use; backend enforces). Gated the row-action + create buttons via canWriteTab/canDeleteTab (perm.ts): Menu (Edit/Recipe/Daily-Special/Delete/Availability), Hotel-Inventory (Receive/Use/Edit/Del), Service-Requests (Ack/Start/Complete), Restaurant Invoices (Edit/Print/Mark-Paid), Loyalty (Recompute/Add-tier/Edit/Disable/Enroll), restaurant Reservations (New-Booking + Confirm/Cancel/Re-confirm status actions). Remaining passes: Hotel Bookings, Channel Manager, Settings, Monitor/KDS, Rooms-Setup. tsc + vite build clean.
       'rbac-hotel-restaurant-fe-gating-start',       //UX (Phase 3 — Hotel/Restaurant frontend gating START + Events booking-detail complete; the backend fully enforces from Phases 1-2, so this only hides controls a View role can't use). Added a SHARED helper src/perm.ts (canWriteTab/canDeleteTab — reads the tab_perms localStorage map; works in the main App render AND the many STANDALONE view components where App's canDo isn't in scope — the key blocker a mapping pass surfaced). Gated the PRIMARY create/action buttons across the main surfaces: Menu Add-Item (MENU), New Invoice (INVOICES), Hotel New-Booking (HOTEL_BOOKINGS), Add Room (ROOMS), Add/Edit/Delete FAQ (CONCIERGE_FAQ), Hotel-Inventory Add (HOTEL_INVENTORY). Also FINISHED the Events booking-detail: folded evCanEdit('EVENTS_BOOKINGS') into the editable/canRecordPayment flags so a View role sees the whole detail READ-ONLY (no add/remove lines, hotel rooms, cancel, schedule, record-payment, assign/remove-staff; inline qty/price render as static text). SCOPE: a full sweep is 100+ mostly-multi-line buttons (complete map captured in this session) — this gates the highest-value primary buttons; the long tail of inline toggles / per-row actions is an incremental follow-up (every one already blocked server-side). tsc + vite build clean.
       'rbac-events-fe-edit-delete-send-gating',      //UX (frontend parity, Phase 3 follow-up). Reported: a View-only role could still SEE Edit/Delete on Halls&Venues/Rental-Inventory/Add-on-Services/Catering-Menus and the Send-quotation buttons (backend correctly 403s all of them — verified — but the buttons shouldn't show). Extended the EventViews gating: added evCanDelete() and hid the 4 master-data Edit buttons (evCanEdit tab), the 4 Delete buttons (evCanDelete tab = Full), and the 2 Send-quotation buttons (evCanEdit EVENTS_QUOTATIONS). Combined with the earlier create-button gating, a View role now sees read-only Events (no New Booking / +Add / Edit / Delete / Send / Confirm / Checkout). Export CSV stays available to View (it is a read of already-viewable data). Backend remains the security boundary. tsc + vite build clean.
