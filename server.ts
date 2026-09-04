@@ -27476,6 +27476,35 @@ ${data.tenant.name}`;
   });
 
   // ─── CHECKOUT → folio (folio_kind='EVENT') ─────────────────────────────────
+  // Start the event — move a CONFIRMED booking to IN_PROGRESS WITHOUT raising an
+  // invoice (invoicing stays with Checkout). This opens the live window during
+  // which add-ons / supplements may be appended; Checkout at the end bills
+  // everything, including the add-ons. Idempotent: an already-started booking
+  // returns success. Gated at Edit (a normal operational status change).
+  app.post("/api/restaurant/:id/events/bookings/:bid/start", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT id, status FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      if (String(bk.status) === 'IN_PROGRESS') {
+        const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+        return res.json({ ...row, already_started: true });
+      }
+      if (String(bk.status) !== 'CONFIRMED') {
+        return res.status(409).json({ error: "Only a confirmed booking can be started. Confirm the booking first." });
+      }
+      await db.run("UPDATE event_bookings SET status = 'IN_PROGRESS' WHERE id = ?", [req.params.bid]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: 'Event started — In Progress', before: { status: bk.status }, after: { status: 'IN_PROGRESS' } });
+      const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      res.json(row);
+    } catch (err: any) {
+      console.error("/events/bookings start error:", err);
+      res.status(500).json({ error: "Failed to start event" });
+    }
+  });
+
   app.post("/api/restaurant/:id/events/bookings/:bid/checkout", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -52711,8 +52740,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-addons-inprogress-only',
+    commit_marker: 'event-start-button-in-progress',
     code_features: [
+      'event-start-button-in-progress',              //FEATURE ("Start Event" button — the missing door into IN_PROGRESS). Add-ons are IN_PROGRESS-only, but the ONLY prior transition to IN_PROGRESS was Checkout (which RAISES the invoice) — so you couldn't enter the live add-on window without billing first. NEW `POST /events/bookings/:bid/start` (gated EVENTS_BOOKINGS UPDATE/Edit, idempotent) moves CONFIRMED → IN_PROGRESS WITHOUT creating a folio/invoice + writes a STATUS_CHANGED audit; a non-CONFIRMED booking 409s. Frontend: a "Start Event" (Play icon) button in the booking-detail lifecycle row, shown when status === 'CONFIRMED' + evCanEdit('EVENTS_BOOKINGS'), calls act('start'). Real flow now: Confirm → (event day) Start Event → staff add live supplements → Checkout at the end bills everything incl. add-ons. Test TC-EVT-START (Start → IN_PROGRESS, no folio). tsc + vite build clean.
       'event-addons-inprogress-only',                //POLICY (owner): Event Add-ons are now allowed ONLY while the event is actually running — booking status IN_PROGRESS. Tightened `_ADDON_LIVE_STATUSES` from ['CONFIRMED','IN_PROGRESS'] → ['IN_PROGRESS'] (server.ts POST /events/bookings/:bid/addons still 409s otherwise, new message "…while the event is In Progress"); frontend `addonLive` (EventViews) now `status === 'IN_PROGRESS'` so the "+ Add supplement" control shows only then + the hint reads "Available only while the event is In Progress." A CONFIRMED (not-yet-started) booking now rejects add-ons. Tests updated: TC-EVT-ADDON-ADD uses an IN_PROGRESS booking; TC-EVT-ADDON-LIVEGATE now asserts CONFIRMED→409. tsc + vite build clean.
       'event-addons-phase3-booking-ui',              //FEATURE (Event Add-ons Phase 3 — booking-detail UI). New "Add-ons / Supplements" card in EventBookingDetail (EventViews.tsx, full-width after the line-items grid, violet left-border): a "+ Add supplement" control (shown only when the booking is live CONFIRMED/IN_PROGRESS AND the role has EVENTS_ADDONS Edit) toggles an inline picker — Type (Rental/Service/Room/Custom); Rental/Service pick from the master catalogs (prefills name+rate, editable override), Room/Custom take a name+rate; qty; → POST /events/bookings/:bid/addons. Each add-on lists as "name · category — added by X · qty × rate = total" with a Void (X) button gated on EVENTS_ADDONS Full → DELETE. The card shows to anyone viewing the booking that HAS add-ons (they're part of the bill) and the add control only to add-capable staff. Uses the Phase-1 endpoints + Phase-2 permission tab; the picker never touches core booking lines. tsc + vite build clean. Add-ons feature COMPLETE (Phases 1-3).
       'event-addons-phase2-permission-tab',          //FEATURE (Event Add-ons Phase 2 — the EVENTS_ADDONS permission tab). Wires the tab (already enforced by the Phase-1 endpoints) into the RBAC catalogue so an owner can GRANT it: backend `EVENTS_TAB_IDS` (+EVENTS_ADDONS → recognized as an events-module tab by requireModuleAccess/eventsStaff + the requireTabAction migration-safety fallback, so a role granted ONLY EVENTS_ADDONS passes the events module gate); frontend `PERMISSIBLE_TABS` (new grantable row "Event Add-ons / Supplements", eventsOnly — shows under the Events sub-tab of Staff Access) + `TAB_MODULE` (EVENTS_ADDONS→EVENTS) + the super-admin per-tenant editor's `EVENTS_TABS`. NOT a nav page (it gates an action inside booking detail, not a sidebar page). Intended grant = EVENTS_ADDONS Edit + EVENTS_BOOKINGS View → "add-only" staff who can append supplements but cannot edit/remove existing booking lines. hasEventsGrant (EVENTS_ prefix) + the scope-strip (EVENTS_ prefix → EVENTS module) already handle it. Phase 3 (booking-detail UI card + tree picker) still pending. tsc + vite build clean.

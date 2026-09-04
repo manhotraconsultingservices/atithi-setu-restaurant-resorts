@@ -12,7 +12,7 @@ import { prettyRoleLabel } from './roleLabel';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
-  AlertTriangle, Mail, Phone, Upload, Image as ImageIcon,
+  AlertTriangle, Mail, Phone, Upload, Image as ImageIcon, Play,
 } from 'lucide-react';
 
 // Cancelling an event invoice is a high-privilege action. Mirrors the backend gate
@@ -1628,6 +1628,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
           }}>Cancel Invoice</button>
         )}
         {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
+        {bk.status === 'CONFIRMED' && evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} disabled={busy} title="Mark the event as In Progress (no invoice yet) so staff can add live add-ons/supplements. Checkout at the end bills everything." onClick={() => act('start')}><Play size={13} />Start Event</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout', undefined, gstBody())}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_GHOST} disabled={busy} onClick={() => act('complete')}>{t('events.bookings.complete')}</button>}
         {editable && <button className={BTN_DANGER} disabled={busy} onClick={() => setShowCancel(true)}>{t('events.bookings.cancel')}</button>}
