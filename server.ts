@@ -39476,25 +39476,27 @@ ${data.tenant.name}`;
       // Resolve a free room per slot, then run the AUTHORITATIVE availability guard
       // (validateBookingRequest — same as the booking POSTs: overlap + holds +
       // capacity + dates). Validate ALL before inserting anything (atomic).
+      // Precompute rooms already taken by overlapping bookings + holds, then GROW
+      // the set as we claim rooms in THIS batch — so the same physical room can't
+      // be picked twice in one add call (mirrors group-create's globalTaken/
+      // batchClaimed; without it, qty>free silently double-books).
+      const takenRows: any[] = await db.query("SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ? AND room_id IS NOT NULL", [checkOut, checkIn]).catch(() => []);
+      const holdRows: any[] = await db.query("SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?", [checkOut, checkIn]).catch(() => []);
+      const taken = new Set<string>([...takenRows, ...holdRows].map((x: any) => String(x.room_id)));
       const resolved: any[] = [];
       for (const r of expandedRooms) {
-        let roomId: string | null = r.room_id || null;
+        let roomId: string | null = r.room_id ? String(r.room_id) : null;
         if (!roomId) {
-          const free: any = await db.get(
-            `SELECT ro.id FROM rooms ro
-             WHERE ro.status NOT IN ('MAINTENANCE','BLOCKED') AND (ro.type_id=? OR ro.type=?)
-               AND ro.id NOT IN (SELECT room_id FROM room_bookings
-                 WHERE status NOT IN ('CANCELLED','CHECKED_OUT')
-                   AND check_in_date < ? AND check_out_date > ? AND room_id IS NOT NULL)
-               AND ro.id NOT IN (SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?)
-             ORDER BY ro.name LIMIT 1`,
-            [r.room_type_id || r.type_name, r.room_type_id || r.type_name, checkOut, checkIn, checkOut, checkIn]
-          ).catch(() => null);
-          roomId = free?.id || null;
+          // Candidates of the type (type_id first, then legacy `type` name), minus
+          // maintenance/blocked — matching group-create; pick the first not taken.
+          let cands: any[] = await db.query("SELECT id FROM rooms WHERE type_id=? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name", [r.room_type_id || '']).catch(() => []);
+          if (!cands.length) cands = await db.query("SELECT id FROM rooms WHERE type=? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name", [r.room_type_id || r.type_name || '']).catch(() => []);
+          roomId = (cands.find((c: any) => !taken.has(String(c.id)))?.id) || null;
         }
-        if (!roomId) return res.status(409).json({ error: `No available room of the requested type for ${checkIn} → ${checkOut}.` });
+        if (!roomId || taken.has(roomId)) return res.status(409).json({ error: `No available room of the requested type for ${checkIn} → ${checkOut}.` });
         const v = await validateBookingRequest(req.params.id, { room_id: roomId, check_in_date: checkIn, check_out_date: checkOut, booking_type: bookingType, num_guests: Number(r.num_adults || r.num_guests || 1) } as any);
         if (!(v as any).ok) return res.status((v as any).status || 409).json({ error: `Room ${roomId}: ${(v as any).error}` });
+        taken.add(roomId);   // claim for this batch
         resolved.push({ ...r, room_id: roomId });
       }
       const created: any[] = [];
