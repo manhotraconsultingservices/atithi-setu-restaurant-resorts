@@ -5683,6 +5683,57 @@ const DEFAULT_ROLE_PERMS: Record<string, Record<string, number>> = {
   THERAPIST:     { SPA_APPOINTMENTS: 2, SPA_CATALOG: 1, SPA_CLIENTS: 1 },
 };
 
+// ── Role SCOPE enforcement ──────────────────────────────────────────────────
+// A CUSTOM role has a module SCOPE (custom_roles.scope: HOTEL | RESTAURANT | SPA
+// | EVENTS | BOTH). The Staff Access grid only lets the owner grant pages that
+// belong to the role's scope — an out-of-scope page renders as an immutable
+// "N/A" (App.tsx `tabAllowedForRole`). But a role's stored tab_permissions could
+// still CARRY out-of-scope grants (a role polluted by a pre-fix grid save, or a
+// scope later narrowed) that the owner can no longer see or clear in the grid,
+// yet the nav + API gates would honor — the reported "HOTEL Manager set to N/A
+// for Spa still sees the Spa module" leak. We therefore STRIP out-of-scope
+// grants at the read boundary (getTabPermissionsForRole), so enforcement matches
+// exactly what the grid shows. This can never revoke a grant the owner intended:
+// an out-of-scope tab is one the owner could NEVER have granted through the UI.
+//
+// These sets MIRROR the frontend PERMISSIBLE_TABS *Only flags EXACTLY. Spa and
+// Events tabs are cleanly prefixed (SPA_* / EVENTS_*); hotel and restaurant have
+// no clean prefix so they're enumerated. A tab in NONE of these is "general"
+// (grantable to any scope — e.g. MONITOR, INVOICES, CASH_DRAWER, ACCOUNTING,
+// CHECKLISTS, ROSTER). Keep in lockstep with App.tsx.
+const _HOTEL_ONLY_TABS = new Set(['ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS',
+  'HOUSEKEEPING', 'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ', 'FRONT_OFFICE_REPORTS',
+  'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'HOTEL_INVENTORY']);
+const _RESTAURANT_ONLY_TABS = new Set(['ORDERS', 'MENU', 'INVENTORY', 'DELIVERY', 'QR', 'BOOKINGS', 'RESTAURANT_REPORTS']);
+
+// The module a tab is EXCLUSIVE to, or null if it's a general/shared tab.
+function _tabExclusiveModule(tab: string): 'HOTEL' | 'RESTAURANT' | 'SPA' | 'EVENTS' | null {
+  if (tab.startsWith('SPA_')) return 'SPA';
+  if (tab.startsWith('EVENTS_')) return 'EVENTS';
+  if (_HOTEL_ONLY_TABS.has(tab)) return 'HOTEL';
+  if (_RESTAURANT_ONLY_TABS.has(tab)) return 'RESTAURANT';
+  return null;
+}
+
+// A per-tenant cache of custom-role → scope (avoids a tenant-DB read on every
+// permission cache-miss). Same TTL as the tab cache; invalidated together.
+type CachedScope = { scope: string | null; loadedAt: number };
+const _roleScopeCache = new Map<string, CachedScope>();
+async function _customRoleScope(tenantId: string, roleId: string): Promise<string | null> {
+  const key = `${tenantId}::${String(roleId).toUpperCase()}`;
+  const cached = _roleScopeCache.get(key);
+  const now = Date.now ? Date.now() : new Date().getTime();
+  if (cached && (now - cached.loadedAt) < TAB_CACHE_TTL_MS) return cached.scope;
+  let scope: string | null = null;
+  try {
+    const db = await getTenantDb(tenantId);
+    const row: any = await db.get("SELECT scope FROM custom_roles WHERE UPPER(id) = ? LIMIT 1", [String(roleId).toUpperCase()]);
+    scope = row?.scope ? String(row.scope).toUpperCase() : null;
+  } catch { scope = null; }
+  _roleScopeCache.set(key, { scope, loadedAt: now });
+  return scope;
+}
+
 async function getTabPermissionsForRole(tenantId: string, role: string): Promise<TabPerms | null> {
   if (!tenantId || !role) return null;
   const key = `${tenantId}::${role.toUpperCase()}`;
@@ -5789,6 +5840,26 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
         if (!(tab in perms)) perms[tab] = 3;
       }
     }
+    // SCOPE STRIP — for a CUSTOM role with a module scope, drop any grant for a
+    // page OUTSIDE that scope. These are stray grants the owner cannot see or
+    // clear in the Staff Access grid (it renders out-of-scope cells as immutable
+    // N/A), so honoring them leaked e.g. the whole Spa module into a HOTEL-scoped
+    // role's nav + API (reported). Mirrors the frontend `tabAllowedForRole`, so
+    // it only ever removes grants the owner could NEVER have made through the UI
+    // — never a legitimate, intended grant. Built-in roles have no custom_roles
+    // row → no scope → untouched; a BOTH-scope role keeps everything.
+    if (perms !== null && !_isBuiltinRole) {
+      const scope = await _customRoleScope(tenantId, role);
+      // Only a recognized SINGLE-module scope strips; BOTH / ALL / unknown keep
+      // everything (fail-safe — never over-strip on an unexpected scope value).
+      if (scope && (scope === 'HOTEL' || scope === 'RESTAURANT' || scope === 'SPA' || scope === 'EVENTS')) {
+        for (const tab of Object.keys(perms)) {
+          if (tab.startsWith('__')) continue;   // keep sentinels (__complete__ etc.)
+          const m = _tabExclusiveModule(tab);
+          if (m && m !== scope) delete perms[tab];
+        }
+      }
+    }
     _tabCache.set(key, { perms, loadedAt: now });
     return perms;
   } catch {
@@ -5827,6 +5898,11 @@ async function _roleHasTab(req: AuthRequest, tabId: string, minLevel = 1): Promi
 function invalidateTabCacheForTenant(tenantId: string) {
   for (const key of _tabCache.keys()) {
     if (key.startsWith(`${tenantId}::`)) _tabCache.delete(key);
+  }
+  // Role scope drives the out-of-scope grant strip in getTabPermissionsForRole —
+  // clear it in lockstep so a scope change (or a role edit) takes effect at once.
+  for (const key of _roleScopeCache.keys()) {
+    if (key.startsWith(`${tenantId}::`)) _roleScopeCache.delete(key);
   }
 }
 
@@ -52583,8 +52659,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-addons-phase1-backend',
+    commit_marker: 'rbac-scope-strip-outofscope-grants',
     code_features: [
+      'rbac-scope-strip-outofscope-grants',          //SECURITY FIX (nav + API leak — a scoped custom role saw/accessed a module it has N/A for). Reported + confirmed on RESTO_1777732755237_243X0 (Ankur Cafe): the "Manager 1" custom role (CUSTOM_MANAGER_MTGS99CJ, custom_roles.scope=HOTEL) showed the whole Spa & Wellness module in the sidebar despite every Spa page = N/A in Staff Access. Root cause: the role's stored tab_permissions still CARRIED stray out-of-scope grants (SPA_CALENDAR..SPA_REPORTS + SPA_INVENTORY at level 3, plus EVENTS_CHECKLISTS 3) — polluted by a pre-fix grid save (see staffaccess-prefill-no-escalation) — and the owner can NO LONGER see or clear them: the Staff Access grid renders out-of-scope cells as an immutable "N/A" (App.tsx tabAllowedForRole: a HOTEL-scope role can't be granted spaOnly/eventsOnly/restaurantOnly pages). But getTabPermissionsForRole → /my-permissions + requireTabAction honored the stored grant → Spa group in nav + live Spa API access. FIX: strip out-of-scope grants at the READ boundary (getTabPermissionsForRole), mirroring the frontend tabAllowedForRole EXACTLY via new _HOTEL_ONLY_TABS/_RESTAURANT_ONLY_TABS sets + SPA_/EVENTS_ prefixes (_tabExclusiveModule). For a custom role whose custom_roles.scope is a single module (HOTEL|RESTAURANT|SPA|EVENTS), any granted page exclusive to a DIFFERENT module is dropped; general/shared pages (MONITOR, INVOICES, CASH_DRAWER, ACCOUNTING, CHECKLISTS, ROSTER, finance…) and BOTH/ALL/unknown scopes are untouched, and built-in roles (no custom_roles row) are never touched. This can NEVER revoke an intended grant — an out-of-scope page is one the owner could never have granted through the UI. Scope resolved from the per-tenant custom_roles table, cached 30s (_roleScopeCache) and invalidated with the tab cache. Fixes nav + API together so they match the grid. tsc clean.
       'event-addons-phase1-backend',                 //FEATURE (Event Add-ons / Supplements — Phase 1 backend, APPEND-ONLY). Business ask: during/after a confirmed event a guest requests extras (extra chair/table/room/service); staff with access control may ADD them but must NOT be able to remove/update existing booking lines. Today add/remove/update a line are the SAME capability (one full-array PUT /events/bookings/:bid gated EVENTS_BOOKINGS Edit), so "add-only" can't be expressed. Phase 1 adds an isolated, additive append-only mechanism: (1) NEW table event_booking_addons (eventsService.ts schema-init, NOT a request handler — id/booking_id/category[RENTAL|SERVICE|ROOM|CUSTOM]/ref_id/name_snapshot/description/quantity/unit_rate/gst_percent/line_total/status[ACTIVE|VOID]/added_by/added_at/voided_by/voided_at). SEPARATE table (not the shared line tables) so a full-booking PUT can NEVER clobber add-ons and append-only is enforced by construction. (2) POST /events/bookings/:bid/addons — appends ONE line, gated requireTabAction('EVENTS_ADDONS','CREATE') + live-window status guard (status IN CONFIRMED/IN_PROGRESS); snapshots name/rate/gst from event_rental_items / event_services master for RENTAL/SERVICE (integrity), ad-hoc for ROOM/CUSTOM; flat-priced (qty×unit_rate, no span multiply); stamps added_by. DELETE /addons/:aid = soft-VOID, gated DELETE (Full) so add-only staff can't remove; never hard-deletes. (3) Billing+invoice integration: computeEventBill + assembleEventQuoteLines each add ONE defensive .catch(()=>[]) query pushing ACTIVE add-ons (line_type 'ADDON') into the taxable pool / invoice lines — bookings with no add-ons render byte-identical to before; a missing table can't break billing. (4) booking-detail GET returns addons[]. EVENTS_ADDONS tab not yet in the catalogue (Phase 2) → requireTabAction safely denies configured custom roles + passes OWNER, so Phase 1 is OWNER-testable with zero staff exposure. Phase 2 = wire the EVENTS_ADDONS permission tab; Phase 3 = booking-detail UI. tsc clean.
       'rbac-fe-sweep-p1',                            //UX (Hotel/Restaurant FE sweep, pass 1 — hides write controls a View role can't use; backend enforces). Gated the row-action + create buttons via canWriteTab/canDeleteTab (perm.ts): Menu (Edit/Recipe/Daily-Special/Delete/Availability), Hotel-Inventory (Receive/Use/Edit/Del), Service-Requests (Ack/Start/Complete), Restaurant Invoices (Edit/Print/Mark-Paid), Loyalty (Recompute/Add-tier/Edit/Disable/Enroll), restaurant Reservations (New-Booking + Confirm/Cancel/Re-confirm status actions). Remaining passes: Hotel Bookings, Channel Manager, Settings, Monitor/KDS, Rooms-Setup. tsc + vite build clean.
       'rbac-hotel-restaurant-fe-gating-start',       //UX (Phase 3 — Hotel/Restaurant frontend gating START + Events booking-detail complete; the backend fully enforces from Phases 1-2, so this only hides controls a View role can't use). Added a SHARED helper src/perm.ts (canWriteTab/canDeleteTab — reads the tab_perms localStorage map; works in the main App render AND the many STANDALONE view components where App's canDo isn't in scope — the key blocker a mapping pass surfaced). Gated the PRIMARY create/action buttons across the main surfaces: Menu Add-Item (MENU), New Invoice (INVOICES), Hotel New-Booking (HOTEL_BOOKINGS), Add Room (ROOMS), Add/Edit/Delete FAQ (CONCIERGE_FAQ), Hotel-Inventory Add (HOTEL_INVENTORY). Also FINISHED the Events booking-detail: folded evCanEdit('EVENTS_BOOKINGS') into the editable/canRecordPayment flags so a View role sees the whole detail READ-ONLY (no add/remove lines, hotel rooms, cancel, schedule, record-payment, assign/remove-staff; inline qty/price render as static text). SCOPE: a full sweep is 100+ mostly-multi-line buttons (complete map captured in this session) — this gates the highest-value primary buttons; the long tail of inline toggles / per-row actions is an incremental follow-up (every one already blocked server-side). tsc + vite build clean.
