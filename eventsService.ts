@@ -638,6 +638,12 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // Which half-day slot (AM/PM) a HALF_DAY booking occupies — drives the effective
   // start/end window and the AM vs PM price. NULL for HOURLY/DAILY bookings.
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS half_day_slot TEXT`).catch(() => {});
+  // Category-wise discount: the existing `discount` column is the EVENT discount
+  // (venue / rentals / services / catering / add-ons); `discount_hotel` is a
+  // SEPARATE pre-GST discount that applies ONLY to hotel room rent. Each is applied
+  // within its own category so its GST stays correct (rooms use the Hotel slab,
+  // event lines use the event GST). Defaults to 0 → existing bookings unchanged.
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS discount_hotel DOUBLE PRECISION DEFAULT 0`).catch(() => {});
 
   // ── Event-invoice GST config (owner-configurable, default 18%) ───────────────
   // A single event GST rate applies to all non-room event lines (venue, rentals,

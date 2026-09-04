@@ -1194,15 +1194,25 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     await load(); flashSaved();
   };
   const commitDiscount = async (value: string) => {
-    // Clamp to [0, subtotal] so the discount can never exceed the bill. The
-    // pre-tax subtotal comes from the backend bill breakdown (falls back to
-    // deriving it from total_amount for older API responses).
-    const sub = Number(bk.bill?.subtotal ?? (Number(bk.total_amount || 0) + Number(bk.discount || 0)));
-    const num = Math.min(sub, Math.max(0, Number(value) || 0));
+    // EVENT discount — applies to venue / rentals / services / catering / add-ons.
+    // Clamp to [0, event base] (falls back to subtotal for older API responses).
+    const evBase = Number((bk.bill?.categories || []).find((c: any) => c.key === 'EVENT')?.base
+      ?? bk.bill?.subtotal ?? (Number(bk.total_amount || 0) + Number(bk.discount || 0)));
+    const num = Math.min(evBase, Math.max(0, Number(value) || 0));
     if (Number(bk.discount || 0) === num) return;
     // The server enforces a hard below-cost guard; surface a rejection and revert.
     try {
       await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ discount: num }) });
+      await load(); flashSaved();
+    } catch (e: any) { alert(e.message); await load(); }
+  };
+  const commitDiscountHotel = async (value: string) => {
+    // HOTEL-ROOMS discount — applies only to room rent. Clamp to [0, room base].
+    const roomBase = Number((bk.bill?.categories || []).find((c: any) => c.key === 'HOTEL')?.base || 0);
+    const num = Math.min(roomBase, Math.max(0, Number(value) || 0));
+    if (Number(bk.discount_hotel || 0) === num) return;
+    try {
+      await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ discount_hotel: num }) });
       await load(); flashSaved();
     } catch (e: any) { alert(e.message); await load(); }
   };
@@ -1309,6 +1319,15 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const evDiscount = Number(bill.discount || 0);
   const evGrand = Number(bill.grand ?? bk.total_amount ?? 0);
   const evPct = evSubtotal > 0 ? Math.round((evDiscount / evSubtotal) * 100) : 0;
+  // Category (Event vs Hotel rooms) + rate-wise GST breakdown from the shared bill
+  // engine, so the ledger reads the same as the quotation / invoice.
+  const evCategories: any[] = Array.isArray(bill.categories) ? bill.categories : [];
+  const evRateSummary: any[] = Array.isArray(bill.rateSummary) ? bill.rateSummary : [];
+  const evEventCat = evCategories.find((c: any) => c.key === 'EVENT');
+  const evRoomCat = evCategories.find((c: any) => c.key === 'HOTEL');
+  const evHasRooms = !!evRoomCat && Number(evRoomCat.base || 0) > 0;
+  const evDiscEvent = Number(bill.discount_event ?? bill.discount ?? bk.discount ?? 0);
+  const evDiscHotel = Number(bill.discount_hotel ?? bk.discount_hotel ?? 0);
   const hasEmail = !!(bk.customer_email && String(bk.customer_email).trim());
   // Multi-day venue breakdown — when a DAILY booking spans more than one day, show
   // the day count (and the per-day rate when it divides evenly) so the venue total
@@ -1408,55 +1427,78 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             )}
           </div>
 
-          {/* Bill summary ledger — makes subtotal, discount and grand total legible. */}
-          <div className="rounded-xl bg-[#faf7f2] border border-[#e8dccf] p-3">
-            {/* Venue rent line — for a multi-day DAILY booking, spell out rate × days. */}
-            {evVenueRate > 0 && (
-              <div className="flex items-center justify-between text-xs text-[#6b5d52] mb-0.5">
-                <span>{t('events.bookings.venue')}{bk.venue_rate_basis === 'DAILY' && evDays > 1 ? ` · ${evDays} days` : bk.venue_rate_basis === 'HALF_DAY' ? ` · ${bk.half_day_slot || 'AM'}` : bk.venue_rate_basis === 'HOURLY' ? ' · hourly' : ''}</span>
-                <span className="tabular-nums">{money(evVenueRate)}</span>
-              </div>
+          {/* Bill summary — category-wise (Event vs Hotel rooms), each with its own
+              pre-GST discount, plus a rate-wise GST breakup so the tax is never a
+              mystery. Falls back to a flat summary for older API responses. */}
+          <div className="rounded-xl bg-[#faf7f2] border border-[#e8dccf] p-3 space-y-2 text-xs">
+            {evCategories.length > 0 ? (
+              <>
+                {/* EVENT category — venue / rentals / services / catering / add-ons. */}
+                {evEventCat && (
+                  <div className="space-y-1">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e]">Event</div>
+                    {evVenueRate > 0 && (
+                      <div className="flex justify-between text-[#6b5d52]"><span>Venue{bk.venue_rate_basis === 'DAILY' && evDays > 1 ? ` · ${evDays} days` : bk.venue_rate_basis === 'HALF_DAY' ? ` · ${bk.half_day_slot || 'AM'}` : bk.venue_rate_basis === 'HOURLY' ? ' · hourly' : ''}</span><span className="tabular-nums">{money(evVenueRate)}</span></div>
+                    )}
+                    <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="tabular-nums">{money(evEventCat.base)}</span></div>
+                    {(editable || evDiscEvent > 0) && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-[#6b5d52]">Discount</span>
+                        {editable
+                          ? <span className="flex items-center gap-1"><span className="text-rose-500">− ₹</span><input key={`de-${evDiscEvent}`} type="number" min={0} max={evEventCat.base} defaultValue={evDiscEvent} onBlur={e => commitDiscount(e.target.value)} className="w-16 px-1.5 py-0.5 rounded-lg border border-[#e8dccf] text-right tabular-nums" /></span>
+                          : <span className="text-rose-500 tabular-nums">− {money(evDiscEvent)}</span>}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* HOTEL ROOMS category — its own slab GST + its own discount. */}
+                {evHasRooms && (
+                  <div className="space-y-1 pt-2 border-t border-[#e8dccf]">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e]">Hotel rooms</div>
+                    <div className="flex justify-between text-[#6b5d52]"><span>Room rent</span><span className="tabular-nums">{money(evRoomCat.base)}</span></div>
+                    {(editable || evDiscHotel > 0) && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-[#6b5d52]">Discount</span>
+                        {editable
+                          ? <span className="flex items-center gap-1"><span className="text-rose-500">− ₹</span><input key={`dh-${evDiscHotel}`} type="number" min={0} max={evRoomCat.base} defaultValue={evDiscHotel} onBlur={e => commitDiscountHotel(e.target.value)} className="w-16 px-1.5 py-0.5 rounded-lg border border-[#e8dccf] text-right tabular-nums" /></span>
+                          : <span className="text-rose-500 tabular-nums">− {money(evDiscHotel)}</span>}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* GST breakup — items clubbed by rate (each on its net, post-discount base). */}
+                {evRateSummary.length > 0 && (
+                  <div className="space-y-0.5 pt-2 border-t border-[#e8dccf]">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e] mb-0.5">GST breakup</div>
+                    {evRateSummary.map((r: any) => (
+                      <div key={r.rate} className="flex justify-between text-[11px] text-[#6b5d52]">
+                        <span>@ {r.rate}% <span className="text-[#b3a495]">on {money(r.taxable)}</span></span>
+                        <span className="tabular-nums">+ {money(r.gst)}</span>
+                      </div>
+                    ))}
+                    <div className="flex justify-between text-[11px] font-semibold text-[#14110c] pt-0.5"><span>Total GST</span><span className="tabular-nums">+ {money(evTax)}</span></div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {/* Fallback (older API without the category breakdown). */}
+                {evVenueRate > 0 && <div className="flex justify-between text-[#6b5d52]"><span>{t('events.bookings.venue')}</span><span className="tabular-nums">{money(evVenueRate)}</span></div>}
+                <div className="flex justify-between text-[#6b5d52]"><span>{t('events.bookings.subtotal')}</span><span className="tabular-nums">{money(evSubtotal)}</span></div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[#6b5d52]">{t('events.bookings.discount')}</span>
+                  {editable
+                    ? <span className="flex items-center gap-1"><span className="text-rose-500">− ₹</span><input key={`disc-${evDiscount}`} type="number" min={0} max={evSubtotal} defaultValue={evDiscount} onBlur={e => commitDiscount(e.target.value)} className="w-20 px-1.5 py-0.5 rounded-lg border border-[#e8dccf] text-right tabular-nums" /></span>
+                    : <span className="text-rose-500 tabular-nums">{evDiscount > 0 ? `− ${money(evDiscount)}` : money(0)}</span>}
+                </div>
+                {evTax > 0 && <div className="flex justify-between text-[#6b5d52]"><span>{t('events.bookings.gst')}</span><span className="tabular-nums">+ {money(evTax)}</span></div>}
+              </>
             )}
-            {evVenueRate > 0 && bk.venue_rate_basis === 'DAILY' && evDays > 1 && (
-              <div className="text-[10px] text-[#9d8b7e] text-right mb-1.5 tabular-nums">{evUniform ? `${money(evPerDay)} × ${evDays} days` : `across ${evDays} days`}</div>
-            )}
-            <div className="flex items-center justify-between text-xs text-[#6b5d52] mb-1.5">
-              <span>{t('events.bookings.subtotal')}</span>
-              <span className="tabular-nums">{money(evSubtotal)}</span>
-            </div>
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs text-[#6b5d52]">{t('events.bookings.discount')}</span>
-              {editable ? (
-                <span className="flex items-center gap-1">
-                  <span className="text-xs text-rose-500">− ₹</span>
-                  {/* key remounts the uncontrolled input when the persisted discount
-                      changes (e.g. after a below-cost rejection reverts it). */}
-                  <input key={`disc-${evDiscount}`} type="number" min={0} max={evSubtotal} defaultValue={evDiscount} onBlur={e => commitDiscount(e.target.value)}
-                    className="w-20 px-1.5 py-0.5 rounded-lg border border-[#e8dccf] text-right text-xs tabular-nums" />
-                </span>
-              ) : (
-                <span className="text-xs text-rose-500 tabular-nums">{evDiscount > 0 ? `− ${money(evDiscount)}` : money(0)}</span>
-              )}
-            </div>
-            {evDiscount > 0 && (
-              <div className="flex items-center justify-end gap-1 text-[10px] text-emerald-700 mb-1.5">
-                <Check size={11} />{t('events.bookings.saved', { amount: money(evDiscount), pct: evPct })}
-              </div>
-            )}
-            {/* GST line — shown only when tax applies. Booking total now matches
-                the quotation/invoice (subtotal + GST − discount). */}
-            {evTax > 0 && (
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-xs text-[#6b5d52]">{t('events.bookings.gst')}</span>
-                <span className="text-xs text-[#6b5d52] tabular-nums">+ {money(evTax)}</span>
-              </div>
-            )}
-            <div className="h-px bg-[#e8dccf] my-1.5" />
-            <div className="flex items-baseline justify-between">
+            <div className="pt-1.5 border-t border-[#e8dccf] flex items-baseline justify-between">
               <span className="text-xs font-semibold text-[#14110c]">{t('events.bookings.grandTotal')}</span>
               <span className="text-2xl font-bold text-[#cc5a16] tabular-nums">{money(evGrand)}</span>
             </div>
-            <p className="mt-1.5 text-[10px] text-[#9d8b7e] text-right">{evTax > 0 ? t('events.bookings.gstInclNote') : t('events.bookings.gstNote')}</p>
+            <p className="text-[10px] text-[#9d8b7e] text-right">{evTax > 0 ? t('events.bookings.gstInclNote') : t('events.bookings.gstNote')}</p>
           </div>
         </div>
       </div>

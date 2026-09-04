@@ -25225,42 +25225,88 @@ ${data.tenant.name}`;
     return `${w}${n === 1 ? '' : 's'}`;
   };
 
-  const computeEventBill = async (db: any, bookingId: string, gstOverride?: number): Promise<{ subtotal: number; tax: number; discount: number; grand: number }> => {
-    const bk: any = await db.get("SELECT venue_id, venue_rate, discount, venue_rate_basis, event_date, end_date, start_time, end_time FROM event_bookings WHERE id = ?", [bookingId]);
-    if (!bk) return { subtotal: 0, tax: 0, discount: 0, grand: 0 };
+  // Category + rate-wise bill engine — the SINGLE source of truth shared by
+  // computeEventBill (booking totals) and assembleEventQuoteLines (quote / invoice)
+  // so all three always agree. Splits lines into HOTEL (rooms, taxed at the room
+  // slab GST) vs EVENT (venue / rentals / services / catering / add-ons, at the
+  // event GST). Each category has its OWN pre-GST discount (discount_hotel vs the
+  // event `discount`), allocated proportionally WITHIN that category so GST is
+  // charged on the discounted (net) share at each line's own rate — a room discount
+  // never bleeds into the event GST and vice-versa. Mutates each line's gst_amount.
+  const _applyEventBill = (
+    lines: { amount: number; gst_rate: number; line_type?: string; gst_amount?: number }[],
+    discountEvent: number, discountHotel: number
+  ) => {
+    const isHotel = (l: any) => l.line_type === 'HOTEL_ROOM';
+    const eventBase = round2(lines.filter(l => !isHotel(l)).reduce((s, l) => s + Number(l.amount || 0), 0));
+    const roomBase = round2(lines.filter(isHotel).reduce((s, l) => s + Number(l.amount || 0), 0));
+    const discE = round2(Math.min(Math.max(0, Number(discountEvent || 0)), eventBase));
+    const discH = round2(Math.min(Math.max(0, Number(discountHotel || 0)), roomBase));
+    const nfE = eventBase > 0 ? (eventBase - discE) / eventBase : 1;
+    const nfH = roomBase > 0 ? (roomBase - discH) / roomBase : 1;
+    const rateMap: Record<string, { taxable: number; gst: number }> = {};
+    let evGstTotal = 0, rmGstTotal = 0;
+    for (const l of lines) {
+      const hotel = isHotel(l);
+      const net = round2(Number(l.amount || 0) * (hotel ? nfH : nfE));
+      const g = round2(net * Number(l.gst_rate || 0) / 100);
+      l.gst_amount = g;
+      if (hotel) rmGstTotal = round2(rmGstTotal + g); else evGstTotal = round2(evGstTotal + g);
+      const k = String(Number(l.gst_rate || 0));
+      (rateMap[k] = rateMap[k] || { taxable: 0, gst: 0 });
+      rateMap[k].taxable = round2(rateMap[k].taxable + net);
+      rateMap[k].gst = round2(rateMap[k].gst + g);
+    }
+    const subtotal = round2(eventBase + roomBase);
+    const discount = round2(discE + discH);
+    const tax = round2(evGstTotal + rmGstTotal);
+    const grand = round2((subtotal - discount) + tax);
+    const categories = [
+      { key: 'EVENT', label: 'Event', base: eventBase, discount: discE, taxable: round2(eventBase - discE), gst: round2(evGstTotal), total: round2(eventBase - discE + evGstTotal) },
+      { key: 'HOTEL', label: 'Hotel rooms', base: roomBase, discount: discH, taxable: round2(roomBase - discH), gst: round2(rmGstTotal), total: round2(roomBase - discH + rmGstTotal) },
+    ].filter(c => c.base > 0 || c.discount > 0);
+    const rateSummary = Object.entries(rateMap)
+      .filter(([, v]) => v.taxable > 0 || v.gst > 0)
+      .map(([r, v]) => ({ rate: Number(r), taxable: v.taxable, gst: v.gst }))
+      .sort((a, b) => a.rate - b.rate);
+    return { subtotal, discount, tax, grand, discount_event: discE, discount_hotel: discH, categories, rateSummary };
+  };
+
+  const computeEventBill = async (db: any, bookingId: string, gstOverride?: number): Promise<any> => {
+    // discount_hotel is a newer column — a tenant mid-migration may not have it yet,
+    // so fall back to the pre-column shape (discount_hotel → 0) rather than throwing.
+    let bk: any;
+    try { bk = await db.get("SELECT venue_rate, discount, discount_hotel, venue_rate_basis, event_date, end_date, start_time, end_time FROM event_bookings WHERE id = ?", [bookingId]); }
+    catch { bk = await db.get("SELECT venue_rate, discount, venue_rate_basis, event_date, end_date, start_time, end_time FROM event_bookings WHERE id = ?", [bookingId]); }
+    if (!bk) return { subtotal: 0, tax: 0, discount: 0, grand: 0, categories: [], rateSummary: [], discount_event: 0, discount_hotel: 0 };
     // A per-document GST override (from the ledger's Invoice-GST toggle) wins;
     // otherwise the tenant default. Hotel rooms always keep their own snapshot.
     const evGst = await resolveEventGstRate(db, gstOverride);
     const units = eventUnits(bk);
-    // Each entry is a pre-discount taxable amount + its own GST rate.
-    const taxable: { amt: number; rate: number }[] = [];
+    const lines: any[] = [];
     const venueRate = Number(bk.venue_rate || 0);
-    if (venueRate > 0) taxable.push({ amt: round2(venueRate), rate: evGst });
+    if (venueRate > 0) lines.push({ amount: round2(venueRate), gst_rate: evGst, line_type: 'VENUE' });
     // Rentals — unit × qty × effective duration (scales with the event span).
     for (const it of (await db.query("SELECT unit_rate, quantity, duration_units FROM event_booking_items WHERE booking_id = ?", [bookingId])) || [])
-      taxable.push({ amt: round2(Number(it.unit_rate || 0) * Number(it.quantity || 1) * rentalUnits(it, units)), rate: evGst });
+      lines.push({ amount: round2(Number(it.unit_rate || 0) * Number(it.quantity || 1) * rentalUnits(it, units)), gst_rate: evGst, line_type: 'RENTAL' });
     // Services — unit × qty × event span (multi-day/hour billing rule).
     for (const s of (await db.query("SELECT unit_rate, quantity FROM event_booking_services WHERE booking_id = ?", [bookingId])) || [])
-      taxable.push({ amt: round2(Number(s.unit_rate || 0) * Number(s.quantity || 1) * Math.max(1, units)), rate: evGst });
+      lines.push({ amount: round2(Number(s.unit_rate || 0) * Number(s.quantity || 1) * Math.max(1, units)), gst_rate: evGst, line_type: 'SERVICE' });
     // Catering — priced per plate (pax), independent of the event span.
     for (const c of (await db.query("SELECT line_total FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => [])) || [])
-      taxable.push({ amt: round2(Number(c.line_total || 0)), rate: evGst });
-    // Hotel rooms — already priced per-night; keep their own snapshotted GST.
+      lines.push({ amount: round2(Number(c.line_total || 0)), gst_rate: evGst, line_type: 'FNB' });
+    // Hotel rooms — already priced per-night; keep their own snapshotted (slab) GST.
     for (const rm of (await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId])) || [])
-      taxable.push({ amt: round2(Number(rm.line_total || 0)), rate: Number(rm.gst_percent ?? 12) });
-    // Add-ons / supplements — flat-priced lines appended live during the event.
-    // Each carries its own snapshotted GST. Defensive: the table may not exist on
-    // a tenant whose schema predates it, so a missing table must NOT break billing.
+      lines.push({ amount: round2(Number(rm.line_total || 0)), gst_rate: Number(rm.gst_percent ?? 12), line_type: 'HOTEL_ROOM' });
+    // Add-ons / supplements — flat-priced lines appended live during the event. Each
+    // carries its own snapshotted GST. Defensive: a missing table (older schema)
+    // must NOT break billing.
     for (const a of (await db.query("SELECT line_total, gst_percent FROM event_booking_addons WHERE booking_id = ? AND status = 'ACTIVE'", [bookingId]).catch(() => [])) || [])
-      taxable.push({ amt: round2(Number(a.line_total || 0)), rate: Number(a.gst_percent ?? evGst) });
-    const subtotal = round2(taxable.reduce((sum, t) => sum + t.amt, 0));
-    // Discount comes off BEFORE GST. Allocate it across lines proportionally so
-    // each line is taxed on its discounted (net) share.
-    const discount = round2(Math.min(Math.max(0, Number(bk.discount || 0)), subtotal));
-    const netFactor = subtotal > 0 ? (subtotal - discount) / subtotal : 1;
-    const tax = round2(taxable.reduce((sum, t) => sum + round2(t.amt * netFactor * t.rate / 100), 0));
-    const grand = round2((subtotal - discount) + tax);
-    return { subtotal, tax, discount, grand };
+      lines.push({ amount: round2(Number(a.line_total || 0)), gst_rate: Number(a.gst_percent ?? evGst), line_type: 'ADDON' });
+    const r = _applyEventBill(lines, Number(bk.discount || 0), Number(bk.discount_hotel || 0));
+    return { subtotal: r.subtotal, tax: r.tax, discount: r.discount, grand: r.grand,
+             discount_event: r.discount_event, discount_hotel: r.discount_hotel,
+             categories: r.categories, rateSummary: r.rateSummary };
   };
 
   const recomputeEventTotal = async (db: any, bookingId: string): Promise<number> => {
@@ -26211,6 +26257,7 @@ ${data.tenant.name}`;
       // so edits could double-book a hall or leave a stale rate).
       if (b.guest_count !== undefined && b.guest_count !== null && b.guest_count !== '' && Number(b.guest_count) < 0) return res.status(400).json({ error: "Guest count cannot be negative." });
       if (b.discount !== undefined && b.discount !== null && b.discount !== '' && Number(b.discount) < 0) return res.status(400).json({ error: "Discount cannot be negative." });
+      if (b.discount_hotel !== undefined && b.discount_hotel !== null && b.discount_hotel !== '' && Number(b.discount_hotel) < 0) return res.status(400).json({ error: "Hotel-rooms discount cannot be negative." });
       const schedKeys = ['venue_id','event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot'];
       const scheduleChanged = schedKeys.some(k => b[k] !== undefined && String(b[k] ?? '') !== String(existing[k] ?? ''));
       if (scheduleChanged) {
@@ -26231,7 +26278,7 @@ ${data.tenant.name}`;
       const fields: string[] = []; const vals: any[] = [];
       const allow = ['venue_id','customer_name','customer_phone','customer_email','customer_gstin','event_type',
         'event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot','guest_count','booking_source',
-        'venue_rate','discount','advance_amount','special_requests'];
+        'venue_rate','discount','discount_hotel','advance_amount','special_requests'];
       for (const k of allow) {
         if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(b[k]); }
       }
@@ -27284,15 +27331,14 @@ ${data.tenant.name}`;
       const d = a.description_snapshot ? ` — ${a.description_snapshot}` : '';
       lines.push({ line_type: 'ADDON', description: `${a.name_snapshot} × ${a.quantity}${d}`, quantity: a.quantity, unit_rate: a.unit_rate, amount: round2(a.line_total), gst_rate: Number(a.gst_percent ?? evGst), gst_amount: 0 });
     }
-    const subtotal = round2(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
-    // Discount comes off BEFORE GST — allocate proportionally and tax each line
-    // on its net (discounted) share. Mirrors computeEventBill exactly.
-    const discount = round2(Math.min(Math.max(0, Number(bk.discount || 0)), subtotal));
-    const netFactor = subtotal > 0 ? (subtotal - discount) / subtotal : 1;
-    for (const l of lines) l.gst_amount = round2(Number(l.amount) * netFactor * Number(l.gst_rate) / 100);
-    const tax = round2(lines.reduce((s, l) => s + Number(l.gst_amount || 0), 0));
-    const grand = round2((subtotal - discount) + tax);
-    return { lines, subtotal, tax, discount, grand };
+    // Category + rate-wise engine (shared with computeEventBill): the EVENT discount
+    // applies to non-room lines and the HOTEL discount to room lines, each before its
+    // own GST; it also sets every line's gst_amount. Keeps quote / invoice / booking
+    // totals identical, and surfaces the per-category + rate-wise breakdown.
+    const r = _applyEventBill(lines as any, Number(bk.discount || 0), Number(bk.discount_hotel || 0));
+    return { lines, subtotal: r.subtotal, tax: r.tax, discount: r.discount, grand: r.grand,
+             discount_event: r.discount_event, discount_hotel: r.discount_hotel,
+             categories: r.categories, rateSummary: r.rateSummary };
   };
 
   app.post("/api/restaurant/:id/events/bookings/:bid/quotations", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'CREATE'), async (req: AuthRequest, res: Response) => {
@@ -52968,8 +53014,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-room-gst-breakup-p4b',
+    commit_marker: 'event-category-gst-dual-discount-p5',
     code_features: [
+      'event-category-gst-dual-discount-p5',         //FEATURE (Event bill — category GST clarity + dual discounts; Phase 1: engine + booking page). New shared `_applyEventBill` engine is the SINGLE source of truth for computeEventBill (booking total) AND assembleEventQuoteLines (quote/invoice), so all three always agree. It splits lines into HOTEL (rooms, at the Hotel slab GST) vs EVENT (venue/rentals/services/catering/add-ons, at the event GST), applies each category's OWN pre-GST discount, taxes each line on its discounted net at its own rate, and returns per-category + rate-wise (GST clubbed by %) breakdowns. DATA MODEL: new `event_bookings.discount_hotel` (eventsService ADD COLUMN; existing `discount` = the EVENT discount). PUT whitelists+validates discount_hotel. Booking page now shows Event vs Hotel-rooms sections each with a ₹ discount input + a "GST breakup @rate on ₹base" table. Note: a discount now applies WITHIN its category (an event discount no longer reduces room GST) — intended per owner request; bookings with discount_hotel=0 and discount≤event base are unchanged. Phase 2 (next): same breakdown on the quotation + invoice PDFs. tsc + vite build clean.
       'event-room-gst-breakup-p4b',                  //UX (Event hotel rooms — full tax breakdown). Room lines now show BASE rate (ex-GST) · Qty · BASE amount · GST amount with its % · TOTAL incl GST, plus a "Room totals" footer (Σ base + Σ GST = Σ incl GST). GST % is the per-tenant Hotel GST SLAB (loadHotelTaxConfig reads hotel_gst_slab* from restaurants; gstRateForTariff picks the slab from the SINGLE room's tariff — so 4× ₹2800 rooms correctly show 12%, not the 18% a ₹11,200 sum would give). GST amount = base × %/100 per line (single-room basis × qty), never a slab on the summed rent. Display-only; billing math unchanged (computeEventBill already taxes each line at its own rate). tsc + vite build clean. NEXT (proposed): rate-wise GST summary + category (Room vs Event) subtotals + per-category discount across booking/quote/invoice.
       'event-rooms-grouping-save-p4',                //UX (Event booking — hotel rooms card + save clarity). (1) GROUP identical BOOKED rooms into ONE line with a Qty (was N rows for N reserved rooms) — grouped by type/dates/rate/GST; reserved rooms are still stored one-per-row (each keeps its hotel_booking_id) but shown as "Qty 4". (2) A ± STEPPER on each booked line to change the count: + reserves one more (atomic add), − releases one — the DELETE /events/bookings/:bid/rooms/:rid endpoint now CANCELS the underlying hotel booking (unless it's already checked-in/out → 409 "handle in Hotel module") instead of the old flat "cancel from Hotel module first" refusal. (3) New GST% column on each room line (shows the snapshotted room-rent GST). (4) SAVE clarity: the booking detail auto-saves every field on blur (no Save button) — added a persistent "Every change is saved automatically" hint + a fixed "✓ Saved" flash after each inline commit (commitContact/Venue/Discount/Line/Catering + updateRoom). tsc + vite build clean.
       'public-events-slug-resolve',                  //BUGFIX (public Events page "not available"). GET /api/public/restaurant/:id/events + the inquiry POST resolved :id as a raw restaurant id via publicEventsGate (SELECT ... WHERE id=?), but the public URL passes the tenant PUBLIC TOKEN/slug (e.g. /events/W6UdosorsUkt) → 404 → the page rendered "Events page not available." The public MENU route already fixes this with `resolvePublicTenantParam` (rewrites token→internal id); added the SAME middleware to both public events routes. Hotel + Spa public pages happened to survive via a client-side slug-resolve retry (App.tsx ~70393 / SpaViews ~1200) that the events page lacks; the server-side fix is the clean one and benefits every caller. Raw-id URLs still work (resolver matches `public_token=? OR id=?`). Verified 404→200 for the slug.
