@@ -1226,8 +1226,14 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     catch (e: any) { alert(e.message); }
   };
   const addRoom = async (roomTypeId: string | null, name: string, rate: number, rooms: number) => {
-    await api(`/events/bookings/${bookingId}/rooms`, { method: 'POST', body: JSON.stringify({ room_type_id: roomTypeId, room_type_snapshot: name, quoted_rate: Number(rate) || 0, num_rooms: Math.max(1, Number(rooms) || 1) }) });
-    await load();
+    try {
+      // On a CONFIRMED / IN_PROGRESS booking the server reserves real hotel
+      // inventory now (not just a QUOTED line); if none is free it rejects — surface
+      // that. On success refresh availability so the free counts reflect the booking.
+      await api(`/events/bookings/${bookingId}/rooms`, { method: 'POST', body: JSON.stringify({ room_type_id: roomTypeId, room_type_snapshot: name, quoted_rate: Number(rate) || 0, num_rooms: Math.max(1, Number(rooms) || 1) }) });
+      await load();
+      try { const r = await api(`/events/bookings/${bookingId}/hotel-availability`); setHotelRooms(r?.room_types || []); } catch { /* */ }
+    } catch (e: any) { alert(e.message); }
   };
   const updateRoom = async (rid: string, patch: any) => {
     try { await api(`/events/bookings/${bookingId}/rooms/${rid}`, { method: 'PUT', body: JSON.stringify(patch) }); await load(); } catch (e: any) { alert(e.message); }

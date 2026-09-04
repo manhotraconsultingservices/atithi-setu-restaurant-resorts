@@ -26856,6 +26856,12 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       if (!bk) return res.status(404).json({ error: "Booking not found" });
+      // Lifecycle gate: rooms can't be attached to a closed booking — matches the
+      // hotel add-room rule ("any status except cancelled / complete/checked-out").
+      const evStatus = String(bk.status || '').toUpperCase();
+      if (evStatus === 'CANCELLED' || evStatus === 'COMPLETED') {
+        return res.status(409).json({ error: `Rooms can't be added to a ${evStatus.toLowerCase()} event booking.` });
+      }
       const b = req.body || {};
       const checkIn = b.check_in_date || bk.event_date;
       const checkOut = b.check_out_date || bk.end_date || bk.event_date;
@@ -26879,6 +26885,39 @@ ${data.tenant.name}`;
          checkIn, checkOut, numRooms, rate, roomGst, lineTotal]
       );
       await recomputeEventTotal(db, req.params.bid);
+      // ── Phase 3: reserve REAL hotel inventory for a room added AFTER confirm ──
+      // Before confirm, room lines are just QUOTED and the confirm loop reserves them
+      // all. But a room added once the booking is CONFIRMED / IN_PROGRESS would stay
+      // QUOTED forever — billed yet never reserved in the hotel (a phantom reservation).
+      // So reserve it now, mirroring the confirm loop; if the hotel has no inventory,
+      // roll the just-inserted line back and reject (never bill for an unreservable
+      // room). One hotel booking per line, same as confirm — the FE adds one room per
+      // action so its billed == reserved. Only when Hotel is enabled: an events-only
+      // tenant has no inventory to reserve, so the line stays a QUOTED billing quote.
+      if (evStatus === 'CONFIRMED' || evStatus === 'IN_PROGRESS') {
+        const hotelOn = await ensureHotelEnabled(req.params.id).catch(() => ({ ok: false } as any));
+        if (hotelOn.ok) {
+          const isoOf = (v: any): string => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
+          const payload = {
+            room_type_id: b.room_type_id || null,
+            guest_name: bk.customer_name, guest_phone: bk.customer_phone, guest_email: bk.customer_email,
+            check_in_date: isoOf(checkIn), check_out_date: isoOf(checkOut),
+            booking_source: 'EVENT', room_rate: rate || undefined,
+            special_requests: `Event booking ${bk.id} — ${bk.customer_name}`,
+          };
+          const result = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings`, req.headers.authorization, payload);
+          if (result.ok && result.data?.id) {
+            await db.run("UPDATE event_booking_rooms SET status = 'BOOKED', hotel_booking_id = ? WHERE id = ?", [result.data.id, id]);
+            try { await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'ROOM_RESERVED', summary: `Added + reserved a hotel room (${b.room_type_snapshot || b.room_type_name || 'Room'}) on a ${evStatus.toLowerCase()} booking` }); } catch { /* audit best-effort */ }
+          } else {
+            // Reservation failed (no inventory / hotel error) — undo the line so nothing
+            // is billed unreserved, then surface the hotel's reason.
+            await db.run("DELETE FROM event_booking_rooms WHERE id = ?", [id]).catch(() => {});
+            await recomputeEventTotal(db, req.params.bid).catch(() => {});
+            return res.status(result.status && result.status >= 400 ? result.status : 409).json({ error: result.data?.error || `No hotel room available to reserve for ${isoOf(checkIn)} → ${isoOf(checkOut)}.` });
+          }
+        }
+      }
       const row = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [id]);
       res.status(201).json(row);
     } catch (err: any) { res.status(500).json({ error: "Failed to attach room" }); }
@@ -52849,8 +52888,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-individual-add-room-p2',
+    commit_marker: 'event-add-room-reserve-p3',
     code_features: [
+      'event-add-room-reserve-p3',                   //FEATURE (Add Room to existing booking — Phase 3: EVENT bookings, reserve post-confirm rooms). Closed the phantom-reservation gap: POST /events/bookings/:bid/rooms always inserted status QUOTED, so a room attached AFTER the confirm loop already ran stayed QUOTED forever — billed on the event yet never reserved in the hotel. Now, when the booking is CONFIRMED or IN_PROGRESS (and Hotel is enabled), the attach immediately reserves real inventory by mirroring the confirm loop (callSelfApi POST /hotel/bookings → status BOOKED + hotel_booking_id). If the hotel has no room, the just-inserted line is rolled back (DELETE + recomputeEventTotal) and the attach is REJECTED with the hotel's reason — never bill for an unreservable room (consistent w/ hotel add-room Phases 1&2). Added a lifecycle gate (409 on CANCELLED / COMPLETED). Events-only tenants (no Hotel module) keep the QUOTED billing-quote behavior unchanged. One hotel booking per line (parity with confirm); the FE adds one room per action so billed==reserved. FRONTEND: addRoom now surfaces the reservation error (alert) + refreshes availability counts; the room-line Pill already shows BOOKED/QUOTED/FAILED, and the "Add Hotel Rooms" button already showed for confirmed/in-progress (editable). tsc + vite build clean.
       'hotel-individual-add-room-p2',                //FEATURE (Add Room to existing booking — Phase 2: INDIVIDUAL hotel bookings, convert-to-group). New POST /hotel/bookings/:bookingId/add-room: if the booking is standalone (group_id NULL) it is first CONVERTED into a group (mint a room_booking_groups row seeded from the booking + stamp group_id/group_name onto the existing room), then the room add DELEGATES to the hardened Phase-1 group rooms/add via callSelfApi — so there is ONE room-add code path (availability guard + per-room rate + group total/num_rooms recompute), not a duplicated one. Lifecycle gate: allowed for any status EXCEPT CANCELLED / CHECKED_OUT / NO_SHOW. On a failed add the conversion is rolled back (group rooms/add validates all rooms before inserting → 409 leaves nothing inserted → safe to delete the just-minted empty group). Best-effort object audit (CONVERTED_TO_GROUP / ROOM_ADDED). FRONTEND: pending. tsc + vite build clean. Phase 3 = event bookings (reserve post-confirm rooms).
       'hotel-group-add-room-p1',                     //FEATURE (Add Room to existing booking — Phase 1: GROUP hotel bookings). Hardened the pre-existing-but-unwired POST /hotel/booking-groups/:groupId/rooms/add: (1) added the AUTHORITATIVE availability guard `validateBookingRequest` per new room (was a weak raw subquery → double-booking risk) — resolves a free room of the type, then validates overlap/holds/capacity/dates, atomically before any INSERT; (2) per-room rate + total via `computeBookingTotalWithExtras` with the same all-in-override rule as group-create (was only storing room_rate, no total_amount); (3) recompute the group's `num_rooms` AND `total_amount` respecting the group discount (old code left total_amount stale → wrong group invoice); (4) lifecycle gate — 409 if the group is already settled (grp.settled_at). New rooms are status BOOKED, dates/guest/booking_type/meal-plan copied from the group. FRONTEND: a new "+ Add Room" form in the group detail modal's Guests & Rooms tab (room-type picker + qty + optional rate, fetches room-types on open), gated canWriteTab('HOTEL_BOOKINGS') + shown only while the group has an active (non-checked-out/cancelled) room → POST rooms/add → reload. Additive; no folio/GL change (each room folio is created at its own check-in). tsc + vite build clean. Phase 2 = individual booking (convert-to-group); Phase 3 = event bookings (reserve post-confirm rooms).
       'event-lifecycle-bar-top',                     //UX (booking lifecycle discoverability). The status-advancing actions (Confirm → Start Event → Checkout → Complete → Cancel) were buried at the BOTTOM of a long booking Overview, so owners couldn't find Checkout. Moved them into a prominent "Lifecycle" bar at the TOP of the booking Overview (EventBookingDetail, first card, shown to EVENTS_BOOKINGS-Edit roles on an actionable booking). Each button keeps its status condition; Checkout tooltip notes it also raises the invoice + moves CONFIRMED→In Progress, and Start Event notes it opens the add-on window without invoicing. The bottom action row now holds only the DOCUMENT actions (Generate Quote / BEO / Invoice PDF / Email / Cancel-Invoice). Pure frontend; no endpoint change. tsc + vite build clean.
