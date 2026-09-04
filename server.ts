@@ -26774,6 +26774,40 @@ ${data.tenant.name}`;
     }
   };
 
+  // Reserve `count` REAL hotel rooms of a type for an event booking, via the Hotel
+  // API. POST /hotel/bookings books ONE room per call, so we loop — a room line with
+  // num_rooms>1 becomes `count` real reservations (each POST re-checks availability
+  // against the ones already committed, so no double-pick). Returns the
+  // hotel_booking_ids actually reserved (fewer than `count` if inventory ran out) +
+  // the last error, so the caller can roll back (atomic add) or record a shortfall
+  // (best-effort confirm).
+  const reserveEventHotelRooms = async (
+    restId: string, bk: any, line: any, count: number, authHeader: string | undefined
+  ): Promise<{ ids: string[]; lastError: string | null; lastStatus: number }> => {
+    const isoOf = (v: any): string => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
+    const ids: string[] = [];
+    let lastError: string | null = null, lastStatus = 0;
+    for (let i = 0; i < Math.max(1, count); i++) {
+      const payload = {
+        room_type_id: line.room_type_id || null,
+        guest_name: bk.customer_name, guest_phone: bk.customer_phone, guest_email: bk.customer_email,
+        check_in_date: isoOf(line.check_in_date), check_out_date: isoOf(line.check_out_date),
+        booking_source: 'EVENT', room_rate: Number(line.quoted_rate) || undefined,
+        special_requests: `Event booking ${bk.id} — ${bk.customer_name}`,
+      };
+      const result = await callSelfApi('POST', `/api/restaurant/${restId}/hotel/bookings`, authHeader, payload);
+      if (result.ok && (result.data as any)?.id) ids.push((result.data as any).id);
+      else { lastError = (result.data as any)?.error || null; lastStatus = result.status; break; }
+    }
+    return { ids, lastError, lastStatus };
+  };
+  // Cancel a set of hotel bookings created for an event (rollback on a partial reserve).
+  const cancelEventHotelRooms = async (restId: string, ids: string[], authHeader: string | undefined): Promise<void> => {
+    for (const hid of ids) {
+      try { await callSelfApi('POST', `/api/restaurant/${restId}/hotel/bookings/${hid}/cancel`, authHeader, { reason: 'Event room reservation rolled back' }); } catch { /* best-effort */ }
+    }
+  };
+
   // Read hotel availability + rates for an event's dates (read-only, quote time).
   app.get("/api/restaurant/:id/events/bookings/:bid/hotel-availability", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
@@ -26885,37 +26919,52 @@ ${data.tenant.name}`;
          checkIn, checkOut, numRooms, rate, roomGst, lineTotal]
       );
       await recomputeEventTotal(db, req.params.bid);
-      // ── Phase 3: reserve REAL hotel inventory for a room added AFTER confirm ──
-      // Before confirm, room lines are just QUOTED and the confirm loop reserves them
-      // all. But a room added once the booking is CONFIRMED / IN_PROGRESS would stay
-      // QUOTED forever — billed yet never reserved in the hotel (a phantom reservation).
-      // So reserve it now, mirroring the confirm loop; if the hotel has no inventory,
-      // roll the just-inserted line back and reject (never bill for an unreservable
-      // room). One hotel booking per line, same as confirm — the FE adds one room per
-      // action so its billed == reserved. Only when Hotel is enabled: an events-only
-      // tenant has no inventory to reserve, so the line stays a QUOTED billing quote.
+      // ── Phase 3: reserve REAL hotel inventory for room(s) added AFTER confirm ──
+      // Before confirm, room lines are just QUOTED and the confirm loop reserves them.
+      // A room added once the booking is CONFIRMED / IN_PROGRESS would otherwise stay
+      // QUOTED forever — billed yet never reserved (a phantom reservation). Reserve it
+      // now. A line with num_rooms>1 books that many REAL rooms (POST /hotel/bookings
+      // is one room per call) and, on success, is EXPANDED into that many BOOKED rows
+      // (num_rooms=1 each) so every reserved room carries its own hotel_booking_id.
+      // ATOMIC: if fewer than requested are free, cancel the ones taken, drop the line,
+      // and reject — never bill for a room we couldn't reserve. Only when Hotel is
+      // enabled: an events-only tenant keeps the QUOTED billing quote.
+      const isoOf = (v: any): string => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
       if (evStatus === 'CONFIRMED' || evStatus === 'IN_PROGRESS') {
         const hotelOn = await ensureHotelEnabled(req.params.id).catch(() => ({ ok: false } as any));
         if (hotelOn.ok) {
-          const isoOf = (v: any): string => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
-          const payload = {
-            room_type_id: b.room_type_id || null,
-            guest_name: bk.customer_name, guest_phone: bk.customer_phone, guest_email: bk.customer_email,
-            check_in_date: isoOf(checkIn), check_out_date: isoOf(checkOut),
-            booking_source: 'EVENT', room_rate: rate || undefined,
-            special_requests: `Event booking ${bk.id} — ${bk.customer_name}`,
-          };
-          const result = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings`, req.headers.authorization, payload);
-          if (result.ok && result.data?.id) {
-            await db.run("UPDATE event_booking_rooms SET status = 'BOOKED', hotel_booking_id = ? WHERE id = ?", [result.data.id, id]);
-            try { await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'ROOM_RESERVED', summary: `Added + reserved a hotel room (${b.room_type_snapshot || b.room_type_name || 'Room'}) on a ${evStatus.toLowerCase()} booking` }); } catch { /* audit best-effort */ }
-          } else {
-            // Reservation failed (no inventory / hotel error) — undo the line so nothing
-            // is billed unreserved, then surface the hotel's reason.
+          const { ids, lastError, lastStatus } = await reserveEventHotelRooms(
+            req.params.id, bk,
+            { room_type_id: b.room_type_id || null, check_in_date: checkIn, check_out_date: checkOut, quoted_rate: rate },
+            numRooms, req.headers.authorization
+          );
+          if (ids.length < numRooms) {
+            // Shortfall — undo everything so nothing is billed unreserved.
+            await cancelEventHotelRooms(req.params.id, ids, req.headers.authorization);
             await db.run("DELETE FROM event_booking_rooms WHERE id = ?", [id]).catch(() => {});
             await recomputeEventTotal(db, req.params.bid).catch(() => {});
-            return res.status(result.status && result.status >= 400 ? result.status : 409).json({ error: result.data?.error || `No hotel room available to reserve for ${isoOf(checkIn)} → ${isoOf(checkOut)}.` });
+            const msg = ids.length === 0
+              ? (lastError || `No hotel room available to reserve for ${isoOf(checkIn)} → ${isoOf(checkOut)}.`)
+              : `Only ${ids.length} of ${numRooms} room(s) are available for ${isoOf(checkIn)} → ${isoOf(checkOut)} — none were added.`;
+            return res.status(lastStatus && lastStatus >= 400 ? lastStatus : 409).json({ error: msg });
           }
+          // All reserved — expand the single QUOTED line into `numRooms` BOOKED rows.
+          const perRoomTotal = round2(rate * nights);
+          await db.run("UPDATE event_booking_rooms SET status = 'BOOKED', hotel_booking_id = ?, num_rooms = 1, line_total = ? WHERE id = ?", [ids[0], perRoomTotal, id]);
+          for (let k = 1; k < ids.length; k++) {
+            const rid = mkEventId('EBR');
+            await db.run(
+              `INSERT INTO event_booking_rooms
+                 (id, booking_id, room_type_id, room_type_snapshot, check_in_date, check_out_date, num_rooms, quoted_rate, gst_percent, line_total, status, hotel_booking_id)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'BOOKED', ?)`,
+              [rid, req.params.bid, b.room_type_id || null, b.room_type_snapshot || b.room_type_name || 'Room',
+               checkIn, checkOut, rate, roomGst, perRoomTotal, ids[k]]
+            );
+          }
+          await recomputeEventTotal(db, req.params.bid).catch(() => {});
+          try { await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'ROOM_RESERVED', summary: `Added + reserved ${ids.length} hotel room(s) (${b.room_type_snapshot || b.room_type_name || 'Room'}) on a ${evStatus.toLowerCase()} booking` }); } catch { /* audit best-effort */ }
+          const first: any = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [id]);
+          return res.status(201).json({ ...first, reserved: ids.length });
         }
       }
       const row = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [id]);
@@ -27087,44 +27136,64 @@ ${data.tenant.name}`;
         }
       }
 
-      // Create real hotel bookings for each QUOTED room via the Hotel API.
+      // Create real hotel bookings for each QUOTED room line via the Hotel API. A line
+      // with num_rooms>1 reserves that many REAL rooms and is EXPANDED into that many
+      // BOOKED rows (num_rooms=1 each, one hotel_booking_id each). Best-effort: reserve
+      // as many as are free; a shortfall stays as one FAILED row so staff can see it.
       const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status = 'QUOTED'", [req.params.bid]);
       const roomResults: any[] = [];
       for (const rm of rooms) {
-        const payload = {
-          room_type_id: rm.room_type_id,
-          guest_name: bk.customer_name,
-          guest_phone: bk.customer_phone,
-          guest_email: bk.customer_email,
-          check_in_date: rm.check_in_date,
-          check_out_date: rm.check_out_date,
-          booking_source: 'EVENT',
-          room_rate: rm.quoted_rate || undefined,
-          special_requests: `Event booking ${bk.id} — ${bk.customer_name}`,
-        };
-        const result = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings`, req.headers.authorization, payload);
-        if (result.ok && result.data?.id) {
-          await db.run("UPDATE event_booking_rooms SET status = 'BOOKED', hotel_booking_id = ? WHERE id = ?", [result.data.id, rm.id]);
-          roomResults.push({ room_line_id: rm.id, ok: true, hotel_booking_id: result.data.id });
-        } else {
+        const want = Math.max(1, Number(rm.num_rooms || 1));
+        const ciISO = rm.check_in_date instanceof Date ? rm.check_in_date.toISOString().slice(0, 10) : String(rm.check_in_date || '').slice(0, 10);
+        const coISO = rm.check_out_date instanceof Date ? rm.check_out_date.toISOString().slice(0, 10) : String(rm.check_out_date || '').slice(0, 10);
+        const nightsRm = Math.max(1, Math.round((new Date(coISO + 'T00:00:00Z').getTime() - new Date(ciISO + 'T00:00:00Z').getTime()) / 86400000) || 1);
+        const perRoomTotal = round2(Number(rm.quoted_rate || 0) * nightsRm);
+        const { ids, lastError, lastStatus } = await reserveEventHotelRooms(req.params.id, bk, rm, want, req.headers.authorization);
+        if (ids.length === 0) {
           await db.run("UPDATE event_booking_rooms SET status = 'FAILED' WHERE id = ?", [rm.id]);
-          roomResults.push({ room_line_id: rm.id, ok: false, error: result.data?.error || `Hotel booking failed (${result.status})` });
+          roomResults.push({ room_line_id: rm.id, ok: false, requested: want, reserved: 0, error: lastError || `Hotel booking failed (${lastStatus})` });
+        } else {
+          await db.run("UPDATE event_booking_rooms SET status = 'BOOKED', hotel_booking_id = ?, num_rooms = 1, line_total = ? WHERE id = ?", [ids[0], perRoomTotal, rm.id]);
+          for (let k = 1; k < ids.length; k++) {
+            const rid = mkEventId('EBR');
+            await db.run(
+              `INSERT INTO event_booking_rooms
+                 (id, booking_id, room_type_id, room_type_snapshot, check_in_date, check_out_date, num_rooms, quoted_rate, gst_percent, line_total, status, hotel_booking_id)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'BOOKED', ?)`,
+              [rid, req.params.bid, rm.room_type_id, rm.room_type_snapshot, rm.check_in_date, rm.check_out_date, rm.quoted_rate, rm.gst_percent, perRoomTotal, ids[k]]
+            );
+          }
+          if (ids.length < want) {
+            // Reserved fewer than asked — leave a FAILED row for the shortfall so it's visible.
+            const rid = mkEventId('EBR');
+            const shortfall = want - ids.length;
+            await db.run(
+              `INSERT INTO event_booking_rooms
+                 (id, booking_id, room_type_id, room_type_snapshot, check_in_date, check_out_date, num_rooms, quoted_rate, gst_percent, line_total, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FAILED')`,
+              [rid, req.params.bid, rm.room_type_id, rm.room_type_snapshot, rm.check_in_date, rm.check_out_date, shortfall, rm.quoted_rate, rm.gst_percent, round2(perRoomTotal * shortfall)]
+            );
+          }
+          roomResults.push({ room_line_id: rm.id, ok: ids.length === want, requested: want, reserved: ids.length, hotel_booking_id: ids[0] });
         }
       }
+      await recomputeEventTotal(db, req.params.bid).catch(() => {});
 
+      const totalReq = roomResults.reduce((s, r) => s + (r.requested || 0), 0);
+      const totalRes = roomResults.reduce((s, r) => s + (r.reserved || 0), 0);
       await db.run("UPDATE event_bookings SET status = 'CONFIRMED' WHERE id = ?", [req.params.bid]);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
-      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: `Booking CONFIRMED${rooms.length ? ` · ${roomResults.filter(r => r.ok).length}/${rooms.length} hotel room(s) booked` : ''}`, before: { status: bk.status }, after: { status: 'CONFIRMED' } });
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: `Booking CONFIRMED${totalReq ? ` · ${totalRes}/${totalReq} hotel room(s) booked` : ''}`, before: { status: bk.status }, after: { status: 'CONFIRMED' } });
       notifyEvent(req.params.id, 'EVENT_CONFIRMED', row, {
         grand_total: Number(row.total_amount || 0),
         advance: Number(row.advance_amount || 0),
         balance: round2(Math.max(0, Number(row.total_amount || 0) - Number(row.advance_amount || 0))),
       });
-      const failed = roomResults.filter(r => !r.ok);
+      const shortfallCount = totalReq - totalRes;
       res.json({
         ...row,
         room_results: roomResults,
-        warning: failed.length ? `${failed.length} hotel room(s) could not be booked — check hotel availability.` : undefined,
+        warning: shortfallCount > 0 ? `${shortfallCount} hotel room(s) could not be booked — check hotel availability.` : undefined,
       });
     } catch (err: any) {
       console.error("/events/bookings confirm error:", err);
@@ -52888,8 +52957,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-add-room-menu-entry-p2b',
+    commit_marker: 'event-add-room-multi-p3b',
     code_features: [
+      'event-add-room-multi-p3b',                    //FIX (Event group rooms — reserve N real rooms, not 1). POST /hotel/bookings books ONE room per call, so both the confirm loop AND the Phase-3 post-confirm add reserved only 1 real hotel room per room-LINE regardless of num_rooms — a num_rooms=3 line billed 3 but reserved 1 (partial phantom). New shared helper reserveEventHotelRooms() loops num_rooms (each POST re-checks availability against the committed ones — no double-pick) + cancelEventHotelRooms() rolls back. POST-CONFIRM ADD is now ATOMIC: reserves all N or, on shortfall, cancels the ones taken + drops the line + 409 ("Only X of N available — none were added"); on success EXPANDS the line into N BOOKED rows (num_rooms=1 each, own hotel_booking_id). CONFIRM loop now reserves num_rooms per QUOTED line + expands into N BOOKED rows, best-effort (a shortfall stays one FAILED row); recomputeEventTotal after; summary/warning use reserved/requested totals. Billing total unchanged (N rows × rate×nights == old rate×N×nights). tsc + vite build clean.
       'hotel-add-room-menu-entry-p2b',               //UX (Add Room discoverability). The Phase-2 individual "Add Room" form lived in the booking DETAIL modal, reachable only via the Booking-ID link — a column hidden by default (def:false) — and clicking a checked-in row opens the folio, not the detail. So the feature was effectively unreachable in normal use. FIX: added an "➕ Add room" entry to the always-visible booking row "···" actions menu (gated canWriteTab('HOTEL_BOOKINGS'), shown for BOOKED/ASSIGNED/CHECKED_IN non-no-show) that opens the booking detail with the Add-Room form pre-expanded (fetches room-types). Group + Events entry points were already discoverable (Groups→Detail→Guests & Rooms→+ Add Room; Events→booking→Hotel Rooms→Add Hotel Rooms). Pure frontend. vite build clean.
       'event-add-room-reserve-p3',                   //FEATURE (Add Room to existing booking — Phase 3: EVENT bookings, reserve post-confirm rooms). Closed the phantom-reservation gap: POST /events/bookings/:bid/rooms always inserted status QUOTED, so a room attached AFTER the confirm loop already ran stayed QUOTED forever — billed on the event yet never reserved in the hotel. Now, when the booking is CONFIRMED or IN_PROGRESS (and Hotel is enabled), the attach immediately reserves real inventory by mirroring the confirm loop (callSelfApi POST /hotel/bookings → status BOOKED + hotel_booking_id). If the hotel has no room, the just-inserted line is rolled back (DELETE + recomputeEventTotal) and the attach is REJECTED with the hotel's reason — never bill for an unreservable room (consistent w/ hotel add-room Phases 1&2). Added a lifecycle gate (409 on CANCELLED / COMPLETED). Events-only tenants (no Hotel module) keep the QUOTED billing-quote behavior unchanged. One hotel booking per line (parity with confirm); the FE adds one room per action so billed==reserved. FRONTEND: addRoom now surfaces the reservation error (alert) + refreshes availability counts; the room-line Pill already shows BOOKED/QUOTED/FAILED, and the "Add Hotel Rooms" button already showed for confirmed/in-progress (editable). tsc + vite build clean.
       'hotel-individual-add-room-p2',                //FEATURE (Add Room to existing booking — Phase 2: INDIVIDUAL hotel bookings, convert-to-group). New POST /hotel/bookings/:bookingId/add-room: if the booking is standalone (group_id NULL) it is first CONVERTED into a group (mint a room_booking_groups row seeded from the booking + stamp group_id/group_name onto the existing room), then the room add DELEGATES to the hardened Phase-1 group rooms/add via callSelfApi — so there is ONE room-add code path (availability guard + per-room rate + group total/num_rooms recompute), not a duplicated one. Lifecycle gate: allowed for any status EXCEPT CANCELLED / CHECKED_OUT / NO_SHOW. On a failed add the conversion is rolled back (group rooms/add validates all rooms before inserting → 409 leaves nothing inserted → safe to delete the just-minted empty group). Best-effort object audit (CONVERTED_TO_GROUP / ROOM_ADDED). FRONTEND: pending. tsc + vite build clean. Phase 3 = event bookings (reserve post-confirm rooms).
