@@ -1072,6 +1072,10 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const [emailInvoice, setEmailInvoice] = useState(false);
   const [caterPkgs, setCaterPkgs] = useState<any[]>([]);
   const [nonce, setNonce] = useState(0);
+  // Add-ons / Supplements (Phase 3) — an append-only picker gated on EVENTS_ADDONS,
+  // separate from the core booking-line editing (which needs EVENTS_BOOKINGS edit).
+  const [showAddon, setShowAddon] = useState(false);
+  const [addonForm, setAddonForm] = useState<any>({ category: 'RENTAL', ref_id: '', name: '', quantity: 1, unit_rate: '', gst_percent: '' });
   // Venue options for the change-venue selector. Prefer the list passed in; when
   // opened via a drill-down that doesn't pass one (e.g. the dashboard), fetch it.
   const [venueOpts, setVenueOpts] = useState<any[]>(venues || []);
@@ -1126,6 +1130,43 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     svc.push({ service_id: svcId, quantity: 1, unit_rate: sv.rate });
     await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ services: svc }) });
     await load();
+  };
+  // ── Add-ons / Supplements (append-only, gated on EVENTS_ADDONS) ──────────────
+  // Picking a master Rental/Service prefills its name + rate (editable override);
+  // Room/Custom are ad-hoc name + rate. POST appends one line (server snapshots +
+  // computes the total); it never touches the core booking lines.
+  const onPickAddonItem = (id: string) => {
+    const src = addonForm.category === 'RENTAL' ? rentals : services;
+    const x = src.find((r: any) => r.id === id);
+    const rate = addonForm.category === 'RENTAL' ? (x?.rent_daily ?? 0) : (x?.rate ?? 0);
+    setAddonForm((f: any) => ({ ...f, ref_id: id, name: x?.name || '', unit_rate: String(rate), gst_percent: x?.gst_percent != null ? String(x.gst_percent) : '' }));
+  };
+  const addAddon = async () => {
+    const f = addonForm;
+    const payload: any = { category: f.category, quantity: Number(f.quantity || 1) };
+    if (f.category === 'RENTAL' || f.category === 'SERVICE') {
+      if (!f.ref_id) { alert('Please pick an item.'); return; }
+      payload.ref_id = f.ref_id;
+    } else if (!String(f.name || '').trim()) { alert('A name is required.'); return; }
+    if (String(f.name || '').trim()) payload.name = String(f.name).trim();
+    if (f.unit_rate !== '' && f.unit_rate != null) payload.unit_rate = Number(f.unit_rate);
+    if (f.gst_percent !== '' && f.gst_percent != null) payload.gst_percent = Number(f.gst_percent);
+    if ((f.category === 'CUSTOM' || f.category === 'ROOM') && (payload.unit_rate == null || !isFinite(payload.unit_rate) || payload.unit_rate < 0)) { alert('A valid rate is required.'); return; }
+    setBusy(true);
+    try {
+      await api(`/events/bookings/${bookingId}/addons`, { method: 'POST', body: JSON.stringify(payload) });
+      setShowAddon(false);
+      setAddonForm({ category: 'RENTAL', ref_id: '', name: '', quantity: 1, unit_rate: '', gst_percent: '' });
+      await load();
+    } catch (e: any) { alert(e.message); }
+    finally { setBusy(false); }
+  };
+  const voidAddon = async (aid: string) => {
+    if (!window.confirm('Void this add-on / supplement? It will be removed from the bill.')) return;
+    setBusy(true);
+    try { await api(`/events/bookings/${bookingId}/addons/${aid}`, { method: 'DELETE' }); await load(); }
+    catch (e: any) { alert(e.message); }
+    finally { setBusy(false); }
   };
   const removeLine = async (kind: 'items' | 'services', idx: number) => {
     const src = kind === 'items'
@@ -1502,6 +1543,58 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
           )}
         </div>
       </div>
+
+      {/* Add-ons / Supplements — guest-requested extras appended live during the
+          event, gated on EVENTS_ADDONS (separate from booking-line editing). */}
+      {(() => {
+        const addonLive = bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS';
+        const canAddAddon = addonLive && evCanEdit('EVENTS_ADDONS');
+        const canVoidAddon = evCanDelete('EVENTS_ADDONS');
+        const addons = bk.addons || [];
+        if (!addons.length && !canAddAddon) return null;
+        const isMaster = addonForm.category === 'RENTAL' || addonForm.category === 'SERVICE';
+        return (
+          <div className={`${CARD} mt-4 border-l-4 border-l-[#7c3aed]`}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-bold text-sm flex items-center gap-1.5"><Plus size={15} className="text-[#7c3aed]" />Add-ons / Supplements</h3>
+              {canAddAddon && !showAddon && <button className={BTN_GHOST} onClick={() => setShowAddon(true)}><Plus size={13} />Add supplement</button>}
+            </div>
+            <p className="text-[11px] text-[#9d8b7e] mb-2">Extras a guest requested during the event — added on top of the booking. The base booking lines are never changed.{!addonLive && ' (Available once the event is confirmed / in progress.)'}</p>
+            {showAddon && canAddAddon && (
+              <div className="mb-3 p-3 rounded-xl bg-[#faf7f2] border border-[#e8dccf] grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
+                <div><label className={LABEL}>Type</label>
+                  <select className={`${INPUT} text-xs`} value={addonForm.category} onChange={e => setAddonForm({ category: e.target.value, ref_id: '', name: '', quantity: 1, unit_rate: '', gst_percent: '' })}>
+                    <option value="RENTAL">Rental (chair, table…)</option><option value="SERVICE">Service</option><option value="ROOM">Room</option><option value="CUSTOM">Custom</option>
+                  </select></div>
+                {isMaster ? (
+                  <div className="md:col-span-2"><label className={LABEL}>Item</label>
+                    <select className={`${INPUT} text-xs`} value={addonForm.ref_id} onChange={e => onPickAddonItem(e.target.value)}>
+                      <option value="">Select…</option>
+                      {(addonForm.category === 'RENTAL' ? rentals : services).map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                    </select></div>
+                ) : (
+                  <div className="md:col-span-2"><label className={LABEL}>Name</label>
+                    <input className={`${INPUT} text-xs`} value={addonForm.name} onChange={e => setAddonForm({ ...addonForm, name: e.target.value })} placeholder="e.g. Extra sofa" /></div>
+                )}
+                <div><label className={LABEL}>Qty</label><input type="number" min={1} className={`${INPUT} text-xs`} value={addonForm.quantity} onChange={e => setAddonForm({ ...addonForm, quantity: e.target.value })} /></div>
+                <div><label className={LABEL}>Rate ₹</label><input type="number" min={0} className={`${INPUT} text-xs`} value={addonForm.unit_rate} onChange={e => setAddonForm({ ...addonForm, unit_rate: e.target.value })} placeholder={isMaster ? 'from master' : ''} /></div>
+                <div className="flex gap-1">
+                  <button className={BTN_PRIMARY} disabled={busy} onClick={addAddon}><Plus size={13} />Add</button>
+                  <button className={BTN_GHOST} disabled={busy} onClick={() => setShowAddon(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+            {addons.length === 0 ? <p className="text-xs text-[#9d8b7e]">— none yet</p> : addons.map((a: any) => (
+              <div key={a.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
+                <span className="flex-1 min-w-0 truncate">{a.name_snapshot} <span className="text-[#9d8b7e]">· {String(a.category || '').toLowerCase()}</span>{a.added_by ? <span className="text-[10px] text-[#b7a99b]"> — added by {a.added_by}</span> : null}</span>
+                <span className="text-[#9d8b7e]">{a.quantity} × {money(a.unit_rate)}</span>
+                <span className="w-16 text-right font-semibold">{money(a.line_total)}</span>
+                {canVoidAddon && <button title="Void this add-on" onClick={() => voidAddon(a.id)}><X size={12} className="text-rose-500" /></button>}
+              </div>
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Payment schedule + receipts */}
       <PaymentPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} canRecord={canRecordPayment} onChanged={load} />
