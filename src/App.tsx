@@ -27543,6 +27543,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_DASHBOARD',  label: 'Events Dashboard',   description: 'Events ops cockpit: pipeline, win rate, revenue, receivables, venue utilization.', eventsOnly: true },
               { id: 'EVENTS_CALENDAR',   label: 'Events Calendar',    description: 'Venue × date booking calendar.', eventsOnly: true },
               { id: 'EVENTS_BOOKINGS',   label: 'Event Bookings',     description: 'Create/edit event bookings, lines, discount, payments, staff, confirm, checkout, invoice.', eventsOnly: true },
+              { id: 'EVENTS_ADDONS',     label: 'Event Add-ons / Supplements', description: 'Append guest-requested extras (chairs, tables, an extra room, a service) to a confirmed / in-progress booking WITHOUT editing the booking itself. Edit = add a supplement; Full = void one. Pair with Event Bookings = View to give add-only staff who cannot edit or remove existing lines.', eventsOnly: true },
               { id: 'EVENTS_VENUES',     label: 'Event Venues',       description: 'Convention halls / lawns master — categories, AC, occupancy, rates, photos.', eventsOnly: true },
               { id: 'EVENTS_RENTALS',    label: 'Event Rentals',      description: 'Rentable inventory master — tables, chairs, sofas, cylinders, plates.', eventsOnly: true },
               { id: 'EVENTS_SERVICES',   label: 'Event Services',     description: 'Add-on services master — serving staff, security, parking, decoration.', eventsOnly: true },
@@ -27591,7 +27592,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ROOMS: 'FRONTDESK', HOTEL_BOOKINGS: 'FRONTDESK', SERVICES: 'FRONTDESK', SERVICE_REQUESTS: 'FRONTDESK', HOUSEKEEPING: 'FRONTDESK', CHECKLISTS: 'FRONTDESK', FOLIOS: 'FRONTDESK', COMPLIANCE: 'FRONTDESK', CONCIERGE_FAQ: 'FRONTDESK', FRONT_OFFICE_REPORTS: 'FRONTDESK',
               ORDERS: 'RESTAURANT', MENU: 'RESTAURANT', DELIVERY: 'RESTAURANT', QR: 'RESTAURANT', BOOKINGS: 'RESTAURANT', RESTAURANT_REPORTS: 'RESTAURANT',
               SPA_CALENDAR: 'SPA', SPA_APPOINTMENTS: 'SPA', SPA_CATALOG: 'SPA', SPA_RESOURCES: 'SPA', SPA_CLIENTS: 'SPA', SPA_PACKAGES: 'SPA', SPA_REPORTS: 'SPA', SPA_BILLING: 'SPA', SPA_SETTINGS: 'SPA',
-              EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
+              EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_ADDONS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
               EXPENSE_JOURNAL: 'ACCOUNTS', PROCUREMENT: 'ACCOUNTS', RECEIVABLES: 'ACCOUNTS',
               ACCOUNTING: 'ACCOUNTS', ACCOUNTS_PNL: 'ACCOUNTS', ACCOUNTS_CASHFLOW: 'ACCOUNTS', ACCOUNTS_GST: 'ACCOUNTS', ACCOUNTS_VENDOR_AGING: 'ACCOUNTS', CASH_DRAWER: 'ACCOUNTS',
               CHECKLIST_BOARD: 'OVERVIEW', STATUS_BOARD: 'FRONTDESK',
@@ -53109,7 +53110,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   ];
   // Events & Convention tabs (shown only when the selected restaurant has events_enabled)
   const EVENTS_TABS = [
-    'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_VENUES', 'EVENTS_RENTALS',
+    'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_ADDONS', 'EVENTS_VENUES', 'EVENTS_RENTALS',
     'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS', 'EVENTS_MIGRATION',
   ];
   // Spa & Wellness tabs (shown only when the selected restaurant has spa_enabled)
