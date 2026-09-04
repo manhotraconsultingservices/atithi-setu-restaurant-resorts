@@ -716,6 +716,8 @@ function EventBookings({ restaurantId, token }: Props) {
 
   const create = async () => {
     if (!form.customer_name || !form.event_date) { alert('Customer name and event date are required'); return; }
+    if (!form.venue_id) { alert('Venue is required.'); return; }
+    if (!form.customer_phone || !form.customer_phone.trim()) { alert('Phone number is required.'); return; }
     try {
       const body = { ...form, guest_count: Number(form.guest_count || 0) };
       const created = await api('/events/bookings', { method: 'POST', body: JSON.stringify(body) });
@@ -741,15 +743,15 @@ function EventBookings({ restaurantId, token }: Props) {
         <div className={`${CARD} mb-4`}>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div><label className={LABEL}>{t('common.name')}</label><input className={INPUT} value={form.customer_name} onChange={e => setForm({ ...form, customer_name: e.target.value })} /></div>
-            <div><label className={LABEL}>{t('common.phone')}</label><input className={INPUT} value={form.customer_phone} onChange={e => setForm({ ...form, customer_phone: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('common.phone')} <span className="text-red-500">*</span></label><input className={INPUT} value={form.customer_phone} onChange={e => setForm({ ...form, customer_phone: e.target.value })} /></div>
             <div><label className={LABEL}>{t('common.email')}</label><input className={INPUT} value={form.customer_email} onChange={e => setForm({ ...form, customer_email: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.bookings.eventType')}</label>
               <select className={INPUT} value={form.event_type} onChange={e => setForm({ ...form, event_type: e.target.value })}>
                 {['WEDDING', 'RECEPTION', 'CONFERENCE', 'BIRTHDAY', 'CORPORATE', 'OTHER'].map(c => <option key={c} value={c}>{c}</option>)}
               </select></div>
-            <div><label className={LABEL}>{t('events.bookings.venue')}</label>
+            <div><label className={LABEL}>{t('events.bookings.venue')} <span className="text-red-500">*</span></label>
               <select className={INPUT} value={form.venue_id} onChange={e => setForm({ ...form, venue_id: e.target.value })}>
-                <option value="">—</option>
+                <option value="">Select a venue…</option>
                 {venues.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select></div>
             <div><label className={LABEL}>{t('events.bookings.eventDate')}</label><input type="date" className={INPUT} value={form.event_date} onChange={e => setForm({ ...form, event_date: e.target.value })} /></div>
