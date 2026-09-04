@@ -1549,10 +1549,17 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
         <div className={`${CARD} md:col-span-2`}>
           <div className="flex items-center justify-between mb-2"><h3 className="font-bold text-sm flex items-center gap-1.5"><Hotel size={15} />{t('events.bookings.hotelRooms')}</h3>
             {editable && <button className={BTN_GHOST} onClick={loadHotel}><Plus size={13} />{t('events.bookings.addHotelRooms')}</button>}</div>
-          {/* Column labels */}
+          {/* Column labels — base rate (ex-GST) · qty · GST (% from the Hotel slab
+              settings, on the SINGLE room rate) · total incl GST. */}
           {(bk.rooms || []).length > 0 && (
             <div className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-wide text-[#b3a495] pb-1 border-b border-[#f0e9df]">
-              <span className="flex-1">Room</span><span className="whitespace-nowrap">GST</span><span className="w-[92px] text-center">Qty × rate</span><span className="w-16 text-right">Amount</span><span className="w-3.5" />
+              <span className="flex-1">Room</span>
+              <span className="w-14 text-right">Rate/nt</span>
+              <span className="w-[74px] text-center">Qty</span>
+              <span className="w-16 text-right">Base</span>
+              <span className="w-16 text-right">GST</span>
+              <span className="w-16 text-right">Total</span>
+              <span className="w-3.5" />
             </div>
           )}
           {(bk.rooms || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (() => {
@@ -1570,33 +1577,59 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
                 else { g.ids.push(rm.id); g.qty += 1; g.line_total += Number(rm.line_total || 0); }
               } else lines.push({ ...rm, ids: [rm.id], qty: Number(rm.num_rooms || 1) });
             }
-            return lines.map((ln: any) => {
+            // Room-rent GST is charged on the SINGLE room's tariff slab (already
+            // resolved into gst_percent at attach from the Hotel GST settings), applied
+            // per room — NOT on the summed line. base = ex-GST rent; gst = base × %.
+            let tBase = 0, tGst = 0;
+            const rows = lines.map((ln: any) => {
+              const gstPct = Number(ln.gst_percent || 0);
+              const base = Number(ln.line_total || 0);              // ex-GST rent (rate × qty × nights)
+              const gstAmt = Math.round(base * gstPct) / 100;        // gstPct is a %, so /100
+              tBase += base; tGst += gstAmt;
               const quotedEditable = editable && ln.status === 'QUOTED';
               const bookedEditable = editable && ln.status === 'BOOKED';
               return (
                 <div key={ln.ids[0]} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
                   <span className="flex-1 min-w-0 truncate">{ln.room_type_snapshot} <span className="text-[#9d8b7e]">({dOnly(ln.check_in_date)} → {dOnly(ln.check_out_date)})</span> <Pill status={ln.status} /></span>
-                  <span className="text-[10px] text-[#9d8b7e] whitespace-nowrap tabular-nums" title="Room rent GST (Hotel slab)">{Number(ln.gst_percent || 0)}%</span>
+                  {quotedEditable
+                    ? <input type="number" min={0} defaultValue={ln.quoted_rate} title="Base rate / night (ex-GST)" onBlur={e => updateRoom(ln.ids[0], { quoted_rate: Number(e.target.value) })} className="w-14 px-1 py-0.5 rounded border border-[#e8dccf] text-right tabular-nums" />
+                    : <span className="w-14 text-right text-[#9d8b7e] tabular-nums" title="Base rate / night (ex-GST)">{money(ln.quoted_rate)}</span>}
                   {quotedEditable ? (
-                    <span className="w-[92px] flex items-center justify-end gap-1">
-                      <input type="number" min={1} defaultValue={ln.num_rooms} title="Rooms" onBlur={e => updateRoom(ln.ids[0], { num_rooms: Number(e.target.value) })} className="w-10 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
-                      <span className="text-[#9d8b7e]">×₹</span>
-                      <input type="number" min={0} defaultValue={ln.quoted_rate} title="Rate / night" onBlur={e => updateRoom(ln.ids[0], { quoted_rate: Number(e.target.value) })} className="w-14 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                    <span className="w-[74px] flex items-center justify-center">
+                      <input type="number" min={1} defaultValue={ln.num_rooms} title="Rooms" onBlur={e => updateRoom(ln.ids[0], { num_rooms: Number(e.target.value) })} className="w-12 px-1 py-0.5 rounded border border-[#e8dccf] text-center" />
                     </span>
                   ) : bookedEditable ? (
-                    <span className="w-[92px] flex items-center justify-end gap-1">
+                    <span className="w-[74px] flex items-center justify-center gap-1">
                       <button title="Release one room" onClick={() => removeRoom(ln.ids[ln.ids.length - 1])} className="w-5 h-5 rounded border border-[#e8dccf] leading-none text-[#cc5a16] font-bold hover:bg-[#f0e9df]">−</button>
                       <span className="w-5 text-center font-semibold tabular-nums">{ln.qty}</span>
                       <button title="Reserve one more room" onClick={() => addRoom(ln.room_type_id, ln.room_type_snapshot, Number(ln.quoted_rate) || 0, 1)} className="w-5 h-5 rounded border border-[#e8dccf] leading-none text-emerald-600 font-bold hover:bg-[#f0e9df]">+</button>
                     </span>
-                  ) : <span className="w-[92px] text-right text-[#9d8b7e] whitespace-nowrap tabular-nums">{ln.qty} × {money(ln.quoted_rate)}</span>}
-                  <span className="w-16 text-right font-semibold tabular-nums">{money(ln.line_total)}</span>
+                  ) : <span className="w-[74px] text-center text-[#9d8b7e] tabular-nums">×{ln.qty}</span>}
+                  <span className="w-16 text-right text-[#6b5d52] tabular-nums" title="Room rent (ex-GST)">{money(base)}</span>
+                  <span className="w-16 text-right leading-tight tabular-nums" title={`GST @ ${gstPct}% (Hotel slab, on single-room rent)`}>
+                    <span className="block text-[#6b5d52]">{money(gstAmt)}</span>
+                    <span className="block text-[9px] text-[#9d8b7e]">@ {gstPct}%</span>
+                  </span>
+                  <span className="w-16 text-right font-semibold tabular-nums" title="Total incl. GST">{money(base + gstAmt)}</span>
                   {quotedEditable
                     ? <button onClick={() => removeRoom(ln.ids[0])}><X size={12} className="text-rose-500" /></button>
                     : <span className="w-3.5 flex-none" aria-hidden />}
                 </div>
               );
             });
+            return (<>
+              {rows}
+              {/* Rooms totals — base + GST = grand (incl GST). */}
+              <div className="flex items-center gap-1.5 text-[11px] pt-1.5 font-semibold text-[#14110c]">
+                <span className="flex-1 text-right text-[10px] uppercase tracking-wide text-[#9d8b7e]">Room totals</span>
+                <span className="w-14" />
+                <span className="w-[74px]" />
+                <span className="w-16 text-right tabular-nums" title="Total room rent (ex-GST)">{money(tBase)}</span>
+                <span className="w-16 text-right tabular-nums" title="Total room GST">{money(Math.round(tGst * 100) / 100)}</span>
+                <span className="w-16 text-right tabular-nums text-[#cc5a16]" title="Total incl. GST">{money(tBase + Math.round(tGst * 100) / 100)}</span>
+                <span className="w-3.5" />
+              </div>
+            </>);
           })()}
           {showHotel && (
             <div className="mt-2 p-2 rounded-xl bg-[#faf7f2] border border-[#e8dccf]">
