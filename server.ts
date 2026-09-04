@@ -5893,6 +5893,25 @@ async function _roleHasTab(req: AuthRequest, tabId: string, minLevel = 1): Promi
   return false;
 }
 
+// Inline WRITE gate for handlers whose route has NO `:id` tenant param (tenant
+// comes from the token — e.g. /api/inventory/*, /api/brand/*, /api/owner/*),
+// where `requireTabAction` middleware is inert (or, worse, would read the wrong
+// :id). Requires the caller's role to hold `tab` at >= minLevel (Edit=2 for
+// create/update, Full=3 for delete), with an OWNER / built-in-MANAGER / platform
+// fast-path (bare `_roleHasTab` denies a null-matrix MANAGER; this restores it).
+// Sends 403 and returns false when denied, so callers use:
+//   if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
+async function _requireTabWrite(req: AuthRequest, res: Response, tab: string, minLevel: number): Promise<boolean> {
+  const role = String(req.user?.role || '').toUpperCase();
+  if (['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return true;
+  if (await _roleHasTab(req, tab, minLevel)) return true;
+  res.status(403).json({
+    error: `Forbidden — ${tab} ${minLevel >= 3 ? 'Full' : 'Edit'} access required. Ask the property owner to grant it in Staff Access.`,
+    required_tab: tab, required_level: minLevel,
+  });
+  return false;
+}
+
 // Bust the cache after a write to restaurant_role_permissions so the new
 // matrix takes effect immediately instead of waiting 30s for TTL.
 function invalidateTabCacheForTenant(tenantId: string) {
@@ -8561,6 +8580,7 @@ async function startServer() {
 
   // POST — create a brand
   app.post("/api/brand", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'SETTINGS', 2))) return;
     try {
       const name = String(req.body?.name || '').trim();
       if (!name) return res.status(400).json({ error: 'name required' });
@@ -8580,6 +8600,7 @@ async function startServer() {
 
   // PATCH — update brand metadata
   app.patch("/api/brand/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'SETTINGS', 2))) return;
     try {
       const sets: string[] = [];
       const params: any[] = [];
@@ -8599,6 +8620,7 @@ async function startServer() {
 
   // POST — link a restaurant to a brand (sets brand_id + optional location label)
   app.post("/api/brand/:brandId/link", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'SETTINGS', 2))) return;
     try {
       const restaurantId = String(req.body?.restaurant_id || '').trim();
       if (!restaurantId) return res.status(400).json({ error: 'restaurant_id required' });
@@ -8621,6 +8643,7 @@ async function startServer() {
 
   // POST — unlink (clear brand_id)
   app.post("/api/brand/unlink", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'SETTINGS', 2))) return;
     try {
       const restaurantId = String(req.body?.restaurant_id || '').trim();
       if (!restaurantId) return res.status(400).json({ error: 'restaurant_id required' });
@@ -17752,6 +17775,7 @@ ${data.tenant.name}`;
 
   // Ingredients: update
   app.patch("/api/inventory/ingredients/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const allowed = [
@@ -17782,6 +17806,7 @@ ${data.tenant.name}`;
   // Ingredients: soft-delete (sets is_active=0). Hard delete blocked because
   // recipes / movements / GRN line items reference this row.
   app.delete("/api/inventory/ingredients/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE ingredients SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.id]);
@@ -17794,6 +17819,7 @@ ${data.tenant.name}`;
   // Ingredients: bulk stock adjustment (manual override)
   // Used for ad-hoc corrections. Logs MANUAL movement with a "before/after" note.
   app.post("/api/inventory/ingredients/:id/adjust-stock", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const { new_qty, reason } = req.body;
       if (new_qty == null || isNaN(Number(new_qty))) {
@@ -18046,6 +18072,7 @@ ${data.tenant.name}`;
   });
 
   app.patch("/api/inventory/suppliers/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const allowed = [
@@ -18072,6 +18099,7 @@ ${data.tenant.name}`;
 
   // Soft-delete (PO/GRN history references this row)
   app.delete("/api/inventory/suppliers/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE suppliers SET is_active = 0 WHERE id = ?", [req.params.id]);
@@ -18255,6 +18283,7 @@ ${data.tenant.name}`;
 
   // Update PO header (only DRAFT POs editable for header fields)
   app.patch("/api/inventory/purchase-orders/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -18283,6 +18312,7 @@ ${data.tenant.name}`;
 
   // Replace line items on a DRAFT PO. Recomputes totals.
   app.put("/api/inventory/purchase-orders/:id/items", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const { items } = req.body;
       if (!Array.isArray(items)) return res.status(400).json({ error: "items array is required" });
@@ -18333,6 +18363,7 @@ ${data.tenant.name}`;
 
   // Mark a PO as SENT (DRAFT → SENT). Optionally fires an email to the supplier later.
   app.post("/api/inventory/purchase-orders/:id/send", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -18436,6 +18467,7 @@ ${data.tenant.name}`;
   // Email PO to supplier with PDF attachment
   // Body: { to?: string, cc?: string, message?: string }   // overrides supplier.email if 'to' is provided
   app.post("/api/inventory/purchase-orders/:id/email", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId!);
       const data = await hydratePOForPdf(db, req.params.id, req.user!.restaurantId!);
@@ -18475,6 +18507,7 @@ ${data.tenant.name}`;
 
   // Cancel a PO (any non-terminal status → CANCELLED)
   app.post("/api/inventory/purchase-orders/:id/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -18796,6 +18829,7 @@ ${data.tenant.name}`;
 
   // Upload bill image for an existing GRN
   app.post("/api/inventory/grn/:id/upload-bill", authenticate, restaurantStaff, upload.single('bill'), async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded (field name: 'bill')" });
       const db = await getTenantDb(req.user!.restaurantId);
@@ -20527,6 +20561,7 @@ ${data.tenant.name}`;
   // Update one or more line items during the count.
   // Body: { items: [{ id, actual_qty }, ...] }
   app.patch("/api/inventory/counts/:id/items", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const { items } = req.body;
       if (!Array.isArray(items)) return res.status(400).json({ error: "items array required" });
@@ -20561,6 +20596,7 @@ ${data.tenant.name}`;
   // for each non-zero variance, posts a COUNT_ADJUSTMENT movement and brings
   // ingredients.current_stock_qty in line with reality.
   app.post("/api/inventory/counts/:id/complete", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId!);
       const count: any = await db.get("SELECT * FROM physical_counts WHERE id = ?", [req.params.id]);
@@ -21442,6 +21478,7 @@ ${data.tenant.name}`;
   });
 
   app.delete("/api/inventory/seasonality/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE seasonality_factors SET is_active = 0 WHERE id = ?", [req.params.id]);
@@ -22528,6 +22565,7 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/storage-locations", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
     try {
       const { name, kind } = req.body;
       if (!name) return res.status(400).json({ error: "name is required" });
@@ -22546,6 +22584,7 @@ ${data.tenant.name}`;
   });
 
   app.delete("/api/storage-locations/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
     try {
       if (req.params.id === 'LOC-MAIN') return res.status(400).json({ error: "Cannot delete the default Main location" });
       const db = await getTenantDb(req.user!.restaurantId);
@@ -24262,6 +24301,7 @@ ${data.tenant.name}`;
   // Assign / reassign a checklist instance to a role and/or a specific user, or park
   // it as a DRAFT (manager/owner only). Notifies the assignee when it goes ASSIGNED.
   app.post("/api/restaurant/:id/checklists/jobs/:jid/assign", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'CHECKLIST_BOARD', 2))) return;
     if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase()) && !(await _roleHasTab(req, 'CHECKLIST_BOARD', 1))) return res.status(403).json({ error: 'Only a manager or owner can assign checklists.' });
     try {
       const db = await getTenantDb(req.params.id);
@@ -49878,6 +49918,7 @@ ${data.tenant.name}`;
 
   // Attendance: Manager marks attendance on behalf of any staff member (including offline employees)
   app.post("/api/restaurant/:id/attendance/staff/:staffId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'ATTENDANCE', 2))) return;
     try {
       const role = req.user?.role ?? '';
       if (!(await _roleHasTab(req, 'ATTENDANCE'))) {
@@ -49911,6 +49952,7 @@ ${data.tenant.name}`;
 
   // Attendance: Manager bulk-mark attendance for multiple staff on a date
   app.post("/api/restaurant/:id/attendance/bulk", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'ATTENDANCE', 2))) return;
     try {
       const role = req.user?.role ?? '';
       if (!(await _roleHasTab(req, 'ATTENDANCE'))) {
@@ -51334,7 +51376,7 @@ ${data.tenant.name}`;
   });
 
   // Admin: Renew Subscription
-  app.post("/api/admin/restaurants/:id/renew-subscription", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/admin/restaurants/:id/renew-subscription", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
       const { type } = req.body;
       const restaurant = await centralDb.get("SELECT subscription_expires_at FROM restaurants WHERE id = ?", [req.params.id]);
@@ -51643,6 +51685,7 @@ ${data.tenant.name}`;
     } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to load alert rules' }); }
   });
   app.post("/api/owner/alert-rules", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'NOTIFICATIONS', 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await ensureAlertRules(db, req.user!.restaurantId);
@@ -51672,6 +51715,7 @@ ${data.tenant.name}`;
     } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to save alert rule' }); }
   });
   app.delete("/api/owner/alert-rules/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'NOTIFICATIONS', 3))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("DELETE FROM alert_rules WHERE id = ?", [req.params.id]).catch(() => {});
@@ -51679,6 +51723,7 @@ ${data.tenant.name}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   app.post("/api/owner/alert-rules/evaluate", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'NOTIFICATIONS', 2))) return;
     try {
       const out = await evaluateAlertRules(req.user!.restaurantId, true); // dry-run: report breaches, don't send
       res.json(out);
@@ -52659,8 +52704,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-accounting-cashdrawer-write-gates',
+    commit_marker: 'rbac-audit-sweep-27-write-holes',
     code_features: [
+      'rbac-audit-sweep-27-write-holes',             //SECURITY (comprehensive one-pass write-gate audit — closes 27 holes across the app). Method: static inventory of ALL 533 write routes → 114 suspects → empirical probe with a View-level-EVERYTHING custom role (scratchpad rbac_probe_all.mjs: 73 secure / 13 wrote / 26 got-past-gate) → 7-agent review to separate real holes from false positives (self-service auth/refresh+switch-restaurant+/me/*+own-checklist, read-only previews smart-po/invoice-preview, e-invoice webhook, aiosell/sentiment compute) → fix → re-probe. NEW inline helper `_requireTabWrite(req,res,tab,minLevel)` (OWNER/MANAGER/SA/CTO fast-path + `_roleHasTab`≥level + 403) for routes whose :id is NOT the tenant (tenant from token → requireTabAction is inert/wrong there). GATED 27: [HIGH] `/api/admin/restaurants/:id/renew-subscription` had authenticate-ONLY (no isAdmin) → ANY tenant user could extend ANY restaurant's subscription cross-tenant → added `isAdmin`; [HIGH] inventory ingredient/supplier DELETE + brand PATCH; the whole INVENTORY family (`/api/inventory/*` ingredients/suppliers/seasonality/purchase-orders/grn/counts + storage-locations: delete/patch/put/post — module-gated only, :id is the RECORD id) → INVENTORY Edit(2)/Full(3); brand create/patch/link/unlink → SETTINGS(2); owner alert-rules create/delete/evaluate → NOTIFICATIONS(2/3); attendance staff/bulk (marking OTHERS) → ATTENDANCE(2); checklists/jobs/:jid/assign → CHECKLIST_BOARD(2). All via _requireTabWrite except admin(isAdmin) + storage-locations/attendance/checklists which have an :id tenant (still use _requireTabWrite — _roleHasTab resolves tenant from the token). 12 false positives left open (verified self-service/read-only). tsc clean. RESIDUAL: brand routes gate on caller's SETTINGS Edit but don't verify brand OWNERSHIP (a SETTINGS-Edit user could touch another tenant's central brand row) — deeper scoping, flagged.
       'rbac-accounting-cashdrawer-write-gates',       //SECURITY FIX (View-level grant could WRITE — Ledger & Books + Cash Drawer). Reported on RESTO_1777732755237_243X0 "Manager 1" (ACCOUNTING=View, CASH_DRAWER=View): could still post manual journal entries, record expenses/payments (₹25,000), add loans, and open/close/count/hand-over the cash drawer. Root cause: the accounting/cash write endpoints used READ-level inline gates. `_acctOwnerOnly` admits >=View(1) on ANY finance tab — correct for READS, but it guarded 18 WRITE routes (journal-entries, expense-payments, loans, bank-accounts, owner-equity txns, payment-charges, backfill-gl, tds-payable, periods close/reopen, day-close/unlock, bank-reconciliation). `_acctStaff` admits ANY staff role — it guarded 6 cash WRITES (drawer open/close/handover, handover accept/cancel, cash-count). FIX: two new WRITE-level gates — `_acctCanWrite` (OWNER/admin/built-in-MANAGER, or ACCOUNTING>=Edit(2)) on the 17 Ledger writes, and `_acctDrawerWrite` (OWNER/admin + built-in cash roles MANAGER/CASHIER/FRONT_DESK, or CASH_DRAWER>=Edit(2)) on the 6 drawer/cash-count writes. Drawer approve/reject/lock already used the correct write-level `_acctManager` (CASH_DRAWER Full or built-in mgr) — left unchanged. All 30 GET reads keep `_acctOwnerOnly`/`_acctStaff` (>=View is right for reads). A custom Manager set to View is now denied (not built-in MANAGER; ACCOUNTING/CASH_DRAWER level 1 < 2); Edit/Full and owner/cashier keep write access. tsc clean.
       'rbac-scope-strip-outofscope-grants',          //SECURITY FIX (nav + API leak — a scoped custom role saw/accessed a module it has N/A for). Reported + confirmed on RESTO_1777732755237_243X0 (Ankur Cafe): the "Manager 1" custom role (CUSTOM_MANAGER_MTGS99CJ, custom_roles.scope=HOTEL) showed the whole Spa & Wellness module in the sidebar despite every Spa page = N/A in Staff Access. Root cause: the role's stored tab_permissions still CARRIED stray out-of-scope grants (SPA_CALENDAR..SPA_REPORTS + SPA_INVENTORY at level 3, plus EVENTS_CHECKLISTS 3) — polluted by a pre-fix grid save (see staffaccess-prefill-no-escalation) — and the owner can NO LONGER see or clear them: the Staff Access grid renders out-of-scope cells as an immutable "N/A" (App.tsx tabAllowedForRole: a HOTEL-scope role can't be granted spaOnly/eventsOnly/restaurantOnly pages). But getTabPermissionsForRole → /my-permissions + requireTabAction honored the stored grant → Spa group in nav + live Spa API access. FIX: strip out-of-scope grants at the READ boundary (getTabPermissionsForRole), mirroring the frontend tabAllowedForRole EXACTLY via new _HOTEL_ONLY_TABS/_RESTAURANT_ONLY_TABS sets + SPA_/EVENTS_ prefixes (_tabExclusiveModule). For a custom role whose custom_roles.scope is a single module (HOTEL|RESTAURANT|SPA|EVENTS), any granted page exclusive to a DIFFERENT module is dropped; general/shared pages (MONITOR, INVOICES, CASH_DRAWER, ACCOUNTING, CHECKLISTS, ROSTER, finance…) and BOTH/ALL/unknown scopes are untouched, and built-in roles (no custom_roles row) are never touched. This can NEVER revoke an intended grant — an out-of-scope page is one the owner could never have granted through the UI. Scope resolved from the per-tenant custom_roles table, cached 30s (_roleScopeCache) and invalidated with the tab cache. Fixes nav + API together so they match the grid. tsc clean.
       'event-addons-phase1-backend',                 //FEATURE (Event Add-ons / Supplements — Phase 1 backend, APPEND-ONLY). Business ask: during/after a confirmed event a guest requests extras (extra chair/table/room/service); staff with access control may ADD them but must NOT be able to remove/update existing booking lines. Today add/remove/update a line are the SAME capability (one full-array PUT /events/bookings/:bid gated EVENTS_BOOKINGS Edit), so "add-only" can't be expressed. Phase 1 adds an isolated, additive append-only mechanism: (1) NEW table event_booking_addons (eventsService.ts schema-init, NOT a request handler — id/booking_id/category[RENTAL|SERVICE|ROOM|CUSTOM]/ref_id/name_snapshot/description/quantity/unit_rate/gst_percent/line_total/status[ACTIVE|VOID]/added_by/added_at/voided_by/voided_at). SEPARATE table (not the shared line tables) so a full-booking PUT can NEVER clobber add-ons and append-only is enforced by construction. (2) POST /events/bookings/:bid/addons — appends ONE line, gated requireTabAction('EVENTS_ADDONS','CREATE') + live-window status guard (status IN CONFIRMED/IN_PROGRESS); snapshots name/rate/gst from event_rental_items / event_services master for RENTAL/SERVICE (integrity), ad-hoc for ROOM/CUSTOM; flat-priced (qty×unit_rate, no span multiply); stamps added_by. DELETE /addons/:aid = soft-VOID, gated DELETE (Full) so add-only staff can't remove; never hard-deletes. (3) Billing+invoice integration: computeEventBill + assembleEventQuoteLines each add ONE defensive .catch(()=>[]) query pushing ACTIVE add-ons (line_type 'ADDON') into the taxable pool / invoice lines — bookings with no add-ons render byte-identical to before; a missing table can't break billing. (4) booking-detail GET returns addons[]. EVENTS_ADDONS tab not yet in the catalogue (Phase 2) → requireTabAction safely denies configured custom roles + passes OWNER, so Phase 1 is OWNER-testable with zero staff exposure. Phase 2 = wire the EVENTS_ADDONS permission tab; Phase 3 = booking-detail UI. tsc clean.
