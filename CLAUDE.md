@@ -119,6 +119,20 @@ Optional `property_type ∈ {RESTAURANT, HOTEL, BOTH}` on `restaurants`. When HO
 * **AI Concierge** (Groq-based, FAQ-grounded chatbot) with sentiment analysis on feedback.
 * Hotel KPIs: ADR, RevPAR, Occupancy, Ancillary revenue %.
 
+#### Add Room to an Existing Booking (3 surfaces) — and the patterns it MUST follow
+Staff can add rooms to an **active** booking (throughout its lifecycle **except** cancelled / checked-out / completed / settled) on three surfaces. When you extend or add a similar "grow an existing record" capability, follow these rules — they are why this shipped without breaking billing:
+
+* **Group hotel** — `POST /hotel/booking-groups/:groupId/rooms/add`. UI: Hotel Bookings → **Groups** sub-tab → a group's **📋 Detail** → **Guests & Rooms** tab → **+ Add Room**.
+* **Individual hotel** — `POST /hotel/bookings/:bookingId/add-room`. A standalone booking is **converted into a group** (mint `room_booking_groups` seeded from the booking, stamp `group_id`/`group_name` onto the existing room), then it **delegates to the group `rooms/add` via `callSelfApi`**. UI: Hotel Bookings → click a booking row → detail modal → **Add Room**.
+* **Events** — `POST /events/bookings/:bid/rooms`. Once the event is CONFIRMED/IN_PROGRESS (and Hotel is enabled) the attach **reserves real hotel inventory** (mirrors the confirm loop's `callSelfApi POST /hotel/bookings`); events-only tenants keep the QUOTED billing-quote line. UI: Events → a booking → **Hotel Rooms** card → **Add Hotel Rooms**.
+
+**Mandatory patterns (apply to any new inventory-consuming write):**
+1. **Reserve-or-reject — never bill for what you can't reserve.** Any line that represents real inventory must pass the authoritative availability guard (`validateBookingRequest`) / create the real reservation atomically. On no-inventory, **roll back the line and return 409** — do not leave a billed-but-unreserved "phantom" row (this was the events bug: a room added after confirm stayed QUOTED = billed, never reserved).
+2. **Delegate, don't duplicate.** To add a capability that overlaps a validated endpoint, call it internally with `callSelfApi(method, path, req.headers.authorization, body)` (returns `{ok,status,data}`) instead of copying its logic — one code path, one place to fix. (Individual→group delegates to group `rooms/add`; events + confirm delegate to `/hotel/bookings`.)
+3. **Batch-claim `taken` Set landmine.** When resolving **multiple** free rooms before inserting, grow a `taken` Set as each is claimed (seed it from overlapping bookings + `room_holds`) — otherwise the loop double-picks the same physical room. Candidate query is `status NOT IN ('MAINTENANCE','BLOCKED')` (never `status='available'`, which matches nothing).
+4. **Recompute the parent aggregate.** After adding a child row, recompute the group/booking `num_rooms` **and** `total_amount` (respecting any discount) so the invoice stays correct.
+5. **Lifecycle-gate every post-creation edit** (409 on cancelled / checked-out / completed / settled). Deploy markers: `hotel-group-add-room-p1`, `hotel-individual-add-room-p2`, `event-add-room-reserve-p3`.
+
 ### Inventory Management Module (Restaurant + Cloud Kitchen)
 End-to-end stock control: **catalog → recipes → auto-deduction → procurement → reconciliation → forecasting**. Module is opt-in — tenants without recipes are unaffected (orders place fine, no deduction happens, no errors logged).
 
