@@ -1333,6 +1333,19 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       refreshNonce={nonce}
       overview={
       <div>
+      {/* Lifecycle bar — advance the booking's status. Surfaced at the TOP so the
+          next action (Confirm → Start Event → Checkout → Complete) is easy to find
+          without scrolling. Only shown to a role that can edit the booking. */}
+      {evCanEdit('EVENTS_BOOKINGS') && ['INQUIRY', 'QUOTED', 'CONFIRMED', 'IN_PROGRESS'].includes(bk.status) && (
+        <div className={`${CARD} mb-4 flex flex-wrap items-center gap-2`}>
+          <span className="text-[11px] font-bold text-[#6b5d52] uppercase tracking-wide mr-1">Lifecycle</span>
+          {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
+          {bk.status === 'CONFIRMED' && <button className={BTN_PRIMARY} disabled={busy} title="Mark the event In Progress (no invoice yet) so staff can add live add-ons / supplements. Checkout at the end bills everything." onClick={() => act('start')}><Play size={13} />Start Event</button>}
+          {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_PRIMARY} disabled={busy} title="Raise the event invoice (also moves a confirmed booking to In Progress)." onClick={() => act('checkout', undefined, gstBody())}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
+          {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_GHOST} disabled={busy} onClick={() => act('complete')}>{t('events.bookings.complete')}</button>}
+          {editable && <button className={BTN_DANGER} disabled={busy} onClick={() => setShowCancel(true)}>{t('events.bookings.cancel')}</button>}
+        </div>
+      )}
       <div className={`${CARD} mb-4`}>
         <div className="grid md:grid-cols-[1fr_16rem] gap-4 items-start">
           {/* Customer + editable contact — the email captured here is the recipient
@@ -1610,7 +1623,8 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
         <span className="text-[10px] text-[#9d8b7e]">Applies to the quotation / invoice you generate next. Hotel rooms follow Hotel GST.</span>
       </div>
 
-      {/* Lifecycle actions */}
+      {/* Document actions — quotation / BEO / invoice / email (lifecycle status
+          actions live in the Lifecycle bar at the top of the overview). */}
       <div className="flex flex-wrap gap-2 mt-1">
         <button className={BTN_GHOST} disabled={busy} onClick={genQuote}><FileText size={13} />{t('events.bookings.generateQuote')}</button>
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/beo.pdf`, token)}><ClipboardList size={13} />{t('events.bookings.beo')}</button>
@@ -1627,11 +1641,6 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             finally { setBusy(false); }
           }}>Cancel Invoice</button>
         )}
-        {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
-        {bk.status === 'CONFIRMED' && evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} disabled={busy} title="Mark the event as In Progress (no invoice yet) so staff can add live add-ons/supplements. Checkout at the end bills everything." onClick={() => act('start')}><Play size={13} />Start Event</button>}
-        {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout', undefined, gstBody())}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
-        {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_GHOST} disabled={busy} onClick={() => act('complete')}>{t('events.bookings.complete')}</button>}
-        {editable && <button className={BTN_DANGER} disabled={busy} onClick={() => setShowCancel(true)}>{t('events.bookings.cancel')}</button>}
       </div>
 
       {showCancel && (
