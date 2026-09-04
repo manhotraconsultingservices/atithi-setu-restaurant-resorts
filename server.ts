@@ -39461,44 +39461,82 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const grp: any = await db.get("SELECT * FROM room_booking_groups WHERE id=?", [groupId]);
       if (!grp) return res.status(404).json({ error: "Group not found" });
+      // Lifecycle gate: a group that's already been settled / invoiced is closed —
+      // rooms can't be added (matches "any status except checked-out / complete").
+      if (grp.settled_at) return res.status(409).json({ error: "This group has already been settled — rooms can't be added. Add a new booking instead." });
+      // The group's booking_type + dates drive rate + availability. Read them from a
+      // live member (fallback OVERNIGHT); the group row holds the shared date range.
+      const sample: any = await db.get("SELECT booking_type, meal_plan_id FROM room_bookings WHERE group_id=? AND status NOT IN ('CANCELLED') ORDER BY created_at LIMIT 1", [groupId]).catch(() => null);
+      const bookingType = String(sample?.booking_type || 'OVERNIGHT').toUpperCase();
+      const checkIn = grp.check_in_date, checkOut = grp.check_out_date;
+      const nights = bookingType === 'DAY_USE' ? 1 : Math.max(1, Math.ceil((new Date(checkOut).getTime() - new Date(checkIn).getTime()) / 86400000));
       const expandedRooms = rooms.flatMap((r: any) =>
-        Array.from({ length: Math.max(1, Math.floor(Number(r.qty)||1)) }, () => ({ ...r }))
+        Array.from({ length: Math.max(1, Math.floor(Number(r.qty) || 1)) }, () => ({ ...r }))
       );
-      const created: any[] = [];
+      // Resolve a free room per slot, then run the AUTHORITATIVE availability guard
+      // (validateBookingRequest — same as the booking POSTs: overlap + holds +
+      // capacity + dates). Validate ALL before inserting anything (atomic).
+      const resolved: any[] = [];
       for (const r of expandedRooms) {
-        // Resolve an available room of this type.
-        const available: any = r.room_id
-          ? await db.get("SELECT * FROM rooms WHERE id=? AND status='available'", [r.room_id])
-          : await db.get(
-              `SELECT ro.* FROM rooms ro
-               WHERE ro.status='available'
-                 AND (ro.type=? OR ro.type_id=?)
-                 AND ro.id NOT IN (
-                   SELECT room_id FROM room_bookings
-                    WHERE status NOT IN ('CANCELLED','CHECKED_OUT')
-                      AND check_in_date < ? AND check_out_date > ?
-                      AND room_id IS NOT NULL
-                 )
-               LIMIT 1`,
-              [r.room_type_id||r.type_name, r.room_type_id||r.type_name, grp.check_out_date, grp.check_in_date]
-            );
-        const bookingId = `BK-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+        let roomId: string | null = r.room_id || null;
+        if (!roomId) {
+          const free: any = await db.get(
+            `SELECT ro.id FROM rooms ro
+             WHERE ro.status='available' AND (ro.type=? OR ro.type_id=?)
+               AND ro.id NOT IN (SELECT room_id FROM room_bookings
+                 WHERE status NOT IN ('CANCELLED','CHECKED_OUT')
+                   AND check_in_date < ? AND check_out_date > ? AND room_id IS NOT NULL)
+             LIMIT 1`,
+            [r.room_type_id || r.type_name, r.room_type_id || r.type_name, checkOut, checkIn]
+          ).catch(() => null);
+          roomId = free?.id || null;
+        }
+        if (!roomId) return res.status(409).json({ error: `No available room of the requested type for ${checkIn} → ${checkOut}.` });
+        const v = await validateBookingRequest(req.params.id, { room_id: roomId, check_in_date: checkIn, check_out_date: checkOut, booking_type: bookingType, num_guests: Number(r.num_adults || r.num_guests || 1) } as any);
+        if (!(v as any).ok) return res.status((v as any).status || 409).json({ error: `Room ${roomId}: ${(v as any).error}` });
+        resolved.push({ ...r, room_id: roomId });
+      }
+      const created: any[] = [];
+      for (const r of resolved) {
+        // Per-room rate + total via the shared engine (matrix / meal-plan / extras),
+        // with the same all-in-override rule as group create so total_amount matches
+        // the folio seeded at check-in.
+        const rowMealPlanId = r.meal_plan_id || sample?.meal_plan_id || null;
+        const bd = await computeBookingTotalWithExtras(
+          req.params.id, r.room_id, checkIn, bookingType === 'DAY_USE' ? checkIn : checkOut,
+          { mealPlanId: rowMealPlanId, extraAdults: Number(r.extra_adults || 0),
+            extraChildrenWithMattress: Number(r.extra_children_with_mattress || 0),
+            extraChildrenNoMattress: Number(r.extra_children_no_mattress || 0),
+            bookingType: bookingType === 'DAY_USE' ? 'DAY_USE' : 'OVERNIGHT' } as any
+        );
+        let rate = Number(r.room_rate) || 0;
+        const night1 = (bd as any).per_night?.[0]?.base_rate || 0;
+        const override = rate > 0 && Math.abs(rate - night1) > 0.01;
+        if (rate <= 0) rate = night1;
+        const total = override ? (bookingType === 'DAY_USE' ? rate : rate * nights) : (bd as any).total;
+        const bookingId = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         await db.run(
           `INSERT INTO room_bookings
-             (id, room_id, guest_name, guest_phone, check_in_date, check_out_date,
-              room_rate, num_adults, status, group_id, group_name, booking_type)
-           VALUES (?,?,?,?,?,?,?,?,'BOOKED',?,?,?)`,
-          [bookingId, available?.id||null,
-           grp.contact_name||'Group Guest', grp.contact_phone||null,
-           grp.check_in_date, grp.check_out_date, Number(r.room_rate)||0,
-           Number(r.num_adults)||1, groupId, grp.name, r.booking_type||'FIT']
+             (id, room_id, guest_name, guest_phone, guest_email, check_in_date, check_out_date,
+              room_rate, total_amount, num_adults, extra_adults, extra_children_with_mattress,
+              extra_children_no_mattress, status, booking_source, booking_type, meal_plan_id, group_id, group_name)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'BOOKED', ?, ?, ?, ?, ?)`,
+          [bookingId, r.room_id, grp.contact_name || 'Group Guest', grp.contact_phone || null, grp.contact_email || null,
+           checkIn, checkOut, round2(rate), round2(total), Number(r.num_adults) || 1, Number(r.extra_adults) || 0,
+           Number(r.extra_children_with_mattress) || 0, Number(r.extra_children_no_mattress) || 0,
+           grp.booking_source || 'DIRECT', bookingType, rowMealPlanId, groupId, grp.name]
         );
-        created.push({ id: bookingId, room_id: available?.id||null });
+        created.push({ id: bookingId, room_id: r.room_id });
       }
-      // Update num_rooms on the group.
+      // Recompute the group's num_rooms AND total_amount (respecting the group's
+      // discount) — the old code left total_amount stale, breaking the group invoice.
+      const grossRow: any = await db.get("SELECT COALESCE(SUM(total_amount),0) AS g FROM room_bookings WHERE group_id=? AND status != 'CANCELLED'", [groupId]).catch(() => ({ g: 0 }));
+      let groupTotal = Number(grossRow?.g || 0);
+      if (grp.discount_type === 'PERCENT') groupTotal = groupTotal * (1 - Math.min(100, Number(grp.discount_value || 0)) / 100);
+      else if (grp.discount_type === 'FLAT') groupTotal = Math.max(0, groupTotal - Number(grp.discount_value || 0));
       await db.run(
-        "UPDATE room_booking_groups SET num_rooms = (SELECT COUNT(*) FROM room_bookings WHERE group_id=? AND status!='CANCELLED') WHERE id=?",
-        [groupId, groupId]
+        "UPDATE room_booking_groups SET num_rooms = (SELECT COUNT(*) FROM room_bookings WHERE group_id=? AND status!='CANCELLED'), total_amount = ? WHERE id=?",
+        [groupId, round2(groupTotal), groupId]
       );
       res.status(201).json({ ok: true, added: created.length, bookings: created });
     } catch (err) {
@@ -52740,8 +52778,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-lifecycle-bar-top',
+    commit_marker: 'hotel-group-add-room-p1',
     code_features: [
+      'hotel-group-add-room-p1',                     //FEATURE (Add Room to existing booking — Phase 1: GROUP hotel bookings). Hardened the pre-existing-but-unwired POST /hotel/booking-groups/:groupId/rooms/add: (1) added the AUTHORITATIVE availability guard `validateBookingRequest` per new room (was a weak raw subquery → double-booking risk) — resolves a free room of the type, then validates overlap/holds/capacity/dates, atomically before any INSERT; (2) per-room rate + total via `computeBookingTotalWithExtras` with the same all-in-override rule as group-create (was only storing room_rate, no total_amount); (3) recompute the group's `num_rooms` AND `total_amount` respecting the group discount (old code left total_amount stale → wrong group invoice); (4) lifecycle gate — 409 if the group is already settled (grp.settled_at). New rooms are status BOOKED, dates/guest/booking_type/meal-plan copied from the group. FRONTEND: a new "+ Add Room" form in the group detail modal's Guests & Rooms tab (room-type picker + qty + optional rate, fetches room-types on open), gated canWriteTab('HOTEL_BOOKINGS') + shown only while the group has an active (non-checked-out/cancelled) room → POST rooms/add → reload. Additive; no folio/GL change (each room folio is created at its own check-in). tsc + vite build clean. Phase 2 = individual booking (convert-to-group); Phase 3 = event bookings (reserve post-confirm rooms).
       'event-lifecycle-bar-top',                     //UX (booking lifecycle discoverability). The status-advancing actions (Confirm → Start Event → Checkout → Complete → Cancel) were buried at the BOTTOM of a long booking Overview, so owners couldn't find Checkout. Moved them into a prominent "Lifecycle" bar at the TOP of the booking Overview (EventBookingDetail, first card, shown to EVENTS_BOOKINGS-Edit roles on an actionable booking). Each button keeps its status condition; Checkout tooltip notes it also raises the invoice + moves CONFIRMED→In Progress, and Start Event notes it opens the add-on window without invoicing. The bottom action row now holds only the DOCUMENT actions (Generate Quote / BEO / Invoice PDF / Email / Cancel-Invoice). Pure frontend; no endpoint change. tsc + vite build clean.
       'event-start-button-in-progress',              //FEATURE ("Start Event" button — the missing door into IN_PROGRESS). Add-ons are IN_PROGRESS-only, but the ONLY prior transition to IN_PROGRESS was Checkout (which RAISES the invoice) — so you couldn't enter the live add-on window without billing first. NEW `POST /events/bookings/:bid/start` (gated EVENTS_BOOKINGS UPDATE/Edit, idempotent) moves CONFIRMED → IN_PROGRESS WITHOUT creating a folio/invoice + writes a STATUS_CHANGED audit; a non-CONFIRMED booking 409s. Frontend: a "Start Event" (Play icon) button in the booking-detail lifecycle row, shown when status === 'CONFIRMED' + evCanEdit('EVENTS_BOOKINGS'), calls act('start'). Real flow now: Confirm → (event day) Start Event → staff add live supplements → Checkout at the end bills everything incl. add-ons. Test TC-EVT-START (Start → IN_PROGRESS, no folio). tsc + vite build clean.
       'event-addons-inprogress-only',                //POLICY (owner): Event Add-ons are now allowed ONLY while the event is actually running — booking status IN_PROGRESS. Tightened `_ADDON_LIVE_STATUSES` from ['CONFIRMED','IN_PROGRESS'] → ['IN_PROGRESS'] (server.ts POST /events/bookings/:bid/addons still 409s otherwise, new message "…while the event is In Progress"); frontend `addonLive` (EventViews) now `status === 'IN_PROGRESS'` so the "+ Add supplement" control shows only then + the hint reads "Available only while the event is In Progress." A CONFIRMED (not-yet-started) booking now rejects add-ons. Tests updated: TC-EVT-ADDON-ADD uses an IN_PROGRESS booking; TC-EVT-ADDON-LIVEGATE now asserts CONFIRMED→409. tsc + vite build clean.

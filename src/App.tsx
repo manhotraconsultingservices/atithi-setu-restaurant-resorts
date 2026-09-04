@@ -10199,6 +10199,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [groupTransferFrom, setGroupTransferFrom] = useState('');
   const [groupTransferTo, setGroupTransferTo] = useState('');
   const [groupTransferBusy, setGroupTransferBusy] = useState(false);
+  // ADD-ROOM to an existing group (self-contained: room types fetched on open).
+  const [groupAddRoom, setGroupAddRoom] = useState<{ open: boolean; typeId: string; qty: string; rate: string; busy: boolean; types: any[] }>({ open: false, typeId: '', qty: '1', rate: '', busy: false, types: [] });
   const [groupDateExt, setGroupDateExt] = useState({ check_in_date: '', check_out_date: '' });
   const [groupDateExtBusy, setGroupDateExtBusy] = useState(false);
   const [groupDepositAmt, setGroupDepositAmt] = useState('');
@@ -36099,6 +36101,74 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             }}
                             className="w-full py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-40"
                           >{groupTransferBusy ? 'Transferring…' : '⇄ Swap Guests'}</button>
+                        </div>
+                      )}
+
+                      {/* Add Room to this group — the endpoint validates availability
+                          + recomputes the group total. Shown while the group is still
+                          active (has a non-checked-out / non-cancelled room). */}
+                      {canWriteTab('HOTEL_BOOKINGS') && groupDetailData.some((b: any) => b.status !== 'CANCELLED' && b.status !== 'CHECKED_OUT') && (
+                        <div className="border border-dashed border-emerald-300 rounded-xl p-3 bg-emerald-50/50">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-700">Add Room to Group</p>
+                            {!groupAddRoom.open && (
+                              <button
+                                className="text-[10px] font-bold px-2 py-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700"
+                                onClick={async () => {
+                                  setGroupAddRoom(s => ({ ...s, open: true }));
+                                  try {
+                                    const rr = await fetch(`/api/restaurant/${restaurantId}/hotel/room-types`, { headers: { Authorization: `Bearer ${token}` } });
+                                    if (rr.ok) { const t = await rr.json(); setGroupAddRoom(s => ({ ...s, types: Array.isArray(t) ? t : [] })); }
+                                  } catch { /* */ }
+                                }}
+                              >+ Add Room</button>
+                            )}
+                          </div>
+                          {groupAddRoom.open && (
+                            <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 items-end">
+                              <div>
+                                <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase">Room Type</label>
+                                <select value={groupAddRoom.typeId} onChange={e => setGroupAddRoom(s => ({ ...s, typeId: e.target.value }))}
+                                  className="w-full text-xs border border-emerald-200 rounded-lg px-2 py-1.5 outline-none bg-white">
+                                  <option value="">Select…</option>
+                                  {groupAddRoom.types.map((rt: any) => <option key={rt.id} value={rt.id}>{rt.name}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase">Qty</label>
+                                <input type="number" min={1} value={groupAddRoom.qty} onChange={e => setGroupAddRoom(s => ({ ...s, qty: e.target.value }))}
+                                  className="w-full text-xs border border-emerald-200 rounded-lg px-2 py-1.5 outline-none" />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase">Rate/night</label>
+                                <input type="number" min={0} value={groupAddRoom.rate} onChange={e => setGroupAddRoom(s => ({ ...s, rate: e.target.value }))} placeholder="tariff"
+                                  className="w-full text-xs border border-emerald-200 rounded-lg px-2 py-1.5 outline-none" />
+                              </div>
+                              <div className="flex gap-1">
+                                <button
+                                  disabled={!groupAddRoom.typeId || groupAddRoom.busy}
+                                  onClick={async () => {
+                                    setGroupAddRoom(s => ({ ...s, busy: true }));
+                                    try {
+                                      const body = { rooms: [{ room_type_id: groupAddRoom.typeId, qty: Math.max(1, Number(groupAddRoom.qty) || 1), room_rate: groupAddRoom.rate ? Number(groupAddRoom.rate) : 0 }] };
+                                      const rr = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupDetailId}/rooms/add`, {
+                                        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        body: JSON.stringify(body),
+                                      });
+                                      if (!rr.ok) throw new Error((await rr.json())?.error || 'Failed to add room');
+                                      const d = await rr.json();
+                                      toast.success(`Added ${d.added} room${d.added === 1 ? '' : 's'} to the group.`);
+                                      setGroupAddRoom(s => ({ open: false, typeId: '', qty: '1', rate: '', busy: false, types: s.types }));
+                                      await loadGroupDetail(groupDetailId!); setGroupsList(null);
+                                    } catch (err: any) { toast.error(err.message); setGroupAddRoom(s => ({ ...s, busy: false })); }
+                                  }}
+                                  className="text-xs font-bold px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40"
+                                >{groupAddRoom.busy ? 'Adding…' : 'Add'}</button>
+                                <button onClick={() => setGroupAddRoom(s => ({ ...s, open: false }))}
+                                  className="text-xs font-bold px-2 py-1.5 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200">Cancel</button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
