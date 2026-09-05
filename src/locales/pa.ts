@@ -280,4 +280,20 @@ export const pa: Record<string, string> = {
   'public.events.venues': 'ਸਾਡੇ ਸਥਾਨ',
   'public.events.services': 'ਸੇਵਾਵਾਂ ਜੋ ਅਸੀਂ ਪੇਸ਼ ਕਰਦੇ ਹਾਂ',
   'public.events.capacity': 'ਸਮਰੱਥਾ',
+
+  // ── Navigation (Phase 2 Wave 1) — keyed by the English label string ─────────
+  'Home': 'ਘਰ',
+  'Checklists': 'ਚੈੱਕਲਿਸਟਾਂ', 'My Checklist': 'ਮੇਰੀ ਚੈੱਕਲਿਸਟ', 'Checklist Board': 'ਚੈੱਕਲਿਸਟ ਬੋਰਡ', 'Checklist Templates': 'ਚੈੱਕਲਿਸਟ ਟੈਂਪਲੇਟ',
+  'Overview': 'ਸੰਖੇਪ', 'Command Centre': 'ਕਮਾਂਡ ਸੈਂਟਰ', 'Invoices': 'ਇਨਵੌਇਸ',
+  'Restaurant': 'ਰੈਸਟੋਰੈਂਟ', 'Orders': 'ਆਰਡਰ', 'Menu': 'ਮੀਨੂ', 'QR & Tables': 'QR ਤੇ ਟੇਬਲ', 'Table Bookings': 'ਟੇਬਲ ਬੁਕਿੰਗ', 'Delivery Partners': 'ਡਿਲੀਵਰੀ ਪਾਰਟਨਰ', 'Kitchen Printers': 'ਰਸੋਈ ਪ੍ਰਿੰਟਰ', 'Print Format': 'ਪ੍ਰਿੰਟ ਫਾਰਮੈਟ', 'Restaurant Reports': 'ਰੈਸਟੋਰੈਂਟ ਰਿਪੋਰਟਾਂ',
+  'Spa & Wellness': 'ਸਪਾ ਤੇ ਤੰਦਰੁਸਤੀ', 'Appointment Calendar': 'ਮੁਲਾਕਾਤ ਕੈਲੰਡਰ', 'Appointments': 'ਮੁਲਾਕਾਤਾਂ', 'Service Menu': 'ਸੇਵਾ ਮੀਨੂ', 'Therapists & Cabins': 'ਥੈਰੇਪਿਸਟ ਤੇ ਕੈਬਿਨ', 'Clients': 'ਗਾਹਕ', 'Packages & Memberships': 'ਪੈਕੇਜ ਤੇ ਮੈਂਬਰਸ਼ਿਪ', 'Spa Reports': 'ਸਪਾ ਰਿਪੋਰਟਾਂ', 'Invoices & Payments': 'ਇਨਵੌਇਸ ਤੇ ਭੁਗਤਾਨ',
+  'Reservations': 'ਬੁਕਿੰਗਾਂ', 'Room Availability': 'ਕਮਰੇ ਦੀ ਉਪਲਬਧਤਾ', 'Status Board': 'ਸਥਿਤੀ ਬੋਰਡ', 'Room Setup': 'ਕਮਰਾ ਸੈੱਟਅੱਪ', 'Hotel Reports': 'ਹੋਟਲ ਰਿਪੋਰਟਾਂ', 'Guest Requests': 'ਮਹਿਮਾਨ ਬੇਨਤੀਆਂ', 'Housekeeping': 'ਹਾਊਸਕੀਪਿੰਗ', 'Service Catalogue': 'ਸੇਵਾ ਸੂਚੀ', 'Guest Bills': 'ਮਹਿਮਾਨ ਬਿੱਲ', 'Guest Compliance': 'ਮਹਿਮਾਨ ਪਾਲਣਾ', 'Concierge': 'ਕੰਸੀਅਰਜ',
+  'Events & Convention': 'ਸਮਾਗਮ ਤੇ ਸੰਮੇਲਨ', 'Dashboard': 'ਡੈਸ਼ਬੋਰਡ', 'Event Calendar': 'ਸਮਾਗਮ ਕੈਲੰਡਰ', 'Bookings': 'ਬੁਕਿੰਗਾਂ', 'Halls & Venues': 'ਹਾਲ ਤੇ ਸਥਾਨ', 'Rental Inventory': 'ਕਿਰਾਏ ਦੀ ਸੂਚੀ', 'Add-on Services': 'ਵਾਧੂ ਸੇਵਾਵਾਂ', 'Catering Menus': 'ਕੇਟਰਿੰਗ ਮੀਨੂ', 'Quotations': 'ਕੋਟੇਸ਼ਨਾਂ', 'Cleaning Checklist': 'ਸਫ਼ਾਈ ਚੈੱਕਲਿਸਟ', 'Events Reports': 'ਸਮਾਗਮ ਰਿਪੋਰਟਾਂ', 'Data Migration': 'ਡਾਟਾ ਮਾਈਗ੍ਰੇਸ਼ਨ', 'Public Page Settings': 'ਜਨਤਕ ਪੰਨਾ ਸੈਟਿੰਗਾਂ',
+  'Accounts': 'ਖਾਤੇ', 'Payables & Procurement': 'ਦੇਣਦਾਰੀਆਂ ਤੇ ਖਰੀਦ', 'Expense Journal': 'ਖਰਚ ਜਰਨਲ', 'OTA & Agent Receivables': 'OTA ਤੇ ਏਜੰਟ ਪ੍ਰਾਪਤੀਆਂ', 'Vendor Aging': 'ਵਿਕਰੇਤਾ ਏਜਿੰਗ', 'P&L Report': 'ਲਾਭ-ਹਾਨੀ ਰਿਪੋਰਟ', 'Cash Flow': 'ਨਕਦੀ ਪ੍ਰਵਾਹ', 'GST Ledger': 'GST ਲੇਜਰ', 'Ledger & Books': 'ਲੇਜਰ ਤੇ ਬਹੀ',
+  'Cash': 'ਨਕਦੀ', 'Cash Drawer': 'ਕੈਸ਼ ਦਰਾਜ਼',
+  'Inventory': 'ਵਸਤੂ-ਸੂਚੀ', 'Hotel Inventory': 'ਹੋਟਲ ਵਸਤੂ-ਸੂਚੀ', 'Kitchen Inventory': 'ਰਸੋਈ ਵਸਤੂ-ਸੂਚੀ', 'Spa Inventory': 'ਸਪਾ ਵਸਤੂ-ਸੂਚੀ',
+  'Sales & Distribution': 'ਵਿਕਰੀ ਤੇ ਵੰਡ', 'Channel Manager': 'ਚੈਨਲ ਮੈਨੇਜਰ', 'Direct Booking Page': 'ਸਿੱਧੀ ਬੁਕਿੰਗ ਪੰਨਾ', 'Loyalty': 'ਵਫ਼ਾਦਾਰੀ', 'Guest Feedback': 'ਮਹਿਮਾਨ ਫੀਡਬੈਕ',
+  'Reports': 'ਰਿਪੋਰਟਾਂ', 'All Reports': 'ਸਾਰੀਆਂ ਰਿਪੋਰਟਾਂ',
+  'Workforce': 'ਸਟਾਫ਼', 'Staff Directory': 'ਸਟਾਫ਼ ਡਾਇਰੈਕਟਰੀ', 'Attendance': 'ਹਾਜ਼ਰੀ', 'Roster': 'ਰੋਸਟਰ', 'Timesheet': 'ਟਾਈਮਸ਼ੀਟ', 'Staff Payroll': 'ਸਟਾਫ਼ ਤਨਖਾਹ', 'HR & Payroll': 'HR ਤੇ ਤਨਖਾਹ',
+  'Administration': 'ਪ੍ਰਬੰਧ', 'Brand & Settings': 'ਬ੍ਰਾਂਡ ਤੇ ਸੈਟਿੰਗਾਂ', 'Staff Access': 'ਸਟਾਫ਼ ਪਹੁੰਚ', 'Notifications': 'ਸੂਚਨਾਵਾਂ', 'Subscription': 'ਗਾਹਕੀ',
 };

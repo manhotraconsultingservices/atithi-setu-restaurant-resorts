@@ -11066,6 +11066,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Seed the app-wide language store with the tenant's choice so the whole app
   // (not just Events) defaults to that language, honouring any per-user override.
   useEffect(() => { setSecondaryLanguage(secondaryLanguage); }, [secondaryLanguage]);
+  // Translate function for the main shell (aliased `tr` — the nav map already uses
+  // `t` for the tab item). Phase 2 Wave 1 wraps the navigation with it.
+  const { t: tr } = useT();
   // ── Dashboard mode ─────────────────────────────────────────────────────
   // For BOTH-mode tenants (Restaurant + Hotel on the same tenant), the
   // owner can pick which "side" of the business to see in the nav. The
@@ -16035,7 +16038,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div key={m.id} className="mb-0.5">
               <button
                 type="button"
-                title={m.label}
+                title={tr(m.label)}
                 onClick={() => {
                   if (collapsed) { setNavCollapsed(false); setExpandedModules(prev => ({ ...prev, [m.id]: true })); }
                   else { toggleModule(m); }
@@ -16049,7 +16052,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <span className={cn(activeHere ? "text-[#cc5a16]" : "text-[#9c8e85]")}>{m.icon}</span>
                 {!collapsed && (
                   <>
-                    <span className="flex-1 text-left text-[11px] font-bold uppercase tracking-[0.14em]">{m.label}</span>
+                    <span className="flex-1 text-left text-[11px] font-bold uppercase tracking-[0.14em]">{tr(m.label)}</span>
                     {expanded ? <ChevronDown size={14} className="text-[#9c8e85]" /> : <ChevronRight size={14} className="text-[#9c8e85]" />}
                   </>
                 )}
@@ -16068,7 +16071,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           : "text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#3d3128]"
                       )}
                     >
-                      {t.label}
+                      {tr(t.label)}
                       {isActivePage(t) && <Check size={13} />}
                     </button>
                   ))}
@@ -16083,7 +16086,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const renderHomeLink = (collapsed: boolean) => (
           <button
             type="button"
-            title="Home"
+            title={tr('Home')}
             onClick={() => { setActiveTab('HOME'); setMobileNavOpen(false); }}
             className={cn(
               "w-full flex items-center gap-2.5 rounded-xl transition-colors mb-1",
@@ -16092,7 +16095,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             )}
           >
             <span className={cn(activeTab === 'HOME' ? "text-white" : "text-[#9c8e85]")}><LayoutDashboard size={16} /></span>
-            {!collapsed && <span className="flex-1 text-left text-[11px] font-bold uppercase tracking-[0.14em]">Home</span>}
+            {!collapsed && <span className="flex-1 text-left text-[11px] font-bold uppercase tracking-[0.14em]">{tr('Home')}</span>}
           </button>
         );
 
