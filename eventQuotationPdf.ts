@@ -258,13 +258,13 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       doc.text(docDateStr, rx, ry, { width: RIGHT_W, align: 'right' }); ry += dateH + 2;
       if (validStr) doc.text(validStr, rx, ry, { width: RIGHT_W, align: 'right' });
 
-      y = bandH + 20;
+      y = bandH + 12;
 
       // ── Customer + event details ─────────────────────────────────────────
       const pfL = L('Prepared For', 'preparedFor'); const edL = L('Event Details', 'eventDetails');
       doc.font(pfL.f || 'Helvetica-Bold').fontSize(10).fillColor(INK).text(pfL.t, M, y, { width: INNER / 2 - 10 });
       doc.font(edL.f || 'Helvetica-Bold').fontSize(10).fillColor(INK).text(edL.t, M + INNER / 2, y);
-      y += 15;
+      y += 13;
       doc.font('Helvetica').fontSize(9).fillColor(INK);
       const leftLines = [
         waSafe(data.booking.customer_name),
@@ -284,41 +284,42 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       ].filter(Boolean);
       const rowsCount = Math.max(leftLines.length, rightLines.length);
       for (let i = 0; i < rowsCount; i++) {
-        if (leftLines[i]) doc.text(leftLines[i], M, y + i * 12, { width: INNER / 2 - 10 });
-        if (rightLines[i]) doc.text(rightLines[i], M + INNER / 2, y + i * 12, { width: INNER / 2 });
+        if (leftLines[i]) doc.text(leftLines[i], M, y + i * 11, { width: INNER / 2 - 10 });
+        if (rightLines[i]) doc.text(rightLines[i], M + INNER / 2, y + i * 11, { width: INNER / 2 });
       }
-      y += rowsCount * 12 + 16;
+      y += rowsCount * 11 + 10;
 
       // ── Line-item table ──────────────────────────────────────────────────
       const cols = { type: M, desc: M + 70, qty: M + 300, rate: M + 350, amt: M + 430 };
-      doc.rect(M, y, INNER, 20).fill(ACCENT);
+      doc.rect(M, y, INNER, 17).fill(ACCENT);
       doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(8.5);
-      doc.text('TYPE', cols.type + 4, y + 6);
-      doc.text('DESCRIPTION', cols.desc, y + 6);
-      doc.text('QTY', cols.qty, y + 6, { width: 40, align: 'right' });
-      doc.text('RATE', cols.rate, y + 6, { width: 70, align: 'right' });
-      doc.text('AMOUNT', cols.amt, y + 6, { width: INNER - (cols.amt - M) - 4, align: 'right' });
-      y += 20;
+      doc.text('TYPE', cols.type + 4, y + 5);
+      doc.text('DESCRIPTION', cols.desc, y + 5);
+      doc.text('QTY', cols.qty, y + 5, { width: 40, align: 'right' });
+      doc.text('RATE', cols.rate, y + 5, { width: 70, align: 'right' });
+      doc.text('AMOUNT', cols.amt, y + 5, { width: INNER - (cols.amt - M) - 4, align: 'right' });
+      y += 17;
 
       doc.font('Helvetica').fontSize(8.5).fillColor(INK);
       for (const ln of data.lines) {
         const desc = waSafe(ln.description || '');
-        const descH = doc.heightOfString(desc, { width: 220 });
-        const rowH = Math.max(18, descH + 8);
-        if (y + rowH > 720) { doc.addPage(); y = M; }
-        doc.fillColor(MUTED).fontSize(7.5).text(lineTypeLabel(ln.line_type), cols.type + 4, y + 5, { width: 64 });
-        doc.fillColor(INK).fontSize(8.5).text(desc, cols.desc, y + 5, { width: 220 });
-        doc.text(String(ln.quantity ?? 1), cols.qty, y + 5, { width: 40, align: 'right' });
-        doc.text(fmtMoney(ln.unit_rate, cur), cols.rate, y + 5, { width: 70, align: 'right' });
-        doc.text(fmtMoney(ln.amount, cur), cols.amt, y + 5, { width: INNER - (cols.amt - M) - 4, align: 'right' });
+        const descH = doc.heightOfString(desc, { width: 230 });
+        const rowH = Math.max(14, descH + 4);
+        if (y + rowH > 752) { doc.addPage(); y = M; }
+        doc.fillColor(MUTED).fontSize(7.5).text(lineTypeLabel(ln.line_type), cols.type + 4, y + 3, { width: 64 });
+        doc.fillColor(INK).fontSize(8.5).text(desc, cols.desc, y + 3, { width: 230 });
+        doc.text(String(ln.quantity ?? 1), cols.qty, y + 3, { width: 40, align: 'right' });
+        doc.text(fmtMoney(ln.unit_rate, cur), cols.rate, y + 3, { width: 70, align: 'right' });
+        doc.text(fmtMoney(ln.amount, cur), cols.amt, y + 3, { width: INNER - (cols.amt - M) - 4, align: 'right' });
         y += rowH;
         doc.moveTo(M, y).lineTo(M + INNER, y).lineWidth(0.5).strokeColor(HAIR).stroke();
       }
 
       // ── Totals (right column) ────────────────────────────────────────────
-      y += 10;
-      // Keep the totals + GST summary together — never orphan them low on a page.
-      if (y > 600) { doc.addPage(); y = M; }
+      y += 8;
+      // Only break to a new page when the totals genuinely won't fit — otherwise
+      // they'd orphan onto page 2 and leave a big blank on page 1.
+      if (y + 96 > 752) { doc.addPage(); y = M; }
       const totX = M + INNER - 214;
       const totW = 214;
       const totalRow = (en: string, key: string, val: string, bold = false) => {
@@ -327,7 +328,7 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
         doc.text(lbl.t, totX, y, { width: totW - 96, lineBreak: false });
         doc.font(bold ? 'Helvetica-Bold' : 'Helvetica');
         doc.text(val, totX + totW - 96, y, { width: 96, align: 'right' });
-        y += bold ? 18 : 14;
+        y += bold ? 16 : 12;
       };
       totalRow('Subtotal', 'subtotal', fmtMoney(data.subtotal, cur));
       // Two discount lines when a hotel-rooms discount is present AND the split
@@ -373,9 +374,9 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
         }
         const rateRows = Object.entries(rateMap).map(([r, v]) => ({ rate: Number(r), taxable: v.taxable, gst: v.gst })).filter(x => x.gst > 0.005).sort((a, b) => a.rate - b.rate);
         if (rateRows.length > 0) {
-          y += 18;
-          if (y + (44 + rateRows.length * 14) > 800) { doc.addPage(); y = M; }
-          doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK).text('GST SUMMARY', M, y); y += 14;
+          y += 10;
+          if (y + (40 + rateRows.length * 13) > 792) { doc.addPage(); y = M; }
+          doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK).text('GST SUMMARY', M, y); y += 13;
           const c0 = M + 2, c1 = M + 50, c2 = M + 205, c3 = M + 305, c4 = M + 405;
           const wRate = 46, wTax = 148, wCg = 96, wSg = 96, wGst = INNER - (c4 - M) - 2;
           doc.rect(M, y - 2, INNER, 15).fill('#f3f4f6');
@@ -385,7 +386,7 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
           doc.text('CGST', c2, y + 2, { width: wCg, align: 'right', lineBreak: false });
           doc.text('SGST', c3, y + 2, { width: wSg, align: 'right', lineBreak: false });
           doc.text('Total GST', c4, y + 2, { width: wGst, align: 'right', lineBreak: false });
-          y += 15;
+          y += 14;
           doc.font('Helvetica').fontSize(8.5).fillColor(INK);
           let tTax = 0, tGst = 0;
           for (const rr of rateRows) {
@@ -396,7 +397,7 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
             doc.text(fmtMoney(cg, cur), c2, y, { width: wCg, align: 'right', lineBreak: false });
             doc.text(fmtMoney(sg, cur), c3, y, { width: wSg, align: 'right', lineBreak: false });
             doc.text(fmtMoney(rr.gst, cur), c4, y, { width: wGst, align: 'right', lineBreak: false });
-            y += 13;
+            y += 12;
             doc.moveTo(M, y - 1).lineTo(M + INNER, y - 1).lineWidth(0.3).strokeColor(HAIR).stroke();
           }
           const cgT = Math.round((tGst / 2) * 100) / 100; const sgT = Math.round((tGst - cgT) * 100) / 100;
@@ -406,19 +407,19 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
           doc.text(fmtMoney(cgT, cur), c2, y + 2, { width: wCg, align: 'right', lineBreak: false });
           doc.text(fmtMoney(sgT, cur), c3, y + 2, { width: wSg, align: 'right', lineBreak: false });
           doc.text(fmtMoney(tGst, cur), c4, y + 2, { width: wGst, align: 'right', lineBreak: false });
-          y += 18;
+          y += 14;
         }
       }
 
       // ── Notes + footer ───────────────────────────────────────────────────
-      y += 18;
+      y += 10;
       if (data.quotation.notes) {
         const notes = waSafe(data.quotation.notes);
         const notesL = L('Notes', 'notes');
-        doc.font(notesL.f || 'Helvetica-Bold').fontSize(9).fillColor(INK).text(notesL.t, M, y);
-        y += 13;
-        doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(notes, M, y, { width: INNER });
-        y += doc.heightOfString(notes, { width: INNER }) + 12;
+        doc.font(notesL.f || 'Helvetica-Bold').fontSize(8.5).fillColor(INK).text(notesL.t, M, y);
+        y += 11;
+        doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(notes, M, y, { width: INNER });
+        y += doc.heightOfString(notes, { width: INNER }) + 8;
       }
       // ── Policies (Cancellation / Terms / Payment) — owner-authored, printed on
       // every quotation AND invoice. Page-break when a long block would overflow.
@@ -430,10 +431,10 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       ] as [string, string | undefined][]).filter((s): s is [string, string] => !!(s[1] && String(s[1]).trim()));
       for (const [ph, body] of polSections) {
         const txt = waSafe(String(body).trim());
-        const bodyH = doc.font('Helvetica').fontSize(8.5).heightOfString(txt, { width: INNER });
-        if (y + bodyH + 26 > 812) { doc.addPage(); y = M; }
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text(ph, M, y); y += 13;
-        doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(txt, M, y, { width: INNER }); y += bodyH + 12;
+        const bodyH = doc.font('Helvetica').fontSize(8).heightOfString(txt, { width: INNER });
+        if (y + bodyH + 22 > 815) { doc.addPage(); y = M; }
+        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK).text(ph, M, y); y += 11;
+        doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(txt, M, y, { width: INNER }); y += bodyH + 8;
       }
 
       const isInvoice = /INVOICE/i.test(data.docLabel || '');
