@@ -16111,13 +16111,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <button
                 type="button"
                 onClick={() => setNavCollapsed(c => !c)}
-                title={navCollapsed ? 'Expand menu' : 'Collapse menu'}
+                title={tr(navCollapsed ? 'Expand menu' : 'Collapse menu')}
                 className={cn(
                   "flex items-center gap-2 rounded-xl text-[10px] font-bold uppercase tracking-[0.14em] text-[#9c8e85] hover:bg-[#faf7f2] transition-colors mb-1",
                   navCollapsed ? "justify-center py-2" : "px-3 py-2"
                 )}
               >
-                {navCollapsed ? <ChevronRight size={16} /> : <><ChevronLeft size={16} /> Collapse</>}
+                {navCollapsed ? <ChevronRight size={16} /> : <><ChevronLeft size={16} /> {tr('Collapse')}</>}
               </button>
               {renderHomeLink(navCollapsed)}
               {renderModules(navCollapsed)}
@@ -45171,6 +45171,7 @@ function HotelHomeLaunchpad({
   role: string | null;
 }) {
   const toast = useToast();
+  const { t: tr } = useT();
   const [snap, setSnap] = useState<any>(null);
   const [heroUrl, setHeroUrl] = useState<string>('');
   const [bookingSlug, setBookingSlug] = useState<string>('');
@@ -45188,7 +45189,7 @@ function HotelHomeLaunchpad({
   }, [restaurantId, token]);
   const [worklist, setWorklist] = useState<{arrivals:any[];departures:any[];spaToday:any[];rooms:any[]}>({arrivals:[],departures:[],spaToday:[],rooms:[]});
   const hour = new Date().getHours();
-  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const greeting = tr(hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening');
   const dateLabel = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
 
   useEffect(() => {
@@ -45228,7 +45229,7 @@ function HotelHomeLaunchpad({
         {/* Welcome */}
         <div className="mb-6">
           <h1 className="text-2xl sm:text-3xl font-bold font-serif text-[#1a1208]">{greeting}</h1>
-          <p className="text-sm text-[#6b5d52] mt-1">Welcome back to <span className="font-semibold text-[#3d3128]">{propertyName}</span> · {dateLabel}</p>
+          <p className="text-sm text-[#6b5d52] mt-1">{tr('Welcome back to')} <span className="font-semibold text-[#3d3128]">{propertyName}</span> · {dateLabel}</p>
         </div>
 
         {/* Module tiles — branded with the property's own name + photo. When a
@@ -45248,15 +45249,15 @@ function HotelHomeLaunchpad({
                 <div className={cn('relative p-5 w-full flex flex-col', !hasImg && 'bg-white')}>
                   <div className="flex items-center justify-between mb-3">
                     <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: hasImg ? 'rgba(255,255,255,0.2)' : '#fbede4', color: hasImg ? '#fff' : '#cc5a16' }}><Bed size={24} /></span>
-                    {snap && <span className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full" style={{ background: hasImg ? 'rgba(255,255,255,0.22)' : '#e9f7ef', color: hasImg ? '#fff' : '#1f513f' }}>{s.occupancy_pct ?? 0}% occupied</span>}
+                    {snap && <span className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full" style={{ background: hasImg ? 'rgba(255,255,255,0.22)' : '#e9f7ef', color: hasImg ? '#fff' : '#1f513f' }}>{tr('home.occupiedPct', { pct: s.occupancy_pct ?? 0 })}</span>}
                   </div>
                   <div className="mt-auto">
-                    <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#cc5a16' }}>Hotel</div>
+                    <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#cc5a16' }}>{tr('Hotel')}</div>
                     <div className="text-xl font-bold font-serif truncate" style={{ color: hasImg ? '#fff' : '#1a1208' }}>{propertyName}</div>
                     <div className="text-[12px] mb-2" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#3d3128' }}>
-                      {snap ? <>{s.occupied_tonight ?? 0} in-house · {s.arrivals_count ?? 0} arriving · {s.departures_count ?? 0} departing today</> : 'Front desk · rooms · bookings'}
+                      {snap ? tr('home.occupancyLine', { inhouse: s.occupied_tonight ?? 0, arriving: s.arrivals_count ?? 0, departing: s.departures_count ?? 0 }) : tr('Front desk · rooms · bookings')}
                     </div>
-                    <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: hasImg ? '#fff' : '#cc5a16' }}>Manage hotel <ChevronRight size={15} /></div>
+                    <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: hasImg ? '#fff' : '#cc5a16' }}>{tr('Manage hotel')} <ChevronRight size={15} /></div>
                   </div>
                 </div>
               </button>
@@ -45277,10 +45278,10 @@ function HotelHomeLaunchpad({
                     <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: hasImg ? 'rgba(255,255,255,0.2)' : '#e1f5ee', color: hasImg ? '#fff' : '#0f6e56' }}><Utensils size={22} /></span>
                   </div>
                   <div className="mt-auto">
-                    <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#0f6e56' }}>Restaurant</div>
+                    <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#0f6e56' }}>{tr('Restaurant')}</div>
                     <div className="text-xl font-bold font-serif truncate" style={{ color: hasImg ? '#fff' : '#1a1208' }}>{propertyName}</div>
-                    <div className="text-[12px] mb-2" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#3d3128' }}>Dining · orders · tables · KOT</div>
-                    <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: hasImg ? '#fff' : '#0f6e56' }}>Manage restaurant <ChevronRight size={15} /></div>
+                    <div className="text-[12px] mb-2" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#3d3128' }}>{tr('Dining · orders · tables · KOT')}</div>
+                    <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: hasImg ? '#fff' : '#0f6e56' }}>{tr('Manage restaurant')} <ChevronRight size={15} /></div>
                   </div>
                 </div>
               </button>
@@ -45295,10 +45296,10 @@ function HotelHomeLaunchpad({
                   <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: '#f3eef7', color: '#7e5792' }}><Sparkles size={22} /></span>
                 </div>
                 <div className="mt-auto">
-                  <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: '#7e5792' }}>Spa & Wellness</div>
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: '#7e5792' }}>{tr('Spa & Wellness')}</div>
                   <div className="text-xl font-bold font-serif truncate text-[#1a1208]">{propertyName}</div>
-                  <div className="text-[12px] mb-2 text-[#3d3128]">Appointments · therapists · packages</div>
-                  <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: '#7e5792' }}>Manage spa <ChevronRight size={15} /></div>
+                  <div className="text-[12px] mb-2 text-[#3d3128]">{tr('Appointments · therapists · packages')}</div>
+                  <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: '#7e5792' }}>{tr('Manage spa')} <ChevronRight size={15} /></div>
                 </div>
               </div>
             </button>
@@ -45312,10 +45313,10 @@ function HotelHomeLaunchpad({
                   <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: '#f1ecfe', color: '#7c3aed' }}><CalendarRange size={22} /></span>
                 </div>
                 <div className="mt-auto">
-                  <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: '#7c3aed' }}>Events & Convention</div>
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: '#7c3aed' }}>{tr('Events & Convention')}</div>
                   <div className="text-xl font-bold font-serif truncate text-[#1a1208]">{propertyName}</div>
-                  <div className="text-[12px] mb-2 text-[#3d3128]">Halls · bookings · quotations · catering</div>
-                  <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: '#7c3aed' }}>Manage events <ChevronRight size={15} /></div>
+                  <div className="text-[12px] mb-2 text-[#3d3128]">{tr('Halls · bookings · quotations · catering')}</div>
+                  <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: '#7c3aed' }}>{tr('Manage events')} <ChevronRight size={15} /></div>
                 </div>
               </div>
             </button>
@@ -45335,7 +45336,7 @@ function HotelHomeLaunchpad({
           if (links.length === 0) return null;
           return (
             <div className="mb-5">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Public pages</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">{tr('Public pages')}</p>
               <div className="flex flex-wrap gap-2">
                 {links.map(({ label, url, color }) => (
                   <div key={label} className="flex items-center gap-1.5 bg-white border rounded-xl px-3 py-1.5 text-xs" style={{ borderColor: `${color}30` }}>

@@ -335,4 +335,18 @@ export const hi: Record<string, string> = {
   'Reports': 'रिपोर्ट्स', 'All Reports': 'सभी रिपोर्ट',
   'Workforce': 'कर्मचारी', 'Staff Directory': 'स्टाफ डायरेक्टरी', 'Attendance': 'उपस्थिति', 'Roster': 'रोस्टर', 'Timesheet': 'टाइमशीट', 'Staff Payroll': 'स्टाफ पेरोल', 'HR & Payroll': 'HR और पेरोल',
   'Administration': 'प्रशासन', 'Brand & Settings': 'ब्रांड और सेटिंग्स', 'Staff Access': 'स्टाफ एक्सेस', 'Notifications': 'सूचनाएं', 'Subscription': 'सदस्यता',
+
+  // ── Home dashboard (Phase 2 Wave 2) ─────────────────────────────────────────
+  'Good morning': 'सुप्रभात', 'Good afternoon': 'शुभ दोपहर', 'Good evening': 'शुभ संध्या',
+  'Welcome back to': 'वापस स्वागत है',
+  'Hotel': 'होटल',
+  'Manage hotel': 'होटल प्रबंधित करें', 'Manage restaurant': 'रेस्टोरेंट प्रबंधित करें', 'Manage spa': 'स्पा प्रबंधित करें', 'Manage events': 'इवेंट्स प्रबंधित करें',
+  'Front desk · rooms · bookings': 'फ्रंट डेस्क · कमरे · बुकिंग',
+  'Dining · orders · tables · KOT': 'डाइनिंग · ऑर्डर · टेबल · KOT',
+  'Appointments · therapists · packages': 'अपॉइंटमेंट · थेरेपिस्ट · पैकेज',
+  'Halls · bookings · quotations · catering': 'हॉल · बुकिंग · कोटेशन · कैटरिंग',
+  'Public pages': 'सार्वजनिक पेज',
+  'home.occupiedPct': '{pct}% भरा हुआ',
+  'home.occupancyLine': '{inhouse} ठहरे · {arriving} आ रहे · {departing} आज जा रहे',
+  'Collapse': 'समेटें', 'Expand menu': 'मेन्यू खोलें', 'Collapse menu': 'मेन्यू समेटें', 'Sign Out': 'साइन आउट',
 };

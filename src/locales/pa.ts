@@ -296,4 +296,18 @@ export const pa: Record<string, string> = {
   'Reports': 'ਰਿਪੋਰਟਾਂ', 'All Reports': 'ਸਾਰੀਆਂ ਰਿਪੋਰਟਾਂ',
   'Workforce': 'ਸਟਾਫ਼', 'Staff Directory': 'ਸਟਾਫ਼ ਡਾਇਰੈਕਟਰੀ', 'Attendance': 'ਹਾਜ਼ਰੀ', 'Roster': 'ਰੋਸਟਰ', 'Timesheet': 'ਟਾਈਮਸ਼ੀਟ', 'Staff Payroll': 'ਸਟਾਫ਼ ਤਨਖਾਹ', 'HR & Payroll': 'HR ਤੇ ਤਨਖਾਹ',
   'Administration': 'ਪ੍ਰਬੰਧ', 'Brand & Settings': 'ਬ੍ਰਾਂਡ ਤੇ ਸੈਟਿੰਗਾਂ', 'Staff Access': 'ਸਟਾਫ਼ ਪਹੁੰਚ', 'Notifications': 'ਸੂਚਨਾਵਾਂ', 'Subscription': 'ਗਾਹਕੀ',
+
+  // ── Home dashboard (Phase 2 Wave 2) ─────────────────────────────────────────
+  'Good morning': 'ਸ਼ੁਭ ਸਵੇਰ', 'Good afternoon': 'ਸ਼ੁਭ ਦੁਪਹਿਰ', 'Good evening': 'ਸ਼ੁਭ ਸ਼ਾਮ',
+  'Welcome back to': 'ਜੀ ਆਇਆਂ ਨੂੰ',
+  'Hotel': 'ਹੋਟਲ',
+  'Manage hotel': 'ਹੋਟਲ ਪ੍ਰਬੰਧੋ', 'Manage restaurant': 'ਰੈਸਟੋਰੈਂਟ ਪ੍ਰਬੰਧੋ', 'Manage spa': 'ਸਪਾ ਪ੍ਰਬੰਧੋ', 'Manage events': 'ਸਮਾਗਮ ਪ੍ਰਬੰਧੋ',
+  'Front desk · rooms · bookings': 'ਫਰੰਟ ਡੈਸਕ · ਕਮਰੇ · ਬੁਕਿੰਗਾਂ',
+  'Dining · orders · tables · KOT': 'ਖਾਣਾ · ਆਰਡਰ · ਟੇਬਲ · KOT',
+  'Appointments · therapists · packages': 'ਮੁਲਾਕਾਤਾਂ · ਥੈਰੇਪਿਸਟ · ਪੈਕੇਜ',
+  'Halls · bookings · quotations · catering': 'ਹਾਲ · ਬੁਕਿੰਗਾਂ · ਕੋਟੇਸ਼ਨਾਂ · ਕੇਟਰਿੰਗ',
+  'Public pages': 'ਜਨਤਕ ਪੰਨੇ',
+  'home.occupiedPct': '{pct}% ਭਰੇ ਹੋਏ',
+  'home.occupancyLine': '{inhouse} ਠਹਿਰੇ · {arriving} ਆ ਰਹੇ · {departing} ਅੱਜ ਜਾ ਰਹੇ',
+  'Collapse': 'ਸਮੇਟੋ', 'Expand menu': 'ਮੀਨੂ ਖੋਲ੍ਹੋ', 'Collapse menu': 'ਮੀਨੂ ਸਮੇਟੋ', 'Sign Out': 'ਸਾਈਨ ਆਊਟ',
 };
