@@ -315,59 +315,18 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
         doc.moveTo(M, y).lineTo(M + INNER, y).lineWidth(0.5).strokeColor(HAIR).stroke();
       }
 
-      // ── GST rate-wise summary (left) + Totals (right) ────────────────────
+      // ── Totals (right column) ────────────────────────────────────────────
       y += 10;
-      // Keep the whole totals block together — never orphan it low on a page.
-      if (y > 660) { doc.addPage(); y = M; }
-      const blockTopY = y;
-      const totX = M + INNER - 210;
-      const totW = 210;
-      // Rate-wise GST breakup, derived from the lines (net taxable per rate = the
-      // GST reversed at that rate; clubs event + room lines that share a %). The
-      // GST-compliant summary that removes any confusion over the tax.
-      const rateMap: Record<string, { taxable: number; gst: number }> = {};
-      for (const ln of data.lines) {
-        const rate = Number(ln.gst_rate || 0);
-        const net = rate > 0 ? Math.round((Number(ln.gst_amount || 0) * 100 / rate) * 100) / 100 : Number(ln.amount || 0);
-        const k = String(rate);
-        (rateMap[k] = rateMap[k] || { taxable: 0, gst: 0 });
-        rateMap[k].taxable = Math.round((rateMap[k].taxable + net) * 100) / 100;
-        rateMap[k].gst = Math.round((rateMap[k].gst + Number(ln.gst_amount || 0)) * 100) / 100;
-      }
-      const rateRows = Object.entries(rateMap).map(([r, v]) => ({ rate: Number(r), taxable: v.taxable, gst: v.gst })).filter(x => x.gst > 0.005).sort((a, b) => a.rate - b.rate);
-      let leftEndY = blockTopY;
-      if (data.tax_amount > 0 && rateRows.length > 0) {
-        let gy = blockTopY;
-        doc.font('Helvetica-Bold').fontSize(8).fillColor(MUTED).text('GST SUMMARY', M, gy); gy += 12;
-        const gcRate = M, gcTax = M + 40, gcCg = M + 110, gcSg = M + 156, gcTot = M + 204;
-        doc.font('Helvetica-Bold').fontSize(7).fillColor(MUTED);
-        doc.text('Rate', gcRate, gy, { width: 36 });
-        doc.text('Taxable', gcTax, gy, { width: 64, align: 'right' });
-        doc.text('CGST', gcCg, gy, { width: 42, align: 'right' });
-        doc.text('SGST', gcSg, gy, { width: 42, align: 'right' });
-        doc.text('GST', gcTot, gy, { width: 44, align: 'right' });
-        gy += 10;
-        doc.moveTo(M, gy).lineTo(M + 248, gy).lineWidth(0.5).strokeColor(HAIR).stroke(); gy += 3;
-        doc.font('Helvetica').fontSize(7.5).fillColor(INK);
-        for (const rr of rateRows) {
-          const cg = Math.round((rr.gst / 2) * 100) / 100; const sg = Math.round((rr.gst - cg) * 100) / 100;
-          doc.fillColor(INK).text(`${rr.rate}%`, gcRate, gy, { width: 36 });
-          doc.fillColor(MUTED).text(fmtMoney(rr.taxable, cur), gcTax, gy, { width: 64, align: 'right' });
-          doc.text(fmtMoney(cg, cur), gcCg, gy, { width: 42, align: 'right' });
-          doc.text(fmtMoney(sg, cur), gcSg, gy, { width: 42, align: 'right' });
-          doc.fillColor(INK).text(fmtMoney(rr.gst, cur), gcTot, gy, { width: 44, align: 'right' });
-          gy += 11;
-        }
-        leftEndY = gy;
-      }
-      // Totals (right column).
-      y = blockTopY;
+      // Keep the totals + GST summary together — never orphan them low on a page.
+      if (y > 600) { doc.addPage(); y = M; }
+      const totX = M + INNER - 214;
+      const totW = 214;
       const totalRow = (en: string, key: string, val: string, bold = false) => {
         const lbl = L(en, key);
         doc.font(lbl.f || (bold ? 'Helvetica-Bold' : 'Helvetica')).fontSize(bold ? 10.5 : 9).fillColor(INK);
-        doc.text(lbl.t, totX, y, { width: totW - 84, lineBreak: false });
+        doc.text(lbl.t, totX, y, { width: totW - 96, lineBreak: false });
         doc.font(bold ? 'Helvetica-Bold' : 'Helvetica');
-        doc.text(val, totX + totW - 84, y, { width: 84, align: 'right' });
+        doc.text(val, totX + totW - 96, y, { width: 96, align: 'right' });
         y += bold ? 18 : 14;
       };
       totalRow('Subtotal', 'subtotal', fmtMoney(data.subtotal, cur));
@@ -382,6 +341,9 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       } else if (Number(data.discount || 0) > 0) {
         totalRow('Discount', 'discount', `- ${fmtMoney(data.discount, cur)}`);
       }
+      // Taxable value (subtotal − discount) — makes it EXPLICIT that GST is charged
+      // on the discounted amount, not the gross. Shown only when a discount applies.
+      if (Number(data.discount || 0) > 0) totalRow('Taxable Value', 'taxableValue', fmtMoney(Math.max(0, data.subtotal - data.discount), cur));
       // GST-compliant tax presentation: split into CGST + SGST (intra-state) when
       // GST is charged; a zero-GST invoice shows no tax line.
       if (data.tax_amount > 0) {
@@ -393,8 +355,60 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       doc.moveTo(totX, y + 2).lineTo(totX + totW, y + 2).lineWidth(1).strokeColor(ACCENT).stroke();
       y += 6;
       totalRow('Grand Total', 'grandTotal', fmtMoney(data.grand_total, cur), true);
-      // Continue below whichever column ran longer (summary vs totals).
-      y = Math.max(y, leftEndY);
+
+      // ── Rate-wise GST summary (FULL WIDTH, below the totals) ─────────────
+      // Clubs every line — event + rooms — at each %. "Taxable Value" is the NET
+      // (post-discount) amount, derived from each line's gst_amount, so it reconciles
+      // with the GST actually charged. Full-width columns → large amounts never
+      // collide (fixes the overlap in the cramped left-hand version).
+      if (data.tax_amount > 0) {
+        const rateMap: Record<string, { taxable: number; gst: number }> = {};
+        for (const ln of data.lines) {
+          const rate = Number(ln.gst_rate || 0);
+          const net = rate > 0 ? Math.round((Number(ln.gst_amount || 0) * 100 / rate) * 100) / 100 : Number(ln.amount || 0);
+          const k = String(rate);
+          (rateMap[k] = rateMap[k] || { taxable: 0, gst: 0 });
+          rateMap[k].taxable = Math.round((rateMap[k].taxable + net) * 100) / 100;
+          rateMap[k].gst = Math.round((rateMap[k].gst + Number(ln.gst_amount || 0)) * 100) / 100;
+        }
+        const rateRows = Object.entries(rateMap).map(([r, v]) => ({ rate: Number(r), taxable: v.taxable, gst: v.gst })).filter(x => x.gst > 0.005).sort((a, b) => a.rate - b.rate);
+        if (rateRows.length > 0) {
+          y += 18;
+          if (y + (44 + rateRows.length * 14) > 800) { doc.addPage(); y = M; }
+          doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK).text('GST SUMMARY', M, y); y += 14;
+          const c0 = M + 2, c1 = M + 50, c2 = M + 205, c3 = M + 305, c4 = M + 405;
+          const wRate = 46, wTax = 148, wCg = 96, wSg = 96, wGst = INNER - (c4 - M) - 2;
+          doc.rect(M, y - 2, INNER, 15).fill('#f3f4f6');
+          doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8);
+          doc.text('Rate', c0, y + 2, { width: wRate, lineBreak: false });
+          doc.text('Taxable Value', c1, y + 2, { width: wTax, align: 'right', lineBreak: false });
+          doc.text('CGST', c2, y + 2, { width: wCg, align: 'right', lineBreak: false });
+          doc.text('SGST', c3, y + 2, { width: wSg, align: 'right', lineBreak: false });
+          doc.text('Total GST', c4, y + 2, { width: wGst, align: 'right', lineBreak: false });
+          y += 15;
+          doc.font('Helvetica').fontSize(8.5).fillColor(INK);
+          let tTax = 0, tGst = 0;
+          for (const rr of rateRows) {
+            const cg = Math.round((rr.gst / 2) * 100) / 100; const sg = Math.round((rr.gst - cg) * 100) / 100;
+            tTax = Math.round((tTax + rr.taxable) * 100) / 100; tGst = Math.round((tGst + rr.gst) * 100) / 100;
+            doc.fillColor(INK).text(`${rr.rate}%`, c0, y, { width: wRate, lineBreak: false });
+            doc.text(fmtMoney(rr.taxable, cur), c1, y, { width: wTax, align: 'right', lineBreak: false });
+            doc.text(fmtMoney(cg, cur), c2, y, { width: wCg, align: 'right', lineBreak: false });
+            doc.text(fmtMoney(sg, cur), c3, y, { width: wSg, align: 'right', lineBreak: false });
+            doc.text(fmtMoney(rr.gst, cur), c4, y, { width: wGst, align: 'right', lineBreak: false });
+            y += 13;
+            doc.moveTo(M, y - 1).lineTo(M + INNER, y - 1).lineWidth(0.3).strokeColor(HAIR).stroke();
+          }
+          const cgT = Math.round((tGst / 2) * 100) / 100; const sgT = Math.round((tGst - cgT) * 100) / 100;
+          doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK);
+          doc.text('Total', c0, y + 2, { width: wRate, lineBreak: false });
+          doc.text(fmtMoney(tTax, cur), c1, y + 2, { width: wTax, align: 'right', lineBreak: false });
+          doc.text(fmtMoney(cgT, cur), c2, y + 2, { width: wCg, align: 'right', lineBreak: false });
+          doc.text(fmtMoney(sgT, cur), c3, y + 2, { width: wSg, align: 'right', lineBreak: false });
+          doc.text(fmtMoney(tGst, cur), c4, y + 2, { width: wGst, align: 'right', lineBreak: false });
+          y += 18;
+        }
+      }
 
       // ── Notes + footer ───────────────────────────────────────────────────
       y += 18;
