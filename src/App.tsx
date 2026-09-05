@@ -22822,8 +22822,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="space-y-5">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
-              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Hotel Bookings</h2>
-              <p className="text-sm text-[#6b5d52] mt-1">Manage reservations, check-ins, and check-outs.</p>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{tr('Hotel Bookings')}</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">{tr('Manage reservations, check-ins, and check-outs.')}</p>
             </div>
             <div className="flex items-center gap-2">
               {/* Sprint A1 — view toggle */}
@@ -22837,17 +22837,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       bookingsView === v ? 'bg-[#cc5a16] text-white shadow' : 'text-[#6b5d52] hover:bg-[#faf7f2]'
                     )}
                   >
-                    {v === 'CALENDAR_V2' ? <><CalendarClock size={12}/> Calendar</>
-                      : v === 'DASHBOARD' ? <>📊 Dashboard</>
-                      : <>List</>}
+                    {v === 'CALENDAR_V2' ? <><CalendarClock size={12}/> {tr('Calendar')}</>
+                      : v === 'DASHBOARD' ? <>📊 {tr('Dashboard')}</>
+                      : <>{tr('List')}</>}
                   </button>
                 ))}
               </div>
               {canWriteTab('HOTEL_BOOKINGS') && <button onClick={openGroupBookingModal} className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/30 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 transition-all flex items-center gap-2">
-                <Plus size={14} /> Group
+                <Plus size={14} /> {tr('Group')}
               </button>}
               {canWriteTab('HOTEL_BOOKINGS') && <button onClick={() => { setEditingBooking({ check_in_date: new Date().toISOString().slice(0,10), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20">
-                <Plus size={16} /> New Booking
+                <Plus size={16} /> {tr('New Booking')}
               </button>}
             </div>
           </div>
@@ -22977,7 +22977,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     )}
                   >
                     <span>{tab.icon}</span>
-                    <span>{tab.label}</span>
+                    <span>{tr(tab.label)}</span>
                     {tab.count !== null && tab.count > 0 && (
                       <span className={cn("px-1.5 py-0.5 rounded-full text-[10px] font-bold min-w-[18px] text-center",
                         bookingSubTab === tab.key ? "bg-white/25 text-white" : "bg-[#cc5a16]/10 text-[#cc5a16]"
@@ -23463,7 +23463,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-4 sm:p-5 mb-4 shadow-sm">
             <div className="flex items-center gap-2 mb-3">
               <Search size={16} className="text-[#cc5a16]" />
-              <h4 className="text-sm font-bold text-[#1a1208]">Search bookings &amp; guest history</h4>
+              <h4 className="text-sm font-bold text-[#1a1208]">{tr('Search bookings & guest history')}</h4>
               {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to || bookingHistoryFilter.source) && (
                 <button
                   onClick={async () => {
@@ -23471,7 +23471,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     await fetchHotelBookings();
                   }}
                   className="ml-auto text-[10px] font-bold uppercase tracking-widest text-[#c13b3b] hover:underline"
-                >Clear filters</button>
+                >{tr('Clear filters')}</button>
               )}
             </div>
             <form
@@ -23490,7 +23490,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 type="search"
                 value={bookingHistoryFilter.search}
                 onChange={e => setBookingHistoryFilter(f => ({ ...f, search: e.target.value }))}
-                placeholder="Guest name, phone, email, booking ID, or invoice number"
+                placeholder={tr('Guest name, phone, email, booking ID, or invoice number')}
                 className="sm:col-span-5 bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
               />
               <select
@@ -23498,11 +23498,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 onChange={e => setBookingHistoryFilter(f => ({ ...f, status: e.target.value }))}
                 className="sm:col-span-2 bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
               >
-                <option value="">Any status</option>
-                <option value="BOOKED">Booked</option>
-                <option value="CHECKED_IN">Checked-in</option>
-                <option value="CHECKED_OUT">Checked-out (past)</option>
-                <option value="CANCELLED">Cancelled</option>
+                <option value="">{tr('Any status')}</option>
+                <option value="BOOKED">{tr('Booked')}</option>
+                <option value="CHECKED_IN">{tr('Checked-in')}</option>
+                <option value="CHECKED_OUT">{tr('Checked-out (past)')}</option>
+                <option value="CANCELLED">{tr('Cancelled')}</option>
               </select>
               <input
                 type="date"
@@ -23521,7 +23521,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <button
                 type="submit"
                 className="sm:col-span-1 bg-[#cc5a16] text-white rounded-2xl px-4 py-2.5 text-xs font-bold uppercase tracking-widest hover:bg-[#a84612]"
-              >Search</button>
+              >{tr('Search')}</button>
             </form>
 
             {/* Source / Agent filter chips — client-side, no server round-trip.
@@ -23533,7 +23533,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               if (normalisedSources.length === 0) return null;
               return (
                 <div className="mt-3 flex flex-wrap gap-1.5 items-center">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Source:</span>
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{tr('Source:')}</span>
                   <button
                     type="button"
                     onClick={() => setBookingHistoryFilter(f => ({ ...f, source: '' }))}
@@ -23541,7 +23541,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       !bookingHistoryFilter.source
                         ? "bg-[#cc5a16] text-white border-[#cc5a16]"
                         : "bg-white border-[#cc5a16]/20 text-[#3d3128] hover:bg-[#faf7f2]")}
-                  >All</button>
+                  >{tr('All')}</button>
                   {normalisedSources.map((s: string) => (
                     <button
                       key={s}
@@ -23567,10 +23567,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             return (
               <div className="bg-amber-50 border border-amber-200 rounded-[24px] px-5 py-3 mb-4 flex flex-wrap items-center gap-4 text-sm">
                 <span className="font-bold text-amber-900">{bookingHistoryFilter.source}</span>
-                <span className="text-amber-700">{displayedBookings.length} bookings</span>
-                <span className="text-amber-700">Revenue: <strong className="font-mono">₹{totalRevenue.toLocaleString('en-IN')}</strong></span>
+                <span className="text-amber-700">{tr('pms.bookingsCount', { n: displayedBookings.length })}</span>
+                <span className="text-amber-700">{tr('Revenue:')} <strong className="font-mono">₹{totalRevenue.toLocaleString('en-IN')}</strong></span>
                 {totalCommission > 0 && (
-                  <span className="text-amber-700">Commission: <strong className="font-mono">₹{totalCommission.toLocaleString('en-IN')}</strong></span>
+                  <span className="text-amber-700">{tr('Commission:')} <strong className="font-mono">₹{totalCommission.toLocaleString('en-IN')}</strong></span>
                 )}
                 {Object.entries(countByStatus).map(([st, n]) => (
                   <span key={st} className="text-[10px] font-bold uppercase tracking-widest text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">{st}: {n}</span>
@@ -23579,7 +23579,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   type="button"
                   onClick={() => setBookingHistoryFilter(f => ({ ...f, source: '' }))}
                   className="ml-auto text-[10px] font-bold uppercase tracking-widest text-amber-700 hover:underline"
-                >Clear</button>
+                >{tr('Clear')}</button>
               </div>
             );
           })()}
@@ -23590,13 +23590,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             {displayedBookings.length === 0 ? (
               <div className="p-12 text-center text-sm text-[#6b5d52]">
                 {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to || bookingHistoryFilter.source)
-                  ? 'No bookings match your filters. Try a wider date range or clear the search.'
-                  : 'No bookings yet. Create your first booking above.'}
+                  ? tr('No bookings match your filters. Try a wider date range or clear the search.')
+                  : tr('No bookings yet. Create your first booking above.')}
               </div>
             ) : (<>
               <div className="flex items-center justify-between px-5 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
                 <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                  {displayedBookings.length}{displayedBookings.length !== hotelBookings.length ? ` of ${hotelBookings.length}` : ''} booking{displayedBookings.length === 1 ? '' : 's'}
+                  {displayedBookings.length}{displayedBookings.length !== hotelBookings.length ? ` ${tr('of')} ${hotelBookings.length}` : ''} {tr(displayedBookings.length === 1 ? 'booking' : 'bookings')}
                 </span>
                 <div className="flex items-center gap-3">
                 {/* Columns chooser — enterprise-grid style show/hide, persisted
@@ -23608,21 +23608,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] hover:text-[#cc5a16] flex items-center gap-1 border border-[#cc5a16]/20 rounded-lg px-2.5 py-1.5 bg-white"
                     title="Show / hide columns"
                   >
-                    <Filter size={12} /> Columns
+                    <Filter size={12} /> {tr('Columns')}
                   </button>
                   {bookingColMenuOpen && (
                     <>
                       <div className="fixed inset-0 z-[55]" onClick={() => setBookingColMenuOpen(false)} />
                       <div className="absolute right-0 mt-1 z-[56] w-52 bg-white rounded-xl border border-[#cc5a16]/20 shadow-xl p-2">
                         <div className="px-2 py-1 text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] flex items-center justify-between">
-                          <span>Columns</span>
+                          <span>{tr('Columns')}</span>
                           <button
                             type="button"
                             onClick={() => setBookingCols(Object.fromEntries(BOOKING_COL_DEFS.map(c => [c.key, c.def])))}
                             className="text-[9px] text-[#cc5a16] hover:underline normal-case tracking-normal font-semibold"
-                          >Reset</button>
+                          >{tr('Reset')}</button>
                         </div>
-                        <div className="px-2 py-1 text-[10px] text-[#9c8e85] italic">Guest &amp; Actions are always shown.</div>
+                        <div className="px-2 py-1 text-[10px] text-[#9c8e85] italic">{tr('Guest & Actions are always shown.')}</div>
                         <div className="max-h-64 overflow-y-auto">
                           {BOOKING_COL_DEFS.map(c => (
                             <label key={c.key} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-[#faf7f2] cursor-pointer text-xs text-[#3d3128]">
@@ -23631,7 +23631,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 checked={colOn(c.key)}
                                 onChange={e => setBookingCols(prev => ({ ...prev, [c.key]: e.target.checked }))}
                               />
-                              {c.label}
+                              {tr(c.label)}
                             </label>
                           ))}
                         </div>
@@ -23668,7 +23668,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   }}
                   className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline flex items-center gap-1"
                 >
-                  <Download size={12} /> Export CSV
+                  <Download size={12} /> {tr('Export CSV')}
                 </button>
                 </div>
               </div>
@@ -23683,27 +23683,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <th onClick={() => toggleBookingSort('guest')} title="Click to sort"
                         style={{ position: 'relative', width: colWidths['guest'] ? colWidths['guest']+'px' : undefined }}
                         className={cn(sortableCls, 'text-left sticky left-0 z-[2] bg-[#faf7f2] shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)]')}>
-                      Guest{arrow('guest')}
+                      {tr('Guest')}{arrow('guest')}
                       <div onMouseDown={e => startColResize('guest', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} />
                     </th>
-                    {colOn('booking_id') && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['booking_id'] ? colWidths['booking_id']+'px' : undefined }}>Booking ID<div onMouseDown={e => startColResize('booking_id', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('room')      && <th onClick={() => toggleBookingSort('room')}     title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['room'] ? colWidths['room']+'px' : undefined }}>Room{arrow('room')}<div onMouseDown={e => startColResize('room', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('dates')     && <th onClick={() => toggleBookingSort('check_in')} title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['dates'] ? colWidths['dates']+'px' : undefined }}>Dates{arrow('check_in')}<div onMouseDown={e => startColResize('dates', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('checked_in')  && <th className="px-4 py-3 text-left whitespace-nowrap" style={{ position: 'relative', width: colWidths['checked_in'] ? colWidths['checked_in']+'px' : undefined }}>Checked in<div onMouseDown={e => startColResize('checked_in', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('checked_out') && <th className="px-4 py-3 text-left whitespace-nowrap" style={{ position: 'relative', width: colWidths['checked_out'] ? colWidths['checked_out']+'px' : undefined }}>Checked out<div onMouseDown={e => startColResize('checked_out', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('nights')    && <th className="px-4 py-3 text-right" style={{ position: 'relative', width: colWidths['nights'] ? colWidths['nights']+'px' : undefined }}>Nights<div onMouseDown={e => startColResize('nights', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('guests')    && <th className="px-4 py-3 text-right" style={{ position: 'relative', width: colWidths['guests'] ? colWidths['guests']+'px' : undefined }}>Guests<div onMouseDown={e => startColResize('guests', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('adults')    && <th className="px-4 py-3 text-right" title="Total adults (extra beyond capacity in brackets)" style={{ position: 'relative', width: colWidths['adults'] ? colWidths['adults']+'px' : undefined }}>Adults<div onMouseDown={e => startColResize('adults', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('meal_plan') && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['meal_plan'] ? colWidths['meal_plan']+'px' : undefined }}>Meal Plan<div onMouseDown={e => startColResize('meal_plan', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('status')    && <th onClick={() => toggleBookingSort('status')} title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['status'] ? colWidths['status']+'px' : undefined }}>Status{arrow('status')}<div onMouseDown={e => startColResize('status', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('total')     && <th onClick={() => toggleBookingSort('total')}  title="Click to sort" className={cn(sortableCls, 'text-right')} style={{ position: 'relative', width: colWidths['total'] ? colWidths['total']+'px' : undefined }}>Total{arrow('total')}<div onMouseDown={e => startColResize('total', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('restaurant') && <th className="text-right px-4 py-3" title="Room-service F&B for this guest — click to view / mark paid" style={{ position: 'relative', width: colWidths['restaurant'] ? colWidths['restaurant']+'px' : undefined }}>Restaurant bill<div onMouseDown={e => startColResize('restaurant', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('advance')   && <th className="text-right px-4 py-3" title="Advance payments already collected" style={{ position: 'relative', width: colWidths['advance'] ? colWidths['advance']+'px' : undefined }}>Advance<div onMouseDown={e => startColResize('advance', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('source')    && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['source'] ? colWidths['source']+'px' : undefined }}>Source<div onMouseDown={e => startColResize('source', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('created')   && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['created'] ? colWidths['created']+'px' : undefined }}>Created<div onMouseDown={e => startColResize('created', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('paylink')   && <th className="text-center px-4 py-3" style={{ position: 'relative', width: colWidths['paylink'] ? colWidths['paylink']+'px' : undefined }}>Pay link<div onMouseDown={e => startColResize('paylink', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('booking_id') && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['booking_id'] ? colWidths['booking_id']+'px' : undefined }}>{tr('Booking ID')}<div onMouseDown={e => startColResize('booking_id', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('room')      && <th onClick={() => toggleBookingSort('room')}     title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['room'] ? colWidths['room']+'px' : undefined }}>{tr('Room')}{arrow('room')}<div onMouseDown={e => startColResize('room', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('dates')     && <th onClick={() => toggleBookingSort('check_in')} title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['dates'] ? colWidths['dates']+'px' : undefined }}>{tr('Dates')}{arrow('check_in')}<div onMouseDown={e => startColResize('dates', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('checked_in')  && <th className="px-4 py-3 text-left whitespace-nowrap" style={{ position: 'relative', width: colWidths['checked_in'] ? colWidths['checked_in']+'px' : undefined }}>{tr('Checked in')}<div onMouseDown={e => startColResize('checked_in', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('checked_out') && <th className="px-4 py-3 text-left whitespace-nowrap" style={{ position: 'relative', width: colWidths['checked_out'] ? colWidths['checked_out']+'px' : undefined }}>{tr('Checked out')}<div onMouseDown={e => startColResize('checked_out', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('nights')    && <th className="px-4 py-3 text-right" style={{ position: 'relative', width: colWidths['nights'] ? colWidths['nights']+'px' : undefined }}>{tr('Nights')}<div onMouseDown={e => startColResize('nights', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('guests')    && <th className="px-4 py-3 text-right" style={{ position: 'relative', width: colWidths['guests'] ? colWidths['guests']+'px' : undefined }}>{tr('Guests')}<div onMouseDown={e => startColResize('guests', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('adults')    && <th className="px-4 py-3 text-right" title="Total adults (extra beyond capacity in brackets)" style={{ position: 'relative', width: colWidths['adults'] ? colWidths['adults']+'px' : undefined }}>{tr('Adults')}<div onMouseDown={e => startColResize('adults', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('meal_plan') && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['meal_plan'] ? colWidths['meal_plan']+'px' : undefined }}>{tr('Meal Plan')}<div onMouseDown={e => startColResize('meal_plan', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('status')    && <th onClick={() => toggleBookingSort('status')} title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['status'] ? colWidths['status']+'px' : undefined }}>{tr('Status')}{arrow('status')}<div onMouseDown={e => startColResize('status', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('total')     && <th onClick={() => toggleBookingSort('total')}  title="Click to sort" className={cn(sortableCls, 'text-right')} style={{ position: 'relative', width: colWidths['total'] ? colWidths['total']+'px' : undefined }}>{tr('Total')}{arrow('total')}<div onMouseDown={e => startColResize('total', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('restaurant') && <th className="text-right px-4 py-3" title="Room-service F&B for this guest — click to view / mark paid" style={{ position: 'relative', width: colWidths['restaurant'] ? colWidths['restaurant']+'px' : undefined }}>{tr('Restaurant bill')}<div onMouseDown={e => startColResize('restaurant', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('advance')   && <th className="text-right px-4 py-3" title="Advance payments already collected" style={{ position: 'relative', width: colWidths['advance'] ? colWidths['advance']+'px' : undefined }}>{tr('Advance')}<div onMouseDown={e => startColResize('advance', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('source')    && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['source'] ? colWidths['source']+'px' : undefined }}>{tr('Source')}<div onMouseDown={e => startColResize('source', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('created')   && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['created'] ? colWidths['created']+'px' : undefined }}>{tr('Created')}<div onMouseDown={e => startColResize('created', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('paylink')   && <th className="text-center px-4 py-3" style={{ position: 'relative', width: colWidths['paylink'] ? colWidths['paylink']+'px' : undefined }}>{tr('Pay link')}<div onMouseDown={e => startColResize('paylink', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
                     {/* Actions — pinned right so staff never scroll to reach them */}
-                    <th className="text-right px-4 py-3 sticky right-0 z-[2] bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.12)]">Actions</th>
+                    <th className="text-right px-4 py-3 sticky right-0 z-[2] bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.12)]">{tr('Actions')}</th>
                   </tr>
                     );
                   })()}
@@ -23746,7 +23746,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 className="inline-block text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-violet-100 text-violet-800"
                                 title={`Group: ${b.group_name || b.group_id}`}
                               >
-                                Group{b.group_name ? ` · ${b.group_name}` : ''}
+                                {tr('Group')}{b.group_name ? ` · ${b.group_name}` : ''}
                               </span>
                             )}
                             {/* FIX-1 — show which field matched the search so
@@ -23755,7 +23755,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <span
                                 className="inline-block text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-[#cc5a16]/10 text-[#cc5a16]"
                                 title="Match source for the current search"
-                              >match: {b.matched_field}</span>
+                              >{tr('match:')} {b.matched_field}</span>
                             )}
                           </div>
                           <div className="text-[11px] text-[#9c8e85]">{b.guest_phone || '—'} {b.guest_nationality ? `· ${b.guest_nationality}` : ''}</div>
@@ -23796,7 +23796,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <span
                               className={cn("inline-block whitespace-nowrap px-2 py-1 rounded-md text-[10px] font-bold uppercase border", lcStyle.bg, lcStyle.text, lcStyle.border)}
                               title={`DB status: ${b.status}`}
-                            >{lcStyle.label}</span>
+                            >{tr(lcStyle.label)}</span>
                           </td>
                         )}
                         {colOn('total') && (
@@ -23823,8 +23823,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               >
                                 ₹{Number(b.fnb_total || 0).toLocaleString('en-IN')}
                                 {Number(b.fnb_unpaid || 0) <= 0.01
-                                  ? <span className="ml-1 text-[9px] font-bold text-emerald-700 uppercase">✓ paid</span>
-                                  : <span className="ml-1 text-[9px] font-bold text-amber-700 uppercase">unpaid</span>}
+                                  ? <span className="ml-1 text-[9px] font-bold text-emerald-700 uppercase">✓ {tr('paid')}</span>
+                                  : <span className="ml-1 text-[9px] font-bold text-amber-700 uppercase">{tr('unpaid')}</span>}
                               </button>
                             ) : <span className="text-[#9c8e85]">—</span>}
                           </td>
@@ -23882,13 +23882,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <button
                                 onClick={() => confirmAndCheckIn(b)}
                                 className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600 whitespace-nowrap"
-                              >Check In</button>
+                              >{tr('Check In')}</button>
                             )}
                             {b.status === 'CHECKED_IN' && canWriteTab('HOTEL_BOOKINGS') && (
                               <button
                                 onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }}
                                 className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608] whitespace-nowrap"
-                              >Check Out</button>
+                              >{tr('Check Out')}</button>
                             )}
                             {/* Group settle — primary group CTA, stays outside overflow */}
                             {b.group_id && b.status === 'CHECKED_IN' && canWriteTab('HOTEL_BOOKINGS') && (
@@ -23922,7 +23922,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 }}
                                 title="Settle every CHECKED_IN room in this group under one invoice"
                                 className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-[11px] font-bold hover:bg-violet-700 whitespace-nowrap"
-                              >Settle Group</button>
+                              >{tr('Settle Group')}</button>
                             )}
                             {/* ··· overflow menu */}
                             <div className="relative" data-booking-action-menu>
@@ -23958,7 +23958,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     {/* Edit — BOOKED only */}
                                     {b.status === 'BOOKED' && (
                                       <button className={menuItemCls} onClick={() => { setEditingBooking({ ...b }); setShowBookingModal(true); setOpenActionMenu(null); }}>
-                                        ✏️ Edit booking
+                                        ✏️ {tr('Edit booking')}
                                       </button>
                                     )}
                                     {/* Documents */}
@@ -23967,7 +23967,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         className={cn(menuItemCls, needsDocs ? "text-amber-800 bg-amber-50 hover:bg-amber-100" : "")}
                                         onClick={() => { setDocsTargetBooking({ ...b }); setOpenActionMenu(null); }}
                                       >
-                                        📄 Documents{docCount > 0 ? ` (${docCount})` : ''}{needsDocs ? ' ⚠' : ''}
+                                        📄 {tr('Documents')}{docCount > 0 ? ` (${docCount})` : ''}{needsDocs ? ' ⚠' : ''}
                                       </button>
                                     )}
                                     {/* Add room — active bookings only (BOOKED / ASSIGNED /
@@ -23984,31 +23984,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                           if (rr.ok) { const tps = await rr.json(); setIndivAddRoom(s => ({ ...s, types: Array.isArray(tps) ? tps : [] })); }
                                         } catch { /* */ }
                                       }}>
-                                        ➕ Add room{b.group_name ? ' to group' : ''}
+                                        ➕ {tr('Add room')}{b.group_name ? ' ' + tr('to group') : ''}
                                       </button>
                                     )}
                                     {/* Advance payment */}
                                     {(b.status === 'BOOKED' || b.status === 'CHECKED_IN') && (
                                       <button className={menuItemCls} onClick={() => { setAdvancePayTarget(b); setAdvanceDraft({ amount: '', method: 'CASH', reference: '' }); setOpenActionMenu(null); }}>
-                                        💰 Record advance
+                                        💰 {tr('Record advance')}
                                       </button>
                                     )}
                                     {/* Folio — CHECKED_IN with open folio */}
                                     {b.status === 'CHECKED_IN' && b.open_folio_id && (
                                       <button className={menuItemCls} onClick={async () => { setOpenActionMenu(null); try { await loadFolio(b.open_folio_id); } catch (err: any) { toast.error(err?.message || 'Failed to load folio'); } }}>
-                                        📋 Open folio
+                                        📋 {tr('Open folio')}
                                       </button>
                                     )}
                                     {/* Room operations — CHECKED_IN */}
                                     {b.status === 'CHECKED_IN' && sep}
                                     {b.status === 'CHECKED_IN' && (
                                       <button className={menuItemCls} onClick={() => { openMoveRoom(b); setOpenActionMenu(null); }}>
-                                        🔄 Move room
+                                        🔄 {tr('Move room')}
                                       </button>
                                     )}
                                     {b.status === 'CHECKED_IN' && (
                                       <button className={menuItemCls} onClick={() => { openUpgradeRoom(b); setOpenActionMenu(null); }}>
-                                        ⬆ Upgrade room
+                                        ⬆ {tr('Upgrade room')}
                                       </button>
                                     )}
                                     {b.status === 'CHECKED_IN' && (
@@ -24016,7 +24016,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         setAmendStay({ booking: b, newDate: String(b.check_out_date || '').slice(0, 10), saving: false });
                                         setOpenActionMenu(null);
                                       }}>
-                                        📅 Amend checkout date
+                                        📅 {tr('Amend checkout date')}
                                       </button>
                                     )}
                                     {/* Group document actions */}
@@ -24035,7 +24035,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                           setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
                                         } catch (err: any) { toast.error(err.message); }
                                       }}>
-                                        📑 Group invoice PDF
+                                        📑 {tr('Group invoice PDF')}
                                       </button>
                                     )}
                                     {b.group_id && (
@@ -24050,21 +24050,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                           toast.success(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.`);
                                         } catch (err: any) { toast.error(err.message); }
                                       }}>
-                                        📧 Email group invoice
+                                        📧 {tr('Email group invoice')}
                                       </button>
                                     )}
                                     {/* OTA re-sync */}
                                     {isOta && sep}
                                     {isOta && (
                                       <button className={menuItemCls} onClick={() => { resyncBookingToChannel(b); setOpenActionMenu(null); }}>
-                                        🔁 Re-sync to channel
+                                        🔁 {tr('Re-sync to channel')}
                                       </button>
                                     )}
                                     {/* Destructive — Cancel */}
                                     {b.status === 'BOOKED' && sep}
                                     {b.status === 'BOOKED' && (
                                       <button className={menuItemDestructCls} onClick={() => { cancelBooking(b.id); setOpenActionMenu(null); }}>
-                                        ✕ Cancel booking
+                                        ✕ {tr('Cancel booking')}
                                       </button>
                                     )}
                                   </div>,
@@ -24086,11 +24086,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-[#cc5a16]/10 bg-[#faf7f2] flex-wrap">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[11px] text-[#6b5d52]">
-                      Showing <strong className="text-[#3d3128]">{(bookingsPage - 1) * bookingsPageSize + 1}</strong>
+                      {tr('Showing')} <strong className="text-[#3d3128]">{(bookingsPage - 1) * bookingsPageSize + 1}</strong>
                       –<strong className="text-[#3d3128]">{Math.min(bookingsPage * bookingsPageSize, displayedBookings.length)}</strong>
-                      {' '}of <strong className="text-[#3d3128]">{displayedBookings.length}</strong>
+                      {' '}{tr('of')} <strong className="text-[#3d3128]">{displayedBookings.length}</strong>
                     </span>
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] ml-2">Rows/page</label>
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] ml-2">{tr('Rows/page')}</label>
                     <select value={bookingsPageSize} onChange={e => setBookingsPageSize(Number(e.target.value))}
                       className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[11px] font-bold text-[#3d3128] focus:outline-none focus:ring-1 ring-[#cc5a16]/30">
                       {[10, 25, 50].map(n => <option key={n} value={n}>{n}</option>)}
@@ -24099,14 +24099,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   {bookingsTotalPages > 1 && (
                     <div className="flex items-center gap-1">
                       <button type="button" onClick={() => setBookingsPage(1)} disabled={bookingsPage <= 1}
-                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">« First</button>
+                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">« {tr('First')}</button>
                       <button type="button" onClick={() => setBookingsPage(p => Math.max(1, p - 1))} disabled={bookingsPage <= 1}
-                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">‹ Prev</button>
-                      <span className="px-2 text-[11px] font-bold text-[#3d3128] whitespace-nowrap">Page {bookingsPage} / {bookingsTotalPages}</span>
+                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">‹ {tr('Prev')}</button>
+                      <span className="px-2 text-[11px] font-bold text-[#3d3128] whitespace-nowrap">{tr('Page')} {bookingsPage} / {bookingsTotalPages}</span>
                       <button type="button" onClick={() => setBookingsPage(p => Math.min(bookingsTotalPages, p + 1))} disabled={bookingsPage >= bookingsTotalPages}
-                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">Next ›</button>
+                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">{tr('Next')} ›</button>
                       <button type="button" onClick={() => setBookingsPage(bookingsTotalPages)} disabled={bookingsPage >= bookingsTotalPages}
-                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">Last »</button>
+                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">{tr('Last')} »</button>
                     </div>
                   )}
                 </div>
@@ -27463,7 +27463,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   )}
                   className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline flex items-center gap-1"
                 >
-                  <Download size={12} /> Export CSV
+                  <Download size={12} /> {tr('Export CSV')}
                 </button>
               </div>
               <table className="w-full text-sm">

@@ -383,4 +383,5 @@ export const en: Record<string, string> = {
   'home.occupancyLine': '{inhouse} in-house · {arriving} arriving · {departing} departing today',
   'menu.itemsAcross': '{n} items across {cats} categories',
   'menu.allFilter': 'All ({n})',
+  'pms.bookingsCount': '{n} bookings',
 };
