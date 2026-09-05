@@ -77,9 +77,11 @@ If you'd rather run it with Node.js instead of the .exe:
    BASE_URL=https://erp.atithi-setu.com
    RESTAURANT_ID=RESTO-1003
    AGENT_TOKEN=pat_xxxxxxxxxxxxxxxxxxxx
-   POLL_MS=3000
+   POLL_MS=800
    ```
-3. Run it: `node agent.mjs` → you'll see `polling every 3000ms`.
+3. Run it: `node agent.mjs` → you'll see `polling every 800ms`.
+   (A `POLL_MS` above 1000 is clamped back to 800 so tickets stay near-instant;
+   set `POLL_ALLOW_SLOW=1` to keep a slower poll on a genuinely weak network.)
 
 Keep it running: **Windows** — Task Scheduler at logon, or [NSSM](https://nssm.cc/) as a
 service. **Linux/Pi** — a `systemd` unit or `pm2 start agent.mjs --name print-agent`.

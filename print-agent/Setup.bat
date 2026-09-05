@@ -29,7 +29,7 @@ if exist "%~dp0.env" (
   )
 )
 if not defined CUR_BASE_URL set "CUR_BASE_URL=https://erp.atithi-setu.com"
-if not defined CUR_POLL_MS  set "CUR_POLL_MS=3000"
+if not defined CUR_POLL_MS  set "CUR_POLL_MS=800"
 
 set "BASE_URL=%CUR_BASE_URL%"
 set /p BASE_URL=  Server URL [%CUR_BASE_URL%]:

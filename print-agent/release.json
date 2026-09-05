@@ -4,6 +4,12 @@
   "url": "https://erp.atithi-setu.com/api/print-agent/download",
   "notes": "v3.5.0 — resilience: polling is decoupled from printing, so one slow/unreachable printer only backs up its own queue instead of freezing all printing; eager pre-warmed USB worker (no 1-3s first-ticket compile); 8s->2.5s network connect timeout; 200ms->30ms post-write flush. Pairs with server-side print-job retry backoff.",
   "_status": "ARMED 2026-09-03 — self-update is ON. Every agent on v3.3+ auto-updates to 3.5.0 within ~6h (download -> verify sha256 -> swap -> restart). The binary served by GET /api/print-agent/download is print-agent/dist/AtithiSetuPrintAgent.exe, force-committed so the VPS serves it. To pause self-update, set latest/sha256/url back to null. NOTE: prefer AGENT_EXE_PATH (VPS disk) or a CDN url for future releases to avoid committing the ~57MB binary to git history.",
+  "_pending_release": {
+    "version": "3.5.1",
+    "reason": "P0 latency fix — SELF-HEAL the poll interval. agent.mjs now clamps any configured POLL_MS>1000 back to 800ms (POLL_ALLOW_SLOW=1 to opt out), and the installers/.env.example/README now default to 800 instead of 3000. This is what actually re-tunes the ~2-3s stale-.env installs that auto-update could never fix (it swaps the .exe, never the .env).",
+    "rollout": "Source + config are committed. To ship to the fleet: (1) build the exe — `cd print-agent && npx pkg . --targets node22-win-x64 --output dist/AtithiSetuPrintAgent.exe`; (2) compute its hash — `sha256sum dist/AtithiSetuPrintAgent.exe`; (3) set latest='3.5.1' and sha256=<that hash> here and commit the new dist exe (or, preferred, host it at AGENT_EXE_PATH/CDN and point url there). Agents on v3.3+ then auto-update within ~6h and self-heal their poll interval. Until then latest stays 3.5.0 so auto-update remains safe.",
+    "instant_workaround": "To fix a specific tenant NOW without waiting for the build: on the billing PC edit the agent's .env to POLL_MS=800 and restart the AtithiSetuPrintAgent service (or re-run Setup.bat, which now defaults to 800)."
+  },
   "_history": {
     "3.4.1": { "sha256": "e5479a152ab1c20647023f619486d1fe9e6d974ff87f90c4ca4ba287ee78f2cd", "note": "faster printing (persistent USB worker, shorter poll)" },
     "3.4.0": { "sha256": "6b4b49f643a8e8e2cec680be2c54efa33bd7a15120ad2d6ae07a83f66c497c46", "note": "superseded by 3.4.1 before any agent picked it up" },

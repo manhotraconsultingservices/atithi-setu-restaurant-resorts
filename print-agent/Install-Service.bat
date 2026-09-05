@@ -47,7 +47,7 @@ if exist "%DIR%\.env" (
   )
 )
 if not defined CUR_BASE_URL set "CUR_BASE_URL=https://erp.atithi-setu.com"
-if not defined CUR_POLL_MS  set "CUR_POLL_MS=3000"
+if not defined CUR_POLL_MS  set "CUR_POLL_MS=800"
 
 rem ---- Server URL (Enter = keep the shown value) ----
 set "BASE_URL=%CUR_BASE_URL%"

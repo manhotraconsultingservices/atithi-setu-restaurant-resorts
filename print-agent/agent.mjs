@@ -44,7 +44,13 @@ import { fileURLToPath } from 'node:url';
 // slow" cause). Also: eager+pre-warmed USB worker (no 1-3s first-ticket compile),
 // 8s→2.5s network connect timeout, 200ms→30ms post-write flush. Pairs with the
 // server-side print-job retry backoff so a down printer stops hammering every poll.
-const AGENT_VERSION = '3.5.0';
+// v3.5.1 = SELF-HEAL the poll interval. Older installers wrote POLL_MS=3000 into the
+// .env and auto-update swaps the .exe but NEVER the .env — so a stale 2–3s poll
+// persisted forever and silently cancelled every speed gain above (~1.5s avg wait on
+// EVERY ticket). We now clamp any configured poll slower than POLL_CAP_MS back to the
+// fast default, unless the operator explicitly opts out (POLL_ALLOW_SLOW=1). This
+// makes an update actually re-tune the fleet without editing each PC's .env.
+const AGENT_VERSION = '3.5.1';
 
 // ── locate a folder we can read a .env / write temp files next to ────────────
 // Under `node agent.mjs` this is the script dir; bundled as an .exe it's the
@@ -82,7 +88,21 @@ const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
 // fetches it, so this is the baseline latency on EVERY print. Was default 3000 /
 // floor 1000 (1.5–3s wait); now default 800 / floor 250 for near-instant tickets.
 // A tiny poll is cheap: the pending query is indexed and returns only PENDING rows.
-const POLL_MS = Math.max(250, Number(process.env.POLL_MS) || 800);
+//
+// SELF-HEAL (v3.5.1): a poll slower than POLL_CAP_MS only adds ticket latency and is
+// never what a busy kitchen wants. Old Setup.bat/Install-Service.bat wrote 3000 into
+// the .env, which auto-update can't rewrite — so we clamp a stale-slow value back to
+// the fast default. An operator on a genuinely weak network can keep a slow poll with
+// POLL_ALLOW_SLOW=1.
+const POLL_DEFAULT_MS = 800;
+const POLL_CAP_MS = 1000;
+const POLL_ALLOW_SLOW = String(process.env.POLL_ALLOW_SLOW || '') === '1';
+const _pollRaw = Math.max(250, Number(process.env.POLL_MS) || POLL_DEFAULT_MS);
+const _pollClamped = (_pollRaw > POLL_CAP_MS && !POLL_ALLOW_SLOW);
+const POLL_MS = _pollClamped ? POLL_DEFAULT_MS : _pollRaw;
+if (_pollClamped) {
+  console.log(`note: POLL_MS=${_pollRaw}ms in .env is slower than ${POLL_CAP_MS}ms — using ${POLL_DEFAULT_MS}ms for near-instant tickets (set POLL_ALLOW_SLOW=1 to keep the slower interval).`);
+}
 // Network printer connect timeout (was a fixed 8s — an unreachable printer froze
 // the loop for 8s/attempt). A LAN printer answers in ms; 2.5s is generous.
 const NET_CONNECT_MS = Math.max(800, Number(process.env.NET_CONNECT_MS) || 2500);
