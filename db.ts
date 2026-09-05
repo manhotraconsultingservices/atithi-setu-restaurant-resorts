@@ -1264,6 +1264,10 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // Retry backoff — a failed job is deferred (not re-fetched every 800ms poll),
   // so a down printer stops burning the connect-timeout on every tick.
   await db.exec("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ").catch(() => {});
+  // Atomic-claim lease (v3.6 real-time push): the agent fetch flips PENDING→'SENT'
+  // + stamps claimed_at so two agents / a restart can't double-fetch; a 'SENT' job
+  // with no ack is re-claimed after a short lease. Nullable, defaults absent.
+  await db.exec("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ").catch(() => {});
   await db.exec("CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs (status, created_at)").catch(() => {});
   // Backs the reconciliation sweep's "does this order already have a live KOT job?"
   // check (NOT EXISTS on order_id) so no order is left without a kitchen ticket.

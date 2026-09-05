@@ -50,7 +50,14 @@ import { fileURLToPath } from 'node:url';
 // EVERY ticket). We now clamp any configured poll slower than POLL_CAP_MS back to the
 // fast default, unless the operator explicitly opts out (POLL_ALLOW_SLOW=1). This
 // makes an update actually re-tune the fleet without editing each PC's .env.
-const AGENT_VERSION = '3.5.1';
+// v3.6.0 = REAL-TIME PUSH. Hold an SSE stream (GET /print-jobs/stream); the server
+// pushes a "job" event the instant a ticket is enqueued, so we fetch + print in
+// ~sub-300ms instead of waiting for a poll cycle. The poll stays as a fallback/
+// reconnect safety net — slow (FALLBACK_POLL_MS) while the stream is healthy, fast
+// (POLL_MS) the moment it drops. Server now hands out jobs via an ATOMIC CLAIM
+// (PENDING→SENT lease), so a push + a poll can never double-print, and a second
+// agent / a restart is safe. Set USE_STREAM=0 to force poll-only.
+const AGENT_VERSION = '3.6.0';
 
 // ── locate a folder we can read a .env / write temp files next to ────────────
 // Under `node agent.mjs` this is the script dir; bundled as an .exe it's the
@@ -103,6 +110,14 @@ const POLL_MS = _pollClamped ? POLL_DEFAULT_MS : _pollRaw;
 if (_pollClamped) {
   console.log(`note: POLL_MS=${_pollRaw}ms in .env is slower than ${POLL_CAP_MS}ms — using ${POLL_DEFAULT_MS}ms for near-instant tickets (set POLL_ALLOW_SLOW=1 to keep the slower interval).`);
 }
+// Real-time PUSH (v3.6): hold an SSE stream to the server and print the instant a
+// ticket is enqueued. While the stream is healthy the poll is just a safety net, so
+// it backs off to FALLBACK_POLL_MS; if the stream drops we fall straight back to the
+// fast POLL_MS until it reconnects. USE_STREAM=0 forces the old poll-only behaviour.
+const USE_STREAM = String(process.env.USE_STREAM ?? '1') !== '0';
+const RECONNECT_MS = Math.max(1000, Number(process.env.STREAM_RECONNECT_MS) || 3000);
+const FALLBACK_POLL_MS = Math.max(POLL_MS, Number(process.env.FALLBACK_POLL_MS) || 15000);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Network printer connect timeout (was a fixed 8s — an unreachable printer froze
 // the loop for 8s/attempt). A LAN printer answers in ms; 2.5s is generous.
 const NET_CONNECT_MS = Math.max(800, Number(process.env.NET_CONNECT_MS) || 2500);
@@ -480,10 +495,13 @@ function dispatch(job) {
   _printerChains.set(key, next);
 }
 // `polling` only guards the POLL fetch (so slow server responses don't stack polls)
-// — it never waits on printing, unlike the old `ticking` guard.
+// — it never waits on printing, unlike the old `ticking` guard. `_reTick` remembers a
+// fetch requested (by a push event or a poll) WHILE a fetch was already running, so a
+// ticket enqueued mid-fetch is drained immediately after instead of waiting a cycle.
 let polling = false;
+let _reTick = false;
 async function tick() {
-  if (polling) return;
+  if (polling) { _reTick = true; return; }
   polling = true;
   try {
     let jobs = [];
@@ -496,7 +514,45 @@ async function tick() {
     for (const job of (Array.isArray(jobs) ? jobs : [])) dispatch(job);
   } finally {
     polling = false;
+    if (_reTick) { _reTick = false; setImmediate(tick); }   // a push/poll arrived mid-fetch → drain now
   }
+}
+
+// ── real-time push consumer (SSE) ────────────────────────────────────────────
+// Hold a long-lived stream; on each 'job' event fetch + print NOW via tick() (which
+// claims atomically server-side, so this never double-prints alongside the fallback
+// poll). Auto-reconnects. `_streamOn` slows the poll to a safety-net cadence while the
+// stream is healthy and speeds it back up the instant the stream drops.
+let _streamOn = false;
+async function connectStream() {
+  if (!USE_STREAM) return;
+  for (;;) {
+    try {
+      const r = await fetch(api('/print-jobs/stream'), { headers: { ...headers, Accept: 'text/event-stream' } });
+      if (r.status === 401 || r.status === 403) { console.error('stream AUTH FAILED — check AGENT_TOKEN / RESTAURANT_ID.'); await sleep(30000); continue; }
+      if (!r.ok || !r.body) { await sleep(RECONNECT_MS); continue; }
+      _streamOn = true;
+      console.log('print stream connected — real-time tickets on');
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const s = dec.decode(value, { stream: true });
+        if (s.includes('data:')) tick();   // a ticket was queued → fetch + print now
+      }
+    } catch { /* connection dropped */ }
+    if (_streamOn) console.log('print stream disconnected — falling back to fast poll, retrying');
+    _streamOn = false;
+    await sleep(RECONNECT_MS);
+  }
+}
+// Fallback poll — safety net for missed pushes / a dropped stream. Self-reschedules so
+// the gap tracks _streamOn: slow while the stream is healthy, fast when it is down.
+let _pollTimer = null;
+function scheduleNextPoll() {
+  const gap = (USE_STREAM && _streamOn) ? FALLBACK_POLL_MS : POLL_MS;
+  _pollTimer = setTimeout(async () => { try { await tick(); } catch { /* */ } scheduleNextPoll(); }, gap);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -595,13 +651,14 @@ function _applyUpdate(dir) {
   // We keep running until the updater stops this service in a few seconds.
 }
 
-console.log(`Atithi-Setu print agent v${AGENT_VERSION} — ${BASE_URL} / ${RESTAURANT_ID}, polling every ${POLL_MS}ms` + (AUTO_UPDATE ? ' · auto-update on' : ' · auto-update OFF'));
+console.log(`Atithi-Setu print agent v${AGENT_VERSION} — ${BASE_URL} / ${RESTAURANT_ID}, ${USE_STREAM ? 'real-time push + ' : ''}poll ${POLL_MS}ms${USE_STREAM ? ` (fallback ${FALLBACK_POLL_MS}ms while streaming)` : ''}` + (AUTO_UPDATE ? ' · auto-update on' : ' · auto-update OFF'));
 // Eagerly spawn the USB worker at startup so the C# raw-print class compiles NOW
 // (~1-3s) instead of on the first KOT of the session. It sits idle until the first
 // USB job; if it dies it respawns lazily on the next job (sendToUsbFast).
 if (process.platform === 'win32' && !_usbWorker) { try { _usbWorker = _startUsbWorker(); } catch { /* falls back per-job */ } }
 tick();
-setInterval(tick, POLL_MS);
+scheduleNextPoll();     // self-rescheduling fallback poll (fast when no stream, slow while streaming)
+connectStream();        // real-time push (no-op if USE_STREAM=0)
 if (AUTO_UPDATE) {
   setTimeout(checkForUpdate, 60 * 1000);          // ~1 min after start
   setInterval(checkForUpdate, UPDATE_CHECK_MS);   // then periodically

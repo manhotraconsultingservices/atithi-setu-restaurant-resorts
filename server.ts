@@ -646,6 +646,20 @@ async function _getRestaurantSettings(rid: string): Promise<any> {
 }
 function _invalidateRestaurantSettings(rid: string) { _restaurantSettingsCache.delete(rid); }
 
+// ── Real-time print push (SSE) ──────────────────────────────────────────────
+// A per-tenant set of open agent SSE connections (see GET /print-jobs/stream).
+// When a ticket is enqueued we push a one-line "job" event so the agent fetches +
+// prints IMMEDIATELY instead of waiting for its next poll cycle. The push is only a
+// wake-up nudge — never the payload — and the agent claims jobs atomically on fetch,
+// so a spurious or duplicate nudge is harmless. Module-level so both the enqueue
+// helpers (module scope) and the route handlers can reach it.
+const _printStreams = new Map<string, Set<any>>();
+function signalPrintJobs(restaurantId: string): void {
+  const set = _printStreams.get(String(restaurantId));
+  if (!set || set.size === 0) return;
+  for (const r of set) { try { r.write('event: job\ndata: 1\n\n'); } catch { /* stale conn; its close handler cleans up */ } }
+}
+
 // Thermal KOT auto-print: enqueue print jobs for a just-placed order. Groups the
 // order's items by menu category and routes to each active printer whose `station`
 // matches (or station='ALL' → the whole order). Fire-and-forget — NEVER blocks or
@@ -766,6 +780,9 @@ async function enqueuePrintJobsForOrder(restaurantId: string, orderId: string, o
         await enqueueKotJob(p, all);
       }
     }
+    // Real-time push: wake any connected agent so it fetches + prints NOW instead
+    // of waiting for its next poll. No-op when no agent is streaming (poll covers it).
+    signalPrintJobs(restaurantId);
   } catch (e) {
     console.warn(`[print] enqueue failed for order ${orderId}:`, e);
   }
@@ -49114,6 +49131,7 @@ ${data.tenant.name}`;
         "INSERT INTO print_jobs (id, printer_id, order_id, kind, content, status) VALUES (?, ?, ?, 'KOT', ?, 'PENDING')",
         [jid, p.id, null, content]
       );
+      signalPrintJobs(req.params.id);   // push: agent prints the test ticket immediately
       res.json({ success: true, jobId: jid, printer: p.name });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -49141,11 +49159,31 @@ ${data.tenant.name}`;
     if (!(await _printAgentAuth(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
+      // ATOMIC CLAIM (v3.6): flip eligible PENDING (and stale-lease 'SENT') jobs to
+      // 'SENT' + stamp claimed_at, and return them — so two agents or a restart can't
+      // double-fetch the same ticket. FOR UPDATE SKIP LOCKED makes concurrent agents
+      // safe; a 'SENT' job with no ack for >30s is re-claimed (crash recovery). The
+      // ack endpoint moves 'SENT'→'PRINTED' (or back to 'PENDING' on failure).
+      // Backward-compatible: older agents that just poll this endpoint keep working —
+      // they simply see jobs marked 'SENT' behind the scenes.
       const jobs: any[] = await db.query(
-        `SELECT j.id, j.order_id, j.kind, j.content, j.attempts, j.created_at,
+        `WITH claimed AS (
+           UPDATE print_jobs SET status = 'SENT', claimed_at = NOW()
+            WHERE id IN (
+              SELECT id FROM print_jobs
+               WHERE attempts < 6
+                 AND ( (status = 'PENDING' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
+                       OR (status = 'SENT' AND claimed_at IS NOT NULL AND claimed_at <= NOW() - INTERVAL '30 seconds') )
+               ORDER BY created_at
+               LIMIT 50
+               FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, order_id, kind, content, attempts, created_at, printer_id
+         )
+         SELECT c.id, c.order_id, c.kind, c.content, c.attempts, c.created_at,
                 p.name AS printer_name, p.host, p.port, p.conn_type, p.copies
-           FROM print_jobs j LEFT JOIN kitchen_printers p ON p.id = j.printer_id
-          WHERE j.status = 'PENDING' AND j.attempts < 6 AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= NOW()) ORDER BY j.created_at LIMIT 50`
+           FROM claimed c LEFT JOIN kitchen_printers p ON p.id = c.printer_id
+          ORDER BY c.created_at`
       ).catch(() => []);
       // Normalise the connection so a NETWORK printer prints even if it was saved
       // as USB with an IP in it (the config form defaults to USB, and it's an easy
@@ -49186,6 +49224,44 @@ ${data.tenant.name}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
+  // Agent: REAL-TIME PUSH (SSE). The agent holds this connection open; the instant a
+  // ticket is enqueued for this tenant we emit a "job" event and the agent fetches +
+  // prints immediately (no poll wait). The agent keeps a slow fallback poll for
+  // reconnect / missed events, and jobs are claimed atomically on fetch, so the push
+  // is only a wake-up nudge. A 25s heartbeat comment stops Cloudflare / proxies from
+  // dropping an idle stream; X-Accel-Buffering:no + no-transform disable buffering so
+  // events aren't held. Auth is the same agent token as the poll.
+  app.get("/api/restaurant/:id/print-jobs/stream", async (req: Request, res: Response) => {
+    if (!(await _printAgentAuth(req, res))) return;
+    const tenant = String(req.params.id);
+    try { req.socket?.setKeepAlive?.(true); req.socket?.setTimeout?.(0); } catch { /* */ }
+    res.status(200).set({
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    try { (res as any).flushHeaders?.(); } catch { /* */ }
+    res.write('retry: 3000\n\n');          // client reconnect backoff hint
+    res.write(': connected\n\n');           // open the stream
+    res.write('event: job\ndata: 1\n\n');   // nudge once so the agent drains anything queued while it was away
+    let set = _printStreams.get(tenant);
+    if (!set) { set = new Set(); _printStreams.set(tenant, set); }
+    set.add(res);
+    const ka = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* */ } }, 25000);
+    let done = false;
+    const cleanup = () => {
+      if (done) return; done = true;
+      clearInterval(ka);
+      const s = _printStreams.get(tenant);
+      if (s) { s.delete(res); if (s.size === 0) _printStreams.delete(tenant); }
+      try { res.end(); } catch { /* */ }
+    };
+    req.on('close', cleanup);
+    req.on('error', cleanup);
+    res.on('error', cleanup);
+  });
+
   // Staff: print health for the Command Centre indicator — how many kitchen tickets
   // are waiting / have failed, the oldest wait, and whether the on-prem agent is
   // online. Lets the floor SEE a printer problem instead of silently missing tickets.
@@ -49196,9 +49272,9 @@ ${data.tenant.name}`;
       const hasPrinter = Number(printers?.[0]?.c || 0) > 0;
       const row: any = await db.get(`
         SELECT
-          COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+          COUNT(*) FILTER (WHERE status IN ('PENDING','SENT')) AS pending,
           COUNT(*) FILTER (WHERE status = 'FAILED' AND created_at > NOW() - INTERVAL '30 minutes') AS failed,
-          EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE status = 'PENDING')))::int AS oldest_pending_secs
+          EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE status IN ('PENDING','SENT'))))::int AS oldest_pending_secs
         FROM print_jobs
       `).catch(() => null);
       const hb = _agentHeartbeats.get(String(req.params.id));
@@ -49226,7 +49302,7 @@ ${data.tenant.name}`;
          WHERE o.created_at > NOW() - INTERVAL '2 hours'
            AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
            AND o.deleted_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM print_jobs j WHERE j.order_id = o.id AND j.status IN ('PENDING','PRINTED'))
+           AND NOT EXISTS (SELECT 1 FROM print_jobs j WHERE j.order_id = o.id AND j.status IN ('PENDING','SENT','PRINTED'))
          ORDER BY o.created_at DESC LIMIT 100`).catch(() => []);
       let retried = 0;
       for (const o of orphans) { await enqueuePrintJobsForOrder(req.params.id, o.id).catch(() => {}); retried++; }
@@ -49339,6 +49415,7 @@ ${data.tenant.name}`;
         ).catch(() => {});
         queued++;
       }
+      if (queued > 0) signalPrintJobs(req.params.id);   // push: agent prints the bill immediately
       res.json({ success: true, queued, printers: targets.map((p: any) => p.name) });
     } catch (e: any) { res.status(500).json({ error: e?.message || 'failed to queue invoice' }); }
   });
@@ -52116,7 +52193,7 @@ ${data.tenant.name}`;
                 WHERE o.created_at > NOW() - INTERVAL '30 minutes'
                   AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
                   AND o.deleted_at IS NULL
-                  AND NOT EXISTS (SELECT 1 FROM print_jobs j WHERE j.order_id = o.id AND j.status IN ('PENDING','PRINTED'))
+                  AND NOT EXISTS (SELECT 1 FROM print_jobs j WHERE j.order_id = o.id AND j.status IN ('PENDING','SENT','PRINTED'))
                 ORDER BY o.created_at LIMIT 50`
             ).catch(() => []);
             for (const o of orphans) {
@@ -53016,8 +53093,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'i18n-phase2-wave4-pms-reservations',
+    commit_marker: 'print-realtime-sse-claim',
     code_features: [
+      'print-realtime-sse-claim',                    //FEATURE (P1 print latency — real-time SSE push + atomic job claim). The KOT/invoice print pipeline was poll-only (agent polled every POLL_MS → best case ~POLL_MS/2 wait). NOW: (1) real-time PUSH — new SSE endpoint GET /api/restaurant/:id/print-jobs/stream (agent-token auth) holds the agent's connection open; enqueuePrintJobsForOrder + the invoice-queue + the printer-test routes call signalPrintJobs(tenant) (module-level per-tenant Map<tenant,Set<res>>) to emit a 'job' event the instant a ticket is queued, so the agent fetches+prints in ~sub-300ms; 25s heartbeat + X-Accel-Buffering:no keep it alive through Cloudflare. (2) ATOMIC CLAIM — /print-jobs/pending now runs a WITH-claimed CTE (UPDATE ... SET status='SENT', claimed_at=NOW() ... FOR UPDATE SKIP LOCKED RETURNING) instead of a pure SELECT, so two agents / a restart can't double-fetch; a 'SENT' job unacked >30s is re-claimed (crash recovery). ack moves SENT→PRINTED (or →PENDING on failure). New nullable print_jobs.claimed_at (db.ts, idempotent ALTER). Made every 'already-queued?' check SENT-aware to avoid re-enqueue dupes: retry-failed + 60s reconcile NOT EXISTS now IN ('PENDING','SENT','PRINTED'); health counts PENDING+SENT. Backward-compatible: old poll-only agents keep working (they just see jobs go SENT). Pairs with agent v3.6.0 (SSE consumer + slow fallback poll). SERVER change deploys now (claim helps existing agents immediately; SSE dormant until agents update). tsc clean.
       'i18n-phase2-wave4-pms-reservations',          //FEATURE (Localization Phase 2 Wave 4 — the PMS RESERVATIONS page now translates). Wrapped the inline HOTEL_BOOKINGS render: header "Hotel Bookings" + subtitle, the List/Calendar/Dashboard view toggle, Group + New Booking buttons, the Reservations/Groups/Room Assignment sub-tab strip (tr(tab.label)), and the full RESERVATIONS bookings table — search/filter bar ("Search bookings & guest history", Clear filters, guest search placeholder, status <select> options, Search, Source:/All chips, Revenue:/Commission:/Clear banner), both empty states, the "{n} of {n} bookings" count, the Columns show/hide menu (+ tr(c.label) on BOOKING_COL_DEFS), all 18 sortable column headers, the lifecycle status pill (tr(lcStyle.label) — Assigned/Checked-in/Checking out/Checked-out/Cancelled), F&B paid/unpaid badges, Group/match badges, the Check In / Check Out / Settle Group CTAs, the full ··· overflow menu (Edit booking/Documents/Add room/Record advance/Open folio/Move room/Upgrade room/Amend checkout date/Group invoice PDF/Email group invoice/Re-sync to channel/Cancel booking), and the pagination bar. Added ~76 keys to pa.ts + hi.ts (+ dotted pms.bookingsCount to en.ts). Reused existing Reservations/Dashboard/Status/Cancelled keys. Additive, English fallback intact, no logic change. FE-only; tsc clean; vite build clean.
       'i18n-phase2-wave3-restaurant',                //FEATURE (Localization Phase 2 Wave 3 — the RESTAURANT Menu + Orders pages now translate). Wrapped the inline MENU render (header "Restaurant Menu" + "{n} items across {cats} categories", Menu/Recipes CSV Template/Export/Import buttons, Add Item, search placeholder, "All ({n})" filter, empty state, item-card Out of Stock/Special/Half/Full/Edit/Recipe) and the inline ORDERS render (header "Order Management", refresh, search placeholder, date "to", the 7 sortable column headers Order ID/Customer/Table/Items/Amount/Method/Status via tr(label), "N items" cell, payment-status pills PAID/PENDING/Cancelled, "No orders found") with the App-level `tr()`. Added the matching keys to pa.ts + hi.ts (other langs fall back to English). ALSO FIXED a Wave-2 gap: the interpolated keys home.occupiedPct/home.occupancyLine (+ new menu.itemsAcross/menu.allFilter) were missing from en.ts, so English-only tenants would have seen the raw dotted key on the Home occupancy pill — now added to en.ts. Additive, English fallback intact, no logic change. FE-only; tsc clean; vite build clean.
       'i18n-phase2-wave2-home',                      //FEATURE (Localization Phase 2 Wave 2 — the HOME dashboard + nav toggle now translate). Wrapped HotelHomeLaunchpad (added its own `const {t:tr}=useT()`): greeting (Good morning/afternoon/evening), "Welcome back to", the 4 module tiles (Hotel/Restaurant/Spa/Events labels + descriptions + "Manage …" CTAs), the "{pct}% occupied" pill + "{n} in-house · {n} arriving · {n} departing today" line (interpolated keys home.occupiedPct/home.occupancyLine), "Public pages", and the nav Collapse/Expand toggle. ~20 keys added to pa.ts + hi.ts (others fall back to English). Verified live in Punjabi. Additive, English fallback intact. FE-only; vite build clean.
