@@ -16218,43 +16218,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* ── Header ── */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h2 className="text-3xl font-bold font-serif">Restaurant Menu</h2>
-              <p className="text-sm text-[#6b5d52] mt-0.5">{menu.length} items across {[...new Set(menu.map(m => m.category).filter(Boolean))].length} categories</p>
+              <h2 className="text-3xl font-bold font-serif">{tr('Restaurant Menu')}</h2>
+              <p className="text-sm text-[#6b5d52] mt-0.5">{tr('menu.itemsAcross', { n: menu.length, cats: [...new Set(menu.map(m => m.category).filter(Boolean))].length })}</p>
             </div>
             <div className="flex flex-col gap-2 items-end">
               {/* Menu CSV row */}
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mr-1">Menu CSV:</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mr-1">{tr('Menu CSV:')}</span>
                 <button onClick={handleMenuTemplateCsv} title="Download Menu CSV Template"
                   className="px-3 py-2 rounded-xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all">
-                  <Download size={13}/> Template
+                  <Download size={13}/> {tr('Template')}
                 </button>
                 <button onClick={handleMenuExportCsv} title="Export all menu items as CSV"
                   className="px-3 py-2 rounded-xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all">
-                  <Download size={13}/> Export
+                  <Download size={13}/> {tr('Export')}
                 </button>
                 <label className="px-3 py-2 rounded-xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all cursor-pointer">
-                  <Upload size={13}/> Import
+                  <Upload size={13}/> {tr('Import')}
                   <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleCsvFileParse(e.target.files[0]); e.target.value=''; }} />
                 </label>
                 {canWriteTab('MENU') && <button onClick={() => setIsAddingItem(true)}
                   className="bg-[#cc5a16] text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-[#a84612] transition-all">
-                  <Plus size={14}/> Add Item
+                  <Plus size={14}/> {tr('Add Item')}
                 </button>}
               </div>
               {/* Recipe CSV row — bulk-define ingredient mappings for many menu items at once */}
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-700 mr-1">🧾 Recipes CSV:</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-700 mr-1">🧾 {tr('Recipes CSV:')}</span>
                 <button onClick={handleRecipeTemplateCsv} title="Download Recipe CSV Template"
                   className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all">
-                  <Download size={13}/> Template
+                  <Download size={13}/> {tr('Template')}
                 </button>
                 <button onClick={handleRecipeExportCsv} title="Export all recipes (one row per ingredient line)"
                   className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all">
-                  <Download size={13}/> Export
+                  <Download size={13}/> {tr('Export')}
                 </button>
                 <label className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all cursor-pointer">
-                  <Upload size={13}/> Import
+                  <Upload size={13}/> {tr('Import')}
                   <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleRecipeCsvFile(e.target.files[0]); e.target.value=''; }} />
                 </label>
               </div>
@@ -16269,7 +16269,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="relative w-full sm:w-72 shrink-0">
               <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9c8e85]"/>
               <input value={menuSearchTerm} onChange={e => setMenuSearchTerm(e.target.value)}
-                placeholder="Search menu items…"
+                placeholder={tr('Search menu items…')}
                 className="w-full pl-11 pr-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-sm text-[#1a1208] placeholder-[#9c8e85] outline-none focus:ring-2 ring-[#cc5a16]/30 focus:border-[#cc5a16]/40 bg-white"/>
             </div>
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1 flex-wrap">
@@ -16279,7 +16279,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     menuCatFilter === cat
                       ? 'bg-[#cc5a16] text-white border-[#cc5a16]'
                       : 'bg-white border-[#cc5a16]/10 text-[#6b5d52] hover:border-[#cc5a16]/30')}>
-                  {cat === 'ALL' ? `All (${menu.length})` : `${cat} (${menu.filter(m => m.category === cat).length})`}
+                  {cat === 'ALL' ? tr('menu.allFilter', { n: menu.length }) : `${cat} (${menu.filter(m => m.category === cat).length})`}
                 </button>
               ))}
             </div>
@@ -16307,8 +16307,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             if (filtered.length === 0) return (
               <div className="text-center py-16 text-[#9c8e85]">
                 <div className="text-5xl mb-3">🍽️</div>
-                <p className="font-medium">No items found</p>
-                <p className="text-sm mt-1">Try adjusting your search or filters</p>
+                <p className="font-medium">{tr('No items found')}</p>
+                <p className="text-sm mt-1">{tr('Try adjusting your search or filters')}</p>
               </div>
             );
 
@@ -16347,7 +16347,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   {/* Availability badge */}
                   <div className="absolute top-2 left-2">
                     {!item.available && (
-                      <span className="bg-red-500/90 text-white text-[11px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">Out of Stock</span>
+                      <span className="bg-red-500/90 text-white text-[11px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">{tr('Out of Stock')}</span>
                     )}
                   </div>
                 </div>
@@ -16365,7 +16365,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </span>
                     {item.is_daily_special && (
                       <span className="bg-yellow-100 text-yellow-700 text-[11px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5">
-                        <Star size={8} fill="currentColor"/> Special
+                        <Star size={8} fill="currentColor"/> {tr('Special')}
                       </span>
                     )}
                   </div>
@@ -16379,12 +16379,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <div className="flex gap-2 mb-4">
                     {item.price_half ? (
                       <div className="bg-[#faf7f2] px-3 py-1.5 rounded-xl">
-                        <span className="text-[11px] text-[#9c8e85] uppercase font-bold block">Half</span>
+                        <span className="text-[11px] text-[#9c8e85] uppercase font-bold block">{tr('Half')}</span>
                         <span className="text-sm font-bold font-mono">₹{Number(item.price_half).toFixed(2)}</span>
                       </div>
                     ) : null}
                     <div className="bg-[#faf7f2] px-3 py-1.5 rounded-xl">
-                      <span className="text-[11px] text-[#9c8e85] uppercase font-bold block">Full</span>
+                      <span className="text-[11px] text-[#9c8e85] uppercase font-bold block">{tr('Full')}</span>
                       <span className="text-sm font-bold font-mono">₹{Number(item.price_full ?? (item as any).price ?? 0).toFixed(2)}</span>
                     </div>
                   </div>
@@ -16397,7 +16397,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         className="text-[11px] font-bold text-[#1a1208] bg-[#faf7f2] hover:bg-[#cc5a16] hover:text-white border border-[#cc5a16]/20 hover:border-[#cc5a16] flex items-center gap-1 px-2.5 py-1.5 rounded-lg transition-all"
                         title="Edit menu item"
                       >
-                        <Edit3 size={12}/> Edit
+                        <Edit3 size={12}/> {tr('Edit')}
                       </button>}
                       {canWriteTab('MENU') && <button
                         onClick={async () => {
@@ -16408,7 +16408,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         className="text-[11px] font-bold text-[#0E7490] bg-cyan-50 hover:bg-cyan-600 hover:text-white border border-cyan-200 hover:border-cyan-600 flex items-center gap-1 px-2.5 py-1.5 rounded-lg transition-all"
                         title="Recipe — define ingredients per serving for inventory tracking"
                       >
-                        🧾 Recipe
+                        🧾 {tr('Recipe')}
                       </button>}
                       {canWriteTab('MENU') && <button
                         onClick={() => handleToggleDailySpecial(item.id, !item.is_daily_special)}
@@ -20877,13 +20877,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       ) : activeTab === 'ORDERS' ? (
         <div className="space-y-8">
           <div className="flex justify-between items-center">
-            <h2 className="text-3xl font-bold font-serif">Order Management</h2>
+            <h2 className="text-3xl font-bold font-serif">{tr('Order Management')}</h2>
             <button 
               onClick={fetchOrders}
               className="px-4 py-2 bg-white border border-[#cc5a16]/10 rounded-2xl text-[#1a1208] hover:bg-[#faf7f2] transition-all flex items-center gap-2 text-xs font-bold uppercase tracking-widest"
             >
               <RefreshCw size={16} className={cn(loadingOrders && "animate-spin")} />
-              Refresh On demand database queries
+              {tr('Refresh On demand database queries')}
             </button>
           </div>
 
@@ -20893,7 +20893,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
               <input
                 type="text"
-                placeholder="Search by order ID, customer name, phone, table…"
+                placeholder={tr('Search by order ID, customer name, phone, table…')}
                 value={paymentSearch}
                 onChange={e => { setPaymentSearch(e.target.value); setOrdersPage(1); }}
                 className="w-full bg-white border border-[#cc5a16]/10 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 shadow-sm"
@@ -20902,7 +20902,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="flex gap-2 items-center">
               <input type="date" value={ordersDateFrom} onChange={e => { setOrdersDateFrom(e.target.value); setOrdersPage(1); }}
                 className="bg-white border border-[#cc5a16]/10 rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 shadow-sm text-[#1a1208] cursor-pointer" title="From date" />
-              <span className="text-[#9c8e85] text-xs font-bold">to</span>
+              <span className="text-[#9c8e85] text-xs font-bold">{tr('to')}</span>
               <input type="date" value={ordersDateTo} onChange={e => { setOrdersDateTo(e.target.value); setOrdersPage(1); }}
                 className="bg-white border border-[#cc5a16]/10 rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 shadow-sm text-[#1a1208] cursor-pointer" title="To date" />
               {(ordersDateFrom || ordersDateTo) && (
@@ -20934,7 +20934,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         className="px-6 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] cursor-pointer select-none hover:text-[#cc5a16] transition-colors"
                       >
                         <span className="flex items-center gap-1">
-                          {label}
+                          {tr(label)}
                           {paymentSort.col === col
                             ? <span className="text-[#cc5a16]">{paymentSort.dir === 'asc' ? '↑' : '↓'}</span>
                             : <span className="opacity-20">↕</span>}
@@ -20979,7 +20979,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     const safePage   = Math.min(ordersPage, totalPages);
                     const pageRows   = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
                     if (pageRows.length === 0) return (
-                      <tr><td colSpan={7} className="py-16 text-center text-[#9c8e85] italic">No orders found</td></tr>
+                      <tr><td colSpan={7} className="py-16 text-center text-[#9c8e85] italic">{tr('No orders found')}</td></tr>
                     );
                     return pageRows.map(order => (
                     <tr key={order.id} className={cn("hover:bg-[#faf7f2]/30 transition-colors", (order as any).status === 'CANCELLED' && "opacity-50")}>
@@ -20998,7 +20998,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </td>
                       <td className="px-6 py-4 text-sm">{order.tableNumber}</td>
                       <td className="px-6 py-4 text-xs text-[#6b5d52]">
-                        {Array.isArray(order.items) ? order.items.length : 0} item{Array.isArray(order.items) && order.items.length !== 1 ? 's' : ''}
+                        {(() => { const n = Array.isArray(order.items) ? order.items.length : 0; return `${n} ${tr(n === 1 ? 'item' : 'items')}`; })()}
                       </td>
                       <td className="px-6 py-4 font-mono font-bold text-sm">₹{(order.totalAmount ?? 0).toFixed(2)}</td>
                       <td className="px-6 py-4">
@@ -21009,14 +21009,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <td className="px-6 py-4">
                         {(order as any).status === 'CANCELLED' ? (
                           <span className="text-[11px] font-bold uppercase tracking-widest px-3 py-1 rounded-full bg-red-100 text-red-600">
-                            Cancelled
+                            {tr('Cancelled')}
                           </span>
                         ) : (
                           <span className={cn(
                             "text-[11px] font-bold uppercase tracking-widest px-3 py-1 rounded-full",
                             order.paymentStatus === 'PAID' ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"
                           )}>
-                            {order.paymentStatus || 'PENDING'}
+                            {tr(order.paymentStatus || 'PENDING')}
                           </span>
                         )}
                       </td>

@@ -375,4 +375,12 @@ export const en: Record<string, string> = {
   'public.events.venues': 'Our Venues',
   'public.events.services': 'Services We Offer',
   'public.events.capacity': 'Capacity',
+
+  // ── Interpolated (dotted) keys — English source for {var} strings so
+  //    English tenants never see the raw key. Plain English-string keys don't
+  //    need an entry here (they fall back to the key itself). ──────────────────
+  'home.occupiedPct': '{pct}% occupied',
+  'home.occupancyLine': '{inhouse} in-house · {arriving} arriving · {departing} departing today',
+  'menu.itemsAcross': '{n} items across {cats} categories',
+  'menu.allFilter': 'All ({n})',
 };
