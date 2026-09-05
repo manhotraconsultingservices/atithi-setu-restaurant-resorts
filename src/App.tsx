@@ -20,7 +20,7 @@ import { canWriteTab, canDeleteTab } from './perm';
 import { prettyRoleLabel } from './roleLabel';
 import { computeTabVisibility } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
-import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
+import { LanguageProvider, useT, LANGUAGE_NAMES, LANGUAGE_SHORT, SECONDARY_LANGUAGE_OPTIONS, setSecondaryLanguage } from './i18n';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Utensils, 
@@ -2474,6 +2474,7 @@ export default function App() {
               {role} {restaurantId && `| ${restaurantId}`}
             </span>
           </div>
+          {token && restaurantId && role !== 'SUPER_ADMIN' && <LanguageSwitcher />}
           <div className="h-8 w-px bg-[#cc5a16]/10 mx-1" />
           <button
             type="button"
@@ -2544,6 +2545,84 @@ export default function App() {
 // - mentions data is safe
 // - provides concrete contact paths
 // ─────────────────────────────────────────────────────────────────────
+// LanguageSwitcher — compact header toggle between English and the tenant's
+// chosen language. Renders nothing when the tenant hasn't set a language. The
+// user's choice persists per-browser (setLang → localStorage 'appLang'), and
+// overrides the tenant default. Reads the module-level i18n store, so it works
+// anywhere in the app (no provider needed).
+function LanguageSwitcher() {
+  const { lang, secondary, setLang } = useT();
+  if (!secondary || !LANGUAGE_NAMES[secondary]) return null;
+  const opts: string[] = ['en', secondary];
+  return (
+    <div className="flex items-center rounded-xl border border-[#cc5a16]/15 overflow-hidden shrink-0" title="Interface language">
+      {opts.map((l) => (
+        <button
+          key={l}
+          type="button"
+          data-allow-readonly
+          onClick={() => setLang(l)}
+          title={LANGUAGE_NAMES[l] || l}
+          className={cn(
+            "px-2.5 py-1.5 text-[11px] font-bold transition-colors",
+            lang === l ? "bg-[#cc5a16] text-white" : "bg-white text-[#6b5d52] hover:bg-[#faf7f2]"
+          )}
+        >
+          {LANGUAGE_SHORT[l] || String(l).toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// LanguageSettings — first-class Settings section where the owner picks the
+// tenant's app language. Saves via the dedicated /settings/language endpoint
+// (SETTINGS-Edit gated, only touches secondary_language — no field-blanking),
+// then calls onSaved() so App re-fetches the tenant and the whole app re-renders
+// in the new language.
+function LanguageSettings({ restaurantId, token, current, onSaved }: { restaurantId: string; token: string; current: string | null; onSaved: () => void }) {
+  const [sel, setSel] = useState<string>(current || '');
+  const [suggested, setSuggested] = useState<string>('');
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { setSel(current || ''); }, [current]);
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/settings/language`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => (r.ok ? r.json() : null)).then((d) => { if (d) setSuggested(d.suggested_language || ''); }).catch(() => {});
+  }, [restaurantId, token]);
+  const save = async () => {
+    setBusy(true); setSaved(false);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/settings/language`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ secondary_language: sel || null }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({})))?.error || 'Failed to save');
+      setSaved(true); onSaved();
+    } catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="bg-white p-6 rounded-[24px] border border-[#cc5a16]/10 shadow-sm">
+      <h3 className="text-xl font-bold font-serif flex items-center gap-2">🌐 App Language</h3>
+      <p className="text-xs text-[#6b5d52] mt-1 mb-4 max-w-xl">Choose the language your team sees across the app. It becomes the default for everyone on this account; each user can still switch to English from the top bar. Any text not yet translated stays in English.</p>
+      <div className="flex flex-wrap items-end gap-3">
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Interface language</label>
+          <select value={sel} onChange={(e) => setSel(e.target.value)} className="px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white min-w-[220px]">
+            <option value="">English only</option>
+            {SECONDARY_LANGUAGE_OPTIONS.map((l) => <option key={l} value={l}>{LANGUAGE_NAMES[l] || l}</option>)}
+          </select>
+        </div>
+        <button onClick={save} disabled={busy || sel === (current || '')} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-40">{busy ? 'Saving…' : 'Save'}</button>
+        {saved && <span className="text-xs text-emerald-700 font-semibold">✓ Saved</span>}
+      </div>
+      {suggested && LANGUAGE_NAMES[suggested] && (
+        <p className="text-[11px] text-[#9d8b7e] mt-3">Suggested for your state: <strong>{LANGUAGE_NAMES[suggested]}</strong>{sel !== suggested && <> — <button className="text-[#cc5a16] font-semibold hover:underline" onClick={() => setSel(suggested)}>use this</button></>}</p>
+      )}
+    </div>
+  );
+}
+
 // LocationSwitcher (Phase B1) — top-bar dropdown that lets an owner switch
 // between the restaurants they own. Hidden when the user has only one
 // location (most owners). When clicked it shows: every accessible location
@@ -10984,6 +11063,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const isEventsEnabled = !!restaurant && Number((restaurant as any).events_enabled) === 1;
   // Tenant's secondary language for the i18n toggle (null = English-only).
   const secondaryLanguage = (restaurant as any)?.secondary_language || null;
+  // Seed the app-wide language store with the tenant's choice so the whole app
+  // (not just Events) defaults to that language, honouring any per-user override.
+  useEffect(() => { setSecondaryLanguage(secondaryLanguage); }, [secondaryLanguage]);
   // ── Dashboard mode ─────────────────────────────────────────────────────
   // For BOTH-mode tenants (Restaurant + Hotel on the same tenant), the
   // owner can pick which "side" of the business to see in the nav. The
@@ -28545,6 +28627,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : activeTab === 'SETTINGS' ? (
         <div className="max-w-3xl space-y-6">
+          {/* ── App Language (tenant-wide default UI language) ── */}
+          {restaurantId && token && (
+            <LanguageSettings restaurantId={restaurantId} token={token} current={secondaryLanguage} onSaved={fetchRestaurant} />
+          )}
           {/* ── Property Type — READ-ONLY for Owners ─────────────────────
               Activation of the Hotel module is a billing-tier decision so
               the toggle has been moved to the SuperAdmin console
