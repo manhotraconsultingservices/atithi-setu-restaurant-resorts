@@ -3460,6 +3460,47 @@ async function validateBookingRequest(
   return { ok: true, status: 200, error: '' };
 }
 
+// Day-use-aware set of room_ids TAKEN for a requested stay window. The plain
+// half-open overlap (check_in < co AND check_out > ci) collapses to an EMPTY range
+// when check_in == check_out — so a same-day / DAY_USE stay (a day-use check-in, or
+// an event day) would match nothing and the floating-room resolver would re-pick an
+// already-occupied room (false rejection when free rooms exist; the ONLY reason it
+// doesn't oversell is validateBookingRequest's own day-use guard catching it after).
+// This normalises a same-day stay to the night [ci, ci+1) AND also catches EXISTING
+// day-use bookings landing on any day the new stay needs — mirroring
+// validateBookingRequest — so availability is correct on the check-in day and every
+// event day. Used by every floating-room resolver (single / group-create / add-room).
+async function takenRoomIdsForRange(
+  db: any, checkIn: string, checkOut: string, bookingType?: string
+): Promise<Set<string>> {
+  const ci = normaliseDateIso(checkIn);
+  const coRaw = normaliseDateIso(checkOut);
+  const isDayUse = String(bookingType || '').toUpperCase() === 'DAY_USE' || !coRaw || coRaw <= ci;
+  // A same-day stay occupies the single day ci → treat it as the half-open night [ci, ci+1).
+  const effCo = isDayUse
+    ? (() => { const d = new Date(ci + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })()
+    : coRaw;
+  const rows: any[] = await db.query(
+    `SELECT room_id FROM room_bookings
+       WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND room_id IS NOT NULL
+         AND check_in_date < ? AND check_out_date > ?
+     UNION
+     SELECT room_id FROM room_bookings
+       WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND room_id IS NOT NULL
+         AND COALESCE(booking_type,'OVERNIGHT') = 'DAY_USE'
+         AND check_in_date >= ? AND check_in_date < ?`,
+    [effCo, ci, ci, effCo]
+  ).catch(() => []);
+  const holds: any[] = await db.query(
+    "SELECT room_id FROM room_holds WHERE room_id IS NOT NULL AND start_date < ? AND end_date > ?",
+    [effCo, ci]
+  ).catch(() => []);
+  return new Set<string>(
+    [...(Array.isArray(rows) ? rows : []), ...(Array.isArray(holds) ? holds : [])]
+      .map((r: any) => String(r.room_id)).filter((x) => x && x !== 'null' && x !== 'undefined')
+  );
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  computeCancellationRefund — Phase H1
 //
@@ -25313,7 +25354,10 @@ ${data.tenant.name}`;
     for (const c of (await db.query("SELECT line_total FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => [])) || [])
       lines.push({ amount: round2(Number(c.line_total || 0)), gst_rate: evGst, line_type: 'FNB' });
     // Hotel rooms — already priced per-night; keep their own snapshotted (slab) GST.
-    for (const rm of (await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId])) || [])
+    // EXCLUDE 'FAILED' rooms: at confirm time a room the hotel couldn't actually
+    // reserve (no inventory) is recorded as a FAILED line so staff can SEE the
+    // shortfall — but it must NOT be billed. Only QUOTED/BOOKED rooms bill.
+    for (const rm of (await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status NOT IN ('CANCELLED','FAILED')", [bookingId])) || [])
       lines.push({ amount: round2(Number(rm.line_total || 0)), gst_rate: Number(rm.gst_percent ?? 12), line_type: 'HOTEL_ROOM' });
     // Add-ons / supplements — flat-priced lines appended live during the event. Each
     // carries its own snapshotted GST. Defensive: a missing table (older schema)
@@ -26259,7 +26303,7 @@ ${data.tenant.name}`;
           cost += Number(s.cost_snapshot || 0) * Number(s.quantity || 1) * su;
         }
         revenue += await scalar("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_catering WHERE booking_id = ?");
-        revenue += await scalar("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'");
+        revenue += await scalar("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_rooms WHERE booking_id = ? AND status NOT IN ('CANCELLED','FAILED')");
         cost += await scalar("SELECT COALESCE(SUM(cost_snapshot*pax),0) AS v FROM event_booking_catering WHERE booking_id = ?");
         const subtotal = round2(revenue);
         const totalCost = round2(cost);
@@ -27336,7 +27380,9 @@ ${data.tenant.name}`;
       const d = [c.description_snapshot, menu].filter(Boolean).join(' — ');
       lines.push({ line_type: 'FNB', description: `${c.name_snapshot} (${c.package_type_snapshot}) × ${c.pax} pax${d ? ` — ${d}` : ''}`, quantity: c.pax, unit_rate: c.price_per_plate, amount: round2(c.line_total), gst_rate: evGst, gst_amount: 0 });
     }
-    const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED' ORDER BY created_at", [bk.id]);
+    // Bill only rooms that are actually held: exclude 'FAILED' (couldn't be reserved
+    // at confirm — kept visible in the booking view, but never invoiced/quoted).
+    const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status NOT IN ('CANCELLED','FAILED') ORDER BY created_at", [bk.id]);
     for (const rm of rooms) {
       lines.push({ line_type: 'HOTEL_ROOM', description: `${rm.room_type_snapshot} × ${rm.num_rooms} (${_fmtEvDate(rm.check_in_date)} to ${_fmtEvDate(rm.check_out_date)})`, quantity: rm.num_rooms, unit_rate: rm.quoted_rate, amount: round2(rm.line_total), gst_rate: Number(rm.gst_percent ?? 12), gst_amount: 0 });
     }
@@ -33051,15 +33097,9 @@ ${data.tenant.name}`;
             : "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
           isUncat ? [] : [room_type_id]
         );
-        const bConf: any[] = await tenantDb.query(
-          "SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ?",
-          [check_out_date, check_in_date]
-        );
-        const hConf: any[] = await tenantDb.query(
-          "SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?",
-          [check_out_date, check_in_date]
-        );
-        const taken = new Set<string>([...bConf, ...hConf].map((r: any) => String(r.room_id)));
+        // Day-use-aware taken set — correct on the check-in day (a same-day/DAY_USE
+        // stay is normalised to [ci, ci+1) so it isn't an empty range). See takenRoomIdsForRange.
+        const taken = await takenRoomIdsForRange(tenantDb, check_in_date, check_out_date, booking_type);
         const freePool = candidates.filter((c: any) => !taken.has(String(c.id)));
         // Honour the room the staff clicked (calendar cell / Find Rooms) when it
         // is still free — they get that exact room, but it stays FLOATING and
@@ -33480,15 +33520,9 @@ ${data.tenant.name}`;
       // path). Rooms sent with room_type_id are auto-assigned to the first free
       // physical room of that category and written as room_locked=0 (floating).
       // Rooms sent with an explicit room_id remain pinned (room_locked=1).
-      const bConflictRows: any[] = await tenantDb.query(
-        "SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ?",
-        [check_out_date, check_in_date]
-      );
-      const hConflictRows: any[] = await tenantDb.query(
-        "SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?",
-        [check_out_date, check_in_date]
-      );
-      const globalTaken = new Set<string>([...bConflictRows, ...hConflictRows].map((r: any) => String(r.room_id)));
+      // Day-use-aware taken set — correct on the check-in day and every event day
+      // (a same-day/DAY_USE stay is normalised to [ci, ci+1)). See takenRoomIdsForRange.
+      const globalTaken = await takenRoomIdsForRange(tenantDb, check_in_date, check_out_date, booking_type);
       const batchClaimed = new Set<string>();
 
       const resolvedRooms: Array<{ room_id: string; room_locked: number }> = [];
@@ -39664,9 +39698,9 @@ ${data.tenant.name}`;
       // the set as we claim rooms in THIS batch — so the same physical room can't
       // be picked twice in one add call (mirrors group-create's globalTaken/
       // batchClaimed; without it, qty>free silently double-books).
-      const takenRows: any[] = await db.query("SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ? AND room_id IS NOT NULL", [checkOut, checkIn]).catch(() => []);
-      const holdRows: any[] = await db.query("SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?", [checkOut, checkIn]).catch(() => []);
-      const taken = new Set<string>([...takenRows, ...holdRows].map((x: any) => String(x.room_id)));
+      // Day-use-aware taken set — correct on the check-in day and every event day
+      // (the old half-open overlap missed same-day/DAY_USE occupants). See takenRoomIdsForRange.
+      const taken = await takenRoomIdsForRange(db, checkIn, checkOut, bookingType);
       const resolved: any[] = [];
       for (const r of expandedRooms) {
         let roomId: string | null = r.room_id ? String(r.room_id) : null;
@@ -53093,8 +53127,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'print-realtime-sse-claim',
+    commit_marker: 'hotel-availability-dayuse-eventbill-fix',
     code_features: [
+      'hotel-availability-dayuse-eventbill-fix',      //BUGFIX (2 reported bugs — hotel room availability on check-in/event days + event phantom-room billing). (BUG 2, events) On confirm, a hotel room the system couldn't reserve (no inventory) is recorded as a 'FAILED' event_booking_rooms row WITH a line_total so staff can SEE the shortfall — but the billing engine read rooms with `status <> 'CANCELLED'`, which INCLUDED 'FAILED', so the unbookable room's charge stayed in the grand total + invoice + quote + PDF + revenue. FIXED: computeEventBill, assembleEventQuoteLines, and the dashboard revenue calc now use `status NOT IN ('CANCELLED','FAILED')` — the failed room stays visible but is never billed (also retroactively corrects already-confirmed events). (BUG 1 / user guidance "check availability on check-in and event days") The floating-room resolver's `taken` set (single POST /hotel/bookings, group-create, and the group rooms/add that booking add-room delegates to) used a plain half-open overlap `check_in_date < co AND check_out_date > ci`, which is an EMPTY range when check_in==check_out — so a same-day / DAY_USE stay (a day-use check-in or an event day) matched nothing and the resolver re-picked an already-occupied room (validateBookingRequest then falsely rejected it — under-booking; it never oversold because that guard is day-use-aware). FIXED: new shared `takenRoomIdsForRange(db,ci,co,bookingType)` normalises a same-day stay to the night [ci,ci+1) AND unions existing DAY_USE bookings landing on any needed day (mirrors validateBookingRequest) + applies the same to holds; all 3 resolvers now use it. Overnight behaviour unchanged (verified: over-add still 409). Empirically reproduced on RESTO-1003 (overnight over-add correctly 409'd; day-use 2nd room was wrongly rejected pre-fix). tsc clean.
       'print-realtime-sse-claim',                    //FEATURE (P1 print latency — real-time SSE push + atomic job claim). The KOT/invoice print pipeline was poll-only (agent polled every POLL_MS → best case ~POLL_MS/2 wait). NOW: (1) real-time PUSH — new SSE endpoint GET /api/restaurant/:id/print-jobs/stream (agent-token auth) holds the agent's connection open; enqueuePrintJobsForOrder + the invoice-queue + the printer-test routes call signalPrintJobs(tenant) (module-level per-tenant Map<tenant,Set<res>>) to emit a 'job' event the instant a ticket is queued, so the agent fetches+prints in ~sub-300ms; 25s heartbeat + X-Accel-Buffering:no keep it alive through Cloudflare. (2) ATOMIC CLAIM — /print-jobs/pending now runs a WITH-claimed CTE (UPDATE ... SET status='SENT', claimed_at=NOW() ... FOR UPDATE SKIP LOCKED RETURNING) instead of a pure SELECT, so two agents / a restart can't double-fetch; a 'SENT' job unacked >30s is re-claimed (crash recovery). ack moves SENT→PRINTED (or →PENDING on failure). New nullable print_jobs.claimed_at (db.ts, idempotent ALTER). Made every 'already-queued?' check SENT-aware to avoid re-enqueue dupes: retry-failed + 60s reconcile NOT EXISTS now IN ('PENDING','SENT','PRINTED'); health counts PENDING+SENT. Backward-compatible: old poll-only agents keep working (they just see jobs go SENT). Pairs with agent v3.6.0 (SSE consumer + slow fallback poll). SERVER change deploys now (claim helps existing agents immediately; SSE dormant until agents update). tsc clean.
       'i18n-phase2-wave4-pms-reservations',          //FEATURE (Localization Phase 2 Wave 4 — the PMS RESERVATIONS page now translates). Wrapped the inline HOTEL_BOOKINGS render: header "Hotel Bookings" + subtitle, the List/Calendar/Dashboard view toggle, Group + New Booking buttons, the Reservations/Groups/Room Assignment sub-tab strip (tr(tab.label)), and the full RESERVATIONS bookings table — search/filter bar ("Search bookings & guest history", Clear filters, guest search placeholder, status <select> options, Search, Source:/All chips, Revenue:/Commission:/Clear banner), both empty states, the "{n} of {n} bookings" count, the Columns show/hide menu (+ tr(c.label) on BOOKING_COL_DEFS), all 18 sortable column headers, the lifecycle status pill (tr(lcStyle.label) — Assigned/Checked-in/Checking out/Checked-out/Cancelled), F&B paid/unpaid badges, Group/match badges, the Check In / Check Out / Settle Group CTAs, the full ··· overflow menu (Edit booking/Documents/Add room/Record advance/Open folio/Move room/Upgrade room/Amend checkout date/Group invoice PDF/Email group invoice/Re-sync to channel/Cancel booking), and the pagination bar. Added ~76 keys to pa.ts + hi.ts (+ dotted pms.bookingsCount to en.ts). Reused existing Reservations/Dashboard/Status/Cancelled keys. Additive, English fallback intact, no logic change. FE-only; tsc clean; vite build clean.
       'i18n-phase2-wave3-restaurant',                //FEATURE (Localization Phase 2 Wave 3 — the RESTAURANT Menu + Orders pages now translate). Wrapped the inline MENU render (header "Restaurant Menu" + "{n} items across {cats} categories", Menu/Recipes CSV Template/Export/Import buttons, Add Item, search placeholder, "All ({n})" filter, empty state, item-card Out of Stock/Special/Half/Full/Edit/Recipe) and the inline ORDERS render (header "Order Management", refresh, search placeholder, date "to", the 7 sortable column headers Order ID/Customer/Table/Items/Amount/Method/Status via tr(label), "N items" cell, payment-status pills PAID/PENDING/Cancelled, "No orders found") with the App-level `tr()`. Added the matching keys to pa.ts + hi.ts (other langs fall back to English). ALSO FIXED a Wave-2 gap: the interpolated keys home.occupiedPct/home.occupancyLine (+ new menu.itemsAcross/menu.allFilter) were missing from en.ts, so English-only tenants would have seen the raw dotted key on the Home occupancy pill — now added to en.ts. Additive, English fallback intact, no logic change. FE-only; tsc clean; vite build clean.
