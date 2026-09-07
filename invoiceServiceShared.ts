@@ -58,6 +58,7 @@ export const HAS_HINDI_FONT: boolean = (() => {
 export const L = {
   TAX_INVOICE: { en: 'TAX INVOICE',              hi: 'कर चालान' },
   CREDIT_NOTE: { en: 'CREDIT NOTE',              hi: 'क्रेडिट नोट' },
+  PROFORMA_INVOICE: { en: 'PROFORMA INVOICE',    hi: 'प्रोफ़ॉर्मा चालान' },
   ORIGINAL:    { en: 'Original for Recipient',   hi: 'प्राप्तकर्ता के लिए मूल' },
   BILL_TO:     { en: 'BILL TO',                  hi: 'बिल प्राप्तकर्ता' },
   INVOICE_NO:  { en: 'Invoice No',               hi: 'चालान क्रमांक' },
@@ -179,6 +180,9 @@ export interface InvoiceData {
   sameStateGst?: boolean;       // optional manual override; if unset, auto-derived from guest.state vs hotel.state
   // Phase 5: Credit note variant
   isCreditNote?: boolean;
+  // UAT F-1 (Sep 2026): an OPEN folio rendered before settlement is a proforma —
+  // no tax-invoice serial is minted for it; the title reads PROFORMA INVOICE.
+  isProforma?: boolean;
   parentInvoiceNumber?: string; // shown on credit notes as "Against Invoice #..."
   parentInvoiceDate?: string;   // original invoice date — Rule 53(1A)(f) requires number AND date
   creditNoteReason?: string;

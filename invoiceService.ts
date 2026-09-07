@@ -69,7 +69,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         size: 'A4',
         margin: 0,
         info: {
-          Title: `${data.isCreditNote ? 'Credit Note' : 'Tax Invoice'} — ${data.folio.invoiceNumber}`,
+          Title: `${data.isCreditNote ? 'Credit Note' : data.isProforma ? 'Proforma Invoice' : 'Tax Invoice'} — ${data.folio.invoiceNumber}`,
           Author: data.hotel.name,
           Subject: `Folio ${data.folio.id}`,
           Keywords: 'invoice,hotel,folio,GST' + (data.isCreditNote ? ',credit-note' : ''),
@@ -175,7 +175,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       }
 
       // Title box (right) — TAX INVOICE or CREDIT NOTE
-      const titleLabel = data.isCreditNote ? label('CREDIT_NOTE') : label('TAX_INVOICE');
+      const titleLabel = data.isCreditNote ? label('CREDIT_NOTE') : data.isProforma ? label('PROFORMA_INVOICE') : label('TAX_INVOICE');
       doc.roundedRect(PAGE_W - M - 150, y, 150, 32, 4).fillAndStroke(ACCENT, ACCENT);
       doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(13)
          .text(titleLabel.en, PAGE_W - M - 150, y + 6, { width: 150, align: 'center' });

@@ -220,7 +220,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
 
       // ─── Document title strip ──────────────────────────────────────
       // Small, secondary — the brand block above already commands the eye.
-      const titleLbl = isCreditNote ? label('CREDIT_NOTE') : label('TAX_INVOICE');
+      const titleLbl = isCreditNote ? label('CREDIT_NOTE') : data.isProforma ? label('PROFORMA_INVOICE') : label('TAX_INVOICE');
       doc.fillColor(ACCENT_DARK).font('Helvetica-Bold').fontSize(11)
          .text(titleLbl.en, M + 8, y, { characterSpacing: 1.5 });
       if (titleLbl.hi) {

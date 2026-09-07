@@ -1887,6 +1887,19 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_folio_entries_folio   ON folio_entries(folio_id);
   `);
 
+  // UAT F-3 (Sep 2026) — historical GST output-register rows were written at
+  // check-out BEFORE the folio's serial was stamped, so they carry invoice_number
+  // NULL and a GSTR-1 line could not be tied to its invoice. New rows carry the
+  // serial (minted at settlement and passed in). This idempotent DML copies each
+  // folio's stored serial onto its own NULL register rows; folios that never got
+  // a serial stay NULL until they are numbered. Boot-time only (this function runs
+  // once per hotel tenant at startup / enable) — never per request.
+  await tenantDb.exec(`
+    UPDATE gst_output_register g SET invoice_number = f.invoice_number
+      FROM folios f
+     WHERE f.id = g.folio_id AND g.invoice_number IS NULL AND f.invoice_number IS NOT NULL
+  `).catch((e: any) => console.warn('[hotel-schema] GST register serial backfill failed:', e));
+
   // BCG Tariff Phase 1 (7 Jun 2026) — seed the four Indian-hospitality
   // standard meal plans + an empty Peak/Off season skeleton. Owner fills
   // in the actual date ranges + matrix rates via Settings → Tariff
@@ -3151,8 +3164,12 @@ async function writeGstRegisterFromFolio(
   // M3 — a gst_exempt folio is a taxable-value-only supply: record the taxable
   // amount but ZERO GST, so the GSTR-1 output register reconciles with the GL /
   // GSTR-3B instead of carrying phantom output tax on an exempt sale.
-  const folioRow: any = await tenantDb.get("SELECT gst_exempt FROM folios WHERE id = ?", [folioId]);
+  const folioRow: any = await tenantDb.get("SELECT gst_exempt, invoice_number FROM folios WHERE id = ?", [folioId]);
   const isExempt = Number(folioRow?.gst_exempt || 0) === 1;
+  // UAT F-3 — every register row carries the invoice serial (GSTR-1 lines must be
+  // tied to an invoice). Callers mint the serial at settlement and pass it in; if
+  // they don't, read it off the folio (settle paths stamp it before calling here).
+  const invoiceNumber: string | null = opts.invoiceNumber || folioRow?.invoice_number || null;
 
   const entries: any[] = await tenantDb.query(
     `SELECT * FROM folio_entries
@@ -3194,7 +3211,7 @@ async function writeGstRegisterFromFolio(
           igst_rate, igst_amount, total_gst, hsn_sac, supply_type, guest_gstin)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, restaurantId, period, folioId,
-       opts.bookingId || null, opts.invoiceNumber || null, settlementDate,
+       opts.bookingId || null, invoiceNumber, settlementDate,
        entry.entry_type, entry.account_head || null, entry.cost_centre || null,
        taxable, half, cgst, half, sgst,
        0, 0, gstAmt,
@@ -39233,6 +39250,15 @@ ${data.tenant.name}`;
             !!waive,
             loyaltyResolver
           );
+          // UAT F-1/F-3 — mint each child folio's serial at settlement from the single
+          // hotel allocator and stamp it on its GST register rows. Group check-out
+          // previously never numbered child folios at all (they were minted later, from
+          // the restaurant series, on their first PDF render).
+          let childInvNum: string | null = null;
+          if (settled?.id && settled.status === 'settled') {
+            childInvNum = await ensureFolioInvoiceNumber(tenantDb, req.params.id, settled)
+              .catch((e: any) => { console.warn('[group-checkout] serial alloc failed:', e); return null; });
+          }
           await tenantDb.run(
             "UPDATE room_bookings SET status='CHECKED_OUT', actual_checkout_at = ? WHERE id = ?",
             [now, b.id]
@@ -39262,6 +39288,7 @@ ${data.tenant.name}`;
           // Sprint 2 BCG — write GST register for each settled child folio.
           if (settled?.id) {
             writeGstRegisterFromFolio(tenantDb, req.params.id, settled.id, {
+              invoiceNumber: childInvNum,
               invoiceDate: now.slice(0, 10),
               bookingId: b.id,
               guestGstin: b.guest_gstin || null,
@@ -39289,6 +39316,17 @@ ${data.tenant.name}`;
             "UPDATE folios SET status = 'settled', payment_method = ?, settled_at = ? WHERE id = ?",
             [payment_method || 'CASH', now, masterFolioRow.id]
           );
+          // UAT F-1/F-3 — the master (group-charges) folio is a settled tax invoice
+          // too: mint its serial from the single allocator and put its GST rows in
+          // the output register (it is GL-posted below, so GSTR-1 and GSTR-3B agree).
+          const masterInvNum = await ensureFolioInvoiceNumber(tenantDb, req.params.id, { ...masterFolioRow, status: 'settled', settled_at: now })
+            .catch((e: any) => { console.warn('[group-checkout] master folio serial alloc failed:', e); return null; });
+          writeGstRegisterFromFolio(tenantDb, req.params.id, masterFolioRow.id, {
+            invoiceNumber: masterInvNum,
+            invoiceDate: now.slice(0, 10),
+            bookingId: null,
+            guestGstin: null,
+          }).catch(e => console.warn('[group-checkout] master folio GST register write failed:', e));
           totalGrand += Number(masterFolioRow.grand_total || 0);
           // GL (Day Book reflection fix): post the master folio's OWN charges to the
           // ledger (FOLIO-<id>, idempotent + balanced). Previously this raw settle
@@ -41480,6 +41518,16 @@ ${data.tenant.name}`;
       const settled = await settleFolioForBooking(
         req.params.id, b.id, effectiveMethod, discount || 0, !!waive, loyaltyResolver
       );
+      // UAT F-1/F-3 — mint the tax-invoice serial SYNCHRONOUSLY at settlement from
+      // the single hotel allocator, so the GST register rows below carry it and the
+      // fire-and-forget invoice email re-uses it. (Previously the serial was minted
+      // inside the async email block, AFTER the register was written — and off the
+      // "latest folio for the booking", which could be a credit note.)
+      let settledInvNum: string | null = null;
+      if (settled && settled.status === 'settled') {
+        settledInvNum = await ensureFolioInvoiceNumber(tenantDb, req.params.id, settled)
+          .catch((e: any) => { console.warn('[hotel-checkout] serial alloc failed:', e); return null; });
+      }
 
       const now = new Date().toISOString();
       await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ?", [now, req.params.bookingId]);
@@ -41529,6 +41577,7 @@ ${data.tenant.name}`;
 
         // Sprint 2 BCG — GST output register (best-effort, never blocks checkout).
         writeGstRegisterFromFolio(tenantDb, req.params.id, settled.id, {
+          invoiceNumber: settledInvNum,
           invoiceDate: (settled as any).settled_at || new Date().toISOString().slice(0, 10),
           bookingId:   b.id,
           guestGstin:  b.guest_gstin || null,
@@ -41584,13 +41633,16 @@ ${data.tenant.name}`;
           const hotel = check.restaurant;
           // Fetch the settled folio fresh — settled object from
           // settleFolioForBooking may not include all columns we need.
+          // UAT F-2: fetch THE folio that was just settled (by id) — the old
+          // "latest folio for the booking" lookup could return a credit note
+          // issued earlier against this booking and number/mail THAT instead.
+          if (!settled?.id) return;
           const folio: any = await tenantDb.get(
             `SELECT f.*, r.name AS room_name
                FROM folios f
           LEFT JOIN rooms r ON r.id = f.room_id
-              WHERE f.booking_id = ?
-           ORDER BY f.created_at DESC LIMIT 1`,
-            [b.id]
+              WHERE f.id = ?`,
+            [settled.id]
           );
           if (!folio) return;
           const entries: any[] = await tenantDb.query(
@@ -41602,44 +41654,11 @@ ${data.tenant.name}`;
           if (Number(folio.gst_exempt) === 1) entries.forEach((e: any) => { e.gst_amount = 0; e.gst_rate = 0; });
           const invoiceDate = folio.settled_at || folio.created_at || new Date().toISOString();
           const settledDate = new Date(invoiceDate);
-          // BA-FIX-4 (H4, 11 Jun 2026) — persist invoice_number on the
-          // folio to prevent collision. Earlier formula
-          // (INV-YYYY-<last6chars-of-folio-id>) could theoretically
-          // collide if two folios shared the last-6 of their id (rare
-          // but real for high-volume tenants). Use the existing
-          // sequences table + getNextTenantSequence helper that
-          // already powers the restaurant invoice numbering. Reads
-          // existing invoice_number first — only generates new if
-          // never set, so reprints keep the same number.
-          let invNum: string = folio.invoice_number || '';
-          if (!invNum) {
-            try {
-              const seq = await getNextTenantSequence(tenantDb, `hotel-invoice-${settledDate.getFullYear()}`);
-              invNum = `INV-${settledDate.getFullYear()}-${String(seq).padStart(5, '0')}`;
-            } catch {
-              // Fallback to old scheme if sequences table is unavailable
-              invNum = `INV-${settledDate.getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
-            }
-            // Persist on the folio row so subsequent reprints / sends
-            // return the same number. Idempotent on retry.
-            try {
-              await tenantDb.run(
-                "UPDATE folios SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
-                [invNum, folio.id]
-              );
-            } catch (e) {
-              // Column may not exist on older tenant schemas — add it.
-              try {
-                await tenantDb.exec(
-                  "ALTER TABLE folios ADD COLUMN IF NOT EXISTS invoice_number TEXT"
-                );
-                await tenantDb.run(
-                  "UPDATE folios SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
-                  [invNum, folio.id]
-                );
-              } catch { /* truly unrecoverable; log and move on */ }
-            }
-          }
+          // UAT F-1 — the serial was minted at settlement above by the single hotel
+          // allocator; this is a pure re-read (idempotent) — never mints a second
+          // number and never falls back to an inline generator / ALTER TABLE.
+          const invNum: string = await ensureFolioInvoiceNumber(tenantDb, req.params.id, folio);
+          void settledDate;
 
           const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
           const pdf = await generateInvoicePdf({
@@ -44185,7 +44204,7 @@ ${data.tenant.name}`;
       let parentInvoiceNumber: string | undefined;
       let parentInvoiceDate: string | undefined;
       if (isCredit && folio.parent_folio_id) {
-        const parent: any = await tenantDb.get("SELECT id, doc_type, invoice_number, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
+        const parent: any = await tenantDb.get("SELECT id, doc_type, status, invoice_number, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
         if (parent) {
           parentInvoiceNumber = await ensureFolioInvoiceNumber(tenantDb, req.params.id, parent);
           parentInvoiceDate = String(parent.settled_at || parent.created_at || '').slice(0, 10);
@@ -44246,6 +44265,7 @@ ${data.tenant.name}`;
         placeOfSupply: hotel.state,
         // sameStateGst is now auto-derived from guest.state vs hotel.state
         isCreditNote:  isCredit,
+        isProforma:    String(folio.status || '').toLowerCase() === 'open',   // UAT F-1: open folio = proforma, no serial minted
         parentInvoiceNumber,
         parentInvoiceDate,
         creditNoteReason: folio.reason,
@@ -44332,7 +44352,7 @@ ${data.tenant.name}`;
       let parentInvoiceNumber: string | undefined;
       let parentInvoiceDate: string | undefined;
       if (isCredit && folio.parent_folio_id) {
-        const parent: any = await tenantDb.get("SELECT id, doc_type, invoice_number, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
+        const parent: any = await tenantDb.get("SELECT id, doc_type, status, invoice_number, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
         if (parent) {
           parentInvoiceNumber = await ensureFolioInvoiceNumber(tenantDb, req.params.id, parent);
           parentInvoiceDate = String(parent.settled_at || parent.created_at || '').slice(0, 10);
@@ -44374,6 +44394,7 @@ ${data.tenant.name}`;
         })),
         placeOfSupply: hotel.state,
         isCreditNote: isCredit,
+        isProforma:   String(folio.status || '').toLowerCase() === 'open',   // UAT F-1: open folio = proforma, no serial minted
         parentInvoiceNumber,
         parentInvoiceDate,
         creditNoteReason: folio.reason,
@@ -44498,6 +44519,11 @@ ${data.tenant.name}`;
           [eid, cnId, e.entry_type, e.description, e.quantity, e.unit_price, e.amount, e.gst_rate, e.gst_amount, e.id]
         );
       }
+      // UAT F-2 — a credit note is an ISSUED document: mint its CN-<FY>-NNNNN serial
+      // now from its own series (Rule 53). Previously the CN was inserted with no
+      // number and whichever path touched it next numbered it as an INVOICE.
+      await ensureFolioInvoiceNumber(tenantDb, req.params.id, { id: cnId, doc_type: 'CREDIT_NOTE', status: 'settled' })
+        .catch((e: any) => console.warn('[credit-note] serial alloc failed:', e));
       const cn = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [cnId]);
       // Phase 3.2 — reverse the parent folio's GL settlement as a DATED contra
       // journal keyed to the credit note (FOLIO-<cnId>), so revenue, output GST
@@ -44788,22 +44814,14 @@ ${data.tenant.name}`;
       await recomputeFolioTotals(tenantDb, folio.id);
       const now = new Date().toISOString();
 
-      // Generate invoice number (same logic as hotel checkout)
-      const settledDate = new Date(now);
-      let invNum = folio.invoice_number || '';
-      if (!invNum) {
-        try {
-          const seq = await getNextTenantSequence(tenantDb, `hotel-invoice-${settledDate.getFullYear()}`);
-          invNum = `INV-${settledDate.getFullYear()}-${String(seq).padStart(5, '0')}`;
-        } catch {
-          invNum = `INV-${settledDate.getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
-        }
-      }
-
+      // UAT F-1/F-2 — flip to settled FIRST, then mint from the single hotel
+      // allocator (ensureFolioInvoiceNumber): the serial is issued at settlement,
+      // never before, and never from an inline generator / the restaurant series.
       await tenantDb.run(
-        "UPDATE folios SET status = 'settled', settled_at = ?, payment_method = ?, invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
-        [now, payment_method, invNum, folio.id]
+        "UPDATE folios SET status = 'settled', settled_at = ?, payment_method = ? WHERE id = ?",
+        [now, payment_method, folio.id]
       );
+      const invNum: string = await ensureFolioInvoiceNumber(tenantDb, req.params.id, { ...folio, status: 'settled', settled_at: now });
 
       // Record a FINAL payment covering the outstanding balance
       const refreshed: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
@@ -46770,44 +46788,56 @@ ${data.tenant.name}`;
     }
   };
 
-  // GST-B1: allocate a consecutive, per-FY serial for a HOTEL folio invoice or
-  // credit note. Hotels always get a serial (accommodation invoices must carry a
-  // valid Rule 46(b) number regardless of the tenant's RANDOM/SEQUENTIAL toggle).
-  // Invoices share the tenant's single `invoice` series (with restaurant orders);
-  // credit notes get their own `credit-note` series with a CN- prefix. The caller
-  // PERSISTS the returned number on folios.invoice_number so it is stable across
-  // re-renders and forms a gap-free series.
+  // GST-B1 → UAT F-1/F-2 (Sep 2026): THE ONE allocator for HOTEL folio serials.
+  // Every hotel tenant's issued invoices already run on the per-FY
+  // `hotel-invoice-<FY>` sequence (INV-<FY>-NNNNN, 5-digit) — check-out and the
+  // standalone settle minted from it INLINE, while this render-path allocator drew
+  // from the tenant's shared RESTAURANT `invoice` series (INV-1014 / INV-2026-0335
+  // style, no year when yearly-reset is off) and the credit-note flow never minted
+  // at all (a CN later got INV-2026-00043 from the invoice series). Every path
+  // wrote with COALESCE, so whichever touched the folio first won → a mixed,
+  // non-consecutive series (Rule 46(b)) and credit notes numbered as invoices
+  // (Rule 53). Now every path calls ensureFolioInvoiceNumber → this:
+  //   invoices     → sequence `hotel-invoice-<FY>`      → INV-<FY>-NNNNN
+  //   credit notes → sequence `hotel-credit-note-<FY>`  → CN-<FY>-NNNNN
+  // FY = Indian financial year (Apr–Mar, getYearIST). Hotel serials are ALWAYS
+  // sequential and independent of the restaurant RANDOM/SEQUENTIAL toggle and
+  // custom prefix (those stay restaurant-only). Continues each tenant's existing
+  // hotel-invoice-<FY> counter unchanged (no renumbering of issued documents).
   const allocateFolioSerial = async (
     tenantDb: DbInterface, restaurantId: string, isCredit: boolean
   ): Promise<string | null> => {
     try {
-      const r: any = await centralDb.get(
-        `SELECT invoice_number_prefix, invoice_yearly_reset FROM restaurants WHERE id = ?`, [restaurantId]);
-      const yearlyReset = Number(r?.invoice_yearly_reset ?? 1) !== 0;   // default: reset per FY
-      const year = yearlyReset ? getYearIST() : null;
-      if (isCredit) {
-        const n = await getNextTenantSequence(tenantDb, yearlyReset ? `credit-note-${year}` : 'credit-note');
-        return formatInvoiceNumber('CN-', n, year);
-      }
-      const rawPrefix = String(r?.invoice_number_prefix || '').trim();
-      const prefix = (rawPrefix && INVOICE_PREFIX_RE.test(rawPrefix)) ? rawPrefix : 'INV-';
-      const n = await getNextTenantSequence(tenantDb, yearlyReset ? `invoice-${year}` : 'invoice');
-      return formatInvoiceNumber(prefix, n, year);
+      const year = getYearIST();
+      const n = await getNextTenantSequence(tenantDb, isCredit ? `hotel-credit-note-${year}` : `hotel-invoice-${year}`);
+      return `${isCredit ? 'CN-' : 'INV-'}${year}-${String(n).padStart(5, '0')}`;
     } catch (err) {
       console.warn(`[invoice-numbering] folio serial alloc failed for ${restaurantId}:`, err);
       return null;
     }
   };
+  // Statuses whose document has actually been ISSUED — the only time a serial may
+  // be minted. ('closed' = spa folios; 'superseded' = a revised invoice's original.)
+  const FOLIO_SERIAL_STATUSES = new Set(['settled', 'superseded', 'closed']);
   // Allocate-or-reuse the persisted serial for a folio. Idempotent: sets
   // folios.invoice_number once (COALESCE), re-reads, and returns the stored value
-  // so re-rendering the PDF never mints a new number.
+  // so re-rendering the PDF never mints a new number. UAT F-1: an OPEN folio is a
+  // proforma — rendering/emailing it must NOT burn a serial (a later cancellation
+  // would leave a gap in the consecutive series and the number would predate the
+  // supply), so it gets a NON-persisted PROFORMA-<id> label; the real serial is
+  // minted at settlement (check-out / group check-out / settle / credit-note).
   const ensureFolioInvoiceNumber = async (tenantDb: DbInterface, restaurantId: string, folio: any): Promise<string> => {
     if (folio?.invoice_number) return String(folio.invoice_number);
+    const tail = String(folio?.id || '').slice(-6).toUpperCase();
+    const status = String(folio?.status || '').toLowerCase();
+    if (!FOLIO_SERIAL_STATUSES.has(status)) {
+      return status === 'open' ? `PROFORMA-${tail}` : `VOID-${tail}`;
+    }
     const isCredit = folio?.doc_type === 'CREDIT_NOTE';
     let num = await allocateFolioSerial(tenantDb, restaurantId, isCredit);
     if (!num) {
       const yr = new Date(folio?.settled_at || folio?.created_at || Date.now()).getFullYear();
-      num = `${isCredit ? 'CN-' : 'INV-'}${yr}-${String(folio?.id || '').slice(-6).toUpperCase()}`;
+      num = `${isCredit ? 'CN-' : 'INV-'}${yr}-${tail}`;
     }
     try {
       await tenantDb.run("UPDATE folios SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?", [num, folio.id]);
@@ -53152,8 +53182,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-availcount-dayuse-and-noroomid-fix',
+    commit_marker: 'gst-serial-unify-f1f2f3',
     code_features: [
+      'gst-serial-unify-f1f2f3',                      //BUGFIX (UAT findings F-1/F-2/F-3 — hotel GST document serials). (F-1) Hotel tax invoices were numbered by THREE generators: the PDF/email render path (allocateFolioSerial) drew from the tenant\'s shared RESTAURANT `invoice` series (INV-1014 / INV-2026-0335 — no year when yearly-reset is off, 4-digit), while check-out and the standalone settle minted INLINE from `hotel-invoice-YYYY` (INV-2026-000NN); every path wrote with COALESCE so whichever touched the folio first won → a mixed, non-consecutive series (Rule 46(b)). Group check-out never numbered child folios at all. (F-2) The credit-note endpoint never minted a serial, and the check-out email block numbered the "latest folio for the booking" — which could be that CN — so a credit note consumed INV-2026-00043 from the invoice series (Rule 53 needs its own CN series). (F-3) The GST output register was written at check-out BEFORE the serial was stamped, so every register row had invoice_number NULL (GSTR-1 lines untied to invoices). FIX — ONE allocator: allocateFolioSerial now uses `hotel-invoice-<FY>` → INV-<FY>-NNNNN and `hotel-credit-note-<FY>` → CN-<FY>-NNNNN (FY = Apr–Mar via getYearIST; continues every tenant\'s existing hotel-invoice counter, no renumbering); ensureFolioInvoiceNumber mints ONLY for issued folios (settled/superseded/closed) — an OPEN folio rendered before settlement gets a non-persisted PROFORMA-<id> label + "PROFORMA INVOICE" title (both PDF templates) so a render never burns a serial. All settlement paths now mint synchronously via the allocator and pass the serial into writeGstRegisterFromFolio: individual check-out (before the register write; the email block re-reads by settled.id), group check-out (each child + the master group folio, which now also gets register rows), standalone settle (status flipped first, then minted), credit-note creation (CN- minted at insert). writeGstRegisterFromFolio also falls back to folios.invoice_number. Historical register rows: idempotent boot-time DML in createHotelTables copies each folio\'s stored serial onto its NULL register rows (settled folios that never got a serial stay NULL until numbered). Removed the inline generators + the ALTER TABLE-in-a-request-handler fallback. Smoke: TC-GST-SERIAL-PROFORMA/INV/REGISTER/CN. tsc clean.',
       'hotel-availcount-dayuse-and-noroomid-fix',     //BUGFIX (availability COUNT over-reported free rooms on an event/day-use day + no booking without a room_id). (COUNT BUG) Owner: adding a room shows "Queens Room 1 available" while the actual add correctly says "no room available" (count disagrees with the resolver). Root cause: the availability COUNT is derived from occupancy queries that used the plain half-open overlap `check_in_date < end AND check_out_date > start`, which MISSES a DAY_USE / same-day booking on the boundary day (its check_out == check_in == start), so a day-use-occupied room reads free → over-count. The RESOLVER (takenRoomIdsForRange) is already day-use-aware, hence the disagreement. FIXED to be day-use-aware everywhere the count comes from: (1) `GET /hotel/availability` grid bookings query + the per-booking stamp (same-day → stamp the single day); (2) `GET /hotel/find-available-rooms` bookingConflicts query; (3) the FE `conflictRoomIds` in BOTH the group-booking modal and the add-room modal (App.tsx — the old `dayUseSameDate` special-case only caught day-use↔day-use; now normalises a same-day stay to [d, d+1) on both sides). The events "N/M free" card reads /hotel/availability so it's fixed too. (NO-ROOM-ID GUARD) Closed the ONLY code path that could insert a room_booking with a NULL room_id — the SuperAdmin data-migration import (`r.room_id || null`) — it now resolves a real room (id → room_number → room_name) or REJECTS the row, so no room-less/inventory-invisible booking is imported (every other insert path already resolves + guards room_id). tsc + vite build clean.
       'hotel-availability-dayuse-eventbill-fix',      //BUGFIX (2 reported bugs — hotel room availability on check-in/event days + event phantom-room billing). (BUG 2, events) On confirm, a hotel room the system couldn't reserve (no inventory) is recorded as a 'FAILED' event_booking_rooms row WITH a line_total so staff can SEE the shortfall — but the billing engine read rooms with `status <> 'CANCELLED'`, which INCLUDED 'FAILED', so the unbookable room's charge stayed in the grand total + invoice + quote + PDF + revenue. FIXED: computeEventBill, assembleEventQuoteLines, and the dashboard revenue calc now use `status NOT IN ('CANCELLED','FAILED')` — the failed room stays visible but is never billed (also retroactively corrects already-confirmed events). (BUG 1 / user guidance "check availability on check-in and event days") The floating-room resolver's `taken` set (single POST /hotel/bookings, group-create, and the group rooms/add that booking add-room delegates to) used a plain half-open overlap `check_in_date < co AND check_out_date > ci`, which is an EMPTY range when check_in==check_out — so a same-day / DAY_USE stay (a day-use check-in or an event day) matched nothing and the resolver re-picked an already-occupied room (validateBookingRequest then falsely rejected it — under-booking; it never oversold because that guard is day-use-aware). FIXED: new shared `takenRoomIdsForRange(db,ci,co,bookingType)` normalises a same-day stay to the night [ci,ci+1) AND unions existing DAY_USE bookings landing on any needed day (mirrors validateBookingRequest) + applies the same to holds; all 3 resolvers now use it. Overnight behaviour unchanged (verified: over-add still 409). Empirically reproduced on RESTO-1003 (overnight over-add correctly 409'd; day-use 2nd room was wrongly rejected pre-fix). tsc clean.
       'print-realtime-sse-claim',                    //FEATURE (P1 print latency — real-time SSE push + atomic job claim). The KOT/invoice print pipeline was poll-only (agent polled every POLL_MS → best case ~POLL_MS/2 wait). NOW: (1) real-time PUSH — new SSE endpoint GET /api/restaurant/:id/print-jobs/stream (agent-token auth) holds the agent's connection open; enqueuePrintJobsForOrder + the invoice-queue + the printer-test routes call signalPrintJobs(tenant) (module-level per-tenant Map<tenant,Set<res>>) to emit a 'job' event the instant a ticket is queued, so the agent fetches+prints in ~sub-300ms; 25s heartbeat + X-Accel-Buffering:no keep it alive through Cloudflare. (2) ATOMIC CLAIM — /print-jobs/pending now runs a WITH-claimed CTE (UPDATE ... SET status='SENT', claimed_at=NOW() ... FOR UPDATE SKIP LOCKED RETURNING) instead of a pure SELECT, so two agents / a restart can't double-fetch; a 'SENT' job unacked >30s is re-claimed (crash recovery). ack moves SENT→PRINTED (or →PENDING on failure). New nullable print_jobs.claimed_at (db.ts, idempotent ALTER). Made every 'already-queued?' check SENT-aware to avoid re-enqueue dupes: retry-failed + 60s reconcile NOT EXISTS now IN ('PENDING','SENT','PRINTED'); health counts PENDING+SENT. Backward-compatible: old poll-only agents keep working (they just see jobs go SENT). Pairs with agent v3.6.0 (SSE consumer + slow fallback poll). SERVER change deploys now (claim helps existing agents immediately; SSE dormant until agents update). tsc clean.
