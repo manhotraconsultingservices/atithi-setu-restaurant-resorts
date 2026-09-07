@@ -32462,15 +32462,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const coStr = normaliseBookingDate(draft.check_out_date);
         const conflictRoomIds = new Set<string>();
         if (ciStr && coStr) {
+          // Day-use-aware overlap — normalise a same-day stay to the night [d, d+1) on
+          // both sides so a fully-booked type isn't over-reported (matches the server grid).
+          const addDay = (s: string) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
+          const myEffCo = (draft.booking_type === 'DAY_USE' || coStr <= ciStr) ? addDay(ciStr) : coStr;
           for (const b of hotelBookings) {
             if (!b.room_id) continue;
             if (b.status === 'CANCELLED' || b.status === 'CHECKED_OUT') continue;
             const bci = normaliseBookingDate(b.check_in_date);
             const bco = normaliseBookingDate(b.check_out_date);
             if (!bci || !bco) continue;
-            const overlap = bci < coStr && bco > ciStr;
-            const dayUseSameDate = draft.booking_type === 'DAY_USE' && b.booking_type === 'DAY_USE' && bci === ciStr;
-            if (overlap || dayUseSameDate) conflictRoomIds.add(b.room_id);
+            const bEffCo = (b.booking_type === 'DAY_USE' || bco <= bci) ? addDay(bci) : bco;
+            if (bci < myEffCo && bEffCo > ciStr) conflictRoomIds.add(b.room_id);
           }
         }
         // All rooms free for these dates — category-level, no per-room pick dedup
@@ -34771,6 +34774,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const myId  = editingBooking.id;
                   const conflictRoomIds = new Set<string>();
                   if (ciStr && coStr) {
+                    // Day-use-aware overlap — a same-day stay (DAY_USE, or check-out not
+                    // after check-in) occupies the single night [d, d+1); normalise BOTH
+                    // sides so a fully-booked type isn't over-reported as "1 available" on
+                    // an event / day-use day (matches the server availability grid).
+                    const addDay = (s: string) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
+                    const myEffCo = (bt === 'DAY_USE' || coStr <= ciStr) ? addDay(ciStr) : coStr;
                     for (const b of hotelBookings) {
                       if (myId && b.id === myId) continue;
                       if (!b.room_id) continue;
@@ -34778,13 +34787,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const bci = normaliseBookingDate(b.check_in_date);
                       const bco = normaliseBookingDate(b.check_out_date);
                       if (!bci || !bco) continue;
-                      // Half-open interval overlap: [bci, bco) ∩ [ci, co) ≠ ∅
-                      const overlap = bci < coStr && bco > ciStr;
-                      // Same-date day-use ↔ day-use collision (the half-open
-                      // check above doesn't fire when ci === co).
-                      const dayUseSameDate =
-                        bt === 'DAY_USE' && b.booking_type === 'DAY_USE' && bci === ciStr;
-                      if (overlap || dayUseSameDate) conflictRoomIds.add(b.room_id);
+                      const bEffCo = (b.booking_type === 'DAY_USE' || bco <= bci) ? addDay(bci) : bco;
+                      if (bci < myEffCo && bEffCo > ciStr) conflictRoomIds.add(b.room_id);
                     }
                   }
                   // Visible rooms = not in conflict AND not in maintenance/blocked.

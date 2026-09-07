@@ -30305,8 +30305,8 @@ ${data.tenant.name}`;
            FROM room_bookings
           WHERE status NOT IN ('CANCELLED', 'CHECKED_OUT')
             AND check_in_date < ?
-            AND check_out_date > ?`,
-        [end, start]
+            AND (check_out_date > ? OR ((COALESCE(booking_type,'OVERNIGHT') = 'DAY_USE' OR check_out_date <= check_in_date) AND check_in_date >= ?))`,
+        [end, start, start]
       );
       // Include CHECKED_OUT in the same window (greyed on the calendar)
       const recentCheckouts: any[] = await tenantDb.query(
@@ -30356,7 +30356,11 @@ ${data.tenant.name}`;
       for (const b of bookings) {
         const bci = iso(b.check_in_date);
         const bco = iso(b.check_out_date);
-        if (b.booking_type === 'DAY_USE' && bci === bco) {
+        // Same-day stay (DAY_USE, or any booking whose check-out isn't after check-in)
+        // occupies exactly its check-in day — mark just that day. The plain overnight
+        // loop below would miss it (its [bci, bco) interval is empty), which is what
+        // over-reported a fully-booked type as "1 available" on an event/day-use day.
+        if (b.booking_type === 'DAY_USE' || bco <= bci) {
           if (bci >= start && bci < end) stamp(b.room_id, bci, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: 'DAY_USE', check_in_date: bci, check_out_date: bco, room_locked: b.room_locked });
           continue;
         }
@@ -30443,9 +30447,9 @@ ${data.tenant.name}`;
            FROM room_bookings
           WHERE status NOT IN ('CANCELLED', 'CHECKED_OUT')
             AND check_in_date < ?
-            AND check_out_date > ?
+            AND (check_out_date > ? OR ((COALESCE(booking_type,'OVERNIGHT') = 'DAY_USE' OR check_out_date <= check_in_date) AND check_in_date >= ?))
             ${excludeBookingId ? 'AND id <> ?' : ''}`,
-        excludeBookingId ? [end, start, excludeBookingId] : [end, start]
+        excludeBookingId ? [end, start, start, excludeBookingId] : [end, start, start]
       );
       const holdConflicts: any[] = await tenantDb.query(
         `SELECT room_id, kind, end_date AS conflict_end
@@ -52524,6 +52528,27 @@ ${data.tenant.name}`;
           results.push({ index: i, error: "Missing required: guest_name, check_in_date, check_out_date" });
           continue;
         }
+        // A booking CANNOT exist without a room — the availability model counts by
+        // room_id, so a NULL room_id would silently not decrement inventory (oversell).
+        // Resolve a real room: explicit room_id (verified) → room_number/name → else
+        // REJECT the row (no phantom, room-less booking is ever imported).
+        let migRoomId: string | null = r.room_id != null && String(r.room_id).trim() !== '' ? String(r.room_id).trim() : null;
+        if (migRoomId) {
+          const hit: any = await tenantDb.get("SELECT id FROM rooms WHERE id = ?", [migRoomId]).catch(() => null);
+          if (!hit) migRoomId = null;   // stale / unknown id → try to re-resolve by number/name
+        }
+        if (!migRoomId && r.room_number != null && String(r.room_number).trim() !== '') {
+          const byNum: any = await tenantDb.get("SELECT id FROM rooms WHERE room_number = ? OR name = ? LIMIT 1", [String(r.room_number).trim(), String(r.room_number).trim()]).catch(() => null);
+          migRoomId = byNum?.id || null;
+        }
+        if (!migRoomId && r.room_name != null && String(r.room_name).trim() !== '') {
+          const byName: any = await tenantDb.get("SELECT id FROM rooms WHERE name = ? LIMIT 1", [String(r.room_name).trim()]).catch(() => null);
+          migRoomId = byName?.id || null;
+        }
+        if (!migRoomId) {
+          results.push({ index: i, error: "A booking cannot exist without a room — provide a valid room_id (or a room_number / room_name that matches an existing room)." });
+          continue;
+        }
         const rnd = Math.random().toString(36).slice(2, 7);
         const id = `BK-MIG-${Date.now()}-${rnd}-${i}`;
         try {
@@ -52542,7 +52567,7 @@ ${data.tenant.name}`;
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           `, [
             id,
-            r.room_id || null,
+            migRoomId,
             String(r.guest_name),
             r.guest_phone || null,
             r.guest_email || null,
@@ -53127,8 +53152,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-availability-dayuse-eventbill-fix',
+    commit_marker: 'hotel-availcount-dayuse-and-noroomid-fix',
     code_features: [
+      'hotel-availcount-dayuse-and-noroomid-fix',     //BUGFIX (availability COUNT over-reported free rooms on an event/day-use day + no booking without a room_id). (COUNT BUG) Owner: adding a room shows "Queens Room 1 available" while the actual add correctly says "no room available" (count disagrees with the resolver). Root cause: the availability COUNT is derived from occupancy queries that used the plain half-open overlap `check_in_date < end AND check_out_date > start`, which MISSES a DAY_USE / same-day booking on the boundary day (its check_out == check_in == start), so a day-use-occupied room reads free → over-count. The RESOLVER (takenRoomIdsForRange) is already day-use-aware, hence the disagreement. FIXED to be day-use-aware everywhere the count comes from: (1) `GET /hotel/availability` grid bookings query + the per-booking stamp (same-day → stamp the single day); (2) `GET /hotel/find-available-rooms` bookingConflicts query; (3) the FE `conflictRoomIds` in BOTH the group-booking modal and the add-room modal (App.tsx — the old `dayUseSameDate` special-case only caught day-use↔day-use; now normalises a same-day stay to [d, d+1) on both sides). The events "N/M free" card reads /hotel/availability so it's fixed too. (NO-ROOM-ID GUARD) Closed the ONLY code path that could insert a room_booking with a NULL room_id — the SuperAdmin data-migration import (`r.room_id || null`) — it now resolves a real room (id → room_number → room_name) or REJECTS the row, so no room-less/inventory-invisible booking is imported (every other insert path already resolves + guards room_id). tsc + vite build clean.
       'hotel-availability-dayuse-eventbill-fix',      //BUGFIX (2 reported bugs — hotel room availability on check-in/event days + event phantom-room billing). (BUG 2, events) On confirm, a hotel room the system couldn't reserve (no inventory) is recorded as a 'FAILED' event_booking_rooms row WITH a line_total so staff can SEE the shortfall — but the billing engine read rooms with `status <> 'CANCELLED'`, which INCLUDED 'FAILED', so the unbookable room's charge stayed in the grand total + invoice + quote + PDF + revenue. FIXED: computeEventBill, assembleEventQuoteLines, and the dashboard revenue calc now use `status NOT IN ('CANCELLED','FAILED')` — the failed room stays visible but is never billed (also retroactively corrects already-confirmed events). (BUG 1 / user guidance "check availability on check-in and event days") The floating-room resolver's `taken` set (single POST /hotel/bookings, group-create, and the group rooms/add that booking add-room delegates to) used a plain half-open overlap `check_in_date < co AND check_out_date > ci`, which is an EMPTY range when check_in==check_out — so a same-day / DAY_USE stay (a day-use check-in or an event day) matched nothing and the resolver re-picked an already-occupied room (validateBookingRequest then falsely rejected it — under-booking; it never oversold because that guard is day-use-aware). FIXED: new shared `takenRoomIdsForRange(db,ci,co,bookingType)` normalises a same-day stay to the night [ci,ci+1) AND unions existing DAY_USE bookings landing on any needed day (mirrors validateBookingRequest) + applies the same to holds; all 3 resolvers now use it. Overnight behaviour unchanged (verified: over-add still 409). Empirically reproduced on RESTO-1003 (overnight over-add correctly 409'd; day-use 2nd room was wrongly rejected pre-fix). tsc clean.
       'print-realtime-sse-claim',                    //FEATURE (P1 print latency — real-time SSE push + atomic job claim). The KOT/invoice print pipeline was poll-only (agent polled every POLL_MS → best case ~POLL_MS/2 wait). NOW: (1) real-time PUSH — new SSE endpoint GET /api/restaurant/:id/print-jobs/stream (agent-token auth) holds the agent's connection open; enqueuePrintJobsForOrder + the invoice-queue + the printer-test routes call signalPrintJobs(tenant) (module-level per-tenant Map<tenant,Set<res>>) to emit a 'job' event the instant a ticket is queued, so the agent fetches+prints in ~sub-300ms; 25s heartbeat + X-Accel-Buffering:no keep it alive through Cloudflare. (2) ATOMIC CLAIM — /print-jobs/pending now runs a WITH-claimed CTE (UPDATE ... SET status='SENT', claimed_at=NOW() ... FOR UPDATE SKIP LOCKED RETURNING) instead of a pure SELECT, so two agents / a restart can't double-fetch; a 'SENT' job unacked >30s is re-claimed (crash recovery). ack moves SENT→PRINTED (or →PENDING on failure). New nullable print_jobs.claimed_at (db.ts, idempotent ALTER). Made every 'already-queued?' check SENT-aware to avoid re-enqueue dupes: retry-failed + 60s reconcile NOT EXISTS now IN ('PENDING','SENT','PRINTED'); health counts PENDING+SENT. Backward-compatible: old poll-only agents keep working (they just see jobs go SENT). Pairs with agent v3.6.0 (SSE consumer + slow fallback poll). SERVER change deploys now (claim helps existing agents immediately; SSE dormant until agents update). tsc clean.
       'i18n-phase2-wave4-pms-reservations',          //FEATURE (Localization Phase 2 Wave 4 — the PMS RESERVATIONS page now translates). Wrapped the inline HOTEL_BOOKINGS render: header "Hotel Bookings" + subtitle, the List/Calendar/Dashboard view toggle, Group + New Booking buttons, the Reservations/Groups/Room Assignment sub-tab strip (tr(tab.label)), and the full RESERVATIONS bookings table — search/filter bar ("Search bookings & guest history", Clear filters, guest search placeholder, status <select> options, Search, Source:/All chips, Revenue:/Commission:/Clear banner), both empty states, the "{n} of {n} bookings" count, the Columns show/hide menu (+ tr(c.label) on BOOKING_COL_DEFS), all 18 sortable column headers, the lifecycle status pill (tr(lcStyle.label) — Assigned/Checked-in/Checking out/Checked-out/Cancelled), F&B paid/unpaid badges, Group/match badges, the Check In / Check Out / Settle Group CTAs, the full ··· overflow menu (Edit booking/Documents/Add room/Record advance/Open folio/Move room/Upgrade room/Amend checkout date/Group invoice PDF/Email group invoice/Re-sync to channel/Cancel booking), and the pagination bar. Added ~76 keys to pa.ts + hi.ts (+ dotted pms.bookingsCount to en.ts). Reused existing Reservations/Dashboard/Status/Cancelled keys. Additive, English fallback intact, no logic change. FE-only; tsc clean; vite build clean.
