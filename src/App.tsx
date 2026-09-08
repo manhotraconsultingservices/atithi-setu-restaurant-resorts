@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { TabErrorBoundary } from './components/TabErrorBoundary';
 import { createPortal } from 'react-dom';
 import { DataTable, exportToCsv } from './components/DataTable';
 import { AllReportsHub } from './components/AllReportsHub';
@@ -16143,7 +16144,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       {/* ── CONTENT COLUMN — renders to the right of the sidebar ────── */}
       <div className="flex-1 min-w-0 space-y-6 md:space-y-8">
 
-
+      {/* One bad row must never blank the whole app: a render error inside the
+          active tab is contained here (resets when the user switches tabs). */}
+      <TabErrorBoundary resetKey={activeTab}>
       {!isContentAccessible(activeTab, allowedTabs) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center">
@@ -16361,7 +16364,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       item.dietary_type === 'VEG' ? 'bg-green-100 text-green-700' :
                       item.dietary_type === 'NON_VEG' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700')}>
                       <div className={cn('w-1.5 h-1.5 rounded-full', item.dietary_type === 'VEG' ? 'bg-green-600' : item.dietary_type === 'NON_VEG' ? 'bg-red-600' : 'bg-blue-600')}/>
-                      {item.dietary_type.replace('_',' ')}
+                      {item.dietary_type ? String(item.dietary_type).replace('_', ' ') : '—'}
                     </span>
                     {item.is_daily_special && (
                       <span className="bg-yellow-100 text-yellow-700 text-[11px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5">
@@ -31512,6 +31515,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       ) : (
         <AttendanceManagement role="OWNER" token={token} restaurantId={restaurantId} />
       )}
+      </TabErrorBoundary>
 
       {/* Table Bill Modal — Owner view of current active bill */}
       <AnimatePresence>
@@ -50927,7 +50931,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     
     const filteredMenu = menu.filter(item => {
       const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                           item.description.toLowerCase().includes(searchQuery.toLowerCase());
+                           (item.description || '').toLowerCase().includes(searchQuery.toLowerCase());
       const matchesCategory = filterCategory === 'All' || item.category === filterCategory;
       const matchesDietary = filterDietary === 'All' || item.dietary_type === filterDietary;
       const matchesSize = filterSize === 'All' || (filterSize === 'HALF' ? !!item.price_half : !item.price_half);
