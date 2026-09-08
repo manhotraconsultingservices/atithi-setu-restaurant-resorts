@@ -23660,8 +23660,29 @@ ${data.tenant.name}`;
   // stay dates: CHECK_IN → arrival day, CHECK_OUT → departure day, MID_STAY →
   // arrival + recurrence, DAILY/other → the day it's raised. null when inputs
   // aren't valid dates. Drives the overdue-reminder sweep in the daily cron.
-  const _chkYmd = (d: any): string | null => { const s = String(d || '').slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null; };
-  const _chkYmdPlus = (ymd: string, n: number): string => { const dt = new Date(ymd + 'T00:00:00'); dt.setDate(dt.getDate() + n); return dt.toISOString().slice(0, 10); };
+  // UAT F-C1/F-C2 — a `date` column comes back from pg as a JS Date, so the old
+  // `String(d).slice(0,10)` produced "Tue Sep 08": every ISO check failed (CHECK_OUT
+  // jobs got due_date = NULL) and `Date.parse("Tue Sep 08")` resolved to the year
+  // 2001, so "nights stayed" came out around 9,131 and the mid-stay / cleaning
+  // cadence was meaningless. pg builds that Date from LOCAL components, so read it
+  // back the same way — toISOString() would shift the calendar day in any timezone
+  // east of UTC (IST included). Strings already in ISO shape pass straight through.
+  const _pgYmd = (v: any): string | null => {
+    if (v == null || v === '') return null;
+    const fmt = (dt: Date) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+    if (v instanceof Date) return isNaN(v.getTime()) ? null : fmt(v);
+    const s = String(v);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : fmt(d);
+  };
+  const _chkYmd = (d: any): string | null => _pgYmd(d);
+  // Day arithmetic in UTC — `new Date(ymd + 'T00:00:00')` is LOCAL midnight, and
+  // toISOString() on it lands on the previous day everywhere east of UTC.
+  const _chkYmdPlus = (ymd: string, n: number): string => { const dt = new Date(ymd + 'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate() + n); return dt.toISOString().slice(0, 10); };
+  // Whole nights between two YYYY-MM-DD days (both parsed as UTC midnight, so DST
+  // and the server timezone can never make this a fraction).
+  const _chkNights = (fromYmd: string, toYmd: string): number => Math.round((Date.parse(toYmd + 'T00:00:00Z') - Date.parse(fromYmd + 'T00:00:00Z')) / 86400000);
   const _checklistDueDate = (trigger: string, o: { checkInDate?: any; checkOutDate?: any; recurrenceNights?: number; asOf?: any }): string | null => {
     switch (trigger) {
       case 'CHECK_IN': return _chkYmd(o.checkInDate);
@@ -23778,9 +23799,9 @@ ${data.tenant.name}`;
     if (o.isHotel && Number(has?.midstay || 0) > 0) {
       const stays: any[] = await db.query("SELECT rb.id, rb.room_id, rb.check_in_date, r.name, r.room_number, r.type_id FROM room_bookings rb JOIN rooms r ON r.id = rb.room_id WHERE rb.status = 'CHECKED_IN'").catch(() => []);
       for (const st of stays) {
-        const ci = String(st.check_in_date || '').slice(0, 10);
+        const ci = _pgYmd(st.check_in_date);          // F-C1: pg DATE → JS Date
         if (!ci) continue;
-        const nights = Math.floor((Date.parse(o.ymd) - Date.parse(ci)) / 86400000);
+        const nights = _chkNights(ci, o.ymd);
         if (nights <= 0) continue;
         const tpls: any[] = await resolveTemplatesForTrigger(db, { facility_type: 'ROOM', facility_id: st.room_id, room_type_id: st.type_id || null, trigger: 'MID_STAY' });
         for (const tpl of tpls) {
@@ -23801,11 +23822,11 @@ ${data.tenant.name}`;
       for (const st of stays) {
         const freq = Math.floor(Number(st.freq));
         if (!(freq >= 1)) continue; // 0 / null → guest opted out of in-stay cleaning
-        const ci = String(st.check_in_date || '').slice(0, 10);
-        const co = String(st.check_out_date || '').slice(0, 10);
+        const ci = _pgYmd(st.check_in_date);          // F-C1: pg DATE → JS Date
+        const co = _pgYmd(st.check_out_date);
         if (!ci) continue;
         if (co && co <= o.ymd) continue; // departing today / overdue → checkout cleaning covers it
-        const nights = Math.floor((Date.parse(o.ymd) - Date.parse(ci)) / 86400000);
+        const nights = _chkNights(ci, o.ymd);
         if (nights < freq || nights % freq !== 0) continue;
         const tpls: any[] = await resolveTemplatesForTrigger(db, { facility_type: 'ROOM', facility_id: st.room_id, room_type_id: st.type_id || null, trigger: 'CLEANING' });
         for (const tpl of tpls) {
@@ -41142,9 +41163,11 @@ ${data.tenant.name}`;
         // check-out. The CHECK_OUT checklist is now raised ONLY at actual check-out.
         // Room is now OCCUPIED — raise any ROOM_OCCUPIED status checklist (non-blocking).
         await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLabel, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rmStay?.type_id || null, trigger: 'ROOM_OCCUPIED', blocks_release_override: 0 });
-        const ciYmd = String(b.check_in_date || '').slice(0, 10), coYmd = String(b.check_out_date || '').slice(0, 10);
-        const stayNights = (/^\d{4}-\d{2}-\d{2}$/.test(ciYmd) && /^\d{4}-\d{2}-\d{2}$/.test(coYmd))
-          ? Math.round((new Date(coYmd + 'T00:00:00').getTime() - new Date(ciYmd + 'T00:00:00').getTime()) / 86400000) : 0;
+        // F-C1 — the booking row is read back from pg, so these are Dates; the old
+        // String().slice(0,10) gave "Tue Sep 08", the ISO test failed, stayNights
+        // fell to 0 and NO mid-stay checklist was ever seeded at check-in.
+        const ciYmd = _pgYmd(b.check_in_date), coYmd = _pgYmd(b.check_out_date);
+        const stayNights = (ciYmd && coYmd) ? _chkNights(ciYmd, coYmd) : 0;
         if (stayNights > 1) {
           const msTpls = await resolveTemplatesForTrigger(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, room_type_id: rmStay?.type_id || null, trigger: 'MID_STAY' });
           for (const tpl of (msTpls || [])) {
@@ -53490,8 +53513,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'menu-null-dietary-white-screen',
+    commit_marker: 'checklist-schedule-dates-f-c1-f-c2',
     code_features: [
+      'checklist-schedule-dates-f-c1-f-c2',           //BUGFIX (Checklist UAT F-C1 High + F-C2 Medium, 8 Sep 2026). A pg `date` column arrives as a JS Date, and the checklist code read it with `String(d).slice(0,10)` → "Tue Sep 08": (F-C1) `Date.parse("Tue Sep 08")` resolves to the YEAR 2001, so `nights = today − check_in` came out ≈9131 in `runTenantScheduledChecklists` — MID_STAY fired on the arrival day and every day regardless of `recurrence_nights` (dedupe keys `MIDSTAY:…:N9131`), the per-booking CLEANING cadence was arbitrary and its "skip the departure day" test compared "Thu Sep 11" with "2026-09-09" as text so it never skipped; the SAME read at check-in (~41145) made `stayNights` 0, so a multi-night stay never seeded a mid-stay job at all. (F-C2) `_chkYmd` rejected the Date against its ISO regex → the CHECK_OUT job was created with `due_date = NULL`, invisible to the overdue-reminder sweep (`notifyOverdueChecklists` filters on due_date). FIX: new `_pgYmd()` reads a Date back through its LOCAL components (pg builds it from local components, so toISOString would shift the calendar day in any timezone east of UTC) and passes ISO strings through; `_chkYmd` delegates to it; `_chkYmdPlus` does its day arithmetic in UTC (was local midnight + toISOString, same off-by-one); new `_chkNights(from,to)` computes whole nights from two ISO days. Applied at the MID_STAY + CLEANING scheduler loops and the check-in stay-nights calc. Smoke: TC-CHK-MIDSTAY-SEEDED, TC-CHK-NIGHTS-CADENCE, TC-CHK-CHECKOUT-DUE. tsc + vite build clean.',
       'menu-null-dietary-white-screen',               //BUGFIX (CRITICAL, reported 8 Sep 2026: Restaurant → Menu white screen). One menu row on RESTO-1003 ("DBG 1788330485275", category QA — written by an RBAC debugging script on 2 Sep through POST /menu without a dietary_type) had dietary_type = NULL; the Menu tab renders item.dietary_type.replace(...) so the whole React tree threw and the app went blank. FIX: (1) data — the junk row deleted, all 13 tenants scanned (no other NULL rows); (2) FE — the dietary badge and the public-menu description search are null-safe; (3) FE — new <TabErrorBoundary> around the content column: a render error inside ANY tab now shows a contained "This page hit an error" card with Try again / Reload (resets on tab switch) instead of a white screen; (4) API — POST /menu and PATCH /api/menu/:id default a missing/blank dietary_type to VEG and description to "" so no future API/CSV write can recreate the landmine. Smoke: TC-MENU-NULL-DIET. tsc + vite build clean.',
       'rest-guards-f-r3-r8-ledger-numeric-f-a1',      //BUGFIX (Restaurant UAT F-R3..F-R8 + accounting F-A1). (F-R3) a manual invoice raised as CHARGE_TO_ROOM still recorded restaurant GST (₹900 → ₹990) because computeInvoiceTotals applies the settings GST regardless of the zeroed legacy fallback — charge-to-room now bypasses the totals engine and records the raw items (matches the folio line). (F-R4) restaurant orders charged to a room stayed payment_status=PENDING forever after the room was settled — new _markRoomChargedOrdersPaid(folioId) runs at folio settlement (settleFolioForBooking + standalone settle): every order referenced by the folio\'s F&B entries is marked PAID/DELIVERED with room_paid_at (cancelled ones untouched; payment_method stays CHARGE_TO_ROOM so no order journal is posted). (F-R5) PATCH /sessions/:token/close had no state guard — unknown token → 404, a bill that already carries a tender (settled/charged) or is cancelled → 409 SESSION_ALREADY_SETTLED (re-close used to overwrite CASH→CARD); a table merely freed by staff (no tender) may still be settled. (F-R6) POST /orders: a guest may not add to a bill-requested table (409 SESSION_BILL_REQUESTED — the QR app already blocked it, the server now does; staff may still append) and nobody can add to a settled/charged/cancelled session (409 SESSION_CLOSED — previously a guest token for a locked session was ignored and a SECOND session was auto-opened on the table). (F-R7) POST /menu + PATCH /api/menu/:id validate: name required (was a 500), price/price_half/price_full ≥ 0 (a −₹1 price was stored). (F-R8) POST /invoices/manual with no items → 400 NO_ITEMS (used to create a ₹0 invoice and burn a sequential serial). (F-A1, accounting precision) gl_entries.dr_amount/cr_amount were single-precision REAL: SUM() in the trial balance/BS/cash-flow read in float4 (₹607,577.20 summed as ₹607,577.25), which is where the long-standing paise mismatches (TC-ACC-BS −0.07, TC-ACC-CASHFLOW 0.15, TC-ACC-AGING-AR 0.06) came from — the per-tenant init now migrates both columns to NUMERIC(14,2) once (guarded by information_schema, values rounded to the paisa) and pg NUMERIC (OID 1700) is parsed to JS numbers globally so every existing Number(...) reader and JSON shape is unchanged. Smoke: TC-BILL-CLOSE-GUARD, TC-ORD-BILL-LOCK, TC-INV-EMPTY-REJECTED, TC-MENU-VALIDATION. tsc clean.',
       'rest-order-integrity-f-r1-r2-r9',              //BUGFIX (Restaurant UAT findings F-R1/F-R2/F-R9). (F-R1, GL) `_postOrderGl` treated orders.total_amount as GST-INCLUSIVE (taxable = total − gst) but ordinary rounds store it PRE-tax (QR/POS send the subtotal + gst_amount; request-bill sums them that way) while manual/edited/adjustment rows stored inclusive totals → every ordinary round booked cash and revenue short by its GST (₹878.90 collected → Dr Cash ₹808.90 / Cr revenue ₹729), and the inclusive adjustment total made the session bill add GST twice (₹99 + ₹9.90 billed as ₹118.80; the long-failing smoke TC-DINE-BILL-ADJUSTMENT expecting ₹90 was this clash). FIX: the GL poster now derives every order journal from the order\'s ITEMS through computeInvoiceTotals (registered on globalThis.__computeInvoiceTotals) — the same engine that prints the bill — so GL == invoice regardless of storage convention; the adjustment round is stored PRE-tax like every other round (gst_amount + gst_percent on the row); a rounding guard keeps Dr = Cr. Legacy itemless rows keep the inclusive reading. (F-R2, public /orders) the unauthenticated guest endpoint inserted whatever was sent (empty cart, qty −2, ₹500 of items as total ₹1) — now: ≥1 item with name / integer qty ≥1 / price ≥0 else 400; total_amount + gst_amount are ALWAYS recomputed server-side (pre-tax subtotal + GST from settings, client values ignored); a GUEST (no valid staff JWT for the tenant — new _optionalStaffUser) may only order MENU items at MENU prices (full/half; unavailable / price-at-counter items refused; ITEM_PRICE_MISMATCH otherwise), staff keep custom items/prices. (F-R9, serials) every round called generateInvoiceNumberIfSequential then wrote with COALESCE, discarding the drawn number from round 2 on (12 gaps in 44 draws on RESTO-1003) — now a number is drawn only when the session has none. Smoke: TC-ORD-VALIDATION, TC-ORD-GUEST-PRICE, TC-GL-BILL-MATCH, TC-INV-SERIAL-NO-BURN (+ TC-DINE-BILL-ADJUSTMENT passes again). tsc clean.',
