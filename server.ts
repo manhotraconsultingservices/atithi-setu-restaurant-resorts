@@ -5176,13 +5176,49 @@ async function _postOrderGl(db: any, restaurantId: string, order: any, postedBy:
     const already = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
     if (already) return;
 
-    const total = +Number(order.total_amount || 0).toFixed(2);
-    if (total <= 0) return;
-    const gst = +Number(order.gst_amount || 0).toFixed(2);
+    // UAT F-R1 (Sep 2026) — derive the journal from the order's ITEMS through the
+    // same totals engine that prints the bill (computeInvoiceTotals), never from
+    // the stored total_amount. Ordinary rounds store total_amount PRE-tax (the QR /
+    // POS clients send the subtotal with gst_amount alongside, and the session bill
+    // engine sums them that way) while manual / edited invoices store it
+    // GST-INCLUSIVE — and this helper assumed inclusive for every row, so each
+    // ordinary round booked cash and revenue short by its own GST (a ₹878.90 bill
+    // posted Dr Cash ₹808.90 / Cr revenue ₹729). Items are convention-free; the
+    // engine applies the row's discount + service charge and the tenant's
+    // single-sourced GST exactly as the printed invoice does, so GL == bill.
+    let items: any[] = [];
+    try { items = typeof order.items === 'string' ? JSON.parse(order.items) : (Array.isArray(order.items) ? order.items : []); } catch { items = []; }
+    const itemsSub = +(items.reduce((s: number, it: any) =>
+      s + Math.max(0, Number(it?.price ?? it?.unit_price ?? it?.unitPrice ?? 0)) * Math.max(0, Number(it?.quantity ?? it?.qty ?? 1)), 0)).toFixed(2);
     const scp = Number(order.service_charge_percent || 0);
-    const taxable = +(total - gst).toFixed(2);
-    const netRev = +(taxable / (1 + scp / 100)).toFixed(2);
-    const svcAmt = +(taxable - netRev).toFixed(2);
+    let gross = 0, netRev = 0, svcAmt = 0, gst = 0;
+    const engine = (globalThis as any).__computeInvoiceTotals;
+    if (itemsSub > 0 && typeof engine === 'function') {
+      const t = await engine({
+        tenantId: restaurantId, subtotal: itemsSub,
+        discountAmount: Number(order.discount_amount || 0), serviceChargePct: scp,
+        legacyGstFallback: { gst_percent: Number(order.gst_percent || 0), apply_gst: Number(order.apply_gst ?? 1) === 1 },
+      });
+      gross  = +Number(t?.grandTotal || 0).toFixed(2);
+      netRev = +Number(t?.subtotalAfterDiscount || 0).toFixed(2);
+      svcAmt = +Number(t?.serviceCharge || 0).toFixed(2);
+      gst    = +Number(t?.totalTax || 0).toFixed(2);
+    } else {
+      // Legacy row without items (or engine not registered): every such writer
+      // stored a GST-inclusive total, so keep the historical reading for them.
+      const total = +Number(order.total_amount || 0).toFixed(2);
+      gst = +Number(order.gst_amount || 0).toFixed(2);
+      const taxable = +(total - gst).toFixed(2);
+      netRev = +(taxable / (1 + scp / 100)).toFixed(2);
+      svcAmt = +(taxable - netRev).toFixed(2);
+      gross = total;
+    }
+    if (gross <= 0) return;
+    // Rounding guard: the credit side must equal the tender debit to the paisa —
+    // absorb any 1-paisa residue into revenue so the journal always balances.
+    const crSum = +(netRev + svcAmt + gst).toFixed(2);
+    if (Math.abs(crSum - gross) > 0.009) netRev = +(netRev + (gross - crSum)).toFixed(2);
+    const taxable = +(gross - gst).toFixed(2);
     const isEco = Number(order.is_eco_paid || 0) === 1;
     const entryDate = _glPostDate(order.created_at);
 
@@ -5194,7 +5230,7 @@ async function _postOrderGl(db: any, restaurantId: string, order: any, postedBy:
       lines.push({ account_code: '1010', account_name: 'Bank — Main Account', dr_amount: taxable, cr_amount: 0, narration: `ECO ${order.eco_platform || ''} order ${order.id}`.trim() });
     } else {
       const mdr = await _mdrConfig(restaurantId);
-      lines.push(..._tenderGlLines(mdr, order.payment_method, total, `${order.payment_method || 'CASH'} order ${order.id}`));
+      lines.push(..._tenderGlLines(mdr, order.payment_method, gross, `${order.payment_method || 'CASH'} order ${order.id}`));
     }
     lines.push({ account_code: '4010', account_name: 'F&B Revenue', dr_amount: 0, cr_amount: netRev, narration: `F&B order ${order.id}` });
     if (svcAmt > 0) lines.push({ account_code: '4020', account_name: 'Service Charge Revenue', dr_amount: 0, cr_amount: svcAmt, narration: `Service charge ${order.id}` });
@@ -5425,6 +5461,24 @@ function _clearJwtCookie(res: Response) {
 }
 
 // Middleware
+// Optional identity on PUBLIC routes (UAT F-R2): returns the decoded staff JWT
+// when a valid token for THIS tenant (or a platform admin) accompanies the
+// request — header or cookie — and null otherwise. Never throws, never blocks:
+// a guest QR diner simply has no token. Used to decide whether an order may carry
+// custom items/prices (staff) or must be menu items at menu prices (guest).
+function _optionalStaffUser(req: any, tenantId: string): any | null {
+  try {
+    const h = req.headers?.authorization;
+    const token = h ? String(h).split(' ')[1] : (req.cookies?.[JWT_COOKIE_NAME] || null);
+    if (!token) return null;
+    const decoded: any = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+    if (!decoded) return null;
+    const role = String(decoded.role || '').toUpperCase();
+    if (role === 'SUPER_ADMIN' || role === 'CTO') return decoded;
+    return decoded.restaurantId && String(decoded.restaurantId) === String(tenantId) ? decoded : null;
+  } catch { return null; }
+}
+
 const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
   // T1-S8 — accept the JWT from EITHER the Authorization header (legacy
   // SPA, mobile clients, integrations) OR the HttpOnly cookie issued at
@@ -13989,6 +14043,9 @@ async function startServer() {
   (globalThis as any).__COUNTRY_DEFAULTS = COUNTRY_DEFAULTS;
   (globalThis as any).__loadSnapshotCtx = _loadSnapshotCtx;
   (globalThis as any).__isEcoSec95 = _isEcoSec95;
+  // UAT F-R1: the top-level GL poster (_postOrderGl) derives every order journal
+  // through this same engine so the ledger always equals the printed bill.
+  (globalThis as any).__computeInvoiceTotals = computeInvoiceTotals;
 
   // Preview endpoint — frontend can call this to get the exact same totals
   // the server would compute when creating the invoice. Mirrors what
@@ -45865,13 +45922,20 @@ ${data.tenant.name}`;
       const _adjTot = await computeInvoiceTotals({ tenantId: req.params.id, subtotal, serviceChargePct: 0 }).catch(() => null);
       const adjGst   = _adjTot ? Number(_adjTot.totalTax || 0) : 0;
       const adjTotal = _adjTot ? Number(_adjTot.grandTotal || subtotal) : subtotal;
+      // UAT F-R1 (Sep 2026): store the adjustment like EVERY other round —
+      // total_amount = PRE-tax subtotal, gst_amount = its GST (+ the rate on the
+      // row). The 2026-08-28 fix stored a GST-INCLUSIVE total, which the session
+      // bill then added GST to AGAIN (₹99 + ₹9.90 billed as ₹118.80) and which
+      // broke the round convention the GL relied on. The ledger now derives every
+      // journal from items, so CGST/SGST still post correctly for adjustments.
+      const adjGstPct = subtotal > 0 ? Math.round(adjGst / subtotal * 10000) / 100 : 0;
       const roundRow: any = await db.get("SELECT COALESCE(MAX(round_number), 0) AS mx FROM orders WHERE session_id = ?", [session.id]).catch(() => ({ mx: 0 }));
       const roundNum = Number(roundRow?.mx || 0) + 1;
       const id = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
-        `INSERT INTO orders (id, table_number, items, total_amount, gst_amount, status, kitchen_status, payment_status, session_id, checkout_mode, round_number, is_adjustment, created_at)
-         VALUES (?, ?, ?, ?, ?, 'DELIVERED', 'served', 'PENDING', ?, 'postpaid', ?, 1, NOW())`,
-        [id, session.table_name || null, JSON.stringify(items), adjTotal, adjGst, session.id, roundNum]
+        `INSERT INTO orders (id, table_number, items, total_amount, gst_amount, gst_percent, apply_gst, status, kitchen_status, payment_status, session_id, checkout_mode, round_number, is_adjustment, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'DELIVERED', 'served', 'PENDING', ?, 'postpaid', ?, 1, NOW())`,
+        [id, session.table_name || null, JSON.stringify(items), subtotal, adjGst, adjGstPct, adjGst > 0 ? 1 : 0, session.id, roundNum]
       );
       await db.run("UPDATE table_sessions SET round_count = ? WHERE id = ?", [roundNum, session.id]).catch(() => {});
       // AUDIT — manager added items to the table bill (a new Manager Adjustment
@@ -45884,7 +45948,7 @@ ${data.tenant.name}`;
           after: { round_number: roundNum, items, subtotal: Number(subtotal), gst_amount: adjGst, total_amount: adjTotal, table: _ctx.table, waiter: _ctx.waiter },
         });
       } catch { /* audit non-fatal */ }
-      res.status(201).json({ success: true, id, round_number: roundNum, total_amount: adjTotal, gst_amount: adjGst, items_added: items.length });
+      res.status(201).json({ success: true, id, round_number: roundNum, total_amount: subtotal, gst_amount: adjGst, grand_total: adjTotal, items_added: items.length });
     } catch (err: any) {
       console.error("Session adjustment error:", err);
       res.status(500).json({ error: "Failed to add adjustment items" });
@@ -47957,8 +48021,55 @@ ${data.tenant.name}`;
       const id = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
       const finalTableNumber  = table_number || tableNumber;
-      const finalTotalAmount  = total_amount || totalAmount;
-      const finalGstAmount    = gst_amount || gstAmount;
+
+      // ── UAT F-R2 (Sep 2026): the server owns validation and totals ─────────
+      // This is the PUBLIC guest-order endpoint. It used to INSERT whatever the
+      // client sent: an empty cart, a negative quantity, and a total_amount that
+      // contradicted the items (₹500 of items sent as ₹1) were all stored as sent
+      // — and the session bill then charged what the client had claimed. Now:
+      //   • every order needs ≥ 1 item with a name, an integer quantity ≥ 1 and a
+      //     price ≥ 0 (400 otherwise);
+      //   • total_amount / gst_amount are ALWAYS recomputed here from the items
+      //     and the tenant's GST setting — client-sent values are ignored
+      //     (total_amount stays the PRE-tax subtotal, gst_amount alongside, the
+      //     convention every reader of round rows uses);
+      //   • a GUEST (no staff token) may only order menu items at menu prices
+      //     (full / half); staff may still key custom items and prices.
+      void total_amount; void totalAmount; void gst_amount; void gstAmount;   // ignored by design
+      const rawItems: any[] = Array.isArray(items) ? items : [];
+      if (rawItems.length === 0) {
+        return res.status(400).json({ error: 'Add at least one item to the order.', code: 'NO_ITEMS' });
+      }
+      const orderItems: any[] = [];
+      for (const it of rawItems) {
+        const name = String(it?.name || it?.menuName || '').trim();
+        const qty = Number(it?.quantity ?? it?.qty);
+        const price = Number(it?.price ?? it?.unit_price ?? it?.unitPrice);
+        if (!name) return res.status(400).json({ error: 'Every item needs a name.', code: 'ITEM_NAME_REQUIRED' });
+        if (!Number.isInteger(qty) || qty < 1) return res.status(400).json({ error: `Invalid quantity for ${name}.`, code: 'ITEM_QTY_INVALID' });
+        if (!Number.isFinite(price) || price < 0) return res.status(400).json({ error: `Invalid price for ${name}.`, code: 'ITEM_PRICE_INVALID' });
+        orderItems.push({ ...it, name, quantity: qty, price: Math.round(price * 100) / 100 });
+      }
+      const staffUser = _optionalStaffUser(req, req.params.id);
+      if (!staffUser) {
+        for (const it of orderItems) {
+          const mid = String(it.id || it.menu_item_id || it.menuItemId || '').trim();
+          if (!mid) return res.status(400).json({ error: `${it.name} is not on the menu. Please order from the menu, or ask our staff.`, code: 'ITEM_NOT_ON_MENU' });
+          const m: any = await db.get("SELECT id, name, price, price_half, price_full, price_tbd, is_available FROM menu WHERE id = ?", [mid]).catch(() => null);
+          if (!m) return res.status(400).json({ error: `${it.name} is no longer on the menu.`, code: 'ITEM_NOT_ON_MENU' });
+          if (Number(m.is_available ?? 1) === 0) return res.status(400).json({ error: `${m.name} is currently unavailable.`, code: 'ITEM_UNAVAILABLE' });
+          if (Number(m.price_tbd || 0) === 1) return res.status(400).json({ error: `${m.name} is priced at the counter — please ask our staff to add it.`, code: 'ITEM_PRICE_AT_COUNTER' });
+          const allowed = [m.price, m.price_full, m.price_half].map(Number).filter(v => Number.isFinite(v) && v > 0);
+          if (!allowed.some(p => Math.abs(p - it.price) < 0.005)) {
+            return res.status(400).json({ error: `The price for ${m.name} does not match the menu. Please refresh and try again.`, code: 'ITEM_PRICE_MISMATCH' });
+          }
+        }
+      }
+      const orderSubtotal = Math.round(orderItems.reduce((s, it) => s + it.price * it.quantity, 0) * 100) / 100;
+      let orderGstRate = 0;
+      try { const rg: any = await _getRestaurantSettings(req.params.id); if (rg?.is_gst_enabled) orderGstRate = Number(rg.gst_percentage || 0); } catch { /* GST off */ }
+      const finalTotalAmount  = orderSubtotal;                                        // PRE-tax subtotal
+      const finalGstAmount    = Math.round(orderSubtotal * orderGstRate) / 100;        // GST on it
       const finalCustomerName = customer_name || customerName;
       const finalCustomerPhone= customer_phone || customerPhone;
       const finalCustomerEmail= customer_email || customerEmail;
@@ -48063,7 +48174,13 @@ ${data.tenant.name}`;
           // Update session customer info + round_count + (lazy) invoice_number.
           // Defensively re-create the sequences table inline (idempotent).
           await db.exec(`CREATE TABLE IF NOT EXISTS sequences (name TEXT PRIMARY KEY, current_value INTEGER NOT NULL DEFAULT 0)`).catch(() => {});
-          const sessionInvoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
+          // UAT F-R9 (Sep 2026): draw a sequential number ONLY when the session has
+          // none yet. Every round used to call the generator and then write with
+          // COALESCE, so from the second round on the freshly drawn number was
+          // discarded — a gap in the consecutive series on every multi-round table
+          // (a 7-round session burned 5 numbers). Rule 46(b) needs no gaps.
+          const sessSerialRow: any = await db.get("SELECT invoice_number FROM table_sessions WHERE id = ?", [finalSessionId]).catch(() => null);
+          const sessionInvoiceNumber = sessSerialRow?.invoice_number ? null : await generateInvoiceNumberIfSequential(db, req.params.id);
           await db.run(
             `UPDATE table_sessions
                 SET customer_name  = COALESCE(customer_name, ?),
@@ -48169,7 +48286,7 @@ ${data.tenant.name}`;
           const override = !!req.body?.override_min_margin;
           const cogsHelper = (globalThis as any).__computeOrderCogs;
           if (cogsHelper) {
-            const { cogs, hasRecipes } = await cogsHelper(db, items);
+            const { cogs, hasRecipes } = await cogsHelper(db, orderItems);
             if (hasRecipes && cogs > 0 && Number(finalTotalAmount) > 0) {
               const sell = Number(finalTotalAmount);
               const marginPct = ((sell - cogs) / sell) * 100;
@@ -48219,7 +48336,7 @@ ${data.tenant.name}`;
       `, [
         id,
         finalTableNumber || null,
-        JSON.stringify(items),
+        JSON.stringify(orderItems),
         finalTotalAmount,
         finalGstAmount || 0,
         orderStatus,
@@ -48396,12 +48513,12 @@ ${data.tenant.name}`;
       // Fire-and-forget — must NEVER fail an order. If recipes don't exist for
       // an item, that's fine; we silently skip. If the deduction throws, the
       // order is already INSERTed and the response sent.
-      deductIngredientsForOrder(db, id, items, req.params.id).catch(err => {
+      deductIngredientsForOrder(db, id, orderItems, req.params.id).catch(err => {
         console.warn(`[inventory] Deduction failed for order ${id}:`, err);
       });
 
       // ── Notifications (non-blocking) ─────────────────────────────────────
-      const itemLabels = (items as any[]).map((i: any) =>
+      const itemLabels = (orderItems as any[]).map((i: any) =>
         `${i.name || i.item_name || 'Item'} x${i.quantity ?? 1}`
       );
 
@@ -53248,8 +53365,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'uat-f4-f8-guards-catering-gst',
+    commit_marker: 'rest-order-integrity-f-r1-r2-r9',
     code_features: [
+      'rest-order-integrity-f-r1-r2-r9',              //BUGFIX (Restaurant UAT findings F-R1/F-R2/F-R9). (F-R1, GL) `_postOrderGl` treated orders.total_amount as GST-INCLUSIVE (taxable = total − gst) but ordinary rounds store it PRE-tax (QR/POS send the subtotal + gst_amount; request-bill sums them that way) while manual/edited/adjustment rows stored inclusive totals → every ordinary round booked cash and revenue short by its GST (₹878.90 collected → Dr Cash ₹808.90 / Cr revenue ₹729), and the inclusive adjustment total made the session bill add GST twice (₹99 + ₹9.90 billed as ₹118.80; the long-failing smoke TC-DINE-BILL-ADJUSTMENT expecting ₹90 was this clash). FIX: the GL poster now derives every order journal from the order\'s ITEMS through computeInvoiceTotals (registered on globalThis.__computeInvoiceTotals) — the same engine that prints the bill — so GL == invoice regardless of storage convention; the adjustment round is stored PRE-tax like every other round (gst_amount + gst_percent on the row); a rounding guard keeps Dr = Cr. Legacy itemless rows keep the inclusive reading. (F-R2, public /orders) the unauthenticated guest endpoint inserted whatever was sent (empty cart, qty −2, ₹500 of items as total ₹1) — now: ≥1 item with name / integer qty ≥1 / price ≥0 else 400; total_amount + gst_amount are ALWAYS recomputed server-side (pre-tax subtotal + GST from settings, client values ignored); a GUEST (no valid staff JWT for the tenant — new _optionalStaffUser) may only order MENU items at MENU prices (full/half; unavailable / price-at-counter items refused; ITEM_PRICE_MISMATCH otherwise), staff keep custom items/prices. (F-R9, serials) every round called generateInvoiceNumberIfSequential then wrote with COALESCE, discarding the drawn number from round 2 on (12 gaps in 44 draws on RESTO-1003) — now a number is drawn only when the session has none. Smoke: TC-ORD-VALIDATION, TC-ORD-GUEST-PRICE, TC-GL-BILL-MATCH, TC-INV-SERIAL-NO-BURN (+ TC-DINE-BILL-ADJUSTMENT passes again). tsc clean.',
       'uat-f4-f8-guards-catering-gst',                //BUGFIX (UAT findings F-4/F-5/F-7/F-8 + F-6 tenant config). (F-4) DELETE /hotel/rooms/:roomId deleted a room even with a guest CHECKED_IN or future BOOKED reservations on it, orphaning their room_id (exposed during UAT clean-up) — now 409 with a human message (checked-in vs N upcoming, next arrival) + code ROOM_HAS_ACTIVE_BOOKINGS; suggests Blocked/Maintenance to retire a room; delete is audited. (F-5) POST /events/bookings/:bid/complete had NO lifecycle guard (an INQUIRY could be marked COMPLETED and then invoiced) — now only IN_PROGRESS, or CONFIRMED on/after its event date (staff forgot Start), may complete; COMPLETED is idempotent (no duplicate housekeeping job); INQUIRY/QUOTED/CANCELLED → 409. (F-7) Catering lines were taxed at the event composite rate (18%) although every catering row already SNAPSHOTS the package gst_percent (default 5%) — computeEventBill + assembleEventQuoteLines now honour the snapshot (same rule as add-ons/rooms); a per-document GST override or GST-off still wins; issued event invoices are persisted folios so they are unchanged, open bookings/quotes recompute at the package rate. (F-8) POST /hotel/folios/:id/credit-note accepted an OPEN folio (no tax invoice yet) and voided/superseded ones (GL already reversed → double reversal) — now 409 unless the parent is settled; the parent serial is ensured first so the CN references a real invoice number (Rule 53). (F-6) no code change — the ID-at-check-in gate already defaults ON; Manhotra Consulting had it explicitly OFF and it was switched ON via the settings endpoint (echoing the five direct-assigned stay/refund fields). Smoke: TC-HOTEL-F4-ROOM-DELETE-GUARD, TC-EVT-F5-COMPLETE-GUARD, TC-HOTEL-F6-ID-GATE, TC-EVT-F7-CATERING-GST, TC-GST-F8-CN-OPEN-FOLIO. tsc clean.',
       'gst-serial-unify-f1f2f3',                      //BUGFIX (UAT findings F-1/F-2/F-3 — hotel GST document serials). (F-1) Hotel tax invoices were numbered by THREE generators: the PDF/email render path (allocateFolioSerial) drew from the tenant\'s shared RESTAURANT `invoice` series (INV-1014 / INV-2026-0335 — no year when yearly-reset is off, 4-digit), while check-out and the standalone settle minted INLINE from `hotel-invoice-YYYY` (INV-2026-000NN); every path wrote with COALESCE so whichever touched the folio first won → a mixed, non-consecutive series (Rule 46(b)). Group check-out never numbered child folios at all. (F-2) The credit-note endpoint never minted a serial, and the check-out email block numbered the "latest folio for the booking" — which could be that CN — so a credit note consumed INV-2026-00043 from the invoice series (Rule 53 needs its own CN series). (F-3) The GST output register was written at check-out BEFORE the serial was stamped, so every register row had invoice_number NULL (GSTR-1 lines untied to invoices). FIX — ONE allocator: allocateFolioSerial now uses `hotel-invoice-<FY>` → INV-<FY>-NNNNN and `hotel-credit-note-<FY>` → CN-<FY>-NNNNN (FY = Apr–Mar via getYearIST; continues every tenant\'s existing hotel-invoice counter, no renumbering); ensureFolioInvoiceNumber mints ONLY for issued folios (settled/superseded/closed) — an OPEN folio rendered before settlement gets a non-persisted PROFORMA-<id> label + "PROFORMA INVOICE" title (both PDF templates) so a render never burns a serial. All settlement paths now mint synchronously via the allocator and pass the serial into writeGstRegisterFromFolio: individual check-out (before the register write; the email block re-reads by settled.id), group check-out (each child + the master group folio, which now also gets register rows), standalone settle (status flipped first, then minted), credit-note creation (CN- minted at insert). writeGstRegisterFromFolio also falls back to folios.invoice_number. Historical register rows: idempotent boot-time DML in createHotelTables copies each folio\'s stored serial onto its NULL register rows (settled folios that never got a serial stay NULL until numbered). Removed the inline generators + the ALTER TABLE-in-a-request-handler fallback. Smoke: TC-GST-SERIAL-PROFORMA/INV/REGISTER/CN. tsc clean.',
       'hotel-availcount-dayuse-and-noroomid-fix',     //BUGFIX (availability COUNT over-reported free rooms on an event/day-use day + no booking without a room_id). (COUNT BUG) Owner: adding a room shows "Queens Room 1 available" while the actual add correctly says "no room available" (count disagrees with the resolver). Root cause: the availability COUNT is derived from occupancy queries that used the plain half-open overlap `check_in_date < end AND check_out_date > start`, which MISSES a DAY_USE / same-day booking on the boundary day (its check_out == check_in == start), so a day-use-occupied room reads free → over-count. The RESOLVER (takenRoomIdsForRange) is already day-use-aware, hence the disagreement. FIXED to be day-use-aware everywhere the count comes from: (1) `GET /hotel/availability` grid bookings query + the per-booking stamp (same-day → stamp the single day); (2) `GET /hotel/find-available-rooms` bookingConflicts query; (3) the FE `conflictRoomIds` in BOTH the group-booking modal and the add-room modal (App.tsx — the old `dayUseSameDate` special-case only caught day-use↔day-use; now normalises a same-day stay to [d, d+1) on both sides). The events "N/M free" card reads /hotel/availability so it's fixed too. (NO-ROOM-ID GUARD) Closed the ONLY code path that could insert a room_booking with a NULL room_id — the SuperAdmin data-migration import (`r.room_id || null`) — it now resolves a real room (id → room_number → room_name) or REJECTS the row, so no room-less/inventory-invisible booking is imported (every other insert path already resolves + guards room_id). tsc + vite build clean.
