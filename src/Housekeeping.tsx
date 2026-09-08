@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import {
   Sparkles, Check, X, Plus, RefreshCw, ListChecks, History, ShieldAlert, DoorOpen, Building2, ClipboardList,
 } from 'lucide-react';
+import { canDeleteTab } from './perm';
 
 const CARD = 'bg-white rounded-2xl border border-[#e8dccf] p-5';
 const BTN = 'px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors';
@@ -62,6 +63,7 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
   const [loading, setLoading] = useState(true);
   const [openJob, setOpenJob] = useState<any>(null); // {..., tasks}
   const [busy, setBusy] = useState(false);
+  const canOverride = canDeleteTab('HOUSEKEEPING');  // mirrors the server rule (manager/owner or Housekeeping Full)
   // Manual / on-demand start (inspections, ad-hoc runs).
   const [showStart, setShowStart] = useState(false);
   const [startTpls, setStartTpls] = useState<any[]>([]);
@@ -183,7 +185,9 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
             {pendMand > 0 && <p className="flex items-center gap-1 text-[11px] text-amber-700 mb-2"><ShieldAlert size={12} />{pendMand} mandatory task(s) must be done to release this facility.</p>}
             {/* Stack full-width on phones so the primary action is always an easy tap. */}
             <div className="flex flex-col sm:flex-row sm:justify-end gap-2 sticky bottom-0 bg-white pt-1">
-              <button className={`${BTN_GHOST} w-full sm:w-auto justify-center py-2.5`} onClick={override} disabled={busy}><ShieldAlert size={13} /> Override</button>
+              {/* F-C3 — skipping a checklist is a manager/Full action on the server;
+                  don't offer the button to an Edit-level user who'd only get a 403. */}
+              {canOverride && <button className={`${BTN_GHOST} w-full sm:w-auto justify-center py-2.5`} onClick={override} disabled={busy}><ShieldAlert size={13} /> Override</button>}
               <button className={`${BTN_PRIMARY} w-full sm:w-auto justify-center py-2.5`} onClick={complete} disabled={busy || pendMand > 0}><Check size={13} /> Mark cleaned &amp; release</button>
             </div>
           </div>

@@ -23437,6 +23437,19 @@ ${data.tenant.name}`;
   // ══════════════════════════════════════════════════════════════════════════
   const mkHkId = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
   const HK_MANAGER_ROLES = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'];
+  // UAT F-C3 — ONE authority for "bypass a release-blocking checklist". Overriding a
+  // job and forcing its room to VACANT are the SAME privilege (either one frees the
+  // facility), but they disagreed: override accepted HOUSEKEEPING at Edit(2) while the
+  // room-status force path was built-in-manager-only. So a housekeeper who was 409'd
+  // on "mark Vacant" could just override the job instead (the gate was real for one
+  // button and cosmetic for the other) — and, since every tenant role is CUSTOM now,
+  // no custom supervisor role could force a room at all. Both now use the codebase's
+  // standard sensitive-action rule: built-in manager/owner, or a role the owner
+  // granted HOUSEKEEPING at FULL (3). Edit(2) still ticks tasks and completes a job
+  // the normal way — it just can't skip the checklist.
+  const _canOverrideChecklist = async (req: AuthRequest): Promise<boolean> =>
+    HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase()) || await _roleHasTab(req, 'HOUSEKEEPING', 3);
+  const HK_OVERRIDE_DENIED = 'Only a manager, or housekeeping staff with Full access, can skip a cleaning checklist.';
   // Human-readable actor for cleaning-log entries — never a raw user UUID.
   // Prefers the JWT display name, then email, then a Title-Cased role.
   const hkActor = (req: AuthRequest): string => {
@@ -24018,7 +24031,7 @@ ${data.tenant.name}`;
   });
   // Manager/owner override — release without completing every task (logged with reason).
   app.post("/api/restaurant/:id/housekeeping/jobs/:jid/override", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase()) && !(await _roleHasTab(req, 'HOUSEKEEPING', 2))) return res.status(403).json({ error: 'Only a manager or owner can override a cleaning checklist.' });
+    if (!(await _canOverrideChecklist(req))) return res.status(403).json({ error: HK_OVERRIDE_DENIED, code: 'OVERRIDE_NOT_ALLOWED' });
     try {
       const db = await getTenantDb(req.params.id);
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
@@ -27432,9 +27445,16 @@ ${data.tenant.name}`;
         // Housekeeping gate: the venue must be cleaned after the previous event
         // before this one is confirmed. A manager can override (body.override_cleaning).
         const openHk = await hasOpenHousekeepingJob(db, bk.venue_id);
-        if (openHk && !req.body?.override_cleaning) {
-          const isMgr = HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase());
-          return res.status(409).json({ error: `This venue still has an open cleaning checklist from a previous event. Complete housekeeping first${isMgr ? ', or confirm again to override.' : '.'}`, housekeeping_blocked: true, can_override: isMgr });
+        if (openHk) {
+          // F-C3 (same family) — `override_cleaning` used to skip this gate for ANY
+          // caller who could confirm an event: the role was only consulted to word the
+          // message, never to authorise the bypass. Now the flag is honoured only for
+          // someone who may skip a checklist, and the bypass is audited.
+          const isMgr = await _canOverrideChecklist(req);
+          if (!req.body?.override_cleaning || !isMgr) {
+            return res.status(409).json({ error: `This venue still has an open cleaning checklist from a previous event. Complete housekeeping first${isMgr ? ', or confirm again to override.' : '.'}`, housekeeping_blocked: true, can_override: isMgr });
+          }
+          await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'HOUSEKEEPING_OVERRIDE', summary: `Confirmed over an open venue cleaning checklist by ${hkActor(req)}` }).catch(() => {});
         }
       }
 
@@ -29869,7 +29889,7 @@ ${data.tenant.name}`;
         // blocks_release=0 stays on the worklist but doesn't hold the room).
         const blockers: any[] = await tenantDb.query("SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' AND blocks_release = 1", [req.params.roomId]).catch(() => []);
         if (blockers.length) {
-          const isMgr = HK_MANAGER_ROLES.includes(String(req.user?.role || '').toUpperCase());
+          const isMgr = await _canOverrideChecklist(req);   // F-C3: same authority as the override endpoint
           if (!isMgr) return res.status(409).json({ error: 'Cleaning checklist not complete — finish the housekeeping tasks before marking this room ready.', housekeeping_job_id: blockers[0].id, housekeeping_job_ids: blockers.map((b: any) => b.id) });
           await tenantDb.run("UPDATE housekeeping_jobs SET status = 'OVERRIDDEN', completed_at = CURRENT_TIMESTAMP, completed_by = ?, override_reason = ? WHERE facility_id = ? AND facility_type = 'ROOM' AND status = 'OPEN' AND blocks_release = 1",
             [hkActor(req), 'Room set VACANT by manager', req.params.roomId]).catch(() => {});
@@ -53513,8 +53533,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-schedule-dates-f-c1-f-c2',
+    commit_marker: 'checklist-override-authority-f-c3',
     code_features: [
+      'checklist-override-authority-f-c3',            //BUGFIX (Checklist UAT F-C3 Medium, 8 Sep 2026). Skipping a release-blocking checklist had TWO different authorities for the same privilege: `POST /housekeeping/jobs/:jid/override` accepted `_roleHasTab(HOUSEKEEPING, 2)` (Edit) while the force path in `PATCH /hotel/rooms/:roomId/status {VACANT}` was `HK_MANAGER_ROLES` only — so a housekeeper who got 409 on "mark Vacant" (the response even names the blocking job) could call override and free the room anyway; conversely, since every tenant role is CUSTOM now, NO custom supervisor role could force a room. Both now go through one helper `_canOverrideChecklist(req)` = built-in manager/owner OR HOUSEKEEPING at FULL(3), the codebase\'s standard sensitive-action rule (matches staff-delete / PO-delete / invoice-soft-delete). Edit(2) still ticks tasks and completes a job normally — it just cannot skip the checklist. SAME FAMILY, found while fixing it: `POST /events/bookings/:bid/confirm` let ANY caller bypass the open-venue-cleaning gate by sending `override_cleaning: true` — the role was only consulted to word the 409 message, never to authorise the bypass; the flag now requires `_canOverrideChecklist` and the bypass writes an EVENT_BOOKING HOUSEKEEPING_OVERRIDE audit row. FE: the Housekeeping worklist hides the Override button unless `canDeleteTab(\'HOUSEKEEPING\')` so an Edit user is not led into a 403. Smoke: TC-CHK-OVERRIDE-AUTH, TC-CHK-FORCE-VACANT-AUTH. tsc + vite build clean.',
       'checklist-schedule-dates-f-c1-f-c2',           //BUGFIX (Checklist UAT F-C1 High + F-C2 Medium, 8 Sep 2026). A pg `date` column arrives as a JS Date, and the checklist code read it with `String(d).slice(0,10)` → "Tue Sep 08": (F-C1) `Date.parse("Tue Sep 08")` resolves to the YEAR 2001, so `nights = today − check_in` came out ≈9131 in `runTenantScheduledChecklists` — MID_STAY fired on the arrival day and every day regardless of `recurrence_nights` (dedupe keys `MIDSTAY:…:N9131`), the per-booking CLEANING cadence was arbitrary and its "skip the departure day" test compared "Thu Sep 11" with "2026-09-09" as text so it never skipped; the SAME read at check-in (~41145) made `stayNights` 0, so a multi-night stay never seeded a mid-stay job at all. (F-C2) `_chkYmd` rejected the Date against its ISO regex → the CHECK_OUT job was created with `due_date = NULL`, invisible to the overdue-reminder sweep (`notifyOverdueChecklists` filters on due_date). FIX: new `_pgYmd()` reads a Date back through its LOCAL components (pg builds it from local components, so toISOString would shift the calendar day in any timezone east of UTC) and passes ISO strings through; `_chkYmd` delegates to it; `_chkYmdPlus` does its day arithmetic in UTC (was local midnight + toISOString, same off-by-one); new `_chkNights(from,to)` computes whole nights from two ISO days. Applied at the MID_STAY + CLEANING scheduler loops and the check-in stay-nights calc. Smoke: TC-CHK-MIDSTAY-SEEDED, TC-CHK-NIGHTS-CADENCE, TC-CHK-CHECKOUT-DUE. tsc + vite build clean.',
       'menu-null-dietary-white-screen',               //BUGFIX (CRITICAL, reported 8 Sep 2026: Restaurant → Menu white screen). One menu row on RESTO-1003 ("DBG 1788330485275", category QA — written by an RBAC debugging script on 2 Sep through POST /menu without a dietary_type) had dietary_type = NULL; the Menu tab renders item.dietary_type.replace(...) so the whole React tree threw and the app went blank. FIX: (1) data — the junk row deleted, all 13 tenants scanned (no other NULL rows); (2) FE — the dietary badge and the public-menu description search are null-safe; (3) FE — new <TabErrorBoundary> around the content column: a render error inside ANY tab now shows a contained "This page hit an error" card with Try again / Reload (resets on tab switch) instead of a white screen; (4) API — POST /menu and PATCH /api/menu/:id default a missing/blank dietary_type to VEG and description to "" so no future API/CSV write can recreate the landmine. Smoke: TC-MENU-NULL-DIET. tsc + vite build clean.',
       'rest-guards-f-r3-r8-ledger-numeric-f-a1',      //BUGFIX (Restaurant UAT F-R3..F-R8 + accounting F-A1). (F-R3) a manual invoice raised as CHARGE_TO_ROOM still recorded restaurant GST (₹900 → ₹990) because computeInvoiceTotals applies the settings GST regardless of the zeroed legacy fallback — charge-to-room now bypasses the totals engine and records the raw items (matches the folio line). (F-R4) restaurant orders charged to a room stayed payment_status=PENDING forever after the room was settled — new _markRoomChargedOrdersPaid(folioId) runs at folio settlement (settleFolioForBooking + standalone settle): every order referenced by the folio\'s F&B entries is marked PAID/DELIVERED with room_paid_at (cancelled ones untouched; payment_method stays CHARGE_TO_ROOM so no order journal is posted). (F-R5) PATCH /sessions/:token/close had no state guard — unknown token → 404, a bill that already carries a tender (settled/charged) or is cancelled → 409 SESSION_ALREADY_SETTLED (re-close used to overwrite CASH→CARD); a table merely freed by staff (no tender) may still be settled. (F-R6) POST /orders: a guest may not add to a bill-requested table (409 SESSION_BILL_REQUESTED — the QR app already blocked it, the server now does; staff may still append) and nobody can add to a settled/charged/cancelled session (409 SESSION_CLOSED — previously a guest token for a locked session was ignored and a SECOND session was auto-opened on the table). (F-R7) POST /menu + PATCH /api/menu/:id validate: name required (was a 500), price/price_half/price_full ≥ 0 (a −₹1 price was stored). (F-R8) POST /invoices/manual with no items → 400 NO_ITEMS (used to create a ₹0 invoice and burn a sequential serial). (F-A1, accounting precision) gl_entries.dr_amount/cr_amount were single-precision REAL: SUM() in the trial balance/BS/cash-flow read in float4 (₹607,577.20 summed as ₹607,577.25), which is where the long-standing paise mismatches (TC-ACC-BS −0.07, TC-ACC-CASHFLOW 0.15, TC-ACC-AGING-AR 0.06) came from — the per-tenant init now migrates both columns to NUMERIC(14,2) once (guarded by information_schema, values rounded to the paisa) and pg NUMERIC (OID 1700) is parsed to JS numbers globally so every existing Number(...) reader and JSON shape is unchanged. Smoke: TC-BILL-CLOSE-GUARD, TC-ORD-BILL-LOCK, TC-INV-EMPTY-REJECTED, TC-MENU-VALIDATION. tsc clean.',
