@@ -2630,19 +2630,25 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // the guard reads the live column type through the same search path the ALTER
   // uses, so the table is never rewritten twice; existing values are rounded to
   // the paisa. New tenants get NUMERIC from the CREATE below. Boot-time only.
-  await db.exec(`
-    DO $$
-    BEGIN
-      IF to_regclass('gl_entries') IS NOT NULL AND (
-           SELECT format_type(atttypid, atttypmod) FROM pg_attribute
-            WHERE attrelid = to_regclass('gl_entries') AND attname = 'dr_amount'
-         ) = 'real' THEN
-        ALTER TABLE gl_entries
-          ALTER COLUMN dr_amount TYPE NUMERIC(14,2) USING ROUND(dr_amount::numeric, 2),
-          ALTER COLUMN cr_amount TYPE NUMERIC(14,2) USING ROUND(cr_amount::numeric, 2);
-      END IF;
-    END $$;
-  `).catch((e: any) => console.warn('[gl] NUMERIC(14,2) migration failed:', e?.message || e));
+  // NB: exec() splits its input on ";" so a DO $$…$$ block cannot be used here —
+  // the guard and the ALTER run as two single statements through get()/run().
+  try {
+    const col: any = await db.get(
+      `SELECT format_type(a.atttypid, a.atttypmod) AS ftype
+         FROM pg_attribute a
+        WHERE a.attrelid = to_regclass('gl_entries') AND a.attname = 'dr_amount'`
+    );
+    if (col && String(col.ftype || '').toLowerCase() === 'real') {
+      await db.run(
+        `ALTER TABLE gl_entries
+           ALTER COLUMN dr_amount TYPE NUMERIC(14,2) USING ROUND(dr_amount::numeric, 2),
+           ALTER COLUMN cr_amount TYPE NUMERIC(14,2) USING ROUND(cr_amount::numeric, 2)`
+      );
+      console.log(`[gl] ${schema}: gl_entries amounts migrated REAL → NUMERIC(14,2)`);
+    }
+  } catch (e: any) {
+    console.warn(`[gl] ${schema}: NUMERIC(14,2) migration failed:`, e?.message || e);
+  }
 
   // ── Minimum Viable Accounting — Phase 1 schema ──────────────────────────
   await db.exec(`
