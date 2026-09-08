@@ -25368,8 +25368,13 @@ ${data.tenant.name}`;
     for (const s of (await db.query("SELECT unit_rate, quantity FROM event_booking_services WHERE booking_id = ?", [bookingId])) || [])
       lines.push({ amount: round2(Number(s.unit_rate || 0) * Number(s.quantity || 1) * Math.max(1, units)), gst_rate: evGst, line_type: 'SERVICE' });
     // Catering — priced per plate (pax), independent of the event span.
-    for (const c of (await db.query("SELECT line_total FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => [])) || [])
-      lines.push({ amount: round2(Number(c.line_total || 0)), gst_rate: evGst, line_type: 'FNB' });
+    // UAT F-7: catering carries its OWN snapshotted GST (the package's gst_percent —
+    // e.g. 5% outdoor catering vs the 18% event composite) — honour it, exactly like
+    // add-ons and hotel rooms do. A per-document override / GST-off still wins.
+    const fnbGst = (snap: any): number =>
+      ((gstOverride !== undefined && gstOverride !== null) || evGst === 0) ? evGst : Number(snap ?? evGst);
+    for (const c of (await db.query("SELECT line_total, gst_percent FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => [])) || [])
+      lines.push({ amount: round2(Number(c.line_total || 0)), gst_rate: fnbGst(c.gst_percent), line_type: 'FNB' });
     // Hotel rooms — already priced per-night; keep their own snapshotted (slab) GST.
     // EXCLUDE 'FAILED' rooms: at confirm time a room the hotel couldn't actually
     // reserve (no inventory) is recorded as a FAILED line so staff can SEE the
@@ -26863,7 +26868,25 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const evBk: any = await db.get("SELECT b.venue_id, b.customer_name, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?", [req.params.bid]).catch(() => null);
+      const evBk: any = await db.get("SELECT b.status, b.event_date, b.venue_id, b.customer_name, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?", [req.params.bid]).catch(() => null);
+      if (!evBk) return res.status(404).json({ error: 'Booking not found' });
+      // UAT F-5 — lifecycle guard (mirrors start / add-ons). Only an event that is
+      // IN_PROGRESS, or CONFIRMED whose event date has arrived (staff forgot to press
+      // Start), can be completed; an INQUIRY / QUOTED / CANCELLED booking cannot —
+      // otherwise a tax invoice could be raised for an event that never took place.
+      const curStatus = String(evBk.status || '').toUpperCase();
+      if (curStatus === 'COMPLETED') return res.json({ success: true, already_completed: true });
+      const todayIst = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      const eventDay = normaliseDateIso(evBk.event_date);
+      const canComplete = curStatus === 'IN_PROGRESS' || (curStatus === 'CONFIRMED' && !!eventDay && eventDay <= todayIst);
+      if (!canComplete) {
+        return res.status(409).json({
+          error: curStatus === 'CONFIRMED'
+            ? `This event is confirmed for ${eventDay} — it can be completed once the event day arrives (start it first on the day).`
+            : `Only an event that is In Progress (or Confirmed on its event day) can be completed. Current status: ${curStatus || 'UNKNOWN'}.`,
+          status: curStatus,
+        });
+      }
       await db.run("UPDATE event_bookings SET status = 'COMPLETED' WHERE id = ?", [req.params.bid]);
       // Housekeeping: raise a cleaning job for the venue from the EVENT checklist.
       try {
@@ -27368,6 +27391,10 @@ ${data.tenant.name}`;
     // catering). A per-document override (from the quotation/invoice request)
     // wins; otherwise the tenant default. Hotel rooms keep their own snapshot.
     const evGst = await resolveEventGstRate(db, gstOverride);
+    // UAT F-7: catering lines honour the package's snapshotted gst_percent (see
+    // computeEventBill — same rule, keeps booking / quote / invoice identical).
+    const fnbGst = (snap: any): number =>
+      ((gstOverride !== undefined && gstOverride !== null) || evGst === 0) ? evGst : Number(snap ?? evGst);
     const units = eventUnits(bk);
     if (Number(bk.venue_rate || 0) > 0) {
       const venue: any = bk.venue_id ? await db.get("SELECT * FROM event_venues WHERE id = ?", [bk.venue_id]) : null;
@@ -27395,7 +27422,7 @@ ${data.tenant.name}`;
       let menu = '';
       try { const m = c.menu_snapshot ? JSON.parse(c.menu_snapshot) : null; if (Array.isArray(m)) menu = m.map((s: any) => `${s.section}: ${(s.options || []).join(', ')}`).join(' | '); } catch { /* */ }
       const d = [c.description_snapshot, menu].filter(Boolean).join(' — ');
-      lines.push({ line_type: 'FNB', description: `${c.name_snapshot} (${c.package_type_snapshot}) × ${c.pax} pax${d ? ` — ${d}` : ''}`, quantity: c.pax, unit_rate: c.price_per_plate, amount: round2(c.line_total), gst_rate: evGst, gst_amount: 0 });
+      lines.push({ line_type: 'FNB', description: `${c.name_snapshot} (${c.package_type_snapshot}) × ${c.pax} pax${d ? ` — ${d}` : ''}`, quantity: c.pax, unit_rate: c.price_per_plate, amount: round2(c.line_total), gst_rate: fnbGst(c.gst_percent), gst_amount: 0 });
     }
     // Bill only rooms that are actually held: exclude 'FAILED' (couldn't be reserved
     // at confirm — kept visible in the booking view, but never invoiced/quoted).
@@ -29652,7 +29679,31 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
+      // UAT F-4 — a room with a live reservation cannot be deleted: the booking
+      // would be left with an orphaned room_id (invisible to availability, folio
+      // and housekeeping). Block while any BOOKED / CHECKED_IN booking references
+      // the room; retire it (status BLOCKED / MAINTENANCE) instead.
+      const live: any = await tenantDb.get(
+        `SELECT COUNT(*)::int AS n,
+                COUNT(*) FILTER (WHERE status = 'CHECKED_IN')::int AS in_house,
+                MIN(check_in_date)::text AS next_arrival
+           FROM room_bookings
+          WHERE room_id = ? AND status IN ('BOOKED', 'CHECKED_IN')`,
+        [req.params.roomId]
+      );
+      if (Number(live?.n || 0) > 0) {
+        const inHouse = Number(live.in_house || 0);
+        return res.status(409).json({
+          error: inHouse > 0
+            ? `This room has a guest checked in. Check the guest out (or move them to another room) before deleting it.`
+            : `This room has ${live.n} upcoming reservation(s) (next arrival ${String(live.next_arrival || '').slice(0, 10)}). Move or cancel them before deleting it, or set the room to Blocked / Maintenance to take it out of inventory.`,
+          code: 'ROOM_HAS_ACTIVE_BOOKINGS',
+          active_bookings: Number(live.n),
+          checked_in: inHouse,
+        });
+      }
       await tenantDb.run("DELETE FROM rooms WHERE id = ?", [req.params.roomId]);
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: req.params.roomId, action: 'DELETED', summary: 'Room deleted' }).catch(() => {});
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to delete room" });
@@ -44486,6 +44537,21 @@ ${data.tenant.name}`;
       if (parent.doc_type === 'CREDIT_NOTE') {
         return res.status(400).json({ error: "Cannot generate a credit note against another credit note" });
       }
+      // UAT F-8 — a credit note reverses an ISSUED tax invoice (Rule 53 requires the
+      // original invoice number + date). An open folio has no invoice yet — adjust
+      // its lines instead; a voided / superseded folio's GL is already reversed, so a
+      // credit note on it would double-reverse.
+      if (String(parent.status || '').toLowerCase() !== 'settled') {
+        return res.status(409).json({
+          error: parent.status === 'open'
+            ? "This folio is still open — no tax invoice has been issued yet. Edit or reverse its lines directly; a credit note can only be issued against a settled invoice."
+            : `A credit note can only be issued against a settled invoice (this folio is ${parent.status}).`,
+          status: parent.status,
+        });
+      }
+      // Make sure the parent carries its serial (legacy settled folios may not) so
+      // the credit note can reference a real invoice number.
+      await ensureFolioInvoiceNumber(tenantDb, req.params.id, parent).catch(() => {});
       // Prevent duplicate credit notes
       const existing: any = await tenantDb.get(
         "SELECT id FROM folios WHERE parent_folio_id = ? AND doc_type = 'CREDIT_NOTE'",
@@ -53182,8 +53248,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gst-serial-unify-f1f2f3',
+    commit_marker: 'uat-f4-f8-guards-catering-gst',
     code_features: [
+      'uat-f4-f8-guards-catering-gst',                //BUGFIX (UAT findings F-4/F-5/F-7/F-8 + F-6 tenant config). (F-4) DELETE /hotel/rooms/:roomId deleted a room even with a guest CHECKED_IN or future BOOKED reservations on it, orphaning their room_id (exposed during UAT clean-up) — now 409 with a human message (checked-in vs N upcoming, next arrival) + code ROOM_HAS_ACTIVE_BOOKINGS; suggests Blocked/Maintenance to retire a room; delete is audited. (F-5) POST /events/bookings/:bid/complete had NO lifecycle guard (an INQUIRY could be marked COMPLETED and then invoiced) — now only IN_PROGRESS, or CONFIRMED on/after its event date (staff forgot Start), may complete; COMPLETED is idempotent (no duplicate housekeeping job); INQUIRY/QUOTED/CANCELLED → 409. (F-7) Catering lines were taxed at the event composite rate (18%) although every catering row already SNAPSHOTS the package gst_percent (default 5%) — computeEventBill + assembleEventQuoteLines now honour the snapshot (same rule as add-ons/rooms); a per-document GST override or GST-off still wins; issued event invoices are persisted folios so they are unchanged, open bookings/quotes recompute at the package rate. (F-8) POST /hotel/folios/:id/credit-note accepted an OPEN folio (no tax invoice yet) and voided/superseded ones (GL already reversed → double reversal) — now 409 unless the parent is settled; the parent serial is ensured first so the CN references a real invoice number (Rule 53). (F-6) no code change — the ID-at-check-in gate already defaults ON; Manhotra Consulting had it explicitly OFF and it was switched ON via the settings endpoint (echoing the five direct-assigned stay/refund fields). Smoke: TC-HOTEL-F4-ROOM-DELETE-GUARD, TC-EVT-F5-COMPLETE-GUARD, TC-HOTEL-F6-ID-GATE, TC-EVT-F7-CATERING-GST, TC-GST-F8-CN-OPEN-FOLIO. tsc clean.',
       'gst-serial-unify-f1f2f3',                      //BUGFIX (UAT findings F-1/F-2/F-3 — hotel GST document serials). (F-1) Hotel tax invoices were numbered by THREE generators: the PDF/email render path (allocateFolioSerial) drew from the tenant\'s shared RESTAURANT `invoice` series (INV-1014 / INV-2026-0335 — no year when yearly-reset is off, 4-digit), while check-out and the standalone settle minted INLINE from `hotel-invoice-YYYY` (INV-2026-000NN); every path wrote with COALESCE so whichever touched the folio first won → a mixed, non-consecutive series (Rule 46(b)). Group check-out never numbered child folios at all. (F-2) The credit-note endpoint never minted a serial, and the check-out email block numbered the "latest folio for the booking" — which could be that CN — so a credit note consumed INV-2026-00043 from the invoice series (Rule 53 needs its own CN series). (F-3) The GST output register was written at check-out BEFORE the serial was stamped, so every register row had invoice_number NULL (GSTR-1 lines untied to invoices). FIX — ONE allocator: allocateFolioSerial now uses `hotel-invoice-<FY>` → INV-<FY>-NNNNN and `hotel-credit-note-<FY>` → CN-<FY>-NNNNN (FY = Apr–Mar via getYearIST; continues every tenant\'s existing hotel-invoice counter, no renumbering); ensureFolioInvoiceNumber mints ONLY for issued folios (settled/superseded/closed) — an OPEN folio rendered before settlement gets a non-persisted PROFORMA-<id> label + "PROFORMA INVOICE" title (both PDF templates) so a render never burns a serial. All settlement paths now mint synchronously via the allocator and pass the serial into writeGstRegisterFromFolio: individual check-out (before the register write; the email block re-reads by settled.id), group check-out (each child + the master group folio, which now also gets register rows), standalone settle (status flipped first, then minted), credit-note creation (CN- minted at insert). writeGstRegisterFromFolio also falls back to folios.invoice_number. Historical register rows: idempotent boot-time DML in createHotelTables copies each folio\'s stored serial onto its NULL register rows (settled folios that never got a serial stay NULL until numbered). Removed the inline generators + the ALTER TABLE-in-a-request-handler fallback. Smoke: TC-GST-SERIAL-PROFORMA/INV/REGISTER/CN. tsc clean.',
       'hotel-availcount-dayuse-and-noroomid-fix',     //BUGFIX (availability COUNT over-reported free rooms on an event/day-use day + no booking without a room_id). (COUNT BUG) Owner: adding a room shows "Queens Room 1 available" while the actual add correctly says "no room available" (count disagrees with the resolver). Root cause: the availability COUNT is derived from occupancy queries that used the plain half-open overlap `check_in_date < end AND check_out_date > start`, which MISSES a DAY_USE / same-day booking on the boundary day (its check_out == check_in == start), so a day-use-occupied room reads free → over-count. The RESOLVER (takenRoomIdsForRange) is already day-use-aware, hence the disagreement. FIXED to be day-use-aware everywhere the count comes from: (1) `GET /hotel/availability` grid bookings query + the per-booking stamp (same-day → stamp the single day); (2) `GET /hotel/find-available-rooms` bookingConflicts query; (3) the FE `conflictRoomIds` in BOTH the group-booking modal and the add-room modal (App.tsx — the old `dayUseSameDate` special-case only caught day-use↔day-use; now normalises a same-day stay to [d, d+1) on both sides). The events "N/M free" card reads /hotel/availability so it's fixed too. (NO-ROOM-ID GUARD) Closed the ONLY code path that could insert a room_booking with a NULL room_id — the SuperAdmin data-migration import (`r.room_id || null`) — it now resolves a real room (id → room_number → room_name) or REJECTS the row, so no room-less/inventory-invisible booking is imported (every other insert path already resolves + guards room_id). tsc + vite build clean.
       'hotel-availability-dayuse-eventbill-fix',      //BUGFIX (2 reported bugs — hotel room availability on check-in/event days + event phantom-room billing). (BUG 2, events) On confirm, a hotel room the system couldn't reserve (no inventory) is recorded as a 'FAILED' event_booking_rooms row WITH a line_total so staff can SEE the shortfall — but the billing engine read rooms with `status <> 'CANCELLED'`, which INCLUDED 'FAILED', so the unbookable room's charge stayed in the grand total + invoice + quote + PDF + revenue. FIXED: computeEventBill, assembleEventQuoteLines, and the dashboard revenue calc now use `status NOT IN ('CANCELLED','FAILED')` — the failed room stays visible but is never billed (also retroactively corrects already-confirmed events). (BUG 1 / user guidance "check availability on check-in and event days") The floating-room resolver's `taken` set (single POST /hotel/bookings, group-create, and the group rooms/add that booking add-room delegates to) used a plain half-open overlap `check_in_date < co AND check_out_date > ci`, which is an EMPTY range when check_in==check_out — so a same-day / DAY_USE stay (a day-use check-in or an event day) matched nothing and the resolver re-picked an already-occupied room (validateBookingRequest then falsely rejected it — under-booking; it never oversold because that guard is day-use-aware). FIXED: new shared `takenRoomIdsForRange(db,ci,co,bookingType)` normalises a same-day stay to the night [ci,ci+1) AND unions existing DAY_USE bookings landing on any needed day (mirrors validateBookingRequest) + applies the same to holds; all 3 resolvers now use it. Overnight behaviour unchanged (verified: over-add still 409). Empirically reproduced on RESTO-1003 (overnight over-add correctly 409'd; day-use 2nd room was wrongly rejected pre-fix). tsc clean.
