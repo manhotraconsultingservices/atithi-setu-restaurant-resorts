@@ -4783,6 +4783,8 @@ async function settleFolioForBooking(
     await recomputeFolioTotals(tenantDb, folio.id);
     await tenantDb.run("UPDATE folios SET status = 'settled', settled_at = ?, payment_method = ? WHERE id = ?",
       [new Date().toISOString(), paymentMethod, folio.id]);
+    // UAT F-R4 — the F&B charged to this room is paid with it now.
+    await _markRoomChargedOrdersPaid(tenantDb, folio.id, paymentMethod);
   }
   const settled = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
 
@@ -5158,6 +5160,34 @@ async function _reverseJournal(
 // (restaurant F&B, spa, events, payroll) that previously never reached the GL.
 // Every one is idempotent (guards on its journal_ref) and non-throwing, so it is
 // safe to call fire-and-forget from an operational endpoint.
+
+// UAT F-R4 — when a guest folio is SETTLED, every restaurant order that was charged
+// to it (table bills, manual invoices, approved room-service requests) has been
+// paid with the room. Mark those orders PAID so the Invoices list and any
+// outstanding-bills view stop showing them as pending forever. Matched through the
+// folio's F&B entries (reference_number = order id); cancelled orders are left
+// untouched; payment_method stays CHARGE_TO_ROOM so the order journal is still
+// skipped (revenue is recognised on the folio). Best-effort, idempotent.
+async function _markRoomChargedOrdersPaid(tenantDb: DbInterface, folioId: string, method: string | null): Promise<number> {
+  try {
+    const r: any = await tenantDb.run(
+      `UPDATE orders
+          SET payment_status = 'PAID',
+              status = CASE WHEN UPPER(COALESCE(status,'')) IN ('CANCELLED','DELIVERED') THEN status ELSE 'DELIVERED' END,
+              room_paid_at = COALESCE(room_paid_at, CURRENT_TIMESTAMP),
+              room_payment_method = COALESCE(room_payment_method, ?)
+        WHERE UPPER(COALESCE(status,'')) <> 'CANCELLED'
+          AND UPPER(COALESCE(payment_status,'')) <> 'PAID'
+          AND id IN (SELECT DISTINCT reference_number FROM folio_entries
+                      WHERE folio_id = ? AND entry_type = 'F_AND_B' AND reference_number IS NOT NULL)`,
+      [method || 'ROOM', folioId]
+    );
+    return Number(r?.changes || r?.rowCount || 0);
+  } catch (e) {
+    console.warn(`[folio] marking room-charged orders paid failed for ${folioId}:`, e);
+    return 0;
+  }
+}
 
 // Post GL for a STANDALONE (non-folio) restaurant order that has been paid. Room
 // F&B charged to a hotel folio is captured by folio settlement and skipped here.
@@ -10807,6 +10837,15 @@ async function startServer() {
   app.post("/api/restaurant/:id/menu", authenticate, restaurantStaff, requireTabAction('MENU', 'CREATE'), menuImageUpload.single('image'), async (req: AuthRequest, res: Response) => {
     try {
       const { name, description, price, price_half, price_full, category, dietary_type, is_daily_special, drive_url, price_tbd } = req.body;
+      // UAT F-R7 — validate before touching the DB: a nameless item used to surface
+      // as a 500 (NOT NULL violation) and a negative price was stored as sent.
+      const menuName = String(name || '').trim();
+      if (!menuName) return res.status(400).json({ error: 'Item name is required.', code: 'NAME_REQUIRED' });
+      for (const [field, label, value] of [['price', 'Price', price], ['price_half', 'Half price', price_half], ['price_full', 'Full price', price_full]] as [string, string, any][]) {
+        if (value === undefined || value === null || value === '') continue;
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 0) return res.status(400).json({ error: `${label} must be a number of 0 or more.`, code: 'PRICE_INVALID', field });
+      }
       const db = await getTenantDb(req.params.id);
       // Idempotent on every menu insert — keeps tenants who haven't
       // hit a server-init refresh on the new schema in sync.
@@ -10842,7 +10881,7 @@ async function startServer() {
       await db.run(`
         INSERT INTO menu (id, name, description, price, price_half, price_full, category, dietary_type, is_daily_special, image_url, drive_file_id, price_tbd)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [id, name, description, effectivePrice, price_half || null, price_full || null, category, dietary_type, is_daily_special === 'true' ? 1 : 0, imageUrl, driveFileId, isTbd ? 1 : 0]);
+      `, [id, menuName, description, effectivePrice, price_half || null, price_full || null, category, dietary_type, is_daily_special === 'true' ? 1 : 0, imageUrl, driveFileId, isTbd ? 1 : 0]);
 
       res.json({ success: true, id });
     } catch (err) {
@@ -10857,6 +10896,21 @@ async function startServer() {
       if (!(await _roleHasTab(req, 'MENU', 2))) return res.status(403).json({ error: 'Forbidden — requires MENU access.' });
       const db = await getTenantDb(req.user!.restaurantId);
       const updates: Record<string, any> = { ...req.body };
+
+      // UAT F-R7 — same rules as create: a name cannot be blanked and no price
+      // field may go negative (a −₹1 price used to be stored and shown on the menu).
+      if ('name' in updates && !String(updates.name || '').trim()) {
+        return res.status(400).json({ error: 'Item name is required.', code: 'NAME_REQUIRED' });
+      }
+      for (const field of ['price', 'price_half', 'price_full']) {
+        if (!(field in updates)) continue;
+        const v = updates[field];
+        if (v === undefined || v === null || v === '' || v === 'undefined') continue;
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 0) {
+          return res.status(400).json({ error: `${field === 'price' ? 'Price' : field === 'price_half' ? 'Half price' : 'Full price'} must be a number of 0 or more.`, code: 'PRICE_INVALID', field });
+        }
+      }
 
       // If a new image file was uploaded, replace image_url
       if (req.file) {
@@ -44945,6 +44999,8 @@ ${data.tenant.name}`;
         [now, payment_method, folio.id]
       );
       const invNum: string = await ensureFolioInvoiceNumber(tenantDb, req.params.id, { ...folio, status: 'settled', settled_at: now });
+      // UAT F-R4 — any restaurant orders charged to this folio are paid with it.
+      await _markRoomChargedOrdersPaid(tenantDb, folio.id, payment_method);
 
       // Record a FINAL payment covering the outstanding balance
       const refreshed: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
@@ -46246,6 +46302,29 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const { payment_method, final_amount } = req.body || {};
 
+      // UAT F-R5 — state guard. Closing used to be an unconditional UPDATE: an
+      // unknown token returned success, and settling an already-settled bill again
+      // silently OVERWROTE the recorded tender (CASH → CARD) and re-marked the
+      // orders paid. Now: unknown token → 404; a bill that already carries a tender
+      // (settled or charged to a room) or was cancelled → 409. A session that staff
+      // merely closed by freeing the table (no tender recorded, still a DRAFT bill)
+      // may still be settled here.
+      const target: any = await db.get(
+        "SELECT id, status, payment_method FROM table_sessions WHERE session_token = ?",
+        [req.params.token]
+      );
+      if (!target) return res.status(404).json({ error: 'Table session not found.', code: 'SESSION_NOT_FOUND' });
+      const targetStatus = String(target.status || '').toLowerCase();
+      if (targetStatus === 'cancelled') {
+        return res.status(409).json({ error: 'This bill was cancelled — it cannot be settled.', code: 'SESSION_CANCELLED', status: target.status });
+      }
+      if (target.payment_method) {
+        return res.status(409).json({
+          error: `This bill is already settled (${target.payment_method}). Settling it again would overwrite the recorded tender — cancel the invoice first if it was wrong.`,
+          code: 'SESSION_ALREADY_SETTLED', status: target.status, payment_method: target.payment_method,
+        });
+      }
+
       const updateParts: string[] = ["status = 'closed'", "closed_at = CURRENT_TIMESTAMP"];
       const updateParams: any[]   = [];
       if (payment_method) { updateParts.push("payment_method = ?"); updateParams.push(payment_method); }
@@ -47254,6 +47333,11 @@ ${data.tenant.name}`;
       // defense — the UI already disables Generate until prices are
       // filled.
       const itemArr = Array.isArray(items) ? items : [];
+      // UAT F-R8 — an invoice must carry at least one line; an empty one used to be
+      // created (₹0) and consumed a sequential invoice number.
+      if (itemArr.length === 0 || !itemArr.some((it: any) => String(it?.name || '').trim())) {
+        return res.status(400).json({ error: 'Add at least one item before generating the invoice.', code: 'NO_ITEMS' });
+      }
       const zeroPriceItems = itemArr.filter((it: any) =>
         String(it?.name || '').trim() && Number(it?.price || 0) <= 0
       );
@@ -47300,20 +47384,27 @@ ${data.tenant.name}`;
       // overrides the configured tax_config rows. Loyalty discount auto-
       // applies when the customer phone matches a recognised member; the
       // owner can still type a larger manual discount and have it stick.
-      const totals = await computeInvoiceTotals({
-        tenantId: req.params.id,
-        subtotal,
-        // Charge-to-room posts raw items to the folio (hotel slab) — force the
-        // restaurant discount / service / GST / loyalty off so the recorded MAN-
-        // row matches exactly what lands on the folio.
-        discountAmount: isChargeToRoom ? 0 : Number(discount_amount || 0),
-        serviceChargePct: isChargeToRoom ? 0 : Number(service_charge_percent || 0),
-        customerPhone: isChargeToRoom ? null : (customer_phone || null),
-        legacyGstFallback: {
-          gst_percent: isChargeToRoom ? 0 : Number(gst_percent || 0),
-          apply_gst: isChargeToRoom ? false : !!apply_gst,
-        },
-      });
+      // Charge-to-room posts raw items to the folio (hotel slab) — the restaurant
+      // discount / service / GST / loyalty do NOT apply, so the recorded MAN- row
+      // must equal the raw items. UAT F-R3: zeroing only the legacy fallback was not
+      // enough — computeInvoiceTotals applies the tenant's settings GST regardless,
+      // so a ₹900 charge was recorded as ₹990 while the folio (correctly) carried
+      // ₹900 at the hotel slab. Bypass the engine entirely for charge-to-room.
+      const totals: any = isChargeToRoom
+        ? { subtotal, manualDiscount: 0, loyaltyDiscount: 0, totalDiscount: 0, subtotalAfterDiscount: subtotal,
+            serviceCharge: 0, serviceChargePct: 0, taxableBase: subtotal, taxLines: [], totalTax: 0,
+            grandTotal: subtotal, loyalty: null, taxLabelSnapshot: null, usedLegacyGst: false }
+        : await computeInvoiceTotals({
+            tenantId: req.params.id,
+            subtotal,
+            discountAmount: Number(discount_amount || 0),
+            serviceChargePct: Number(service_charge_percent || 0),
+            customerPhone: customer_phone || null,
+            legacyGstFallback: {
+              gst_percent: Number(gst_percent || 0),
+              apply_gst: !!apply_gst,
+            },
+          });
 
       const invoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
       // We persist the EFFECTIVE total discount (manual ⨆ loyalty) so the
@@ -48121,10 +48212,33 @@ ${data.tenant.name}`;
         // Resolve session by token if provided
         if (session_token && !finalSessionId) {
           const sess = await db.get(
-            "SELECT id FROM table_sessions WHERE session_token = ? AND status = 'open' AND deleted_at IS NULL",
+            "SELECT id, status FROM table_sessions WHERE session_token = ? AND deleted_at IS NULL",
             [session_token]
           );
           if (sess) finalSessionId = sess.id;
+        }
+        // UAT F-R6 — a table whose bill has been REQUESTED is locked for guests (the
+        // QR app already says so; the server now enforces it), and a settled /
+        // charged / cancelled session never takes another round. Staff may still
+        // append to a bill-requested table (they re-present the bill). Previously a
+        // guest token for a locked session was simply ignored and a SECOND session
+        // was auto-opened on the same table, and an explicit session_id attached
+        // straight to the locked bill without recomputing it.
+        if (finalSessionId) {
+          const st: any = await db.get("SELECT status, payment_method FROM table_sessions WHERE id = ?", [finalSessionId]).catch(() => null);
+          const sStatus = String(st?.status || '').toLowerCase();
+          if (st && sStatus !== 'open') {
+            const staffMayAppend = sStatus === 'bill_requested' && !!staffUser;
+            if (!staffMayAppend) {
+              return res.status(409).json({
+                error: sStatus === 'bill_requested'
+                  ? 'The bill for this table has already been requested. Please ask our staff to add more items.'
+                  : 'This table bill is already settled. Please scan the table QR again to start a new order.',
+                code: sStatus === 'bill_requested' ? 'SESSION_BILL_REQUESTED' : 'SESSION_CLOSED',
+                status: st.status,
+              });
+            }
+          }
         }
         // CMD-CENTER-FIX: auto-create when missing. Only when we have a
         // physical table — Online / cloud-kitchen orders don't get auto
@@ -53365,8 +53479,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rest-order-integrity-f-r1-r2-r9',
+    commit_marker: 'rest-guards-f-r3-r8-ledger-numeric-f-a1',
     code_features: [
+      'rest-guards-f-r3-r8-ledger-numeric-f-a1',      //BUGFIX (Restaurant UAT F-R3..F-R8 + accounting F-A1). (F-R3) a manual invoice raised as CHARGE_TO_ROOM still recorded restaurant GST (₹900 → ₹990) because computeInvoiceTotals applies the settings GST regardless of the zeroed legacy fallback — charge-to-room now bypasses the totals engine and records the raw items (matches the folio line). (F-R4) restaurant orders charged to a room stayed payment_status=PENDING forever after the room was settled — new _markRoomChargedOrdersPaid(folioId) runs at folio settlement (settleFolioForBooking + standalone settle): every order referenced by the folio\'s F&B entries is marked PAID/DELIVERED with room_paid_at (cancelled ones untouched; payment_method stays CHARGE_TO_ROOM so no order journal is posted). (F-R5) PATCH /sessions/:token/close had no state guard — unknown token → 404, a bill that already carries a tender (settled/charged) or is cancelled → 409 SESSION_ALREADY_SETTLED (re-close used to overwrite CASH→CARD); a table merely freed by staff (no tender) may still be settled. (F-R6) POST /orders: a guest may not add to a bill-requested table (409 SESSION_BILL_REQUESTED — the QR app already blocked it, the server now does; staff may still append) and nobody can add to a settled/charged/cancelled session (409 SESSION_CLOSED — previously a guest token for a locked session was ignored and a SECOND session was auto-opened on the table). (F-R7) POST /menu + PATCH /api/menu/:id validate: name required (was a 500), price/price_half/price_full ≥ 0 (a −₹1 price was stored). (F-R8) POST /invoices/manual with no items → 400 NO_ITEMS (used to create a ₹0 invoice and burn a sequential serial). (F-A1, accounting precision) gl_entries.dr_amount/cr_amount were single-precision REAL: SUM() in the trial balance/BS/cash-flow read in float4 (₹607,577.20 summed as ₹607,577.25), which is where the long-standing paise mismatches (TC-ACC-BS −0.07, TC-ACC-CASHFLOW 0.15, TC-ACC-AGING-AR 0.06) came from — the per-tenant init now migrates both columns to NUMERIC(14,2) once (guarded by information_schema, values rounded to the paisa) and pg NUMERIC (OID 1700) is parsed to JS numbers globally so every existing Number(...) reader and JSON shape is unchanged. Smoke: TC-BILL-CLOSE-GUARD, TC-ORD-BILL-LOCK, TC-INV-EMPTY-REJECTED, TC-MENU-VALIDATION. tsc clean.',
       'rest-order-integrity-f-r1-r2-r9',              //BUGFIX (Restaurant UAT findings F-R1/F-R2/F-R9). (F-R1, GL) `_postOrderGl` treated orders.total_amount as GST-INCLUSIVE (taxable = total − gst) but ordinary rounds store it PRE-tax (QR/POS send the subtotal + gst_amount; request-bill sums them that way) while manual/edited/adjustment rows stored inclusive totals → every ordinary round booked cash and revenue short by its GST (₹878.90 collected → Dr Cash ₹808.90 / Cr revenue ₹729), and the inclusive adjustment total made the session bill add GST twice (₹99 + ₹9.90 billed as ₹118.80; the long-failing smoke TC-DINE-BILL-ADJUSTMENT expecting ₹90 was this clash). FIX: the GL poster now derives every order journal from the order\'s ITEMS through computeInvoiceTotals (registered on globalThis.__computeInvoiceTotals) — the same engine that prints the bill — so GL == invoice regardless of storage convention; the adjustment round is stored PRE-tax like every other round (gst_amount + gst_percent on the row); a rounding guard keeps Dr = Cr. Legacy itemless rows keep the inclusive reading. (F-R2, public /orders) the unauthenticated guest endpoint inserted whatever was sent (empty cart, qty −2, ₹500 of items as total ₹1) — now: ≥1 item with name / integer qty ≥1 / price ≥0 else 400; total_amount + gst_amount are ALWAYS recomputed server-side (pre-tax subtotal + GST from settings, client values ignored); a GUEST (no valid staff JWT for the tenant — new _optionalStaffUser) may only order MENU items at MENU prices (full/half; unavailable / price-at-counter items refused; ITEM_PRICE_MISMATCH otherwise), staff keep custom items/prices. (F-R9, serials) every round called generateInvoiceNumberIfSequential then wrote with COALESCE, discarding the drawn number from round 2 on (12 gaps in 44 draws on RESTO-1003) — now a number is drawn only when the session has none. Smoke: TC-ORD-VALIDATION, TC-ORD-GUEST-PRICE, TC-GL-BILL-MATCH, TC-INV-SERIAL-NO-BURN (+ TC-DINE-BILL-ADJUSTMENT passes again). tsc clean.',
       'uat-f4-f8-guards-catering-gst',                //BUGFIX (UAT findings F-4/F-5/F-7/F-8 + F-6 tenant config). (F-4) DELETE /hotel/rooms/:roomId deleted a room even with a guest CHECKED_IN or future BOOKED reservations on it, orphaning their room_id (exposed during UAT clean-up) — now 409 with a human message (checked-in vs N upcoming, next arrival) + code ROOM_HAS_ACTIVE_BOOKINGS; suggests Blocked/Maintenance to retire a room; delete is audited. (F-5) POST /events/bookings/:bid/complete had NO lifecycle guard (an INQUIRY could be marked COMPLETED and then invoiced) — now only IN_PROGRESS, or CONFIRMED on/after its event date (staff forgot Start), may complete; COMPLETED is idempotent (no duplicate housekeeping job); INQUIRY/QUOTED/CANCELLED → 409. (F-7) Catering lines were taxed at the event composite rate (18%) although every catering row already SNAPSHOTS the package gst_percent (default 5%) — computeEventBill + assembleEventQuoteLines now honour the snapshot (same rule as add-ons/rooms); a per-document GST override or GST-off still wins; issued event invoices are persisted folios so they are unchanged, open bookings/quotes recompute at the package rate. (F-8) POST /hotel/folios/:id/credit-note accepted an OPEN folio (no tax invoice yet) and voided/superseded ones (GL already reversed → double reversal) — now 409 unless the parent is settled; the parent serial is ensured first so the CN references a real invoice number (Rule 53). (F-6) no code change — the ID-at-check-in gate already defaults ON; Manhotra Consulting had it explicitly OFF and it was switched ON via the settings endpoint (echoing the five direct-assigned stay/refund fields). Smoke: TC-HOTEL-F4-ROOM-DELETE-GUARD, TC-EVT-F5-COMPLETE-GUARD, TC-HOTEL-F6-ID-GATE, TC-EVT-F7-CATERING-GST, TC-GST-F8-CN-OPEN-FOLIO. tsc clean.',
       'gst-serial-unify-f1f2f3',                      //BUGFIX (UAT findings F-1/F-2/F-3 — hotel GST document serials). (F-1) Hotel tax invoices were numbered by THREE generators: the PDF/email render path (allocateFolioSerial) drew from the tenant\'s shared RESTAURANT `invoice` series (INV-1014 / INV-2026-0335 — no year when yearly-reset is off, 4-digit), while check-out and the standalone settle minted INLINE from `hotel-invoice-YYYY` (INV-2026-000NN); every path wrote with COALESCE so whichever touched the folio first won → a mixed, non-consecutive series (Rule 46(b)). Group check-out never numbered child folios at all. (F-2) The credit-note endpoint never minted a serial, and the check-out email block numbered the "latest folio for the booking" — which could be that CN — so a credit note consumed INV-2026-00043 from the invoice series (Rule 53 needs its own CN series). (F-3) The GST output register was written at check-out BEFORE the serial was stamped, so every register row had invoice_number NULL (GSTR-1 lines untied to invoices). FIX — ONE allocator: allocateFolioSerial now uses `hotel-invoice-<FY>` → INV-<FY>-NNNNN and `hotel-credit-note-<FY>` → CN-<FY>-NNNNN (FY = Apr–Mar via getYearIST; continues every tenant\'s existing hotel-invoice counter, no renumbering); ensureFolioInvoiceNumber mints ONLY for issued folios (settled/superseded/closed) — an OPEN folio rendered before settlement gets a non-persisted PROFORMA-<id> label + "PROFORMA INVOICE" title (both PDF templates) so a render never burns a serial. All settlement paths now mint synchronously via the allocator and pass the serial into writeGstRegisterFromFolio: individual check-out (before the register write; the email block re-reads by settled.id), group check-out (each child + the master group folio, which now also gets register rows), standalone settle (status flipped first, then minted), credit-note creation (CN- minted at insert). writeGstRegisterFromFolio also falls back to folios.invoice_number. Historical register rows: idempotent boot-time DML in createHotelTables copies each folio\'s stored serial onto its NULL register rows (settled folios that never got a serial stay NULL until numbered). Removed the inline generators + the ALTER TABLE-in-a-request-handler fallback. Smoke: TC-GST-SERIAL-PROFORMA/INV/REGISTER/CN. tsc clean.',

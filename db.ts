@@ -1,4 +1,11 @@
-import { Pool, PoolClient } from "pg";
+import { Pool, PoolClient, types as pgTypes } from "pg";
+
+// UAT F-A1 (Sep 2026) — money columns are NUMERIC(14,2) (gl_entries was REAL and
+// summed in float4: ₹607,577.20 read back as ₹607,577.25). node-postgres returns
+// NUMERIC as a string by default; parse it to a JS number here (exact for 2-decimal
+// amounts) so every existing `Number(row.x)` reader and every JSON payload keeps
+// its shape while sums become exact.
+pgTypes.setTypeParser(1700, (v: string | null) => (v === null ? null : parseFloat(v)));
 
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgresql://${process.env.PGUSER || 'postgres'}:${process.env.PGPASSWORD || 'postgres'}@${process.env.PGHOST || 'localhost'}:${process.env.PGPORT || '5432'}/${process.env.PGDATABASE || 'restoflow'}`,
@@ -2616,6 +2623,27 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     );
   `).catch(() => {});
 
+  // UAT F-A1 (Sep 2026) — ledger amounts were single-precision REAL, so every
+  // SUM() in the trial balance / balance sheet / cash flow ran in float4
+  // (₹607,577.20 read back as ₹607,577.25 — the source of the long-standing paise
+  // mismatches). Migrate both columns to NUMERIC(14,2) exactly once per tenant:
+  // the guard reads the live column type through the same search path the ALTER
+  // uses, so the table is never rewritten twice; existing values are rounded to
+  // the paisa. New tenants get NUMERIC from the CREATE below. Boot-time only.
+  await db.exec(`
+    DO $$
+    BEGIN
+      IF to_regclass('gl_entries') IS NOT NULL AND (
+           SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+            WHERE attrelid = to_regclass('gl_entries') AND attname = 'dr_amount'
+         ) = 'real' THEN
+        ALTER TABLE gl_entries
+          ALTER COLUMN dr_amount TYPE NUMERIC(14,2) USING ROUND(dr_amount::numeric, 2),
+          ALTER COLUMN cr_amount TYPE NUMERIC(14,2) USING ROUND(cr_amount::numeric, 2);
+      END IF;
+    END $$;
+  `).catch((e: any) => console.warn('[gl] NUMERIC(14,2) migration failed:', e?.message || e));
+
   // ── Minimum Viable Accounting — Phase 1 schema ──────────────────────────
   await db.exec(`
     CREATE TABLE IF NOT EXISTS chart_of_accounts (
@@ -2638,8 +2666,8 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       entry_date           TEXT NOT NULL,
       account_code         TEXT NOT NULL,
       account_name         TEXT NOT NULL,
-      dr_amount            REAL NOT NULL DEFAULT 0,
-      cr_amount            REAL NOT NULL DEFAULT 0,
+      dr_amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
+      cr_amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
       narration            TEXT,
       source_type          TEXT NOT NULL,
       source_id            TEXT,
