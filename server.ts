@@ -23706,7 +23706,10 @@ ${data.tenant.name}`;
   };
 
   // Create ONE cleaning job from a template (snapshotting steps + blocks_release).
-  const createJobFromTemplate = async (db: any, tpl: any, o: any): Promise<string | null> => {
+  // Returns the job id AND whether it was actually created — a de-duplicated call
+  // hands back the EXISTING open job, which the scheduler used to count as "raised"
+  // (F-C5: two identical runs both reported 23 raised while the second created none).
+  const createJobFromTemplate = async (db: any, tpl: any, o: any): Promise<{ id: string | null; created: boolean }> => {
     const recurring = tpl.trigger_event === 'DAILY' || tpl.trigger_event === 'MID_STAY';
     let dupSql = '', dupParams: any[] = [];
     if (recurring && o.dedupe_key) { dupSql = "SELECT id FROM housekeeping_jobs WHERE dedupe_key = ? AND template_id = ? LIMIT 1"; dupParams = [o.dedupe_key, tpl.id]; }
@@ -23718,7 +23721,7 @@ ${data.tenant.name}`;
       // checklists for the same room in one cleaning cycle).
       dupSql = "SELECT id FROM housekeeping_jobs WHERE facility_type = ? AND facility_id = ? AND template_id = ? AND status = 'OPEN' LIMIT 1"; dupParams = [o.facility_type, o.facility_id, tpl.id];
     }
-    if (dupSql) { const dup: any = await db.get(dupSql, dupParams).catch(() => null); if (dup) return dup.id; }
+    if (dupSql) { const dup: any = await db.get(dupSql, dupParams).catch(() => null); if (dup) return { id: dup.id, created: false }; }
     const steps: any[] = await db.query("SELECT label, is_mandatory, sort_order FROM checklist_template_steps WHERE template_id = ? AND is_active = 1 ORDER BY sort_order, id", [tpl.id]).catch(() => []);
     const jid = mkHkId('HKJ');
     // Responsible team is derived from the trigger so owners never have to assign
@@ -23738,12 +23741,13 @@ ${data.tenant.name}`;
       await db.run("INSERT INTO housekeeping_job_tasks (id, job_id, label, is_mandatory, sort_order) VALUES (?, ?, ?, ?, ?)",
         [mkHkId('HKJT'), jid, s.label, s.is_mandatory, s.sort_order]);
     }
-    return jid;
+    return { id: jid, created: true };
   };
 
   // Raise all applicable checklist jobs for a trigger (one per template). Never
   // throws — the caller (checkout/checkin/complete/cron) is never blocked.
-  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null; assigned_to_role?: string | null; assigned_to_user?: string | null; blocks_release_override?: number | null; due_date?: string | null }): Promise<string[]> => {
+  // `stats` (optional) separates jobs actually CREATED from ones a dedupe returned.
+  const raiseChecklistJobs = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref?: string | null; guest_label?: string | null; trigger: string; room_type_id?: string | null; template_ids?: string[]; dedupe_key?: string | null; assigned_to_role?: string | null; assigned_to_user?: string | null; blocks_release_override?: number | null; due_date?: string | null }, stats?: { created: number; deduped: number }): Promise<string[]> => {
     try {
       await ensureHousekeepingTables(db);
       let templates: any[];
@@ -23755,14 +23759,19 @@ ${data.tenant.name}`;
       }
       if (!templates || !templates.length) return [];
       const ids: string[] = [];
-      for (const tpl of templates) { const jid = await createJobFromTemplate(db, tpl, o); if (jid) ids.push(jid); }
+      for (const tpl of templates) {
+        const r = await createJobFromTemplate(db, tpl, o);
+        if (!r.id) continue;
+        ids.push(r.id);
+        if (stats) { if (r.created) stats.created++; else stats.deduped++; }
+      }
       return ids;
     } catch (e) { console.warn('[checklist] raiseChecklistJobs failed:', e); return []; }
   };
 
   // Backwards-compatible shim — every existing caller keeps working and now
   // transparently supports multiple templates per trigger. Returns first job id.
-  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null; room_type_id?: string | null; blocks_release_override?: number | null; due_date?: string | null }) => {
+  const createHousekeepingJob = async (db: any, o: { facility_type: string; facility_id: string | null; facility_label: string | null; source_ref: string | null; guest_label?: string | null; room_type_id?: string | null; blocks_release_override?: number | null; due_date?: string | null }): Promise<string | null> => {
     const trigger = o.facility_type === 'EVENT' ? 'EVENT_COMPLETE' : 'CHECK_OUT';
     const ids = await raiseChecklistJobs(db, { ...o, trigger });
     return ids[0] || null;
@@ -23777,8 +23786,12 @@ ${data.tenant.name}`;
   // MID_STAY checklists (per in-house stay) for one tenant. Idempotent via dedupe
   // keys — safe to run repeatedly. Used by the 05:00 cron AND the owner-triggered
   // "run now" endpoint. `ymd` lets callers evaluate the run as of a given date.
-  const runTenantScheduledChecklists = async (db: any, o: { isHotel: boolean; isEvents: boolean; isRestaurant?: boolean; isSpa?: boolean; ymd: string }): Promise<number> => {
-    let raised = 0;
+  // Returns the number of jobs ACTUALLY CREATED (F-C5 — it used to add every id the
+  // raiser handed back, including ones a dedupe had merely found, so a repeat run
+  // reported the same "raised" figure while creating nothing). Pass `stats` for the
+  // created/skipped breakdown.
+  const runTenantScheduledChecklists = async (db: any, o: { isHotel: boolean; isEvents: boolean; isRestaurant?: boolean; isSpa?: boolean; ymd: string }, stats?: { created: number; deduped: number }): Promise<number> => {
+    const acc = stats || { created: 0, deduped: 0 };
     await ensureHousekeepingTables(db);
     const s = await loadChecklistSettings(db);   // per-module owner toggles
     const has: any = await db.get("SELECT (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='DAILY') AS daily, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='MID_STAY') AS midstay, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='CLEANING') AS cleaning").catch(() => ({ daily: 0, midstay: 0, cleaning: 0 }));
@@ -23786,15 +23799,13 @@ ${data.tenant.name}`;
     if (o.isHotel && s.HOTEL && Number(has?.daily || 0) > 0) {
       const rooms: any[] = await db.query("SELECT id, name, room_number, type_id FROM rooms").catch(() => []);
       for (const rm of rooms) {
-        const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${o.ymd}`, due_date: o.ymd });
-        raised += ids.length;
+        await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${o.ymd}`, due_date: o.ymd }, acc);
       }
     }
     if (o.isEvents && s.EVENTS && Number(has?.daily || 0) > 0) {
       const venues: any[] = await db.query("SELECT id, name FROM event_venues WHERE is_active = 1").catch(() => []);
       for (const v of venues) {
-        const ids = await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${o.ymd}`, due_date: o.ymd });
-        raised += ids.length;
+        await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${o.ymd}`, due_date: o.ymd }, acc);
       }
     }
     // Module-level daily checklists — the whole outlet is one "facility", for the
@@ -23802,12 +23813,10 @@ ${data.tenant.name}`;
     // owner's per-module toggle; a no-op unless an active DAILY template is scoped to
     // that module (facility_type = the module) or GENERIC.
     if (o.isRestaurant && s.RESTAURANT && Number(has?.daily || 0) > 0) {
-      const ids = await raiseChecklistJobs(db, { facility_type: 'RESTAURANT', facility_id: 'RESTAURANT', facility_label: 'Restaurant', trigger: 'DAILY', dedupe_key: `DAILY:RESTAURANT:${o.ymd}`, due_date: o.ymd });
-      raised += ids.length;
+      await raiseChecklistJobs(db, { facility_type: 'RESTAURANT', facility_id: 'RESTAURANT', facility_label: 'Restaurant', trigger: 'DAILY', dedupe_key: `DAILY:RESTAURANT:${o.ymd}`, due_date: o.ymd }, acc);
     }
     if (o.isSpa && s.SPA && Number(has?.daily || 0) > 0) {
-      const ids = await raiseChecklistJobs(db, { facility_type: 'SPA', facility_id: 'SPA', facility_label: 'Spa & Wellness', trigger: 'DAILY', dedupe_key: `DAILY:SPA:${o.ymd}`, due_date: o.ymd });
-      raised += ids.length;
+      await raiseChecklistJobs(db, { facility_type: 'SPA', facility_id: 'SPA', facility_label: 'Spa & Wellness', trigger: 'DAILY', dedupe_key: `DAILY:SPA:${o.ymd}`, due_date: o.ymd }, acc);
     }
     if (o.isHotel && Number(has?.midstay || 0) > 0) {
       const stays: any[] = await db.query("SELECT rb.id, rb.room_id, rb.check_in_date, r.name, r.room_number, r.type_id FROM room_bookings rb JOIN rooms r ON r.id = rb.room_id WHERE rb.status = 'CHECKED_IN'").catch(() => []);
@@ -23820,8 +23829,7 @@ ${data.tenant.name}`;
         for (const tpl of tpls) {
           const N = Math.max(1, Number(tpl.recurrence_nights) || 1);
           if (nights % N !== 0) continue;
-          const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${st.id}:${tpl.id}:N${nights}`, due_date: o.ymd });
-          raised += ids.length;
+          await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'MID_STAY', template_ids: [tpl.id], dedupe_key: `MIDSTAY:${st.id}:${tpl.id}:N${nights}`, due_date: o.ymd }, acc);
         }
       }
     }
@@ -23843,12 +23851,11 @@ ${data.tenant.name}`;
         if (nights < freq || nights % freq !== 0) continue;
         const tpls: any[] = await resolveTemplatesForTrigger(db, { facility_type: 'ROOM', facility_id: st.room_id, room_type_id: st.type_id || null, trigger: 'CLEANING' });
         for (const tpl of tpls) {
-          const ids = await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'CLEANING', template_ids: [tpl.id], dedupe_key: `CLEAN:${st.id}:${tpl.id}:N${nights}`, due_date: o.ymd });
-          raised += ids.length;
+          await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: st.room_id, facility_label: st.name || (st.room_number ? `Room ${st.room_number}` : st.room_id), room_type_id: st.type_id || null, source_ref: st.id, trigger: 'CLEANING', template_ids: [tpl.id], dedupe_key: `CLEAN:${st.id}:${tpl.id}:N${nights}`, due_date: o.ymd }, acc);
         }
       }
     }
-    return raised;
+    return acc.created;
   };
 
   // Notify the assigned person / team about checklists that passed their due
@@ -23970,6 +23977,11 @@ ${data.tenant.name}`;
       const job: any = await db.get("SELECT * FROM housekeeping_jobs WHERE id = ?", [req.params.jid]);
       if (!job) return res.status(404).json({ error: "Job not found" });
       if (job.status !== 'OPEN') return res.status(409).json({ error: "This cleaning job is already closed" });
+      // F-C4 — the UPDATE below is scoped by (id, job_id), so an unknown or foreign
+      // task id changed nothing and STILL answered 200 (and wrote a "completed a
+      // step" audit line). A stale client must learn its task is gone.
+      const taskRow: any = await db.get("SELECT id FROM housekeeping_job_tasks WHERE id = ? AND job_id = ?", [req.params.tid, req.params.jid]).catch(() => null);
+      if (!taskRow) return res.status(404).json({ error: "That task is not on this checklist", code: 'TASK_NOT_FOUND' });
       const done = req.body?.is_done ? 1 : 0;
       await db.run("UPDATE housekeeping_job_tasks SET is_done = ?, done_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, done_by = ? WHERE id = ? AND job_id = ?",
         [done, done, done ? hkActor(req) : null, req.params.tid, req.params.jid]);
@@ -23981,8 +23993,18 @@ ${data.tenant.name}`;
 
   // Release a facility after cleaning. On complete: all mandatory tasks must be
   // done → job DONE + room flipped back to VACANT (available again).
+  // F-C6 — only a job that actually belongs to the room's cleaning cycle may free
+  // the room. Completing ANY job used to flip a CLEANING room to VACANT, so closing
+  // an inspection, a maintenance handover, an arrival or a mid-stay checklist marked
+  // a room "ready" while housekeeping was still working on it (the UAT clean-up
+  // would have freed 93 rooms this way by closing stale arrival checklists). A job
+  // qualifies when it is release-BLOCKING, or when its trigger is part of the
+  // cleaning cycle — a check-out / cleaning checklist is the housekeeper's "room is
+  // ready" action even on a property that turned release-gating off.
+  const HK_RELEASE_TRIGGERS = new Set(['CHECK_OUT', 'CLEANING', 'ROOM_CLEANING']);
   const releaseFacility = async (db: any, job: any) => {
     if (job.facility_type === 'ROOM' && job.facility_id) {
+      if (Number(job.blocks_release) !== 1 && !HK_RELEASE_TRIGGERS.has(String(job.trigger_event || '').toUpperCase())) return;
       // Don't free the room while ANOTHER release-blocking checklist is still open
       // (e.g. a checkout that raised both a Check-Out and an Inspection checklist).
       const stillBlocking: any = await db.get(
@@ -24363,9 +24385,13 @@ ${data.tenant.name}`;
       const isEvents = Number(rest?.events_enabled) === 1;
       const isSpa = Number(rest?.spa_enabled) === 1;
       const ymd = String(req.body?.as_of || new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10)).slice(0, 10);
-      const raised = await runTenantScheduledChecklists(db, { isHotel, isEvents, isRestaurant, isSpa, ymd });
+      // F-C5 — `raised` is now jobs actually CREATED; `skipped` is the ones that
+      // already existed (a repeat run of the same day is 0 raised / N skipped, not
+      // "N raised" again).
+      const stats = { created: 0, deduped: 0 };
+      const raised = await runTenantScheduledChecklists(db, { isHotel, isEvents, isRestaurant, isSpa, ymd }, stats);
       const overdue_notified = await notifyOverdueChecklists(db, req.params.id, ymd);
-      res.json({ raised, overdue_notified, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
+      res.json({ raised, skipped: stats.deduped, overdue_notified, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to run scheduled checklists' }); }
   });
 
@@ -24496,6 +24522,10 @@ ${data.tenant.name}`;
       if (!job) return res.status(404).json({ error: 'Checklist not found' });
       if (!(await _checklistOwns(req, job))) return res.status(403).json({ error: 'This checklist is not assigned to you.' });
       if (job.status !== 'OPEN') return res.status(409).json({ error: 'This checklist is already closed.' });
+      // F-C4 — same as the housekeeping worklist: a task id that isn't on this
+      // checklist must be a 404, not a silent success.
+      const myTask: any = await db.get("SELECT id FROM housekeeping_job_tasks WHERE id = ? AND job_id = ?", [req.params.tid, req.params.jid]).catch(() => null);
+      if (!myTask) return res.status(404).json({ error: 'That task is not on this checklist', code: 'TASK_NOT_FOUND' });
       const actor = req.user?.email || req.user?.id || null;
       // Body may carry is_done (tick/untick) and/or remark (free-text note). Both optional.
       if (req.body?.is_done !== undefined) {
@@ -53533,8 +53563,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-override-authority-f-c3',
+    commit_marker: 'checklist-low-findings-f-c4-f-c6',
     code_features: [
+      'checklist-low-findings-f-c4-f-c6',             //BUGFIX (Checklist UAT F-C4/F-C5/F-C6 Low, 8 Sep 2026). (F-C4) `PATCH /housekeeping/jobs/:jid/tasks/:tid` and its My-Checklist twin `PATCH /checklists/my/jobs/:jid/tasks/:tid` ran an UPDATE scoped by (id, job_id) with NO existence check — an unknown or foreign task id changed 0 rows, still answered 200 and still wrote a "completed a step" audit line, so a stale mobile client never learned its task was gone; both now 404 `TASK_NOT_FOUND`. (F-C5) `runTenantScheduledChecklists` counted every id `raiseChecklistJobs` returned, including ones a DEDUPE had merely found, so two identical runs of the same day both reported "raised: 23" while the second created nothing — `createJobFromTemplate` now returns `{id, created}`, `raiseChecklistJobs` takes an optional `{created, deduped}` collector, the scheduler returns jobs ACTUALLY created and `POST /checklists/run-scheduled` answers `{raised, skipped}`. (F-C6) `releaseFacility` freed the room on completion/override of ANY job: closing an inspection, a maintenance handover, an arrival or a mid-stay checklist flipped a room that was still being cleaned to VACANT (the UAT clean-up would have freed 93 rooms this way by closing stale arrival jobs) — a job may now release the room only when it is release-BLOCKING or its trigger is in the cleaning cycle (CHECK_OUT / CLEANING / ROOM_CLEANING), which keeps "complete the cleaning checklist → room ready" working on properties that turned release-gating off. Smoke: TC-CHK-TASK-404, TC-CHK-RUN-IDEMPOTENT, TC-CHK-NONBLOCKING-NO-RELEASE. tsc + vite build clean.',
       'checklist-override-authority-f-c3',            //BUGFIX (Checklist UAT F-C3 Medium, 8 Sep 2026). Skipping a release-blocking checklist had TWO different authorities for the same privilege: `POST /housekeeping/jobs/:jid/override` accepted `_roleHasTab(HOUSEKEEPING, 2)` (Edit) while the force path in `PATCH /hotel/rooms/:roomId/status {VACANT}` was `HK_MANAGER_ROLES` only — so a housekeeper who got 409 on "mark Vacant" (the response even names the blocking job) could call override and free the room anyway; conversely, since every tenant role is CUSTOM now, NO custom supervisor role could force a room. Both now go through one helper `_canOverrideChecklist(req)` = built-in manager/owner OR HOUSEKEEPING at FULL(3), the codebase\'s standard sensitive-action rule (matches staff-delete / PO-delete / invoice-soft-delete). Edit(2) still ticks tasks and completes a job normally — it just cannot skip the checklist. SAME FAMILY, found while fixing it: `POST /events/bookings/:bid/confirm` let ANY caller bypass the open-venue-cleaning gate by sending `override_cleaning: true` — the role was only consulted to word the 409 message, never to authorise the bypass; the flag now requires `_canOverrideChecklist` and the bypass writes an EVENT_BOOKING HOUSEKEEPING_OVERRIDE audit row. FE: the Housekeeping worklist hides the Override button unless `canDeleteTab(\'HOUSEKEEPING\')` so an Edit user is not led into a 403. Smoke: TC-CHK-OVERRIDE-AUTH, TC-CHK-FORCE-VACANT-AUTH. tsc + vite build clean.',
       'checklist-schedule-dates-f-c1-f-c2',           //BUGFIX (Checklist UAT F-C1 High + F-C2 Medium, 8 Sep 2026). A pg `date` column arrives as a JS Date, and the checklist code read it with `String(d).slice(0,10)` → "Tue Sep 08": (F-C1) `Date.parse("Tue Sep 08")` resolves to the YEAR 2001, so `nights = today − check_in` came out ≈9131 in `runTenantScheduledChecklists` — MID_STAY fired on the arrival day and every day regardless of `recurrence_nights` (dedupe keys `MIDSTAY:…:N9131`), the per-booking CLEANING cadence was arbitrary and its "skip the departure day" test compared "Thu Sep 11" with "2026-09-09" as text so it never skipped; the SAME read at check-in (~41145) made `stayNights` 0, so a multi-night stay never seeded a mid-stay job at all. (F-C2) `_chkYmd` rejected the Date against its ISO regex → the CHECK_OUT job was created with `due_date = NULL`, invisible to the overdue-reminder sweep (`notifyOverdueChecklists` filters on due_date). FIX: new `_pgYmd()` reads a Date back through its LOCAL components (pg builds it from local components, so toISOString would shift the calendar day in any timezone east of UTC) and passes ISO strings through; `_chkYmd` delegates to it; `_chkYmdPlus` does its day arithmetic in UTC (was local midnight + toISOString, same off-by-one); new `_chkNights(from,to)` computes whole nights from two ISO days. Applied at the MID_STAY + CLEANING scheduler loops and the check-in stay-nights calc. Smoke: TC-CHK-MIDSTAY-SEEDED, TC-CHK-NIGHTS-CADENCE, TC-CHK-CHECKOUT-DUE. tsc + vite build clean.',
       'menu-null-dietary-white-screen',               //BUGFIX (CRITICAL, reported 8 Sep 2026: Restaurant → Menu white screen). One menu row on RESTO-1003 ("DBG 1788330485275", category QA — written by an RBAC debugging script on 2 Sep through POST /menu without a dietary_type) had dietary_type = NULL; the Menu tab renders item.dietary_type.replace(...) so the whole React tree threw and the app went blank. FIX: (1) data — the junk row deleted, all 13 tenants scanned (no other NULL rows); (2) FE — the dietary badge and the public-menu description search are null-safe; (3) FE — new <TabErrorBoundary> around the content column: a render error inside ANY tab now shows a contained "This page hit an error" card with Try again / Reload (resets on tab switch) instead of a white screen; (4) API — POST /menu and PATCH /api/menu/:id default a missing/blank dietary_type to VEG and description to "" so no future API/CSV write can recreate the landmine. Smoke: TC-MENU-NULL-DIET. tsc + vite build clean.',
