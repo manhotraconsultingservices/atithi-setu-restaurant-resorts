@@ -11291,6 +11291,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     refund_full_days: number | null;
     refund_partial_pct: number | null;
     late_checkout_time: string | null;
+    check_in_time: string | null;
+    early_checkin_charge: boolean;
     // Phase H2 — hotel tax config
     gst_slab1_max: number;
     gst_slab1_rate: number;
@@ -11309,6 +11311,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   }>({
     min_stay_nights: 1, max_stay_nights: null,
     refund_full_days: null, refund_partial_pct: null, late_checkout_time: null,
+    check_in_time: null, early_checkin_charge: false,
     gst_slab1_max: 1000, gst_slab1_rate: 12,  // ≤₹1,000 → 12% (0% exemption withdrawn 18-Jul-2022)
     gst_slab2_max: 7500, gst_slab2_rate: 12,
     gst_slab3_rate: 18,
@@ -14211,6 +14214,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         refund_full_days:   data.refund_full_days == null ? null : Number(data.refund_full_days),
         refund_partial_pct: data.refund_partial_pct == null ? null : Number(data.refund_partial_pct),
         late_checkout_time: data.late_checkout_time || null,
+        check_in_time: data.check_in_time || null,
+        early_checkin_charge: !!data.early_checkin_charge,
         gst_slab1_max:      Number(data.gst_slab1_max  ?? 1000),
         gst_slab1_rate:     Number(data.gst_slab1_rate ?? 12),
         gst_slab2_max:      Number(data.gst_slab2_max  ?? 7500),
@@ -29139,6 +29144,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <p className="text-[10px] text-[#9c8e85] mt-1">
                       After this clock time on the check-out date, one extra night at the room rate is auto-added to the folio. Leave blank to disable.
                     </p>
+                  </div>
+                </div>
+
+                {/* ── Check-in time (arrival side of the same policy) ── */}
+                <div className="pt-4 border-t border-[#cc5a16]/10">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Check-in time</p>
+                  <div className="max-w-xs">
+                    <label className="block text-[11px] text-[#6b5d52] mb-1">Standard arrival time (24-hour HH:MM)</label>
+                    <input
+                      type="time"
+                      value={hotelSettings.check_in_time ?? ''}
+                      onChange={e => {
+                        const v = e.target.value.trim();
+                        setHotelSettings(s => ({ ...s, check_in_time: v === '' ? '' : v }));
+                      }}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    />
+                    <p className="text-[10px] text-[#9c8e85] mt-1">
+                      Shown to guests on their booking confirmation. It never blocks an early arrival — the front desk decides.
+                    </p>
+                    <label className="flex items-start gap-2 mt-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!!hotelSettings.early_checkin_charge}
+                        onChange={e => setHotelSettings(s => ({ ...s, early_checkin_charge: e.target.checked }))}
+                        className="mt-0.5 accent-[#cc5a16]"
+                      />
+                      <span className="text-[11px] text-[#6b5d52]">
+                        Charge for early arrival
+                        <span className="block text-[10px] text-[#9c8e85]">
+                          Arriving before this time adds one extra night at the room rate, as its own line the front desk can waive. Off by default.
+                        </span>
+                      </span>
+                    </label>
                   </div>
                 </div>
 

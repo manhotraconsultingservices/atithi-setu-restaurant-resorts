@@ -4669,6 +4669,85 @@ async function computeGuestPerkOnCheckIn(
 // Inserts the late-checkout fee as a folio_entries row using the same
 // shape as room nights so the rest of the folio math (subtotal, GST,
 // recompute) Just Works.
+// ════════════════════════════════════════════════════════════════════════
+//  computeEarlyCheckinFee — the arrival mirror of computeLateCheckoutFee.
+//
+//  A guest who arrives before the house check-in time has occupied the room
+//  through the night the property could otherwise have sold, so the same one
+//  extra night is charged — but ONLY when the owner has switched the charge on.
+//
+//  Rules:
+//    • hotel_early_checkin_charge = 0 (default) → never a fee. Publishing the
+//      arrival time on confirmations works without charging for it.
+//    • No / invalid hotel_check_in_time → no fee.
+//    • Only on the arrival date itself: earlier dates are already refused by the
+//      hard date guard, and a guest arriving on a later date is simply late.
+//    • Arrival time (Asia/Kolkata) before the cutoff → one extra night at the
+//      booking's room_rate, as its own folio line the front desk can waive.
+//
+//  This NEVER blocks a check-in. If a room is clean and free at 08:00, letting
+//  the guest in is good service; the policy question is only whether it is paid for.
+// ════════════════════════════════════════════════════════════════════════
+async function computeEarlyCheckinFee(
+  restaurantId: string,
+  booking: { check_in_date: string; room_rate: number },
+): Promise<{ applies: boolean; fee_amount: number; early_by_hours: number; policy_text: string; check_in_time: string | null; charge_enabled: boolean }> {
+  const r: any = await centralDb.get(
+    `SELECT hotel_check_in_time, hotel_early_checkin_charge FROM restaurants WHERE id = ?`,
+    [restaurantId]
+  );
+  const cutoff: string | null = (r?.hotel_check_in_time || '').trim() || null;
+  const chargeOn = Number(r?.hotel_early_checkin_charge ?? 0) === 1;
+  const rate = Number(booking.room_rate || 0);
+  const base = { fee_amount: 0, early_by_hours: 0, check_in_time: cutoff, charge_enabled: chargeOn };
+  if (!cutoff || !/^\d{2}:\d{2}$/.test(cutoff)) {
+    return { ...base, applies: false, policy_text: 'No check-in time configured.' };
+  }
+  if (!chargeOn) {
+    return { ...base, applies: false, policy_text: `Check-in from ${cutoff}. Early arrivals are not charged.` };
+  }
+  const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata', hour12: false });
+  const [datePart, timePart] = tzDate.split(',').map(s => s.trim());
+  const todayIST = datePart;
+  const [hhStr, mmStr] = (timePart || '00:00:00').split(':');
+  const nowMinutes = Number(hhStr || 0) * 60 + Number(mmStr || 0);
+  const arrivalISO = normaliseDateIso(booking.check_in_date);
+
+  if (todayIST === arrivalISO) {
+    const [cutH, cutM] = cutoff.split(':');
+    const cutoffMinutes = Number(cutH) * 60 + Number(cutM);
+    if (nowMinutes < cutoffMinutes) {
+      const earlyBy = Math.max(0, (cutoffMinutes - nowMinutes) / 60);
+      return {
+        ...base,
+        applies: true,
+        fee_amount: Math.round(rate * 100) / 100,
+        early_by_hours: Math.round(earlyBy * 10) / 10,
+        policy_text: `Arrival at ${timePart?.slice(0, 5)} is before the ${cutoff} check-in time (${earlyBy.toFixed(1)}h early). Adding 1 extra night at ₹${rate.toFixed(2)}.`,
+      };
+    }
+  }
+  return { ...base, applies: false, policy_text: `Arriving on or after the ${cutoff} check-in time — no early-arrival fee.` };
+}
+
+async function addEarlyCheckinFolioEntry(
+  restaurantId: string,
+  folioId: string,
+  rate: number,
+): Promise<void> {
+  const tenantDb = await getTenantDb(restaurantId);
+  const cfg = await loadHotelTaxConfig(restaurantId);
+  const gstPct = gstRateForTariff(rate, cfg);
+  const gstAmt = rate * gstPct / 100;
+  const entryId = `FE-${Date.now()}-EARLY-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+  await tenantDb.run(
+    `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+     VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
+    [entryId, folioId, 'Early check-in fee (extra night)', rate, rate, gstPct, gstAmt]
+  );
+  await recomputeFolioTotals(tenantDb, folioId);
+}
+
 async function addLateCheckoutFolioEntry(
   restaurantId: string,
   folioId: string,
@@ -33516,7 +33595,10 @@ ${data.tenant.name}`;
          duStartTime, duEndTime]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
-      try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
+      try {
+        const hoursCfg: any = await centralDb.get("SELECT hotel_check_in_time, hotel_late_checkout_time FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+        await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date, checkInTime: hoursCfg?.hotel_check_in_time || '', checkOutTime: hoursCfg?.hotel_late_checkout_time || '' });
+      } catch {}
       // Phase H1 — log to channel sync queue (no-op for direct bookings).
       await logChannelSync(req.params.id, row, 'BOOKING_CREATED');
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: bid, action: 'CREATED', summary: `Booking created — ${guest_name || ''} · ${check_in_date}→${check_out_date}`.trim(), after: row });
@@ -38550,6 +38632,9 @@ ${data.tenant.name}`;
             currencySymbol: check.restaurant?.currency_symbol || '₹',
             upiVpa: check.restaurant?.upi_vpa || '',
             upiPayeeName: check.restaurant?.upi_payee_name || check.restaurant?.name || '',
+            // Publish the house arrival / departure times when configured.
+            checkInTime: check.restaurant?.hotel_check_in_time || '',
+            checkOutTime: check.restaurant?.hotel_late_checkout_time || '',
           });
         } catch {}
         try { await logChannelSync(req.params.id, row, 'BOOKING_CREATED'); } catch {}
@@ -41244,6 +41329,29 @@ ${data.tenant.name}`;
       // Open a folio with ROOM_CHARGE entries (Phase 3 — folio engine)
       const folio = await createFolioWithRoomCharges(req.params.id, b);
 
+      // ── Early check-in fee — the arrival mirror of the late-checkout fee.
+      //    Only when the owner switched the charge on AND the guest is arriving
+      //    before the house check-in time. Never blocks the check-in, posts its
+      //    own visible folio line, and the front desk can waive it per arrival
+      //    with `waive_early_checkin: true`. Best-effort: never fails a check-in.
+      let earlyFeeInfo: { applies: boolean; fee_amount: number; early_by_hours: number; policy_text: string; check_in_time: string | null; charge_enabled: boolean } | null = null;
+      try {
+        const waiveEarly = req.body?.waive_early_checkin === true || String(req.body?.waive_early_checkin || '') === 'true';
+        const eFee = await computeEarlyCheckinFee(req.params.id, {
+          check_in_date: b.check_in_date,
+          room_rate: Number(b.room_rate || 0),
+        });
+        earlyFeeInfo = eFee;
+        if (eFee.applies && eFee.fee_amount > 0 && !waiveEarly && folio?.id) {
+          await addEarlyCheckinFolioEntry(req.params.id, folio.id, eFee.fee_amount);
+          await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'EARLY_CHECKIN_FEE', summary: eFee.policy_text });
+        } else if (eFee.applies && waiveEarly) {
+          earlyFeeInfo = { ...eFee, applies: false, policy_text: `${eFee.policy_text} — waived by the front desk.` };
+        }
+      } catch (e) {
+        console.warn('[hotel-checkin] early-checkin fee compute failed:', e);
+      }
+
       // ── ADVANCE PAYMENT (10 Jun 2026 critical fix) ─────────────────
       // Front-desk staff may collect a partial payment from the guest
       // at check-in (cash deposit, card swipe, UPI). Body shape:
@@ -41341,6 +41449,7 @@ ${data.tenant.name}`;
         folio_id: folio?.id || null,
         perk,
         housekeeping_warning: hkWarn,
+        early_checkin: earlyFeeInfo,   // what the arrival policy did, so the desk can see it
       });
     } catch (err: any) {
       console.error("checkin error:", err);
@@ -42947,6 +43056,7 @@ ${data.tenant.name}`;
         `SELECT hotel_min_stay_nights, hotel_max_stay_nights,
                 hotel_refund_full_days, hotel_refund_partial_pct,
                 hotel_late_checkout_time,
+                hotel_check_in_time, hotel_early_checkin_charge,
                 hotel_gst_slab1_max, hotel_gst_slab1_rate,
                 hotel_gst_slab2_max, hotel_gst_slab2_rate,
                 hotel_gst_slab3_rate,
@@ -42965,6 +43075,9 @@ ${data.tenant.name}`;
         refund_full_days:       r?.hotel_refund_full_days ?? null,
         refund_partial_pct:     r?.hotel_refund_partial_pct ?? null,
         late_checkout_time:     r?.hotel_late_checkout_time ?? null,
+        // Arrival side of the same policy. '' is stored when the owner clears it.
+        check_in_time:          (r?.hotel_check_in_time || null),
+        early_checkin_charge:   Number(r?.hotel_early_checkin_charge ?? 0) === 1,
         // Phase H2 — hotel tax config (defaults match post-2022 IN GST slabs)
         gst_slab1_max:          r?.hotel_gst_slab1_max  ?? 1000,
         gst_slab1_rate:         r?.hotel_gst_slab1_rate ?? 0,
@@ -43013,6 +43126,13 @@ ${data.tenant.name}`;
       if (lateTime != null && !/^\d{2}:\d{2}$/.test(lateTime)) {
         return res.status(400).json({ error: 'Late checkout time must be in HH:MM format (24-hour clock).' });
       }
+      // Arrival side. Written with COALESCE below, so a partial PATCH leaves them
+      // alone (unlike the older direct-assigned fields above); '' clears the time.
+      const checkInTime = b.check_in_time === undefined ? null : String(b.check_in_time ?? '').trim();
+      if (checkInTime && !/^\d{2}:\d{2}$/.test(checkInTime)) {
+        return res.status(400).json({ error: 'Check-in time must be in HH:MM format (24-hour clock).' });
+      }
+      const earlyCheckinCharge = b.early_checkin_charge == null ? null : (b.early_checkin_charge ? 1 : 0);
 
       // Phase H2 — hotel tax config. Coerce to safe ranges; allow null
       // (treated as "use platform default" via fallback in loadHotelTaxConfig).
@@ -43054,6 +43174,8 @@ ${data.tenant.name}`;
                 hotel_refund_full_days   = ?,
                 hotel_refund_partial_pct = ?,
                 hotel_late_checkout_time = ?,
+                hotel_check_in_time          = COALESCE(?, hotel_check_in_time),
+                hotel_early_checkin_charge   = COALESCE(?, hotel_early_checkin_charge),
                 hotel_gst_slab1_max          = COALESCE(?, hotel_gst_slab1_max),
                 hotel_gst_slab1_rate         = COALESCE(?, hotel_gst_slab1_rate),
                 hotel_gst_slab2_max          = COALESCE(?, hotel_gst_slab2_max),
@@ -43067,6 +43189,7 @@ ${data.tenant.name}`;
                 round_invoice_to_rupee       = COALESCE(?, round_invoice_to_rupee)
           WHERE id = ?`,
         [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime,
+         checkInTime, earlyCheckinCharge,
          slab1Max, slab1Rate, slab2Max, slab2Rate, slab3Rate, svcPct,
          requireIdAtCheckin,
          checklistValidateOnCheckin,
@@ -53563,8 +53686,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-overnight-sessions-and-note',
+    commit_marker: 'hotel-checkin-time-policy',
     code_features: [
+      'hotel-checkin-time-policy',                    //FEATURE (client gap, 9 Sep 2026): the ARRIVAL half of an 11-to-11 house. Only the departure side existed (`hotel_late_checkout_time` auto-adds one night past the cutoff); check-in was gated on the check-in DATE only, no arrival time was published anywhere and an early arrival was never charged. Two new central columns: `hotel_check_in_time` (HH:MM, published to the guest on the booking confirmation — "Check-in: 20 Sep from 11:00" in both the text and HTML templates, alongside the check-out time) and `hotel_early_checkin_charge` (default 0). New `computeEarlyCheckinFee` mirrors `computeLateCheckoutFee`: when the charge is ON and the guest arrives on the arrival date BEFORE the cutoff (Asia/Kolkata), one extra night at the booking room_rate is posted by `addEarlyCheckinFolioEntry` as its own visible ROOM_CHARGE line (GST at the tariff slab), audited as EARLY_CHECKIN_FEE, waivable per arrival with `waive_early_checkin: true`, and returned on the check-in response as `early_checkin` so the desk can see what happened. **It NEVER blocks a check-in** — a clean room at 08:00 should be given to the guest; the policy question is only whether it is paid for. Both fields are written with COALESCE (a partial PATCH leaves them alone, deliberately NOT repeating the direct-assign trap of the older stay/refund fields; \'\' clears the time) and are validated HH:MM. Settings UI gets the time + an off-by-default "Charge for early arrival" toggle. Smoke: TC-HOTEL-CHECKIN-TIME-SETTING, TC-HOTEL-EARLY-CHECKIN-CHARGE, TC-HOTEL-EARLY-CHECKIN-NO-BLOCK. tsc + vite build clean.',
       'event-overnight-sessions-and-note',            //FEATURE + BUGFIX (client gaps, 9 Sep 2026). (1) VENUE CONFLICTS ARE SPAN-BASED. `venueBookingConflict` treated any booking carrying an `end_date` as occupying those days IN FULL, so a property running two sessions a day could not sell them: a night session recorded 15:00 → next-day 03:00 claimed the whole of the following day and the 03:00 → 15:00 morning session was refused "Venue is no longer available" (reproduced live on RESTO-1003 before the fix). Each booking is now reduced to ONE absolute span (start day + start time → end day + end time, rolling to the next day when the end time is at or before the start time) and two bookings clash only when those spans really overlap, widened by `turnaround_min` on each side; the SQL prefilter is widened a day each way so an overnight candidate is never missed. Genuine overlaps — including inside a multi-day event — still 409, and edge-exclusive means one session may begin exactly when the previous ends. (2) EVENT RESERVATIONS GET A SPECIAL NOTE box on the staff booking form (`special_requests` already existed on the table, the create/update allow-list and the public enquiry form — only the staff input was missing), with labels in all 7 languages. Smoke: TC-EVT-NIGHT-THEN-MORNING, TC-EVT-BACK-TO-BACK, TC-EVT-REAL-CLASH. tsc + vite build clean.',
       'checklist-low-findings-f-c4-f-c6',             //BUGFIX (Checklist UAT F-C4/F-C5/F-C6 Low, 8 Sep 2026). (F-C4) `PATCH /housekeeping/jobs/:jid/tasks/:tid` and its My-Checklist twin `PATCH /checklists/my/jobs/:jid/tasks/:tid` ran an UPDATE scoped by (id, job_id) with NO existence check — an unknown or foreign task id changed 0 rows, still answered 200 and still wrote a "completed a step" audit line, so a stale mobile client never learned its task was gone; both now 404 `TASK_NOT_FOUND`. (F-C5) `runTenantScheduledChecklists` counted every id `raiseChecklistJobs` returned, including ones a DEDUPE had merely found, so two identical runs of the same day both reported "raised: 23" while the second created nothing — `createJobFromTemplate` now returns `{id, created}`, `raiseChecklistJobs` takes an optional `{created, deduped}` collector, the scheduler returns jobs ACTUALLY created and `POST /checklists/run-scheduled` answers `{raised, skipped}`. (F-C6) `releaseFacility` freed the room on completion/override of ANY job: closing an inspection, a maintenance handover, an arrival or a mid-stay checklist flipped a room that was still being cleaned to VACANT (the UAT clean-up would have freed 93 rooms this way by closing stale arrival jobs) — a job may now release the room only when it is release-BLOCKING or its trigger is in the cleaning cycle (CHECK_OUT / CLEANING / ROOM_CLEANING), which keeps "complete the cleaning checklist → room ready" working on properties that turned release-gating off. Smoke: TC-CHK-TASK-404, TC-CHK-RUN-IDEMPOTENT, TC-CHK-NONBLOCKING-NO-RELEASE. tsc + vite build clean.',
       'checklist-override-authority-f-c3',            //BUGFIX (Checklist UAT F-C3 Medium, 8 Sep 2026). Skipping a release-blocking checklist had TWO different authorities for the same privilege: `POST /housekeeping/jobs/:jid/override` accepted `_roleHasTab(HOUSEKEEPING, 2)` (Edit) while the force path in `PATCH /hotel/rooms/:roomId/status {VACANT}` was `HK_MANAGER_ROLES` only — so a housekeeper who got 409 on "mark Vacant" (the response even names the blocking job) could call override and free the room anyway; conversely, since every tenant role is CUSTOM now, NO custom supervisor role could force a room. Both now go through one helper `_canOverrideChecklist(req)` = built-in manager/owner OR HOUSEKEEPING at FULL(3), the codebase\'s standard sensitive-action rule (matches staff-delete / PO-delete / invoice-soft-delete). Edit(2) still ticks tasks and completes a job normally — it just cannot skip the checklist. SAME FAMILY, found while fixing it: `POST /events/bookings/:bid/confirm` let ANY caller bypass the open-venue-cleaning gate by sending `override_cleaning: true` — the role was only consulted to word the 409 message, never to authorise the bypass; the flag now requires `_canOverrideChecklist` and the bypass writes an EVENT_BOOKING HOUSEKEEPING_OVERRIDE audit row. FE: the Housekeeping worklist hides the Override button unless `canDeleteTab(\'HOUSEKEEPING\')` so an Edit user is not led into a 403. Smoke: TC-CHK-OVERRIDE-AUTH, TC-CHK-FORCE-VACANT-AUTH. tsc + vite build clean.',

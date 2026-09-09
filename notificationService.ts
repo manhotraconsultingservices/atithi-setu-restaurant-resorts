@@ -552,8 +552,8 @@ export function buildNotificationContent(
         text:
           `📅 *Booking confirmed*\n` +
           `Guest: ${data.guestName}\n` +
-          `Check-in: ${data.checkIn}\n` +
-          `Check-out: ${data.checkOut}\n` +
+          `Check-in: ${data.checkIn}${data.checkInTime ? ` from ${data.checkInTime}` : ''}\n` +
+          `Check-out: ${data.checkOut}${data.checkOutTime ? ` by ${data.checkOutTime}` : ''}\n` +
           totalLine +
           `Ref: ${data.bookingId}` +
           (hasUpi
@@ -567,8 +567,8 @@ export function buildNotificationContent(
           `<div style="background:#faf7f2;padding:16px;border-radius:8px;margin:16px 0">` +
           `<p style="margin:0 0 4px 0"><strong>Your stay</strong></p>` +
           `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Guest: <strong>${data.guestName}</strong></p>` +
-          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Check-in: ${data.checkIn}</p>` +
-          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Check-out: ${data.checkOut}</p>` +
+          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Check-in: ${data.checkIn}${data.checkInTime ? ` <strong>from ${data.checkInTime}</strong>` : ''}</p>` +
+          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Check-out: ${data.checkOut}${data.checkOutTime ? ` <strong>by ${data.checkOutTime}</strong>` : ''}</p>` +
           (data.mealPlan ? `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Plan: ${data.mealPlan}</p>` : '') +
           totalHtml +
           `<p style="margin:2px 0;color:#9c8e85;font-size:12px">Ref: ${data.bookingId}</p>` +

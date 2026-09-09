@@ -382,6 +382,16 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_refund_full_days INT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_refund_partial_pct DOUBLE PRECISION;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_late_checkout_time TEXT;
+    -- Arrival side of the same policy (e.g. an 11:00-to-11:00 house).
+    --   hotel_check_in_time        HH:MM standard arrival time. Published to the
+    --     guest on the booking confirmation. Never blocks a check-in — the front
+    --     desk keeps its discretion to admit a guest early when the room is ready.
+    --   hotel_early_checkin_charge 1 = arriving before that time adds ONE extra
+    --     night to the folio (mirrors the late-checkout fee), as its own visible
+    --     line the front desk can waive. Default 0 — publishing the time is
+    --     useful on its own, charging for it is a separate decision.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_check_in_time TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_early_checkin_charge INT DEFAULT 0;
     -- Req 1b — Pre-check-in ID gate. When 1 (default), the check-in
     -- endpoint refuses to flip a booking to CHECKED_IN unless at least
     -- one row exists in guest_documents for that booking. Statutory
