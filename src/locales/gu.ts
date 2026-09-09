@@ -113,6 +113,8 @@ export const gu: Record<string, string> = {
   'events.bookings.startTime': 'શરૂઆતનો સમય',
   'events.bookings.endTime': 'સમાપ્તિ સમય',
   'events.bookings.guests': 'મહેમાનો',
+  'events.bookings.specialNote': 'વિશેષ નોંધ',
+  'events.bookings.specialNoteHint': 'ટીમને જાણવા જેવું કંઈ — સજાવટ, સમય, ખાસ મહેમાનો',
   'events.bookings.rateBasis': 'દર આધાર',
   'events.bookings.discount': 'છૂટ',
   'events.bookings.advance': 'એડવાન્સ',

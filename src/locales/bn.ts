@@ -113,6 +113,8 @@ export const bn: Record<string, string> = {
   'events.bookings.startTime': 'শুরুর সময়',
   'events.bookings.endTime': 'শেষের সময়',
   'events.bookings.guests': 'অতিথি',
+  'events.bookings.specialNote': 'বিশেষ নোট',
+  'events.bookings.specialNoteHint': 'দলের জানা দরকার এমন কিছু — সাজসজ্জা, সময়, বিশেষ অতিথি',
   'events.bookings.rateBasis': 'হারের ভিত্তি',
   'events.bookings.discount': 'ছাড়',
   'events.bookings.advance': 'অগ্রিম',

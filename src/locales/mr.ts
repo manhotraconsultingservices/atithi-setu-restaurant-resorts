@@ -113,6 +113,8 @@ export const mr: Record<string, string> = {
   'events.bookings.startTime': 'सुरुवातीची वेळ',
   'events.bookings.endTime': 'समाप्तीची वेळ',
   'events.bookings.guests': 'पाहुणे',
+  'events.bookings.specialNote': 'विशेष टीप',
+  'events.bookings.specialNoteHint': 'टीमला माहीत असावे असे काही — सजावट, वेळ, विशेष पाहुणे',
   'events.bookings.rateBasis': 'दर आधार',
   'events.bookings.discount': 'सूट',
   'events.bookings.advance': 'आगाऊ रक्कम',

@@ -109,6 +109,8 @@ export const hi: Record<string, string> = {
   'events.bookings.startTime': 'आरंभ समय',
   'events.bookings.endTime': 'समाप्ति समय',
   'events.bookings.guests': 'अतिथि',
+  'events.bookings.specialNote': 'विशेष टिप्पणी',
+  'events.bookings.specialNoteHint': 'टीम को जो जानना चाहिए — सजावट, समय, विशिष्ट अतिथि',
   'events.bookings.venueEditHint': 'स्थल बदलने पर स्थल शुल्क पुनः गणना होता है।',
   'events.dash.vsPrior': 'समान अवधि के पिछले काल की तुलना में',
   'events.dash.profitBy': 'लाभ कहाँ से आता है',

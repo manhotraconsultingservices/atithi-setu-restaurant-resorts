@@ -116,6 +116,8 @@ export const en: Record<string, string> = {
   'events.bookings.startTime': 'Start time',
   'events.bookings.endTime': 'End time',
   'events.bookings.guests': 'Guests',
+  'events.bookings.specialNote': 'Special note',
+  'events.bookings.specialNoteHint': 'Anything the team should know — decor, timings, VIP guests',
   'events.bookings.venueEditHint': 'Changing the venue recalculates the venue charge.',
   'events.dash.vsPrior': 'vs the previous period of equal length',
   'events.dash.profitBy': 'Where the profit comes from',

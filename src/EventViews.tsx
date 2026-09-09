@@ -689,7 +689,7 @@ function EventBookings({ restaurantId, token }: Props) {
   const [venues, setVenues] = useState<any[]>([]);
   const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
   const [showNew, setShowNew] = useState(false);
-  const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', half_day_slot: 'AM', venue_rate: '', guest_count: '' };
+  const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', half_day_slot: 'AM', venue_rate: '', guest_count: '', special_requests: '' };
   const [form, setForm] = useState<any>(blank);
   const [avail, setAvail] = useState<{ available: boolean; reason: string; rate: number } | null>(null);
 
@@ -775,6 +775,14 @@ function EventBookings({ restaurantId, token }: Props) {
               <div><label className={LABEL}>{t('events.bookings.endTime')}</label><input type="time" className={INPUT} value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} /></div>
             </>)}
             <div><label className={LABEL}>{t('events.bookings.guests')}</label><input type="number" className={INPUT} value={form.guest_count} onChange={e => setForm({ ...form, guest_count: e.target.value })} /></div>
+            {/* Special note — the same free-text note a hotel reservation carries. Stored
+                on the booking and shown on its detail view; public enquiries fill it too. */}
+            <div className="col-span-2 md:col-span-4">
+              <label className={LABEL}>{t('events.bookings.specialNote')}</label>
+              <textarea className={INPUT} rows={2} value={form.special_requests || ''}
+                onChange={e => setForm({ ...form, special_requests: e.target.value })}
+                placeholder={t('events.bookings.specialNoteHint')} />
+            </div>
           </div>
           {form.venue_id && avail && (
             <div className={`mt-3 flex flex-wrap items-center gap-3 px-3 py-2 rounded-lg border ${avail.available ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>

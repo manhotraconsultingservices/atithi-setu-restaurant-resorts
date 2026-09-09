@@ -130,12 +130,21 @@ function ymdStr(v: any): string {
 }
 
 /**
- * Returns a conflicting event booking on a venue for the given date range +
- * time window, or null. Supports multi-day events (end_date) and overnight
- * events (end_date = next day). Date ranges overlap when
- * `newStart <= existingEnd AND existingStart <= newEnd`. When BOTH bookings are
- * single-day on the same date, time-of-day overlap is additionally required;
- * if either spans multiple days, any date overlap is a conflict.
+ * Returns a conflicting event booking on a venue, or null.
+ *
+ * Each booking is reduced to ONE absolute span — the day it starts plus its start
+ * time, through the day it ends plus its end time — and two bookings clash when
+ * those spans actually overlap (widened by `bufferMin` of turnaround on each side).
+ * A window whose end time is at or before its start time runs past midnight and
+ * ends the following day.
+ *
+ * This replaces an older shortcut where a booking carrying an `end_date` was
+ * treated as occupying every one of those days in full. That refused a property
+ * running two sessions a day (e.g. 15:00 → 03:00, then 03:00 → 15:00 the next
+ * morning): the night session claimed the whole of the following day, so the
+ * morning booking was rejected as unavailable even though the hall was free.
+ * Genuine overlaps, including inside a multi-day event, still conflict.
+ *
  * Only CONFIRMED / IN_PROGRESS bookings hold the venue (INQUIRY/QUOTED do not).
  */
 export async function venueBookingConflict(
@@ -151,6 +160,10 @@ export async function venueBookingConflict(
   const newStart = ymdStr(eventDate);
   const ed = endDate ? ymdStr(endDate) : '';
   const newEnd = ed && ed > newStart ? ed : newStart;
+  // Widen the date prefilter by a day on each side: a window that runs past midnight
+  // reaches into the next day, and the buffer can push a span over a boundary. The
+  // precise span comparison below decides; this only picks the candidates.
+  const shiftYmd = (ymd: string, days: number) => new Date(Date.parse(ymd + 'T00:00:00Z') + days * 86400000).toISOString().slice(0, 10);
   const rows = await tenantDb.query(
     `SELECT id, event_date, end_date, start_time, end_time FROM event_bookings
       WHERE venue_id = ?
@@ -159,23 +172,26 @@ export async function venueBookingConflict(
         AND COALESCE(end_date, event_date) >= ?
         ${excludeBookingId ? "AND id <> ?" : ""}`,
     excludeBookingId
-      ? [venueId, newEnd, newStart, excludeBookingId]
-      : [venueId, newEnd, newStart]
+      ? [venueId, shiftYmd(newEnd, 1), shiftYmd(newStart, -1), excludeBookingId]
+      : [venueId, shiftYmd(newEnd, 1), shiftYmd(newStart, -1)]
   );
-  const nS = hhmmToMin(startTime), nE = hhmmToMin(endTime);
+  // One absolute span per booking, in minutes from an arbitrary common epoch.
+  const dayNum = (ymd: string) => Math.round(Date.parse(ymd + 'T00:00:00Z') / 86400000);
+  const span = (startYmd: string, endYmd: string, sTime: any, eTime: any) => {
+    const s = dayNum(startYmd) * 1440 + hhmmToMin(String(sTime || '00:00'));
+    let e = dayNum(endYmd) * 1440 + hhmmToMin(String(eTime || '00:00'));
+    if (e <= s) e += 1440;   // ends at/before it starts → it runs past midnight
+    return { s, e };
+  };
+  const nw = span(newStart, newEnd, startTime, endTime);
   for (const r of rows) {
     const exStart = ymdStr(r.event_date);
-    const exEnd = ymdStr(r.end_date || r.event_date) > exStart ? ymdStr(r.end_date) : exStart;
-    // Either side multi-day → date overlap alone is a conflict.
-    if (newEnd > newStart || exEnd > exStart) return r;
-    // Both single-day on the same date → require a turnaround/prep gap of at least
-    // bufferMin between the two windows (setup/teardown time). Two windows clash
-    // when the existing window, widened by the buffer on each side, overlaps the
-    // new one. With buffer 0 this is the plain edge-exclusive overlap.
-    if (exStart === newStart) {
-      const eS = hhmmToMin(String(r.start_time)), eE = hhmmToMin(String(r.end_time));
-      if (eS - bufferMin < nE && eE + bufferMin > nS) return r;
-    }
+    const exEndYmd = ymdStr(r.end_date || r.event_date) > exStart ? ymdStr(r.end_date) : exStart;
+    const ex = span(exStart, exEndYmd, r.start_time, r.end_time);
+    // Overlap with the turnaround/prep gap applied to the existing booking on both
+    // sides. With bufferMin = 0 this is a plain edge-exclusive overlap, so one
+    // session may start exactly when the previous one ends.
+    if (ex.s - bufferMin < nw.e && ex.e + bufferMin > nw.s) return r;
   }
   return null;
 }

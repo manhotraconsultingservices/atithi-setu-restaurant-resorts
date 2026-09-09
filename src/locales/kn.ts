@@ -109,6 +109,8 @@ export const kn: Record<string, string> = {
   'events.bookings.startTime': 'ಪ್ರಾರಂಭ ಸಮಯ',
   'events.bookings.endTime': 'ಅಂತಿಮ ಸಮಯ',
   'events.bookings.guests': 'ಅತಿಥಿಗಳು',
+  'events.bookings.specialNote': 'ವಿಶೇಷ ಟಿಪ್ಪಣಿ',
+  'events.bookings.specialNoteHint': 'ತಂಡಕ್ಕೆ ತಿಳಿಯಬೇಕಾದ ವಿಷಯ — ಅಲಂಕಾರ, ಸಮಯ, ವಿಶೇಷ ಅತಿಥಿಗಳು',
   'events.bookings.venueEditHint': 'ಸ್ಥಳವನ್ನು ಬದಲಾಯಿಸಿದರೆ ಸ್ಥಳ ಶುಲ್ಕವನ್ನು ಮರುಲೆಕ್ಕ ಹಾಕಲಾಗುತ್ತದೆ.',
   'events.dash.vsPrior': 'ಸಮಾನ ಅವಧಿಯ ಹಿಂದಿನ ಅವಧಿಗೆ ಹೋಲಿಸಿದರೆ',
   'events.dash.profitBy': 'ಲಾಭ ಎಲ್ಲಿಂದ ಬರುತ್ತದೆ',

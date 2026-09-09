@@ -113,6 +113,8 @@ export const pa: Record<string, string> = {
   'events.bookings.startTime': 'ਸ਼ੁਰੂ ਸਮਾਂ',
   'events.bookings.endTime': 'ਸਮਾਪਤੀ ਸਮਾਂ',
   'events.bookings.guests': 'ਮਹਿਮਾਨ',
+  'events.bookings.specialNote': 'ਖਾਸ ਨੋਟ',
+  'events.bookings.specialNoteHint': 'ਟੀਮ ਨੂੰ ਜੋ ਪਤਾ ਹੋਣਾ ਚਾਹੀਦਾ — ਸਜਾਵਟ, ਸਮਾਂ, ਖਾਸ ਮਹਿਮਾਨ',
   'events.bookings.rateBasis': 'ਦਰ ਆਧਾਰ',
   'events.bookings.discount': 'ਛੂਟ',
   'events.bookings.advance': 'ਪੇਸ਼ਗੀ',
