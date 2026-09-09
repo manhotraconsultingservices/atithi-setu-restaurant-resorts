@@ -4204,6 +4204,11 @@ async function resolvePartnerCommission(restaurantId: string, partner: any): Pro
   return 0;
 }
 
+// A real 24-hour clock time. `\d{2}:\d{2}` alone accepts "25:99", which would
+// have been stored and then read as minute 1599 — always "before the cutoff",
+// so an early-arrival charge would apply to every single check-in.
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 // ════════════════════════════════════════════════════════════════════════
 //  computeLateCheckoutFee — Phase H1
 //
@@ -4235,7 +4240,7 @@ async function computeLateCheckoutFee(
   if (!cutoff || rate <= 0) {
     return { applies: false, fee_amount: 0, late_by_hours: 0, policy_text: 'No late-checkout policy configured.', late_checkout_time: cutoff };
   }
-  if (!/^\d{2}:\d{2}$/.test(cutoff)) {
+  if (!HHMM_RE.test(cutoff)) {
     return { applies: false, fee_amount: 0, late_by_hours: 0, policy_text: 'Invalid late-checkout cutoff configured.', late_checkout_time: cutoff };
   }
 
@@ -4700,7 +4705,7 @@ async function computeEarlyCheckinFee(
   const chargeOn = Number(r?.hotel_early_checkin_charge ?? 0) === 1;
   const rate = Number(booking.room_rate || 0);
   const base = { fee_amount: 0, early_by_hours: 0, check_in_time: cutoff, charge_enabled: chargeOn };
-  if (!cutoff || !/^\d{2}:\d{2}$/.test(cutoff)) {
+  if (!cutoff || !HHMM_RE.test(cutoff)) {
     return { ...base, applies: false, policy_text: 'No check-in time configured.' };
   }
   if (!chargeOn) {
@@ -43123,13 +43128,13 @@ ${data.tenant.name}`;
       const lateTime = b.late_checkout_time == null || b.late_checkout_time === ''
         ? null
         : String(b.late_checkout_time).trim();
-      if (lateTime != null && !/^\d{2}:\d{2}$/.test(lateTime)) {
+      if (lateTime != null && !HHMM_RE.test(lateTime)) {
         return res.status(400).json({ error: 'Late checkout time must be in HH:MM format (24-hour clock).' });
       }
       // Arrival side. Written with COALESCE below, so a partial PATCH leaves them
       // alone (unlike the older direct-assigned fields above); '' clears the time.
       const checkInTime = b.check_in_time === undefined ? null : String(b.check_in_time ?? '').trim();
-      if (checkInTime && !/^\d{2}:\d{2}$/.test(checkInTime)) {
+      if (checkInTime && !HHMM_RE.test(checkInTime)) {
         return res.status(400).json({ error: 'Check-in time must be in HH:MM format (24-hour clock).' });
       }
       const earlyCheckinCharge = b.early_checkin_charge == null ? null : (b.early_checkin_charge ? 1 : 0);
@@ -53686,8 +53691,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-checkin-time-policy',
+    commit_marker: 'hotel-checkin-time-policy-b',
     code_features: [
+      'hotel-checkin-time-policy-b',                  //BUGFIX (caught by the new smoke case on the first deploy): both clock-time settings validated with `/^\\d{2}:\\d{2}$/`, which accepts "25:99" — shape only, not a real time. Stored, it reads back as minute 1599, i.e. later than any wall clock, so an early-arrival charge would fire on EVERY check-in (and a late-checkout cutoff of "25:99" would never fire). All four uses now share `HHMM_RE = /^([01]\\d|2[0-3]):[0-5]\\d$/` — the two PATCH validators and the two fee calculators. Pre-existing weakness on the late-checkout field, inherited when the check-in side was mirrored from it.',
       'hotel-checkin-time-policy',                    //FEATURE (client gap, 9 Sep 2026): the ARRIVAL half of an 11-to-11 house. Only the departure side existed (`hotel_late_checkout_time` auto-adds one night past the cutoff); check-in was gated on the check-in DATE only, no arrival time was published anywhere and an early arrival was never charged. Two new central columns: `hotel_check_in_time` (HH:MM, published to the guest on the booking confirmation — "Check-in: 20 Sep from 11:00" in both the text and HTML templates, alongside the check-out time) and `hotel_early_checkin_charge` (default 0). New `computeEarlyCheckinFee` mirrors `computeLateCheckoutFee`: when the charge is ON and the guest arrives on the arrival date BEFORE the cutoff (Asia/Kolkata), one extra night at the booking room_rate is posted by `addEarlyCheckinFolioEntry` as its own visible ROOM_CHARGE line (GST at the tariff slab), audited as EARLY_CHECKIN_FEE, waivable per arrival with `waive_early_checkin: true`, and returned on the check-in response as `early_checkin` so the desk can see what happened. **It NEVER blocks a check-in** — a clean room at 08:00 should be given to the guest; the policy question is only whether it is paid for. Both fields are written with COALESCE (a partial PATCH leaves them alone, deliberately NOT repeating the direct-assign trap of the older stay/refund fields; \'\' clears the time) and are validated HH:MM. Settings UI gets the time + an off-by-default "Charge for early arrival" toggle. Smoke: TC-HOTEL-CHECKIN-TIME-SETTING, TC-HOTEL-EARLY-CHECKIN-CHARGE, TC-HOTEL-EARLY-CHECKIN-NO-BLOCK. tsc + vite build clean.',
       'event-overnight-sessions-and-note',            //FEATURE + BUGFIX (client gaps, 9 Sep 2026). (1) VENUE CONFLICTS ARE SPAN-BASED. `venueBookingConflict` treated any booking carrying an `end_date` as occupying those days IN FULL, so a property running two sessions a day could not sell them: a night session recorded 15:00 → next-day 03:00 claimed the whole of the following day and the 03:00 → 15:00 morning session was refused "Venue is no longer available" (reproduced live on RESTO-1003 before the fix). Each booking is now reduced to ONE absolute span (start day + start time → end day + end time, rolling to the next day when the end time is at or before the start time) and two bookings clash only when those spans really overlap, widened by `turnaround_min` on each side; the SQL prefilter is widened a day each way so an overnight candidate is never missed. Genuine overlaps — including inside a multi-day event — still 409, and edge-exclusive means one session may begin exactly when the previous ends. (2) EVENT RESERVATIONS GET A SPECIAL NOTE box on the staff booking form (`special_requests` already existed on the table, the create/update allow-list and the public enquiry form — only the staff input was missing), with labels in all 7 languages. Smoke: TC-EVT-NIGHT-THEN-MORNING, TC-EVT-BACK-TO-BACK, TC-EVT-REAL-CLASH. tsc + vite build clean.',
       'checklist-low-findings-f-c4-f-c6',             //BUGFIX (Checklist UAT F-C4/F-C5/F-C6 Low, 8 Sep 2026). (F-C4) `PATCH /housekeeping/jobs/:jid/tasks/:tid` and its My-Checklist twin `PATCH /checklists/my/jobs/:jid/tasks/:tid` ran an UPDATE scoped by (id, job_id) with NO existence check — an unknown or foreign task id changed 0 rows, still answered 200 and still wrote a "completed a step" audit line, so a stale mobile client never learned its task was gone; both now 404 `TASK_NOT_FOUND`. (F-C5) `runTenantScheduledChecklists` counted every id `raiseChecklistJobs` returned, including ones a DEDUPE had merely found, so two identical runs of the same day both reported "raised: 23" while the second created nothing — `createJobFromTemplate` now returns `{id, created}`, `raiseChecklistJobs` takes an optional `{created, deduped}` collector, the scheduler returns jobs ACTUALLY created and `POST /checklists/run-scheduled` answers `{raised, skipped}`. (F-C6) `releaseFacility` freed the room on completion/override of ANY job: closing an inspection, a maintenance handover, an arrival or a mid-stay checklist flipped a room that was still being cleaned to VACANT (the UAT clean-up would have freed 93 rooms this way by closing stale arrival jobs) — a job may now release the room only when it is release-BLOCKING or its trigger is in the cleaning cycle (CHECK_OUT / CLEANING / ROOM_CLEANING), which keeps "complete the cleaning checklist → room ready" working on properties that turned release-gating off. Smoke: TC-CHK-TASK-404, TC-CHK-RUN-IDEMPOTENT, TC-CHK-NONBLOCKING-NO-RELEASE. tsc + vite build clean.',
