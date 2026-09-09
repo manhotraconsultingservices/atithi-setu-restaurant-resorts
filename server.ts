@@ -26537,12 +26537,12 @@ ${data.tenant.name}`;
       const id = mkEventId('EVT');
       await db.run(
         `INSERT INTO event_bookings
-          (id, venue_id, customer_name, customer_phone, customer_email, customer_gstin, event_type, status,
+          (id, venue_id, customer_name, customer_phone, customer_email, customer_gstin, customer_address, event_type, status,
            event_date, end_date, start_time, end_time, venue_rate_basis, half_day_slot, guest_count, booking_source,
            venue_rate, discount, advance_amount, special_requests, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, b.venue_id || null, b.customer_name, b.customer_phone || null, b.customer_email || null,
-         b.customer_gstin || null, b.event_type || null, targetStatus,
+         b.customer_gstin || null, b.customer_address || null, b.event_type || null, targetStatus,
          b.event_date, b.end_date || null, startTime, endTime, rateBasis, slot, Number(b.guest_count || 0),
          b.booking_source || 'DIRECT', round2(venueRate), Number(b.discount || 0),
          Number(b.advance_amount || 0), b.special_requests || null, req.user?.email || null]
@@ -26629,7 +26629,7 @@ ${data.tenant.name}`;
       }
 
       const fields: string[] = []; const vals: any[] = [];
-      const allow = ['venue_id','customer_name','customer_phone','customer_email','customer_gstin','event_type',
+      const allow = ['venue_id','customer_name','customer_phone','customer_email','customer_gstin','customer_address','event_type',
         'event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot','guest_count','booking_source',
         'venue_rate','discount','discount_hotel','advance_amount','special_requests'];
       for (const k of allow) {
@@ -26659,6 +26659,59 @@ ${data.tenant.name}`;
     } catch (err: any) {
       console.error("/events/bookings update error:", err);
       res.status(500).json({ error: "Failed to update booking" });
+    }
+  });
+
+  // ── Customer GST details — for a recipient claiming input tax credit ────────
+  // Rule 46 requires a B2B tax invoice to carry the recipient's name, ADDRESS and
+  // GSTIN. Deliberately a SEPARATE endpoint from the booking editor above:
+  //   • These fields carry no money. Nothing here can change an amount, a date, a
+  //     hall or a line item, so it is safe on a booking whose bill is already final.
+  //   • A corporate customer usually asks for a GST invoice AFTER the event, and
+  //     the booking editor refuses a COMPLETED booking on purpose — that lock
+  //     protects the amounts and must stay. This route is allowed on a completed
+  //     booking so the invoice can simply be reprinted with the details filled in.
+  //   • Entirely optional. Left blank, the invoice prints exactly as it does today
+  //     for a walk-in customer, with no GST bill-to block at all.
+  // A CANCELLED booking is refused — its invoice is already reversed.
+  const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+  app.put("/api/restaurant/:id/events/bookings/:bid/gst-details", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const existing: any = await db.get("SELECT id, status, customer_name, customer_gstin, customer_address FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!existing) return res.status(404).json({ error: 'Booking not found' });
+      if (String(existing.status).toUpperCase() === 'CANCELLED') {
+        return res.status(409).json({ error: 'This booking is cancelled — its invoice has already been reversed.', code: 'BOOKING_CANCELLED' });
+      }
+      const b = req.body || {};
+      // Absent key = leave as-is. Empty string = clear (the customer decided not to claim).
+      const gstin = b.customer_gstin === undefined ? undefined : String(b.customer_gstin ?? '').trim().toUpperCase();
+      const address = b.customer_address === undefined ? undefined : String(b.customer_address ?? '').trim().slice(0, 500);
+      if (gstin && !GSTIN_RE.test(gstin)) {
+        return res.status(400).json({ error: 'That does not look like a valid GSTIN. It is 15 characters, e.g. 27AAPFU0939F1ZV.', code: 'GSTIN_INVALID' });
+      }
+      // A GSTIN without an address is not a compliant B2B invoice — Rule 46 needs both.
+      const finalGstin = gstin === undefined ? (existing.customer_gstin || '') : gstin;
+      const finalAddress = address === undefined ? (existing.customer_address || '') : address;
+      if (finalGstin && !finalAddress) {
+        return res.status(400).json({ error: 'A GSTIN needs the customer’s address too — a GST invoice must carry both for the customer to claim input credit.', code: 'ADDRESS_REQUIRED' });
+      }
+      if (gstin !== undefined) await db.run("UPDATE event_bookings SET customer_gstin = ? WHERE id = ?", [gstin || null, req.params.bid]);
+      if (address !== undefined) await db.run("UPDATE event_bookings SET customer_address = ? WHERE id = ?", [address || null, req.params.bid]);
+      const row: any = await db.get("SELECT id, status, customer_name, customer_gstin, customer_address FROM event_bookings WHERE id = ?", [req.params.bid]);
+      // Audited: this changes what a tax document says about its recipient.
+      await writeObjectAudit(db, req, {
+        objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'GST_DETAILS_UPDATED',
+        summary: row.customer_gstin ? `Customer GST details set — GSTIN ${row.customer_gstin}` : 'Customer GST details cleared',
+        before: { customer_gstin: existing.customer_gstin, customer_address: existing.customer_address },
+        after: { customer_gstin: row.customer_gstin, customer_address: row.customer_address },
+      });
+      res.json({ success: true, ...row, prints_on_invoice: !!row.customer_gstin });
+    } catch (err: any) {
+      console.error("/events/bookings gst-details error:", err);
+      res.status(500).json({ error: 'Failed to save GST details' });
     }
   });
 
@@ -27956,7 +28009,11 @@ ${data.tenant.name}`;
       tenant: eventTenantBlock(restaurant, prof),
       quotation: { quote_number: invNo, version: 1, created_at: invAt },
       docLabel: tax > 0 ? 'TAX INVOICE' : 'INVOICE',
-      booking: { customer_name: bk.customer_name || '', customer_phone: bk.customer_phone, customer_email: bk.customer_email, event_type: bk.event_type, event_date: bk.event_date, end_date: bk.end_date, start_time: bk.start_time, end_time: bk.end_time, guest_count: bk.guest_count, venue_name: bk.venue_name },
+      // customer_gstin / customer_address are carried so a B2B recipient can claim
+      // input tax credit (Rule 46). Both are optional: the PDF prints the GST
+      // bill-to block only when a GSTIN is present, so a walk-in customer's
+      // invoice looks exactly as it does today.
+      booking: { customer_name: bk.customer_name || '', customer_phone: bk.customer_phone, customer_email: bk.customer_email, customer_gstin: bk.customer_gstin, customer_address: bk.customer_address, event_type: bk.event_type, event_date: bk.event_date, end_date: bk.end_date, start_time: bk.start_time, end_time: bk.end_time, guest_count: bk.guest_count, venue_name: bk.venue_name },
       lines,
       subtotal, tax_amount: tax, discount, grand_total: grand,
       discount_event: Number(bk.discount || 0), discount_hotel: Number(bk.discount_hotel || 0),
@@ -53691,8 +53748,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-checkin-time-policy-b',
+    commit_marker: 'event-customer-gst-details',
     code_features: [
+      'event-customer-gst-details',                   //FEATURE (client gap, 9 Sep 2026): an event customer claiming INPUT TAX CREDIT needs its name, ADDRESS and GSTIN on the tax invoice (Rule 46). `customer_gstin` existed on event_bookings and showed on the on-screen folio, but (a) there was NO customer address column at all and (b) neither ever reached the PRINTED invoice — `buildInvoiceData` passed only name/phone/email. Added: `event_bookings.customer_address` (migration in ensureEventTables, never in a handler); both fields carried into the invoice PDF and rendered in the "Prepared For" block — address lines, then `GSTIN: …` — ONLY when present, so a walk-in consumer invoice is byte-for-byte as before. NEW dedicated route `PUT /events/bookings/:bid/gst-details` (EVENTS_BOOKINGS UPDATE): validates the 15-char GSTIN, requires an address alongside it, `\'\'` clears, absent key leaves as-is, audited as GST_DETAILS_UPDATED, 409 on a CANCELLED booking. It is deliberately SEPARATE from `PUT /events/bookings/:bid` (which still 409s a COMPLETED booking — that lock protects the AMOUNTS): these fields carry no money, so a company can ask for a GST invoice AFTER the function and staff just fill them in and reprint. New `<GstDetailsPanel>` beside the invoice actions shows whether details will print. Smoke: TC-EVT-GST-VALIDATION, TC-EVT-GST-ON-INVOICE, TC-EVT-GST-AFTER-COMPLETE. tsc + vite build clean.',
       'hotel-checkin-time-policy-b',                  //BUGFIX (caught by the new smoke case on the first deploy): both clock-time settings validated with `/^\\d{2}:\\d{2}$/`, which accepts "25:99" — shape only, not a real time. Stored, it reads back as minute 1599, i.e. later than any wall clock, so an early-arrival charge would fire on EVERY check-in (and a late-checkout cutoff of "25:99" would never fire). All four uses now share `HHMM_RE = /^([01]\\d|2[0-3]):[0-5]\\d$/` — the two PATCH validators and the two fee calculators. Pre-existing weakness on the late-checkout field, inherited when the check-in side was mirrored from it.',
       'hotel-checkin-time-policy',                    //FEATURE (client gap, 9 Sep 2026): the ARRIVAL half of an 11-to-11 house. Only the departure side existed (`hotel_late_checkout_time` auto-adds one night past the cutoff); check-in was gated on the check-in DATE only, no arrival time was published anywhere and an early arrival was never charged. Two new central columns: `hotel_check_in_time` (HH:MM, published to the guest on the booking confirmation — "Check-in: 20 Sep from 11:00" in both the text and HTML templates, alongside the check-out time) and `hotel_early_checkin_charge` (default 0). New `computeEarlyCheckinFee` mirrors `computeLateCheckoutFee`: when the charge is ON and the guest arrives on the arrival date BEFORE the cutoff (Asia/Kolkata), one extra night at the booking room_rate is posted by `addEarlyCheckinFolioEntry` as its own visible ROOM_CHARGE line (GST at the tariff slab), audited as EARLY_CHECKIN_FEE, waivable per arrival with `waive_early_checkin: true`, and returned on the check-in response as `early_checkin` so the desk can see what happened. **It NEVER blocks a check-in** — a clean room at 08:00 should be given to the guest; the policy question is only whether it is paid for. Both fields are written with COALESCE (a partial PATCH leaves them alone, deliberately NOT repeating the direct-assign trap of the older stay/refund fields; \'\' clears the time) and are validated HH:MM. Settings UI gets the time + an off-by-default "Charge for early arrival" toggle. Smoke: TC-HOTEL-CHECKIN-TIME-SETTING, TC-HOTEL-EARLY-CHECKIN-CHARGE, TC-HOTEL-EARLY-CHECKIN-NO-BLOCK. tsc + vite build clean.',
       'event-overnight-sessions-and-note',            //FEATURE + BUGFIX (client gaps, 9 Sep 2026). (1) VENUE CONFLICTS ARE SPAN-BASED. `venueBookingConflict` treated any booking carrying an `end_date` as occupying those days IN FULL, so a property running two sessions a day could not sell them: a night session recorded 15:00 → next-day 03:00 claimed the whole of the following day and the 03:00 → 15:00 morning session was refused "Venue is no longer available" (reproduced live on RESTO-1003 before the fix). Each booking is now reduced to ONE absolute span (start day + start time → end day + end time, rolling to the next day when the end time is at or before the start time) and two bookings clash only when those spans really overlap, widened by `turnaround_min` on each side; the SQL prefilter is widened a day each way so an overnight candidate is never missed. Genuine overlaps — including inside a multi-day event — still 409, and edge-exclusive means one session may begin exactly when the previous ends. (2) EVENT RESERVATIONS GET A SPECIAL NOTE box on the staff booking form (`special_requests` already existed on the table, the create/update allow-list and the public enquiry form — only the staff input was missing), with labels in all 7 languages. Smoke: TC-EVT-NIGHT-THEN-MORNING, TC-EVT-BACK-TO-BACK, TC-EVT-REAL-CLASH. tsc + vite build clean.',

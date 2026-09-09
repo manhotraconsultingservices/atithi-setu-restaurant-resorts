@@ -647,6 +647,13 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // reason category reuses the existing `cancellation_reason` column; this adds
   // an optional free-text note alongside it.
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS cancel_reason_note TEXT`).catch(() => {});
+  // Billing address of the CUSTOMER (not the property). Optional, and only asked
+  // for when the customer wants to claim input tax credit: Rule 46 requires a
+  // B2B tax invoice to carry the recipient's name, ADDRESS and GSTIN. The GSTIN
+  // column already existed (customer_gstin); the address did not, so an invoice
+  // raised for a company was missing a mandatory field. Blank for a walk-in
+  // consumer, and the invoice then prints no GST bill-to block at all.
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS customer_address TEXT`).catch(() => {});
   // GST portion of the (now tax-inclusive) total_amount, so the booking screen
   // and reports can show tax separately and net it out of revenue. total_amount
   // = subtotal + tax_amount − discount (matches the quotation/invoice model).

@@ -955,6 +955,65 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
 }
 
 // ── Staff rostering: assign the shared roster to the event per working date ──
+// Customer GST details — shown on the invoice ONLY when a GSTIN is on file, which
+// is the customer telling us they want to claim input tax credit. Kept out of the
+// booking editor so it still works once the event is completed and the bill final:
+// nothing here can change an amount. Saving it and reprinting the invoice is the
+// whole flow when a company asks for a GST bill after the function.
+function GstDetailsPanel({ restaurantId, token, booking, onSaved }: Props & { booking: any; onSaved: () => void }) {
+  const api = makeApi(restaurantId, token);
+  const [open, setOpen] = useState(false);
+  const [gstin, setGstin] = useState<string>(booking.customer_gstin || '');
+  const [address, setAddress] = useState<string>(booking.customer_address || '');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const onFile = !!booking.customer_gstin;
+  const cancelled = String(booking.status || '').toUpperCase() === 'CANCELLED';
+  useEffect(() => { setGstin(booking.customer_gstin || ''); setAddress(booking.customer_address || ''); }, [booking.customer_gstin, booking.customer_address]);
+  const save = async () => {
+    setBusy(true); setMsg('');
+    try {
+      await api(`/events/bookings/${booking.id}/gst-details`, { method: 'PUT', body: JSON.stringify({ customer_gstin: gstin.trim(), customer_address: address.trim() }) });
+      setMsg(gstin.trim() ? 'Saved — regenerate the invoice to include it.' : 'Cleared — the invoice will not show GST details.');
+      onSaved();
+    } catch (e: any) { setMsg(e?.message || 'Could not save'); }
+    finally { setBusy(false); }
+  };
+  if (cancelled) return null;
+  return (
+    <div className="mt-4 px-3 py-2 rounded-lg bg-[#faf6f1] border border-[#efe6db]">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-[11px] font-bold text-[#6b5d52] uppercase tracking-wide">Customer GST details</span>
+        {onFile
+          ? <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-semibold">Prints on the invoice · {booking.customer_gstin}</span>
+          : <span className="text-[11px] text-[#9d8b7e]">Not provided — the invoice prints without GST details</span>}
+        <button className={`${BTN_GHOST} ml-auto py-1`} onClick={() => setOpen(o => !o)}>{open ? 'Close' : (onFile ? 'Edit' : 'Add')}</button>
+      </div>
+      {open && (
+        <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label className={LABEL}>Customer GSTIN</label>
+            <input className={INPUT} value={gstin} placeholder="27AAPFU0939F1ZV" maxLength={15}
+              onChange={e => setGstin(e.target.value.toUpperCase())} />
+          </div>
+          <div className="md:col-span-2">
+            <label className={LABEL}>Billing address</label>
+            <textarea className={INPUT} rows={2} value={address} placeholder="Registered address of the customer"
+              onChange={e => setAddress(e.target.value)} />
+          </div>
+          <div className="md:col-span-3 flex flex-wrap items-center gap-3">
+            <button className={BTN_PRIMARY} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save GST details'}</button>
+            <span className="text-[10px] text-[#9d8b7e]">
+              Only needed when the customer wants to claim input tax credit. Can be added after the event — the amounts are not touched, just reprint the invoice.
+            </span>
+            {msg && <span className="text-[11px] text-[#6b5d52]">{msg}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StaffPanel({ restaurantId, token, booking, editable, onChanged }: Props & { booking: any; editable: boolean; onChanged: () => void }) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
@@ -1760,6 +1819,12 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
         <label className="flex items-center gap-1.5 text-xs">%<input type="number" min={0} max={28} step={0.5} disabled={!docGst.enabled} className={`${INPUT} w-20 py-1`} value={docGst.pct} onChange={e => setDocGst({ ...docGst, pct: Number(e.target.value) })} /></label>
         <span className="text-[10px] text-[#9d8b7e]">Applies to the quotation / invoice you generate next. Hotel rooms follow Hotel GST.</span>
       </div>
+
+      {/* Customer GST details — only for a customer claiming input tax credit.
+          Separate from the booking editor on purpose: it carries no money, so it
+          can be filled in AFTER the event (when companies usually ask for a GST
+          invoice) and the invoice simply reprinted. Blank = nothing prints. */}
+      <GstDetailsPanel restaurantId={restaurantId} token={token} booking={bk} onSaved={load} />
 
       {/* Document actions — quotation / BEO / invoice / email (lifecycle status
           actions live in the Lifecycle bar at the top of the overview). */}

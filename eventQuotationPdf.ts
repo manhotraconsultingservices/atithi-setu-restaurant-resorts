@@ -42,6 +42,10 @@ export interface EventQuotationData {
   docLabel?: string;  // header label; defaults to 'QUOTATION'. Pass 'TAX INVOICE' to render an invoice.
   booking: {
     customer_name: string; customer_phone?: string; customer_email?: string;
+    // Recipient details a B2B customer needs in order to claim input tax credit
+    // (Rule 46: name, address and GSTIN of the recipient). Both optional — a
+    // consumer invoice carries neither and prints exactly as before.
+    customer_gstin?: string | null; customer_address?: string | null;
     event_type?: string; event_date?: string; end_date?: string;
     start_time?: string; end_time?: string; guest_count?: number; venue_name?: string;
   };
@@ -266,10 +270,17 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       doc.font(edL.f || 'Helvetica-Bold').fontSize(10).fillColor(INK).text(edL.t, M + INNER / 2, y);
       y += 13;
       doc.font('Helvetica').fontSize(9).fillColor(INK);
+      // A GSTIN means the customer is claiming input tax credit, so the recipient's
+      // address and GSTIN are printed with the name (Rule 46). Address alone is
+      // printed when given. Nothing extra appears for an ordinary consumer.
+      const custGstin = String(data.booking.customer_gstin || '').trim();
+      const custAddr = String(data.booking.customer_address || '').trim();
       const leftLines = [
         waSafe(data.booking.customer_name),
+        ...(custAddr ? custAddr.split(/\r?\n/).map(l => waSafe(l.trim())).filter(Boolean) : []),
         data.booking.customer_phone || '',
         data.booking.customer_email || '',
+        custGstin ? `GSTIN: ${waSafe(custGstin)}` : '',
       ].filter(Boolean);
       const b = data.booking;
       const evStart = ymd(b.event_date);
