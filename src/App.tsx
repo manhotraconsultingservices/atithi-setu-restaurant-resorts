@@ -54,6 +54,7 @@ import {
   Leaf,
   Search,
   Smartphone,
+  Send,
   Hash,
   ListOrdered,
   FileText,
@@ -69844,6 +69845,7 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
     { id: 'EVENTS',    label: 'What gets sent', icon: Bell },
     { id: 'TEMPLATES', label: 'Message wording', icon: FileText },
     { id: 'CHANNELS',  label: 'Channels & delivery', icon: MessageSquare },
+    { id: 'CONSOLE',   label: 'Send a message', icon: Send },
   ];
 
   return (
@@ -70031,6 +70033,349 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
           </div>
 
           <SmartAlertsPanel token={token} />
+        </div>
+      )}
+
+      {notifTab === 'CONSOLE' && <MessagingConsolePanel token={token} canEdit={canEdit} />}
+    </div>
+  );
+}
+
+// ── Messaging console ───────────────────────────────────────────────────────
+// Send something now, and see what has gone out and to whom. The rules are the
+// server's, not this screen's: outside the 24-hour reply window WhatsApp will
+// only carry wording Meta has approved, anyone who replied STOP is skipped, and
+// every attempt lands in the activity log with the provider's own answer.
+function MessagingConsolePanel({ token, canEdit }: { token: string; canEdit: boolean }) {
+  const toast = useToast();
+  const [tab, setTab] = useState<'SEND' | 'ACTIVITY'>('SEND');
+  const [channel, setChannel] = useState<'WHATSAPP' | 'EMAIL' | 'SMS'>('WHATSAPP');
+  const [to, setTo] = useState('');
+  const [subject, setSubject] = useState('');
+  const [text, setText] = useState('');
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [tplConfigured, setTplConfigured] = useState<boolean | null>(null);
+  const [tplReason, setTplReason] = useState('');
+  const [tplName, setTplName] = useState('');
+  const [vars, setVars] = useState<string[]>([]);
+  const [sending, setSending] = useState(false);
+  const [outcome, setOutcome] = useState<any>(null);
+
+  const [summary, setSummary] = useState<any>(null);
+  const [days, setDays] = useState(30);
+  const [log, setLog] = useState<any[]>([]);
+  const [who, setWho] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const auth = { Authorization: `Bearer ${token}` };
+  const tpl = templates.find(t => t.name === tplName) || null;
+  const recipients = to.split(/[,;\n]/).map(t => t.trim()).filter(Boolean);
+
+  useEffect(() => {
+    fetch('/api/owner/whatsapp/templates', { headers: auth })
+      .then(r => r.json())
+      .then(d => {
+        setTemplates((d.templates || []).filter((t: any) => String(t.status).toUpperCase() === 'APPROVED'));
+        setTplConfigured(!!d.configured);
+        setTplReason(d.reason || d.error || '');
+      })
+      .catch(() => setTplConfigured(false));
+  }, []);
+
+  const loadActivity = async () => {
+    setLoading(true);
+    try {
+      const [sm, lg] = await Promise.all([
+        fetch(`/api/owner/messaging/summary?days=${days}`, { headers: auth }).then(r => r.json()),
+        fetch(`/api/owner/notification-deliveries?limit=200${who ? `&recipient=${encodeURIComponent(who)}` : ''}`, { headers: auth }).then(r => r.json()),
+      ]);
+      setSummary(sm); setLog(lg.deliveries || []);
+    } catch { toast.error('Could not load the activity.'); }
+    setLoading(false);
+  };
+  useEffect(() => { if (tab === 'ACTIVITY') loadActivity(); }, [tab, days]);
+
+  const pickTemplate = (name: string) => {
+    setTplName(name);
+    const t = templates.find(x => x.name === name);
+    setVars(Array.from({ length: Math.max(0, (t?.variable_count || 1) - 1) }, () => ''));
+  };
+
+  const send = async () => {
+    if (!recipients.length) { toast.error('Add at least one recipient.'); return; }
+    setSending(true); setOutcome(null);
+    try {
+      const res = await fetch('/api/owner/messaging/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({
+          channel, recipients, text, subject,
+          template_name: channel === 'WHATSAPP' ? tplName : '',
+          template_language: tpl?.language || 'en',
+          category: tpl?.category || 'UTILITY',
+          // {{1}} is always the property name and the server fills it — these are
+          // the rest, in order.
+          variables: vars,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Send failed');
+      setOutcome(body);
+      if (body.sent) toast.success(`Sent to ${body.sent} of ${recipients.length}.`);
+      else toast.error('Nothing went out — see the result below.');
+    } catch (e: any) { toast.error(e.message); }
+    setSending(false);
+  };
+
+  const CH = [
+    { id: 'WHATSAPP', label: 'WhatsApp', icon: MessageSquare },
+    { id: 'EMAIL', label: 'Email', icon: Mail },
+    { id: 'SMS', label: 'SMS', icon: Smartphone },
+  ] as const;
+
+  const statusPill = (st: string) => {
+    const s = String(st || '').toUpperCase();
+    const map: Record<string, string> = {
+      SENT: 'bg-emerald-50 text-emerald-700', DELIVERED: 'bg-emerald-50 text-emerald-700',
+      READ: 'bg-emerald-50 text-emerald-700', FAILED: 'bg-red-50 text-red-700',
+      SKIPPED: 'bg-amber-50 text-amber-700',
+    };
+    return <span className={cn('text-[11px] px-2 py-0.5 rounded-full font-bold', map[s] || 'bg-[#cc5a16]/10 text-[#6b5d52]')}>{s || '—'}</span>;
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex gap-2">
+        {(['SEND', 'ACTIVITY'] as const).map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={cn('px-4 py-2 rounded-2xl text-sm font-bold transition-colors',
+              tab === t ? 'bg-[#cc5a16] text-white' : 'bg-white text-[#6b5d52] border border-[#cc5a16]/10 hover:bg-[#faf7f2]')}>
+            {t === 'SEND' ? 'Compose' : 'Activity'}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'SEND' && (
+        <div className="grid lg:grid-cols-[1.15fr_.85fr] gap-5">
+          <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm p-6 space-y-5">
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Channel</label>
+              <div className="flex gap-2 mt-2">
+                {CH.map(c => (
+                  <button key={c.id} onClick={() => { setChannel(c.id as any); setOutcome(null); }}
+                    className={cn('flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-bold border transition-colors',
+                      channel === c.id ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#cc5a16]/15 hover:bg-[#faf7f2]')}>
+                    <c.icon size={15} /> {c.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">
+                {channel === 'EMAIL' ? 'Email addresses' : 'Phone numbers'}
+                <span className="ml-2 font-normal normal-case tracking-normal text-[#9d8b7e]">one per line, or comma separated · up to 50</span>
+              </label>
+              <textarea value={to} onChange={e => setTo(e.target.value)} rows={3}
+                placeholder={channel === 'EMAIL' ? 'anita@example.com' : '919999900000'}
+                className="w-full mt-2 px-4 py-3 rounded-2xl border border-[#cc5a16]/15 focus:border-[#cc5a16] outline-none font-mono text-sm" />
+              {recipients.length > 0 && <p className="text-xs text-[#6b5d52] mt-1.5">{recipients.length} recipient{recipients.length === 1 ? '' : 's'}</p>}
+            </div>
+
+            {channel === 'WHATSAPP' && (
+              <div className="rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/10 p-4 space-y-3">
+                <div className="flex items-start gap-2 text-xs text-[#6b5d52]">
+                  <Info size={14} className="mt-0.5 shrink-0" />
+                  <span>WhatsApp only allows your own wording within <b>24 hours of the guest writing to you</b>. Outside that, pick an approved template — the server decides per recipient.</span>
+                </div>
+                {tplConfigured === false ? (
+                  <p className="text-sm text-[#6b5d52]">{tplReason || 'WhatsApp is not connected yet.'}</p>
+                ) : (
+                  <div>
+                    <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Approved template</label>
+                    <select value={tplName} onChange={e => pickTemplate(e.target.value)}
+                      className="w-full mt-2 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/15 bg-white text-sm outline-none focus:border-[#cc5a16]">
+                      <option value="">None — free-form, in-window only</option>
+                      {templates.map(t => <option key={t.name} value={t.name}>{t.name} · {t.category} · {t.language}</option>)}
+                    </select>
+                    {tpl && (
+                      <div className="mt-3 space-y-2">
+                        <p className="text-sm bg-white rounded-xl border border-[#cc5a16]/10 p-3 whitespace-pre-wrap text-[#1a1208]">{tpl.body}</p>
+                        <p className="text-[11px] text-[#9d8b7e]">Your property name fills <code>{'{{1}}'}</code> automatically.</p>
+                        {vars.map((v, i) => (
+                          <input key={i} value={v} onChange={e => setVars(vs => vs.map((x, j) => j === i ? e.target.value : x))}
+                            placeholder={`Value for {{${i + 2}}}`}
+                            className="w-full px-4 py-2 rounded-xl border border-[#cc5a16]/15 text-sm outline-none focus:border-[#cc5a16]" />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {channel === 'EMAIL' && (
+              <div>
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Subject</label>
+                <input value={subject} onChange={e => setSubject(e.target.value)}
+                  className="w-full mt-2 px-4 py-3 rounded-2xl border border-[#cc5a16]/15 outline-none focus:border-[#cc5a16]" />
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">
+                Message
+                {channel === 'WHATSAPP' && <span className="ml-2 font-normal normal-case tracking-normal text-[#9d8b7e]">used only inside the 24-hour window</span>}
+              </label>
+              <textarea value={text} onChange={e => setText(e.target.value)} rows={5}
+                className="w-full mt-2 px-4 py-3 rounded-2xl border border-[#cc5a16]/15 outline-none focus:border-[#cc5a16] text-sm" />
+            </div>
+
+            <button onClick={send} disabled={!canEdit || sending || !recipients.length}
+              className="bg-[#cc5a16] text-white px-7 py-3 rounded-2xl font-bold hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center gap-2">
+              {sending ? <RefreshCw size={17} className="animate-spin" /> : <Send size={17} />}
+              {sending ? 'Sending…' : `Send to ${recipients.length || 0}`}
+            </button>
+            {!canEdit && <p className="text-xs text-[#9d8b7e]">You need Edit access to Notifications to send.</p>}
+          </div>
+
+          <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm p-6">
+            <h3 className="font-bold font-serif text-lg">Result</h3>
+            {!outcome ? (
+              <p className="text-sm text-[#6b5d52] mt-2">Nothing sent yet. Every attempt is recorded, including the ones we deliberately skip.</p>
+            ) : (
+              <>
+                <div className="grid grid-cols-3 gap-2 mt-4">
+                  {[['Sent', outcome.sent, 'text-emerald-700'], ['Failed', outcome.failed, 'text-red-700'], ['Skipped', outcome.skipped, 'text-amber-700']].map(([l, n, c]: any) => (
+                    <div key={l} className="rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/10 p-3 text-center">
+                      <div className={cn('text-2xl font-bold tabular-nums', c)}>{n}</div>
+                      <div className="text-[11px] uppercase tracking-widest text-[#6b5d52] mt-0.5">{l}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-4 space-y-2 max-h-80 overflow-y-auto">
+                  {(outcome.results || []).map((r: any, i: number) => (
+                    <div key={i} className="flex items-start justify-between gap-3 text-sm border-b border-[#cc5a16]/5 pb-2">
+                      <div className="min-w-0">
+                        <div className="font-mono text-xs truncate">{r.to}</div>
+                        {r.error && <div className="text-[11px] text-[#6b5d52] mt-0.5">{r.error}</div>}
+                      </div>
+                      <div className="shrink-0">{statusPill(r.status)}</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === 'ACTIVITY' && (
+        <div className="space-y-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <select value={days} onChange={e => setDays(Number(e.target.value))}
+              className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/15 bg-white text-sm outline-none">
+              {[7, 30, 90, 365].map(d => <option key={d} value={d}>Last {d} days</option>)}
+            </select>
+            <input value={who} onChange={e => setWho(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') loadActivity(); }}
+              placeholder="Filter the log by number or email"
+              className="flex-1 min-w-[220px] px-4 py-2.5 rounded-2xl border border-[#cc5a16]/15 text-sm outline-none focus:border-[#cc5a16]" />
+            <button onClick={loadActivity} className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/15 text-sm font-bold text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-2">
+              <RefreshCw size={14} className={cn(loading && 'animate-spin')} /> Refresh
+            </button>
+          </div>
+
+          {summary && (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                {[
+                  ['Messages', summary.totals?.total ?? 0, ''],
+                  ['Delivered', summary.totals?.sent ?? 0, 'text-emerald-700'],
+                  ['Failed', summary.totals?.failed ?? 0, 'text-red-700'],
+                  ['Skipped', summary.totals?.skipped ?? 0, 'text-amber-700'],
+                  ['People reached', summary.totals?.people ?? 0, ''],
+                ].map(([l, n, c]: any) => (
+                  <div key={l} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <div className={cn('text-2xl font-bold tabular-nums', c)}>{n}</div>
+                    <div className="text-[11px] uppercase tracking-widest text-[#6b5d52] mt-0.5">{l}</div>
+                  </div>
+                ))}
+              </div>
+
+              {(summary.cost?.lines || []).length > 0 && (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm p-5">
+                  <div className="flex items-baseline justify-between">
+                    <h3 className="font-bold font-serif">Estimated cost</h3>
+                    <span className="text-xl font-bold tabular-nums">₹{Number(summary.cost.estimated_total || 0).toLocaleString('en-IN')}</span>
+                  </div>
+                  <div className="mt-3 space-y-1.5">
+                    {summary.cost.lines.map((l: any, i: number) => (
+                      <div key={i} className="flex justify-between text-sm text-[#6b5d52]">
+                        <span>{l.channel} · {l.category}</span>
+                        <span className="tabular-nums">{l.messages} × ₹{l.rate} = ₹{l.cost}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-[#9d8b7e] mt-3">An estimate against the platform rate card. Meta bills the account holder directly.</p>
+                </div>
+              )}
+
+              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 bg-[#faf7f2] border-b border-[#cc5a16]/10">
+                  <h3 className="font-bold font-serif">Who we messaged</h3>
+                  <p className="text-xs text-[#6b5d52] mt-0.5">Most-messaged contacts in the last {summary.days} days</p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead><tr className="text-left text-[11px] uppercase tracking-widest text-[#6b5d52] border-b border-[#cc5a16]/10">
+                      <th className="px-6 py-3">Contact</th><th className="px-6 py-3">Channel</th>
+                      <th className="px-6 py-3 text-right">Messages</th><th className="px-6 py-3 text-right">Failed</th><th className="px-6 py-3">Last</th>
+                    </tr></thead>
+                    <tbody>
+                      {(summary.people || []).length === 0 && <tr><td colSpan={5} className="px-6 py-8 text-center text-[#6b5d52]">Nothing sent in this period.</td></tr>}
+                      {(summary.people || []).map((p: any, i: number) => (
+                        <tr key={i} className="border-b border-[#cc5a16]/5 hover:bg-[#faf7f2] cursor-pointer" onClick={() => { setWho(p.recipient); setTimeout(loadActivity, 0); }}>
+                          <td className="px-6 py-3 font-mono text-xs">{p.recipient}</td>
+                          <td className="px-6 py-3">{p.channel}</td>
+                          <td className="px-6 py-3 text-right tabular-nums font-bold">{p.messages}</td>
+                          <td className={cn('px-6 py-3 text-right tabular-nums', Number(p.failed) > 0 && 'text-red-700 font-bold')}>{p.failed}</td>
+                          <td className="px-6 py-3 text-[#6b5d52] text-xs">{p.last_at ? new Date(p.last_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 bg-[#faf7f2] border-b border-[#cc5a16]/10">
+              <h3 className="font-bold font-serif">Every message{who ? ` to ${who}` : ''}</h3>
+            </div>
+            <div className="overflow-x-auto max-h-[520px] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-white"><tr className="text-left text-[11px] uppercase tracking-widest text-[#6b5d52] border-b border-[#cc5a16]/10">
+                  <th className="px-6 py-3">When</th><th className="px-6 py-3">To</th><th className="px-6 py-3">Channel</th>
+                  <th className="px-6 py-3">Why</th><th className="px-6 py-3">Status</th>
+                </tr></thead>
+                <tbody>
+                  {log.length === 0 && <tr><td colSpan={5} className="px-6 py-8 text-center text-[#6b5d52]">No messages yet.</td></tr>}
+                  {log.map((d: any) => (
+                    <tr key={d.id} className="border-b border-[#cc5a16]/5">
+                      <td className="px-6 py-3 text-xs text-[#6b5d52] whitespace-nowrap">{d.created_at ? new Date(d.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}</td>
+                      <td className="px-6 py-3 font-mono text-xs">{d.recipient}</td>
+                      <td className="px-6 py-3">{d.channel}</td>
+                      <td className="px-6 py-3 text-xs">
+                        <div>{d.event_name === 'ON_DEMAND' ? 'Sent by hand' : d.event_name}</div>
+                        {d.error && <div className="text-[11px] text-[#6b5d52] mt-0.5 max-w-md">{d.error}</div>}
+                      </td>
+                      <td className="px-6 py-3">{statusPill(d.status)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
     </div>

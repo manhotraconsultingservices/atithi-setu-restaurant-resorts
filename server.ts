@@ -10049,6 +10049,201 @@ async function startServer() {
     }
   });
 
+  // ── Messaging console: send on demand ────────────────────────────────────
+  // The owner picks a channel, a recipient list and either an approved template
+  // or (inside the 24-hour window) their own wording. This is deliberately an
+  // OPERATIONAL tool, not a bulk blaster: the recipient list is capped, every
+  // send is consent-checked, and outside the window WhatsApp will only go out on
+  // wording Meta has already approved.
+  const ON_DEMAND_MAX_RECIPIENTS = 50;
+  const WA_CATEGORIES = ['UTILITY', 'MARKETING', 'AUTHENTICATION', 'SERVICE'];
+
+  app.post("/api/owner/messaging/send", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications to send messages.' });
+    try {
+      const rid = req.user!.restaurantId;
+      const db = await getTenantDb(rid);
+      await ensureNotifDeliveries(db, rid);
+      await ensureWaTables();
+
+      const channel = String(req.body?.channel || '').toUpperCase();
+      if (!['WHATSAPP', 'EMAIL', 'SMS'].includes(channel)) {
+        return res.status(400).json({ error: 'channel must be WHATSAPP, EMAIL or SMS' });
+      }
+
+      const rawTo: string[] = Array.isArray(req.body?.recipients)
+        ? (req.body.recipients as any[]).map((t: any) => String(t == null ? '' : t))
+        : String(req.body?.recipients || '').split(/[,;\n]/);
+      const recipients: string[] = [...new Set(rawTo.map((t: string) => t.trim()).filter(Boolean))];
+      if (!recipients.length) return res.status(400).json({ error: 'Add at least one recipient.' });
+      if (recipients.length > ON_DEMAND_MAX_RECIPIENTS) {
+        return res.status(400).json({ error: `Send to at most ${ON_DEMAND_MAX_RECIPIENTS} recipients at a time.` });
+      }
+      const wrongShape = recipients.find((t: string) => channel === 'EMAIL' ? !t.includes('@') : t.includes('@'));
+      if (wrongShape) {
+        return res.status(400).json({ error: channel === 'EMAIL' ? `"${wrongShape}" is not an email address.` : `"${wrongShape}" is not a phone number.` });
+      }
+
+      const text = String(req.body?.text || '').trim();
+      const subject = String(req.body?.subject || '').trim();
+      const templateName = String(req.body?.template_name || '').trim();
+      const templateLang = String(req.body?.template_language || 'en').trim();
+      const category = WA_CATEGORIES.includes(String(req.body?.category || '').toUpperCase())
+        ? String(req.body.category).toUpperCase() : 'UTILITY';
+      const variables: string[] = Array.isArray(req.body?.variables) ? req.body.variables.map((v: any) => String(v == null ? '' : v)) : [];
+
+      if (channel === 'EMAIL' && !subject) return res.status(400).json({ error: 'An email needs a subject.' });
+      if (channel !== 'WHATSAPP' && !text) return res.status(400).json({ error: 'Write the message first.' });
+      if (channel === 'WHATSAPP' && !text && !templateName) return res.status(400).json({ error: 'Pick an approved template, or write a message for recipients inside the 24-hour window.' });
+
+      const rRow: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [rid]).catch(() => null);
+      const propertyName = String(rRow?.name || 'Atithi-Setu');
+      // The sender number is shared across every property, so a guest cannot tell
+      // who is writing unless we say so — same rule the dispatcher follows.
+      const body = (channel === 'WHATSAPP' || channel === 'SMS') && text && !text.includes(propertyName)
+        ? `${propertyName}\n${text}` : text;
+
+      const results: any[] = [];
+      _logAndSendTenant = rid;
+      for (const to of recipients) {
+        const consent = await _waConsent(to, channel);
+        if (consent.blocked) {
+          await db.run(
+            "INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'SKIPPED', ?, 'GUEST', ?)",
+            [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, 'ON_DEMAND', channel, to,
+             'This contact asked to stop receiving messages on this channel.', String(body || templateName).slice(0, 140)]
+          ).catch(() => {});
+          results.push({ to, status: 'SKIPPED', error: 'Opted out of this channel.' });
+          continue;
+        }
+
+        let ok: any = false;
+        if (channel === 'EMAIL') {
+          ok = await logAndSend(db, 'ON_DEMAND', 'EMAIL', to, subject,
+            () => sendTenantEmail(rid, to, subject, text, text.replace(/\n/g, '<br/>'), 'GUEST'), 'GUEST');
+          results.push({ to, status: ok ? 'SENT' : 'FAILED', error: ok ? null : 'The mail server did not accept it.' });
+        } else if (channel === 'SMS') {
+          ok = await logAndSend(db, 'ON_DEMAND', 'SMS', to, body, () => sendSMSDetailed(to, body), 'GUEST');
+          results.push({ to, status: ok ? 'SENT' : 'FAILED', error: ok ? null : 'The provider rejected it.' });
+        } else {
+          // Inside the window the guest's own reply lets us send ordinary text,
+          // and Meta does not bill it. Outside it, only approved wording goes.
+          const windowOpen = await _waWindowOpen(to);
+          if (!windowOpen && !templateName) {
+            await db.run(
+              "INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'SKIPPED', ?, 'GUEST', ?)",
+              [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, 'ON_DEMAND', 'WHATSAPP', to,
+               'Outside the 24-hour window, so this needed an approved template.', String(body).slice(0, 140)]
+            ).catch(() => {});
+            results.push({ to, status: 'SKIPPED', error: 'Outside the 24-hour window — pick an approved template.' });
+            continue;
+          }
+          const useTemplate = windowOpen && text ? null : { name: templateName, languageCode: templateLang, variables };
+          _logAndSendCategory = useTemplate ? category : 'SERVICE';
+          _logAndSendTemplate = useTemplate ? templateName : null;
+          ok = await logAndSend(db, 'ON_DEMAND', 'WHATSAPP', to, useTemplate ? `${templateName}(${variables.join(' | ')})` : body,
+            () => sendWhatsAppDetailed(to, body || templateName, useTemplate), 'GUEST');
+          _logAndSendCategory = null; _logAndSendTemplate = null;
+          results.push({ to, status: ok ? 'SENT' : 'FAILED', mode: useTemplate ? 'TEMPLATE' : 'FREE_FORM', error: ok ? null : 'The provider rejected it — see the activity log for the reason.' });
+        }
+      }
+
+      const sent = results.filter(r => r.status === 'SENT').length;
+      res.json({
+        success: sent > 0, sent,
+        failed: results.filter(r => r.status === 'FAILED').length,
+        skipped: results.filter(r => r.status === 'SKIPPED').length,
+        results,
+      });
+    } catch (err: any) {
+      console.error('[messaging/send] failed:', err);
+      res.status(500).json({ error: 'Could not send. Please try again.' });
+    }
+  });
+
+  // How many messages went out, and to whom. The counts come from this tenant's
+  // own delivery log; the cost line comes from the central usage table, which
+  // records the Meta billing category of every send.
+  app.get("/api/owner/messaging/summary", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const rid = req.user!.restaurantId;
+      const db = await getTenantDb(rid);
+      await ensureNotifDeliveries(db, rid);
+      await ensureWaTables();
+      const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
+      const since = `CURRENT_TIMESTAMP - INTERVAL '${days} days'`;
+
+      const totals: any = await db.get(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status IN ('SENT','DELIVERED','READ'))::int AS sent,
+                COUNT(*) FILTER (WHERE status = 'FAILED')::int  AS failed,
+                COUNT(*) FILTER (WHERE status = 'SKIPPED')::int AS skipped,
+                COUNT(DISTINCT recipient)::int AS people
+           FROM notification_deliveries WHERE created_at > ${since}`
+      ).catch(() => ({ total: 0, sent: 0, failed: 0, skipped: 0, people: 0 }));
+
+      const byChannel = await db.query(
+        `SELECT channel,
+                COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status IN ('SENT','DELIVERED','READ'))::int AS sent,
+                COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed
+           FROM notification_deliveries WHERE created_at > ${since}
+          GROUP BY channel ORDER BY total DESC`
+      ).catch(() => []);
+
+      const daily = await db.query(
+        `SELECT to_char(created_at, 'YYYY-MM-DD') AS day, COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed
+           FROM notification_deliveries WHERE created_at > ${since}
+          GROUP BY 1 ORDER BY 1`
+      ).catch(() => []);
+
+      // Who we message most — the "to whom" half of the question.
+      const people = await db.query(
+        `SELECT recipient, channel, COUNT(*)::int AS messages,
+                MAX(created_at) AS last_at,
+                COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed
+           FROM notification_deliveries
+          WHERE created_at > ${since} AND COALESCE(recipient, '') <> ''
+          GROUP BY recipient, channel ORDER BY messages DESC, last_at DESC LIMIT 100`
+      ).catch(() => []);
+
+      const topEvents = await db.query(
+        `SELECT event_name, COUNT(*)::int AS messages
+           FROM notification_deliveries WHERE created_at > ${since}
+          GROUP BY event_name ORDER BY messages DESC LIMIT 12`
+      ).catch(() => []);
+
+      // Billable categories + estimated spend, for this tenant only.
+      const usage = await centralDb.query(
+        `SELECT channel, COALESCE(category, 'SERVICE') AS category, COUNT(*)::int AS messages
+           FROM messaging_usage
+          WHERE restaurant_id = ? AND created_at > (CURRENT_TIMESTAMP - INTERVAL '${days} days')
+          GROUP BY channel, COALESCE(category, 'SERVICE')`, [rid]
+      ).catch(() => []);
+      const rateRows: any[] = await centralDb.query("SELECT key, rate FROM messaging_rates").catch(() => []);
+      const rates: Record<string, number> = { WHATSAPP_MARKETING: 0.78, WHATSAPP_UTILITY: 0.115, WHATSAPP_AUTHENTICATION: 0.115, WHATSAPP_SERVICE: 0, EMAIL: 0.01, SMS: 0.18 };
+      for (const r of (rateRows || [])) rates[r.key] = Number(r.rate);
+      let estimatedCost = 0;
+      const costLines = (usage || []).map((u: any) => {
+        const key = String(u.channel).toUpperCase() === 'WHATSAPP' ? `WHATSAPP_${String(u.category).toUpperCase()}` : String(u.channel).toUpperCase();
+        const rate = Number(rates[key] ?? 0);
+        const cost = Math.round(Number(u.messages) * rate * 100) / 100;
+        estimatedCost += cost;
+        return { channel: u.channel, category: u.category, messages: Number(u.messages), rate, cost };
+      });
+
+      res.json({
+        days, totals, by_channel: byChannel || [], daily: daily || [],
+        people: people || [], top_events: topEvents || [],
+        cost: { currency: 'INR', lines: costLines, estimated_total: Math.round(estimatedCost * 100) / 100 },
+      });
+    } catch (err: any) {
+      console.error('[messaging/summary] failed:', err);
+      res.status(500).json({ error: 'Could not load the messaging summary.' });
+    }
+  });
+
   // Who has asked us to stop. Platform-wide for WhatsApp: the number is shared,
   // so an ignored opt-out damages deliverability for every property on it.
   app.get("/api/owner/messaging-optouts", authenticate, async (req: AuthRequest, res: Response) => {
@@ -10202,8 +10397,13 @@ async function startServer() {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const status = String(req.query.status || '').toUpperCase();
       const clauses: string[] = []; const params: any[] = [];
-      if (status === 'SENT' || status === 'FAILED') { clauses.push('status = ?'); params.push(status); }
+      if (['SENT', 'FAILED', 'SKIPPED', 'DELIVERED', 'READ'].includes(status)) { clauses.push('status = ?'); params.push(status); }
       if (req.query.channel) { clauses.push('channel = ?'); params.push(String(req.query.channel).toUpperCase()); }
+      // Drill-down for the messaging console: one contact's whole history, one
+      // event's sends, or everything since a date.
+      if (req.query.recipient) { clauses.push('LOWER(recipient) LIKE ?'); params.push('%' + String(req.query.recipient).trim().toLowerCase() + '%'); }
+      if (req.query.event) { clauses.push('event_name = ?'); params.push(String(req.query.event)); }
+      if (req.query.since) { clauses.push('created_at >= ?'); params.push(String(req.query.since)); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = await db.query(`SELECT * FROM notification_deliveries ${where} ORDER BY created_at DESC LIMIT ${limit}`, params);
       const counts: any = await db.get(
@@ -54544,8 +54744,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-on-demand-whatsapp',
+    commit_marker: 'messaging-console-bsp',
     code_features: [
+      'messaging-console-bsp',                        //FEATURE (10 Sep 2026). A BSP-style MESSAGING CONSOLE for the property owner, in the shape they already know from Gupshup and the like: send a message on demand, and see how many went out and to whom. Previously the only way to send by hand was `/api/owner/notifications/test`, which sends one fixed sentence to one recipient. NEW `POST /api/owner/messaging/send` — channel WHATSAPP | EMAIL | SMS, up to 50 deduplicated recipients, either an approved template (with its variables) or free-form text, returning a PER-RECIPIENT outcome so the owner sees exactly who it reached. It reuses the dispatcher's rules rather than reimplementing them: opt-outs are checked per recipient and logged as SKIPPED with the reason, the 24-hour service window is evaluated PER RECIPIENT (free-form inside it and billed as SERVICE, the approved template outside it), every attempt goes through `logAndSend` so the activity log and the central `messaging_usage` cost attribution stay truthful, and the property name is prefixed to guest-bound text because the sender number is shared. Recipients are shape-checked against the channel so an email address cannot be sent as a WhatsApp number. NEW `GET /api/owner/messaging/summary?days=` — totals (sent / failed / skipped / distinct people), per-channel and per-day counts, the most-messaged contacts, top events, and estimated spend for THIS tenant from `messaging_usage` against the platform rate card (the admin cost report existed; the owner had no view of their own). `/api/owner/notification-deliveries` gains additive `recipient`, `event` and `since` filters plus SKIPPED/DELIVERED/READ statuses, so the console can drill into one contact's whole history. NEW 4th tab on Notifications, 'Send a message', with a Compose panel (channel picker, recipient box, approved-template picker showing the body and asking only for {{2}} onward since the property name fills {{1}}) and an Activity panel (headline counts, estimated cost, a who-we-messaged table that drills into the full log). New tests TC-MSG-CONSOLE-GUARDS and TC-MSG-CONSOLE-SUMMARY, both side-effect-free. tsc + vite build clean.',
       'invoice-on-demand-whatsapp',                   //FEATURE (10 Sep 2026). THE INVOICE IS AN ON-DEMAND ACTION, and it can now go out on WhatsApp. Hotel and Events already had a staff-triggered send (POST /hotel/folios/:folioId/email-invoice and POST /events/bookings/:bid/invoice/send) that emailed the PDF; neither could reach a guest on WhatsApp, which in India is the channel most guests actually read. Both now take `channel` = EMAIL (default, so the existing Email buttons are byte-for-byte unchanged) | WHATSAPP | BOTH, require only what the chosen channel needs, and report back `sent: ['EMAIL','WHATSAPP']` plus a per-channel reason for anything that did not go. The WhatsApp leg goes through `triggerNotification` rather than calling the sender directly, so opt-outs, the 24-hour service window, the approved-template lookup and the delivery log all apply without being reimplemented at the call site. To make that possible the dispatcher gained two ADDITIVE capabilities: an optional `opts.onlyChannels` filter (omitted by all 60 existing callers = every channel the owner enabled, exactly as before) and a returned `{ sent, failed, skipped, channels }` tally, so an interactive caller can tell the user what happened — `logAndSend` now returns whether the provider took the message. New events HOTEL_INVOICE_SENT and EVENT_INVOICE_SENT with their own written copy and owner switches in the Notifications catalogue; without a catalogue entry there is no notification_settings row and the send would report not-switched-on for ever. NOTE: WhatsApp carries the invoice NUMBER and amount, not the file — `sendWhatsAppDetailed` builds only text and template bodies, and the invoice PDF routes are staff-authenticated so there is no link a guest could open; attaching it needs a DOCUMENT-header template and a tokenised public URL. Spa and Restaurant still have no on-demand invoice send at all. New test TC-INVOICE-ONDEMAND-CHANNEL. tsc + vite build clean.',
       'no-more-502-cloudflare',                       //BUGFIX (10 Sep 2026). Five request handlers answered with **502**, which prod can never do: Cloudflare sits in front of erp.atithi-setu.com and REPLACES a 502 with its own HTML error page (verified live — content-type: text/html, server: cloudflare, our JSON body gone). Every carefully worded message behind them was therefore invisible: the owner saw a generic gateway error and had no idea what to fix. None of the five was a bad gateway anyway — each is an upstream or configuration rejection we chose to surface, which is a 400. Fixed: event INVOICE send and event QUOTATION send (SMTP not configured → now 400 with code EMAIL_NOT_CONFIGURED, so the owner is actually told to set up email and that the PDF is still downloadable), the channel-adapter smoke test (adapter refused the test cycle → 400 ADAPTER_REJECTED, detail preserved), and the two Aiosell calls, property lookup and reservation pull (channel manager refused → 400 AIOSELL_REJECTED carrying r.message). Same class as the two 502s already fixed in the notification work; `status(502)` is now absent from the codebase. No front-end code branched on the 502 status, so nothing else moves. tsc + vite build clean.',
       'spa-client-email',                            //FEATURE (10 Sep 2026): spa appointments could only ever carry a phone number, so the new spa notifications could reach a client on WhatsApp/SMS but never by email. Added `spa_appointments.client_email` (DDL + `ALTER … IF NOT EXISTS` migration in ensureSpaTables), captured on BOTH booking paths — the staff booking form (new optional Client Email box in SpaViews) and the public online booking, which already collected an email for `spa_clients` but never put it on the appointment. The staff path also backfills a linked client's email when it was blank, and never overwrites an existing one. `_resolveGuestContact` reads `client_email` first and falls back to `spa_clients.email` via `client_id`, so appointments booked BEFORE this column existed still resolve an email where the client is on file; `notifySpa` and the reminder cron both carry it. Also: `EVENT_BOOKING_CREATED` offered only OWNER/MANAGER audiences, so a customer could never be told their enquiry was received even though `notifyEvent` already passes their contact details — the CUSTOMER audience is now selectable. tsc + vite build clean.',
