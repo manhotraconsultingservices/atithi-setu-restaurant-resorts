@@ -439,6 +439,7 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
       client_id       TEXT,
       client_name     TEXT,
       client_phone    TEXT,
+      client_email    TEXT,
       service_id      TEXT NOT NULL,
       service_name    TEXT,
       addon_ids       TEXT,                    -- JSON array
@@ -468,6 +469,10 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_spa_appt_status ON spa_appointments(status);
     CREATE INDEX IF NOT EXISTS idx_spa_appt_client ON spa_appointments(client_id);
   `);
+  // Added Sep 2026 with the spa guest notifications: an appointment could only
+  // ever carry a phone number, so a client could not be emailed. Existing rows
+  // still resolve through spa_clients.email where the client is on file.
+  await tenantDb.exec(`ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS client_email TEXT`).catch(() => {});
 
   // ── Packages (prepaid series, auto-deduct) ─────────────────────────────────
   await tenantDb.exec(`

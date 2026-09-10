@@ -6709,10 +6709,17 @@ async function _resolveGuestContact(db: any, data: any): Promise<{ email?: strin
     }
     const appointmentId = pick(data?.appointmentId, data?.appointment_id);
     if (appointmentId && (!out.email || !out.phone)) {
-      const a: any = await db.get("SELECT client_name, client_phone FROM spa_appointments WHERE id = ?", [appointmentId]).catch(() => null);
+      const a: any = await db.get("SELECT client_id, client_name, client_phone, client_email FROM spa_appointments WHERE id = ?", [appointmentId]).catch(() => null);
       if (a) {
         out.phone = out.phone || pick(a.client_phone);
         out.name  = out.name  || pick(a.client_name);
+        out.email = out.email || pick(a.client_email);
+        // Appointments booked before the email column existed still resolve
+        // through the client on file.
+        if (!out.email && a.client_id) {
+          const c: any = await db.get("SELECT email FROM spa_clients WHERE id = ?", [a.client_id]).catch(() => null);
+          out.email = out.email || pick(c?.email);
+        }
       }
     }
     const orderId = pick(data?.orderId, data?.order_id);
@@ -29550,20 +29557,25 @@ ${data.tenant.name}`;
       let clientId = b.client_id || null;
       if (!clientId && b.client_phone) {
         const existing: any = await db.get("SELECT id FROM spa_clients WHERE phone = ? LIMIT 1", [b.client_phone]);
-        if (existing) clientId = existing.id;
-        else {
+        if (existing) {
+          clientId = existing.id;
+          // Fill in an email we did not have before; never overwrite a good one.
+          if (b.client_email) {
+            await db.run("UPDATE spa_clients SET email = ? WHERE id = ? AND COALESCE(email, '') = ''", [b.client_email, clientId]).catch(() => {});
+          }
+        } else {
           clientId = mkSpaId('SPACLI');
-          await db.run("INSERT INTO spa_clients (id, name, phone) VALUES (?, ?, ?)", [clientId, b.client_name || 'Guest', b.client_phone]);
+          await db.run("INSERT INTO spa_clients (id, name, phone, email) VALUES (?, ?, ?, ?)", [clientId, b.client_name || 'Guest', b.client_phone, b.client_email || null]);
         }
       }
 
       const id = mkSpaId('SPAAPT');
       await db.run(
         `INSERT INTO spa_appointments
-           (id, client_id, client_name, client_phone, service_id, service_name, addon_ids, therapist_id, resource_id,
+           (id, client_id, client_name, client_phone, client_email, service_id, service_name, addon_ids, therapist_id, resource_id,
             start_at, end_at, status, price_snapshot, gst_percent_snapshot, deposit_amount, booking_source, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?)`,
-        [id, clientId, b.client_name || null, b.client_phone || null, service.id, service.name,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?)`,
+        [id, clientId, b.client_name || null, b.client_phone || null, b.client_email || null, service.id, service.name,
          JSON.stringify(addonIds), b.therapist_id || null, b.resource_id || null,
          win.startAt, win.endAt, price, gstPct, Number(b.deposit_amount || 0),
          b.booking_source || 'STAFF', b.notes || null]
@@ -29642,6 +29654,7 @@ ${data.tenant.name}`;
         await triggerNotification(restaurantId, eventName, {
           appointmentId: appt?.id,
           customerPhone: appt?.client_phone || undefined,
+          customerEmail: appt?.client_email || undefined,
           customerName: appt?.client_name || '',
           guestName: appt?.client_name || '',
           serviceName: appt?.service_name || 'your treatment',
@@ -30592,9 +30605,9 @@ ${data.tenant.name}`;
       else { clientId = mkSpaId('SPACLI'); await db.run("INSERT INTO spa_clients (id, name, phone, email, marketing_opt_in) VALUES (?, ?, ?, ?, ?)", [clientId, b.client_name, b.client_phone, b.client_email || null, b.marketing_opt_in ? 1 : 0]); }
       const id = mkSpaId('SPAAPT');
       await db.run(
-        `INSERT INTO spa_appointments (id, client_id, client_name, client_phone, service_id, service_name, addon_ids, therapist_id, resource_id, start_at, end_at, status, price_snapshot, gst_percent_snapshot, booking_source)
-         VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, 'BOOKED', ?, ?, 'ONLINE')`,
-        [id, clientId, b.client_name, b.client_phone, service.id, service.name, therapistId || null, resourceId || null, startAt, endAt, round2(service.price || 0), Number(service.gst_percent ?? 18)]);
+        `INSERT INTO spa_appointments (id, client_id, client_name, client_phone, client_email, service_id, service_name, addon_ids, therapist_id, resource_id, start_at, end_at, status, price_snapshot, gst_percent_snapshot, booking_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, 'BOOKED', ?, ?, 'ONLINE')`,
+        [id, clientId, b.client_name, b.client_phone, b.client_email || null, service.id, service.name, therapistId || null, resourceId || null, startAt, endAt, round2(service.price || 0), Number(service.gst_percent ?? 18)]);
       res.status(201).json({ success: true, appointment_id: id, start_at: startAt, end_at: endAt });
     } catch (err: any) { console.error("public spa booking error:", err); res.status(500).json({ error: "Failed to book" }); }
   });
@@ -54453,8 +54466,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-guest-notifications',
+    commit_marker: 'spa-client-email',
     code_features: [
+      'spa-client-email',                            //FEATURE (10 Sep 2026): spa appointments could only ever carry a phone number, so the new spa notifications could reach a client on WhatsApp/SMS but never by email. Added `spa_appointments.client_email` (DDL + `ALTER … IF NOT EXISTS` migration in ensureSpaTables), captured on BOTH booking paths — the staff booking form (new optional Client Email box in SpaViews) and the public online booking, which already collected an email for `spa_clients` but never put it on the appointment. The staff path also backfills a linked client's email when it was blank, and never overwrites an existing one. `_resolveGuestContact` reads `client_email` first and falls back to `spa_clients.email` via `client_id`, so appointments booked BEFORE this column existed still resolve an email where the client is on file; `notifySpa` and the reminder cron both carry it. Also: `EVENT_BOOKING_CREATED` offered only OWNER/MANAGER audiences, so a customer could never be told their enquiry was received even though `notifyEvent` already passes their contact details — the CUSTOMER audience is now selectable. tsc + vite build clean.',
       'spa-guest-notifications',                     //FEATURE + CORRECTION (10 Sep 2026). Spa & Wellness raised NO guest notifications at all — a client could book a treatment and never hear from the property again. Added `notifySpa` (shaped like the events module's `notifyEvent`): **SPA_APPOINTMENT_CONFIRMED** on confirm, **SPA_APPOINTMENT_CANCELLED** on cancel (carrying the reason), and **SPA_APPOINTMENT_REMINDER** from a new 18:00 IST cron the evening before, deduped centrally via `sent_spa_reminders` exactly like the hotel pre-arrival sweep and scoped to `spa_enabled` tenants. `_resolveGuestContact` now also resolves a client from `spa_appointments` (client_name/client_phone). Written copy added for all three, and the three events are in the settings catalogue under a new Spa & Wellness group so an owner can switch them on per channel. **CORRECTION to the 10 Sep review:** the "12 dead switches" figure was wrong — my detector only matched a literal event name passed directly to `triggerNotification`, so it missed (a) the `notifyEvent` wrapper, through which all five EVENT_* notifications DO fire and DO pass customer contact, and (b) computed names (`const eventName = status === ... ? 'ORDER_READY' : 'ORDER_CANCELLED'`), which covers BOOKING_CONFIRMED/ORDER_READY/ORDER_CANCELLED/DAILY_REPORT. The genuinely unfired list is just three: CUSTOMER_INVOICE, NEW_FEEDBACK, STAFF_ATTENDANCE. tsc + vite build clean.',
       'notif-stage-d-templates-webhook-consent',      //FEATURE (notification rebuild, stage D, 10 Sep 2026). (1) APPROVED TEMPLATES ARE PLATFORM PROPERTY, not tenant: the WhatsApp sender is ONE shared Atithi-Setu number and Meta will not let an approved template be edited afterwards, so the event→template mapping moved to central `wa_template_map` (template_name, language, category, variables) managed from the ADMIN console; the tenant keeps only the free-form wording used INSIDE the 24-hour reply window and is told which template applies. Variable order is owner-mapped, with `restaurantName` forced into {{1}} because the sender is shared. (2) THE WEBHOOK NOW DOES ITS JOB — it previously console.logged and dropped everything. Verifies Meta's X-Hub-Signature-256 (when META_WA_APP_SECRET is set) over the raw body, applies delivery/read/failed receipts to the right tenant's `notification_deliveries` row via the central index (receipts carry a message id and no tenant), records inbound messages to open the 24-hour service window, and honours STOP/UNSUBSCRIBE + START/SUBSCRIBE. Inside the window we send free-form text (not billed); outside it the approved template. (3) CONSENT: central `messaging_optout` checked before EVERY guest send on WhatsApp and email — a blocked contact is logged as SKIPPED with the reason rather than silently dropped. Platform-wide for WhatsApp because one ignored opt-out damages the shared number's quality rating for every tenant. Owner API to view/add/remove. (4) COST ATTRIBUTION: central `messaging_usage` records every send with its Meta BILLING CATEGORY (MARKETING/UTILITY/AUTHENTICATION/SERVICE), so `/api/admin/messaging/usage` reports messages, failures and estimated cost per tenant against editable `messaging_rates`. New admin endpoints: whatsapp/templates (live list from Meta), whatsapp/template-map (GET/PUT), messaging/rates (GET/PUT), messaging/usage. tsc + vite build clean.',
       'notif-tenant-smtp-templates-ui',               //FEATURE (notification rebuild, stages B+C, 10 Sep 2026). (1) PER-TENANT MAIL SERVER: guest email now leaves the PROPERTY's own domain. New tenant-scoped `tenant_email_config` (host/port/secure/user/password/from/reply-to/enabled), password encrypted at rest with AES-256-GCM keyed off JWT_SECRET and NEVER returned by the API (the UI only learns `has_password`); `sendEmailAs(cfg,…)` in notificationService builds a per-config cached nodemailer transport and returns a real SendResult; `verifyTenantSmtp` checks credentials without sending. Owner API: GET/PUT `/api/owner/email-config` + POST `/api/owner/email-config/verify`. Falls back to the platform account when unset, so nothing changes for tenants who never configure one. **The platform BCC is gone for guest mail** — every guest email used to be blind-copied to the shared platform mailbox (thirteen businesses' guest correspondence in one operator inbox, which no guest consented to); TEAM mail on the platform sender keeps it. (2) CHANNEL-SPECIFIC WORDING: `notification_templates` gains `whatsapp_template`, `wa_meta_template_name`, `wa_meta_template_lang` — one shared body cannot serve both a WhatsApp line and a structured email; the dispatcher now picks the WhatsApp copy when written and sends the mapped APPROVED Meta template (with the property name as the first variable, since the sender number is shared). (3) NEW NOTIFICATIONS SCREEN: the ~100-row role×channel×3-text-column switchboard is replaced by three tabs — What gets sent (collapsible groups; per event the audience collapses to Guests / My team with four channel chips), Message wording (per-event email subject+body and WhatsApp copy with live preview, sample variables and the Meta template mapping), Channels & delivery (own mail server form with Check-connection, WhatsApp shared-sender explainer, and a delivery log that now shows audience and the real failure reason). tsc + vite build clean.',
@@ -57553,7 +57567,7 @@ ${data.tenant.name}`;
         try {
           const db = await getTenantDb(tn.id);
           const appts: any[] = await db.query(
-            `SELECT id, client_name, client_phone, service_name, start_at
+            `SELECT id, client_name, client_phone, client_email, service_name, start_at
                FROM spa_appointments
               WHERE status IN ('BOOKED', 'CONFIRMED') AND start_at::date = ?::date`, [tomorrow]
           ).catch(() => []);
@@ -57569,7 +57583,7 @@ ${data.tenant.name}`;
             } catch { /* race — fine */ }
             const when = a.start_at ? new Date(a.start_at) : null;
             await triggerNotification(tn.id, 'SPA_APPOINTMENT_REMINDER', {
-              appointmentId: a.id, customerPhone: a.client_phone || undefined,
+              appointmentId: a.id, customerPhone: a.client_phone || undefined, customerEmail: a.client_email || undefined,
               guestName: a.client_name || '', customerName: a.client_name || '',
               serviceName: a.service_name || 'your treatment',
               appointmentAt: when ? when.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '',
