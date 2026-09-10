@@ -10138,7 +10138,10 @@ async function startServer() {
             results.push({ to, status: 'SKIPPED', error: 'Outside the 24-hour window — pick an approved template.' });
             continue;
           }
-          const useTemplate = windowOpen && text ? null : { name: templateName, languageCode: templateLang, variables };
+          // {{1}} is always the property name — the sender is shared, so the guest
+          // must be told who is writing. The owner supplies {{2}} onward.
+          const useTemplate = windowOpen && text ? null
+            : { name: templateName, languageCode: templateLang, variables: [propertyName, ...variables] };
           _logAndSendCategory = useTemplate ? category : 'SERVICE';
           _logAndSendTemplate = useTemplate ? templateName : null;
           ok = await logAndSend(db, 'ON_DEMAND', 'WHATSAPP', to, useTemplate ? `${templateName}(${variables.join(' | ')})` : body,
