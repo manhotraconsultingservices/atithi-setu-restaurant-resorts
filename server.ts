@@ -8,7 +8,7 @@ import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import cookieParser from "cookie-parser";
-import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from "crypto";
+import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash, timingSafeEqual } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
@@ -6473,6 +6473,92 @@ async function ensureNotifDeliveries(db: any, rid: string) {
 // Send on a single channel with the failure ISOLATED (one channel throwing must
 // never abort the others) and the outcome logged.
 
+
+// ── WhatsApp: message index, service window and consent ─────────────────────
+// The sender is ONE shared Atithi-Setu number, so Meta's delivery receipts and
+// inbound messages arrive platform-wide with no tenant on them. Three small
+// CENTRAL tables make that workable:
+//   wa_message_index  — provider message id → the tenant that sent it, so a
+//                       receipt can find and update the right delivery row
+//   wa_service_window — when each guest last wrote to us. Inside 24 hours we may
+//                       send free-form text; outside it Meta requires a template
+//   messaging_optout  — who asked us to stop. A shared sender means one tenant
+//                       spamming costs everyone the number's quality rating, so
+//                       this is enforced platform-wide for WhatsApp
+let _waTablesReady = false;
+async function ensureWaTables(): Promise<void> {
+  if (_waTablesReady) return;
+  try {
+    await centralDb.exec(`CREATE TABLE IF NOT EXISTS wa_message_index (
+      provider_message_id TEXT PRIMARY KEY, restaurant_id TEXT, recipient TEXT,
+      event_name TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+    await centralDb.exec(`CREATE TABLE IF NOT EXISTS wa_service_window (
+      phone TEXT PRIMARY KEY, last_inbound_at TIMESTAMP)`);
+    // Event → the template Meta approved on the shared sender. PLATFORM-level:
+    // an approved template cannot be edited, and the sender belongs to us, so a
+    // tenant must not be able to point an event at arbitrary wording.
+    await centralDb.exec(`CREATE TABLE IF NOT EXISTS wa_template_map (
+      event_name TEXT PRIMARY KEY, template_name TEXT, language TEXT DEFAULT 'en',
+      category TEXT, variables TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+    // Every message we send, with the billing category Meta charges on, so the
+    // platform can attribute cost per tenant. Doubles as the routing index for
+    // delivery receipts, which arrive with a message id and nothing else.
+    await centralDb.exec(`CREATE TABLE IF NOT EXISTS messaging_usage (
+      provider_message_id TEXT PRIMARY KEY, restaurant_id TEXT, channel TEXT,
+      category TEXT, template_name TEXT, event_name TEXT, audience TEXT,
+      status TEXT DEFAULT 'SENT', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+    await centralDb.exec(`CREATE INDEX IF NOT EXISTS idx_msg_usage_tenant ON messaging_usage(restaurant_id, created_at DESC)`);
+    // Editable unit rates so a cost estimate tracks Meta's price changes.
+    await centralDb.exec(`CREATE TABLE IF NOT EXISTS messaging_rates (
+      key TEXT PRIMARY KEY, rate NUMERIC(10,4), updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+    await centralDb.exec(`CREATE TABLE IF NOT EXISTS messaging_optout (
+      contact TEXT, channel TEXT, source TEXT, restaurant_id TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (contact, channel))`);
+    _waTablesReady = true;
+  } catch { /* best effort — messaging must never be blocked by bookkeeping */ }
+}
+
+// Normalise a phone/email to a comparable key.
+function _contactKey(v: string): string {
+  const t = String(v || '').trim().toLowerCase();
+  if (t.includes('@')) return t;
+  const digits = t.replace(/[^\d]/g, '');
+  return digits.length > 10 ? digits.slice(-10) : digits;   // last 10 digits, country-code agnostic
+}
+
+// Has this contact asked us to stop on this channel?
+async function _waConsent(contact: string, channel: string): Promise<{ blocked: boolean; source?: string }> {
+  try {
+    await ensureWaTables();
+    const r: any = await centralDb.get("SELECT source FROM messaging_optout WHERE contact = ? AND channel = ?", [_contactKey(contact), channel]).catch(() => null);
+    return r ? { blocked: true, source: r.source } : { blocked: false };
+  } catch { return { blocked: false }; }
+}
+
+async function _recordOptOut(contact: string, channel: string, source: string, restaurantId?: string): Promise<void> {
+  await ensureWaTables();
+  await centralDb.run(
+    `INSERT INTO messaging_optout (contact, channel, source, restaurant_id) VALUES (?, ?, ?, ?)
+     ON CONFLICT (contact, channel) DO UPDATE SET source = EXCLUDED.source, created_at = CURRENT_TIMESTAMP`,
+    [_contactKey(contact), channel, source, restaurantId || null]).catch(() => {});
+}
+async function _recordOptIn(contact: string, channel: string): Promise<void> {
+  await ensureWaTables();
+  await centralDb.run("DELETE FROM messaging_optout WHERE contact = ? AND channel = ?", [_contactKey(contact), channel]).catch(() => {});
+}
+
+// Is the 24-hour customer-service window open for this number? Inside it we can
+// send ordinary text; outside it Meta only accepts an approved template.
+async function _waWindowOpen(phone: string): Promise<boolean> {
+  try {
+    await ensureWaTables();
+    const r: any = await centralDb.get("SELECT last_inbound_at FROM wa_service_window WHERE phone = ?", [_contactKey(phone)]).catch(() => null);
+    if (!r?.last_inbound_at) return false;
+    return (Date.now() - new Date(r.last_inbound_at).getTime()) < 24 * 3600 * 1000;
+  } catch { return false; }
+}
+
 // ── Per-tenant mail server ──────────────────────────────────────────────────
 // Guest email leaves the PROPERTY's own domain when it has configured a mail
 // server, and the platform account only acts as a fallback. The password is
@@ -6545,6 +6631,9 @@ async function sendTenantEmail(restaurantId: string, to: string, subject: string
   return sendEmailAs(cfg, to, subject, text, html, undefined, { bcc });
 }
 
+let _logAndSendTenant: string | null = null;
+let _logAndSendCategory: string | null = null;
+let _logAndSendTemplate: string | null = null;
 async function logAndSend(db: any, eventName: string, channel: string, recipient: string, preview: string, fn: () => Promise<any>, audience?: string) {
   const id = `ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const write = (status: string, error: string | null, code: string | null, providerId: string | null) =>
@@ -6568,6 +6657,18 @@ async function logAndSend(db: any, eventName: string, channel: string, recipient
   const code = isResult ? (res.code || null) : null;
   const providerId = isResult ? (res.id || null) : null;
   await write(ok ? 'SENT' : 'FAILED', ok ? null : String(error || 'Unknown provider error').slice(0, 300), ok ? null : code, providerId);
+  // Index the provider's id centrally so its delivery receipt — which arrives
+  // platform-wide with no tenant on it — can find this row again.
+  if (ok && _logAndSendTenant) {
+    try {
+      await ensureWaTables();
+      // Keyed by the provider id where there is one, so a delivery receipt can
+      // find this row; email gets a synthetic key so the usage totals still add up.
+      await centralDb.run(
+        "INSERT INTO messaging_usage (provider_message_id, restaurant_id, channel, category, template_name, event_name, audience, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'SENT') ON CONFLICT (provider_message_id) DO NOTHING",
+        [providerId || `${channel}-${id}`, _logAndSendTenant, channel, _logAndSendCategory || null, _logAndSendTemplate || null, eventName, audience || null]).catch(() => {});
+    } catch { /* usage accounting must never block a send */ }
+  }
   if (!ok) console.error(`[notif] ${channel} → ${recipient} for ${eventName} rejected:`, error);
 }
 
@@ -6817,14 +6918,16 @@ async function triggerNotification(restaurantId: string, eventName: string, data
       } catch { /* fall back to default content */ }
       // Deduplicate recipients (same email/phone might appear via role lookup + manual list)
       const uniqueRecipients = [...new Set(recipients.filter(Boolean))];
+      _logAndSendTenant = restaurantId;
       const audienceTag = isGuestAudience ? 'GUEST' : 'TEAM';
       // WhatsApp copy is written separately from email copy where the owner has
       // done so — a WhatsApp message wants one short paragraph, an email wants a
       // subject and structure. Falls back to the shared body when not written.
       let waBody: string | null = null;
       let metaTemplate: { name: string; languageCode?: string; variables?: (string | number)[] } | null = null;
+      let metaCategory = 'SERVICE';   // Meta bills template sends by category; free-form in-window is not billed
       try {
-        const wt: any = await db.get("SELECT whatsapp_template, wa_meta_template_name, wa_meta_template_lang, enabled FROM notification_templates WHERE event_type = ?", [eventName]).catch(() => null);
+        const wt: any = await db.get("SELECT whatsapp_template, wa_meta_template_name, wa_meta_template_lang, wa_template_vars, enabled FROM notification_templates WHERE event_type = ?", [eventName]).catch(() => null);
         if (wt && Number(wt.enabled) !== 0) {
           if (wt.whatsapp_template) {
             waBody = String(wt.whatsapp_template).replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m: string, k: string) => {
@@ -6835,13 +6938,28 @@ async function triggerNotification(restaurantId: string, eventName: string, data
           // Meta requires an APPROVED template for anything the business starts
           // (outside the 24-hour reply window). The property name is always the
           // first variable, because the sender number is shared across tenants.
-          if (wt.wa_meta_template_name) {
-            metaTemplate = {
-              name: String(wt.wa_meta_template_name),
-              languageCode: String(wt.wa_meta_template_lang || 'en'),
-              variables: [String(data.restaurantName || ''), String(data.guestName || data.customerName || '')].filter(v => v !== ''),
-            };
-          }
+          // The approved template is NOT the tenant's to choose — see the central
+          // wa_template_map, managed from the admin console.
+        }
+      } catch { /* fall back to the shared copy */ }
+      try {
+        await ensureWaTables();
+        const map: any = await centralDb.get("SELECT template_name, language, category, variables FROM wa_template_map WHERE event_name = ?", [eventName]).catch(() => null);
+        if (map?.template_name) {
+          // The property name always fills the first placeholder: the sender is
+          // shared, so the guest must be told which business is writing.
+          const mapped = String(map.variables || '').split(',').map((v: string) => v.trim()).filter(Boolean);
+          const names = mapped.length ? mapped : ['restaurantName', 'guestName'];
+          if (names[0] !== 'restaurantName') names.unshift('restaurantName');
+          metaTemplate = {
+            name: String(map.template_name),
+            languageCode: String(map.language || 'en'),
+            variables: names.map((k: string) => {
+              const v = k.split('.').reduce((acc: any, p: string) => acc == null ? acc : acc[p], data);
+              return v == null ? '' : String(v);
+            }),
+          };
+          metaCategory = String(map.category || 'UTILITY').toUpperCase();
         }
       } catch { /* fall back to the shared copy */ }
       // The WhatsApp sender is one shared Atithi-Setu number, so a guest cannot
@@ -6859,13 +6977,37 @@ async function triggerNotification(restaurantId: string, eventName: string, data
       for (const recipient of uniqueRecipients) {
         const isEmail = recipient.includes('@');
         if (setting.email_enabled && isEmail) {
-          await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendTenantEmail(restaurantId, recipient, content.subject, content.text, content.html, audienceTag), audienceTag);
+          const emailConsent = isGuestAudience ? await _waConsent(recipient, 'EMAIL') : { blocked: false };
+          if (emailConsent.blocked) {
+            await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?, ?)",
+              [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, eventName, 'EMAIL', recipient, 'This guest asked to stop receiving email.', audienceTag, String(content.subject).slice(0, 140)]).catch(() => {});
+          } else {
+            await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendTenantEmail(restaurantId, recipient, content.subject, content.text, content.html, audienceTag), audienceTag);
+          }
         }
         if (setting.sms_enabled && !isEmail) {
           await logAndSend(db, eventName, 'SMS', recipient, outboundText, () => sendSMSDetailed(recipient, outboundText), audienceTag);
         }
         if (setting.whatsapp_enabled && !isEmail) {
-          await logAndSend(db, eventName, 'WHATSAPP', recipient, waText, () => sendWhatsAppDetailed(recipient, waText, metaTemplate), audienceTag);
+          // A guest who replied STOP is never messaged again. The sender number is
+          // shared across every property, so one ignored opt-out would damage
+          // deliverability for all of them.
+          const consent = isGuestAudience ? await _waConsent(recipient, 'WHATSAPP') : { blocked: false };
+          if (consent.blocked) {
+            await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?, ?)",
+              [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, eventName, 'WHATSAPP', recipient, 'This guest asked to stop receiving WhatsApp messages.', audienceTag, String(waText).slice(0, 140)]).catch(() => {});
+          } else {
+            // Inside the 24-hour window that the guest's own reply opened we may
+            // send ordinary text; outside it Meta requires the approved template.
+            const windowOpen = isGuestAudience ? await _waWindowOpen(recipient) : true;
+            const useTemplate = windowOpen ? null : metaTemplate;
+            // Free-form inside the window costs nothing; a template send is billed
+            // at its category rate, which is what the cost report attributes.
+            _logAndSendCategory = useTemplate ? metaCategory : 'SERVICE';
+            _logAndSendTemplate = useTemplate ? useTemplate.name : null;
+            await logAndSend(db, eventName, 'WHATSAPP', recipient, waText, () => sendWhatsAppDetailed(recipient, waText, useTemplate), audienceTag);
+            _logAndSendCategory = null; _logAndSendTemplate = null;
+          }
         }
       }
       // Telegram: channel-level (not per-recipient), uses stored chat_id override or env default
@@ -7588,6 +7730,138 @@ async function startServer() {
   });
 
   // Admin: Get Users
+  // ══ Platform messaging: approved templates + what they cost ═══════════════
+  // WhatsApp goes out from ONE Atithi-Setu number shared by every tenant, and an
+  // approved template cannot be edited afterwards — so the template catalogue and
+  // the event mapping are platform property, managed here rather than per tenant.
+  // A tenant still chooses whether an event goes out on WhatsApp at all, and
+  // writes the free-form wording used inside the 24-hour reply window.
+
+  // What Meta has approved on our sender.
+  app.get("/api/admin/whatsapp/templates", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      const waba = process.env.META_WA_BUSINESS_ACCOUNT_ID;
+      const tok = process.env.META_WA_ACCESS_TOKEN;
+      if (!waba || !tok) {
+        return res.json({ templates: [], configured: false, reason: 'Set META_WA_BUSINESS_ACCOUNT_ID and META_WA_ACCESS_TOKEN to load the approved templates.' });
+      }
+      const url = `https://graph.facebook.com/v21.0/${waba}/message_templates?limit=200&fields=name,status,language,category,components`;
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${tok}` } });
+      const body: any = await r.json().catch(() => ({}));
+      if (!r.ok || body?.error) return res.status(400).json({ templates: [], configured: true, error: body?.error?.message || 'Meta refused the request.' });
+      const templates = (body?.data || []).map((t: any) => {
+        const bodyComp = (t.components || []).find((c: any) => String(c.type).toUpperCase() === 'BODY');
+        const text = bodyComp?.text || '';
+        return {
+          name: t.name, language: t.language, status: t.status, category: t.category, body: text,
+          // Placeholder count — the mapping must supply exactly this many fields
+          // or Meta rejects every send using it.
+          variable_count: (String(text).match(/\{\{\s*\d+\s*\}\}/g) || []).length,
+        };
+      });
+      res.json({ templates, configured: true });
+    } catch { res.status(500).json({ templates: [], error: 'Could not reach Meta.' }); }
+  });
+
+  // The event → template mapping every tenant shares.
+  app.get("/api/admin/whatsapp/template-map", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      await ensureWaTables();
+      const rows = await centralDb.query("SELECT event_name, template_name, language, category, variables, updated_at FROM wa_template_map ORDER BY event_name").catch(() => []);
+      res.json({ map: rows || [] });
+    } catch { res.status(500).json({ error: 'Failed to load the template map' }); }
+  });
+
+  app.put("/api/admin/whatsapp/template-map/:event", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureWaTables();
+      const ev = String(req.params.event || '').trim().toUpperCase();
+      const name = String(req.body?.template_name || '').trim();
+      if (!ev) return res.status(400).json({ error: 'An event is required.' });
+      if (!name) {
+        await centralDb.run("DELETE FROM wa_template_map WHERE event_name = ?", [ev]).catch(() => {});
+        return res.json({ success: true, cleared: true });
+      }
+      const vars = Array.isArray(req.body?.variables) ? req.body.variables.join(',') : String(req.body?.variables || '');
+      await centralDb.run(
+        `INSERT INTO wa_template_map (event_name, template_name, language, category, variables, updated_at)
+         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (event_name) DO UPDATE SET template_name = EXCLUDED.template_name, language = EXCLUDED.language,
+           category = EXCLUDED.category, variables = EXCLUDED.variables, updated_at = CURRENT_TIMESTAMP`,
+        [ev, name, String(req.body?.language || 'en'), String(req.body?.category || 'UTILITY').toUpperCase(), vars]
+      );
+      res.json({ success: true });
+    } catch { res.status(500).json({ error: 'Failed to save the mapping' }); }
+  });
+
+  // Unit rates behind the cost estimate, so it tracks Meta's pricing changes.
+  const DEFAULT_RATES: Record<string, number> = { WHATSAPP_MARKETING: 0.78, WHATSAPP_UTILITY: 0.115, WHATSAPP_AUTHENTICATION: 0.115, WHATSAPP_SERVICE: 0, EMAIL: 0.01, SMS: 0.18 };
+  app.get("/api/admin/messaging/rates", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      await ensureWaTables();
+      const rows: any[] = await centralDb.query("SELECT key, rate FROM messaging_rates").catch(() => []);
+      const rates = { ...DEFAULT_RATES };
+      for (const r of (rows || [])) rates[r.key] = Number(r.rate);
+      res.json({ rates, defaults: DEFAULT_RATES, currency: 'INR' });
+    } catch { res.status(500).json({ error: 'Failed to load rates' }); }
+  });
+
+  app.put("/api/admin/messaging/rates", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureWaTables();
+      const rates = req.body?.rates || {};
+      for (const [k, v] of Object.entries(rates)) {
+        if (!/^[A-Z_]+$/.test(k)) continue;
+        await centralDb.run("INSERT INTO messaging_rates (key, rate, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT (key) DO UPDATE SET rate = EXCLUDED.rate, updated_at = CURRENT_TIMESTAMP",
+          [k, Number(v) || 0]).catch(() => {});
+      }
+      res.json({ success: true });
+    } catch { res.status(500).json({ error: 'Failed to save rates' }); }
+  });
+
+  // Usage and estimated cost per tenant. Meta bills template sends by category;
+  // a free-form reply inside the 24-hour window is not billed, which is why the
+  // service line is counted separately and priced at zero by default.
+  app.get("/api/admin/messaging/usage", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureWaTables();
+      const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
+      const rows: any[] = await centralDb.query(
+        `SELECT restaurant_id, channel, COALESCE(category, 'SERVICE') AS category,
+                COUNT(*)::int AS messages,
+                COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed
+           FROM messaging_usage
+          WHERE created_at > (CURRENT_TIMESTAMP - (? || ' days')::interval)
+          GROUP BY 1, 2, 3`, [String(days)]
+      ).catch(() => []);
+      const rateRows: any[] = await centralDb.query("SELECT key, rate FROM messaging_rates").catch(() => []);
+      const rates: Record<string, number> = { ...DEFAULT_RATES };
+      for (const r of (rateRows || [])) rates[r.key] = Number(r.rate);
+      const names: any[] = await centralDb.query("SELECT id, name FROM restaurants").catch(() => []);
+      const nameOf = (id: string) => (names || []).find((n: any) => n.id === id)?.name || id;
+
+      const byTenant: Record<string, any> = {};
+      let grandTotal = 0;
+      for (const r of (rows || [])) {
+        const key = r.restaurant_id || 'unknown';
+        const rateKey = r.channel === 'WHATSAPP' ? `WHATSAPP_${String(r.category).toUpperCase()}` : String(r.channel).toUpperCase();
+        const rate = rates[rateKey] ?? 0;
+        const cost = Math.round(Number(r.messages) * rate * 100) / 100;
+        grandTotal += cost;
+        byTenant[key] = byTenant[key] || { restaurant_id: key, name: nameOf(key), messages: 0, failed: 0, cost: 0, lines: [] };
+        byTenant[key].messages += Number(r.messages);
+        byTenant[key].failed += Number(r.failed);
+        byTenant[key].cost = Math.round((byTenant[key].cost + cost) * 100) / 100;
+        byTenant[key].lines.push({ channel: r.channel, category: r.category, messages: Number(r.messages), failed: Number(r.failed), rate, cost });
+      }
+      res.json({
+        days, currency: 'INR', rates,
+        total_cost: Math.round(grandTotal * 100) / 100,
+        tenants: Object.values(byTenant).sort((a: any, b: any) => b.cost - a.cost),
+      });
+    } catch { res.status(500).json({ error: 'Failed to build the usage report' }); }
+  });
+
   app.get("/api/admin/users", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
       const users = await centralDb.query("SELECT id, login_id, name, email, phone, role, is_active FROM users WHERE role IN ('SUPER_ADMIN', 'SALES_REP', 'CTO')");
@@ -9705,14 +9979,72 @@ async function startServer() {
     }
   });
 
-  // ── Owner: the property's own mail server ─────────────────────────────────
-  // Guest email should come from the property, not a shared platform mailbox.
-  // The password is written encrypted and never read back out to the browser.
   const _notifCanEdit = async (req: AuthRequest) => {
     const r = String(req.user?.role || '').toUpperCase();
     return ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(r) || await _roleHasTab(req, 'NOTIFICATIONS', 2);
   };
 
+  // ── Owner: WhatsApp templates, and who has opted out ──────────────────────
+  // The sender is one shared Atithi-Setu number, so the approved templates on it
+  // are shared too — this lists what Meta has approved so an owner picks a real
+  // one instead of typing a name that will be rejected at send time.
+  app.get("/api/owner/whatsapp/templates", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const waba = process.env.META_WA_BUSINESS_ACCOUNT_ID;
+      const tokenEnv = process.env.META_WA_ACCESS_TOKEN;
+      if (!waba || !tokenEnv) {
+        return res.json({ templates: [], configured: false, reason: 'WhatsApp is not connected yet. Once the Meta account is linked, your approved templates appear here.' });
+      }
+      const url = `https://graph.facebook.com/v21.0/${waba}/message_templates?limit=100&fields=name,status,language,category,components`;
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${tokenEnv}` } });
+      const body: any = await r.json().catch(() => ({}));
+      if (!r.ok || body?.error) {
+        return res.status(400).json({ templates: [], configured: true, error: body?.error?.message || 'Meta refused the request for your templates.' });
+      }
+      const templates = (body?.data || []).map((t: any) => {
+        const bodyComp = (t.components || []).find((c: any) => String(c.type).toUpperCase() === 'BODY');
+        const text = bodyComp?.text || '';
+        return {
+          name: t.name, language: t.language, status: t.status, category: t.category,
+          body: text,
+          // How many {{n}} placeholders the approved wording expects — the owner
+          // must map exactly this many fields or Meta rejects the send.
+          variable_count: (String(text).match(/\{\{\s*\d+\s*\}\}/g) || []).length,
+        };
+      });
+      res.json({ templates, configured: true });
+    } catch (err: any) {
+      res.status(500).json({ templates: [], error: 'Could not reach Meta for the template list' });
+    }
+  });
+
+  // Who has asked us to stop. Platform-wide for WhatsApp: the number is shared,
+  // so an ignored opt-out damages deliverability for every property on it.
+  app.get("/api/owner/messaging-optouts", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureWaTables();
+      const rows = await centralDb.query("SELECT contact, channel, source, created_at FROM messaging_optout ORDER BY created_at DESC LIMIT 200").catch(() => []);
+      res.json({ optouts: rows || [] });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to load the opt-out list' }); }
+  });
+
+  app.post("/api/owner/messaging-optouts", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications.' });
+    try {
+      const contact = String(req.body?.contact || '').trim();
+      const channel = String(req.body?.channel || 'WHATSAPP').toUpperCase();
+      const remove = req.body?.remove === true;
+      if (!contact) return res.status(400).json({ error: 'A phone number or email address is required.' });
+      if (!['WHATSAPP', 'SMS', 'EMAIL'].includes(channel)) return res.status(400).json({ error: 'channel must be WHATSAPP, SMS or EMAIL' });
+      if (remove) await _recordOptIn(contact, channel);
+      else await _recordOptOut(contact, channel, `Added by ${req.user?.email || 'staff'}`, req.user!.restaurantId);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to update the opt-out list' }); }
+  });
+
+  // ── Owner: the property's own mail server ─────────────────────────────────
+  // Guest email should come from the property, not a shared platform mailbox.
+  // The password is written encrypted and never read back out to the browser.
   app.get("/api/owner/email-config", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
@@ -9949,32 +10281,86 @@ async function startServer() {
   });
 
   // ── Meta Cloud API: WhatsApp webhook events (POST) ─────────────────────────
-  // Receives delivery receipts, read receipts, and incoming customer messages.
-  app.post("/api/webhooks/whatsapp", (req: Request, res: Response) => {
-    // Acknowledge immediately (Meta requires 200 within 20 s)
-    res.status(200).json({ status: "ok" });
-
+  // Delivery receipts, read receipts and incoming customer messages. This used
+  // to write a console line and drop everything on the floor, so a message that
+  // Meta accepted but never delivered looked exactly like one that was read.
+  //
+  // A receipt carries no tenant — the sender number is shared — so it is routed
+  // through the central wa_message_index written when the message was sent.
+  const applyWhatsAppStatus = async (st: any): Promise<void> => {
+    const id = String(st?.id || '');
+    if (!id) return;
+    await ensureWaTables();
+    const idx: any = await centralDb.get("SELECT restaurant_id FROM messaging_usage WHERE provider_message_id = ?", [id]).catch(() => null);
+    await centralDb.run("UPDATE messaging_usage SET status = ? WHERE provider_message_id = ?", [String(st.status || '').toUpperCase() || 'SENT', id]).catch(() => {});
+    if (!idx?.restaurant_id) return;   // not one of ours, or sent before indexing existed
+    const status = String(st.status || '').toUpperCase();   // SENT | DELIVERED | READ | FAILED
+    const errTitle = st?.errors?.[0]?.title || st?.errors?.[0]?.message || null;
+    const errCode = st?.errors?.[0]?.code != null ? String(st.errors[0].code) : null;
     try {
-      const body = req.body as any;
-      const entry = body?.entry?.[0]?.changes?.[0]?.value;
-      if (!entry) return;
+      const db = await getTenantDb(idx.restaurant_id);
+      await db.run(
+        "UPDATE notification_deliveries SET status = ?, error = COALESCE(?, error), error_code = COALESCE(?, error_code) WHERE provider_message_id = ?",
+        [status === 'FAILED' ? 'FAILED' : status, errTitle ? String(errTitle).slice(0, 300) : null, errCode, id]
+      ).catch(() => {});
+    } catch { /* tenant may be gone */ }
+  };
 
-      // Incoming message from a customer
-      const messages = entry.messages;
-      if (messages?.length) {
-        const msg = messages[0];
-        console.log(`[Meta Webhook] Incoming WhatsApp from ${msg.from}: ${msg.text?.body || '(non-text)'}`);
-      }
-
-      // Delivery / read status update
-      const statuses = entry.statuses;
-      if (statuses?.length) {
-        const st = statuses[0];
-        console.log(`[Meta Webhook] Message ${st.id} status: ${st.status} → ${st.recipient_id}`);
-      }
-    } catch (err) {
-      console.error("[Meta Webhook] Processing error:", err);
+  // An inbound message opens the 24-hour service window (free-form text is then
+  // allowed) and is where opt-out has to be honoured — replying STOP is what a
+  // guest naturally does, and ignoring it is what gets a shared sender blocked.
+  const applyWhatsAppInbound = async (msg: any): Promise<void> => {
+    const from = String(msg?.from || '');
+    if (!from) return;
+    await ensureWaTables();
+    await centralDb.run(
+      `INSERT INTO wa_service_window (phone, last_inbound_at) VALUES (?, CURRENT_TIMESTAMP)
+       ON CONFLICT (phone) DO UPDATE SET last_inbound_at = CURRENT_TIMESTAMP`,
+      [_contactKey(from)]).catch(() => {});
+    const text = String(msg?.text?.body || msg?.button?.text || '').trim().toUpperCase();
+    if (/^(STOP|UNSUBSCRIBE|OPTOUT|OPT OUT)\b/.test(text)) {
+      await _recordOptOut(from, 'WHATSAPP', 'Guest replied ' + text.split(/\s+/)[0]);
+      console.log(`[Meta Webhook] ${from} opted out of WhatsApp`);
+    } else if (/^(START|SUBSCRIBE|UNSTOP|OPTIN|OPT IN)\b/.test(text)) {
+      await _recordOptIn(from, 'WHATSAPP');
+      console.log(`[Meta Webhook] ${from} opted back in to WhatsApp`);
     }
+  };
+
+  app.post("/api/webhooks/whatsapp", express.json({ verify: (req: any, _res, buf: Buffer) => { req.rawBody = buf?.length ? buf.toString('utf8') : ''; }, limit: '512kb' }), (req: Request, res: Response) => {
+    // Meta wants a 200 within 20 s and retries otherwise, so acknowledge first
+    // and do the work afterwards.
+    res.status(200).json({ status: 'ok' });
+
+    // Verify the payload really came from Meta when an app secret is configured.
+    // Without one we still process (nothing here is destructive) but say so.
+    const appSecret = process.env.META_WA_APP_SECRET;
+    if (appSecret) {
+      const sig = String(req.headers['x-hub-signature-256'] || '');
+      const rawBody: string = (req as any).rawBody || '';
+      const expected = 'sha256=' + createHmac('sha256', appSecret).update(rawBody, 'utf8').digest('hex');
+      const a = Buffer.from(sig), b = Buffer.from(expected);
+      if (a.length !== b.length || !timingSafeEqual(a, b)) {
+        console.warn('[Meta Webhook] Rejected — signature mismatch.');
+        return;
+      }
+    }
+
+    (async () => {
+      try {
+        const body = req.body as any;
+        for (const entry of (body?.entry || [])) {
+          for (const change of (entry?.changes || [])) {
+            const value = change?.value;
+            if (!value) continue;
+            for (const msg of (value.messages || [])) await applyWhatsAppInbound(msg);
+            for (const st of (value.statuses || [])) await applyWhatsAppStatus(st);
+          }
+        }
+      } catch (err) {
+        console.error('[Meta Webhook] Processing error:', err);
+      }
+    })();
   });
 
   // Login Logic
@@ -22061,22 +22447,23 @@ ${data.tenant.name}`;
 
   app.put("/api/restaurant/:id/notification-templates/:event", authenticate, restaurantStaff, requireTabAction('SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
-      const { subject_template, body_template, enabled, whatsapp_template, wa_meta_template_name, wa_meta_template_lang } = req.body;
+      const { subject_template, body_template, enabled, whatsapp_template, wa_meta_template_name, wa_meta_template_lang, wa_template_vars } = req.body;
       const db = await getTenantDb(req.params.id);
       await db.run(
-        `INSERT INTO notification_templates (event_type, subject_template, body_template, whatsapp_template, wa_meta_template_name, wa_meta_template_lang, enabled, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `INSERT INTO notification_templates (event_type, subject_template, body_template, whatsapp_template, wa_meta_template_name, wa_meta_template_lang, wa_template_vars, enabled, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT (event_type) DO UPDATE SET
            subject_template      = EXCLUDED.subject_template,
            body_template         = EXCLUDED.body_template,
            whatsapp_template     = EXCLUDED.whatsapp_template,
            wa_meta_template_name = EXCLUDED.wa_meta_template_name,
            wa_meta_template_lang = EXCLUDED.wa_meta_template_lang,
+           wa_template_vars      = EXCLUDED.wa_template_vars,
            enabled               = EXCLUDED.enabled,
            updated_at            = CURRENT_TIMESTAMP`,
         [req.params.event, subject_template || null, body_template || null,
          whatsapp_template || null, wa_meta_template_name || null, wa_meta_template_lang || 'en',
-         enabled === false ? 0 : 1]
+         wa_template_vars || null, enabled === false ? 0 : 1]
       );
       res.json({ success: true });
     } catch (err) {
@@ -54030,8 +54417,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-tenant-smtp-templates-ui-b',
+    commit_marker: 'notif-stage-d-templates-webhook-consent',
     code_features: [
+      'notif-stage-d-templates-webhook-consent',      //FEATURE (notification rebuild, stage D, 10 Sep 2026). (1) APPROVED TEMPLATES ARE PLATFORM PROPERTY, not tenant: the WhatsApp sender is ONE shared Atithi-Setu number and Meta will not let an approved template be edited afterwards, so the event→template mapping moved to central `wa_template_map` (template_name, language, category, variables) managed from the ADMIN console; the tenant keeps only the free-form wording used INSIDE the 24-hour reply window and is told which template applies. Variable order is owner-mapped, with `restaurantName` forced into {{1}} because the sender is shared. (2) THE WEBHOOK NOW DOES ITS JOB — it previously console.logged and dropped everything. Verifies Meta's X-Hub-Signature-256 (when META_WA_APP_SECRET is set) over the raw body, applies delivery/read/failed receipts to the right tenant's `notification_deliveries` row via the central index (receipts carry a message id and no tenant), records inbound messages to open the 24-hour service window, and honours STOP/UNSUBSCRIBE + START/SUBSCRIBE. Inside the window we send free-form text (not billed); outside it the approved template. (3) CONSENT: central `messaging_optout` checked before EVERY guest send on WhatsApp and email — a blocked contact is logged as SKIPPED with the reason rather than silently dropped. Platform-wide for WhatsApp because one ignored opt-out damages the shared number's quality rating for every tenant. Owner API to view/add/remove. (4) COST ATTRIBUTION: central `messaging_usage` records every send with its Meta BILLING CATEGORY (MARKETING/UTILITY/AUTHENTICATION/SERVICE), so `/api/admin/messaging/usage` reports messages, failures and estimated cost per tenant against editable `messaging_rates`. New admin endpoints: whatsapp/templates (live list from Meta), whatsapp/template-map (GET/PUT), messaging/rates (GET/PUT), messaging/usage. tsc + vite build clean.',
       'notif-tenant-smtp-templates-ui',               //FEATURE (notification rebuild, stages B+C, 10 Sep 2026). (1) PER-TENANT MAIL SERVER: guest email now leaves the PROPERTY's own domain. New tenant-scoped `tenant_email_config` (host/port/secure/user/password/from/reply-to/enabled), password encrypted at rest with AES-256-GCM keyed off JWT_SECRET and NEVER returned by the API (the UI only learns `has_password`); `sendEmailAs(cfg,…)` in notificationService builds a per-config cached nodemailer transport and returns a real SendResult; `verifyTenantSmtp` checks credentials without sending. Owner API: GET/PUT `/api/owner/email-config` + POST `/api/owner/email-config/verify`. Falls back to the platform account when unset, so nothing changes for tenants who never configure one. **The platform BCC is gone for guest mail** — every guest email used to be blind-copied to the shared platform mailbox (thirteen businesses' guest correspondence in one operator inbox, which no guest consented to); TEAM mail on the platform sender keeps it. (2) CHANNEL-SPECIFIC WORDING: `notification_templates` gains `whatsapp_template`, `wa_meta_template_name`, `wa_meta_template_lang` — one shared body cannot serve both a WhatsApp line and a structured email; the dispatcher now picks the WhatsApp copy when written and sends the mapped APPROVED Meta template (with the property name as the first variable, since the sender number is shared). (3) NEW NOTIFICATIONS SCREEN: the ~100-row role×channel×3-text-column switchboard is replaced by three tabs — What gets sent (collapsible groups; per event the audience collapses to Guests / My team with four channel chips), Message wording (per-event email subject+body and WhatsApp copy with live preview, sample variables and the Meta template mapping), Channels & delivery (own mail server form with Check-connection, WhatsApp shared-sender explainer, and a delivery log that now shows audience and the real failure reason). tsc + vite build clean.',
       'notif-engine-guest-reach-truthful-log',        //FIX (notification engine review, 10 Sep 2026 — stage A of the rebuild). TWO STRUCTURAL DEFECTS, both proven on live data. (1) NO GUEST HAS EVER BEEN REACHED, on any channel, for any event: `triggerNotification` read the guest address straight out of the event payload (`data.customerEmail`), and NOT ONE of the 60 `triggerNotification(...)` call sites passes it — with no email the CUSTOMER branch fell through to `_resolveRecipients(id,'CUSTOMER')`, which looks for staff whose job title is CUSTOMER and finds none. Evidence: 134 deliveries on RESTO-1003, 100% TELEGRAM to one staff chat, 0 WhatsApp/SMS/EMAIL ever. New `_resolveGuestContact(db, data)` resolves the guest from the RECORD the event is about (room_bookings / event_bookings / orders) with the payload still winning when supplied, so 60 call sites stay untouched and a phone-only guest (the norm in India) is now reachable. (2) THE DELIVERY LOG LIED: `sendWhatsApp`/`sendSMS` caught their own errors and returned void, so `logAndSend` saw no throw and wrote SENT — 134 of 134 with no failure path in existence. Added `sendWhatsAppDetailed`/`sendSMSDetailed` returning `SendResult {ok,id,error,code}` (mirroring the existing sendTelegramDetailed convention; the plain senders remain untouched wrappers for their other callers), and `logAndSend` now records the PROVIDER's answer plus `provider_message_id`, `error_code` and `audience`. The owner-facing per-channel TEST button had the same lie and now reports the real result. Also: WhatsApp is ONE shared Atithi-Setu number by design, so guest-bound SMS/WhatsApp is prefixed with the property name when the copy does not already carry it. `sendWhatsAppDetailed` accepts an approved-template payload (Meta rejects business-initiated free-form text outside the 24h window with 131047) — wiring per-event templates is stage D. Smoke: TC-NOTIF-GUEST-REACHED, TC-NOTIF-TRUTHFUL-LOG. tsc + vite build clean.',
       'event-customer-gst-details',                   //FEATURE (client gap, 9 Sep 2026): an event customer claiming INPUT TAX CREDIT needs its name, ADDRESS and GSTIN on the tax invoice (Rule 46). `customer_gstin` existed on event_bookings and showed on the on-screen folio, but (a) there was NO customer address column at all and (b) neither ever reached the PRINTED invoice — `buildInvoiceData` passed only name/phone/email. Added: `event_bookings.customer_address` (migration in ensureEventTables, never in a handler); both fields carried into the invoice PDF and rendered in the "Prepared For" block — address lines, then `GSTIN: …` — ONLY when present, so a walk-in consumer invoice is byte-for-byte as before. NEW dedicated route `PUT /events/bookings/:bid/gst-details` (EVENTS_BOOKINGS UPDATE): validates the 15-char GSTIN, requires an address alongside it, `\'\'` clears, absent key leaves as-is, audited as GST_DETAILS_UPDATED, 409 on a CANCELLED booking. It is deliberately SEPARATE from `PUT /events/bookings/:bid` (which still 409s a COMPLETED booking — that lock protects the AMOUNTS): these fields carry no money, so a company can ask for a GST invoice AFTER the function and staff just fill them in and reprint. New `<GstDetailsPanel>` beside the invoice actions shows whether details will print. Smoke: TC-EVT-GST-VALIDATION, TC-EVT-GST-ON-INVOICE, TC-EVT-GST-AFTER-COMPLETE. tsc + vite build clean.',

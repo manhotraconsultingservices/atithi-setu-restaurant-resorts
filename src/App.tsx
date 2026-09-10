@@ -70147,8 +70147,7 @@ function NotificationTemplatesPanel({ token, restaurantId, events, canEdit }: { 
         method: 'PUT', headers: authHdr,
         body: JSON.stringify({
           subject_template: draft.subject_template || '', body_template: draft.body_template || '',
-          whatsapp_template: draft.whatsapp_template || '', wa_meta_template_name: draft.wa_meta_template_name || '',
-          wa_meta_template_lang: draft.wa_meta_template_lang || 'en', enabled: draft.enabled !== 0,
+          whatsapp_template: draft.whatsapp_template || '', enabled: draft.enabled !== 0,
         }),
       });
       if (r.ok) { toast.success('Wording saved'); await load(); } else toast.error('Could not save the wording');
@@ -70204,20 +70203,11 @@ function NotificationTemplatesPanel({ token, restaurantId, events, canEdit }: { 
           {draft.whatsapp_template && (
             <div className="mt-2 text-[13px] bg-[#DCF8C6] text-[#1a1208] rounded-2xl rounded-tl-sm p-3 max-w-md whitespace-pre-wrap">{preview(draft.whatsapp_template)}</div>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-            <div>
-              <label className={L}>Approved template name</label>
-              <input className={F} disabled={!canEdit} value={draft.wa_meta_template_name || ''} onChange={e => setDraft({ ...draft, wa_meta_template_name: e.target.value })} placeholder="booking_confirmation" />
-            </div>
-            <div>
-              <label className={L}>Template language</label>
-              <input className={F} disabled={!canEdit} value={draft.wa_meta_template_lang || 'en'} onChange={e => setDraft({ ...draft, wa_meta_template_lang: e.target.value })} placeholder="en" />
-            </div>
-          </div>
           <p className="text-[11px] text-[#6b5d52] mt-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
-            WhatsApp only lets a business start a conversation with wording Meta approved in advance. Create the template in Meta
-            Business Manager, then put its exact name here. Your property name is always sent as the first detail, so guests know
-            who is writing.
+            <b>When this wording is used:</b> only when the guest has written to you in the last 24 hours. To start a conversation,
+            WhatsApp requires wording approved by Meta in advance, and approved wording cannot be edited afterwards — so those
+            templates are <b>managed centrally</b> for the shared Atithi-Setu number and applied to this event automatically.
+            Your property name is always the first detail sent, so guests know who is writing.
           </p>
         </div>
 

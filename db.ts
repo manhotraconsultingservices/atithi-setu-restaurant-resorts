@@ -1869,6 +1869,8 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE notification_templates ADD COLUMN IF NOT EXISTS whatsapp_template TEXT").catch(() => {});
   await db.exec("ALTER TABLE notification_templates ADD COLUMN IF NOT EXISTS wa_meta_template_name TEXT").catch(() => {});
   await db.exec("ALTER TABLE notification_templates ADD COLUMN IF NOT EXISTS wa_meta_template_lang TEXT DEFAULT 'en'").catch(() => {});
+  // Which data field fills {{1}}, {{2}}, … in the approved template, in order.
+  await db.exec("ALTER TABLE notification_templates ADD COLUMN IF NOT EXISTS wa_template_vars TEXT").catch(() => {});
   await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_display_order ON ingredients (display_order)`).catch(() => {});
