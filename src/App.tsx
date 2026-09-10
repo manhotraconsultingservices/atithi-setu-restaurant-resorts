@@ -20784,7 +20784,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
         </div>
       ) : activeTab === 'NOTIFICATIONS' ? (
-        <NotificationSettings restaurantId={restaurantId} token={token} isHotelEnabled={isHotelEnabled} isRestaurantEnabled={isRestaurantEnabled} isSpaEnabled={isSpaEnabled} isEventsEnabled={isEventsEnabled} />
+        <NotificationSettings restaurantId={restaurantId} token={token} restaurantName={restaurant?.name || ''} isHotelEnabled={isHotelEnabled} isRestaurantEnabled={isRestaurantEnabled} isSpaEnabled={isSpaEnabled} isEventsEnabled={isEventsEnabled} />
       ) : activeTab === 'FEEDBACK' ? (
         <div className="space-y-8">
           <div className="flex justify-between items-center">
@@ -69715,7 +69715,7 @@ function SmartAlertsPanel({ token }: { token: string }) {
   );
 }
 
-function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestaurantEnabled, isSpaEnabled, isEventsEnabled }: { restaurantId: string, token: string, isHotelEnabled?: boolean, isRestaurantEnabled?: boolean, isSpaEnabled?: boolean, isEventsEnabled?: boolean }) {
+function NotificationSettings({ restaurantId, token, restaurantName, isHotelEnabled, isRestaurantEnabled, isSpaEnabled, isEventsEnabled }: { restaurantId: string, token: string, restaurantName?: string, isHotelEnabled?: boolean, isRestaurantEnabled?: boolean, isSpaEnabled?: boolean, isEventsEnabled?: boolean }) {
   const toast = useToast();
   const canEdit = canWriteTab('NOTIFICATIONS');
   const [settings, setSettings] = useState<any[]>([]);
@@ -70036,7 +70036,7 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
         </div>
       )}
 
-      {notifTab === 'CONSOLE' && <MessagingConsolePanel token={token} canEdit={canEdit} />}
+      {notifTab === 'CONSOLE' && <MessagingConsolePanel token={token} canEdit={canEdit} propertyName={restaurantName || ''} />}
     </div>
   );
 }
@@ -70046,7 +70046,7 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
 // server's, not this screen's: outside the 24-hour reply window WhatsApp will
 // only carry wording Meta has approved, anyone who replied STOP is skipped, and
 // every attempt lands in the activity log with the provider's own answer.
-function MessagingConsolePanel({ token, canEdit }: { token: string; canEdit: boolean }) {
+function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string; canEdit: boolean; propertyName: string }) {
   const toast = useToast();
   const [tab, setTab] = useState<'SEND' | 'ACTIVITY'>('SEND');
   const [channel, setChannel] = useState<'WHATSAPP' | 'EMAIL' | 'SMS'>('WHATSAPP');
@@ -70070,6 +70070,12 @@ function MessagingConsolePanel({ token, canEdit }: { token: string; canEdit: boo
   const auth = { Authorization: `Bearer ${token}` };
   const tpl = templates.find(t => t.name === tplName) || null;
   const recipients = to.split(/[,;\n]/).map(t => t.trim()).filter(Boolean);
+  // Exactly what the guest receives: {{1}} is the property name, filled by the
+  // server, and the rest are the values typed above.
+  const preview = tpl
+    ? String(tpl.body).replace(/\{\{\s*(\d+)\s*\}\}/g, (_m: string, n: string) =>
+        Number(n) === 1 ? (propertyName || 'Your property') : (vars[Number(n) - 2] || `{{${n}}}`))
+    : '';
 
   useEffect(() => {
     fetch('/api/owner/whatsapp/templates', { headers: auth })
@@ -70185,7 +70191,7 @@ function MessagingConsolePanel({ token, canEdit }: { token: string; canEdit: boo
               <div className="rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/10 p-4 space-y-3">
                 <div className="flex items-start gap-2 text-xs text-[#6b5d52]">
                   <Info size={14} className="mt-0.5 shrink-0" />
-                  <span>WhatsApp only allows your own wording within <b>24 hours of the guest writing to you</b>. Outside that, pick an approved template — the server decides per recipient.</span>
+                  <span>Every WhatsApp message uses wording Meta has approved. Pick a template and fill in its details — you cannot type your own text here.</span>
                 </div>
                 {tplConfigured === false ? (
                   <p className="text-sm text-[#6b5d52]">{tplReason || 'WhatsApp is not connected yet.'}</p>
@@ -70194,18 +70200,23 @@ function MessagingConsolePanel({ token, canEdit }: { token: string; canEdit: boo
                     <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Approved template</label>
                     <select value={tplName} onChange={e => pickTemplate(e.target.value)}
                       className="w-full mt-2 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/15 bg-white text-sm outline-none focus:border-[#cc5a16]">
-                      <option value="">None — free-form, in-window only</option>
+                      <option value="">Choose a template…</option>
                       {templates.map(t => <option key={t.name} value={t.name}>{t.name} · {t.category} · {t.language}</option>)}
                     </select>
+                    {templates.length === 0 && (
+                      <p className="text-xs text-[#6b5d52] mt-2">No approved templates yet. Until Meta approves one, WhatsApp cannot be sent from here.</p>
+                    )}
                     {tpl && (
                       <div className="mt-3 space-y-2">
-                        <p className="text-sm bg-white rounded-xl border border-[#cc5a16]/10 p-3 whitespace-pre-wrap text-[#1a1208]">{tpl.body}</p>
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Fill in the details</p>
                         <p className="text-[11px] text-[#9d8b7e]">Your property name fills <code>{'{{1}}'}</code> automatically.</p>
                         {vars.map((v, i) => (
                           <input key={i} value={v} onChange={e => setVars(vs => vs.map((x, j) => j === i ? e.target.value : x))}
                             placeholder={`Value for {{${i + 2}}}`}
                             className="w-full px-4 py-2 rounded-xl border border-[#cc5a16]/15 text-sm outline-none focus:border-[#cc5a16]" />
                         ))}
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] pt-1">What the guest will see</p>
+                        <p className="text-sm bg-white rounded-xl border border-[#cc5a16]/10 p-3 whitespace-pre-wrap text-[#1a1208]">{preview}</p>
                       </div>
                     )}
                   </div>
@@ -70221,16 +70232,15 @@ function MessagingConsolePanel({ token, canEdit }: { token: string; canEdit: boo
               </div>
             )}
 
-            <div>
-              <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">
-                Message
-                {channel === 'WHATSAPP' && <span className="ml-2 font-normal normal-case tracking-normal text-[#9d8b7e]">used only inside the 24-hour window</span>}
-              </label>
-              <textarea value={text} onChange={e => setText(e.target.value)} rows={5}
-                className="w-full mt-2 px-4 py-3 rounded-2xl border border-[#cc5a16]/15 outline-none focus:border-[#cc5a16] text-sm" />
-            </div>
+            {channel !== 'WHATSAPP' && (
+              <div>
+                <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Message</label>
+                <textarea value={text} onChange={e => setText(e.target.value)} rows={5}
+                  className="w-full mt-2 px-4 py-3 rounded-2xl border border-[#cc5a16]/15 outline-none focus:border-[#cc5a16] text-sm" />
+              </div>
+            )}
 
-            <button onClick={send} disabled={!canEdit || sending || !recipients.length}
+            <button onClick={send} disabled={!canEdit || sending || !recipients.length || (channel === 'WHATSAPP' && !tplName)}
               className="bg-[#cc5a16] text-white px-7 py-3 rounded-2xl font-bold hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center gap-2">
               {sending ? <RefreshCw size={17} className="animate-spin" /> : <Send size={17} />}
               {sending ? 'Sending…' : `Send to ${recipients.length || 0}`}

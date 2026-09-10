@@ -10094,7 +10094,11 @@ async function startServer() {
 
       if (channel === 'EMAIL' && !subject) return res.status(400).json({ error: 'An email needs a subject.' });
       if (channel !== 'WHATSAPP' && !text) return res.status(400).json({ error: 'Write the message first.' });
-      if (channel === 'WHATSAPP' && !text && !templateName) return res.status(400).json({ error: 'Pick an approved template, or write a message for recipients inside the 24-hour window.' });
+      // WhatsApp always goes out on an approved template — there is no compose
+      // path for it. Meta would allow free-form inside the 24-hour window, but
+      // that window is invisible to whoever is composing, so the same button
+      // would behave differently from one recipient to the next.
+      if (channel === 'WHATSAPP' && !templateName) return res.status(400).json({ error: 'Pick an approved template. WhatsApp messages must use wording Meta has approved.' });
 
       const rRow: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [rid]).catch(() => null);
       const propertyName = String(rRow?.name || 'Atithi-Setu');
@@ -10126,28 +10130,15 @@ async function startServer() {
           ok = await logAndSend(db, 'ON_DEMAND', 'SMS', to, body, () => sendSMSDetailed(to, body), 'GUEST');
           results.push({ to, status: ok ? 'SENT' : 'FAILED', error: ok ? null : 'The provider rejected it.' });
         } else {
-          // Inside the window the guest's own reply lets us send ordinary text,
-          // and Meta does not bill it. Outside it, only approved wording goes.
-          const windowOpen = await _waWindowOpen(to);
-          if (!windowOpen && !templateName) {
-            await db.run(
-              "INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'SKIPPED', ?, 'GUEST', ?)",
-              [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, 'ON_DEMAND', 'WHATSAPP', to,
-               'Outside the 24-hour window, so this needed an approved template.', String(body).slice(0, 140)]
-            ).catch(() => {});
-            results.push({ to, status: 'SKIPPED', error: 'Outside the 24-hour window — pick an approved template.' });
-            continue;
-          }
           // {{1}} is always the property name — the sender is shared, so the guest
           // must be told who is writing. The owner supplies {{2}} onward.
-          const useTemplate = windowOpen && text ? null
-            : { name: templateName, languageCode: templateLang, variables: [propertyName, ...variables] };
-          _logAndSendCategory = useTemplate ? category : 'SERVICE';
-          _logAndSendTemplate = useTemplate ? templateName : null;
-          ok = await logAndSend(db, 'ON_DEMAND', 'WHATSAPP', to, useTemplate ? `${templateName}(${variables.join(' | ')})` : body,
-            () => sendWhatsAppDetailed(to, body || templateName, useTemplate), 'GUEST');
+          const useTemplate = { name: templateName, languageCode: templateLang, variables: [propertyName, ...variables] };
+          _logAndSendCategory = category;
+          _logAndSendTemplate = templateName;
+          ok = await logAndSend(db, 'ON_DEMAND', 'WHATSAPP', to, `${templateName}(${variables.join(' | ')})`,
+            () => sendWhatsAppDetailed(to, templateName, useTemplate), 'GUEST');
           _logAndSendCategory = null; _logAndSendTemplate = null;
-          results.push({ to, status: ok ? 'SENT' : 'FAILED', mode: useTemplate ? 'TEMPLATE' : 'FREE_FORM', error: ok ? null : 'The provider rejected it — see the activity log for the reason.' });
+          results.push({ to, status: ok ? 'SENT' : 'FAILED', mode: 'TEMPLATE', error: ok ? null : 'The provider rejected it — see the activity log for the reason.' });
         }
       }
 
@@ -54747,8 +54738,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'messaging-console-bsp-var1',
+    commit_marker: 'wa-approved-templates-only',
     code_features: [
+      'wa-approved-templates-only',                   //CHANGE (owner decision, 10 Sep 2026). **NO COMPOSE BOX FOR WHATSAPP — every WhatsApp message the property starts uses wording Meta has approved.** The messaging console shipped earlier the same day allowed free-form text when the guest had written first, which Meta does permit inside the 24-hour service window. Removed deliberately: whether that window happens to be open is invisible to the person composing, so one button would sometimes send their own words and sometimes an approved template, and only the delivery log would say which. Now `POST /api/owner/messaging/send` REQUIRES `template_name` for WhatsApp (400 otherwise), always sends `type: 'template'`, and always bills at the template's category — the free-form branch and its SKIPPED outside-the-window path are both gone. The compose textarea is hidden for WhatsApp in the UI and replaced by a mandatory approved-template picker, its variable inputs, and a live preview of exactly what the guest will receive (with the property name already filling {{1}}); the Send button stays disabled until a template is chosen, and an empty template list says so plainly. Email and SMS are untouched — neither is Meta and neither has a template regime. Automatic notifications still use the tenant's own wording inside the window; that surface was not part of this decision. New test TC-MSG-WA-TEMPLATE-ONLY. tsc + vite build clean.',
       'messaging-console-bsp',                        //FEATURE (10 Sep 2026). A BSP-style MESSAGING CONSOLE for the property owner, in the shape they already know from Gupshup and the like: send a message on demand, and see how many went out and to whom. Previously the only way to send by hand was `/api/owner/notifications/test`, which sends one fixed sentence to one recipient. NEW `POST /api/owner/messaging/send` — channel WHATSAPP | EMAIL | SMS, up to 50 deduplicated recipients, either an approved template (with its variables) or free-form text, returning a PER-RECIPIENT outcome so the owner sees exactly who it reached. It reuses the dispatcher's rules rather than reimplementing them: opt-outs are checked per recipient and logged as SKIPPED with the reason, the 24-hour service window is evaluated PER RECIPIENT (free-form inside it and billed as SERVICE, the approved template outside it), every attempt goes through `logAndSend` so the activity log and the central `messaging_usage` cost attribution stay truthful, and the property name is prefixed to guest-bound text because the sender number is shared. Recipients are shape-checked against the channel so an email address cannot be sent as a WhatsApp number. NEW `GET /api/owner/messaging/summary?days=` — totals (sent / failed / skipped / distinct people), per-channel and per-day counts, the most-messaged contacts, top events, and estimated spend for THIS tenant from `messaging_usage` against the platform rate card (the admin cost report existed; the owner had no view of their own). `/api/owner/notification-deliveries` gains additive `recipient`, `event` and `since` filters plus SKIPPED/DELIVERED/READ statuses, so the console can drill into one contact's whole history. NEW 4th tab on Notifications, 'Send a message', with a Compose panel (channel picker, recipient box, approved-template picker showing the body and asking only for {{2}} onward since the property name fills {{1}}) and an Activity panel (headline counts, estimated cost, a who-we-messaged table that drills into the full log). New tests TC-MSG-CONSOLE-GUARDS and TC-MSG-CONSOLE-SUMMARY, both side-effect-free. FIXED before release: the console passed the owner's template variables straight to `sendWhatsAppDetailed`, which maps variables[0] onto {{1}} — and {{1}} is ALWAYS the property name because the sender is shared, so every value would have shifted by one and Meta would have rejected the send on a parameter-count mismatch. The property name is now forced into first position exactly as the dispatcher does. tsc + vite build clean.',
       'invoice-on-demand-whatsapp',                   //FEATURE (10 Sep 2026). THE INVOICE IS AN ON-DEMAND ACTION, and it can now go out on WhatsApp. Hotel and Events already had a staff-triggered send (POST /hotel/folios/:folioId/email-invoice and POST /events/bookings/:bid/invoice/send) that emailed the PDF; neither could reach a guest on WhatsApp, which in India is the channel most guests actually read. Both now take `channel` = EMAIL (default, so the existing Email buttons are byte-for-byte unchanged) | WHATSAPP | BOTH, require only what the chosen channel needs, and report back `sent: ['EMAIL','WHATSAPP']` plus a per-channel reason for anything that did not go. The WhatsApp leg goes through `triggerNotification` rather than calling the sender directly, so opt-outs, the 24-hour service window, the approved-template lookup and the delivery log all apply without being reimplemented at the call site. To make that possible the dispatcher gained two ADDITIVE capabilities: an optional `opts.onlyChannels` filter (omitted by all 60 existing callers = every channel the owner enabled, exactly as before) and a returned `{ sent, failed, skipped, channels }` tally, so an interactive caller can tell the user what happened — `logAndSend` now returns whether the provider took the message. New events HOTEL_INVOICE_SENT and EVENT_INVOICE_SENT with their own written copy and owner switches in the Notifications catalogue; without a catalogue entry there is no notification_settings row and the send would report not-switched-on for ever. NOTE: WhatsApp carries the invoice NUMBER and amount, not the file — `sendWhatsAppDetailed` builds only text and template bodies, and the invoice PDF routes are staff-authenticated so there is no link a guest could open; attaching it needs a DOCUMENT-header template and a tokenised public URL. Spa and Restaurant still have no on-demand invoice send at all. New test TC-INVOICE-ONDEMAND-CHANNEL. tsc + vite build clean.',
       'no-more-502-cloudflare',                       //BUGFIX (10 Sep 2026). Five request handlers answered with **502**, which prod can never do: Cloudflare sits in front of erp.atithi-setu.com and REPLACES a 502 with its own HTML error page (verified live — content-type: text/html, server: cloudflare, our JSON body gone). Every carefully worded message behind them was therefore invisible: the owner saw a generic gateway error and had no idea what to fix. None of the five was a bad gateway anyway — each is an upstream or configuration rejection we chose to surface, which is a 400. Fixed: event INVOICE send and event QUOTATION send (SMTP not configured → now 400 with code EMAIL_NOT_CONFIGURED, so the owner is actually told to set up email and that the PDF is still downloadable), the channel-adapter smoke test (adapter refused the test cycle → 400 ADAPTER_REJECTED, detail preserved), and the two Aiosell calls, property lookup and reservation pull (channel manager refused → 400 AIOSELL_REJECTED carrying r.message). Same class as the two 502s already fixed in the notification work; `status(502)` is now absent from the codebase. No front-end code branched on the 502 status, so nothing else moves. tsc + vite build clean.',
