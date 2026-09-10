@@ -6466,7 +6466,14 @@ async function ensureNotifDeliveries(db: any, rid: string) {
     await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS provider_message_id TEXT`).catch(() => {});
     await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS error_code TEXT`).catch(() => {});
     await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS audience TEXT`).catch(() => {});
+    // Which approved template carried it, who the contact is, and which way it
+    // went — the message log cannot show any of these without them, and inbound
+    // messages had nowhere to live at all.
+    await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS template_name TEXT`).catch(() => {});
+    await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS contact_name TEXT`).catch(() => {});
+    await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS direction TEXT DEFAULT 'OUT'`).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_notif_deliv_created ON notification_deliveries(created_at DESC)`);
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_notif_deliv_recipient ON notification_deliveries(recipient, created_at DESC)`).catch(() => {});
   } catch { /* ignore */ }
   _notifDelivReady.add(rid);
 }
@@ -6634,11 +6641,16 @@ async function sendTenantEmail(restaurantId: string, to: string, subject: string
 let _logAndSendTenant: string | null = null;
 let _logAndSendCategory: string | null = null;
 let _logAndSendTemplate: string | null = null;
+// The guest's name, resolved from the record the notification is about. Carried
+// the same way as the category so logAndSend can label a log row with a person
+// rather than a bare phone number, without changing 60 call sites.
+let _logAndSendName: string | null = null;
 async function logAndSend(db: any, eventName: string, channel: string, recipient: string, preview: string, fn: () => Promise<any>, audience?: string) {
   const id = `ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const write = (status: string, error: string | null, code: string | null, providerId: string | null) =>
-    db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, error_code, provider_message_id, audience, preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, eventName, channel, recipient || '', status, error, code, providerId, audience || null, String(preview || '').slice(0, 140)]).catch(() => {});
+    db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, error_code, provider_message_id, audience, preview, template_name, contact_name, direction) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OUT')",
+      [id, eventName, channel, recipient || '', status, error, code, providerId, audience || null, String(preview || '').slice(0, 140),
+       _logAndSendTemplate || null, _logAndSendName || null]).catch(() => {});
   let res: any;
   try {
     res = await fn();
@@ -6667,6 +6679,14 @@ async function logAndSend(db: any, eventName: string, channel: string, recipient
       await centralDb.run(
         "INSERT INTO messaging_usage (provider_message_id, restaurant_id, channel, category, template_name, event_name, audience, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'SENT') ON CONFLICT (provider_message_id) DO NOTHING",
         [providerId || `${channel}-${id}`, _logAndSendTenant, channel, _logAndSendCategory || null, _logAndSendTemplate || null, eventName, audience || null]).catch(() => {});
+      // A WhatsApp reply arrives with a phone number and no tenant. Remember who
+      // last wrote to this contact so the reply can be filed in the right log.
+      if (channel === 'WHATSAPP' && recipient) {
+        await centralDb.run(
+          `INSERT INTO wa_message_index (provider_message_id, restaurant_id, recipient, event_name) VALUES (?, ?, ?, ?)
+           ON CONFLICT (provider_message_id) DO NOTHING`,
+          [providerId || `${channel}-${id}`, _logAndSendTenant, _contactKey(recipient), eventName]).catch(() => {});
+      }
     } catch { /* usage accounting must never block a send */ }
   }
   if (!ok) console.error(`[notif] ${channel} → ${recipient} for ${eventName} rejected:`, error);
@@ -6890,6 +6910,7 @@ async function triggerNotification(restaurantId: string, eventName: string, data
         // in India) is now reachable; previously the whole branch was skipped
         // unless an email happened to be present, which it never was.
         const guest = await _resolveGuestContact(db, data);
+        _logAndSendName = guest.name || null;
         if (guest.email) recipients.push(guest.email);
         if (guest.phone) recipients.push(guest.phone);
         if (!recipients.length) {
@@ -7041,6 +7062,7 @@ async function triggerNotification(restaurantId: string, eventName: string, data
         }
       }
       // Telegram: channel-level (not per-recipient), uses stored chat_id override or env default
+      _logAndSendName = null;
       if (setting.telegram_enabled && wants('TELEGRAM')) {
         record(await logAndSend(db, eventName, 'TELEGRAM', setting.telegram_chat_id || 'default', content.text, () => sendTelegram(setting.telegram_chat_id || null, content.text)), 'TELEGRAM');
       }
@@ -10155,6 +10177,102 @@ async function startServer() {
     }
   });
 
+  // ── Inbox: the same delivery rows, grouped into conversations ────────────
+  // The window state is what an operator needs before typing: Meta blocks
+  // free-form replies once 24 hours have passed since the contact last wrote,
+  // and the only way through after that is an approved template.
+  app.get("/api/owner/messaging/threads", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const rid = req.user!.restaurantId;
+      const db = await getTenantDb(rid);
+      await ensureNotifDeliveries(db, rid);
+      await ensureWaTables();
+      const limit = Math.min(Number(req.query.limit) || 60, 200);
+      const search = String(req.query.q || '').trim().toLowerCase();
+
+      const clauses = ["channel = 'WHATSAPP'", "COALESCE(recipient, '') <> ''"];
+      const params: any[] = [];
+      if (search) { clauses.push("(LOWER(recipient) LIKE ? OR LOWER(COALESCE(contact_name, '')) LIKE ?)"); params.push(`%${search}%`, `%${search}%`); }
+
+      const rows: any[] = await db.query(
+        `SELECT recipient,
+                MAX(COALESCE(contact_name, '')) AS contact_name,
+                COUNT(*)::int AS messages,
+                COUNT(*) FILTER (WHERE COALESCE(direction, 'OUT') = 'IN')::int AS received,
+                MAX(created_at) AS last_at
+           FROM notification_deliveries
+          WHERE ${clauses.join(' AND ')}
+          GROUP BY recipient
+          ORDER BY last_at DESC
+          LIMIT ${limit}`, params
+      ).catch(() => []);
+
+      // The last line of each conversation, for the preview in the list.
+      const threads: any[] = [];
+      for (const r of (rows || [])) {
+        const last: any = await db.get(
+          `SELECT preview, status, direction, created_at FROM notification_deliveries
+            WHERE channel = 'WHATSAPP' AND recipient = ? ORDER BY created_at DESC LIMIT 1`, [r.recipient]
+        ).catch(() => null);
+        threads.push({ ...r, last_preview: last?.preview || '', last_status: last?.status || '', last_direction: last?.direction || 'OUT' });
+      }
+
+      // One central lookup for every contact rather than one per row.
+      const keys = threads.map(t => _contactKey(t.recipient)).filter(Boolean);
+      const windows: Record<string, string> = {};
+      if (keys.length) {
+        const marks = keys.map(() => '?').join(',');
+        const wr: any[] = await centralDb.query(
+          `SELECT phone, last_inbound_at FROM wa_service_window WHERE phone IN (${marks})`, keys).catch(() => []);
+        for (const w of (wr || [])) windows[String(w.phone)] = w.last_inbound_at;
+      }
+      const now = Date.now();
+      for (const t of threads) {
+        const li = windows[_contactKey(t.recipient)];
+        const openUntil = li ? new Date(li).getTime() + 24 * 3600e3 : 0;
+        t.window_open = openUntil > now;
+        t.window_closes_at = openUntil ? new Date(openUntil).toISOString() : null;
+      }
+
+      res.json({ threads });
+    } catch (err: any) {
+      console.error('[messaging/threads] failed:', err);
+      res.status(500).json({ error: 'Could not load conversations.' });
+    }
+  });
+
+  // One conversation, oldest first, the way it is read.
+  app.get("/api/owner/messaging/thread", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const rid = req.user!.restaurantId;
+      const contact = String(req.query.contact || '').trim();
+      if (!contact) return res.status(400).json({ error: 'Which contact?' });
+      const db = await getTenantDb(rid);
+      await ensureNotifDeliveries(db, rid);
+      await ensureWaTables();
+      const messages = await db.query(
+        `SELECT id, preview, status, error, direction, template_name, event_name, created_at
+           FROM notification_deliveries
+          WHERE channel = 'WHATSAPP' AND recipient = ?
+          ORDER BY created_at ASC LIMIT 300`, [contact]
+      ).catch(() => []);
+      const w: any = await centralDb.get("SELECT last_inbound_at FROM wa_service_window WHERE phone = ?", [_contactKey(contact)]).catch(() => null);
+      const openUntil = w?.last_inbound_at ? new Date(w.last_inbound_at).getTime() + 24 * 3600e3 : 0;
+      const name: any = await db.get(
+        `SELECT contact_name FROM notification_deliveries WHERE recipient = ? AND COALESCE(contact_name, '') <> '' ORDER BY created_at DESC LIMIT 1`, [contact]
+      ).catch(() => null);
+      res.json({
+        contact, contact_name: name?.contact_name || '',
+        window_open: openUntil > Date.now(),
+        window_closes_at: openUntil ? new Date(openUntil).toISOString() : null,
+        messages: messages || [],
+      });
+    } catch (err: any) {
+      console.error('[messaging/thread] failed:', err);
+      res.status(500).json({ error: 'Could not load this conversation.' });
+    }
+  });
+
   // How many messages went out, and to whom. The counts come from this tenant's
   // own delivery log; the cost line comes from the central usage table, which
   // records the Meta billing category of every send.
@@ -10167,14 +10285,34 @@ async function startServer() {
       const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
       const since = `CURRENT_TIMESTAMP - INTERVAL '${days} days'`;
 
+      // The six a messaging console is actually read through. SENT counts every
+      // message the provider accepted, including those since delivered or read,
+      // so the tiles add up the way an operator expects.
       const totals: any = await db.get(
         `SELECT COUNT(*)::int AS total,
                 COUNT(*) FILTER (WHERE status IN ('SENT','DELIVERED','READ'))::int AS sent,
+                COUNT(*) FILTER (WHERE status IN ('DELIVERED','READ'))::int AS delivered,
+                COUNT(*) FILTER (WHERE status = 'READ')::int    AS read,
                 COUNT(*) FILTER (WHERE status = 'FAILED')::int  AS failed,
                 COUNT(*) FILTER (WHERE status = 'SKIPPED')::int AS skipped,
+                COUNT(*) FILTER (WHERE COALESCE(direction, 'OUT') = 'IN')::int AS received,
+                COUNT(*) FILTER (WHERE created_at >= date_trunc('day', CURRENT_TIMESTAMP))::int AS today,
                 COUNT(DISTINCT recipient)::int AS people
            FROM notification_deliveries WHERE created_at > ${since}`
-      ).catch(() => ({ total: 0, sent: 0, failed: 0, skipped: 0, people: 0 }));
+      ).catch(() => ({ total: 0, sent: 0, delivered: 0, read: 0, failed: 0, skipped: 0, received: 0, today: 0, people: 0 }));
+
+      // Per-template totals drive the template filter and show which approved
+      // wording is actually carrying the traffic.
+      const byTemplate = await db.query(
+        `SELECT template_name,
+                COUNT(*)::int AS messages,
+                COUNT(*) FILTER (WHERE status IN ('DELIVERED','READ'))::int AS delivered,
+                COUNT(*) FILTER (WHERE status = 'READ')::int AS read,
+                COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed
+           FROM notification_deliveries
+          WHERE created_at > ${since} AND COALESCE(template_name, '') <> ''
+          GROUP BY template_name ORDER BY messages DESC`
+      ).catch(() => []);
 
       const byChannel = await db.query(
         `SELECT channel,
@@ -10194,7 +10332,10 @@ async function startServer() {
 
       // Who we message most — the "to whom" half of the question.
       const people = await db.query(
-        `SELECT recipient, channel, COUNT(*)::int AS messages,
+        `SELECT recipient, channel,
+                MAX(COALESCE(contact_name, '')) AS contact_name,
+                COUNT(*)::int AS messages,
+                COUNT(*) FILTER (WHERE COALESCE(direction, 'OUT') = 'IN')::int AS received,
                 MAX(created_at) AS last_at,
                 COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed
            FROM notification_deliveries
@@ -10229,7 +10370,7 @@ async function startServer() {
 
       res.json({
         days, totals, by_channel: byChannel || [], daily: daily || [],
-        people: people || [], top_events: topEvents || [],
+        people: people || [], top_events: topEvents || [], by_template: byTemplate || [],
         cost: { currency: 'INR', lines: costLines, estimated_total: Math.round(estimatedCost * 100) / 100 },
       });
     } catch (err: any) {
@@ -10398,6 +10539,10 @@ async function startServer() {
       if (req.query.recipient) { clauses.push('LOWER(recipient) LIKE ?'); params.push('%' + String(req.query.recipient).trim().toLowerCase() + '%'); }
       if (req.query.event) { clauses.push('event_name = ?'); params.push(String(req.query.event)); }
       if (req.query.since) { clauses.push('created_at >= ?'); params.push(String(req.query.since)); }
+      if (req.query.direction) { clauses.push('COALESCE(direction, ?) = ?'); params.push('OUT', String(req.query.direction).toUpperCase()); }
+      if (req.query.template) { clauses.push('template_name = ?'); params.push(String(req.query.template)); }
+      if (req.query.q) { clauses.push('(LOWER(preview) LIKE ? OR LOWER(recipient) LIKE ? OR LOWER(COALESCE(contact_name, \'\')) LIKE ?)');
+        const q = '%' + String(req.query.q).trim().toLowerCase() + '%'; params.push(q, q, q); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = await db.query(`SELECT * FROM notification_deliveries ${where} ORDER BY created_at DESC LIMIT ${limit}`, params);
       const counts: any = await db.get(
@@ -10542,6 +10687,25 @@ async function startServer() {
       `INSERT INTO wa_service_window (phone, last_inbound_at) VALUES (?, CURRENT_TIMESTAMP)
        ON CONFLICT (phone) DO UPDATE SET last_inbound_at = CURRENT_TIMESTAMP`,
       [_contactKey(from)]).catch(() => {});
+    // File the reply in the log of whichever property last wrote to this number.
+    // A receipt carries no tenant — the sender is shared — so this is the only
+    // link back. Without it there is no inbound history and no RECEIVED count.
+    try {
+      const owner: any = await centralDb.get(
+        "SELECT restaurant_id FROM wa_message_index WHERE recipient = ? ORDER BY created_at DESC LIMIT 1",
+        [_contactKey(from)]).catch(() => null);
+      if (owner?.restaurant_id) {
+        const tdb = await getTenantDb(owner.restaurant_id);
+        await ensureNotifDeliveries(tdb, owner.restaurant_id);
+        await tdb.run(
+          `INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, preview, audience, direction, provider_message_id)
+           VALUES (?, 'INBOUND', 'WHATSAPP', ?, 'RECEIVED', ?, 'GUEST', 'IN', ?)`,
+          [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, from,
+           String(msg?.text?.body || msg?.button?.text || '(non-text message)').slice(0, 140),
+           String(msg?.id || '') || null]).catch(() => {});
+      }
+    } catch { /* the window and opt-out below matter more than the transcript */ }
+
     const text = String(msg?.text?.body || msg?.button?.text || '').trim().toUpperCase();
     if (/^(STOP|UNSUBSCRIBE|OPTOUT|OPT OUT)\b/.test(text)) {
       await _recordOptOut(from, 'WHATSAPP', 'Guest replied ' + text.split(/\s+/)[0]);
@@ -54738,8 +54902,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-approved-templates-only',
+    commit_marker: 'wa-message-log-and-inbox',
     code_features: [
+      'wa-message-log-and-inbox',                    //FEATURE (10 Sep 2026), closing the gap against a dedicated BSP console. THREE THINGS THE LOG COULD NOT SHOW, because it never stored them: which approved TEMPLATE carried a message, WHO the contact is, and anything INBOUND at all — the webhook only stamped the 24-hour window and handled STOP, so replies vanished and there was no RECEIVED count or conversation to read. `notification_deliveries` now carries `template_name`, `contact_name` and `direction`; `logAndSend` fills the first two (the name via a new module-level `_logAndSendName`, set from `_resolveGuestContact` in the dispatcher's guest branch, so none of the 60 call sites changed); and an inbound WhatsApp message is filed as a `direction='IN'` row with status RECEIVED. Routing it needed a tenant, which a reply does not carry because the sender is shared — so `wa_message_index`, a table ensureWaTables has created since stage D but which was NEVER WRITTEN OR READ (routing actually went through messaging_usage), is now populated on every WhatsApp send and answers exactly that question. `/api/owner/messaging/summary` reports the six counters a console is read through — today, sent, delivered, read, failed, received — plus people and per-template totals; `/api/owner/notification-deliveries` gains `direction`, `template` and free-text `q` filters. NEW `/api/owner/messaging/threads` (every WhatsApp contact, last line, and whether the 24-hour window is open — resolved in ONE central query rather than one per row) and `/api/owner/messaging/thread?contact=` (one conversation, oldest first). UI: the console is now Compose / Message log / Inbox. The log gained the six counters, status chips including Received, a template filter, and rows showing the contact's name, a template chip and the direction. The Inbox reads the same rows as conversations with a window badge per contact and, when it has closed, the plain statement that WhatsApp blocks free-form replies and only an approved template will reach them. Compose gained a template-registry line (total vs approved). New tests TC-MSG-INBOX and TC-MSG-LOG-COUNTERS. STILL OPEN vs the reference console: audience segments for bulk sends and a grouped broadcast history. tsc + vite build clean.',
       'wa-approved-templates-only',                   //CHANGE (owner decision, 10 Sep 2026). **NO COMPOSE BOX FOR WHATSAPP — every WhatsApp message the property starts uses wording Meta has approved.** The messaging console shipped earlier the same day allowed free-form text when the guest had written first, which Meta does permit inside the 24-hour service window. Removed deliberately: whether that window happens to be open is invisible to the person composing, so one button would sometimes send their own words and sometimes an approved template, and only the delivery log would say which. Now `POST /api/owner/messaging/send` REQUIRES `template_name` for WhatsApp (400 otherwise), always sends `type: 'template'`, and always bills at the template's category — the free-form branch and its SKIPPED outside-the-window path are both gone. The compose textarea is hidden for WhatsApp in the UI and replaced by a mandatory approved-template picker, its variable inputs, and a live preview of exactly what the guest will receive (with the property name already filling {{1}}); the Send button stays disabled until a template is chosen, and an empty template list says so plainly. Email and SMS are untouched — neither is Meta and neither has a template regime. Automatic notifications still use the tenant's own wording inside the window; that surface was not part of this decision. New test TC-MSG-WA-TEMPLATE-ONLY. tsc + vite build clean.',
       'messaging-console-bsp',                        //FEATURE (10 Sep 2026). A BSP-style MESSAGING CONSOLE for the property owner, in the shape they already know from Gupshup and the like: send a message on demand, and see how many went out and to whom. Previously the only way to send by hand was `/api/owner/notifications/test`, which sends one fixed sentence to one recipient. NEW `POST /api/owner/messaging/send` — channel WHATSAPP | EMAIL | SMS, up to 50 deduplicated recipients, either an approved template (with its variables) or free-form text, returning a PER-RECIPIENT outcome so the owner sees exactly who it reached. It reuses the dispatcher's rules rather than reimplementing them: opt-outs are checked per recipient and logged as SKIPPED with the reason, the 24-hour service window is evaluated PER RECIPIENT (free-form inside it and billed as SERVICE, the approved template outside it), every attempt goes through `logAndSend` so the activity log and the central `messaging_usage` cost attribution stay truthful, and the property name is prefixed to guest-bound text because the sender number is shared. Recipients are shape-checked against the channel so an email address cannot be sent as a WhatsApp number. NEW `GET /api/owner/messaging/summary?days=` — totals (sent / failed / skipped / distinct people), per-channel and per-day counts, the most-messaged contacts, top events, and estimated spend for THIS tenant from `messaging_usage` against the platform rate card (the admin cost report existed; the owner had no view of their own). `/api/owner/notification-deliveries` gains additive `recipient`, `event` and `since` filters plus SKIPPED/DELIVERED/READ statuses, so the console can drill into one contact's whole history. NEW 4th tab on Notifications, 'Send a message', with a Compose panel (channel picker, recipient box, approved-template picker showing the body and asking only for {{2}} onward since the property name fills {{1}}) and an Activity panel (headline counts, estimated cost, a who-we-messaged table that drills into the full log). New tests TC-MSG-CONSOLE-GUARDS and TC-MSG-CONSOLE-SUMMARY, both side-effect-free. FIXED before release: the console passed the owner's template variables straight to `sendWhatsAppDetailed`, which maps variables[0] onto {{1}} — and {{1}} is ALWAYS the property name because the sender is shared, so every value would have shifted by one and Meta would have rejected the send on a parameter-count mismatch. The property name is now forced into first position exactly as the dispatcher does. tsc + vite build clean.',
       'invoice-on-demand-whatsapp',                   //FEATURE (10 Sep 2026). THE INVOICE IS AN ON-DEMAND ACTION, and it can now go out on WhatsApp. Hotel and Events already had a staff-triggered send (POST /hotel/folios/:folioId/email-invoice and POST /events/bookings/:bid/invoice/send) that emailed the PDF; neither could reach a guest on WhatsApp, which in India is the channel most guests actually read. Both now take `channel` = EMAIL (default, so the existing Email buttons are byte-for-byte unchanged) | WHATSAPP | BOTH, require only what the chosen channel needs, and report back `sent: ['EMAIL','WHATSAPP']` plus a per-channel reason for anything that did not go. The WhatsApp leg goes through `triggerNotification` rather than calling the sender directly, so opt-outs, the 24-hour service window, the approved-template lookup and the delivery log all apply without being reimplemented at the call site. To make that possible the dispatcher gained two ADDITIVE capabilities: an optional `opts.onlyChannels` filter (omitted by all 60 existing callers = every channel the owner enabled, exactly as before) and a returned `{ sent, failed, skipped, channels }` tally, so an interactive caller can tell the user what happened — `logAndSend` now returns whether the provider took the message. New events HOTEL_INVOICE_SENT and EVENT_INVOICE_SENT with their own written copy and owner switches in the Notifications catalogue; without a catalogue entry there is no notification_settings row and the send would report not-switched-on for ever. NOTE: WhatsApp carries the invoice NUMBER and amount, not the file — `sendWhatsAppDetailed` builds only text and template bodies, and the invoice PDF routes are staff-authenticated so there is no link a guest could open; attaching it needs a DOCUMENT-header template and a tokenised public URL. Spa and Restaurant still have no on-demand invoice send at all. New test TC-INVOICE-ONDEMAND-CHANNEL. tsc + vite build clean.',

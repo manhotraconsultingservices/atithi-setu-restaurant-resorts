@@ -70048,12 +70048,13 @@ function NotificationSettings({ restaurantId, token, restaurantName, isHotelEnab
 // every attempt lands in the activity log with the provider's own answer.
 function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string; canEdit: boolean; propertyName: string }) {
   const toast = useToast();
-  const [tab, setTab] = useState<'SEND' | 'ACTIVITY'>('SEND');
+  const [tab, setTab] = useState<'SEND' | 'ACTIVITY' | 'INBOX'>('SEND');
   const [channel, setChannel] = useState<'WHATSAPP' | 'EMAIL' | 'SMS'>('WHATSAPP');
   const [to, setTo] = useState('');
   const [subject, setSubject] = useState('');
   const [text, setText] = useState('');
   const [templates, setTemplates] = useState<any[]>([]);
+  const [allTemplates, setAllTemplates] = useState<any[]>([]);
   const [tplConfigured, setTplConfigured] = useState<boolean | null>(null);
   const [tplReason, setTplReason] = useState('');
   const [tplName, setTplName] = useState('');
@@ -70066,6 +70067,10 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
   const [log, setLog] = useState<any[]>([]);
   const [who, setWho] = useState('');
   const [loading, setLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('ALL');
+  const [tplFilter, setTplFilter] = useState('');
+  const [threads, setThreads] = useState<any[]>([]);
+  const [openThread, setOpenThread] = useState<any>(null);
 
   const auth = { Authorization: `Bearer ${token}` };
   const tpl = templates.find(t => t.name === tplName) || null;
@@ -70081,6 +70086,7 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
     fetch('/api/owner/whatsapp/templates', { headers: auth })
       .then(r => r.json())
       .then(d => {
+        setAllTemplates(d.templates || []);
         setTemplates((d.templates || []).filter((t: any) => String(t.status).toUpperCase() === 'APPROVED'));
         setTplConfigured(!!d.configured);
         setTplReason(d.reason || d.error || '');
@@ -70091,15 +70097,36 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
   const loadActivity = async () => {
     setLoading(true);
     try {
+      const qs = new URLSearchParams({ limit: '200' });
+      if (who) qs.set('recipient', who);
+      if (tplFilter) qs.set('template', tplFilter);
+      if (statusFilter === 'RECEIVED') qs.set('direction', 'IN');
+      else if (statusFilter !== 'ALL') qs.set('status', statusFilter);
       const [sm, lg] = await Promise.all([
         fetch(`/api/owner/messaging/summary?days=${days}`, { headers: auth }).then(r => r.json()),
-        fetch(`/api/owner/notification-deliveries?limit=200${who ? `&recipient=${encodeURIComponent(who)}` : ''}`, { headers: auth }).then(r => r.json()),
+        fetch(`/api/owner/notification-deliveries?${qs}`, { headers: auth }).then(r => r.json()),
       ]);
       setSummary(sm); setLog(lg.deliveries || []);
     } catch { toast.error('Could not load the activity.'); }
     setLoading(false);
   };
-  useEffect(() => { if (tab === 'ACTIVITY') loadActivity(); }, [tab, days]);
+  useEffect(() => { if (tab === 'ACTIVITY') loadActivity(); }, [tab, days, statusFilter, tplFilter]);
+
+  const loadThreads = async (q = '') => {
+    setLoading(true);
+    try {
+      const d = await fetch(`/api/owner/messaging/threads${q ? `?q=${encodeURIComponent(q)}` : ''}`, { headers: auth }).then(r => r.json());
+      setThreads(d.threads || []);
+    } catch { toast.error('Could not load conversations.'); }
+    setLoading(false);
+  };
+  const openConversation = async (contact: string) => {
+    try {
+      const d = await fetch(`/api/owner/messaging/thread?contact=${encodeURIComponent(contact)}`, { headers: auth }).then(r => r.json());
+      setOpenThread(d);
+    } catch { toast.error('Could not open this conversation.'); }
+  };
+  useEffect(() => { if (tab === 'INBOX') loadThreads(); }, [tab]);
 
   const pickTemplate = (name: string) => {
     setTplName(name);
@@ -70151,11 +70178,11 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
   return (
     <div className="space-y-5">
       <div className="flex gap-2">
-        {(['SEND', 'ACTIVITY'] as const).map(t => (
+        {(['SEND', 'ACTIVITY', 'INBOX'] as const).map(t => (
           <button key={t} onClick={() => setTab(t)}
             className={cn('px-4 py-2 rounded-2xl text-sm font-bold transition-colors',
               tab === t ? 'bg-[#cc5a16] text-white' : 'bg-white text-[#6b5d52] border border-[#cc5a16]/10 hover:bg-[#faf7f2]')}>
-            {t === 'SEND' ? 'Compose' : 'Activity'}
+            {t === 'SEND' ? 'Compose' : t === 'ACTIVITY' ? 'Message log' : 'Inbox'}
           </button>
         ))}
       </div>
@@ -70163,6 +70190,21 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
       {tab === 'SEND' && (
         <div className="grid lg:grid-cols-[1.15fr_.85fr] gap-5">
           <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm p-6 space-y-5">
+            {tplConfigured && allTemplates.length > 0 && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#6b5d52] pb-1 border-b border-[#cc5a16]/10">
+                <span className="font-bold text-[#1a1208]">Template registry</span>
+                <span className="text-[#9d8b7e]">live from the Atithi-Setu WhatsApp account</span>
+                <span className="ml-auto flex items-center gap-2">
+                  <span>{allTemplates.length} total</span>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-bold">{templates.length} approved</span>
+                  {allTemplates.length - templates.length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 font-bold">
+                      {allTemplates.length - templates.length} not usable yet
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
             <div>
               <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Channel</label>
               <div className="flex gap-2 mt-2">
@@ -70294,15 +70336,36 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
             </button>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2">
+            {['ALL', 'SENT', 'DELIVERED', 'READ', 'FAILED', 'SKIPPED', 'RECEIVED'].map(st => (
+              <button key={st} onClick={() => setStatusFilter(st)}
+                className={cn('px-3 py-1.5 rounded-full text-xs font-bold transition-colors',
+                  statusFilter === st ? 'bg-[#1a1208] text-white' : 'bg-white text-[#6b5d52] border border-[#cc5a16]/10 hover:bg-[#faf7f2]')}>
+                {st === 'ALL' ? 'All' : st.charAt(0) + st.slice(1).toLowerCase()}
+              </button>
+            ))}
+            {(summary?.by_template || []).length > 0 && (
+              <select value={tplFilter} onChange={e => setTplFilter(e.target.value)}
+                className="ml-auto px-3 py-1.5 rounded-2xl border border-[#cc5a16]/15 bg-white text-xs outline-none">
+                <option value="">All templates</option>
+                {summary.by_template.map((t: any) => (
+                  <option key={t.template_name} value={t.template_name}>{t.template_name} ({t.messages})</option>
+                ))}
+              </select>
+            )}
+          </div>
+
           {summary && (
             <>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
                 {[
-                  ['Messages', summary.totals?.total ?? 0, ''],
-                  ['Delivered', summary.totals?.sent ?? 0, 'text-emerald-700'],
+                  ['Today', summary.totals?.today ?? 0, ''],
+                  ['Sent', summary.totals?.sent ?? 0, ''],
+                  ['Delivered', summary.totals?.delivered ?? 0, 'text-emerald-700'],
+                  ['Read', summary.totals?.read ?? 0, 'text-emerald-700'],
                   ['Failed', summary.totals?.failed ?? 0, 'text-red-700'],
-                  ['Skipped', summary.totals?.skipped ?? 0, 'text-amber-700'],
-                  ['People reached', summary.totals?.people ?? 0, ''],
+                  ['Received', summary.totals?.received ?? 0, 'text-[#cc5a16]'],
+                  ['People', summary.totals?.people ?? 0, ''],
                 ].map(([l, n, c]: any) => (
                   <div key={l} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
                     <div className={cn('text-2xl font-bold tabular-nums', c)}>{n}</div>
@@ -70373,11 +70436,21 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
                   {log.map((d: any) => (
                     <tr key={d.id} className="border-b border-[#cc5a16]/5">
                       <td className="px-6 py-3 text-xs text-[#6b5d52] whitespace-nowrap">{d.created_at ? new Date(d.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}</td>
-                      <td className="px-6 py-3 font-mono text-xs">{d.recipient}</td>
-                      <td className="px-6 py-3">{d.channel}</td>
+                      <td className="px-6 py-3">
+                        {d.contact_name && <div className="font-bold text-[13px]">{d.contact_name}</div>}
+                        <div className="font-mono text-xs text-[#6b5d52]">{d.recipient}</div>
+                      </td>
+                      <td className="px-6 py-3">
+                        <span className="inline-flex items-center gap-1">
+                          {String(d.direction || 'OUT') === 'IN' ? '↙' : '↗'} {d.channel}
+                        </span>
+                      </td>
                       <td className="px-6 py-3 text-xs">
-                        <div>{d.event_name === 'ON_DEMAND' ? 'Sent by hand' : d.event_name}</div>
-                        {d.error && <div className="text-[11px] text-[#6b5d52] mt-0.5 max-w-md">{d.error}</div>}
+                        {d.template_name
+                          ? <span className="inline-block px-2 py-0.5 rounded-md bg-[#faf7f2] border border-[#cc5a16]/10 font-mono text-[11px]">{d.template_name}</span>
+                          : <span>{d.event_name === 'ON_DEMAND' ? 'Sent by hand' : d.event_name === 'INBOUND' ? 'Reply from the guest' : d.event_name}</span>}
+                        {d.preview && <div className="text-[11px] text-[#6b5d52] mt-1 max-w-md truncate">{d.preview}</div>}
+                        {d.error && <div className="text-[11px] text-red-700 mt-0.5 max-w-md">{d.error}</div>}
                       </td>
                       <td className="px-6 py-3">{statusPill(d.status)}</td>
                     </tr>
@@ -70385,6 +70458,108 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      )}
+
+      {tab === 'INBOX' && (
+        <div className="grid lg:grid-cols-[320px_1fr] gap-5">
+          <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+            <div className="px-4 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
+              <h3 className="font-bold font-serif">Conversations</h3>
+              <input value={who} onChange={e => setWho(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') loadThreads(who); }}
+                placeholder="Search name or number"
+                className="w-full mt-2 px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm outline-none focus:border-[#cc5a16]" />
+            </div>
+            <div className="max-h-[560px] overflow-y-auto">
+              {threads.length === 0 && (
+                <p className="px-4 py-8 text-center text-sm text-[#6b5d52]">
+                  {loading ? 'Loading…' : 'No WhatsApp conversations yet.'}
+                </p>
+              )}
+              {threads.map((t: any) => (
+                <button key={t.recipient} onClick={() => openConversation(t.recipient)}
+                  className={cn('w-full text-left px-4 py-3 border-b border-[#cc5a16]/5 hover:bg-[#faf7f2] transition-colors',
+                    openThread?.contact === t.recipient && 'bg-[#faf7f2] border-l-2 border-l-[#cc5a16]')}>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-bold text-sm truncate">{t.contact_name || t.recipient}</span>
+                    <span className="text-[10px] text-[#9d8b7e] shrink-0">
+                      {t.last_at ? new Date(t.last_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : ''}
+                    </span>
+                  </div>
+                  <div className="text-xs text-[#6b5d52] truncate mt-0.5">
+                    {String(t.last_direction) === 'IN' ? '' : 'You: '}{t.last_preview || '—'}
+                  </div>
+                  <span className={cn('inline-block mt-1.5 text-[10px] px-2 py-0.5 rounded-full font-bold',
+                    t.window_open ? 'bg-emerald-50 text-emerald-700' : 'bg-[#cc5a16]/10 text-[#6b5d52]')}>
+                    {t.window_open ? 'Window open' : 'Window closed'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden flex flex-col">
+            {!openThread ? (
+              <p className="p-10 text-center text-sm text-[#6b5d52]">Pick a conversation to read it.</p>
+            ) : (
+              <>
+                <div className="px-6 py-4 border-b border-[#cc5a16]/10 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold font-serif">{openThread.contact_name || openThread.contact}</h3>
+                    <p className="text-xs text-[#6b5d52] font-mono">{openThread.contact}</p>
+                  </div>
+                  <span className={cn('text-[11px] px-2.5 py-1 rounded-full font-bold shrink-0',
+                    openThread.window_open ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700')}>
+                    {openThread.window_open ? 'Window open' : 'Window closed'}
+                  </span>
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-6 py-5 space-y-3 max-h-[440px] bg-[#faf7f2]/40">
+                  {(openThread.messages || []).length === 0 && (
+                    <p className="text-center text-sm text-[#6b5d52]">Nothing in this conversation yet.</p>
+                  )}
+                  {(openThread.messages || []).map((m: any) => {
+                    const inbound = String(m.direction || 'OUT') === 'IN';
+                    return (
+                      <div key={m.id} className={cn('flex', inbound ? 'justify-start' : 'justify-end')}>
+                        <div className={cn('max-w-[78%] rounded-2xl px-4 py-2.5 text-sm',
+                          inbound ? 'bg-white border border-[#cc5a16]/10' : 'bg-[#075E54] text-white')}>
+                          <div className="whitespace-pre-wrap">{m.preview || '—'}</div>
+                          <div className={cn('flex items-center gap-2 mt-1.5 text-[10px]',
+                            inbound ? 'text-[#9d8b7e]' : 'text-white/70')}>
+                            <span>{m.created_at ? new Date(m.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : ''}</span>
+                            {m.template_name && <span className="font-mono">· {m.template_name}</span>}
+                            {!inbound && <span>· {m.status}</span>}
+                          </div>
+                          {m.error && <div className="text-[10px] mt-1 text-red-200">{m.error}</div>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="px-6 py-4 border-t border-[#cc5a16]/10">
+                  {openThread.window_open ? (
+                    <p className="text-xs text-[#6b5d52]">
+                      This contact wrote to you recently, so the 24-hour window is open
+                      {openThread.window_closes_at ? ` until ${new Date(openThread.window_closes_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}` : ''}.
+                      This property still sends WhatsApp only on approved templates — use <b>Compose</b>.
+                    </p>
+                  ) : (
+                    <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3 text-xs text-[#1a1208]">
+                      The 24-hour reply window has closed. WhatsApp blocks free-form replies now — use an approved
+                      template from <b>Compose</b> to reach this contact.
+                    </div>
+                  )}
+                  <button onClick={() => { setTab('SEND'); setChannel('WHATSAPP'); setTo(openThread.contact); }}
+                    className="mt-3 bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-sm font-bold hover:bg-[#a84612] flex items-center gap-2">
+                    <Send size={15} /> Send a template to this contact
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
