@@ -321,6 +321,44 @@ export function buildNotificationContent(
 
     /* ── Spa & wellness ─────────────────────────────────────────────── */
 
+    /* Invoices, sent on demand by the property */
+
+    case 'HOTEL_INVOICE_SENT':
+      return {
+        subject: `${data.isCreditNote ? 'Credit note' : 'Your invoice'} ${data.invoiceNumber || ''} from ${r}`,
+        text:
+          `Thank you for staying with ${r}, ${data.guestName || 'there'}.\n\n` +
+          (data.isCreditNote
+            ? `Your credit note ${data.invoiceNumber || ''} is ready.`
+            : `Your bill of ${data.amount || ''} is settled and your invoice ${data.invoiceNumber || ''} is ready.`) +
+          `\n\nWe hope to see you again soon.`,
+        html:
+          `<h2 style="color:#cc5a16">${data.isCreditNote ? 'Credit note' : 'Your invoice'}</h2>` +
+          `<p>Thank you for staying with <strong>${r}</strong>, ${data.guestName || 'there'}.</p>` +
+          `<p>${data.isCreditNote
+              ? `Your credit note <strong>${data.invoiceNumber || ''}</strong> is ready.`
+              : `Your bill of <strong>${data.amount || ''}</strong> is settled and your invoice <strong>${data.invoiceNumber || ''}</strong> is ready.`}</p>` +
+          `<p style="color:#6b5d52;font-size:14px">We hope to see you again soon.</p>`,
+      };
+
+    case 'EVENT_INVOICE_SENT':
+      return {
+        subject: `Your invoice ${data.invoiceNumber || ''} from ${r}`,
+        text:
+          `Thank you ${data.customerName || 'there'}, your invoice from ${r}` +
+          (data.eventDate ? ` for your event on ${data.eventDate}` : '') + ` is ready.\n\n` +
+          `Invoice: ${data.invoiceNumber || ''}\nTotal: ${data.amount || ''}\n\n` +
+          `The full breakdown is in your email.`,
+        html:
+          `<h2 style="color:#7c3aed">Your invoice is ready</h2>` +
+          `<p>Thank you <strong>${data.customerName || 'there'}</strong>, your invoice from <strong>${r}</strong>` +
+          `${data.eventDate ? ` for your event on ${data.eventDate}` : ''} is ready.</p>` +
+          `<div style="background:#faf5ff;padding:16px;border-radius:8px;margin:16px 0">` +
+          `<p style="margin:2px 0"><strong>${data.invoiceNumber || ''}</strong></p>` +
+          `<p style="margin:2px 0;color:#475569">${data.amount || ''}</p></div>` +
+          `<p style="color:#475569;font-size:14px">The full breakdown is in your email.</p>`,
+      };
+
     case 'SPA_APPOINTMENT_CONFIRMED':
       return {
         subject: `Your appointment at ${r} is confirmed`,

@@ -69517,6 +69517,7 @@ const NOTIFICATION_EVENTS: {
   { id: 'GUEST_CHECKED_OUT',          label: 'Guest Checked Out',             roles: ['OWNER', 'FRONT_DESK', 'HOUSEKEEPING'],               group: 'Hotel', description: 'Fired on guest check-out (housekeeping is notified to prepare cleaning)' },
   { id: 'BOOKING_NO_SHOW',            label: 'Booking No-Show',               roles: ['OWNER', 'FRONT_DESK'],                               group: 'Hotel', description: 'Fired when a booking is marked as a no-show' },
   { id: 'GUEST_PRE_ARRIVAL',          label: 'Pre-Arrival Message',           roles: ['CUSTOMER'],                                          group: 'Hotel', description: 'Sent to the guest before their arrival date' },
+  { id: 'HOTEL_INVOICE_SENT',         label: 'Invoice Sent (on demand)',      roles: ['CUSTOMER'],                                          group: 'Hotel', description: 'Sent when a staff member sends the guest their invoice from the folio' },
   // Loyalty
   { id: 'LOYALTY_TIER_UPGRADED',      label: 'Loyalty Tier Upgraded',         roles: ['CUSTOMER'],                                          group: 'Loyalty', description: 'Sent when a customer moves up a loyalty tier' },
   { id: 'LOYALTY_NEAR_UPGRADE',       label: 'Near Tier Upgrade',             roles: ['CUSTOMER'],                                          group: 'Loyalty', description: 'Nudge sent when a customer is close to the next tier' },
@@ -69547,6 +69548,7 @@ const NOTIFICATION_EVENTS: {
   { id: 'EVENT_CONFIRMED',            label: 'Event Confirmed',               roles: ['OWNER', 'MANAGER', 'CUSTOMER'],                      group: 'Events & Convention', description: 'Sent when an event booking is confirmed' },
   { id: 'EVENT_PAYMENT_RECEIVED',     label: 'Event Payment Received',        roles: ['OWNER', 'MANAGER', 'CUSTOMER'],                      group: 'Events & Convention', description: 'Fired when a payment is recorded against an event booking' },
   { id: 'EVENT_CANCELLED',            label: 'Event Cancelled',               roles: ['OWNER', 'MANAGER', 'CUSTOMER'],                      group: 'Events & Convention', description: 'Fired when an event booking is cancelled' },
+  { id: 'EVENT_INVOICE_SENT',         label: 'Invoice Sent (on demand)',      roles: ['CUSTOMER'],                                          group: 'Events & Convention', description: 'Sent when a staff member sends the customer their event invoice' },
   { id: 'EVENT_UPCOMING_REMINDER',    label: 'Upcoming Event Reminder',       roles: ['CUSTOMER', 'OWNER'],                                 group: 'Events & Convention', description: 'Sent to the customer a couple of days before a confirmed event' },
   // Spa & wellness
   { id: 'SPA_APPOINTMENT_CONFIRMED',  label: 'Appointment Confirmed',         roles: ['CUSTOMER', 'OWNER'],                                 group: 'Spa & Wellness',      description: 'Sent to the client when their treatment booking is confirmed' },

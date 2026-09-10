@@ -6645,7 +6645,7 @@ async function logAndSend(db: any, eventName: string, channel: string, recipient
   } catch (e: any) {
     await write('FAILED', String(e?.message || e).slice(0, 300), 'EXCEPTION', null);
     console.error(`[notif] ${channel} → ${recipient} for ${eventName} failed:`, e?.message || e);
-    return;
+    return false;
   }
   // The senders used to swallow their own errors and return void/false, so "did
   // not throw" was recorded as SENT — which is why the live log holds 134 sends
@@ -6670,6 +6670,7 @@ async function logAndSend(db: any, eventName: string, channel: string, recipient
     } catch { /* usage accounting must never block a send */ }
   }
   if (!ok) console.error(`[notif] ${channel} → ${recipient} for ${eventName} rejected:`, error);
+  return ok;
 }
 
 // ── Who is the guest on this event? ─────────────────────────────────────────
@@ -6854,7 +6855,19 @@ async function notifyNewTenant(meta: {
   await notifyPlatformAdmin('NEW_TENANT', lines.join('\n'));
 }
 
-async function triggerNotification(restaurantId: string, eventName: string, data: any) {
+// `opts.onlyChannels` narrows a send to the channels the caller asked for —
+// used by the on-demand invoice actions, where the staff member picks EMAIL,
+// WHATSAPP or both. Omitted (every existing caller) means every channel the
+// owner has switched on, exactly as before. The returned tally lets an
+// interactive caller tell the user what happened; automatic callers ignore it.
+type NotifyTally = { sent: number; failed: number; skipped: number; channels: string[] };
+async function triggerNotification(restaurantId: string, eventName: string, data: any, opts?: { onlyChannels?: string[] }): Promise<NotifyTally> {
+  const tally: NotifyTally = { sent: 0, failed: 0, skipped: 0, channels: [] };
+  const wants = (ch: string) => !opts?.onlyChannels || opts.onlyChannels.includes(ch);
+  const record = (ok: boolean | void, ch: string) => {
+    if (ok) { tally.sent++; if (!tally.channels.includes(ch)) tally.channels.push(ch); }
+    else tally.failed++;
+  };
   try {
     // Inject restaurant name so all notifications display the correct restaurant
     if (!data.restaurantName) {
@@ -6865,7 +6878,7 @@ async function triggerNotification(restaurantId: string, eventName: string, data
     const db = await getTenantDb(restaurantId);
     await ensureNotifDeliveries(db, restaurantId);
     const settings = await db.query("SELECT * FROM notification_settings WHERE event_name = ?", [eventName]);
-    if (!settings || settings.length === 0) return;
+    if (!settings || settings.length === 0) return tally;
 
     for (const setting of settings) {
       // Determine recipients based on role
@@ -6991,24 +7004,26 @@ async function triggerNotification(restaurantId: string, eventName: string, data
 
       for (const recipient of uniqueRecipients) {
         const isEmail = recipient.includes('@');
-        if (setting.email_enabled && isEmail) {
+        if (setting.email_enabled && isEmail && wants('EMAIL')) {
           const emailConsent = isGuestAudience ? await _waConsent(recipient, 'EMAIL') : { blocked: false };
           if (emailConsent.blocked) {
+            tally.skipped++;
             await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?, ?)",
               [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, eventName, 'EMAIL', recipient, 'This guest asked to stop receiving email.', audienceTag, String(content.subject).slice(0, 140)]).catch(() => {});
           } else {
-            await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendTenantEmail(restaurantId, recipient, content.subject, content.text, content.html, audienceTag), audienceTag);
+            record(await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendTenantEmail(restaurantId, recipient, content.subject, content.text, content.html, audienceTag), audienceTag), 'EMAIL');
           }
         }
-        if (setting.sms_enabled && !isEmail) {
-          await logAndSend(db, eventName, 'SMS', recipient, outboundText, () => sendSMSDetailed(recipient, outboundText), audienceTag);
+        if (setting.sms_enabled && !isEmail && wants('SMS')) {
+          record(await logAndSend(db, eventName, 'SMS', recipient, outboundText, () => sendSMSDetailed(recipient, outboundText), audienceTag), 'SMS');
         }
-        if (setting.whatsapp_enabled && !isEmail) {
+        if (setting.whatsapp_enabled && !isEmail && wants('WHATSAPP')) {
           // A guest who replied STOP is never messaged again. The sender number is
           // shared across every property, so one ignored opt-out would damage
           // deliverability for all of them.
           const consent = isGuestAudience ? await _waConsent(recipient, 'WHATSAPP') : { blocked: false };
           if (consent.blocked) {
+            tally.skipped++;
             await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?, ?)",
               [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, eventName, 'WHATSAPP', recipient, 'This guest asked to stop receiving WhatsApp messages.', audienceTag, String(waText).slice(0, 140)]).catch(() => {});
           } else {
@@ -7020,19 +7035,20 @@ async function triggerNotification(restaurantId: string, eventName: string, data
             // at its category rate, which is what the cost report attributes.
             _logAndSendCategory = useTemplate ? metaCategory : 'SERVICE';
             _logAndSendTemplate = useTemplate ? useTemplate.name : null;
-            await logAndSend(db, eventName, 'WHATSAPP', recipient, waText, () => sendWhatsAppDetailed(recipient, waText, useTemplate), audienceTag);
+            record(await logAndSend(db, eventName, 'WHATSAPP', recipient, waText, () => sendWhatsAppDetailed(recipient, waText, useTemplate), audienceTag), 'WHATSAPP');
             _logAndSendCategory = null; _logAndSendTemplate = null;
           }
         }
       }
       // Telegram: channel-level (not per-recipient), uses stored chat_id override or env default
-      if (setting.telegram_enabled) {
-        await logAndSend(db, eventName, 'TELEGRAM', setting.telegram_chat_id || 'default', content.text, () => sendTelegram(setting.telegram_chat_id || null, content.text));
+      if (setting.telegram_enabled && wants('TELEGRAM')) {
+        record(await logAndSend(db, eventName, 'TELEGRAM', setting.telegram_chat_id || 'default', content.text, () => sendTelegram(setting.telegram_chat_id || null, content.text)), 'TELEGRAM');
       }
     }
   } catch (err) {
     console.error(`Failed to trigger notification for ${eventName}:`, err);
   }
+  return tally;
 }
 
 async function startServer() {
@@ -28730,18 +28746,43 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const data = await buildInvoiceData(db, check.restaurant, req.params.bid, parseEventGstOverride(req.body));
       if (!data) return res.status(404).json({ error: "Booking not found" });
+      const invChannel = String(req.body?.channel || 'EMAIL').toUpperCase();
+      const wantEmail = invChannel === 'EMAIL' || invChannel === 'BOTH';
+      const wantWa    = invChannel === 'WHATSAPP' || invChannel === 'BOTH';
+      if (!wantEmail && !wantWa) return res.status(400).json({ error: "channel must be EMAIL, WHATSAPP or BOTH." });
       const to = String(req.body?.email || data.booking.customer_email || '').trim();
-      if (!to) return res.status(400).json({ error: "No recipient email — add the customer's email first." });
+      if (wantEmail && !to) return res.status(400).json({ error: "No recipient email — add the customer's email first." });
+      const toPhone = String(req.body?.phone || data.booking.customer_phone || '').trim();
+      if (wantWa && !toPhone) return res.status(400).json({ error: "No phone number on this booking — add the customer's phone first." });
       const pdf = await generateEventQuotationPdf(data);
       const subject = `Invoice ${data.quotation.quote_number} — ${data.tenant.name}`;
       const text = `Dear ${data.booking.customer_name},\n\nPlease find attached your invoice (${data.quotation.quote_number}).\n\nThank you,\n${data.tenant.name}`;
       const html = `<p>Dear ${data.booking.customer_name},</p><p>Please find attached your invoice (<strong>${data.quotation.quote_number}</strong>).</p><p>Thank you,<br/>${data.tenant.name}</p>`;
-      const sent = await sendEmail(to, subject, text, html, [{ filename: `${data.quotation.quote_number}.pdf`, content: pdf }]);
-      // 400, not 502 — Cloudflare eats a 502 body, so the owner would see a
-      // generic gateway page instead of being told SMTP is not set up.
-      if (!sent) return res.status(400).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download.", code: 'EMAIL_NOT_CONFIGURED' });
-      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICE_SENT', summary: `Invoice emailed to ${to}` });
-      res.json({ success: true, sent_to: to });
+      const sentOn: string[] = [];
+      const sendErrors: string[] = [];
+      if (wantEmail) {
+        const sent = await sendEmail(to, subject, text, html, [{ filename: `${data.quotation.quote_number}.pdf`, content: pdf }]);
+        // 400, not 502 — Cloudflare eats a 502 body, so the owner would see a
+        // generic gateway page instead of being told SMTP is not set up.
+        if (sent) sentOn.push('EMAIL');
+        else if (!wantWa) return res.status(400).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download.", code: 'EMAIL_NOT_CONFIGURED' });
+        else sendErrors.push('Email could not be sent (SMTP not configured).');
+      }
+      if (wantWa) {
+        const waTally = await triggerNotification(req.params.id, 'EVENT_INVOICE_SENT', {
+          customerPhone: toPhone, customerEmail: data.booking.customer_email || undefined,
+          customerName: data.booking.customer_name || '', guestName: data.booking.customer_name || '',
+          invoiceNumber: data.quotation.quote_number,
+          eventDate: String(data.booking.event_date || '').slice(0, 10),
+          amount: `₹${Number((data as any).grand_total || 0).toLocaleString('en-IN')}`,
+        }, { onlyChannels: ['WHATSAPP'] });
+        if (waTally.sent) sentOn.push('WHATSAPP');
+        else if (waTally.skipped) sendErrors.push('This customer asked not to receive WhatsApp messages.');
+        else sendErrors.push('WhatsApp did not go out — check that Invoice Sent is switched on for WhatsApp in Notifications, and that WhatsApp is connected.');
+      }
+      if (!sentOn.length) return res.status(400).json({ error: sendErrors.join(' ') || 'No delivery channel matched.' });
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICE_SENT', summary: `Invoice sent on ${sentOn.join(' + ')}` });
+      res.json({ success: true, sent: sentOn, errors: sendErrors.length ? sendErrors : undefined, sent_to: wantEmail ? to : undefined });
     } catch (err: any) { console.error("/events invoice send error:", err); res.status(500).json({ error: "Failed to send invoice" }); }
   });
 
@@ -45491,8 +45532,16 @@ ${data.tenant.name}`;
          WHERE f.id = ?`, [req.params.folioId]
       );
       if (!folio) return res.status(404).json({ error: "Folio not found" });
+      // On demand, and the staff member picks the channel. EMAIL is the default
+      // so the existing Email button keeps behaving exactly as it did.
+      const invChannel = String(req.body?.channel || 'EMAIL').toUpperCase();
+      const wantEmail = invChannel === 'EMAIL' || invChannel === 'BOTH';
+      const wantWa    = invChannel === 'WHATSAPP' || invChannel === 'BOTH';
+      if (!wantEmail && !wantWa) return res.status(400).json({ error: "channel must be EMAIL, WHATSAPP or BOTH." });
       const toEmail = (req.body?.to as string)?.trim() || folio.guest_email;
-      if (!toEmail) return res.status(400).json({ error: "Guest has no email address. Provide 'to' in the request body." });
+      if (wantEmail && !toEmail) return res.status(400).json({ error: "Guest has no email address. Provide 'to' in the request body." });
+      const toPhone = String(req.body?.to_phone || folio.guest_phone || '').trim();
+      if (wantWa && !toPhone) return res.status(400).json({ error: "Guest has no phone number on the booking." });
 
       const entries: any[] = await tenantDb.query(
         "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
@@ -45616,12 +45665,33 @@ ${data.tenant.name}`;
            </div>
          </div>`;
 
-      const { sendEmail: _send } = await import('./notificationService.ts');
-      const sent = await _send(toEmail, subject, textBody, htmlBody, [
-        { filename: `${invNum}-${safeName}.pdf`, content: pdf, contentType: 'application/pdf' },
-      ] as any);
-      if (!sent) return res.status(500).json({ error: "Email delivery failed — check SMTP configuration" });
-      res.json({ success: true, sent_to: toEmail, invoice_number: invNum });
+      const sentOn: string[] = [];
+      const sendErrors: string[] = [];
+      if (wantEmail) {
+        const { sendEmail: _send } = await import('./notificationService.ts');
+        const ok = await _send(toEmail, subject, textBody, htmlBody, [
+          { filename: `${invNum}-${safeName}.pdf`, content: pdf, contentType: 'application/pdf' },
+        ] as any);
+        if (ok) sentOn.push('EMAIL');
+        else sendErrors.push('Email delivery failed — check the SMTP settings.');
+      }
+      if (wantWa) {
+        // WhatsApp carries the invoice NUMBER and amount, not the file: the
+        // sender supports text and template bodies only, and the PDF route is
+        // staff-authenticated so there is no link a guest could open.
+        const waTally = await triggerNotification(req.params.id, 'HOTEL_INVOICE_SENT', {
+          bookingId: folio.booking_id,
+          customerPhone: toPhone, customerEmail: folio.guest_email || undefined,
+          guestName: folio.guest_name || 'Guest', customerName: folio.guest_name || 'Guest',
+          invoiceNumber: invNum, isCreditNote: isCredit,
+          amount: `${hotel.currency_symbol || '₹'}${Number(folio.grand_total || 0).toLocaleString(hotel.locale || 'en-IN')}`,
+        }, { onlyChannels: ['WHATSAPP'] });
+        if (waTally.sent) sentOn.push('WHATSAPP');
+        else if (waTally.skipped) sendErrors.push('This guest asked not to receive WhatsApp messages.');
+        else sendErrors.push('WhatsApp did not go out — check that Invoice Sent is switched on for WhatsApp in Notifications, and that WhatsApp is connected.');
+      }
+      if (!sentOn.length) return res.status(400).json({ error: sendErrors.join(' ') || 'No delivery channel matched.', invoice_number: invNum });
+      res.json({ success: true, sent: sentOn, errors: sendErrors.length ? sendErrors : undefined, sent_to: wantEmail ? toEmail : undefined, sent_to_phone: wantWa ? toPhone : undefined, invoice_number: invNum });
     } catch (err: any) {
       console.error("Email invoice error:", err);
       res.status(500).json({ error: err?.message || "Failed to email invoice" });
@@ -54474,8 +54544,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'no-more-502-cloudflare',
+    commit_marker: 'invoice-on-demand-whatsapp',
     code_features: [
+      'invoice-on-demand-whatsapp',                   //FEATURE (10 Sep 2026). THE INVOICE IS AN ON-DEMAND ACTION, and it can now go out on WhatsApp. Hotel and Events already had a staff-triggered send (POST /hotel/folios/:folioId/email-invoice and POST /events/bookings/:bid/invoice/send) that emailed the PDF; neither could reach a guest on WhatsApp, which in India is the channel most guests actually read. Both now take `channel` = EMAIL (default, so the existing Email buttons are byte-for-byte unchanged) | WHATSAPP | BOTH, require only what the chosen channel needs, and report back `sent: ['EMAIL','WHATSAPP']` plus a per-channel reason for anything that did not go. The WhatsApp leg goes through `triggerNotification` rather than calling the sender directly, so opt-outs, the 24-hour service window, the approved-template lookup and the delivery log all apply without being reimplemented at the call site. To make that possible the dispatcher gained two ADDITIVE capabilities: an optional `opts.onlyChannels` filter (omitted by all 60 existing callers = every channel the owner enabled, exactly as before) and a returned `{ sent, failed, skipped, channels }` tally, so an interactive caller can tell the user what happened — `logAndSend` now returns whether the provider took the message. New events HOTEL_INVOICE_SENT and EVENT_INVOICE_SENT with their own written copy and owner switches in the Notifications catalogue; without a catalogue entry there is no notification_settings row and the send would report not-switched-on for ever. NOTE: WhatsApp carries the invoice NUMBER and amount, not the file — `sendWhatsAppDetailed` builds only text and template bodies, and the invoice PDF routes are staff-authenticated so there is no link a guest could open; attaching it needs a DOCUMENT-header template and a tokenised public URL. Spa and Restaurant still have no on-demand invoice send at all. New test TC-INVOICE-ONDEMAND-CHANNEL. tsc + vite build clean.',
       'no-more-502-cloudflare',                       //BUGFIX (10 Sep 2026). Five request handlers answered with **502**, which prod can never do: Cloudflare sits in front of erp.atithi-setu.com and REPLACES a 502 with its own HTML error page (verified live — content-type: text/html, server: cloudflare, our JSON body gone). Every carefully worded message behind them was therefore invisible: the owner saw a generic gateway error and had no idea what to fix. None of the five was a bad gateway anyway — each is an upstream or configuration rejection we chose to surface, which is a 400. Fixed: event INVOICE send and event QUOTATION send (SMTP not configured → now 400 with code EMAIL_NOT_CONFIGURED, so the owner is actually told to set up email and that the PDF is still downloadable), the channel-adapter smoke test (adapter refused the test cycle → 400 ADAPTER_REJECTED, detail preserved), and the two Aiosell calls, property lookup and reservation pull (channel manager refused → 400 AIOSELL_REJECTED carrying r.message). Same class as the two 502s already fixed in the notification work; `status(502)` is now absent from the codebase. No front-end code branched on the 502 status, so nothing else moves. tsc + vite build clean.',
       'spa-client-email',                            //FEATURE (10 Sep 2026): spa appointments could only ever carry a phone number, so the new spa notifications could reach a client on WhatsApp/SMS but never by email. Added `spa_appointments.client_email` (DDL + `ALTER … IF NOT EXISTS` migration in ensureSpaTables), captured on BOTH booking paths — the staff booking form (new optional Client Email box in SpaViews) and the public online booking, which already collected an email for `spa_clients` but never put it on the appointment. The staff path also backfills a linked client's email when it was blank, and never overwrites an existing one. `_resolveGuestContact` reads `client_email` first and falls back to `spa_clients.email` via `client_id`, so appointments booked BEFORE this column existed still resolve an email where the client is on file; `notifySpa` and the reminder cron both carry it. Also: `EVENT_BOOKING_CREATED` offered only OWNER/MANAGER audiences, so a customer could never be told their enquiry was received even though `notifyEvent` already passes their contact details — the CUSTOMER audience is now selectable. tsc + vite build clean.',
       'spa-guest-notifications',                     //FEATURE + CORRECTION (10 Sep 2026). Spa & Wellness raised NO guest notifications at all — a client could book a treatment and never hear from the property again. Added `notifySpa` (shaped like the events module's `notifyEvent`): **SPA_APPOINTMENT_CONFIRMED** on confirm, **SPA_APPOINTMENT_CANCELLED** on cancel (carrying the reason), and **SPA_APPOINTMENT_REMINDER** from a new 18:00 IST cron the evening before, deduped centrally via `sent_spa_reminders` exactly like the hotel pre-arrival sweep and scoped to `spa_enabled` tenants. `_resolveGuestContact` now also resolves a client from `spa_appointments` (client_name/client_phone). Written copy added for all three, and the three events are in the settings catalogue under a new Spa & Wellness group so an owner can switch them on per channel. **CORRECTION to the 10 Sep review:** the "12 dead switches" figure was wrong — my detector only matched a literal event name passed directly to `triggerNotification`, so it missed (a) the `notifyEvent` wrapper, through which all five EVENT_* notifications DO fire and DO pass customer contact, and (b) computed names (`const eventName = status === ... ? 'ORDER_READY' : 'ORDER_CANCELLED'`), which covers BOOKING_CONFIRMED/ORDER_READY/ORDER_CANCELLED/DAILY_REPORT. The genuinely unfired list is just three: CUSTOMER_INVOICE, NEW_FEEDBACK, STAFF_ATTENDANCE. tsc + vite build clean.',
