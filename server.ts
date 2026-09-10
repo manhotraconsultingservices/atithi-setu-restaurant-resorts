@@ -12,7 +12,7 @@ import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, 
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
-import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, sendTelegramDetailed, buildNotificationContent } from "./notificationService.ts";
+import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, sendTelegramDetailed, buildNotificationContent, sendWhatsAppDetailed, sendSMSDetailed } from "./notificationService.ts";
 import { getChannelAdapter, ChannelCredentials, AdapterAvailabilityPayload, AdapterResult } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
@@ -6461,23 +6461,89 @@ async function ensureNotifDeliveries(db: any, rid: string) {
       id TEXT PRIMARY KEY, event_name TEXT, channel TEXT, recipient TEXT,
       status TEXT DEFAULT 'SENT', error TEXT, preview TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+    // Provider handle (Meta / Twilio message id) so a later delivery receipt can
+    // find this row, and the provider's own error code for triage.
+    await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS provider_message_id TEXT`).catch(() => {});
+    await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS error_code TEXT`).catch(() => {});
+    await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS audience TEXT`).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_notif_deliv_created ON notification_deliveries(created_at DESC)`);
   } catch { /* ignore */ }
   _notifDelivReady.add(rid);
 }
 // Send on a single channel with the failure ISOLATED (one channel throwing must
 // never abort the others) and the outcome logged.
-async function logAndSend(db: any, eventName: string, channel: string, recipient: string, preview: string, fn: () => Promise<any>) {
+async function logAndSend(db: any, eventName: string, channel: string, recipient: string, preview: string, fn: () => Promise<any>, audience?: string) {
   const id = `ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const write = (status: string, error: string | null, code: string | null, providerId: string | null) =>
+    db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, error_code, provider_message_id, audience, preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, eventName, channel, recipient || '', status, error, code, providerId, audience || null, String(preview || '').slice(0, 140)]).catch(() => {});
+  let res: any;
   try {
-    await fn();
-    await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, preview) VALUES (?, ?, ?, ?, 'SENT', ?)",
-      [id, eventName, channel, recipient || '', String(preview || '').slice(0, 140)]).catch(() => {});
+    res = await fn();
   } catch (e: any) {
-    await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, preview) VALUES (?, ?, ?, ?, 'FAILED', ?, ?)",
-      [id, eventName, channel, recipient || '', String(e?.message || e).slice(0, 300), String(preview || '').slice(0, 140)]).catch(() => {});
+    await write('FAILED', String(e?.message || e).slice(0, 300), 'EXCEPTION', null);
     console.error(`[notif] ${channel} → ${recipient} for ${eventName} failed:`, e?.message || e);
+    return;
   }
+  // The senders used to swallow their own errors and return void/false, so "did
+  // not throw" was recorded as SENT — which is why the live log holds 134 sends
+  // and zero failures. Read the PROVIDER's answer: a SendResult when the caller
+  // used a *Detailed* sender, a boolean from sendEmail, void from the legacy ones.
+  const isResult = res && typeof res === 'object' && 'ok' in res;
+  const ok = isResult ? !!res.ok : (typeof res === 'boolean' ? res : true);
+  const error = isResult ? (res.error || null) : (res === false ? 'The provider did not accept the message.' : null);
+  const code = isResult ? (res.code || null) : null;
+  const providerId = isResult ? (res.id || null) : null;
+  await write(ok ? 'SENT' : 'FAILED', ok ? null : String(error || 'Unknown provider error').slice(0, 300), ok ? null : code, providerId);
+  if (!ok) console.error(`[notif] ${channel} → ${recipient} for ${eventName} rejected:`, error);
+}
+
+// ── Who is the guest on this event? ─────────────────────────────────────────
+// The dispatcher used to read the guest's address straight out of the event
+// payload, and NOT ONE of the 60 places that raise an event supplies it — so the
+// guest branch could never be entered and no guest has ever been contacted on any
+// channel. Rather than edit 60 call sites (and depend on the next one remembering),
+// resolve the guest from the record the event is about. Anything a caller does
+// pass still wins, so existing behaviour is untouched.
+async function _resolveGuestContact(db: any, data: any): Promise<{ email?: string; phone?: string; name?: string }> {
+  const out: { email?: string; phone?: string; name?: string } = {};
+  const pick = (...vals: any[]) => { for (const v of vals) { const t = String(v || '').trim(); if (t) return t; } return ''; };
+  // 1. Whatever the caller supplied, under any of the names in use.
+  out.email = pick(data?.customerEmail, data?.guestEmail, data?.email);
+  out.phone = pick(data?.customerPhone, data?.guestPhone, data?.phone);
+  out.name  = pick(data?.customerName, data?.guestName, data?.name);
+  if (out.email && out.phone) return out;
+  // 2. Otherwise look up the record this event concerns.
+  try {
+    const bookingId = pick(data?.bookingId, data?.booking_id);
+    if (bookingId) {
+      const b: any = await db.get("SELECT guest_name, guest_email, guest_phone FROM room_bookings WHERE id = ?", [bookingId]).catch(() => null);
+      if (b) {
+        out.email = out.email || pick(b.guest_email);
+        out.phone = out.phone || pick(b.guest_phone);
+        out.name  = out.name  || pick(b.guest_name);
+      }
+    }
+    const eventBookingId = pick(data?.eventBookingId, data?.event_booking_id, data?.bid);
+    if (eventBookingId && (!out.email || !out.phone)) {
+      const e: any = await db.get("SELECT customer_name, customer_email, customer_phone FROM event_bookings WHERE id = ?", [eventBookingId]).catch(() => null);
+      if (e) {
+        out.email = out.email || pick(e.customer_email);
+        out.phone = out.phone || pick(e.customer_phone);
+        out.name  = out.name  || pick(e.customer_name);
+      }
+    }
+    const orderId = pick(data?.orderId, data?.order_id);
+    if (orderId && (!out.email || !out.phone)) {
+      const o: any = await db.get("SELECT customer_name, customer_phone, customer_email FROM orders WHERE id = ?", [orderId]).catch(() => null);
+      if (o) {
+        out.email = out.email || pick(o.customer_email);
+        out.phone = out.phone || pick(o.customer_phone);
+        out.name  = out.name  || pick(o.customer_name);
+      }
+    }
+  } catch { /* resolution is best-effort — never block a notification */ }
+  return out;
 }
 
 // ── Platform-level admin notifications (SuperAdmin-configurable) ─────────────
@@ -6615,9 +6681,18 @@ async function triggerNotification(restaurantId: string, eventName: string, data
     for (const setting of settings) {
       // Determine recipients based on role
       let recipients: string[] = [];
-      if (setting.role === 'CUSTOMER' && data.customerEmail) {
-        recipients.push(data.customerEmail);
-        if (data.customerPhone) recipients.push(data.customerPhone);
+      const isGuestAudience = String(setting.role || '').toUpperCase() === 'CUSTOMER';
+      if (isGuestAudience) {
+        // Resolve from the record the event is about, not just the payload —
+        // see _resolveGuestContact. A guest with only a phone number (the norm
+        // in India) is now reachable; previously the whole branch was skipped
+        // unless an email happened to be present, which it never was.
+        const guest = await _resolveGuestContact(db, data);
+        if (guest.email) recipients.push(guest.email);
+        if (guest.phone) recipients.push(guest.phone);
+        if (!recipients.length) {
+          console.warn(`[notif] ${eventName}: guest notification skipped — no email or phone on the record`);
+        }
       } else {
         // Phase 3 fix: resolve recipients via _resolveRecipients so that
         // staff-targeted events (CHEF / WAITER / MANAGER / HOUSEKEEPING /
@@ -6669,17 +6744,25 @@ async function triggerNotification(restaurantId: string, eventName: string, data
       } catch { /* fall back to default content */ }
       // Deduplicate recipients (same email/phone might appear via role lookup + manual list)
       const uniqueRecipients = [...new Set(recipients.filter(Boolean))];
+      const audienceTag = isGuestAudience ? 'GUEST' : 'TEAM';
+      // The WhatsApp sender is one shared Atithi-Setu number, so a guest cannot
+      // tell which property is writing. Name it in the first line unless the copy
+      // already does. Team messages keep their existing wording.
+      const propertyName = String(data.restaurantName || '').trim();
+      const outboundText = (isGuestAudience && propertyName && !String(content.text || '').includes(propertyName))
+        ? `${propertyName}\n${content.text}`
+        : content.text;
 
       for (const recipient of uniqueRecipients) {
         const isEmail = recipient.includes('@');
         if (setting.email_enabled && isEmail) {
-          await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendEmail(recipient, content.subject, content.text, content.html));
+          await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendEmail(recipient, content.subject, content.text, content.html), audienceTag);
         }
         if (setting.sms_enabled && !isEmail) {
-          await logAndSend(db, eventName, 'SMS', recipient, content.text, () => sendSMS(recipient, content.text));
+          await logAndSend(db, eventName, 'SMS', recipient, outboundText, () => sendSMSDetailed(recipient, outboundText), audienceTag);
         }
         if (setting.whatsapp_enabled && !isEmail) {
-          await logAndSend(db, eventName, 'WHATSAPP', recipient, content.text, () => sendWhatsApp(recipient, content.text));
+          await logAndSend(db, eventName, 'WHATSAPP', recipient, outboundText, () => sendWhatsAppDetailed(recipient, outboundText, null), audienceTag);
         }
       }
       // Telegram: channel-level (not per-recipient), uses stored chat_id override or env default
@@ -9599,19 +9682,29 @@ async function startServer() {
       const to = String(req.body?.recipient || '').trim();
       const rRow: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [req.user!.restaurantId]).catch(() => null);
       const msg = `✅ Test notification from ${rRow?.name || 'Atithi-Setu'} — your ${channel} channel is working.`;
+      // TEST_CHANNEL_DETAILED — every sender here returns the provider's real
+      // answer. The previous version treated "did not throw" as success, and the
+      // WhatsApp/SMS senders never throw, so a rejected test still showed a tick.
       const senders: Record<string, () => Promise<any>> = {
         EMAIL:    () => sendEmail(to, 'Atithi-Setu — test notification', msg, `<p>${msg}</p>`),
-        SMS:      () => sendSMS(to, msg),
-        WHATSAPP: () => sendWhatsApp(to, msg),
-        TELEGRAM: () => sendTelegram(to || null, msg),
+        SMS:      () => sendSMSDetailed(to, msg),
+        WHATSAPP: () => sendWhatsAppDetailed(to, msg, null),
+        TELEGRAM: () => sendTelegramDetailed(to || null, msg),
       };
       if (!senders[channel]) return res.status(400).json({ error: 'channel must be EMAIL, SMS, WHATSAPP or TELEGRAM' });
       if (channel !== 'TELEGRAM' && !to) return res.status(400).json({ error: 'recipient is required for this channel' });
-      let ok = true, error: string | null = null;
-      try { await senders[channel](); } catch (e: any) { ok = false; error = String(e?.message || e); }
-      await logAndSend(db, 'TEST', channel, to || 'default', msg, async () => { if (!ok) throw new Error(error || 'send failed'); }).catch(() => {});
-      if (ok) res.json({ success: true });
-      else res.status(502).json({ error: error || 'Send failed — check channel credentials.' });
+      let result: any = null, ok = true, error: string | null = null, code: string | null = null;
+      try {
+        result = await senders[channel]();
+        if (result && typeof result === 'object' && 'ok' in result) {
+          ok = !!result.ok; error = result.error || null; code = result.code || null;
+        } else if (typeof result === 'boolean') {
+          ok = result; error = result ? null : 'The mail server did not accept the message.';
+        }
+      } catch (e: any) { ok = false; error = String(e?.message || e); code = 'EXCEPTION'; }
+      await logAndSend(db, 'TEST', channel, to || 'default', msg, async () => (result && typeof result === 'object' && 'ok' in result) ? result : { ok, error }, 'TEST').catch(() => {});
+      if (ok) res.json({ success: true, provider_message_id: (result && result.id) || null });
+      else res.status(502).json({ error: error || 'Send failed — check channel credentials.', code });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Test send failed' });
     }
@@ -53748,8 +53841,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-customer-gst-details',
+    commit_marker: 'notif-engine-guest-reach-truthful-log',
     code_features: [
+      'notif-engine-guest-reach-truthful-log',        //FIX (notification engine review, 10 Sep 2026 — stage A of the rebuild). TWO STRUCTURAL DEFECTS, both proven on live data. (1) NO GUEST HAS EVER BEEN REACHED, on any channel, for any event: `triggerNotification` read the guest address straight out of the event payload (`data.customerEmail`), and NOT ONE of the 60 `triggerNotification(...)` call sites passes it — with no email the CUSTOMER branch fell through to `_resolveRecipients(id,'CUSTOMER')`, which looks for staff whose job title is CUSTOMER and finds none. Evidence: 134 deliveries on RESTO-1003, 100% TELEGRAM to one staff chat, 0 WhatsApp/SMS/EMAIL ever. New `_resolveGuestContact(db, data)` resolves the guest from the RECORD the event is about (room_bookings / event_bookings / orders) with the payload still winning when supplied, so 60 call sites stay untouched and a phone-only guest (the norm in India) is now reachable. (2) THE DELIVERY LOG LIED: `sendWhatsApp`/`sendSMS` caught their own errors and returned void, so `logAndSend` saw no throw and wrote SENT — 134 of 134 with no failure path in existence. Added `sendWhatsAppDetailed`/`sendSMSDetailed` returning `SendResult {ok,id,error,code}` (mirroring the existing sendTelegramDetailed convention; the plain senders remain untouched wrappers for their other callers), and `logAndSend` now records the PROVIDER's answer plus `provider_message_id`, `error_code` and `audience`. The owner-facing per-channel TEST button had the same lie and now reports the real result. Also: WhatsApp is ONE shared Atithi-Setu number by design, so guest-bound SMS/WhatsApp is prefixed with the property name when the copy does not already carry it. `sendWhatsAppDetailed` accepts an approved-template payload (Meta rejects business-initiated free-form text outside the 24h window with 131047) — wiring per-event templates is stage D. Smoke: TC-NOTIF-GUEST-REACHED, TC-NOTIF-TRUTHFUL-LOG. tsc + vite build clean.',
       'event-customer-gst-details',                   //FEATURE (client gap, 9 Sep 2026): an event customer claiming INPUT TAX CREDIT needs its name, ADDRESS and GSTIN on the tax invoice (Rule 46). `customer_gstin` existed on event_bookings and showed on the on-screen folio, but (a) there was NO customer address column at all and (b) neither ever reached the PRINTED invoice — `buildInvoiceData` passed only name/phone/email. Added: `event_bookings.customer_address` (migration in ensureEventTables, never in a handler); both fields carried into the invoice PDF and rendered in the "Prepared For" block — address lines, then `GSTIN: …` — ONLY when present, so a walk-in consumer invoice is byte-for-byte as before. NEW dedicated route `PUT /events/bookings/:bid/gst-details` (EVENTS_BOOKINGS UPDATE): validates the 15-char GSTIN, requires an address alongside it, `\'\'` clears, absent key leaves as-is, audited as GST_DETAILS_UPDATED, 409 on a CANCELLED booking. It is deliberately SEPARATE from `PUT /events/bookings/:bid` (which still 409s a COMPLETED booking — that lock protects the AMOUNTS): these fields carry no money, so a company can ask for a GST invoice AFTER the function and staff just fill them in and reprint. New `<GstDetailsPanel>` beside the invoice actions shows whether details will print. Smoke: TC-EVT-GST-VALIDATION, TC-EVT-GST-ON-INVOICE, TC-EVT-GST-AFTER-COMPLETE. tsc + vite build clean.',
       'hotel-checkin-time-policy-b',                  //BUGFIX (caught by the new smoke case on the first deploy): both clock-time settings validated with `/^\\d{2}:\\d{2}$/`, which accepts "25:99" — shape only, not a real time. Stored, it reads back as minute 1599, i.e. later than any wall clock, so an early-arrival charge would fire on EVERY check-in (and a late-checkout cutoff of "25:99" would never fire). All four uses now share `HHMM_RE = /^([01]\\d|2[0-3]):[0-5]\\d$/` — the two PATCH validators and the two fee calculators. Pre-existing weakness on the late-checkout field, inherited when the check-in side was mirrored from it.',
       'hotel-checkin-time-policy',                    //FEATURE (client gap, 9 Sep 2026): the ARRIVAL half of an 11-to-11 house. Only the departure side existed (`hotel_late_checkout_time` auto-adds one night past the cutoff); check-in was gated on the check-in DATE only, no arrival time was published anywhere and an early arrival was never charged. Two new central columns: `hotel_check_in_time` (HH:MM, published to the guest on the booking confirmation — "Check-in: 20 Sep from 11:00" in both the text and HTML templates, alongside the check-out time) and `hotel_early_checkin_charge` (default 0). New `computeEarlyCheckinFee` mirrors `computeLateCheckoutFee`: when the charge is ON and the guest arrives on the arrival date BEFORE the cutoff (Asia/Kolkata), one extra night at the booking room_rate is posted by `addEarlyCheckinFolioEntry` as its own visible ROOM_CHARGE line (GST at the tariff slab), audited as EARLY_CHECKIN_FEE, waivable per arrival with `waive_early_checkin: true`, and returned on the check-in response as `early_checkin` so the desk can see what happened. **It NEVER blocks a check-in** — a clean room at 08:00 should be given to the guest; the policy question is only whether it is paid for. Both fields are written with COALESCE (a partial PATCH leaves them alone, deliberately NOT repeating the direct-assign trap of the older stay/refund fields; \'\' clears the time) and are validated HH:MM. Settings UI gets the time + an off-by-default "Charge for early arrival" toggle. Smoke: TC-HOTEL-CHECKIN-TIME-SETTING, TC-HOTEL-EARLY-CHECKIN-CHARGE, TC-HOTEL-EARLY-CHECKIN-NO-BLOCK. tsc + vite build clean.',

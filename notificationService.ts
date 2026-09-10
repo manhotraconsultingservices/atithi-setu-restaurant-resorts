@@ -1684,6 +1684,110 @@ export async function sendSMS(to: string, message: string): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Delivery outcome — what the provider actually said.
+//
+// The original senders swallowed their errors and returned void, so a caller
+// could not tell a delivered message from a rejected one; the delivery log then
+// recorded every attempt as SENT (134 of 134 on the live tenant, with no path
+// that could ever record a failure). These *Detailed* variants return the real
+// outcome, mirroring the existing sendTelegramDetailed convention. The plain
+// senders below are kept as thin wrappers so every existing caller is unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+export interface SendResult {
+  ok: boolean;
+  id?: string;        // provider message id — the handle for later delivery receipts
+  error?: string;     // human-readable reason, safe to show an owner
+  code?: string;      // provider error code, e.g. Meta 131047
+}
+
+// A WhatsApp template message. Meta allows free-form text ONLY inside the
+// 24-hour customer-service window that opens when the CUSTOMER writes first.
+// Anything the business initiates — a booking confirmation, a payment link, a
+// reminder — must use a template approved in advance, or Meta rejects it with
+// error 131047. Guests never message the property first, so business-initiated
+// sends are the normal case here, not the exception.
+export interface WhatsAppTemplate {
+  name: string;                     // approved template name in Meta Business Manager
+  languageCode?: string;            // e.g. 'en' / 'en_US' — must match the approved template
+  variables?: (string | number)[];  // body {{1}}, {{2}}, … in order
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sendWhatsAppDetailed — Meta Cloud API, returning the real outcome.
+// Docs: https://developers.facebook.com/docs/whatsapp/cloud-api/messages
+// ─────────────────────────────────────────────────────────────────────────────
+export async function sendWhatsAppDetailed(
+  to: string,
+  message: string,
+  template?: WhatsAppTemplate | null,
+): Promise<SendResult> {
+  if (!META_WA_ACCESS_TOKEN || !META_WA_PHONE_NUMBER_ID) {
+    return { ok: false, error: 'WhatsApp is not connected yet — add the Meta credentials in platform settings.', code: 'NOT_CONFIGURED' };
+  }
+  const phone = toE164(to);
+  const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${META_WA_PHONE_NUMBER_ID}/messages`;
+  const payload: any = template && template.name
+    ? {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: phone,
+        type: 'template',
+        template: {
+          name: template.name,
+          language: { code: template.languageCode || 'en' },
+          ...(template.variables && template.variables.length
+            ? { components: [{ type: 'body', parameters: template.variables.map(v => ({ type: 'text', text: String(v == null ? '' : v) })) }] }
+            : {}),
+        },
+      }
+    : {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: phone,
+        type: 'text',
+        text: { preview_url: false, body: message },
+      };
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${META_WA_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body: any = await response.json().catch(() => ({}));
+    if (!response.ok || body?.error) {
+      const e = body?.error || {};
+      const code = String(e.code != null ? e.code : response.status);
+      // 131047 is the one that matters: the service window has closed, so this
+      // had to be a template. Say so plainly rather than echoing Meta's wording.
+      const friendly = code === '131047'
+        ? 'WhatsApp refused a plain message outside the 24-hour reply window — this notification needs an approved template.'
+        : (e.error_user_msg || e.message || `WhatsApp rejected the message (HTTP ${response.status})`);
+      console.error('[Notification] Meta WhatsApp API error:', JSON.stringify(body));
+      return { ok: false, error: String(friendly).slice(0, 300), code };
+    }
+    const id = body?.messages?.[0]?.id;
+    console.log(`[Notification] WhatsApp ${template && template.name ? `template "${template.name}" ` : ''}sent → ${phone}${id ? ` (${id})` : ''}`);
+    return { ok: true, id };
+  } catch (err: any) {
+    console.error('[Notification] WhatsApp (Meta) send failed:', err);
+    return { ok: false, error: String(err?.message || err).slice(0, 300), code: 'NETWORK' };
+  }
+}
+
+// SMS with the real outcome returned (Twilio).
+export async function sendSMSDetailed(to: string, message: string): Promise<SendResult> {
+  if (!twilioClient) return { ok: false, error: 'SMS is not connected yet — add the Twilio credentials in platform settings.', code: 'NOT_CONFIGURED' };
+  try {
+    const res: any = await twilioClient.messages.create({ body: message, from: process.env.TWILIO_PHONE_NUMBER, to: toE164(to) });
+    console.log(`[Notification] SMS sent → ${to}`);
+    return { ok: true, id: res?.sid };
+  } catch (err: any) {
+    console.error('[Notification] SMS send failed:', err);
+    return { ok: false, error: String(err?.message || err).slice(0, 300), code: String(err?.code || 'ERROR') };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // sendWhatsApp  — Meta Cloud API
 // Docs: https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages
 // ─────────────────────────────────────────────────────────────────────────────
