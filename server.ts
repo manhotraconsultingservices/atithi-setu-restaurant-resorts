@@ -9776,8 +9776,11 @@ async function startServer() {
       await db.run("UPDATE tenant_email_config SET verified_at = ?, last_error = ? WHERE id = 'DEFAULT'",
         [out.ok ? new Date().toISOString() : null, out.ok ? null : String(out.error || '').slice(0, 300)]).catch(() => {});
       _invalidateMailCfg(req.user!.restaurantId);
+      // NOT 502: Cloudflare sits in front of this app and replaces any 502 with
+      // its own HTML error page, so the real reason never reaches the owner. A
+      // rejected mail-server config is a client-correctable condition anyway.
       if (out.ok) res.json({ success: true });
-      else res.status(502).json({ error: out.error || 'The mail server refused the connection.', code: out.code });
+      else res.status(400).json({ error: out.error || 'The mail server refused the connection.', code: out.code });
     } catch (err: any) { res.status(500).json({ error: 'Could not reach the mail server' }); }
   });
 
@@ -9882,8 +9885,10 @@ async function startServer() {
         }
       } catch (e: any) { ok = false; error = String(e?.message || e); code = 'EXCEPTION'; }
       await logAndSend(db, 'TEST', channel, to || 'default', msg, async () => (result && typeof result === 'object' && 'ok' in result) ? result : { ok, error }, 'TEST').catch(() => {});
+      // 400 rather than 502 — Cloudflare swallows a 502 and serves its own HTML
+      // page, which would hide the provider's actual reason from the owner.
       if (ok) res.json({ success: true, provider_message_id: (result && result.id) || null });
-      else res.status(502).json({ error: error || 'Send failed — check channel credentials.', code });
+      else res.status(400).json({ error: error || 'Send failed — check channel credentials.', code });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Test send failed' });
     }
@@ -54025,7 +54030,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-tenant-smtp-templates-ui',
+    commit_marker: 'notif-tenant-smtp-templates-ui-b',
     code_features: [
       'notif-tenant-smtp-templates-ui',               //FEATURE (notification rebuild, stages B+C, 10 Sep 2026). (1) PER-TENANT MAIL SERVER: guest email now leaves the PROPERTY's own domain. New tenant-scoped `tenant_email_config` (host/port/secure/user/password/from/reply-to/enabled), password encrypted at rest with AES-256-GCM keyed off JWT_SECRET and NEVER returned by the API (the UI only learns `has_password`); `sendEmailAs(cfg,…)` in notificationService builds a per-config cached nodemailer transport and returns a real SendResult; `verifyTenantSmtp` checks credentials without sending. Owner API: GET/PUT `/api/owner/email-config` + POST `/api/owner/email-config/verify`. Falls back to the platform account when unset, so nothing changes for tenants who never configure one. **The platform BCC is gone for guest mail** — every guest email used to be blind-copied to the shared platform mailbox (thirteen businesses' guest correspondence in one operator inbox, which no guest consented to); TEAM mail on the platform sender keeps it. (2) CHANNEL-SPECIFIC WORDING: `notification_templates` gains `whatsapp_template`, `wa_meta_template_name`, `wa_meta_template_lang` — one shared body cannot serve both a WhatsApp line and a structured email; the dispatcher now picks the WhatsApp copy when written and sends the mapped APPROVED Meta template (with the property name as the first variable, since the sender number is shared). (3) NEW NOTIFICATIONS SCREEN: the ~100-row role×channel×3-text-column switchboard is replaced by three tabs — What gets sent (collapsible groups; per event the audience collapses to Guests / My team with four channel chips), Message wording (per-event email subject+body and WhatsApp copy with live preview, sample variables and the Meta template mapping), Channels & delivery (own mail server form with Check-connection, WhatsApp shared-sender explainer, and a delivery log that now shows audience and the real failure reason). tsc + vite build clean.',
       'notif-engine-guest-reach-truthful-log',        //FIX (notification engine review, 10 Sep 2026 — stage A of the rebuild). TWO STRUCTURAL DEFECTS, both proven on live data. (1) NO GUEST HAS EVER BEEN REACHED, on any channel, for any event: `triggerNotification` read the guest address straight out of the event payload (`data.customerEmail`), and NOT ONE of the 60 `triggerNotification(...)` call sites passes it — with no email the CUSTOMER branch fell through to `_resolveRecipients(id,'CUSTOMER')`, which looks for staff whose job title is CUSTOMER and finds none. Evidence: 134 deliveries on RESTO-1003, 100% TELEGRAM to one staff chat, 0 WhatsApp/SMS/EMAIL ever. New `_resolveGuestContact(db, data)` resolves the guest from the RECORD the event is about (room_bookings / event_bookings / orders) with the payload still winning when supplied, so 60 call sites stay untouched and a phone-only guest (the norm in India) is now reachable. (2) THE DELIVERY LOG LIED: `sendWhatsApp`/`sendSMS` caught their own errors and returned void, so `logAndSend` saw no throw and wrote SENT — 134 of 134 with no failure path in existence. Added `sendWhatsAppDetailed`/`sendSMSDetailed` returning `SendResult {ok,id,error,code}` (mirroring the existing sendTelegramDetailed convention; the plain senders remain untouched wrappers for their other callers), and `logAndSend` now records the PROVIDER's answer plus `provider_message_id`, `error_code` and `audience`. The owner-facing per-channel TEST button had the same lie and now reports the real result. Also: WhatsApp is ONE shared Atithi-Setu number by design, so guest-bound SMS/WhatsApp is prefixed with the property name when the copy does not already carry it. `sendWhatsAppDetailed` accepts an approved-template payload (Meta rejects business-initiated free-form text outside the 24h window with 131047) — wiring per-event templates is stage D. Smoke: TC-NOTIF-GUEST-REACHED, TC-NOTIF-TRUTHFUL-LOG. tsc + vite build clean.',
