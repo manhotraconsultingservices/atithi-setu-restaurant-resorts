@@ -319,6 +319,57 @@ export function buildNotificationContent(
           `<p>Guests: ${data.guests || 'N/A'}</p>`,
       };
 
+    /* ── Spa & wellness ─────────────────────────────────────────────── */
+
+    case 'SPA_APPOINTMENT_CONFIRMED':
+      return {
+        subject: `Your appointment at ${r} is confirmed`,
+        text:
+          `Hello ${data.guestName || 'there'}, your appointment at ${r} is confirmed.\n` +
+          `${data.serviceName || 'Treatment'}: ${data.appointmentAt || ''}\n` +
+          (data.therapistName ? `With: ${data.therapistName}\n` : '') +
+          `\nPlease arrive about ten minutes early so you can settle in.`,
+        html:
+          `<h2 style="color:#0f766e">Your appointment is confirmed</h2>` +
+          `<p>Hello <strong>${data.guestName || 'there'}</strong>, we look forward to seeing you at <strong>${r}</strong>.</p>` +
+          `<div style="background:#f0fdfa;padding:16px;border-radius:8px;margin:16px 0">` +
+          `<p style="margin:2px 0"><strong>${data.serviceName || 'Treatment'}</strong></p>` +
+          `<p style="margin:2px 0;color:#475569">${data.appointmentAt || ''}</p>` +
+          (data.therapistName ? `<p style="margin:2px 0;color:#475569">With ${data.therapistName}</p>` : '') +
+          `</div>` +
+          `<p style="color:#475569;font-size:14px">Please arrive about ten minutes early so you can settle in.</p>`,
+      };
+
+    case 'SPA_APPOINTMENT_REMINDER':
+      return {
+        subject: `Reminder — your appointment at ${r} tomorrow`,
+        text:
+          `Hello ${data.guestName || 'there'}, a reminder of your appointment at ${r}.\n` +
+          `${data.serviceName || 'Treatment'}: ${data.appointmentAt || ''}\n` +
+          `\nIf you need to change it, just reply to this message.`,
+        html:
+          `<h2 style="color:#0f766e">See you tomorrow</h2>` +
+          `<p>Hello <strong>${data.guestName || 'there'}</strong>, a reminder of your appointment at <strong>${r}</strong>.</p>` +
+          `<div style="background:#f0fdfa;padding:16px;border-radius:8px;margin:16px 0">` +
+          `<p style="margin:2px 0"><strong>${data.serviceName || 'Treatment'}</strong></p>` +
+          `<p style="margin:2px 0;color:#475569">${data.appointmentAt || ''}</p>` +
+          `</div>` +
+          `<p style="color:#475569;font-size:14px">If you need to change it, just reply to this message.</p>`,
+      };
+
+    case 'SPA_APPOINTMENT_CANCELLED':
+      return {
+        subject: `Your appointment at ${r} has been cancelled`,
+        text:
+          `Hello ${data.guestName || 'there'}, your appointment at ${r} on ${data.appointmentAt || 'the scheduled time'} has been cancelled` +
+          `${data.reason ? ` — ${data.reason}` : ''}.\n\nIf this was not expected, please reply and we will sort it out.`,
+        html:
+          `<h2 style="color:#b45309">Appointment cancelled</h2>` +
+          `<p>Hello <strong>${data.guestName || 'there'}</strong>, your appointment at <strong>${r}</strong> on ` +
+          `${data.appointmentAt || 'the scheduled time'} has been cancelled${data.reason ? ` — ${data.reason}` : ''}.</p>` +
+          `<p style="color:#475569;font-size:14px">If this was not expected, please reply and we will sort it out.</p>`,
+      };
+
     case 'BOOKING_CONFIRMED':
       return {
         subject: `✅ Booking Confirmed — ${r}`,

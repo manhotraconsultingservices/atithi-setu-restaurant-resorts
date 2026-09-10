@@ -6707,6 +6707,14 @@ async function _resolveGuestContact(db: any, data: any): Promise<{ email?: strin
         out.name  = out.name  || pick(e.customer_name);
       }
     }
+    const appointmentId = pick(data?.appointmentId, data?.appointment_id);
+    if (appointmentId && (!out.email || !out.phone)) {
+      const a: any = await db.get("SELECT client_name, client_phone FROM spa_appointments WHERE id = ?", [appointmentId]).catch(() => null);
+      if (a) {
+        out.phone = out.phone || pick(a.client_phone);
+        out.name  = out.name  || pick(a.client_name);
+      }
+    }
     const orderId = pick(data?.orderId, data?.order_id);
     if (orderId && (!out.email || !out.phone)) {
       const o: any = await db.get("SELECT customer_name, customer_phone, customer_email FROM orders WHERE id = ?", [orderId]).catch(() => null);
@@ -29623,8 +29631,34 @@ ${data.tenant.name}`;
     return db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]);
   };
 
+  // Guest notifications for the spa. The module had none at all until now — a
+  // client could book a treatment and never hear from the property again. Shaped
+  // like notifyEvent: fire-and-forget, carries the client's details so the
+  // dispatcher does not have to look them up, and never blocks the request.
+  const notifySpa = (restaurantId: string, eventName: string, appt: any, extra: Record<string, any> = {}): void => {
+    (async () => {
+      try {
+        const when = appt?.start_at ? new Date(appt.start_at) : null;
+        await triggerNotification(restaurantId, eventName, {
+          appointmentId: appt?.id,
+          customerPhone: appt?.client_phone || undefined,
+          customerName: appt?.client_name || '',
+          guestName: appt?.client_name || '',
+          serviceName: appt?.service_name || 'your treatment',
+          therapistName: appt?.therapist_name || '',
+          appointmentAt: when ? when.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '',
+          appointmentDate: when ? when.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium' }) : '',
+          ...extra,
+        });
+      } catch (e) { console.warn('[spa] notifySpa failed:', (e as any)?.message || e); }
+    })();
+  };
+
   app.post("/api/restaurant/:id/spa/appointments/:aid/confirm", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
-    try { const row = await spaSetStatus(req, res, 'CONFIRMED'); if (row) res.json(row); }
+    try {
+      const row = await spaSetStatus(req, res, 'CONFIRMED');
+      if (row) { notifySpa(req.params.id, 'SPA_APPOINTMENT_CONFIRMED', row); res.json(row); }
+    }
     catch (err: any) { res.status(500).json({ error: "Failed to confirm" }); }
   });
   app.post("/api/restaurant/:id/spa/appointments/:aid/check-in", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
@@ -29644,7 +29678,9 @@ ${data.tenant.name}`;
         summary: `Appointment "${before?.service_name || 'service'}"${before?.client_name ? ` · ${before.client_name}` : ''} cancelled${req.body?.reason ? ` — ${req.body.reason}` : ''}`,
         before: { status: before?.status }, after: { status: 'CANCELLED', reason: req.body?.reason || null },
       }).catch(() => {});
-      res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
+      const cancelled = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      notifySpa(req.params.id, 'SPA_APPOINTMENT_CANCELLED', cancelled, { reason: req.body?.reason || '' });
+      res.json(cancelled);
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel" }); }
   });
   app.post("/api/restaurant/:id/spa/appointments/:aid/no-show", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
@@ -54417,8 +54453,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-stage-d-templates-webhook-consent',
+    commit_marker: 'spa-guest-notifications',
     code_features: [
+      'spa-guest-notifications',                     //FEATURE + CORRECTION (10 Sep 2026). Spa & Wellness raised NO guest notifications at all — a client could book a treatment and never hear from the property again. Added `notifySpa` (shaped like the events module's `notifyEvent`): **SPA_APPOINTMENT_CONFIRMED** on confirm, **SPA_APPOINTMENT_CANCELLED** on cancel (carrying the reason), and **SPA_APPOINTMENT_REMINDER** from a new 18:00 IST cron the evening before, deduped centrally via `sent_spa_reminders` exactly like the hotel pre-arrival sweep and scoped to `spa_enabled` tenants. `_resolveGuestContact` now also resolves a client from `spa_appointments` (client_name/client_phone). Written copy added for all three, and the three events are in the settings catalogue under a new Spa & Wellness group so an owner can switch them on per channel. **CORRECTION to the 10 Sep review:** the "12 dead switches" figure was wrong — my detector only matched a literal event name passed directly to `triggerNotification`, so it missed (a) the `notifyEvent` wrapper, through which all five EVENT_* notifications DO fire and DO pass customer contact, and (b) computed names (`const eventName = status === ... ? 'ORDER_READY' : 'ORDER_CANCELLED'`), which covers BOOKING_CONFIRMED/ORDER_READY/ORDER_CANCELLED/DAILY_REPORT. The genuinely unfired list is just three: CUSTOMER_INVOICE, NEW_FEEDBACK, STAFF_ATTENDANCE. tsc + vite build clean.',
       'notif-stage-d-templates-webhook-consent',      //FEATURE (notification rebuild, stage D, 10 Sep 2026). (1) APPROVED TEMPLATES ARE PLATFORM PROPERTY, not tenant: the WhatsApp sender is ONE shared Atithi-Setu number and Meta will not let an approved template be edited afterwards, so the event→template mapping moved to central `wa_template_map` (template_name, language, category, variables) managed from the ADMIN console; the tenant keeps only the free-form wording used INSIDE the 24-hour reply window and is told which template applies. Variable order is owner-mapped, with `restaurantName` forced into {{1}} because the sender is shared. (2) THE WEBHOOK NOW DOES ITS JOB — it previously console.logged and dropped everything. Verifies Meta's X-Hub-Signature-256 (when META_WA_APP_SECRET is set) over the raw body, applies delivery/read/failed receipts to the right tenant's `notification_deliveries` row via the central index (receipts carry a message id and no tenant), records inbound messages to open the 24-hour service window, and honours STOP/UNSUBSCRIBE + START/SUBSCRIBE. Inside the window we send free-form text (not billed); outside it the approved template. (3) CONSENT: central `messaging_optout` checked before EVERY guest send on WhatsApp and email — a blocked contact is logged as SKIPPED with the reason rather than silently dropped. Platform-wide for WhatsApp because one ignored opt-out damages the shared number's quality rating for every tenant. Owner API to view/add/remove. (4) COST ATTRIBUTION: central `messaging_usage` records every send with its Meta BILLING CATEGORY (MARKETING/UTILITY/AUTHENTICATION/SERVICE), so `/api/admin/messaging/usage` reports messages, failures and estimated cost per tenant against editable `messaging_rates`. New admin endpoints: whatsapp/templates (live list from Meta), whatsapp/template-map (GET/PUT), messaging/rates (GET/PUT), messaging/usage. tsc + vite build clean.',
       'notif-tenant-smtp-templates-ui',               //FEATURE (notification rebuild, stages B+C, 10 Sep 2026). (1) PER-TENANT MAIL SERVER: guest email now leaves the PROPERTY's own domain. New tenant-scoped `tenant_email_config` (host/port/secure/user/password/from/reply-to/enabled), password encrypted at rest with AES-256-GCM keyed off JWT_SECRET and NEVER returned by the API (the UI only learns `has_password`); `sendEmailAs(cfg,…)` in notificationService builds a per-config cached nodemailer transport and returns a real SendResult; `verifyTenantSmtp` checks credentials without sending. Owner API: GET/PUT `/api/owner/email-config` + POST `/api/owner/email-config/verify`. Falls back to the platform account when unset, so nothing changes for tenants who never configure one. **The platform BCC is gone for guest mail** — every guest email used to be blind-copied to the shared platform mailbox (thirteen businesses' guest correspondence in one operator inbox, which no guest consented to); TEAM mail on the platform sender keeps it. (2) CHANNEL-SPECIFIC WORDING: `notification_templates` gains `whatsapp_template`, `wa_meta_template_name`, `wa_meta_template_lang` — one shared body cannot serve both a WhatsApp line and a structured email; the dispatcher now picks the WhatsApp copy when written and sends the mapped APPROVED Meta template (with the property name as the first variable, since the sender number is shared). (3) NEW NOTIFICATIONS SCREEN: the ~100-row role×channel×3-text-column switchboard is replaced by three tabs — What gets sent (collapsible groups; per event the audience collapses to Guests / My team with four channel chips), Message wording (per-event email subject+body and WhatsApp copy with live preview, sample variables and the Meta template mapping), Channels & delivery (own mail server form with Check-connection, WhatsApp shared-sender explainer, and a delivery log that now shows audience and the real failure reason). tsc + vite build clean.',
       'notif-engine-guest-reach-truthful-log',        //FIX (notification engine review, 10 Sep 2026 — stage A of the rebuild). TWO STRUCTURAL DEFECTS, both proven on live data. (1) NO GUEST HAS EVER BEEN REACHED, on any channel, for any event: `triggerNotification` read the guest address straight out of the event payload (`data.customerEmail`), and NOT ONE of the 60 `triggerNotification(...)` call sites passes it — with no email the CUSTOMER branch fell through to `_resolveRecipients(id,'CUSTOMER')`, which looks for staff whose job title is CUSTOMER and finds none. Evidence: 134 deliveries on RESTO-1003, 100% TELEGRAM to one staff chat, 0 WhatsApp/SMS/EMAIL ever. New `_resolveGuestContact(db, data)` resolves the guest from the RECORD the event is about (room_bookings / event_bookings / orders) with the payload still winning when supplied, so 60 call sites stay untouched and a phone-only guest (the norm in India) is now reachable. (2) THE DELIVERY LOG LIED: `sendWhatsApp`/`sendSMS` caught their own errors and returned void, so `logAndSend` saw no throw and wrote SENT — 134 of 134 with no failure path in existence. Added `sendWhatsAppDetailed`/`sendSMSDetailed` returning `SendResult {ok,id,error,code}` (mirroring the existing sendTelegramDetailed convention; the plain senders remain untouched wrappers for their other callers), and `logAndSend` now records the PROVIDER's answer plus `provider_message_id`, `error_code` and `audience`. The owner-facing per-channel TEST button had the same lie and now reports the real result. Also: WhatsApp is ONE shared Atithi-Setu number by design, so guest-bound SMS/WhatsApp is prefixed with the property name when the copy does not already carry it. `sendWhatsAppDetailed` accepts an approved-template payload (Meta rejects business-initiated free-form text outside the 24h window with 131047) — wiring per-event templates is stage D. Smoke: TC-NOTIF-GUEST-REACHED, TC-NOTIF-TRUTHFUL-LOG. tsc + vite build clean.',
@@ -57492,6 +57529,59 @@ ${data.tenant.name}`;
       UNIQUE (tenant_id, booking_id, sent_on)
     )
   `).catch(() => {});
+
+  // Spa appointment reminders, the evening before. Same shape as the hotel
+  // pre-arrival sweep: deduped centrally so a rerun cannot double-send, and
+  // fired per tenant so each property's own subscription decides the channels.
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS sent_spa_reminders (
+      id SERIAL PRIMARY KEY, tenant_id TEXT NOT NULL, appointment_id TEXT NOT NULL,
+      sent_on DATE NOT NULL DEFAULT CURRENT_DATE,
+      UNIQUE (tenant_id, appointment_id, sent_on))
+  `).catch(() => {});
+
+  cron.schedule('0 18 * * *', async () => {
+    try {
+      const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const todayIST = (tzDate.split(',')[0] || '').trim();
+      const t = new Date(todayIST + 'T00:00:00Z');
+      t.setUTCDate(t.getUTCDate() + 1);
+      const tomorrow = t.toISOString().slice(0, 10);
+      const tenants = await centralDb.query("SELECT id FROM restaurants WHERE is_active = 1 AND spa_enabled = 1").catch(() => []);
+      let sent = 0;
+      for (const tn of (tenants || [])) {
+        try {
+          const db = await getTenantDb(tn.id);
+          const appts: any[] = await db.query(
+            `SELECT id, client_name, client_phone, service_name, start_at
+               FROM spa_appointments
+              WHERE status IN ('BOOKED', 'CONFIRMED') AND start_at::date = ?::date`, [tomorrow]
+          ).catch(() => []);
+          for (const a of appts) {
+            try {
+              await centralDb.run(
+                `INSERT INTO sent_spa_reminders (tenant_id, appointment_id, sent_on) VALUES (?, ?, CURRENT_DATE)
+                 ON CONFLICT (tenant_id, appointment_id, sent_on) DO NOTHING`, [tn.id, a.id]);
+              const dup: any = await centralDb.get(
+                `SELECT COUNT(*) AS n FROM sent_spa_reminders WHERE tenant_id = ? AND appointment_id = ? AND sent_on = CURRENT_DATE`,
+                [tn.id, a.id]);
+              if (Number(dup?.n || 0) > 1) continue;
+            } catch { /* race — fine */ }
+            const when = a.start_at ? new Date(a.start_at) : null;
+            await triggerNotification(tn.id, 'SPA_APPOINTMENT_REMINDER', {
+              appointmentId: a.id, customerPhone: a.client_phone || undefined,
+              guestName: a.client_name || '', customerName: a.client_name || '',
+              serviceName: a.service_name || 'your treatment',
+              appointmentAt: when ? when.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '',
+            }).catch(() => {});
+            sent++;
+          }
+        } catch (e) { console.warn(`[spa-reminder] tenant ${tn.id} skipped:`, e); }
+      }
+      await centralDb.run(`DELETE FROM sent_spa_reminders WHERE sent_on < (CURRENT_DATE - INTERVAL '90 days')`).catch(() => {});
+      if (sent) console.log(`[spa-reminder] ${sent} appointment reminder(s) sent for ${tomorrow}.`);
+    } catch (err) { console.error('[spa-reminder] cron error:', err); }
+  }, { timezone: 'Asia/Kolkata' });
 
   cron.schedule('0 10 * * *', async () => {
     try {

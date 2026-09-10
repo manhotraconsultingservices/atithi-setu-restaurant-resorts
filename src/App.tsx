@@ -69488,7 +69488,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
 const NOTIFICATION_EVENTS: {
   id: string; label: string; roles: string[];
   group: 'Orders' | 'Payments' | 'Bookings' | 'Feedback & Reports' | 'Hotel'
-       | 'Loyalty' | 'Staff' | 'Delivery & OTA' | 'Inventory' | 'System' | 'Events & Convention';
+       | 'Loyalty' | 'Staff' | 'Delivery & OTA' | 'Inventory' | 'System' | 'Events & Convention' | 'Spa & Wellness';
   description: string;
   schedulable?: boolean;
 }[] = [
@@ -69548,6 +69548,10 @@ const NOTIFICATION_EVENTS: {
   { id: 'EVENT_PAYMENT_RECEIVED',     label: 'Event Payment Received',        roles: ['OWNER', 'MANAGER', 'CUSTOMER'],                      group: 'Events & Convention', description: 'Fired when a payment is recorded against an event booking' },
   { id: 'EVENT_CANCELLED',            label: 'Event Cancelled',               roles: ['OWNER', 'MANAGER', 'CUSTOMER'],                      group: 'Events & Convention', description: 'Fired when an event booking is cancelled' },
   { id: 'EVENT_UPCOMING_REMINDER',    label: 'Upcoming Event Reminder',       roles: ['CUSTOMER', 'OWNER'],                                 group: 'Events & Convention', description: 'Sent to the customer a couple of days before a confirmed event' },
+  // Spa & wellness
+  { id: 'SPA_APPOINTMENT_CONFIRMED',  label: 'Appointment Confirmed',         roles: ['CUSTOMER', 'OWNER'],                                 group: 'Spa & Wellness',      description: 'Sent to the client when their treatment booking is confirmed' },
+  { id: 'SPA_APPOINTMENT_REMINDER',   label: 'Appointment Reminder',          roles: ['CUSTOMER'],                                          group: 'Spa & Wellness',      description: 'Sent to the client the evening before their appointment' },
+  { id: 'SPA_APPOINTMENT_CANCELLED',  label: 'Appointment Cancelled',         roles: ['CUSTOMER', 'OWNER'],                                 group: 'Spa & Wellness',      description: 'Sent when a treatment booking is cancelled' },
 ];
 
 // Which capability flag each notification group belongs to. Groups NOT listed
@@ -69561,6 +69565,7 @@ const NOTIFICATION_GROUP_MODULE: Record<string, 'RESTAURANT' | 'HOTEL' | 'EVENTS
   'Inventory': 'RESTAURANT',
   'Hotel': 'HOTEL',
   'Events & Convention': 'EVENTS',
+  'Spa & Wellness': 'SPA',
 };
 
 const NOTIFICATION_CHANNELS = [
