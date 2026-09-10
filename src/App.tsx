@@ -69716,6 +69716,8 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
   const [deliveries, setDeliveries] = useState<any[]>([]);
   const [deliveryCounts, setDeliveryCounts] = useState<{ total: number; sent: number; failed: number }>({ total: 0, sent: 0, failed: 0 });
   const [showLog, setShowLog] = useState(false);
+  const [notifTab, setNotifTab] = useState<string>('EVENTS');
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     fetchSettings();
@@ -69806,10 +69808,7 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
 
   if (loading) return <div className="p-12 text-center text-[#6b5d52] font-medium">Loading notification settings…</div>;
 
-  // Group events by their category
-  // Only surface notification groups for modules this tenant actually has enabled
-  // — a group with no module mapping is common (always shown). Keeps the config
-  // screen to just the notifications the owner can actually act on.
+  // Only surface groups for modules this tenant actually runs.
   const moduleEnabled = (m: string): boolean =>
     m === 'RESTAURANT' ? isRestaurantEnabled !== false
     : m === 'HOTEL' ? !!isHotelEnabled
@@ -69820,234 +69819,415 @@ function NotificationSettings({ restaurantId, token, isHotelEnabled, isRestauran
     const mod = NOTIFICATION_GROUP_MODULE[e.group];
     return !mod || moduleEnabled(mod);
   });
-  const eventGroups = Array.from(
-    new Set(visibleEvents.map(e => e.group))
-  ).map(group => ({
-    group,
-    events: visibleEvents.filter(e => e.group === group),
-  }));
+  const eventGroups = Array.from(new Set(visibleEvents.map(e => e.group)))
+    .map(group => ({ group, events: visibleEvents.filter(e => e.group === group) }));
 
-  // Channel config status pills (purely UI — keys match env var prefixes)
-  const channelStatus = [
-    { label: 'WhatsApp', subtitle: 'Meta Cloud API', key: 'META_WA',  icon: MessageSquare,  color: '#25D366' },
-    { label: 'SMS',      subtitle: 'Twilio',          key: 'TWILIO',   icon: Smartphone,     color: '#F22F46' },
-    { label: 'Email',    subtitle: 'SMTP',            key: 'SMTP',     icon: Mail,           color: '#EA4335' },
-    { label: 'Telegram', subtitle: 'Bot API',         key: 'TELEGRAM', icon: MessageCircle,  color: '#229ED9' },
+  // The old screen showed a row per role with four toggles and three text columns
+  // — around a hundred rows of switchboard. What an owner actually decides is far
+  // smaller: for this event, does the GUEST hear about it, does MY TEAM, and on
+  // which channels. Roles collapse into those two audiences.
+  const audienceOf = (role: string) => String(role).toUpperCase() === 'CUSTOMER' ? 'GUEST' : 'TEAM';
+  const settingFor = (eventId: string, role: string) => settings.find(s => s.event_name === eventId && s.role === role);
+  const channelsOn = (eventId: string, role: string) =>
+    NOTIFICATION_CHANNELS.filter(c => settingFor(eventId, role)?.[c.id]).length;
+  const groupOnCount = (events: any[]) =>
+    events.filter(e => e.roles.some((r: string) => channelsOn(e.id, r) > 0)).length;
+
+  const tabs: { id: string; label: string; icon: any }[] = [
+    { id: 'EVENTS',    label: 'What gets sent', icon: Bell },
+    { id: 'TEMPLATES', label: 'Message wording', icon: FileText },
+    { id: 'CHANNELS',  label: 'Channels & delivery', icon: MessageSquare },
   ];
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold font-serif">Notification Settings</h2>
-          <p className="text-[#6b5d52] mt-1">Toggle alerts for each event and role.</p>
+          <h2 className="text-3xl font-bold font-serif">Notifications</h2>
+          <p className="text-[#6b5d52] mt-1 max-w-xl">Choose what your guests and your team hear about, write the wording, and see what actually got delivered.</p>
         </div>
-        {canEdit && <button
-          onClick={saveSettings}
-          disabled={saving}
-          className="bg-[#cc5a16] text-white px-8 py-3 rounded-2xl font-bold hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center gap-2"
-        >
-          {saving ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
-          Save Changes
-        </button>}
-      </div>
-
-      {/* Smart Alerts — proactive, metric-driven business alerts */}
-      <SmartAlertsPanel token={token} />
-
-      {/* ── Delivery Log — proof the engine is working, per channel, with failures ── */}
-      <div className="bg-white border border-[#cc5a16]/10 rounded-2xl p-5">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-4">
-            <h3 className="font-bold text-[#1a1208] flex items-center gap-2"><MessageCircle size={16} className="text-[#cc5a16]" /> Delivery Log</h3>
-            <div className="flex items-center gap-2 text-xs">
-              <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 font-bold tabular-nums">{deliveryCounts.sent} sent</span>
-              <span className={`px-2.5 py-1 rounded-full font-bold tabular-nums ${deliveryCounts.failed > 0 ? 'bg-rose-50 text-rose-700' : 'bg-[#faf7f2] text-[#9c8e85]'}`}>{deliveryCounts.failed} failed</span>
-              <span className="text-[#9c8e85]">last 30 days</span>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={fetchDeliveries} className="px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/10 text-xs font-bold text-[#1a1208] hover:bg-[#cc5a16]/5 flex items-center gap-1.5"><RefreshCw size={13} /> Refresh</button>
-            <button onClick={() => setShowLog(s => !s)} className="px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/10 text-xs font-bold text-[#1a1208] hover:bg-[#cc5a16]/5">{showLog ? 'Hide' : 'Show'} recent</button>
-          </div>
-        </div>
-        {showLog && (
-          <div className="mt-4 max-h-80 overflow-y-auto rounded-xl border border-[#f0e8d8]">
-            {deliveries.length === 0 ? (
-              <p className="p-4 text-sm text-[#9c8e85] text-center">No notifications sent yet. Enable an event above, then trigger it (or use a per-event test).</p>
-            ) : (
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-[#f5f0e8] text-[#6b5d52] text-[11px] uppercase">
-                  <tr><th className="text-left px-3 py-2">When</th><th className="text-left px-3 py-2">Event</th><th className="text-left px-3 py-2">Channel</th><th className="text-left px-3 py-2">Recipient</th><th className="text-left px-3 py-2">Status</th></tr>
-                </thead>
-                <tbody>
-                  {deliveries.map((d: any) => (
-                    <tr key={d.id} className="border-t border-[#f0e8d8]">
-                      <td className="px-3 py-2 text-xs text-[#6b5d52] whitespace-nowrap">{d.created_at ? new Date(d.created_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' }) : '—'}</td>
-                      <td className="px-3 py-2 text-xs font-medium text-[#1a1208]">{d.event_name}</td>
-                      <td className="px-3 py-2"><span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#fbeee3] text-[#cc5a16]">{d.channel}</span></td>
-                      <td className="px-3 py-2 text-xs text-[#6b5d52] max-w-[180px] truncate" title={d.recipient}>{d.recipient || '—'}</td>
-                      <td className="px-3 py-2">
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${d.status === 'FAILED' ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`} title={d.error || ''}>{d.status}{d.status === 'FAILED' && d.error ? ' ⚠' : ''}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+        {canEdit && notifTab === 'EVENTS' && (
+          <button onClick={saveSettings} disabled={saving}
+            className="bg-[#cc5a16] text-white px-7 py-3 rounded-2xl font-bold hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center gap-2">
+            {saving ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />} Save changes
+          </button>
         )}
       </div>
 
-      {/* ── Per-event toggle table, grouped by category ── */}
-      {eventGroups.map(({ group, events }) => (
-        <div key={group} className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm overflow-hidden">
-          {/* Group header */}
-          <div className="px-8 py-4 bg-[#faf7f2] border-b border-[#cc5a16]/10 flex items-center gap-3">
-            <span className="text-xs font-bold uppercase tracking-widest text-[#1a1208]">{group}</span>
-            <span className="text-[11px] bg-[#cc5a16]/10 text-[#6b5d52] px-2 py-0.5 rounded-full font-bold">{events.length} event{events.length !== 1 ? 's' : ''}</span>
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-[#cc5a16]/10">
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setNotifTab(t.id)}
+            className={cn('flex items-center gap-2 px-5 py-3 text-sm font-bold rounded-t-xl transition-colors',
+              notifTab === t.id ? 'bg-white text-[#cc5a16] border border-b-white border-[#cc5a16]/10 -mb-px' : 'text-[#6b5d52] hover:bg-[#faf7f2]')}>
+            <t.icon size={15} /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ══ WHAT GETS SENT ══ */}
+      {notifTab === 'EVENTS' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 px-4 py-3 rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/10 text-sm text-[#6b5d52]">
+            <span className="font-bold text-[#1a1208]">How to read this:</span>
+            each event can go to your <b>guests</b>, to <b>your team</b>, or both. Click a channel to switch it on for that audience.
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="border-b border-[#cc5a16]/10">
-                  <th className="px-8 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] min-w-[260px]">Event &amp; Role</th>
-                  {NOTIFICATION_CHANNELS.map(channel => (
-                    <th key={channel.id} className="px-6 py-4 text-center">
-                      <div className="flex flex-col items-center gap-1">
-                        <channel.icon size={16} className="text-[#1a1208]" />
-                        <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{channel.label}</span>
-                      </div>
-                    </th>
-                  ))}
-                  <th className="px-4 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] min-w-[160px]">Telegram Chat ID</th>
-                  <th className="px-4 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] min-w-[220px]">Additional Recipients</th>
-                  <th className="px-4 py-4 text-center text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] min-w-[130px]">Schedule Time</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#5A5A40]/5">
-                {events.map(event => (
-                  <React.Fragment key={event.id}>
-                    {event.roles.map((role, idx) => {
-                      const setting = settings.find(s => s.event_name === event.id && s.role === role);
-                      return (
-                        <tr key={`${event.id}-${role}`} className="hover:bg-[#fcfcfc] transition-colors">
-                          <td className="px-8 py-5">
-                            {idx === 0 && (
-                              <div className="flex items-start justify-between gap-2 group mb-1.5">
-                                <div>
-                                  <p className="font-bold text-[#1a1a1a] text-sm">{event.label}</p>
-                                  <p className="text-[11px] text-[#6b5d52] mt-0.5">{event.description}</p>
+          {eventGroups.map(({ group, events }) => {
+            const open = openGroups[group] !== false;
+            const on = groupOnCount(events);
+            return (
+              <div key={group} className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+                <button onClick={() => setOpenGroups(g => ({ ...g, [group]: !open }))}
+                  className="w-full px-6 py-4 bg-[#faf7f2] border-b border-[#cc5a16]/10 flex items-center gap-3 text-left hover:bg-[#f5efe6] transition-colors">
+                  <ChevronRight size={16} className={cn('transition-transform text-[#6b5d52]', open && 'rotate-90')} />
+                  <span className="text-xs font-bold uppercase tracking-widest text-[#1a1208]">{group}</span>
+                  <span className={cn('text-[11px] px-2 py-0.5 rounded-full font-bold',
+                    on > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-[#cc5a16]/10 text-[#6b5d52]')}>
+                    {on > 0 ? `${on} of ${events.length} on` : 'all off'}
+                  </span>
+                </button>
+
+                {open && (
+                  <div className="divide-y divide-[#f0e8d8]">
+                    {events.map(event => (
+                      <div key={event.id} className="px-6 py-4">
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                          <div className="min-w-0">
+                            <p className="font-bold text-[#1a1a1a] text-sm">{event.label}</p>
+                            <p className="text-[12px] text-[#6b5d52] mt-0.5">{event.description}</p>
+                          </div>
+                          <button onClick={() => testNotification(event.id)}
+                            className="shrink-0 px-2.5 py-1 text-[11px] font-bold uppercase tracking-widest text-[#1a1208] bg-[#cc5a16]/5 rounded-lg hover:bg-[#cc5a16]/10">
+                            Test
+                          </button>
+                        </div>
+
+                        <div className="space-y-2">
+                          {event.roles.map((role: string) => {
+                            const aud = audienceOf(role);
+                            const setting = settingFor(event.id, role);
+                            return (
+                              <div key={role} className="flex flex-wrap items-center gap-2 pl-1">
+                                <span className={cn('text-[11px] font-bold px-2 py-1 rounded-lg min-w-[92px] text-center',
+                                  aud === 'GUEST' ? 'bg-blue-50 text-blue-700' : 'bg-[#faf7f2] text-[#6b5d52]')}>
+                                  {aud === 'GUEST' ? 'Guests' : 'My team'}
+                                </span>
+                                {aud === 'TEAM' && (
+                                  <span className="text-[10px] text-[#9c8e85] uppercase tracking-wider">{role.replace(/_/g, ' ')}</span>
+                                )}
+                                <div className="flex flex-wrap gap-1.5">
+                                  {NOTIFICATION_CHANNELS.map(channel => {
+                                    const isOn = !!setting?.[channel.id];
+                                    return (
+                                      <button key={channel.id} onClick={() => handleToggle(event.id, role, channel.id)}
+                                        disabled={!canEdit}
+                                        title={`${channel.label} — ${isOn ? 'on' : 'off'} for ${aud === 'GUEST' ? 'guests' : 'your team'}`}
+                                        className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] font-bold border transition-all disabled:opacity-50',
+                                          isOn ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#9c8e85] border-[#e8dccf] hover:border-[#cc5a16]/40')}>
+                                        <channel.icon size={12} /> {channel.label}
+                                      </button>
+                                    );
+                                  })}
                                 </div>
-                                <button
-                                  onClick={() => testNotification(event.id)}
-                                  className="shrink-0 px-2.5 py-1 text-[11px] font-bold uppercase tracking-widest text-[#1a1208] bg-[#cc5a16]/5 rounded-lg hover:bg-[#cc5a16]/10 transition-all"
-                                >
-                                  Test
-                                </button>
-                              </div>
-                            )}
-                            <span className="inline-block px-2 py-0.5 bg-[#cc5a16]/10 text-[#1a1208] rounded text-[11px] font-bold uppercase tracking-widest">
-                              → {role}
-                            </span>
-                          </td>
-                          {NOTIFICATION_CHANNELS.map(channel => (
-                            <td key={channel.id} className="px-6 py-5 text-center">
-                              <button
-                                onClick={() => handleToggle(event.id, role, channel.id)}
-                                className={cn(
-                                  "w-11 h-6 rounded-full transition-all relative",
-                                  setting?.[channel.id] ? "bg-[#cc5a16]" : "bg-gray-200"
-                                )}
-                                title={setting?.[channel.id] ? 'Enabled — click to disable' : 'Disabled — click to enable'}
-                              >
-                                <div className={cn(
-                                  "absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-all",
-                                  setting?.[channel.id] ? "left-[22px]" : "left-1"
-                                )} />
-                              </button>
-                            </td>
-                          ))}
-                          {/* Telegram Chat ID */}
-                          <td className="px-4 py-5">
-                            <input
-                              placeholder="-100xxxx or @channel"
-                              className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs outline-none focus:ring-2 ring-[#229ED9]/30 font-mono"
-                              value={setting?.telegram_chat_id || ''}
-                              onChange={e => {
-                                const val = e.target.value;
-                                setSettings(prev => {
-                                  const existing = prev.find(s => s.event_name === event.id && s.role === role);
-                                  if (existing) {
-                                    return prev.map(s => (s.event_name === event.id && s.role === role) ? { ...s, telegram_chat_id: val } : s);
-                                  }
-                                  return [...prev, { event_name: event.id, role, telegram_chat_id: val }];
-                                });
-                              }}
-                            />
-                          </td>
-                          {/* Additional Recipients */}
-                          <td className="px-4 py-5">
-                            <input
-                              placeholder="e.g. mgr@resto.com, +919876543210"
-                              className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
-                              value={setting?.recipients || ''}
-                              onChange={e => {
-                                const val = e.target.value;
-                                setSettings(prev => {
-                                  const existing = prev.find(s => s.event_name === event.id && s.role === role);
-                                  if (existing) {
-                                    return prev.map(s => (s.event_name === event.id && s.role === role) ? { ...s, recipients: val } : s);
-                                  }
-                                  return [...prev, { event_name: event.id, role, recipients: val }];
-                                });
-                              }}
-                            />
-                          </td>
-                          {/* Schedule Time — only for schedulable events */}
-                          <td className="px-4 py-5 text-center">
-                            {(event as any).schedulable ? (
-                              <div className="flex flex-col items-center gap-1">
-                                <input
-                                  type="time"
-                                  className="bg-[#faf7f2] border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-xs outline-none focus:ring-2 ring-[#cc5a16]/30 font-mono w-[110px] cursor-pointer"
-                                  value={setting?.schedule_time || ''}
-                                  title={setting?.schedule_time ? `Fires daily at ${setting.schedule_time}` : 'Set a time to auto-send daily'}
-                                  onChange={e => {
-                                    const val = e.target.value;
-                                    setSettings(prev => {
-                                      const existing = prev.find(s => s.event_name === event.id && s.role === role);
-                                      if (existing) {
-                                        return prev.map(s => (s.event_name === event.id && s.role === role) ? { ...s, schedule_time: val } : s);
-                                      }
-                                      return [...prev, { event_name: event.id, role, schedule_time: val }];
-                                    });
-                                  }}
-                                />
-                                {setting?.schedule_time ? (
-                                  <span className="text-[11px] text-[#cc5a16] font-bold">Daily at {setting.schedule_time}</span>
-                                ) : (
-                                  <span className="text-[11px] text-[#9c8e85]">Not scheduled</span>
+                                {aud === 'GUEST' && !!setting?.whatsapp_enabled && (
+                                  <span className="text-[10px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
+                                    needs an approved WhatsApp template
+                                  </span>
                                 )}
                               </div>
-                            ) : (
-                              <span className="text-[11px] text-[#c5b9b2]">—</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-center text-[11px] text-[#9c8e85] py-1.5 md:hidden select-none">‹ scroll ›</p>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
-      ))}
+      )}
 
+      {/* ══ MESSAGE WORDING ══ */}
+      {notifTab === 'TEMPLATES' && (
+        <NotificationTemplatesPanel token={token} restaurantId={restaurantId} events={visibleEvents} canEdit={canEdit} />
+      )}
+
+      {/* ══ CHANNELS & DELIVERY ══ */}
+      {notifTab === 'CHANNELS' && (
+        <div className="space-y-6">
+          <TenantEmailPanel token={token} canEdit={canEdit} />
+
+          {/* WhatsApp — one shared sender, by design */}
+          <div className="bg-white border border-[#cc5a16]/10 rounded-3xl p-6">
+            <div className="flex items-start gap-3">
+              <MessageSquare size={18} className="text-[#25D366] mt-0.5" />
+              <div className="flex-1">
+                <h3 className="font-bold text-[#1a1208]">WhatsApp</h3>
+                <p className="text-sm text-[#6b5d52] mt-1 max-w-2xl">
+                  Messages go out from the shared Atithi-Setu WhatsApp number, so every guest message names your property in the
+                  first line — your guests always know who is writing.
+                </p>
+                <p className="text-[12px] text-[#6b5d52] mt-2 max-w-2xl bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                  <b>Worth knowing:</b> WhatsApp only lets a business start a conversation using wording approved by Meta in advance.
+                  Set that approved template name against each event under <b>Message wording</b>. Without it, WhatsApp will refuse
+                  messages to guests who have not written to you in the last 24 hours.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Delivery log */}
+          <div className="bg-white border border-[#cc5a16]/10 rounded-3xl p-6">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="flex items-center gap-4">
+                <h3 className="font-bold text-[#1a1208] flex items-center gap-2"><MessageCircle size={16} className="text-[#cc5a16]" /> What actually went out</h3>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 font-bold tabular-nums">{deliveryCounts.sent} delivered</span>
+                  <span className={cn('px-2.5 py-1 rounded-full font-bold tabular-nums', deliveryCounts.failed > 0 ? 'bg-rose-50 text-rose-700' : 'bg-[#faf7f2] text-[#9c8e85]')}>{deliveryCounts.failed} failed</span>
+                  <span className="text-[#9c8e85]">last 30 days</span>
+                </div>
+              </div>
+              <button onClick={fetchDeliveries} className="px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/10 text-xs font-bold text-[#1a1208] hover:bg-[#cc5a16]/5 flex items-center gap-1.5"><RefreshCw size={13} /> Refresh</button>
+            </div>
+            <div className="mt-4 max-h-96 overflow-y-auto rounded-2xl border border-[#f0e8d8]">
+              {deliveries.length === 0 ? (
+                <p className="p-6 text-sm text-[#9c8e85] text-center">Nothing sent yet. Switch an event on, then use its Test button.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-[#f5f0e8] text-[#6b5d52] text-[11px] uppercase">
+                    <tr><th className="text-left px-3 py-2">When</th><th className="text-left px-3 py-2">Event</th><th className="text-left px-3 py-2">To</th><th className="text-left px-3 py-2">Channel</th><th className="text-left px-3 py-2">Result</th></tr>
+                  </thead>
+                  <tbody>
+                    {deliveries.map((d: any) => (
+                      <tr key={d.id} className="border-t border-[#f0e8d8]">
+                        <td className="px-3 py-2 text-xs text-[#6b5d52] whitespace-nowrap">{d.created_at ? new Date(d.created_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' }) : '—'}</td>
+                        <td className="px-3 py-2 text-xs font-medium text-[#1a1208]">{d.event_name}</td>
+                        <td className="px-3 py-2 text-xs text-[#6b5d52]">
+                          <span className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded mr-1.5', d.audience === 'GUEST' ? 'bg-blue-50 text-blue-700' : 'bg-[#faf7f2] text-[#9c8e85]')}>{d.audience === 'GUEST' ? 'Guest' : d.audience === 'TEAM' ? 'Team' : '—'}</span>
+                          <span className="max-w-[160px] inline-block truncate align-bottom" title={d.recipient}>{d.recipient || '—'}</span>
+                        </td>
+                        <td className="px-3 py-2"><span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#fbeee3] text-[#cc5a16]">{d.channel}</span></td>
+                        <td className="px-3 py-2">
+                          {d.status === 'FAILED'
+                            ? <span className="text-[11px] text-rose-700" title={d.error || ''}><b>Failed</b>{d.error ? ` — ${String(d.error).slice(0, 60)}` : ''}</span>
+                            : <span className="text-[11px] font-bold text-emerald-700">Delivered</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          <SmartAlertsPanel token={token} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── The property's own mail server ──────────────────────────────────────────
+// Guest email should come from the property's domain, not a shared platform
+// mailbox. Left unset, everything still works through the platform account.
+function TenantEmailPanel({ token, canEdit }: { token: string; canEdit: boolean }) {
+  const toast = useToast();
+  const [cfg, setCfg] = useState<any>(null);
+  const [pw, setPw] = useState('');
+  const [busy, setBusy] = useState(false);
+  const authHdr = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const load = async () => {
+    try { const r = await fetch('/api/owner/email-config', { headers: { Authorization: `Bearer ${token}` } }); if (r.ok) setCfg(await r.json()); }
+    catch { /* ignore */ }
+  };
+  useEffect(() => { load(); }, []);
+  if (!cfg) return null;
+  const set = (k: string, v: any) => setCfg((c: any) => ({ ...c, [k]: v }));
+  const save = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch('/api/owner/email-config', { method: 'PUT', headers: authHdr, body: JSON.stringify({ ...cfg, password: pw }) });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) { toast.success('Mail server saved'); setPw(''); await load(); }
+      else toast.error(d.error || 'Could not save');
+    } finally { setBusy(false); }
+  };
+  const verify = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch('/api/owner/email-config/verify', { method: 'POST', headers: authHdr });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) { toast.success('Your mail server accepted the connection'); await load(); }
+      else toast.error(d.error || 'The mail server refused the connection');
+    } finally { setBusy(false); }
+  };
+  const F = 'w-full bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20';
+  const L = 'block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1';
+  return (
+    <div className="bg-white border border-[#cc5a16]/10 rounded-3xl p-6">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex items-start gap-3">
+          <Mail size={18} className="text-[#EA4335] mt-0.5" />
+          <div>
+            <h3 className="font-bold text-[#1a1208]">Email — your own mail server</h3>
+            <p className="text-sm text-[#6b5d52] mt-1 max-w-2xl">
+              Send guest email from your own domain. Better for deliverability, and guests see your name rather than ours.
+              {!cfg.enabled && cfg.platform_fallback && <> Until you switch this on, email goes out through the shared Atithi-Setu account.</>}
+            </p>
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-sm font-bold text-[#1a1208] shrink-0">
+          <input type="checkbox" className="accent-[#cc5a16]" disabled={!canEdit} checked={!!cfg.enabled} onChange={e => set('enabled', e.target.checked)} />
+          Use my mail server
+        </label>
+      </div>
+
+      {cfg.verified_at && <p className="mt-3 text-[12px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">Connection last checked {new Date(cfg.verified_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}.</p>}
+      {cfg.last_error && <p className="mt-3 text-[12px] text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">Last check failed: {cfg.last_error}</p>}
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+        <div className="md:col-span-2"><label className={L}>Mail server</label><input className={F} disabled={!canEdit} placeholder="smtp.yourdomain.com" value={cfg.host || ''} onChange={e => set('host', e.target.value)} /></div>
+        <div><label className={L}>Port</label><input type="number" className={F} disabled={!canEdit} value={cfg.port ?? 587} onChange={e => set('port', Number(e.target.value))} /></div>
+        <div><label className={L}>Username</label><input className={F} disabled={!canEdit} placeholder="bookings@yourdomain.com" value={cfg.username || ''} onChange={e => set('username', e.target.value)} /></div>
+        <div>
+          <label className={L}>Password</label>
+          <input type="password" className={F} disabled={!canEdit} placeholder={cfg.has_password ? '•••••••• (unchanged)' : 'app password'} value={pw} onChange={e => setPw(e.target.value)} />
+          <p className="text-[10px] text-[#9c8e85] mt-1">Stored encrypted. Leave blank to keep the saved one.</p>
+        </div>
+        <div className="flex items-end pb-1">
+          <label className="flex items-center gap-2 text-sm text-[#6b5d52]">
+            <input type="checkbox" className="accent-[#cc5a16]" disabled={!canEdit} checked={!!cfg.secure} onChange={e => set('secure', e.target.checked)} />
+            Secure (port 465)
+          </label>
+        </div>
+        <div><label className={L}>From address</label><input className={F} disabled={!canEdit} placeholder="bookings@yourdomain.com" value={cfg.from_email || ''} onChange={e => set('from_email', e.target.value)} /></div>
+        <div><label className={L}>From name</label><input className={F} disabled={!canEdit} placeholder="The Grand Hotel" value={cfg.from_name || ''} onChange={e => set('from_name', e.target.value)} /></div>
+        <div><label className={L}>Reply-to <span className="font-normal normal-case text-[#9c8e85]">(optional)</span></label><input className={F} disabled={!canEdit} value={cfg.reply_to || ''} onChange={e => set('reply_to', e.target.value)} /></div>
+      </div>
+
+      {canEdit && (
+        <div className="flex gap-2 mt-4">
+          <button onClick={save} disabled={busy} className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-[#a84612] disabled:opacity-50">Save</button>
+          <button onClick={verify} disabled={busy} className="px-5 py-2.5 rounded-xl font-bold text-sm bg-[#faf7f2] border border-[#e8dccf] text-[#1a1208] hover:bg-[#f0e8d8] disabled:opacity-50">Check connection</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Message wording, per event and per channel ──────────────────────────────
+// Email and WhatsApp need different copy: an email carries a subject and some
+// structure, a WhatsApp message is one short paragraph. Blank fields fall back
+// to the built-in wording, so nothing has to be written for things to work.
+function NotificationTemplatesPanel({ token, restaurantId, events, canEdit }: { token: string; restaurantId: string; events: any[]; canEdit: boolean }) {
+  const toast = useToast();
+  const [rows, setRows] = useState<any[]>([]);
+  const [sel, setSel] = useState<string>(events[0]?.id || '');
+  const [draft, setDraft] = useState<any>({});
+  const [busy, setBusy] = useState(false);
+  const authHdr = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const load = async () => {
+    try { const r = await fetch(`/api/restaurant/${restaurantId}/notification-templates`, { headers: { Authorization: `Bearer ${token}` } }); if (r.ok) setRows(await r.json()); }
+    catch { /* ignore */ }
+  };
+  useEffect(() => { load(); }, []);
+  useEffect(() => { setDraft(rows.find((r: any) => r.event_type === sel) || {}); }, [sel, rows]);
+
+  const event = events.find(e => e.id === sel);
+  const VARS = ['restaurantName', 'guestName', 'checkIn', 'checkOut', 'bookingId', 'amount', 'orderId'];
+  const sample: Record<string, string> = { restaurantName: 'The Grand Hotel', guestName: 'Anita Rao', checkIn: '20 Sep 2026', checkOut: '22 Sep 2026', bookingId: 'BK-1042', amount: '₹12,500', orderId: 'ORD-88' };
+  const preview = (t: string) => String(t || '').replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k) => sample[k] ?? `{{${k}}}`);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/notification-templates/${sel}`, {
+        method: 'PUT', headers: authHdr,
+        body: JSON.stringify({
+          subject_template: draft.subject_template || '', body_template: draft.body_template || '',
+          whatsapp_template: draft.whatsapp_template || '', wa_meta_template_name: draft.wa_meta_template_name || '',
+          wa_meta_template_lang: draft.wa_meta_template_lang || 'en', enabled: draft.enabled !== 0,
+        }),
+      });
+      if (r.ok) { toast.success('Wording saved'); await load(); } else toast.error('Could not save the wording');
+    } finally { setBusy(false); }
+  };
+  const F = 'w-full bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20';
+  const L = 'block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1';
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-4">
+      <div className="bg-white border border-[#cc5a16]/10 rounded-3xl p-3 max-h-[560px] overflow-y-auto">
+        {events.map(e => {
+          const has = rows.find((r: any) => r.event_type === e.id && (r.subject_template || r.body_template || r.whatsapp_template));
+          return (
+            <button key={e.id} onClick={() => setSel(e.id)}
+              className={cn('w-full text-left px-3 py-2 rounded-xl text-sm mb-1 transition-colors',
+                sel === e.id ? 'bg-[#cc5a16] text-white font-bold' : 'text-[#1a1208] hover:bg-[#faf7f2]')}>
+              <span className="block truncate">{e.label}</span>
+              {has && <span className={cn('text-[10px]', sel === e.id ? 'text-white/80' : 'text-emerald-700')}>custom wording</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="bg-white border border-[#cc5a16]/10 rounded-3xl p-6 space-y-5">
+        <div>
+          <h3 className="font-bold text-[#1a1208]">{event?.label || 'Pick an event'}</h3>
+          <p className="text-sm text-[#6b5d52] mt-0.5">{event?.description}</p>
+        </div>
+
+        <div className="text-[12px] text-[#6b5d52] bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2">
+          Put details in with double braces. Available here: {VARS.map(v => <code key={v} className="mx-0.5 bg-white px-1.5 py-0.5 rounded border border-[#e8dccf] text-[11px]">{`{{${v}}}`}</code>)}
+          <span className="block mt-1">Leave a box empty to use the built-in wording.</span>
+        </div>
+
+        <div>
+          <p className="text-xs font-bold uppercase tracking-widest text-[#1a1208] mb-2 flex items-center gap-1.5"><Mail size={13} /> Email</p>
+          <div className="space-y-2">
+            <div><label className={L}>Subject</label><input className={F} disabled={!canEdit} value={draft.subject_template || ''} onChange={e => setDraft({ ...draft, subject_template: e.target.value })} placeholder="Your booking at {{restaurantName}} is confirmed" /></div>
+            <div><label className={L}>Body</label><textarea className={F} rows={4} disabled={!canEdit} value={draft.body_template || ''} onChange={e => setDraft({ ...draft, body_template: e.target.value })} placeholder="Dear {{guestName}}, we look forward to welcoming you on {{checkIn}}." /></div>
+          </div>
+          {(draft.subject_template || draft.body_template) && (
+            <div className="mt-2 text-[12px] bg-white border border-[#e8dccf] rounded-xl p-3">
+              <p className="font-bold text-[#1a1208]">{preview(draft.subject_template) || '(built-in subject)'}</p>
+              <p className="text-[#6b5d52] whitespace-pre-wrap mt-1">{preview(draft.body_template)}</p>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <p className="text-xs font-bold uppercase tracking-widest text-[#1a1208] mb-2 flex items-center gap-1.5"><MessageSquare size={13} /> WhatsApp</p>
+          <textarea className={F} rows={3} disabled={!canEdit} value={draft.whatsapp_template || ''} onChange={e => setDraft({ ...draft, whatsapp_template: e.target.value })} placeholder="Hi {{guestName}}, your booking at {{restaurantName}} is confirmed for {{checkIn}}." />
+          {draft.whatsapp_template && (
+            <div className="mt-2 text-[13px] bg-[#DCF8C6] text-[#1a1208] rounded-2xl rounded-tl-sm p-3 max-w-md whitespace-pre-wrap">{preview(draft.whatsapp_template)}</div>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+            <div>
+              <label className={L}>Approved template name</label>
+              <input className={F} disabled={!canEdit} value={draft.wa_meta_template_name || ''} onChange={e => setDraft({ ...draft, wa_meta_template_name: e.target.value })} placeholder="booking_confirmation" />
+            </div>
+            <div>
+              <label className={L}>Template language</label>
+              <input className={F} disabled={!canEdit} value={draft.wa_meta_template_lang || 'en'} onChange={e => setDraft({ ...draft, wa_meta_template_lang: e.target.value })} placeholder="en" />
+            </div>
+          </div>
+          <p className="text-[11px] text-[#6b5d52] mt-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+            WhatsApp only lets a business start a conversation with wording Meta approved in advance. Create the template in Meta
+            Business Manager, then put its exact name here. Your property name is always sent as the first detail, so guests know
+            who is writing.
+          </p>
+        </div>
+
+        {canEdit && (
+          <div className="flex gap-2 pt-1">
+            <button onClick={save} disabled={busy || !sel} className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-[#a84612] disabled:opacity-50">Save wording</button>
+            <button onClick={() => setDraft({ ...draft, subject_template: '', body_template: '', whatsapp_template: '' })} className="px-5 py-2.5 rounded-xl font-bold text-sm bg-[#faf7f2] border border-[#e8dccf] text-[#1a1208] hover:bg-[#f0e8d8]">Reset to built-in</button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -1899,6 +1899,94 @@ export interface EmailAttachment {
   contentType?: string;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-tenant mail. Guest email should leave the PROPERTY's own domain, not a
+// shared platform mailbox: it is better for deliverability, it is what the guest
+// expects to see, and it removes the blind-copy of every guest email into the
+// operator's inbox (thirteen businesses' correspondence in one place, which no
+// guest consented to). Falls back to the platform account when a property has
+// not configured its own — so nothing changes for tenants who never set one up.
+// ─────────────────────────────────────────────────────────────────────────────
+export interface TenantSmtpConfig {
+  host: string;
+  port?: number;
+  secure?: boolean;
+  user?: string;
+  pass?: string;
+  from_email?: string;
+  from_name?: string;
+  reply_to?: string;
+}
+
+// Transporters are expensive to build and hold a connection pool, so cache one
+// per configuration. Keyed by a fingerprint so an edited config rebuilds itself.
+const _tenantTransports = new Map<string, any>();
+function _tenantTransport(cfg: TenantSmtpConfig): any {
+  const fp = [cfg.host, cfg.port, cfg.secure, cfg.user, cfg.pass].join('|');
+  const hit = _tenantTransports.get(fp);
+  if (hit) return hit;
+  const t = nodemailer.createTransport({
+    host: cfg.host,
+    port: Number(cfg.port || 587),
+    secure: !!cfg.secure,
+    auth: cfg.user ? { user: cfg.user, pass: cfg.pass || '' } : undefined,
+  });
+  if (_tenantTransports.size > 50) _tenantTransports.clear();   // bounded
+  _tenantTransports.set(fp, t);
+  return t;
+}
+
+// Verify a mail server actually accepts the credentials, without sending.
+export async function verifyTenantSmtp(cfg: TenantSmtpConfig): Promise<SendResult> {
+  if (!cfg?.host) return { ok: false, error: 'A mail server address is required.', code: 'NO_HOST' };
+  try {
+    await _tenantTransport(cfg).verify();
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err).slice(0, 300), code: String(err?.code || 'VERIFY_FAILED') };
+  }
+}
+
+// Send through the tenant's mail server when cfg is given, else the platform one.
+// `bcc` is opt-in now: guest mail must never be copied anywhere by default.
+export async function sendEmailAs(
+  cfg: TenantSmtpConfig | null,
+  to: string,
+  subject: string,
+  text: string,
+  html?: string,
+  attachments?: EmailAttachment[],
+  opts?: { bcc?: string | null },
+): Promise<SendResult> {
+  const useTenant = !!(cfg && cfg.host);
+  const transporter = useTenant ? _tenantTransport(cfg as TenantSmtpConfig) : mailTransporter;
+  if (!transporter) {
+    return { ok: false, error: 'Email is not connected yet — add a mail server in notification settings.', code: 'NOT_CONFIGURED' };
+  }
+  const from = useTenant
+    ? ((cfg!.from_name ? `${cfg!.from_name} <${cfg!.from_email || cfg!.user}>` : (cfg!.from_email || cfg!.user)) as string)
+    : process.env.SMTP_FROM;
+  try {
+    const info: any = await transporter.sendMail({
+      from,
+      to,
+      bcc: opts?.bcc || undefined,
+      replyTo: useTenant ? (cfg!.reply_to || undefined) : undefined,
+      subject,
+      text,
+      html,
+      attachments: attachments && attachments.length
+        ? attachments.map(a => ({ filename: a.filename, content: a.content, contentType: a.contentType }))
+        : undefined,
+    });
+    console.log(`[Notification] Email sent → ${to} via ${useTenant ? cfg!.host : 'platform SMTP'}`);
+    return { ok: true, id: info?.messageId };
+  } catch (err: any) {
+    console.error('[Notification] Email send failed:', err);
+    return { ok: false, error: String(err?.message || err).slice(0, 300), code: String(err?.code || 'SEND_FAILED') };
+  }
+}
+
 export async function sendEmail(
   to:          string,
   subject:     string,

@@ -1862,6 +1862,13 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
 
   // Drag-to-reorder support — display_order is honoured by the Ingredients
   // and Suppliers list endpoints when set; ties broken by name.
+  // Channel-specific message copy. One shared body cannot serve both: a WhatsApp
+  // message wants a single short paragraph, an email wants a subject and structure.
+  // wa_meta_template_* map the event to a template approved in Meta Business
+  // Manager, which Meta REQUIRES for anything the business initiates.
+  await db.exec("ALTER TABLE notification_templates ADD COLUMN IF NOT EXISTS whatsapp_template TEXT").catch(() => {});
+  await db.exec("ALTER TABLE notification_templates ADD COLUMN IF NOT EXISTS wa_meta_template_name TEXT").catch(() => {});
+  await db.exec("ALTER TABLE notification_templates ADD COLUMN IF NOT EXISTS wa_meta_template_lang TEXT DEFAULT 'en'").catch(() => {});
   await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_display_order ON ingredients (display_order)`).catch(() => {});

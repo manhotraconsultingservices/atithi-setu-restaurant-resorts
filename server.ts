@@ -8,11 +8,11 @@ import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import cookieParser from "cookie-parser";
-import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
+import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
-import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, sendTelegramDetailed, buildNotificationContent, sendWhatsAppDetailed, sendSMSDetailed } from "./notificationService.ts";
+import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, sendTelegramDetailed, buildNotificationContent, sendWhatsAppDetailed, sendSMSDetailed, sendEmailAs, verifyTenantSmtp, type TenantSmtpConfig } from "./notificationService.ts";
 import { getChannelAdapter, ChannelCredentials, AdapterAvailabilityPayload, AdapterResult } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
@@ -6472,6 +6472,79 @@ async function ensureNotifDeliveries(db: any, rid: string) {
 }
 // Send on a single channel with the failure ISOLATED (one channel throwing must
 // never abort the others) and the outcome logged.
+
+// ── Per-tenant mail server ──────────────────────────────────────────────────
+// Guest email leaves the PROPERTY's own domain when it has configured a mail
+// server, and the platform account only acts as a fallback. The password is
+// encrypted at rest with a key derived from JWT_SECRET, and is never returned by
+// the API — the UI only ever learns whether one is stored.
+async function ensureTenantEmailConfig(db: any): Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS tenant_email_config (
+    id TEXT PRIMARY KEY,
+    host TEXT, port INT DEFAULT 587, secure INT DEFAULT 0,
+    username TEXT, password_enc TEXT,
+    from_email TEXT, from_name TEXT, reply_to TEXT,
+    enabled INT DEFAULT 0,
+    verified_at TIMESTAMP, last_error TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+}
+
+function _secretKey(): Buffer {
+  return createHash('sha256').update(String(process.env.JWT_SECRET || 'atithi-setu-fallback')).digest();
+}
+function _encSecret(plain: string): string {
+  if (!plain) return '';
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', _secretKey(), iv);
+  const enc = Buffer.concat([c.update(String(plain), 'utf8'), c.final()]);
+  return `v1:${iv.toString('base64')}:${c.getAuthTag().toString('base64')}:${enc.toString('base64')}`;
+}
+function _decSecret(stored: string): string {
+  const v = String(stored || '');
+  if (!v.startsWith('v1:')) return v;   // pre-encryption value, if any
+  try {
+    const [, ivB, tagB, dataB] = v.split(':');
+    const d = createDecipheriv('aes-256-gcm', _secretKey(), Buffer.from(ivB, 'base64'));
+    d.setAuthTag(Buffer.from(tagB, 'base64'));
+    return Buffer.concat([d.update(Buffer.from(dataB, 'base64')), d.final()]).toString('utf8');
+  } catch { return ''; }
+}
+
+// Resolved config for sending, or null to mean "use the platform account".
+const _mailCfgCache = new Map<string, { cfg: TenantSmtpConfig | null; at: number }>();
+async function _tenantMailConfig(restaurantId: string): Promise<TenantSmtpConfig | null> {
+  const hit = _mailCfgCache.get(restaurantId);
+  if (hit && Date.now() - hit.at < 60000) return hit.cfg;
+  let cfg: TenantSmtpConfig | null = null;
+  try {
+    const db = await getTenantDb(restaurantId);
+    await ensureTenantEmailConfig(db);
+    const r: any = await db.get("SELECT * FROM tenant_email_config WHERE id = 'DEFAULT'").catch(() => null);
+    if (r && Number(r.enabled) === 1 && r.host) {
+      cfg = {
+        host: r.host, port: Number(r.port || 587), secure: Number(r.secure) === 1,
+        user: r.username || '', pass: _decSecret(r.password_enc || ''),
+        from_email: r.from_email || r.username || '', from_name: r.from_name || '',
+        reply_to: r.reply_to || '',
+      };
+    }
+  } catch { /* fall back to the platform account */ }
+  _mailCfgCache.set(restaurantId, { cfg, at: Date.now() });
+  return cfg;
+}
+function _invalidateMailCfg(restaurantId: string) { _mailCfgCache.delete(restaurantId); }
+
+// Send a notification email for a tenant: their mail server when configured,
+// the platform account otherwise. Guest mail is never blind-copied anywhere.
+async function sendTenantEmail(restaurantId: string, to: string, subject: string, text: string, html?: string, audience?: string) {
+  const cfg = await _tenantMailConfig(restaurantId);
+  // The platform account historically BCC'd itself on every message. Keep that
+  // only for TEAM mail on the platform sender; guest correspondence never is.
+  const bcc = (!cfg && audience !== 'GUEST' && process.env.SMTP_USER && process.env.SMTP_USER.toLowerCase() !== String(to).toLowerCase())
+    ? process.env.SMTP_USER : null;
+  return sendEmailAs(cfg, to, subject, text, html, undefined, { bcc });
+}
+
 async function logAndSend(db: any, eventName: string, channel: string, recipient: string, preview: string, fn: () => Promise<any>, audience?: string) {
   const id = `ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const write = (status: string, error: string | null, code: string | null, providerId: string | null) =>
@@ -6726,7 +6799,7 @@ async function triggerNotification(restaurantId: string, eventName: string, data
       // {{variable}} interpolation against the data object.
       try {
         const tmpl: any = await db.get(
-          "SELECT subject_template, body_template, enabled FROM notification_templates WHERE event_type = ?",
+          "SELECT subject_template, body_template, whatsapp_template, wa_meta_template_name, wa_meta_template_lang, enabled FROM notification_templates WHERE event_type = ?",
           [eventName]
         ).catch(() => null);
         if (tmpl && Number(tmpl.enabled) !== 0) {
@@ -6745,6 +6818,32 @@ async function triggerNotification(restaurantId: string, eventName: string, data
       // Deduplicate recipients (same email/phone might appear via role lookup + manual list)
       const uniqueRecipients = [...new Set(recipients.filter(Boolean))];
       const audienceTag = isGuestAudience ? 'GUEST' : 'TEAM';
+      // WhatsApp copy is written separately from email copy where the owner has
+      // done so — a WhatsApp message wants one short paragraph, an email wants a
+      // subject and structure. Falls back to the shared body when not written.
+      let waBody: string | null = null;
+      let metaTemplate: { name: string; languageCode?: string; variables?: (string | number)[] } | null = null;
+      try {
+        const wt: any = await db.get("SELECT whatsapp_template, wa_meta_template_name, wa_meta_template_lang, enabled FROM notification_templates WHERE event_type = ?", [eventName]).catch(() => null);
+        if (wt && Number(wt.enabled) !== 0) {
+          if (wt.whatsapp_template) {
+            waBody = String(wt.whatsapp_template).replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m: string, k: string) => {
+              const v = k.split('.').reduce((acc: any, p: string) => acc == null ? acc : acc[p], data);
+              return v == null ? '' : String(v);
+            });
+          }
+          // Meta requires an APPROVED template for anything the business starts
+          // (outside the 24-hour reply window). The property name is always the
+          // first variable, because the sender number is shared across tenants.
+          if (wt.wa_meta_template_name) {
+            metaTemplate = {
+              name: String(wt.wa_meta_template_name),
+              languageCode: String(wt.wa_meta_template_lang || 'en'),
+              variables: [String(data.restaurantName || ''), String(data.guestName || data.customerName || '')].filter(v => v !== ''),
+            };
+          }
+        }
+      } catch { /* fall back to the shared copy */ }
       // The WhatsApp sender is one shared Atithi-Setu number, so a guest cannot
       // tell which property is writing. Name it in the first line unless the copy
       // already does. Team messages keep their existing wording.
@@ -6752,17 +6851,21 @@ async function triggerNotification(restaurantId: string, eventName: string, data
       const outboundText = (isGuestAudience && propertyName && !String(content.text || '').includes(propertyName))
         ? `${propertyName}\n${content.text}`
         : content.text;
+      const waRaw = waBody || content.text;
+      const waText = (isGuestAudience && propertyName && !String(waRaw).includes(propertyName))
+        ? `${propertyName}\n${waRaw}`
+        : waRaw;
 
       for (const recipient of uniqueRecipients) {
         const isEmail = recipient.includes('@');
         if (setting.email_enabled && isEmail) {
-          await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendEmail(recipient, content.subject, content.text, content.html), audienceTag);
+          await logAndSend(db, eventName, 'EMAIL', recipient, content.subject, () => sendTenantEmail(restaurantId, recipient, content.subject, content.text, content.html, audienceTag), audienceTag);
         }
         if (setting.sms_enabled && !isEmail) {
           await logAndSend(db, eventName, 'SMS', recipient, outboundText, () => sendSMSDetailed(recipient, outboundText), audienceTag);
         }
         if (setting.whatsapp_enabled && !isEmail) {
-          await logAndSend(db, eventName, 'WHATSAPP', recipient, outboundText, () => sendWhatsAppDetailed(recipient, outboundText, null), audienceTag);
+          await logAndSend(db, eventName, 'WHATSAPP', recipient, waText, () => sendWhatsAppDetailed(recipient, waText, metaTemplate), audienceTag);
         }
       }
       // Telegram: channel-level (not per-recipient), uses stored chat_id override or env default
@@ -9600,6 +9703,82 @@ async function startServer() {
       console.error('menu-templates sync error:', err);
       res.status(500).json({ error: 'Sync failed' });
     }
+  });
+
+  // ── Owner: the property's own mail server ─────────────────────────────────
+  // Guest email should come from the property, not a shared platform mailbox.
+  // The password is written encrypted and never read back out to the browser.
+  const _notifCanEdit = async (req: AuthRequest) => {
+    const r = String(req.user?.role || '').toUpperCase();
+    return ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(r) || await _roleHasTab(req, 'NOTIFICATIONS', 2);
+  };
+
+  app.get("/api/owner/email-config", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await ensureTenantEmailConfig(db);
+      const r: any = await db.get("SELECT * FROM tenant_email_config WHERE id = 'DEFAULT'").catch(() => null);
+      res.json({
+        configured: !!(r && r.host),
+        enabled: Number(r?.enabled ?? 0) === 1,
+        host: r?.host || '', port: Number(r?.port || 587), secure: Number(r?.secure ?? 0) === 1,
+        username: r?.username || '', from_email: r?.from_email || '', from_name: r?.from_name || '',
+        reply_to: r?.reply_to || '',
+        has_password: !!(r?.password_enc),          // never the password itself
+        verified_at: r?.verified_at || null, last_error: r?.last_error || null,
+        platform_fallback: !!process.env.SMTP_HOST, // what happens when this is off
+      });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to load the mail server settings' }); }
+  });
+
+  app.put("/api/owner/email-config", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications to change the mail server.' });
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await ensureTenantEmailConfig(db);
+      const b = req.body || {};
+      const existing: any = await db.get("SELECT password_enc FROM tenant_email_config WHERE id = 'DEFAULT'").catch(() => null);
+      const host = String(b.host || '').trim();
+      const enabled = b.enabled ? 1 : 0;
+      if (enabled && !host) return res.status(400).json({ error: 'A mail server address is required before you can switch this on.' });
+      const fromEmail = String(b.from_email || '').trim();
+      if (fromEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(fromEmail)) return res.status(400).json({ error: 'That From address does not look like an email address.' });
+      // An empty password field means "keep the stored one", never "clear it".
+      const pass = String(b.password || '');
+      const passEnc = pass ? _encSecret(pass) : (existing?.password_enc || null);
+      await db.run(
+        `INSERT INTO tenant_email_config (id, host, port, secure, username, password_enc, from_email, from_name, reply_to, enabled, updated_at)
+         VALUES ('DEFAULT', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET host = EXCLUDED.host, port = EXCLUDED.port, secure = EXCLUDED.secure,
+           username = EXCLUDED.username, password_enc = EXCLUDED.password_enc, from_email = EXCLUDED.from_email,
+           from_name = EXCLUDED.from_name, reply_to = EXCLUDED.reply_to, enabled = EXCLUDED.enabled,
+           updated_at = CURRENT_TIMESTAMP`,
+        [host, Number(b.port || 587), b.secure ? 1 : 0, String(b.username || '').trim(), passEnc,
+         fromEmail, String(b.from_name || '').trim(), String(b.reply_to || '').trim(), enabled]
+      );
+      _invalidateMailCfg(req.user!.restaurantId);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to save the mail server settings' }); }
+  });
+
+  // Check the credentials against the server without sending anything.
+  app.post("/api/owner/email-config/verify", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications.' });
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await ensureTenantEmailConfig(db);
+      const r: any = await db.get("SELECT * FROM tenant_email_config WHERE id = 'DEFAULT'").catch(() => null);
+      if (!r?.host) return res.status(400).json({ error: 'Save the mail server details first.' });
+      const out = await verifyTenantSmtp({
+        host: r.host, port: Number(r.port || 587), secure: Number(r.secure) === 1,
+        user: r.username || '', pass: _decSecret(r.password_enc || ''),
+      });
+      await db.run("UPDATE tenant_email_config SET verified_at = ?, last_error = ? WHERE id = 'DEFAULT'",
+        [out.ok ? new Date().toISOString() : null, out.ok ? null : String(out.error || '').slice(0, 300)]).catch(() => {});
+      _invalidateMailCfg(req.user!.restaurantId);
+      if (out.ok) res.json({ success: true });
+      else res.status(502).json({ error: out.error || 'The mail server refused the connection.', code: out.code });
+    } catch (err: any) { res.status(500).json({ error: 'Could not reach the mail server' }); }
   });
 
   // Owner: Notification Settings
@@ -21877,17 +22056,22 @@ ${data.tenant.name}`;
 
   app.put("/api/restaurant/:id/notification-templates/:event", authenticate, restaurantStaff, requireTabAction('SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
-      const { subject_template, body_template, enabled } = req.body;
+      const { subject_template, body_template, enabled, whatsapp_template, wa_meta_template_name, wa_meta_template_lang } = req.body;
       const db = await getTenantDb(req.params.id);
       await db.run(
-        `INSERT INTO notification_templates (event_type, subject_template, body_template, enabled, updated_at)
-         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `INSERT INTO notification_templates (event_type, subject_template, body_template, whatsapp_template, wa_meta_template_name, wa_meta_template_lang, enabled, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT (event_type) DO UPDATE SET
-           subject_template = EXCLUDED.subject_template,
-           body_template    = EXCLUDED.body_template,
-           enabled          = EXCLUDED.enabled,
-           updated_at       = CURRENT_TIMESTAMP`,
-        [req.params.event, subject_template || null, body_template || null, enabled === false ? 0 : 1]
+           subject_template      = EXCLUDED.subject_template,
+           body_template         = EXCLUDED.body_template,
+           whatsapp_template     = EXCLUDED.whatsapp_template,
+           wa_meta_template_name = EXCLUDED.wa_meta_template_name,
+           wa_meta_template_lang = EXCLUDED.wa_meta_template_lang,
+           enabled               = EXCLUDED.enabled,
+           updated_at            = CURRENT_TIMESTAMP`,
+        [req.params.event, subject_template || null, body_template || null,
+         whatsapp_template || null, wa_meta_template_name || null, wa_meta_template_lang || 'en',
+         enabled === false ? 0 : 1]
       );
       res.json({ success: true });
     } catch (err) {
@@ -53841,8 +54025,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-engine-guest-reach-truthful-log',
+    commit_marker: 'notif-tenant-smtp-templates-ui',
     code_features: [
+      'notif-tenant-smtp-templates-ui',               //FEATURE (notification rebuild, stages B+C, 10 Sep 2026). (1) PER-TENANT MAIL SERVER: guest email now leaves the PROPERTY's own domain. New tenant-scoped `tenant_email_config` (host/port/secure/user/password/from/reply-to/enabled), password encrypted at rest with AES-256-GCM keyed off JWT_SECRET and NEVER returned by the API (the UI only learns `has_password`); `sendEmailAs(cfg,…)` in notificationService builds a per-config cached nodemailer transport and returns a real SendResult; `verifyTenantSmtp` checks credentials without sending. Owner API: GET/PUT `/api/owner/email-config` + POST `/api/owner/email-config/verify`. Falls back to the platform account when unset, so nothing changes for tenants who never configure one. **The platform BCC is gone for guest mail** — every guest email used to be blind-copied to the shared platform mailbox (thirteen businesses' guest correspondence in one operator inbox, which no guest consented to); TEAM mail on the platform sender keeps it. (2) CHANNEL-SPECIFIC WORDING: `notification_templates` gains `whatsapp_template`, `wa_meta_template_name`, `wa_meta_template_lang` — one shared body cannot serve both a WhatsApp line and a structured email; the dispatcher now picks the WhatsApp copy when written and sends the mapped APPROVED Meta template (with the property name as the first variable, since the sender number is shared). (3) NEW NOTIFICATIONS SCREEN: the ~100-row role×channel×3-text-column switchboard is replaced by three tabs — What gets sent (collapsible groups; per event the audience collapses to Guests / My team with four channel chips), Message wording (per-event email subject+body and WhatsApp copy with live preview, sample variables and the Meta template mapping), Channels & delivery (own mail server form with Check-connection, WhatsApp shared-sender explainer, and a delivery log that now shows audience and the real failure reason). tsc + vite build clean.',
       'notif-engine-guest-reach-truthful-log',        //FIX (notification engine review, 10 Sep 2026 — stage A of the rebuild). TWO STRUCTURAL DEFECTS, both proven on live data. (1) NO GUEST HAS EVER BEEN REACHED, on any channel, for any event: `triggerNotification` read the guest address straight out of the event payload (`data.customerEmail`), and NOT ONE of the 60 `triggerNotification(...)` call sites passes it — with no email the CUSTOMER branch fell through to `_resolveRecipients(id,'CUSTOMER')`, which looks for staff whose job title is CUSTOMER and finds none. Evidence: 134 deliveries on RESTO-1003, 100% TELEGRAM to one staff chat, 0 WhatsApp/SMS/EMAIL ever. New `_resolveGuestContact(db, data)` resolves the guest from the RECORD the event is about (room_bookings / event_bookings / orders) with the payload still winning when supplied, so 60 call sites stay untouched and a phone-only guest (the norm in India) is now reachable. (2) THE DELIVERY LOG LIED: `sendWhatsApp`/`sendSMS` caught their own errors and returned void, so `logAndSend` saw no throw and wrote SENT — 134 of 134 with no failure path in existence. Added `sendWhatsAppDetailed`/`sendSMSDetailed` returning `SendResult {ok,id,error,code}` (mirroring the existing sendTelegramDetailed convention; the plain senders remain untouched wrappers for their other callers), and `logAndSend` now records the PROVIDER's answer plus `provider_message_id`, `error_code` and `audience`. The owner-facing per-channel TEST button had the same lie and now reports the real result. Also: WhatsApp is ONE shared Atithi-Setu number by design, so guest-bound SMS/WhatsApp is prefixed with the property name when the copy does not already carry it. `sendWhatsAppDetailed` accepts an approved-template payload (Meta rejects business-initiated free-form text outside the 24h window with 131047) — wiring per-event templates is stage D. Smoke: TC-NOTIF-GUEST-REACHED, TC-NOTIF-TRUTHFUL-LOG. tsc + vite build clean.',
       'event-customer-gst-details',                   //FEATURE (client gap, 9 Sep 2026): an event customer claiming INPUT TAX CREDIT needs its name, ADDRESS and GSTIN on the tax invoice (Rule 46). `customer_gstin` existed on event_bookings and showed on the on-screen folio, but (a) there was NO customer address column at all and (b) neither ever reached the PRINTED invoice — `buildInvoiceData` passed only name/phone/email. Added: `event_bookings.customer_address` (migration in ensureEventTables, never in a handler); both fields carried into the invoice PDF and rendered in the "Prepared For" block — address lines, then `GSTIN: …` — ONLY when present, so a walk-in consumer invoice is byte-for-byte as before. NEW dedicated route `PUT /events/bookings/:bid/gst-details` (EVENTS_BOOKINGS UPDATE): validates the 15-char GSTIN, requires an address alongside it, `\'\'` clears, absent key leaves as-is, audited as GST_DETAILS_UPDATED, 409 on a CANCELLED booking. It is deliberately SEPARATE from `PUT /events/bookings/:bid` (which still 409s a COMPLETED booking — that lock protects the AMOUNTS): these fields carry no money, so a company can ask for a GST invoice AFTER the function and staff just fill them in and reprint. New `<GstDetailsPanel>` beside the invoice actions shows whether details will print. Smoke: TC-EVT-GST-VALIDATION, TC-EVT-GST-ON-INVOICE, TC-EVT-GST-AFTER-COMPLETE. tsc + vite build clean.',
       'hotel-checkin-time-policy-b',                  //BUGFIX (caught by the new smoke case on the first deploy): both clock-time settings validated with `/^\\d{2}:\\d{2}$/`, which accepts "25:99" — shape only, not a real time. Stored, it reads back as minute 1599, i.e. later than any wall clock, so an early-arrival charge would fire on EVERY check-in (and a late-checkout cutoff of "25:99" would never fire). All four uses now share `HHMM_RE = /^([01]\\d|2[0-3]):[0-5]\\d$/` — the two PATCH validators and the two fee calculators. Pre-existing weakness on the late-checkout field, inherited when the check-in side was mirrored from it.',
