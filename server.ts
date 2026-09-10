@@ -17838,8 +17838,11 @@ ${data.tenant.name}`;
         await adapter.pushStoreOpenClose(false, ctx);
         res.json({ success: true, message: `Credentials verified for ${channel} — adapter responded OK to a test cycle.` });
       } catch (adapterErr: any) {
-        return res.status(502).json({
+        // 400, not 502: Cloudflare replaces a 502 body with its own HTML page,
+        // so the detail below never reaches the owner.
+        return res.status(400).json({
           success: false,
+          code: 'ADAPTER_REJECTED',
           message: 'Adapter rejected the test call.',
           detail: String(adapterErr?.message || adapterErr).slice(0, 400),
         });
@@ -28734,7 +28737,9 @@ ${data.tenant.name}`;
       const text = `Dear ${data.booking.customer_name},\n\nPlease find attached your invoice (${data.quotation.quote_number}).\n\nThank you,\n${data.tenant.name}`;
       const html = `<p>Dear ${data.booking.customer_name},</p><p>Please find attached your invoice (<strong>${data.quotation.quote_number}</strong>).</p><p>Thank you,<br/>${data.tenant.name}</p>`;
       const sent = await sendEmail(to, subject, text, html, [{ filename: `${data.quotation.quote_number}.pdf`, content: pdf }]);
-      if (!sent) return res.status(502).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download." });
+      // 400, not 502 — Cloudflare eats a 502 body, so the owner would see a
+      // generic gateway page instead of being told SMTP is not set up.
+      if (!sent) return res.status(400).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download.", code: 'EMAIL_NOT_CONFIGURED' });
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICE_SENT', summary: `Invoice emailed to ${to}` });
       res.json({ success: true, sent_to: to });
     } catch (err: any) { console.error("/events invoice send error:", err); res.status(500).json({ error: "Failed to send invoice" }); }
@@ -28754,7 +28759,8 @@ ${data.tenant.name}`;
       const text = `Dear ${data.booking.customer_name},\n\nPlease find attached our quotation (${data.quotation.quote_number}) for your event. This quotation is valid until ${String(data.quotation.valid_until || '').slice(0, 10)}.\n\nWe look forward to hosting your event.\n\nRegards,\n${data.tenant.name}`;
       const html = `<p>Dear ${data.booking.customer_name},</p><p>Please find attached our quotation (<strong>${data.quotation.quote_number}</strong>) for your event, valid until <strong>${String(data.quotation.valid_until || '').slice(0, 10)}</strong>.</p><p>We look forward to hosting your event.</p><p>Regards,<br/>${data.tenant.name}</p>`;
       const sent = await sendEmail(to, subject, text, html, [{ filename: `${data.quotation.quote_number}.pdf`, content: pdf }]);
-      if (!sent) return res.status(502).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download." });
+      // 400, not 502 — see the invoice-send path above.
+      if (!sent) return res.status(400).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download.", code: 'EMAIL_NOT_CONFIGURED' });
       await db.run("UPDATE event_quotations SET status = 'SENT', sent_at = CURRENT_TIMESTAMP, sent_to_email = ? WHERE id = ?", [to, req.params.qid]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_QUOTATION', objectId: req.params.qid, action: 'SENT', summary: `Quotation emailed to ${to}` });
       notifyEvent(req.params.id, 'EVENT_QUOTATION_SENT', data.booking || {}, {
@@ -35961,7 +35967,8 @@ ${data.tenant.name}`;
       const hotelCode = String((req.query.hotel_code as string) || t.hotelCode || '').trim();
       if (!hotelCode) return res.status(400).json({ error: 'Set the hotel code first.' });
       const r = await aiosellGetProperty(cfg, hotelCode);
-      if (!r.ok) return res.status(502).json({ error: r.message });
+      // 400, not 502 — Cloudflare would replace the body and hide r.message.
+      if (!r.ok) return res.status(400).json({ error: r.message, code: 'AIOSELL_REJECTED' });
       res.json(r.data);
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -36075,7 +36082,8 @@ ${data.tenant.name}`;
       const endDate = String(req.body?.endDate || '').trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return res.status(400).json({ error: 'startDate and endDate (YYYY-MM-DD) required.' });
       const r = await aiosellFetchData(cfg, t.hotelCode, 'reservation', startDate, endDate);
-      if (!r.ok) return res.status(502).json({ error: r.message });
+      // 400, not 502 — see the property lookup above.
+      if (!r.ok) return res.status(400).json({ error: r.message, code: 'AIOSELL_REJECTED' });
       const list: AiosellReservation[] = Array.isArray(r.data) ? r.data : (Array.isArray(r.data?.reservations) ? r.data.reservations : []);
       let ingested = 0;
       if (req.body?.ingest) for (const rv of list) { const out = await aiosellIngestReservation(req.params.id, rv).catch(() => ({ ok: false } as any)); if (out.ok) ingested++; }
@@ -54466,8 +54474,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-client-email',
+    commit_marker: 'no-more-502-cloudflare',
     code_features: [
+      'no-more-502-cloudflare',                       //BUGFIX (10 Sep 2026). Five request handlers answered with **502**, which prod can never do: Cloudflare sits in front of erp.atithi-setu.com and REPLACES a 502 with its own HTML error page (verified live — content-type: text/html, server: cloudflare, our JSON body gone). Every carefully worded message behind them was therefore invisible: the owner saw a generic gateway error and had no idea what to fix. None of the five was a bad gateway anyway — each is an upstream or configuration rejection we chose to surface, which is a 400. Fixed: event INVOICE send and event QUOTATION send (SMTP not configured → now 400 with code EMAIL_NOT_CONFIGURED, so the owner is actually told to set up email and that the PDF is still downloadable), the channel-adapter smoke test (adapter refused the test cycle → 400 ADAPTER_REJECTED, detail preserved), and the two Aiosell calls, property lookup and reservation pull (channel manager refused → 400 AIOSELL_REJECTED carrying r.message). Same class as the two 502s already fixed in the notification work; `status(502)` is now absent from the codebase. No front-end code branched on the 502 status, so nothing else moves. tsc + vite build clean.',
       'spa-client-email',                            //FEATURE (10 Sep 2026): spa appointments could only ever carry a phone number, so the new spa notifications could reach a client on WhatsApp/SMS but never by email. Added `spa_appointments.client_email` (DDL + `ALTER … IF NOT EXISTS` migration in ensureSpaTables), captured on BOTH booking paths — the staff booking form (new optional Client Email box in SpaViews) and the public online booking, which already collected an email for `spa_clients` but never put it on the appointment. The staff path also backfills a linked client's email when it was blank, and never overwrites an existing one. `_resolveGuestContact` reads `client_email` first and falls back to `spa_clients.email` via `client_id`, so appointments booked BEFORE this column existed still resolve an email where the client is on file; `notifySpa` and the reminder cron both carry it. Also: `EVENT_BOOKING_CREATED` offered only OWNER/MANAGER audiences, so a customer could never be told their enquiry was received even though `notifyEvent` already passes their contact details — the CUSTOMER audience is now selectable. tsc + vite build clean.',
       'spa-guest-notifications',                     //FEATURE + CORRECTION (10 Sep 2026). Spa & Wellness raised NO guest notifications at all — a client could book a treatment and never hear from the property again. Added `notifySpa` (shaped like the events module's `notifyEvent`): **SPA_APPOINTMENT_CONFIRMED** on confirm, **SPA_APPOINTMENT_CANCELLED** on cancel (carrying the reason), and **SPA_APPOINTMENT_REMINDER** from a new 18:00 IST cron the evening before, deduped centrally via `sent_spa_reminders` exactly like the hotel pre-arrival sweep and scoped to `spa_enabled` tenants. `_resolveGuestContact` now also resolves a client from `spa_appointments` (client_name/client_phone). Written copy added for all three, and the three events are in the settings catalogue under a new Spa & Wellness group so an owner can switch them on per channel. **CORRECTION to the 10 Sep review:** the "12 dead switches" figure was wrong — my detector only matched a literal event name passed directly to `triggerNotification`, so it missed (a) the `notifyEvent` wrapper, through which all five EVENT_* notifications DO fire and DO pass customer contact, and (b) computed names (`const eventName = status === ... ? 'ORDER_READY' : 'ORDER_CANCELLED'`), which covers BOOKING_CONFIRMED/ORDER_READY/ORDER_CANCELLED/DAILY_REPORT. The genuinely unfired list is just three: CUSTOMER_INVOICE, NEW_FEEDBACK, STAFF_ATTENDANCE. tsc + vite build clean.',
       'notif-stage-d-templates-webhook-consent',      //FEATURE (notification rebuild, stage D, 10 Sep 2026). (1) APPROVED TEMPLATES ARE PLATFORM PROPERTY, not tenant: the WhatsApp sender is ONE shared Atithi-Setu number and Meta will not let an approved template be edited afterwards, so the event→template mapping moved to central `wa_template_map` (template_name, language, category, variables) managed from the ADMIN console; the tenant keeps only the free-form wording used INSIDE the 24-hour reply window and is told which template applies. Variable order is owner-mapped, with `restaurantName` forced into {{1}} because the sender is shared. (2) THE WEBHOOK NOW DOES ITS JOB — it previously console.logged and dropped everything. Verifies Meta's X-Hub-Signature-256 (when META_WA_APP_SECRET is set) over the raw body, applies delivery/read/failed receipts to the right tenant's `notification_deliveries` row via the central index (receipts carry a message id and no tenant), records inbound messages to open the 24-hour service window, and honours STOP/UNSUBSCRIBE + START/SUBSCRIBE. Inside the window we send free-form text (not billed); outside it the approved template. (3) CONSENT: central `messaging_optout` checked before EVERY guest send on WhatsApp and email — a blocked contact is logged as SKIPPED with the reason rather than silently dropped. Platform-wide for WhatsApp because one ignored opt-out damages the shared number's quality rating for every tenant. Owner API to view/add/remove. (4) COST ATTRIBUTION: central `messaging_usage` records every send with its Meta BILLING CATEGORY (MARKETING/UTILITY/AUTHENTICATION/SERVICE), so `/api/admin/messaging/usage` reports messages, failures and estimated cost per tenant against editable `messaging_rates`. New admin endpoints: whatsapp/templates (live list from Meta), whatsapp/template-map (GET/PUT), messaging/rates (GET/PUT), messaging/usage. tsc + vite build clean.',
