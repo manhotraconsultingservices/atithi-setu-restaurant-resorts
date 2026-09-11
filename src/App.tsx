@@ -9561,11 +9561,6 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                       </div>
                     </div>
 
-                    {bankRec.truncated && (
-                      <div className="rounded-lg border border-[#a0522d] bg-[#fdf6ef] px-4 py-2 text-xs text-[#1a1208]">
-                        Showing the first 1,000 movements only. Narrow the date range — the book balance above covers everything, but this list does not.
-                      </div>
-                    )}
                     {bankRecStmtErr && (
                       <div className="rounded-lg border border-[#a0522d] bg-[#fdf6ef] px-4 py-2 text-xs text-[#1a1208]">{bankRecStmtErr}</div>
                     )}
