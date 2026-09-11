@@ -8349,6 +8349,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [bankRecAccount, setBankRecAccount] = useState('1010');
   const [bankRecCleared, setBankRecCleared] = useState<Record<string, boolean>>({});
   const [bankRecStmtBal, setBankRecStmtBal] = useState('');
+  const [bankRecHistory, setBankRecHistory] = useState<any[]>([]);
   const [periods, setPeriods] = useState<any[]>([]);
   const [periodsExc, setPeriodsExc] = useState<any[]>([]);
   const [cashCount, setCashCount] = useState<any>(null);
@@ -8379,7 +8380,16 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
         setBankRecStmtBal(d.statement_closing_balance != null ? String(d.statement_closing_balance) : '');
       }
     }).finally(() => setLoading(false));
+    acctApi(`/accounting/bank-reconciliations?account=${bankRecAccount}`)
+      .then(h => setBankRecHistory(Array.isArray(h?.reconciliations) ? h.reconciliations : []))
+      .catch(() => {});
   }, [acctApi, bankRecAccount, tbFrom, tbTo]);
+
+  // Sign a reconciliation off, or reopen it. A FINAL one refuses further saves.
+  const setBankRecStatus = async (recId: string, status: string) => {
+    await acctApi(`/accounting/bank-reconciliation/${recId}/status`, { method: 'POST', body: JSON.stringify({ status }) });
+    loadBankRec();
+  };
   const loadPeriods = useCallback(() => { setLoading(true); Promise.all([acctApi('/accounting/periods'), acctApi('/accounting/periods/exceptions')]).then(([p, e]) => { if (Array.isArray(p)) setPeriods(p); if (Array.isArray(e)) setPeriodsExc(e); }).finally(() => setLoading(false)); }, [acctApi]);
   const loadCashCount = useCallback(() => { setLoading(true); acctApi(`/accounting/cash-count?date=${asOfDate}`).then(d => { if (d && !d.error) setCashCount(d); }).finally(() => setLoading(false)); }, [acctApi, asOfDate]);
 
@@ -9431,7 +9441,17 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                         Showing the first 1,000 movements only. Narrow the date range — the book balance above covers everything, but this list does not.
                       </div>
                     )}
-                    <div className="flex justify-end"><button onClick={saveBankRec} className={AC_BTN}>Save reconciliation</button></div>
+                    <div className="flex justify-end items-center gap-3">
+                      {bankRec.locked && <span className="text-xs text-[#a0522d] font-semibold">Signed off — reopen it below to make changes</span>}
+                      {!bankRec.locked && bankRec.reconciliation?.id && agreed && (
+                        <button onClick={() => setBankRecStatus(bankRec.reconciliation.id, 'FINAL')}
+                          className="px-3 py-1.5 rounded-lg border border-emerald-600 text-emerald-700 text-xs font-bold hover:bg-emerald-50">
+                          Sign off this reconciliation
+                        </button>
+                      )}
+                      <button onClick={saveBankRec} disabled={!!bankRec.locked}
+                        className={AC_BTN + (bankRec.locked ? ' opacity-40 cursor-not-allowed' : '')}>Save reconciliation</button>
+                    </div>
                   </>
                 );
               })()}
@@ -9450,6 +9470,34 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   )) : (<tr><td colSpan={6} className="px-3 py-3 text-center text-[#9c8e85] italic">No bank movements in this window</td></tr>)}</tbody>
                 </table>
               </div>
+              {bankRecHistory.length > 0 && (
+                <div className="rounded-lg border border-[#e8ded0] bg-white overflow-hidden">
+                  <div className="px-4 py-2 bg-[#f5f0e8] border-b border-[#e8ded0] flex items-center justify-between">
+                    <p className="text-xs font-semibold text-[#1a1208] uppercase tracking-wide">Previous reconciliations</p>
+                    <p className="text-[10px] text-[#9c8e85]">{bankRecHistory.length} on this account</p>
+                  </div>
+                  <div className="max-h-56 overflow-y-auto divide-y divide-[#f0e8d8]">
+                    {bankRecHistory.map((h: any) => (
+                      <div key={h.id} className="flex items-center justify-between gap-3 px-4 py-2 text-sm">
+                        <div className="min-w-0">
+                          <span className="font-semibold text-[#1a1208]">{String(h.statement_date || h.period || '').slice(0, 10)}</span>
+                          <span className="ml-3 tabular-nums text-[#6b5d52]">{fmtAmt(h.statement_closing_balance)}</span>
+                          {h.created_by && <span className="ml-3 text-[11px] text-[#9c8e85]">by {h.created_by}</span>}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${String(h.status) === 'FINAL' ? 'bg-emerald-50 text-emerald-700' : 'bg-[#f5f0e8] text-[#6b5d52]'}`}>
+                            {String(h.status) === 'FINAL' ? 'Signed off' : 'Draft'}
+                          </span>
+                          <button onClick={() => setBankRecStatus(h.id, String(h.status) === 'FINAL' ? 'DRAFT' : 'FINAL')}
+                            className="text-[11px] font-bold text-[#a0522d] hover:underline">
+                            {String(h.status) === 'FINAL' ? 'Reopen' : 'Sign off'}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <p className="text-[11px] text-[#9c8e85]">Tick every line the bank has also processed. What stays unticked is the explanation for the gap between the two balances. Clearing is remembered per account, so an item ticked in one period stays ticked in the next. This screen never posts to the GL.</p>
             </>
           ) : !loading && <p className="text-sm text-[#6b5d52] italic">Choose an account and load.</p>}

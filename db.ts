@@ -2803,6 +2803,15 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     -- that month's view — which would make any adjusted balance wrong. Keyed on
     -- the account instead, a tick means "this has cleared the bank", once, for
     -- good. bank_rec_cleared is still written for one release as a fallback.
+    -- A reconciliation is identified by its account and the STATEMENT DATE it
+    -- was drawn to; the working window is only how someone chose to look at it.
+    -- Keying on the literal "from..to" text meant nudging a date orphaned the
+    -- saved balance and every tick. Backfilled from the tail of that old text.
+    ALTER TABLE bank_reconciliations ADD COLUMN IF NOT EXISTS statement_date TEXT;
+    UPDATE bank_reconciliations SET statement_date = split_part(period, '..', 2)
+      WHERE statement_date IS NULL AND period LIKE '%..%';
+    CREATE INDEX IF NOT EXISTS idx_bankrec_acct_stmt ON bank_reconciliations (account_code, statement_date);
+
     CREATE TABLE IF NOT EXISTS bank_cleared (
       account_code TEXT NOT NULL,
       gl_entry_id  TEXT NOT NULL,

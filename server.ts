@@ -54902,8 +54902,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage2-real-arithmetic',
+    commit_marker: 'bankrec-stage3-work-that-survives',
     code_features: [
+      'bankrec-stage3-work-that-survives',        //FIX (bank reconciliation remediation, stage 3 of 6, 11 Sep 2026). Findings F-6 and F-7. A reconciliation was found by an EXACT TEXT MATCH on `from..to`, so nudging either date — widening the range to catch a late entry, say — orphaned the saved statement balance and every tick with no message: the row was still there, the screen simply could not find it. A reconciliation is really identified by WHICH ACCOUNT and WHICH STATEMENT DATE; the working window is only how someone chose to look at it. New `bank_reconciliations.statement_date` (added in the TENANT MIGRATION PATH, backfilled with `split_part(period, '..', 2)`, indexed on (account_code, statement_date)); the GET looks it up by account+statement date and FALLS BACK to the old text key for anything saved before this release. Save is now an UPSERT on that key instead of always inserting — repeated saves used to stack rows and the screen just read whichever was newest. `status` finally does something: DRAFT while working, FINAL once signed off, and a FINAL reconciliation REFUSES further saves with 409 RECONCILIATION_FINAL until reopened (reopening is written to the object audit, not silent). NEW `GET /accounting/bank-reconciliations?account=` lists the history — there was previously no way to see that a month had been reconciled at all, or by whom. The read also returns `reconciliation` {id, statement_date, status, created_by, created_at} and `locked`. UI gains a Previous-reconciliations panel with per-row Sign off / Reopen, a Sign-off button once the difference is explained, and a Save button that disables itself on a locked record. New tests TC-ACC-BANKREC-WINDOW (save via one window, read the same statement date through another — the exact F-6 failure), TC-ACC-BANKREC-UPSERT (one row per statement date) and TC-ACC-BANKREC-LOCK (finalise blocks saves, reopen restores them, and the test puts the record back to DRAFT so the tenant is left as found). tsc + vite build clean.',
       'bankrec-stage2-real-arithmetic',           //FIX (bank reconciliation remediation, stage 2 of 6, 11 Sep 2026). **THE SCREEN NOW PERFORMS A RECONCILIATION INSTEAD OF A SUBTRACTION.** Findings F-1, F-2 and F-5. The cleared ticks were stored, read back, rendered — and excluded from every calculation: `difference` was just `book_balance - statement_closing_balance`, so ticking every line or none produced an identical answer, and `reconciled` meant book == statement, which at a real month end is almost never true (unpresented cheques and deposits in transit make a gap NORMAL). Now computed: an unclear DEBIT is a deposit in transit (our balance has it, the bank's does not), an uncleared CREDIT is an unpresented cheque, so **adjusted_book_balance = book - uncleared_deposits + uncleared_withdrawals**, which is what the statement must agree with. Summed over EVERY entry up to the statement date rather than only the displayed window — an item raised in August and still outstanding in September has to count and is not in September's list, which is exactly what stage 1's durable `bank_cleared` made possible. NOTHING EXISTING CHANGED MEANING: `difference` and `reconciled` keep their old definitions for one release so any consumer is unaffected, and the new figures (`uncleared_deposits`, `uncleared_withdrawals`, `adjusted_book_balance`, `adjusted_difference`, `reconciled_adjusted`) arrive alongside them. Also ships `truncated` (F-11) so a window over the 1,000-line cap says so instead of showing a complete balance beside an incomplete list. UI: the three cards become a reconciliation statement (balance per bank + deposits in transit - outstanding cheques = book balance), the difference stays BLANK until a statement balance is typed instead of rendering the entire book balance in an alarm colour (F-5), and the sums recompute in the browser from the live tick state - `uncleared_outside_window` supplies the part not on screen. New tests TC-ACC-BANKREC-ADJUSTED (the identity) and TC-ACC-BANKREC-TICK-MOVES (clearing one line moves the uncleared totals by exactly that line, which could not pass before this stage). tsc + vite build clean.',
       'bankrec-stage1-durable-clearing',          //REFACTOR (bank reconciliation remediation, stage 1 of 6, 11 Sep 2026). Groundwork only — no user-visible change. A cleared tick was stored as `bank_rec_cleared(rec_id, gl_entry_id)`, which ties it to the period it was made in. That is wrong for a reconciliation: a cheque issued on 28 Aug and cleared on 3 Sep is absent from September's window entirely, so nothing records that it has since cleared, and ANY adjusted-balance calculation built on a single window would treat it as cleared and get the answer wrong. Clearing is a durable property of a TRANSACTION, so it moves to `bank_cleared(account_code, gl_entry_id, cleared_on, cleared_by)` — a tick now means "this has cleared the bank", once, regardless of which window it was ticked in. Created in the TENANT MIGRATION PATH (never in a handler) with an idempotent INSERT..SELECT backfill of every existing tick. The GET reads the new table and folds in the old per-reconciliation rows so nothing saved before this release is lost; the POST writes BOTH for one release so a revert keeps working. Unticking is honoured too, but ONLY for entries inside the saved window — otherwise saving September would wipe every tick made in August. Blast radius checked before writing: these two tables are referenced in exactly 4 places in server.ts and defined once in db.ts, read by nothing else; `gl_entries.id` is a TEXT PRIMARY KEY and entries are reversed rather than deleted, so the references cannot orphan. Stage 0 (safety net) added TC-ACC-BANKREC-SAVE, TC-ACC-BANKREC-ISOLATION and TC-ACC-BANKREC-RBAC, and widened TC-ACC-BANKREC from a shape check into a cross-check of the book balance against the trial balance. tsc clean.',
       'wa-message-log-and-inbox',                    //FEATURE (10 Sep 2026), closing the gap against a dedicated BSP console. THREE THINGS THE LOG COULD NOT SHOW, because it never stored them: which approved TEMPLATE carried a message, WHO the contact is, and anything INBOUND at all — the webhook only stamped the 24-hour window and handled STOP, so replies vanished and there was no RECEIVED count or conversation to read. `notification_deliveries` now carries `template_name`, `contact_name` and `direction`; `logAndSend` fills the first two (the name via a new module-level `_logAndSendName`, set from `_resolveGuestContact` in the dispatcher's guest branch, so none of the 60 call sites changed); and an inbound WhatsApp message is filed as a `direction='IN'` row with status RECEIVED. Routing it needed a tenant, which a reply does not carry because the sender is shared — so `wa_message_index`, a table ensureWaTables has created since stage D but which was NEVER WRITTEN OR READ (routing actually went through messaging_usage), is now populated on every WhatsApp send and answers exactly that question. `/api/owner/messaging/summary` reports the six counters a console is read through — today, sent, delivered, read, failed, received — plus people and per-template totals; `/api/owner/notification-deliveries` gains `direction`, `template` and free-text `q` filters. NEW `/api/owner/messaging/threads` (every WhatsApp contact, last line, and whether the 24-hour window is open — resolved in ONE central query rather than one per row) and `/api/owner/messaging/thread?contact=` (one conversation, oldest first). UI: the console is now Compose / Message log / Inbox. The log gained the six counters, status chips including Received, a template filter, and rows showing the contact's name, a template chip and the direction. The Inbox reads the same rows as conversations with a window badge per contact and, when it has closed, the plain statement that WhatsApp blocks free-form replies and only an approved template will reach them. Compose gained a template-registry line (total vs approved). New tests TC-MSG-INBOX and TC-MSG-LOG-COUNTERS. STILL OPEN vs the reference console: audience segments for bulk sends and a grouped broadcast history. tsc + vite build clean.',
@@ -57132,7 +57133,15 @@ ${data.tenant.name}`;
           ORDER BY entry_date DESC, created_at DESC LIMIT 1000`,
         [req.params.id, account, from, to]).catch(() => []);
       const period = `${from}..${to}`;
-      const rec: any = await db.get("SELECT * FROM bank_reconciliations WHERE account_code=? AND period=? ORDER BY created_at DESC LIMIT 1", [account, period]).catch(() => null);
+      // Found by account and statement date, so the working window can move
+      // without losing the saved balance. The old exact-text lookup is still
+      // tried for anything saved before this release.
+      let rec: any = await db.get(
+        "SELECT * FROM bank_reconciliations WHERE account_code=? AND statement_date=? ORDER BY created_at DESC LIMIT 1",
+        [account, to]).catch(() => null);
+      if (!rec) {
+        rec = await db.get("SELECT * FROM bank_reconciliations WHERE account_code=? AND period=? ORDER BY created_at DESC LIMIT 1", [account, period]).catch(() => null);
+      }
       // Clear state is a property of the account, so it survives a change of
       // window and a later period clearing an earlier period's item. The old
       // per-reconciliation rows are still folded in, so work saved before this
@@ -57197,8 +57206,47 @@ ${data.tenant.name}`;
         reconciled_adjusted: adjusted_difference != null && Math.abs(adjusted_difference) < 0.02,
         uncleared_outside_window: { deposits: round(outside?.dr || 0), withdrawals: round(outside?.cr || 0) },
         truncated: lines.length >= 1000,
+        reconciliation: rec ? { id: rec.id, statement_date: rec.statement_date || to, status: rec.status || 'DRAFT', created_by: rec.created_by, created_at: rec.created_at } : null,
+        locked: String(rec?.status || '') === 'FINAL',
         lines: withFlags,
       });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Every reconciliation ever saved for an account, newest first. There was no
+  // way to see that a month had been done, or by whom.
+  app.get("/api/restaurant/:id/accounting/bank-reconciliations", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const account = String((req.query as any).account || '1010');
+      const rows = await db.query(
+        `SELECT id, account_code, period, statement_date, statement_closing_balance, status, created_by, created_at
+           FROM bank_reconciliations WHERE account_code=?
+          ORDER BY COALESCE(statement_date, period) DESC, created_at DESC LIMIT 60`,
+        [account]).catch(() => []);
+      res.json({ account_code: account, reconciliations: rows || [] });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Sign one off, or reopen it. A FINAL reconciliation refuses further saves,
+  // and reopening is recorded rather than silent.
+  app.post("/api/restaurant/:id/accounting/bank-reconciliation/:recId/status", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctCanWrite(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const want = String(req.body?.status || '').toUpperCase();
+      if (!['FINAL', 'DRAFT'].includes(want)) return res.status(400).json({ error: "status must be FINAL or DRAFT" });
+      const rec: any = await db.get("SELECT * FROM bank_reconciliations WHERE id=?", [req.params.recId]).catch(() => null);
+      if (!rec) return res.status(404).json({ error: 'Reconciliation not found' });
+      await db.run("UPDATE bank_reconciliations SET status=? WHERE id=?", [want, req.params.recId]);
+      await writeObjectAudit(db, req, {
+        objectType: 'BANK_RECONCILIATION', objectId: req.params.recId,
+        action: want === 'FINAL' ? 'FINALISED' : 'REOPENED',
+        summary: `${rec.account_code} statement ${rec.statement_date || rec.period} — ${want === 'FINAL' ? 'signed off' : 'reopened for changes'}`,
+        before: { status: rec.status }, after: { status: want },
+      }).catch(() => {});
+      res.json({ id: req.params.recId, status: want });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
@@ -57217,12 +57265,32 @@ ${data.tenant.name}`;
         `SELECT id FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date >= ? AND entry_date <= ?`,
         [req.params.id, String(account || '1010'), String(from), String(to)]).catch(() => []);
       const lineIds = new Set((windowRows || []).map((r: any) => String(r.id)));
-      const recId = `BR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const scb = round(Number(statement_closing_balance || 0));
       const by = (req.user as any)?.id || (req.user as any)?.email || null;
-      await db.run(
-        `INSERT INTO bank_reconciliations (id, account_code, period, statement_closing_balance, status, created_by) VALUES (?, ?, ?, ?, 'SAVED', ?)`,
-        [recId, acct, period, scb, by]);
+      const stmtDate = String(to);
+
+      // One reconciliation per account per statement date. Saving again updates
+      // it rather than stacking another row, which is what made the history
+      // unreadable and left the screen reading "whichever was newest".
+      const prior: any = await db.get(
+        "SELECT * FROM bank_reconciliations WHERE account_code=? AND statement_date=? ORDER BY created_at DESC LIMIT 1",
+        [acct, stmtDate]).catch(() => null);
+      if (String(prior?.status || '') === 'FINAL') {
+        return res.status(409).json({
+          error: 'This reconciliation has been signed off. Reopen it before making changes.',
+          code: 'RECONCILIATION_FINAL', id: prior.id,
+        });
+      }
+      const recId = prior?.id || `BR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      if (prior) {
+        await db.run(
+          "UPDATE bank_reconciliations SET statement_closing_balance=?, period=?, created_by=? WHERE id=?",
+          [scb, period, by, recId]);
+      } else {
+        await db.run(
+          `INSERT INTO bank_reconciliations (id, account_code, period, statement_date, statement_closing_balance, status, created_by) VALUES (?, ?, ?, ?, ?, 'DRAFT', ?)`,
+          [recId, acct, period, stmtDate, scb, by]);
+      }
       const ids: string[] = Array.isArray(cleared_entry_ids) ? cleared_entry_ids.map((x: any) => String(x)) : [];
       const clearedOn = String(to || new Date().toISOString().slice(0, 10));
       for (const gid of ids) {
@@ -57245,7 +57313,7 @@ ${data.tenant.name}`;
       const bookRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date <= ?`, [req.params.id, acct, String(to)]).catch(() => ({ bal: 0 }));
       const book_balance = round(bookRow?.bal || 0);
       const difference = round(book_balance - scb);
-      res.status(201).json({ id: recId, account_code: acct, period, book_balance, statement_closing_balance: scb, difference, reconciled: Math.abs(difference) < 0.02, cleared_count: ids.length });
+      res.status(201).json({ id: recId, account_code: acct, period, statement_date: stmtDate, updated: !!prior, book_balance, statement_closing_balance: scb, difference, reconciled: Math.abs(difference) < 0.02, cleared_count: ids.length });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
