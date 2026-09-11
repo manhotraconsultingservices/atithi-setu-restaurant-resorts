@@ -8109,6 +8109,30 @@ function SettlementUploadForm({
   );
 }
 
+// The cost buckets an expense or supplier invoice can be filed against, and
+// how each one looks. ONE definition: this list was hand-written in six places
+// across three expense screens and the supplier-invoice screens, which is how
+// Events & Convention and Spa & Wellness ended up missing from all of them.
+// SHARED is last because it is the catch-all, not a business module.
+// Keep in step with COST_MODULES in server.ts, which validates the same values.
+const COST_MODULES = ['RESTAURANT', 'HOTEL', 'EVENTS', 'SPA', 'SHARED'] as const;
+const COST_MODULE_LABEL: Record<string, string> = {
+  RESTAURANT: 'Restaurant',
+  HOTEL: 'Hotel',
+  EVENTS: 'Events & Convention',
+  SPA: 'Spa & Wellness',
+  SHARED: 'Shared / Property-wide',
+};
+const COST_MODULE_BADGE: Record<string, string> = {
+  RESTAURANT: 'bg-orange-100 text-orange-700',
+  HOTEL: 'bg-blue-100 text-blue-700',
+  EVENTS: 'bg-amber-100 text-amber-800',
+  SPA: 'bg-teal-100 text-teal-700',
+  SHARED: 'bg-purple-100 text-purple-700',
+};
+const costModuleOptions = () =>
+  COST_MODULES.map(m => <option key={m} value={m}>{COST_MODULE_LABEL[m]}</option>);
+
 function AccountingView({ restaurantId, token, initialTab, cashierMode }: { restaurantId: string; token: string; initialTab?: string; cashierMode?: boolean }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
     | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
@@ -46239,11 +46263,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
     catch (e: any) { toast.error('Failed: ' + (e?.message || '')); }
   };
 
-  const modColors: Record<string, string> = {
-    HOTEL: 'bg-blue-100 text-blue-700',
-    RESTAURANT: 'bg-orange-100 text-orange-700',
-    SHARED: 'bg-purple-100 text-purple-700',
-  };
+  const modColors = COST_MODULE_BADGE;
 
   return (
     <div className="space-y-6">
@@ -46277,9 +46297,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
               <select value={form.module} onChange={e => setForm(f => ({ ...f, module: e.target.value }))}
                 className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
                 <option value="" disabled>Select module…</option>
-                <option value="HOTEL">Hotel</option>
-                <option value="RESTAURANT">Restaurant</option>
-                <option value="SHARED">Shared / Property-wide</option>
+                {costModuleOptions()}
               </select>
             </div>
             <div>
@@ -46411,7 +46429,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
   const [pcForm, setPcForm] = useState<any>({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today, module: 'RESTAURANT' });
   const [pcSaving, setPcSaving] = useState(false);
   const [editingPc, setEditingPc] = useState<string | null>(null);
-  const [pcModule, setPcModule] = useState<'ALL' | 'RESTAURANT' | 'HOTEL' | 'SHARED'>('ALL');
+  const [pcModule, setPcModule] = useState<'ALL' | (typeof COST_MODULES)[number]>('ALL');
   const [expView, setExpView] = useState<'ledger' | 'daily' | 'category' | 'consolidated'>('ledger');
   const [expExtra, setExpExtra] = useState<any>(null);
   const role = (localStorage.getItem('role') || '').toUpperCase();
@@ -46604,7 +46622,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
     if (active === 'expense-journal') {
       const rows = data.rows || [];
       const s = data.summary || {};
-      const modColors: Record<string, string> = { RESTAURANT: 'bg-orange-100 text-orange-800', HOTEL: 'bg-blue-100 text-blue-800', SHARED: 'bg-purple-100 text-purple-800' };
+      const modColors = COST_MODULE_BADGE;
 
       const renderDailyTrend = () => {
         if (!expExtra?.daily) return <p className="text-xs italic text-[#9c8e85]">Loading…</p>;
@@ -46715,7 +46733,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
       return (<>
         {/* Module filter tabs */}
         <div className="flex gap-1.5 flex-wrap mb-3">
-          {(['ALL', 'RESTAURANT', 'HOTEL', 'SHARED'] as const).map(m => (
+          {(['ALL', ...COST_MODULES] as const).map(m => (
             <button key={m} type="button" onClick={() => setPcModule(m)}
               className={cn('px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest', pcModule === m ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52] border border-[#e8dccf]')}>{m}</button>
           ))}
@@ -46810,7 +46828,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
             <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">{editingPc ? 'Edit cash entry' : 'Record expense / cash movement'}</p>
             <div className="flex flex-wrap items-end gap-2 text-xs">
               <label>Date<input type="date" value={pcForm.entry_date} onChange={e => setPcForm({ ...pcForm, entry_date: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
-              <label>Module<select value={pcForm.module} onChange={e => setPcForm({ ...pcForm, module: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="RESTAURANT">Restaurant</option><option value="HOTEL">Hotel</option><option value="SHARED">Shared</option></select></label>
+              <label>Module<select value={pcForm.module} onChange={e => setPcForm({ ...pcForm, module: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]">{costModuleOptions()}</select></label>
               <label>Type<select value={pcForm.direction} onChange={e => setPcForm({ ...pcForm, direction: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="OUT">Expense (OUT)</option><option value="IN">Top-up (IN)</option></select></label>
               <label>Amount<input type="number" value={pcForm.amount} onChange={e => setPcForm({ ...pcForm, amount: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] w-28" /></label>
               <label>Category<input value={pcForm.category} onChange={e => setPcForm({ ...pcForm, category: e.target.value })} placeholder="e.g. Stationery" className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
@@ -48166,7 +48184,7 @@ function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: s
   const [data, setData] = useState<any>(null);
   const [petty, setPetty] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [pcModuleR, setPcModuleR] = useState<'ALL' | 'RESTAURANT' | 'HOTEL' | 'SHARED'>('RESTAURANT');
+  const [pcModuleR, setPcModuleR] = useState<'ALL' | (typeof COST_MODULES)[number]>('RESTAURANT');
 
   const cur = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
   const api = async (path: string) => {
@@ -48248,10 +48266,10 @@ function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: s
   const renderTable = () => {
     if (active === 'petty-cash') {
       const s = petty?.summary || {};
-      const modColors: Record<string, string> = { RESTAURANT: 'bg-orange-100 text-orange-800', HOTEL: 'bg-blue-100 text-blue-800', SHARED: 'bg-purple-100 text-purple-800' };
+      const modColors = COST_MODULE_BADGE;
       return (<>
         <div className="flex gap-1.5 flex-wrap mb-3">
-          {(['ALL', 'RESTAURANT', 'HOTEL', 'SHARED'] as const).map(m => (
+          {(['ALL', ...COST_MODULES] as const).map(m => (
             <button key={m} type="button" onClick={() => setPcModuleR(m)}
               className={cn('px-2.5 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-widest', pcModuleR === m ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52] border border-[#e8dccf]')}>{m}</button>
           ))}
@@ -65347,7 +65365,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     CANCELLED: 'bg-red-100 text-red-800',
   };
   const fmtAmt = (n: any) => `₹${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const modColor: Record<string, string> = { RESTAURANT: 'bg-orange-100 text-orange-800', HOTEL: 'bg-blue-100 text-blue-800', SHARED: 'bg-purple-100 text-purple-800' };
+  const modColor = COST_MODULE_BADGE;
 
   const filteredSuppliers = supplierList.filter(s =>
     !supSearch || s.name.toLowerCase().includes(supSearch.toLowerCase()) ||
@@ -65597,9 +65615,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
             <select value={invFilter.module} onChange={e => setInvFilter(f => ({ ...f, module: e.target.value }))}
               className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
               <option value="ALL">All Modules</option>
-              <option value="RESTAURANT">Restaurant</option>
-              <option value="HOTEL">Hotel</option>
-              <option value="SHARED">Shared</option>
+              {costModuleOptions()}
             </select>
             <select value={invFilter.status} onChange={e => setInvFilter(f => ({ ...f, status: e.target.value }))}
               className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
@@ -66375,9 +66391,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Module *</label>
                   <select value={invForm.module} onChange={e => setInvForm(f => ({ ...f, module: e.target.value }))}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
-                    <option value="RESTAURANT">Restaurant</option>
-                    <option value="HOTEL">Hotel</option>
-                    <option value="SHARED">Shared</option>
+                    {costModuleOptions()}
                   </select>
                 </div>
               </div>

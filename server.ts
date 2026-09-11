@@ -4937,6 +4937,17 @@ interface GlLine {
   cost_centre?: string;
 }
 
+// The cost buckets an expense or a supplier invoice can be filed against.
+// ONE list — it was written out by hand in two places here and six in the front
+// end, which is exactly how EVENTS and SPA came to be missing from some of them
+// and not others. Anything added here is immediately offerable everywhere.
+// SHARED stays last: it is the catch-all, not a business module.
+const COST_MODULES = ['RESTAURANT', 'HOTEL', 'EVENTS', 'SPA', 'SHARED'] as const;
+const _normaliseCostModule = (v: any, fallback = 'RESTAURANT'): string => {
+  const up = String(v || '').toUpperCase();
+  return (COST_MODULES as readonly string[]).includes(up) ? up : fallback;
+};
+
 function _glAccountForPaymentMethod(method: string): { code: string; name: string } {
   return String(method || '').toUpperCase() === 'CASH'
     ? { code: '1000', name: 'Cash in Hand' }
@@ -34047,8 +34058,11 @@ ${data.tenant.name}`;
       const amount = Math.abs(Number(req.body?.amount || 0));
       if (!(amount > 0)) return res.status(400).json({ error: 'amount must be greater than 0' });
       const entry_date = String(req.body?.entry_date || new Date().toISOString().slice(0, 10));
-      const rawModule = String(req.body?.module || 'RESTAURANT').toUpperCase();
-      const module = ['RESTAURANT', 'HOTEL', 'SHARED'].includes(rawModule) ? rawModule : 'RESTAURANT';
+      // Coerces an unrecognised module rather than rejecting it, which is the
+      // long-standing behaviour — but the list now covers all four business
+      // modules, so an Events or Spa expense is no longer silently refiled as
+      // Restaurant.
+      const module = _normaliseCostModule(req.body?.module);
       const id = `PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await tenantDb.run(
         `INSERT INTO petty_cash (id, entry_date, direction, category, amount, notes, recorded_by, module)
@@ -34080,7 +34094,7 @@ ${data.tenant.name}`;
         if (k in req.body) {
           let v = req.body[k];
           if (k === 'direction') v = String(v).toUpperCase() === 'OUT' ? 'OUT' : 'IN';
-          if (k === 'module') v = ['RESTAURANT','HOTEL','SHARED'].includes(String(v).toUpperCase()) ? String(v).toUpperCase() : 'RESTAURANT';
+          if (k === 'module') v = _normaliseCostModule(v);
           if (k === 'amount') v = Math.abs(Number(v));
           updates.push(`${k} = ?`);
           params.push(v);
@@ -37608,14 +37622,22 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/reports/vendor-aging", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
+      // Payables carried no module dimension at all: supplier invoices are
+      // filed per module but the ageing report neither showed nor filtered on
+      // it, so an owner could not ask what the banquet side owes. Optional
+      // `?module=` — absent, the report is property-wide exactly as before.
+      const agingModule = req.query.module ? _normaliseCostModule(req.query.module, '') : '';
       const invoices: any[] = await db.query(
         `SELECT si.id, si.supplier_id, s.name AS supplier_name,
-                si.invoice_date, si.due_date, si.outstanding_amount, si.gst_amount
+                si.invoice_date, si.due_date, si.outstanding_amount, si.gst_amount,
+                COALESCE(si.module, 'RESTAURANT') AS module
            FROM supplier_invoices si
            LEFT JOIN suppliers s ON s.id = si.supplier_id
           WHERE si.outstanding_amount > 0
             AND si.status != 'PAID'
-          ORDER BY si.due_date ASC NULLS LAST`
+            ${agingModule ? "AND COALESCE(si.module,'RESTAURANT') = ?" : ''}
+          ORDER BY si.due_date ASC NULLS LAST`,
+        agingModule ? [agingModule] : []
       ).catch(() => []);
 
       const today = new Date();
@@ -54904,8 +54926,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-special-note-visible',
+    commit_marker: 'cost-modules-events-spa',
     code_features: [
+      'cost-modules-events-spa',           //FIX (11 Sep 2026, from the owner's manual testing: 'accounting is not fully supported for Event & Convention and Wellness Spa' — confirmed, and it was worse than a missing dropdown entry). The accounting module recognised **three** cost buckets — RESTAURANT | HOTEL | SHARED — stated outright in the code: 'PETTY CASH / EXPENSE JOURNAL — per-module (RESTAURANT|HOTEL|SHARED) ledger'. **THE TRAP:** both petty-cash routes did not merely default an unknown module, they SILENTLY COERCED it (`includes(raw) ? raw : 'RESTAURANT'`), so adding EVENTS and SPA to the dropdowns alone would have filed every Events expense under Restaurant with no error and no trace — a wrong number in the books rather than a visibly missing option. The server allowlist had to move FIRST. All four business modules are now filable, across BOTH the create and the edit paths, and junk is still coerced (TC-EXPENSE-MODULES asserts both halves, reading the STORED value back rather than trusting the create response). **Root-cause shape:** the module list was hand-written in 2 places in server.ts and **NINE** in App.tsx — three separate Expense Journal surfaces, the Reports petty-cash view, and the supplier-invoice create + filter — which is exactly how some got HOTEL first, others RESTAURANT first, and none got EVENTS or SPA. There were even THREE independent copies of the badge-colour map, one of them named `modColor` (singular) driving the supplier-invoice screens, which a grep for `modColors` misses — found by grepping for what was LEFT rather than assuming the edits were complete. All of them now read one `COST_MODULES` constant per file, so the next module added is offered everywhere at once. **Payables gained a module dimension it never had:** `/reports/vendor-aging` did not even SELECT `si.module`, so an owner could not ask what the banquet side owes; it now returns the module per invoice and accepts an optional `?module=` (absent, the report is property-wide exactly as before). TC-PAYABLES-MODULE asserts a filtered ageing can never exceed the unfiltered one. **NOT done here and reported separately:** `gl_entries.cost_centre` — the ledger's OWN module dimension — is NULL on 100% of rows (2,000/2,000 sampled); the column exists and `_postGlEntries` writes it, but none of the 31 posting call sites passes it. Until that is populated, P&L / Cash Flow / GST Ledger / Ledger & Books cannot be split by module for ANY module, Restaurant and Hotel included. Event and Spa money DOES reach those reports (4050 Banquet & Events, 4040 Spa Revenue via folio settlement) — it simply cannot be told apart. tsc + vite build clean.',
       'event-special-note-visible',        //FIX (11 Sep 2026, reported by the owner). The **Special note** captured on the event booking form disappeared the moment the booking was saved. **It was never a data loss — it is a RENDER GAP,** established end to end on the live tenant before anything was touched: the note is persisted, returned by BOTH `GET /events/bookings/:id` and the list, unchanged through confirm -> start -> complete, and it is even printed on the BEO / function sheet PDF. It was simply never rendered on the booking detail view — the create form writes `special_requests` and nothing in the UI ever read it back. The comment beside the input even claimed it was 'shown on its detail view'; the storing half was built and the showing half never was. Now rendered on the detail view: an inline textarea saving on blur through the SAME `commitContact` auto-save the phone/email fields use (`special_requests` was already on the PUT allowlist and the edit is audited, so NO server change was needed), and read-only once COMPLETED or CANCELLED — which is exactly the state it was reported in. The UI's `editable` flag already mirrors the server's 409 on those statuses, so the editable control can never be offered where the save would fail. Hidden entirely when the booking is locked AND the note is empty, so a finished booking does not grow an empty row. New TC-EVT-SPECIAL-NOTE pins the contract the render depends on — present on create, on the single read and on the list, editable through the ordinary PUT without disturbing the rest of the booking, and unchanged after complete. **The lesson: a field that is written, stored and even printed can still be invisible where people actually work — 'it saved fine' is not evidence anyone can see it.** tsc + vite build clean.',
       'acct-reports-one-row-per-account',  //FIX (11 Sep 2026) — the GROUP BY that stage 6c reported and deliberately did not touch. **Five GL-derived reports keyed their grouping on `gl_entries.account_name` as well as `account_code`** — and that column is free text written by whichever caller posted the journal, with nothing forcing it to match `chart_of_accounts`. So the moment two callers spelled one code differently, that account SPLIT INTO TWO ROWS. Live on RESTO-1003 this was not the single known case but **four**: 1010 as "Bank — Main Account" + "Bank", 1000 as "Cash in Hand" + "Bank", 4000 as "Room Revenue" + "Sales", 5000 as "Cost of F&B Consumed" + "Expense". A trial balance listing an account twice is wrong on its face, and worse, every consumer doing `.find(r => r.account_code === X)` silently reads ONE of the two lines — which is exactly how TC-ACC-BANKREC came to report a false mismatch. All five now group on the code alone and take the display label from the chart of accounts (`COALESCE(c.name, MIN(g.account_name))`): trial balance, gst-outstanding, cash-book expenses, profit-loss, balance-sheet. c.name/c.type/c.display_order are functionally dependent on the code — `chart_of_accounts.code` is the PRIMARY KEY, so the join cannot fan out and grouping by them adds no rows — and a code the chart does not know keeps a GL-supplied name and still yields exactly one row. gst-outstanding gained the chart join it never had (its date predicates re-aliased to `g.` with it). **The P&L hid its own split**: the second 4000/5000 rows netted to zero and were filtered by the `|amt| >= 0.005` cut, so the report looked clean while the grouping was wrong — a reminder that "no visible duplicate" is not evidence of correct grouping. **Deliberately NOT done: normalising historical `gl_entries.account_name` to the chart name.** No report reads that column for display any more, so a backfill fixes nothing that is still broken; the stored label is the audit record of what the poster asserted at posting time and a financial ledger should not have its history rewritten; and a blanket UPDATE over the largest table, running in the tenant migration path on every boot with no user in the loop, is the exact shape of change that has bitten this codebase before. The as-posted label still shows in the GL ledger drill-down and journal exports, which is correct — if that ever reads as confusing, the fix is to display the chart name at render time, not to overwrite rows. Tests (these reports had NONE, which is why the split survived): TC-ACC-TB-UNIQ, TC-ACC-TB-NAME, TC-ACC-TB-BALANCED-UNIQ, TC-ACC-PNL-UNIQ, TC-ACC-BS-UNIQ, TC-ACC-GST-UNIQ, TC-ACC-CASHBOOK-UNIQ — asserted RED before the fix (TB-UNIQ 4 splits, TB-NAME 4 mislabels, BS-UNIQ 1 split) and green after, with the trial balance balancing either way. tsc + vite build clean.',
       'bankrec-stage6c-account-name',      //FIX (stage 6 follow-up, 11 Sep 2026) — a defect I SHIPPED in 6b, caught by TC-ACC-BANKREC going red with a delta that grew by exactly the test charge amount on every run. **Every financial report GROUPS BY (account_code, account_name) — the free-text NAME is part of the key** — so a caller writing a different label for the same code splits that account into TWO LINES on the trial balance: `1010 'Bank — Main Account'` and `1010 'Bank'`. One account appearing twice is precisely what a trial balance must never do. My interest-credited path on the reconciliation screen hardcoded `account_name: 'Bank'` when building its manual journal, so every interest entry a real user posted would have done this to their own trial balance. Fixed at both ends: the screen sends the account's REAL name, and the manual-journal route — the ONLY route that accepts a free-form account name from a client — now RESOLVES the name from `chart_of_accounts` by code, falling back to the caller's text only for a code the chart does not know. No client can split an account by mistyping a label. Also fixed TC-ACC-BANKREC, which compared the reconciliation against `.find()` of the FIRST trial-balance row for the account and so reported a false mismatch once a second row existed; it sums every row for the code now, because a cross-check must not quietly assume one row per account. **NOT changed here:** the GROUP BY itself, which five report queries share. Collapsing them onto the account code (taking the label from the chart) is the proper fix and is the right shape, but rewriting five financial reports with no tests of their own is a bigger change than this stage and is reported for a decision rather than slipped in at the end of one. tsc + vite build clean.',
