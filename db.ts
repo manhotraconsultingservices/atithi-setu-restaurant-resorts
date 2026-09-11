@@ -2797,6 +2797,26 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       gl_entry_id TEXT NOT NULL,
       PRIMARY KEY (rec_id, gl_entry_id)
     );
+    -- Clearing is a property of the TRANSACTION, not of one reconciliation.
+    -- bank_rec_cleared above ties a tick to the period it was made in, so an
+    -- item that clears in a later month than it was raised in is invisible to
+    -- that month's view — which would make any adjusted balance wrong. Keyed on
+    -- the account instead, a tick means "this has cleared the bank", once, for
+    -- good. bank_rec_cleared is still written for one release as a fallback.
+    CREATE TABLE IF NOT EXISTS bank_cleared (
+      account_code TEXT NOT NULL,
+      gl_entry_id  TEXT NOT NULL,
+      cleared_on   TEXT,
+      cleared_by   TEXT,
+      created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (account_code, gl_entry_id)
+    );
+    -- Carry every existing tick across. Idempotent, so it is safe on each boot.
+    INSERT INTO bank_cleared (account_code, gl_entry_id, cleared_by)
+      SELECT r.account_code, c.gl_entry_id, r.created_by
+        FROM bank_rec_cleared c
+        JOIN bank_reconciliations r ON r.id = c.rec_id
+      ON CONFLICT (account_code, gl_entry_id) DO NOTHING;
 
     -- Per-cashier EOD cash drawer: one till per cashier per shift. Lifecycle
     -- OPEN -> PENDING_APPROVAL -> APPROVED | REJECTED. Expected cash is derived

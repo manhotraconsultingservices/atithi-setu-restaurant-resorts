@@ -54902,8 +54902,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-message-log-and-inbox',
+    commit_marker: 'bankrec-stage1-durable-clearing',
     code_features: [
+      'bankrec-stage1-durable-clearing',          //REFACTOR (bank reconciliation remediation, stage 1 of 6, 11 Sep 2026). Groundwork only — no user-visible change. A cleared tick was stored as `bank_rec_cleared(rec_id, gl_entry_id)`, which ties it to the period it was made in. That is wrong for a reconciliation: a cheque issued on 28 Aug and cleared on 3 Sep is absent from September's window entirely, so nothing records that it has since cleared, and ANY adjusted-balance calculation built on a single window would treat it as cleared and get the answer wrong. Clearing is a durable property of a TRANSACTION, so it moves to `bank_cleared(account_code, gl_entry_id, cleared_on, cleared_by)` — a tick now means "this has cleared the bank", once, regardless of which window it was ticked in. Created in the TENANT MIGRATION PATH (never in a handler) with an idempotent INSERT..SELECT backfill of every existing tick. The GET reads the new table and folds in the old per-reconciliation rows so nothing saved before this release is lost; the POST writes BOTH for one release so a revert keeps working. Unticking is honoured too, but ONLY for entries inside the saved window — otherwise saving September would wipe every tick made in August. Blast radius checked before writing: these two tables are referenced in exactly 4 places in server.ts and defined once in db.ts, read by nothing else; `gl_entries.id` is a TEXT PRIMARY KEY and entries are reversed rather than deleted, so the references cannot orphan. Stage 0 (safety net) added TC-ACC-BANKREC-SAVE, TC-ACC-BANKREC-ISOLATION and TC-ACC-BANKREC-RBAC, and widened TC-ACC-BANKREC from a shape check into a cross-check of the book balance against the trial balance. tsc clean.',
       'wa-message-log-and-inbox',                    //FEATURE (10 Sep 2026), closing the gap against a dedicated BSP console. THREE THINGS THE LOG COULD NOT SHOW, because it never stored them: which approved TEMPLATE carried a message, WHO the contact is, and anything INBOUND at all — the webhook only stamped the 24-hour window and handled STOP, so replies vanished and there was no RECEIVED count or conversation to read. `notification_deliveries` now carries `template_name`, `contact_name` and `direction`; `logAndSend` fills the first two (the name via a new module-level `_logAndSendName`, set from `_resolveGuestContact` in the dispatcher's guest branch, so none of the 60 call sites changed); and an inbound WhatsApp message is filed as a `direction='IN'` row with status RECEIVED. Routing it needed a tenant, which a reply does not carry because the sender is shared — so `wa_message_index`, a table ensureWaTables has created since stage D but which was NEVER WRITTEN OR READ (routing actually went through messaging_usage), is now populated on every WhatsApp send and answers exactly that question. `/api/owner/messaging/summary` reports the six counters a console is read through — today, sent, delivered, read, failed, received — plus people and per-template totals; `/api/owner/notification-deliveries` gains `direction`, `template` and free-text `q` filters. NEW `/api/owner/messaging/threads` (every WhatsApp contact, last line, and whether the 24-hour window is open — resolved in ONE central query rather than one per row) and `/api/owner/messaging/thread?contact=` (one conversation, oldest first). UI: the console is now Compose / Message log / Inbox. The log gained the six counters, status chips including Received, a template filter, and rows showing the contact's name, a template chip and the direction. The Inbox reads the same rows as conversations with a window badge per contact and, when it has closed, the plain statement that WhatsApp blocks free-form replies and only an approved template will reach them. Compose gained a template-registry line (total vs approved). New tests TC-MSG-INBOX and TC-MSG-LOG-COUNTERS. STILL OPEN vs the reference console: audience segments for bulk sends and a grouped broadcast history. tsc + vite build clean.',
       'wa-approved-templates-only',                   //CHANGE (owner decision, 10 Sep 2026). **NO COMPOSE BOX FOR WHATSAPP — every WhatsApp message the property starts uses wording Meta has approved.** The messaging console shipped earlier the same day allowed free-form text when the guest had written first, which Meta does permit inside the 24-hour service window. Removed deliberately: whether that window happens to be open is invisible to the person composing, so one button would sometimes send their own words and sometimes an approved template, and only the delivery log would say which. Now `POST /api/owner/messaging/send` REQUIRES `template_name` for WhatsApp (400 otherwise), always sends `type: 'template'`, and always bills at the template's category — the free-form branch and its SKIPPED outside-the-window path are both gone. The compose textarea is hidden for WhatsApp in the UI and replaced by a mandatory approved-template picker, its variable inputs, and a live preview of exactly what the guest will receive (with the property name already filling {{1}}); the Send button stays disabled until a template is chosen, and an empty template list says so plainly. Email and SMS are untouched — neither is Meta and neither has a template regime. Automatic notifications still use the tenant's own wording inside the window; that surface was not part of this decision. New test TC-MSG-WA-TEMPLATE-ONLY. tsc + vite build clean.',
       'messaging-console-bsp',                        //FEATURE (10 Sep 2026). A BSP-style MESSAGING CONSOLE for the property owner, in the shape they already know from Gupshup and the like: send a message on demand, and see how many went out and to whom. Previously the only way to send by hand was `/api/owner/notifications/test`, which sends one fixed sentence to one recipient. NEW `POST /api/owner/messaging/send` — channel WHATSAPP | EMAIL | SMS, up to 50 deduplicated recipients, either an approved template (with its variables) or free-form text, returning a PER-RECIPIENT outcome so the owner sees exactly who it reached. It reuses the dispatcher's rules rather than reimplementing them: opt-outs are checked per recipient and logged as SKIPPED with the reason, the 24-hour service window is evaluated PER RECIPIENT (free-form inside it and billed as SERVICE, the approved template outside it), every attempt goes through `logAndSend` so the activity log and the central `messaging_usage` cost attribution stay truthful, and the property name is prefixed to guest-bound text because the sender number is shared. Recipients are shape-checked against the channel so an email address cannot be sent as a WhatsApp number. NEW `GET /api/owner/messaging/summary?days=` — totals (sent / failed / skipped / distinct people), per-channel and per-day counts, the most-messaged contacts, top events, and estimated spend for THIS tenant from `messaging_usage` against the platform rate card (the admin cost report existed; the owner had no view of their own). `/api/owner/notification-deliveries` gains additive `recipient`, `event` and `since` filters plus SKIPPED/DELIVERED/READ statuses, so the console can drill into one contact's whole history. NEW 4th tab on Notifications, 'Send a message', with a Compose panel (channel picker, recipient box, approved-template picker showing the body and asking only for {{2}} onward since the property name fills {{1}}) and an Activity panel (headline counts, estimated cost, a who-we-messaged table that drills into the full log). New tests TC-MSG-CONSOLE-GUARDS and TC-MSG-CONSOLE-SUMMARY, both side-effect-free. FIXED before release: the console passed the owner's template variables straight to `sendWhatsAppDetailed`, which maps variables[0] onto {{1}} — and {{1}} is ALWAYS the property name because the sender is shared, so every value would have shifted by one and Meta would have rejected the send on a parameter-count mismatch. The property name is now forced into first position exactly as the dispatcher does. tsc + vite build clean.',
@@ -57131,9 +57132,18 @@ ${data.tenant.name}`;
         [req.params.id, account, from, to]).catch(() => []);
       const period = `${from}..${to}`;
       const rec: any = await db.get("SELECT * FROM bank_reconciliations WHERE account_code=? AND period=? ORDER BY created_at DESC LIMIT 1", [account, period]).catch(() => null);
-      let clearedIds: string[] = [];
-      if (rec) { const cl: any[] = await db.query("SELECT gl_entry_id FROM bank_rec_cleared WHERE rec_id=?", [rec.id]).catch(() => []); clearedIds = cl.map((r: any) => String(r.gl_entry_id)); }
-      const clearedSet = new Set(clearedIds);
+      // Clear state is a property of the account, so it survives a change of
+      // window and a later period clearing an earlier period's item. The old
+      // per-reconciliation rows are still folded in, so work saved before this
+      // release still shows — that fallback goes once a release has proved the
+      // new table.
+      const clearedSet = new Set<string>();
+      const durable: any[] = await db.query("SELECT gl_entry_id FROM bank_cleared WHERE account_code=?", [account]).catch(() => []);
+      for (const r of (durable || [])) clearedSet.add(String(r.gl_entry_id));
+      if (rec) {
+        const cl: any[] = await db.query("SELECT gl_entry_id FROM bank_rec_cleared WHERE rec_id=?", [rec.id]).catch(() => []);
+        for (const r of (cl || [])) clearedSet.add(String(r.gl_entry_id));
+      }
       const withFlags = lines.map((l: any) => ({ ...l, cleared: clearedSet.has(String(l.id)) }));
       const statement_closing_balance = rec ? round(rec.statement_closing_balance) : null;
       const difference = statement_closing_balance != null ? round(book_balance - statement_closing_balance) : null;
@@ -57149,6 +57159,13 @@ ${data.tenant.name}`;
       const { account, from, to, statement_closing_balance, cleared_entry_ids } = req.body || {};
       const acct = String(account || '1010');
       const period = `${String(from)}..${String(to)}`;
+      // Only entries inside the saved window were on screen, so only those may
+      // be UNticked by this save. Without this, saving September would clear
+      // every tick made in August.
+      const windowRows: any[] = await db.query(
+        `SELECT id FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date >= ? AND entry_date <= ?`,
+        [req.params.id, String(account || '1010'), String(from), String(to)]).catch(() => []);
+      const lineIds = new Set((windowRows || []).map((r: any) => String(r.id)));
       const recId = `BR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const scb = round(Number(statement_closing_balance || 0));
       const by = (req.user as any)?.id || (req.user as any)?.email || null;
@@ -57156,8 +57173,23 @@ ${data.tenant.name}`;
         `INSERT INTO bank_reconciliations (id, account_code, period, statement_closing_balance, status, created_by) VALUES (?, ?, ?, ?, 'SAVED', ?)`,
         [recId, acct, period, scb, by]);
       const ids: string[] = Array.isArray(cleared_entry_ids) ? cleared_entry_ids.map((x: any) => String(x)) : [];
+      const clearedOn = String(to || new Date().toISOString().slice(0, 10));
       for (const gid of ids) {
+        // Written to both for one release: the old table so a rollback keeps
+        // working, the new one so clearing outlives the period it was made in.
         await db.run("INSERT INTO bank_rec_cleared (rec_id, gl_entry_id) VALUES (?, ?) ON CONFLICT (rec_id, gl_entry_id) DO NOTHING", [recId, gid]);
+        await db.run(
+          "INSERT INTO bank_cleared (account_code, gl_entry_id, cleared_on, cleared_by) VALUES (?, ?, ?, ?) ON CONFLICT (account_code, gl_entry_id) DO NOTHING",
+          [acct, gid, clearedOn, by]).catch(() => {});
+      }
+      // Unticking has to stick too, or a mistake could never be undone.
+      const idSet = new Set(ids);
+      const existing: any[] = await db.query("SELECT gl_entry_id FROM bank_cleared WHERE account_code=?", [acct]).catch(() => []);
+      for (const r of (existing || [])) {
+        const gid = String(r.gl_entry_id);
+        if (!idSet.has(gid) && lineIds.has(gid)) {
+          await db.run("DELETE FROM bank_cleared WHERE account_code=? AND gl_entry_id=?", [acct, gid]).catch(() => {});
+        }
       }
       const bookRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date <= ?`, [req.params.id, acct, String(to)]).catch(() => ({ bal: 0 }));
       const book_balance = round(bookRow?.bal || 0);
