@@ -54902,8 +54902,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage3c-coherent-ticks',
+    commit_marker: 'bankrec-stage4-edges',
     code_features: [
+      'bankrec-stage4-edges',                   //FIX (bank reconciliation remediation, stage 4 of 6, 11 Sep 2026). Three independent edges. **F-4:** the cumulative book balance sat above a WINDOWED list that could never add up to it, with nothing to bridge them — now returns `opening_balance` and `window_movement{debits,credits,net}`, and the invariant opening + net = book_balance is asserted by TC-ACC-BANKREC-OPENING; the UI spells out opening + received − paid = closing. **F-8:** the read was gated MORE TIGHTLY than the write (GET `_acctOwnerOnly`, POST `_acctCanWrite`, which admits MANAGER by role), so a manager was refused the screen but accepted on the save. Fixed AT THE CALL SITES — the shared helpers serve 26 and 17 other routes and were NOT touched. Direction: the WRITE was tightened to match the read, not the read loosened, because a reconciliation signs off the books and blanket role-based access is too loose; access stays grantable per role through Staff Access, which `_acctOwnerOnly` honours, and nobody loses a working workflow since a manager could not open the screen anyway. One line to reverse if managers should reconcile. The stage-3 status route was aligned the same way. **F-9:** the account picker offered two HARDCODED codes, and the second (`1020 Bank — OTA Receivable`) is seeded but never posted to by anything in the product, so choosing it always returned an empty screen — it is now driven from the `bank_accounts` table, deduped, with a fallback to 1010 so it can never render empty. New TC-ACC-BANKREC-GATES creates a throwaway MANAGER, logs in as them and asserts the read and write give that manager the SAME answer — a check an owner-only test could never have made — then deletes the account. tsc + vite build clean.',
       'bankrec-stage3c-coherent-ticks',          //BUGFIX of my own stage-1 change, caught by the stage-2 test on live. The tick DISPLAY unioned `bank_cleared` with the legacy `bank_rec_cleared` rows, while the ARITHMETIC read `bank_cleared` alone — and unticking deleted from the durable table only, leaving the legacy row behind to RESURRECT a tick the user had explicitly removed. Net effect: a line could render as cleared while still being counted as outstanding. Measured on the live tenant: 6 lines shown ticked, 333.00 Dr / 333.00 Cr of them still counted as uncleared, which is what made TC-ACC-BANKREC-TICK-MOVES report a 222 movement for a 111 line. THE INVARIANT THAT SHOULD HAVE EXISTED FROM THE START: the display and the arithmetic must use the SAME SET. `bank_cleared` is now the single source for both — the tenant migration already backfills every legacy row into it at boot, so the union added nothing but contradictions — and unticking now removes the legacy row too, so that table cannot hold a contradiction while it still exists. New TC-ACC-BANKREC-COHERENT reconstructs the uncleared totals from the rendered flags and requires them to equal the server's, which is the assertion that would have caught this immediately. tsc clean.',
       'bankrec-stage3b-history-distinct',        //FOLLOW-UP to stage 3, same day. The history list showed every historical row, and this tenant carries NINE for one statement date — left behind by the old always-insert behaviour and all stamped with the same date by the stage-3 backfill. The plan deliberately does NOT delete rows on a live tenant, so the LIST now returns DISTINCT ON (statement date), newest first; the older rows stay in the table and simply are not the ones shown. Also corrected MY OWN TEST: TC-ACC-BANKREC-UPSERT asserted exactly one row per statement date, which contradicts that very decision, and it failed on live for the right reason. It now saves a THIRD time and asserts the row count does NOT GROW and that all three saves return the same id — which is the actual guarantee the upsert makes. tsc clean.',
       'bankrec-stage3-work-that-survives',        //FIX (bank reconciliation remediation, stage 3 of 6, 11 Sep 2026). Findings F-6 and F-7. A reconciliation was found by an EXACT TEXT MATCH on `from..to`, so nudging either date — widening the range to catch a late entry, say — orphaned the saved statement balance and every tick with no message: the row was still there, the screen simply could not find it. A reconciliation is really identified by WHICH ACCOUNT and WHICH STATEMENT DATE; the working window is only how someone chose to look at it. New `bank_reconciliations.statement_date` (added in the TENANT MIGRATION PATH, backfilled with `split_part(period, '..', 2)`, indexed on (account_code, statement_date)); the GET looks it up by account+statement date and FALLS BACK to the old text key for anything saved before this release. Save is now an UPSERT on that key instead of always inserting — repeated saves used to stack rows and the screen just read whichever was newest. `status` finally does something: DRAFT while working, FINAL once signed off, and a FINAL reconciliation REFUSES further saves with 409 RECONCILIATION_FINAL until reopened (reopening is written to the object audit, not silent). NEW `GET /accounting/bank-reconciliations?account=` lists the history — there was previously no way to see that a month had been reconciled at all, or by whom. The read also returns `reconciliation` {id, statement_date, status, created_by, created_at} and `locked`. UI gains a Previous-reconciliations panel with per-row Sign off / Reopen, a Sign-off button once the difference is explained, and a Save button that disables itself on a locked record. New tests TC-ACC-BANKREC-WINDOW (save via one window, read the same statement date through another — the exact F-6 failure), TC-ACC-BANKREC-UPSERT (one row per statement date) and TC-ACC-BANKREC-LOCK (finalise blocks saves, reopen restores them, and the test puts the record back to DRAFT so the tenant is left as found). tsc + vite build clean.',
@@ -57134,6 +57135,23 @@ ${data.tenant.name}`;
            FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date >= ? AND entry_date <= ?
           ORDER BY entry_date DESC, created_at DESC LIMIT 1000`,
         [req.params.id, account, from, to]).catch(() => []);
+      // What the account stood at before this window opened. Without it the
+      // cumulative book balance sits above a windowed list that cannot explain
+      // it, and a reader reasonably assumes the lines are the whole story.
+      const openRow: any = await db.get(
+        `SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries
+          WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date < ?`,
+        [req.params.id, account, from]).catch(() => ({ bal: 0 }));
+      const opening_balance = round(openRow?.bal || 0);
+      const moveRow: any = await db.get(
+        `SELECT COALESCE(SUM(dr_amount),0) AS dr, COALESCE(SUM(cr_amount),0) AS cr FROM gl_entries
+          WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date >= ? AND entry_date <= ?`,
+        [req.params.id, account, from, to]).catch(() => ({ dr: 0, cr: 0 }));
+      const window_movement = {
+        debits: round(moveRow?.dr || 0),
+        credits: round(moveRow?.cr || 0),
+        net: round(Number(moveRow?.dr || 0) - Number(moveRow?.cr || 0)),
+      };
       const period = `${from}..${to}`;
       // Found by account and statement date, so the working window can move
       // without losing the saved balance. The old exact-text lookup is still
@@ -57210,6 +57228,8 @@ ${data.tenant.name}`;
         reconciled_adjusted: adjusted_difference != null && Math.abs(adjusted_difference) < 0.02,
         uncleared_outside_window: { deposits: round(outside?.dr || 0), withdrawals: round(outside?.cr || 0) },
         truncated: lines.length >= 1000,
+        // opening_balance + window_movement.net === book_balance, always.
+        opening_balance, window_movement,
         reconciliation: rec ? { id: rec.id, statement_date: rec.statement_date || to, status: rec.status || 'DRAFT', created_by: rec.created_by, created_at: rec.created_at } : null,
         locked: String(rec?.status || '') === 'FINAL',
         lines: withFlags,
@@ -57240,7 +57260,8 @@ ${data.tenant.name}`;
   // Sign one off, or reopen it. A FINAL reconciliation refuses further saves,
   // and reopening is recorded rather than silent.
   app.post("/api/restaurant/:id/accounting/bank-reconciliation/:recId/status", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctCanWrite(req, res))) return;
+    // Signing off the books is at least as sensitive as saving; same gate.
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const want = String(req.body?.status || '').toUpperCase();
@@ -57259,7 +57280,12 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/bank-reconciliation", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!(await _acctCanWrite(req, res))) return;
+    // F-8: the same gate as the GET. This route used _acctCanWrite, which
+    // admits MANAGER by role, while the read used _acctOwnerOnly — so a manager
+    // was refused the screen but accepted on the save. Aligned here at the call
+    // site; the shared helpers serve 26 and 17 other routes and are untouched.
+    // Access remains grantable per role through Staff Access.
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;

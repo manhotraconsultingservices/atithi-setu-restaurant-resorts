@@ -8350,6 +8350,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [bankRecCleared, setBankRecCleared] = useState<Record<string, boolean>>({});
   const [bankRecStmtBal, setBankRecStmtBal] = useState('');
   const [bankRecHistory, setBankRecHistory] = useState<any[]>([]);
+  const [bankRecAccounts, setBankRecAccounts] = useState<any[]>([]);
   const [periods, setPeriods] = useState<any[]>([]);
   const [periodsExc, setPeriodsExc] = useState<any[]>([]);
   const [cashCount, setCashCount] = useState<any>(null);
@@ -8382,6 +8383,11 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     }).finally(() => setLoading(false));
     acctApi(`/accounting/bank-reconciliations?account=${bankRecAccount}`)
       .then(h => setBankRecHistory(Array.isArray(h?.reconciliations) ? h.reconciliations : []))
+      .catch(() => {});
+    // The picker used to offer two hardcoded codes, one of which nothing ever
+    // posts to. Drive it from the property's real bank accounts instead.
+    acctApi('/accounting/bank-accounts')
+      .then(a => setBankRecAccounts(Array.isArray(a) ? a : (a?.bank_accounts || a?.accounts || [])))
       .catch(() => {});
   }, [acctApi, bankRecAccount, tbFrom, tbTo]);
 
@@ -9372,8 +9378,18 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
         <div className="space-y-4">
           <div className="flex items-center gap-2 flex-wrap">
             <select value={bankRecAccount} onChange={e => setBankRecAccount(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
-              <option value="1010">1010 · Bank — Main</option>
-              <option value="1020">1020 · Bank — OTA Receivable</option>
+              {(() => {
+                // One option per real bank account. A row without a GL code
+                // falls back to 1010 so the picker is never empty, and a
+                // property with no accounts on file still gets the default.
+                const opts = (bankRecAccounts || [])
+                  .filter((a: any) => Number(a.is_active ?? 1) === 1)
+                  .map((a: any) => ({ code: String(a.gl_account_code || '1010'), label: String(a.label || a.bank_name || 'Bank') }));
+                const seen = new Set<string>();
+                const uniq = opts.filter(o => (seen.has(o.code) ? false : (seen.add(o.code), true)));
+                const list = uniq.length ? uniq : [{ code: '1010', label: 'Bank — Main' }];
+                return list.map(o => <option key={o.code} value={o.code}>{o.code} · {o.label}</option>);
+              })()}
             </select>
             <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
             <span className="text-xs text-[#6b5d52]">to</span>
@@ -9403,7 +9419,14 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                       <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
                         <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Book Balance (GL)</p>
                         <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(bankRec.book_balance)}</p>
-                        <p className="text-[10px] text-[#9c8e85] mt-1">All movements to {tbTo}, not just those listed below</p>
+                        {bankRec.window_movement ? (
+                          <p className="text-[10px] text-[#9c8e85] mt-1 leading-relaxed">
+                            Opened at {fmtAmt(bankRec.opening_balance)}
+                            {' '}{Number(bankRec.window_movement.net) >= 0 ? '+' : '−'} {fmtAmt(Math.abs(Number(bankRec.window_movement.net)))} in this window
+                          </p>
+                        ) : (
+                          <p className="text-[10px] text-[#9c8e85] mt-1">All movements to {tbTo}, not just those listed below</p>
+                        )}
                       </div>
                       <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
                         <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Statement Closing Balance</p>
@@ -9433,6 +9456,14 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                         <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Less: outstanding cheques <span className="text-[10px] text-[#9c8e85]">(issued, not yet presented)</span></span><span className="tabular-nums text-[#a0522d]">− {fmtAmt(outstandingCheques)}</span></div>
                         <div className="flex justify-between px-4 py-2 bg-[#fdfaf5] font-semibold"><span>Should equal the book balance</span><span className="tabular-nums">{entered ? fmtAmt(stmt + depositsInTransit - outstandingCheques) : '—'}</span></div>
                         <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Book balance (GL)</span><span className="tabular-nums">{fmtAmt(bankRec.book_balance)}</span></div>
+                        {bankRec.window_movement && (
+                          <div className="px-4 py-2 bg-[#fdfaf5] text-[11px] text-[#9c8e85] flex flex-wrap gap-x-4 gap-y-1">
+                            <span>Opening {fmtAmt(bankRec.opening_balance)}</span>
+                            <span>+ received {fmtAmt(bankRec.window_movement.debits)}</span>
+                            <span>− paid {fmtAmt(bankRec.window_movement.credits)}</span>
+                            <span className="font-semibold text-[#6b5d52]">= closing {fmtAmt(bankRec.book_balance)}</span>
+                          </div>
+                        )}
                       </div>
                     </div>
 
