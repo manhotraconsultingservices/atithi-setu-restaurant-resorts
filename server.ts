@@ -54904,8 +54904,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage6c-account-name',
+    commit_marker: 'acct-reports-one-row-per-account',
     code_features: [
+      'acct-reports-one-row-per-account',  //FIX (11 Sep 2026) — the GROUP BY that stage 6c reported and deliberately did not touch. **Five GL-derived reports keyed their grouping on `gl_entries.account_name` as well as `account_code`** — and that column is free text written by whichever caller posted the journal, with nothing forcing it to match `chart_of_accounts`. So the moment two callers spelled one code differently, that account SPLIT INTO TWO ROWS. Live on RESTO-1003 this was not the single known case but **four**: 1010 as "Bank — Main Account" + "Bank", 1000 as "Cash in Hand" + "Bank", 4000 as "Room Revenue" + "Sales", 5000 as "Cost of F&B Consumed" + "Expense". A trial balance listing an account twice is wrong on its face, and worse, every consumer doing `.find(r => r.account_code === X)` silently reads ONE of the two lines — which is exactly how TC-ACC-BANKREC came to report a false mismatch. All five now group on the code alone and take the display label from the chart of accounts (`COALESCE(c.name, MIN(g.account_name))`): trial balance, gst-outstanding, cash-book expenses, profit-loss, balance-sheet. c.name/c.type/c.display_order are functionally dependent on the code — `chart_of_accounts.code` is the PRIMARY KEY, so the join cannot fan out and grouping by them adds no rows — and a code the chart does not know keeps a GL-supplied name and still yields exactly one row. gst-outstanding gained the chart join it never had (its date predicates re-aliased to `g.` with it). **The P&L hid its own split**: the second 4000/5000 rows netted to zero and were filtered by the `|amt| >= 0.005` cut, so the report looked clean while the grouping was wrong — a reminder that "no visible duplicate" is not evidence of correct grouping. **Deliberately NOT done: normalising historical `gl_entries.account_name` to the chart name.** No report reads that column for display any more, so a backfill fixes nothing that is still broken; the stored label is the audit record of what the poster asserted at posting time and a financial ledger should not have its history rewritten; and a blanket UPDATE over the largest table, running in the tenant migration path on every boot with no user in the loop, is the exact shape of change that has bitten this codebase before. The as-posted label still shows in the GL ledger drill-down and journal exports, which is correct — if that ever reads as confusing, the fix is to display the chart name at render time, not to overwrite rows. Tests (these reports had NONE, which is why the split survived): TC-ACC-TB-UNIQ, TC-ACC-TB-NAME, TC-ACC-TB-BALANCED-UNIQ, TC-ACC-PNL-UNIQ, TC-ACC-BS-UNIQ, TC-ACC-GST-UNIQ, TC-ACC-CASHBOOK-UNIQ — asserted RED before the fix (TB-UNIQ 4 splits, TB-NAME 4 mislabels, BS-UNIQ 1 split) and green after, with the trial balance balancing either way. tsc + vite build clean.',
       'bankrec-stage6c-account-name',      //FIX (stage 6 follow-up, 11 Sep 2026) — a defect I SHIPPED in 6b, caught by TC-ACC-BANKREC going red with a delta that grew by exactly the test charge amount on every run. **Every financial report GROUPS BY (account_code, account_name) — the free-text NAME is part of the key** — so a caller writing a different label for the same code splits that account into TWO LINES on the trial balance: `1010 'Bank — Main Account'` and `1010 'Bank'`. One account appearing twice is precisely what a trial balance must never do. My interest-credited path on the reconciliation screen hardcoded `account_name: 'Bank'` when building its manual journal, so every interest entry a real user posted would have done this to their own trial balance. Fixed at both ends: the screen sends the account's REAL name, and the manual-journal route — the ONLY route that accepts a free-form account name from a client — now RESOLVES the name from `chart_of_accounts` by code, falling back to the caller's text only for a code the chart does not know. No client can split an account by mistyping a label. Also fixed TC-ACC-BANKREC, which compared the reconciliation against `.find()` of the FIRST trial-balance row for the account and so reported a false mismatch once a second row existed; it sums every row for the code now, because a cross-check must not quietly assume one row per account. **NOT changed here:** the GROUP BY itself, which five report queries share. Collapsing them onto the account code (taking the label from the chart) is the proper fix and is the right shape, but rewriting five financial reports with no tests of their own is a bigger change than this stage and is reported for a decision rather than slipped in at the end of one. tsc + vite build clean.',
       'bankrec-stage6b-import-charges',    //FEATURE (bank reconciliation remediation, stage 6 of 6, part 2 of 2 — COMPLETES THE PLAN. 11 Sep 2026). **F-10 CSV statement import with auto-match** and **F-12 post bank charges and interest from the screen**. *Import:* `POST .../bank-reconciliation/match` parses a bank CSV and pairs its rows with UNCLEARED ledger movements — exact on amount, within N days on date (default 3, capped at 15), each entry claimable once, closest date wins, and a tie is returned flagged `ambiguous` rather than silently picked. **IT WRITES NOTHING** — no tick, no journal. It returns a proposal; the user reviews matched and unmatched rows and the ORDINARY save is what clears anything. An importer that ticks by itself is one that can silently reconcile the books to whatever file it was handed, so TC-ACC-BANKREC-IMPORT-SAFE asserts cleared-line count and GL-exception count are both unmoved by a match. Parser handles the shapes Indian statements actually arrive in: dd/mm/yyyy and dd-mm-yy as well as ISO, separate Debit/Credit columns or one signed Amount, thousands separators and Rs. prefixes, quoted narrations containing commas, and **preamble lines above the header** (account number / customer name — it scans the first 12 lines for the row that looks like a header, otherwise every real export failed with 'no date column'). **Sign convention: a statement DEBIT is money leaving the bank = a CREDIT in our books**; get it backwards and nothing matches. A row splitting into more columns than the header is REFUSED with a reason — an unquoted `Rs. 2,100.00` shears on its comma and yields amounts wrong by orders of magnitude, and reporting that as 'nothing matched' sends someone hunting the wrong problem. *Charges:* posted through the EXISTING `expense-payments` route (and, for interest credited, the existing manual-journal route) rather than a private path, so the entry lands in the Expense Journal where it is visible and reversible like every other expense — which is what the plan required and why. New COA account **5520 Bank Charges** (the nearest before were 'Petty Cash Expenses', the catch-all default, and 'Card & UPI Charges' — both mislabel the P&L). One additive server change: `expense-payments` accepts an optional `bank_account_code`, because it always credited 1010 and a property with two bank accounts had every expense booked against the first; it is VALIDATED against `bank_accounts` so it cannot credit an arbitrary GL account (TC-ACC-BANKREC-CHARGE-ACCT tries to pay from 4000 Room Revenue and must be refused). Tests: IMPORT, IMPORT-SAFE, IMPORT-BADCSV, CHARGE, CHARGE-ACCT. **All 14 review findings are now closed.** tsc + vite build clean.',
       'bankrec-stage6a2-list-fix',           //FIX (stage 6a follow-up, 11 Sep 2026). Two corrections, caught by TC-ACC-BANKREC-COHERENT going red on the stage-6a deploy. (1) I had redefined `truncated` to a constant false, reasoning that a paged list is not a truncated one. But `truncated` never meant 'we hit the 1000 cap' — it meant THE LIST YOU ARE HOLDING IS NOT THE WHOLE WINDOW, and COHERENT depends on exactly that to know whether it may reconstruct the totals from the rows it holds. Pinning it false did not retire a stale flag, it deleted a live signal and let a test run on a premise that no longer held. It is now `has_more` — the same fact, stated properly. (2) COHERENT asked for the DEFAULT response, which since stage 6a is one page, and compared a page against whole-account totals; it now requests a full-window page and skips honestly if the window exceeds one page. Also retired the old 'showing the first 1,000 movements — narrow the date range' banner (there is a pager now; telling someone to narrow the dates when they can click Next is worse than saying nothing), and made TC-ACC-BANKREC-AUDIT create and restore its own tick rather than skipping whenever the account happens to be clean — a test that skips itself on clean data is a test that never runs.',
@@ -55684,8 +55685,21 @@ ${data.tenant.name}`;
       if (from) { dateClauses.push('g.entry_date >= ?'); params.push(from); }
       if (to)   { dateClauses.push('g.entry_date <= ?'); params.push(to); }
       const dateWhere = dateClauses.length ? `AND ${dateClauses.join(' AND ')}` : '';
+      // ONE ROW PER ACCOUNT CODE. `gl_entries.account_name` is free text written
+      // by whichever caller posted the journal, and nothing forces it to match
+      // the chart of accounts. Grouping by it made the LABEL part of the key, so
+      // two callers spelling account 1010 differently ("Bank" vs "Bank — Main
+      // Account") split one account across two trial-balance lines — precisely
+      // what a trial balance must never show, and which silently halves the
+      // figure for any consumer doing `.find(r => r.account_code === X)`. Group
+      // on the code alone and take the display name from the chart. c.name /
+      // c.type / c.display_order are functionally dependent on the code (it is
+      // the PRIMARY KEY of chart_of_accounts, so the join cannot fan out and
+      // grouping by them adds no rows). A code the chart does not know keeps a
+      // GL-supplied name and still yields a single row.
       const rows = await db.query(
-        `SELECT g.account_code, g.account_name,
+        `SELECT g.account_code,
+                COALESCE(c.name, MIN(g.account_name)) AS account_name,
                 COALESCE(c.type, 'UNKNOWN') AS account_type,
                 COALESCE(c.display_order, 999) AS display_order,
                 SUM(g.dr_amount) AS dr_total,
@@ -55693,7 +55707,7 @@ ${data.tenant.name}`;
          FROM gl_entries g
          LEFT JOIN chart_of_accounts c ON c.code = g.account_code
          WHERE g.restaurant_id = ? ${dateWhere} AND g.is_reversed = 0
-         GROUP BY g.account_code, g.account_name, c.type, c.display_order
+         GROUP BY g.account_code, c.name, c.type, c.display_order
          HAVING SUM(g.dr_amount) > 0 OR SUM(g.cr_amount) > 0
          ORDER BY display_order, g.account_code`,
         params
@@ -55719,15 +55733,19 @@ ${data.tenant.name}`;
       const ph = allCodes.map(() => '?').join(',');
       const params: any[] = [req.params.id, ...allCodes];
       let dateWhere = '';
-      if (from) { dateWhere += ' AND entry_date >= ?'; params.push(from); }
-      if (to)   { dateWhere += ' AND entry_date <= ?'; params.push(to); }
+      if (from) { dateWhere += ' AND g.entry_date >= ?'; params.push(from); }
+      if (to)   { dateWhere += ' AND g.entry_date <= ?'; params.push(to); }
+      // One row per GST account code — see the trial-balance note above. A split
+      // here would double-count nothing (the totals are summed over every row)
+      // but would show the owner the same GST account twice in the breakdown.
       const rows: any[] = await db.query(
-        `SELECT account_code, account_name,
-                COALESCE(SUM(dr_amount), 0) AS dr, COALESCE(SUM(cr_amount), 0) AS cr
-           FROM gl_entries
-          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph})${dateWhere}
-          GROUP BY account_code, account_name
-          ORDER BY account_code`,
+        `SELECT g.account_code,
+                COALESCE(c.name, MIN(g.account_name)) AS account_name,
+                COALESCE(SUM(g.dr_amount), 0) AS dr, COALESCE(SUM(g.cr_amount), 0) AS cr
+           FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.account_code IN (${ph})${dateWhere}
+          GROUP BY g.account_code, c.name
+          ORDER BY g.account_code`,
         params
       ).catch(() => []);
       const round = (n: number) => Math.round(Number(n) * 100) / 100;
@@ -55794,12 +55812,15 @@ ${data.tenant.name}`;
       const cash_by_source = cbsRows.map(r => ({ source_type: r.source_type || 'UNKNOWN', in: round(Number(r.din || 0)), out: round(Number(r.dout || 0)) }));
 
       // the day's expenses, grouped by account (dr−cr on EXPENSE accounts).
+      // One row per expense account code — see the trial-balance note above.
       const expRows: any[] = await db.query(
-        `SELECT g.account_code, g.account_name, COALESCE(SUM(g.dr_amount - g.cr_amount),0) AS amount
+        `SELECT g.account_code,
+                COALESCE(c.name, MIN(g.account_name)) AS account_name,
+                COALESCE(SUM(g.dr_amount - g.cr_amount),0) AS amount
            FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
           WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.entry_date = ?
             AND (c.type = 'EXPENSE' OR g.account_code LIKE '5%' OR g.account_code LIKE '6%')
-          GROUP BY g.account_code, g.account_name
+          GROUP BY g.account_code, c.name
          HAVING COALESCE(SUM(g.dr_amount - g.cr_amount),0) <> 0
           ORDER BY g.account_code`,
         [req.params.id, date]).catch(() => []);
@@ -56001,13 +56022,14 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const { entry_date, narration, lines } = req.body;
       if (!Array.isArray(lines) || lines.length < 2) return res.status(400).json({ error: 'At least 2 lines required' });
-      // The canonical name for a code, from the chart of accounts. Reports
-      // GROUP BY (account_code, account_name), so a caller sending a different
-      // label for the same code splits that account into two lines on the
-      // trial balance — one account appearing twice, which is exactly what a
-      // trial balance must never do. This is the only route that takes an
-      // account name from a client, so it is the place to settle it. A code the
-      // chart does not know keeps whatever the caller sent.
+      // The canonical name for a code, from the chart of accounts. The reports
+      // no longer group on the free-text label (they group on the code and read
+      // the name from the chart), so a variant label can no longer split an
+      // account in two. This still stands: it is the only route that takes an
+      // account name from a client, and the name it writes is what the GL
+      // ledger, the journal drill-down and any export of gl_entries show — so
+      // a mistyped label would still mislabel a real posting. A code the chart
+      // does not know keeps whatever the caller sent.
       const coaRows: any[] = await db.query("SELECT code, name FROM chart_of_accounts").catch(() => []);
       const coaName = new Map((coaRows || []).map((r: any) => [String(r.code), String(r.name)]));
       const glLines: GlLine[] = lines.map((l: any) => ({
@@ -56158,14 +56180,18 @@ ${data.tenant.name}`;
       let dateWhere = '';
       if (from) { dateWhere += ' AND g.entry_date >= ?'; params.push(from); }
       if (to)   { dateWhere += ' AND g.entry_date <= ?'; params.push(to); }
+      // One row per account code — see the trial-balance note above. Splitting
+      // here shows the same revenue or expense head twice on the P&L.
       const rows: any[] = await db.query(
-        `SELECT g.account_code, g.account_name, COALESCE(c.type,'UNKNOWN') AS account_type,
+        `SELECT g.account_code,
+                COALESCE(c.name, MIN(g.account_name)) AS account_name,
+                COALESCE(c.type,'UNKNOWN') AS account_type,
                 COALESCE(SUM(g.dr_amount),0) AS dr, COALESCE(SUM(g.cr_amount),0) AS cr
            FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
           WHERE g.restaurant_id = ? AND g.is_reversed = 0
             AND (c.type IN ('REVENUE','EXPENSE') OR g.account_code LIKE '4%' OR g.account_code LIKE '5%' OR g.account_code LIKE '6%')
             ${dateWhere}
-          GROUP BY g.account_code, g.account_name, c.type
+          GROUP BY g.account_code, c.name, c.type
           ORDER BY g.account_code`,
         params).catch(() => []);
       const revenue: any[] = [], expenses: any[] = [];
@@ -56197,13 +56223,18 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const asOf = String((req.query as any).asOf || new Date().toISOString().slice(0, 10));
+      // One row per account code — see the trial-balance note above. Splitting
+      // here lists the same asset (e.g. the bank account) twice on the balance
+      // sheet, each for part of its true balance.
       const rows: any[] = await db.query(
-        `SELECT g.account_code, g.account_name, COALESCE(c.type,'UNKNOWN') AS account_type,
+        `SELECT g.account_code,
+                COALESCE(c.name, MIN(g.account_name)) AS account_name,
+                COALESCE(c.type,'UNKNOWN') AS account_type,
                 COALESCE(c.display_order,999) AS display_order,
                 COALESCE(SUM(g.dr_amount),0) AS dr, COALESCE(SUM(g.cr_amount),0) AS cr
            FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
           WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.entry_date <= ?
-          GROUP BY g.account_code, g.account_name, c.type, c.display_order
+          GROUP BY g.account_code, c.name, c.type, c.display_order
           ORDER BY display_order, g.account_code`,
         [req.params.id, asOf]).catch(() => []);
       const assets: any[] = [], liabilities: any[] = [], equity: any[] = [];
