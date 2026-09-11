@@ -8561,6 +8561,12 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     fn();
   };
 
+  // The selected bank account's real name, for anything that has to write it.
+  const bankRecAccountName = (() => {
+    const hit = (bankRecAccounts || []).find((a: any) => String(a.gl_account_code || '1010') === String(bankRecAccount));
+    return String(hit?.label || hit?.bank_name || 'Bank — Main Account');
+  })();
+
   // F-10. Read a statement file and ask the server what it thinks matches.
   // This marks NOTHING cleared — it returns a proposal. Applying it is a
   // separate, deliberate act (tick the matches, then Save).
@@ -8617,8 +8623,13 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
           method: 'POST',
           body: JSON.stringify({
             entry_date: date, narration: note,
+            // Send the account's REAL name, not a label of our own. The
+            // trial balance keys on (code, name), so 'Bank' here would have
+            // split the bank account into a second row on the report. The
+            // server resolves it from the chart of accounts as well; both,
+            // because this screen should not be the thing that gets it wrong.
             lines: [
-              { account_code: bankRecAccount, account_name: 'Bank', dr_amount: amt, cr_amount: 0 },
+              { account_code: bankRecAccount, account_name: bankRecAccountName, dr_amount: amt, cr_amount: 0 },
               { account_code: '4900', account_name: 'Other Income', dr_amount: 0, cr_amount: amt },
             ],
           }),
