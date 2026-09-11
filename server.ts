@@ -4982,6 +4982,26 @@ const GL_SOURCE_MODULE: Record<string, string> = {
   LOAN: 'SHARED',
 };
 
+// Optional module filter for any GL-derived report. `?module=EVENTS` narrows
+// to that module; `&include_shared=1` also folds in SHARED, the property-wide
+// costs — which is how a module P&L is normally read. No `module` parameter
+// means no clause at all, so every report behaves exactly as it did before.
+//
+// `col` lets a caller pass the table alias its query uses ('g.cost_centre').
+// Rows posted before cost-centre tagging have a NULL centre and are excluded by
+// any filter: they belong to no known module, and folding them into one would
+// be an invention rather than a report.
+const _glModuleFilter = (req: any, col = 'cost_centre'): { sql: string; params: any[]; module: string | null; includeShared: boolean } => {
+  const q = (req && req.query) || {};
+  const mod = q.module ? _normaliseCostModule(q.module, '') : '';
+  if (!mod) return { sql: '', params: [], module: null, includeShared: false };
+  const inc = ['1', 'true', 'yes'].includes(String(q.include_shared || '').toLowerCase());
+  if (inc && mod !== 'SHARED') {
+    return { sql: ` AND ${col} IN (?, 'SHARED')`, params: [mod], module: mod, includeShared: true };
+  }
+  return { sql: ` AND ${col} = ?`, params: [mod], module: mod, includeShared: false };
+};
+
 // A folio is the one document that can belong to any of three modules.
 const _folioCostModule = (folio: any): string => {
   const kind = String(folio?.folio_kind || 'HOTEL').toUpperCase();
@@ -54971,8 +54991,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gl-cost-centre-tagging',
+    commit_marker: 'gl-reports-by-module',
     code_features: [
+      'gl-reports-by-module',              //FEATURE (option B, part 2 of 2 — 12 Sep 2026). **The GL-derived reports can now be read PER MODULE.** Part 1 made journals carry a cost centre; this spends it. Trial balance, P&L, Balance Sheet, GST Ledger, Cash Book, Cash Flow (GL) and Ledger & Books all take an optional `?module=`, and `&include_shared=1` folds in the property-wide costs — which is how a module P&L is normally read (the banquet side's own costs plus its share of what nobody splits). **Without the parameter every report runs the SAME SQL and returns the SAME rows as before**; this had to be additive on a live ledger. **THE INVARIANT THAT DICTATED THE SHAPE:** Cash Book and Cash Flow do not merely list rows, they assert `closing = opening + in − out` and that their buckets partition `closing − opening`. Filtering only the MOVEMENTS while leaving opening and closing property-wide would have made those reports state something false, so the clause is applied to the opening and closing balances too and the identity then holds WITHIN the module — the only reading of it that means anything. **Why a filtered trial balance still BALANCES:** a cost centre is journal-level (every line of a journal shares one — the only per-line setter is `_reverseJournal`, which copies the original's), so a filter can never cut a journal in half and leave a one-sided entry. TC-ACC-MODULE-FILTER asserts exactly that for all five modules, plus that a filtered view never exceeds the whole and that `include_shared` can only widen; it goes red the day someone sets a per-line centre that differs within a journal, which is precisely when someone needs to know. TC-ACC-MODULE-FILTER-REPORTS asserts all six report routes accept the filter without erroring — a 500 there would kill a report screen the moment an owner picked a module. **Two honest limits.** (1) Rows posted before part 1 have a NULL cost centre and are EXCLUDED by any filter: they belong to no known module and folding them into one would be an invention, not a report. A marker-guarded historical backfill is the remaining piece. (2) `/reports/cash-flow` (Reports → Cash Flow) is NOT ledger-derived at all — it reads `folio_payments`, `orders`, `supplier_payments`, `petty_cash` and `payroll_runs` directly — so a cost-centre filter cannot apply to it; `/accounting/cash-flow-gl` is the GL one and is filtered. tsc + vite build clean.',
       'gl-cost-centre-tagging',            //FEATURE (option B, part 1 of 2 — 11 Sep 2026). **The ledger now records which module a journal belongs to.** `gl_entries.cost_centre` has existed since the table was created — the column is there, `GlLine` declares it, `_postGlEntries` writes it — but NONE of the 31 posting call sites ever passed it, so it was NULL on 100% of rows and no GL-derived report could be split by module for ANY module, Restaurant and Hotel included. **Shape: NOT 31 edits.** `cost_centre` is a per-LINE field, so tagging line by line would mean touching every line literal in the file. Instead `_postGlEntries` gained an optional JOURNAL-level cost centre applied to any line without its own, and failing that derives one from the SOURCE TYPE via `GL_SOURCE_MODULE` — most types answer this themselves (an FNB_ORDER is always the restaurant; payroll, cash counts, drawers, loans and capital are SHARED by nature, because splitting them would be an allocation decision nobody asked this code to make). Only genuinely ambiguous sites pass a value: the FOLIO family (a folio is hotel, event OR spa — `_folioCostModule` reads `folio_kind`; the payments route now selects that column, which it did not before) and PETTY_CASH / SUPPLIER_INVOICE / SUPPLIER_PAYMENT / EXPENSE_PAYMENT, whose own row carries a module the user chose. **A source type in neither place stays NULL rather than guessing** — an untagged entry is honest, a wrongly tagged one is a wrong number in someone's management accounts. Reversals needed nothing: `_reverseJournal` already copies `cost_centre` from the original lines, so a reversal lands in the same bucket as what it undoes. **Nothing reads the column yet** — the report filters are part 2, deliberately separate so this is revertible on its own, and historical rows stay NULL until a marker-guarded backfill is decided on. TC-GL-COSTCENTRE asserts both halves: an explicitly chosen module reaches the journal, and a source type that implies its module is tagged with no caller help. tsc + vite build clean.',
       'cost-modules-events-spa',           //FIX (11 Sep 2026, from the owner's manual testing: 'accounting is not fully supported for Event & Convention and Wellness Spa' — confirmed, and it was worse than a missing dropdown entry). The accounting module recognised **three** cost buckets — RESTAURANT | HOTEL | SHARED — stated outright in the code: 'PETTY CASH / EXPENSE JOURNAL — per-module (RESTAURANT|HOTEL|SHARED) ledger'. **THE TRAP:** both petty-cash routes did not merely default an unknown module, they SILENTLY COERCED it (`includes(raw) ? raw : 'RESTAURANT'`), so adding EVENTS and SPA to the dropdowns alone would have filed every Events expense under Restaurant with no error and no trace — a wrong number in the books rather than a visibly missing option. The server allowlist had to move FIRST. All four business modules are now filable, across BOTH the create and the edit paths, and junk is still coerced (TC-EXPENSE-MODULES asserts both halves, reading the STORED value back rather than trusting the create response). **Root-cause shape:** the module list was hand-written in 2 places in server.ts and **NINE** in App.tsx — three separate Expense Journal surfaces, the Reports petty-cash view, and the supplier-invoice create + filter — which is exactly how some got HOTEL first, others RESTAURANT first, and none got EVENTS or SPA. There were even THREE independent copies of the badge-colour map, one of them named `modColor` (singular) driving the supplier-invoice screens, which a grep for `modColors` misses — found by grepping for what was LEFT rather than assuming the edits were complete. All of them now read one `COST_MODULES` constant per file, so the next module added is offered everywhere at once. **Payables gained a module dimension it never had:** `/reports/vendor-aging` did not even SELECT `si.module`, so an owner could not ask what the banquet side owes; it now returns the module per invoice and accepts an optional `?module=` (absent, the report is property-wide exactly as before). TC-PAYABLES-MODULE asserts a filtered ageing can never exceed the unfiltered one. **NOT done here and reported separately:** `gl_entries.cost_centre` — the ledger's OWN module dimension — is NULL on 100% of rows (2,000/2,000 sampled); the column exists and `_postGlEntries` writes it, but none of the 31 posting call sites passes it. Until that is populated, P&L / Cash Flow / GST Ledger / Ledger & Books cannot be split by module for ANY module, Restaurant and Hotel included. Event and Spa money DOES reach those reports (4050 Banquet & Events, 4040 Spa Revenue via folio settlement) — it simply cannot be told apart. tsc + vite build clean.',
       'event-special-note-visible',        //FIX (11 Sep 2026, reported by the owner). The **Special note** captured on the event booking form disappeared the moment the booking was saved. **It was never a data loss — it is a RENDER GAP,** established end to end on the live tenant before anything was touched: the note is persisted, returned by BOTH `GET /events/bookings/:id` and the list, unchanged through confirm -> start -> complete, and it is even printed on the BEO / function sheet PDF. It was simply never rendered on the booking detail view — the create form writes `special_requests` and nothing in the UI ever read it back. The comment beside the input even claimed it was 'shown on its detail view'; the storing half was built and the showing half never was. Now rendered on the detail view: an inline textarea saving on blur through the SAME `commitContact` auto-save the phone/email fields use (`special_requests` was already on the PUT allowlist and the edit is audited, so NO server change was needed), and read-only once COMPLETED or CANCELLED — which is exactly the state it was reported in. The UI's `editable` flag already mirrors the server's 409 on those statuses, so the editable control can never be offered where the save would fail. Hidden entirely when the booking is locked AND the note is empty, so a finished booking does not grow an empty row. New TC-EVT-SPECIAL-NOTE pins the contract the render depends on — present on create, on the single read and on the list, editable through the ordinary PUT without disturbing the rest of the booking, and unchanged after complete. **The lesson: a field that is written, stored and even printed can still be invisible where people actually work — 'it saved fine' is not evidence anyone can see it.** tsc + vite build clean.',
@@ -55736,6 +55757,8 @@ ${data.tenant.name}`;
       if (source_type) { clauses.push('source_type = ?'); params.push(source_type); }
       if (journal_ref) { clauses.push('journal_ref = ?'); params.push(journal_ref); }
       if (!includeReversed) clauses.push('is_reversed = 0');
+      const glMod = _glModuleFilter(req);
+      if (glMod.sql) { clauses.push(glMod.sql.replace(/^ AND /, '')); params.push(...glMod.params); }
       const rows = await db.query(
         `SELECT * FROM gl_entries WHERE ${clauses.join(' AND ')}
          ORDER BY entry_date DESC, created_at DESC LIMIT 2000`,
@@ -55755,6 +55778,8 @@ ${data.tenant.name}`;
       if (from) { dateClauses.push('g.entry_date >= ?'); params.push(from); }
       if (to)   { dateClauses.push('g.entry_date <= ?'); params.push(to); }
       const dateWhere = dateClauses.length ? `AND ${dateClauses.join(' AND ')}` : '';
+      const tbMod = _glModuleFilter(req, 'g.cost_centre');
+      params.push(...tbMod.params);
       // ONE ROW PER ACCOUNT CODE. `gl_entries.account_name` is free text written
       // by whichever caller posted the journal, and nothing forces it to match
       // the chart of accounts. Grouping by it made the LABEL part of the key, so
@@ -55776,7 +55801,7 @@ ${data.tenant.name}`;
                 SUM(g.cr_amount) AS cr_total
          FROM gl_entries g
          LEFT JOIN chart_of_accounts c ON c.code = g.account_code
-         WHERE g.restaurant_id = ? ${dateWhere} AND g.is_reversed = 0
+         WHERE g.restaurant_id = ? ${dateWhere} AND g.is_reversed = 0${tbMod.sql}
          GROUP BY g.account_code, c.name, c.type, c.display_order
          HAVING SUM(g.dr_amount) > 0 OR SUM(g.cr_amount) > 0
          ORDER BY display_order, g.account_code`,
@@ -55805,6 +55830,8 @@ ${data.tenant.name}`;
       let dateWhere = '';
       if (from) { dateWhere += ' AND g.entry_date >= ?'; params.push(from); }
       if (to)   { dateWhere += ' AND g.entry_date <= ?'; params.push(to); }
+      const gstMod = _glModuleFilter(req, 'g.cost_centre');
+      params.push(...gstMod.params);
       // One row per GST account code — see the trial-balance note above. A split
       // here would double-count nothing (the totals are summed over every row)
       // but would show the owner the same GST account twice in the breakdown.
@@ -55813,7 +55840,7 @@ ${data.tenant.name}`;
                 COALESCE(c.name, MIN(g.account_name)) AS account_name,
                 COALESCE(SUM(g.dr_amount), 0) AS dr, COALESCE(SUM(g.cr_amount), 0) AS cr
            FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
-          WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.account_code IN (${ph})${dateWhere}
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.account_code IN (${ph})${dateWhere}${gstMod.sql}
           GROUP BY g.account_code, c.name
           ORDER BY g.account_code`,
         params
@@ -55851,16 +55878,21 @@ ${data.tenant.name}`;
       const BANK = ['1010', '1020'];    // Bank — Main + OTA Receivable
 
       // opening (dr−cr for entries strictly before `date`) and the day's in/out.
+      // The module clause is applied to the OPENING as well as the day's
+      // movement. Filtering only the movement would leave a property-wide
+      // opening balance above a module's takings and the report would state
+      // `closing = opening + in - out` while meaning nothing of the sort.
+      const cbMod = _glModuleFilter(req);
       const bucket = async (codes: string[]) => {
         const ph = codes.map(() => '?').join(',');
         const op: any = await db.get(
           `SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries
-            WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph}) AND entry_date < ?`,
-          [req.params.id, ...codes, date]).catch(() => ({ bal: 0 }));
+            WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph}) AND entry_date < ?${cbMod.sql}`,
+          [req.params.id, ...codes, date, ...cbMod.params]).catch(() => ({ bal: 0 }));
         const day: any = await db.get(
           `SELECT COALESCE(SUM(dr_amount),0) AS din, COALESCE(SUM(cr_amount),0) AS dout FROM gl_entries
-            WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph}) AND entry_date = ?`,
-          [req.params.id, ...codes, date]).catch(() => ({ din: 0, dout: 0 }));
+            WHERE restaurant_id = ? AND is_reversed = 0 AND account_code IN (${ph}) AND entry_date = ?${cbMod.sql}`,
+          [req.params.id, ...codes, date, ...cbMod.params]).catch(() => ({ din: 0, dout: 0 }));
         const opening = round(Number(op?.bal || 0));
         const inn = round(Number(day?.din || 0));
         const out = round(Number(day?.dout || 0));
@@ -56252,6 +56284,8 @@ ${data.tenant.name}`;
       let dateWhere = '';
       if (from) { dateWhere += ' AND g.entry_date >= ?'; params.push(from); }
       if (to)   { dateWhere += ' AND g.entry_date <= ?'; params.push(to); }
+      const plMod = _glModuleFilter(req, 'g.cost_centre');
+      params.push(...plMod.params);
       // One row per account code — see the trial-balance note above. Splitting
       // here shows the same revenue or expense head twice on the P&L.
       const rows: any[] = await db.query(
@@ -56262,7 +56296,7 @@ ${data.tenant.name}`;
            FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
           WHERE g.restaurant_id = ? AND g.is_reversed = 0
             AND (c.type IN ('REVENUE','EXPENSE') OR g.account_code LIKE '4%' OR g.account_code LIKE '5%' OR g.account_code LIKE '6%')
-            ${dateWhere}
+            ${dateWhere}${plMod.sql}
           GROUP BY g.account_code, c.name, c.type
           ORDER BY g.account_code`,
         params).catch(() => []);
@@ -56295,6 +56329,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const asOf = String((req.query as any).asOf || new Date().toISOString().slice(0, 10));
+      const bsMod = _glModuleFilter(req, 'g.cost_centre');
       // One row per account code — see the trial-balance note above. Splitting
       // here lists the same asset (e.g. the bank account) twice on the balance
       // sheet, each for part of its true balance.
@@ -56305,10 +56340,10 @@ ${data.tenant.name}`;
                 COALESCE(c.display_order,999) AS display_order,
                 COALESCE(SUM(g.dr_amount),0) AS dr, COALESCE(SUM(g.cr_amount),0) AS cr
            FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
-          WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.entry_date <= ?
+          WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.entry_date <= ?${bsMod.sql}
           GROUP BY g.account_code, c.name, c.type, c.display_order
           ORDER BY display_order, g.account_code`,
-        [req.params.id, asOf]).catch(() => []);
+        [req.params.id, asOf, ...bsMod.params]).catch(() => []);
       const assets: any[] = [], liabilities: any[] = [], equity: any[] = [];
       let total_assets = 0, total_liabilities = 0, equity_posted = 0, earnings = 0;
       for (const r of rows) {
@@ -56352,8 +56387,13 @@ ${data.tenant.name}`;
       const t = String((req.query as any).to || new Date().toISOString().slice(0, 10));
       const CASH = ['1000', '1010', '1020'];
       const ph = CASH.map(() => '?').join(',');
-      const opRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code IN (${ph}) AND entry_date < ?`, [req.params.id, ...CASH, f]).catch(() => ({ bal: 0 }));
-      const clRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code IN (${ph}) AND entry_date <= ?`, [req.params.id, ...CASH, t]).catch(() => ({ bal: 0 }));
+      // Applied to opening and closing too — this report asserts that its
+      // buckets partition `closing - opening`, and filtering only the movements
+      // would make that claim false. Filtered, the identity holds within the
+      // module, which is the only reading of it that means anything.
+      const cfMod = _glModuleFilter(req);
+      const opRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code IN (${ph}) AND entry_date < ?${cfMod.sql}`, [req.params.id, ...CASH, f, ...cfMod.params]).catch(() => ({ bal: 0 }));
+      const clRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code IN (${ph}) AND entry_date <= ?${cfMod.sql}`, [req.params.id, ...CASH, t, ...cfMod.params]).catch(() => ({ bal: 0 }));
       const opening = round(opRow?.bal || 0), closing = round(clRow?.bal || 0);
       const rows: any[] = await db.query(
         `SELECT g.journal_ref, g.account_code, g.account_name, g.source_type, g.dr_amount, g.cr_amount, COALESCE(c.type,'UNKNOWN') AS account_type
