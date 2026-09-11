@@ -8351,6 +8351,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [bankRecStmtBal, setBankRecStmtBal] = useState('');
   const [bankRecHistory, setBankRecHistory] = useState<any[]>([]);
   const [bankRecAccounts, setBankRecAccounts] = useState<any[]>([]);
+  const [bankRecStmtErr, setBankRecStmtErr] = useState<string | null>(null);
   const [periods, setPeriods] = useState<any[]>([]);
   const [periodsExc, setPeriodsExc] = useState<any[]>([]);
   const [cashCount, setCashCount] = useState<any>(null);
@@ -8528,6 +8529,28 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     const res = await acctApi('/accounting/cash-count', { method: 'POST', body: JSON.stringify({ count_date: asOfDate, session: 'CLOSE', counted_amount: parseFloat(ccCounted) || 0, note: '', post_variance: ccPostVar }) });
     if (res && !res.error) { setCcMsg({ type: 'ok', text: `Recorded. Variance ${fmtAmt(res.variance)}${res.variance_journal_ref ? ` · journal ${res.variance_journal_ref}` : ''}` }); setCcCounted(''); loadCashCount(); }
     else setCcMsg({ type: 'err', text: res?.error || 'Failed to record count' });
+  };
+  // The statement is a document, not a page, so it is fetched as a blob and
+  // opened rather than linked — a plain href would carry no Authorization
+  // header and come back 401. Same shape as the folio invoice download.
+  const openBankRecStatement = async () => {
+    setBankRecStmtErr(null);
+    try {
+      const qs = `?account=${encodeURIComponent(bankRecAccount)}&from=${tbFrom}&to=${tbTo}`;
+      const res = await fetch(`/api/restaurant/${restaurantId}/accounting/bank-reconciliation/statement.pdf${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({} as any));
+        setBankRecStmtErr(b.error || `Could not produce the statement (HTTP ${res.status})`);
+        return;
+      }
+      const url = URL.createObjectURL(await res.blob());
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) {
+      setBankRecStmtErr(err?.message || 'Could not produce the statement');
+    }
   };
   const saveBankRec = async () => {
     const cleared_entry_ids = Object.entries(bankRecCleared).filter(([, v]) => v).map(([k]) => k);
@@ -9472,8 +9495,31 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                         Showing the first 1,000 movements only. Narrow the date range — the book balance above covers everything, but this list does not.
                       </div>
                     )}
+                    {bankRecStmtErr && (
+                      <div className="rounded-lg border border-[#a0522d] bg-[#fdf6ef] px-4 py-2 text-xs text-[#1a1208]">{bankRecStmtErr}</div>
+                    )}
                     <div className="flex justify-end items-center gap-3">
                       {bankRec.locked && <span className="text-xs text-[#a0522d] font-semibold">Signed off — reopen it below to make changes</span>}
+                      {(() => {
+                        // The statement is built from SAVED state. Ticks and a
+                        // statement balance that have not been saved yet are on
+                        // this screen but not in the document, so say so instead
+                        // of printing something that contradicts what is being
+                        // read on screen.
+                        const savedBal = bankRec.statement_closing_balance;
+                        const dirty = (bankRec.lines || []).some((l: any) => !!bankRecCleared[l.id] !== !!l.cleared)
+                          || (String(bankRecStmtBal || '') !== '' && Math.abs((parseFloat(bankRecStmtBal) || 0) - Number(savedBal ?? NaN)) > 0.005)
+                          || (savedBal == null && String(bankRecStmtBal || '') !== '');
+                        return (
+                          <>
+                            {dirty && <span className="text-[11px] text-[#a0522d]">Save first — the statement is built from saved work</span>}
+                            <button onClick={openBankRecStatement}
+                              className="px-3 py-1.5 rounded-lg border border-[#d4c4a8] text-[#6b5d52] text-xs font-bold hover:bg-[#f5f0e8]">
+                              Statement (PDF)
+                            </button>
+                          </>
+                        );
+                      })()}
                       {!bankRec.locked && bankRec.reconciliation?.id && agreed && (
                         <button onClick={() => setBankRecStatus(bankRec.reconciliation.id, 'FINAL')}
                           className="px-3 py-1.5 rounded-lg border border-emerald-600 text-emerald-700 text-xs font-bold hover:bg-emerald-50">

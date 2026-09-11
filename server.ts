@@ -29,6 +29,7 @@ import {
   halfDayWindow, venueTurnaroundMin,
 } from "./eventsService.ts";
 import { generateEventQuotationPdf, generateEventBEOPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
+import { generateBankRecStatementPdf, type BankRecStatementData } from "./bankRecStatementPdf.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
 import {
   computePayslip as computeStatutoryPayslip,
@@ -54902,8 +54903,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage4b-revert-write-gate',
+    commit_marker: 'bankrec-stage5-statement',
     code_features: [
+      'bankrec-stage5-statement',        //FEATURE (bank reconciliation remediation, stage 5 of 6, 11 Sep 2026). **F-3 — the deliverable.** The screen could reconcile but could not produce the DOCUMENT: the thing an auditor asks for and the thing properties were keeping on paper. Two new routes, `GET .../bank-reconciliation/statement` (the model, JSON) and `.../statement.pdf` (the printable document), plus a Statement (PDF) button on the worksheet. The document states the reconciliation in the conventional direction — bank statement balance, ADD deposits in transit, LESS cheques not yet presented, EQUALS the books — with every outstanding item listed under its own heading, and sign-off blocks. It is the inverse of the `adjusted_book_balance` the screen shows and agrees with it by construction. Deliberately on SEPARATE routes: the stage plan's guard was that a rendering failure must not be able to take the load or the save down with it, and a bad PDF now 400s on its own route while the screen stays up. Serving the MODEL as JSON is what makes it testable — a PDF's text is deflated and hex-encoded and cannot be read from a test, so TC-ACC-BANKREC-STATEMENT asserts the arithmetic against the JSON (and cross-checks the itemised totals against the main endpoint's uncleared sums, so the document and the screen can never drift apart), while TC-ACC-BANKREC-STATEMENT-PDF asserts only that a real PDF comes back. Rendered locally against four shapes before deploying — normal, no statement balance, 412 items over 7 pages, and empty. That caught a real defect: PDFKit's `ellipsis: true` does NOT truncate, it wrapped, and a long narration printed on top of the row beneath it; text is now clipped by measuring it with `widthOfString`. LANDMINE kept: built-in Helvetica has no rupee glyph U+20B9 and THROWS on it, so money is 'Rs.' — same fix as the hotel invoice and event quotation. **The stage-1 dual write is NOT retired here.** The plan gates that on a release having proved the new table, with a row-count assertion first; stage 1 went live only hours ago. The assertion is what ships instead: `legacy_ticks_unmigrated` on the reconciliation read counts legacy `bank_rec_cleared` ticks absent from durable `bank_cleared`, and TC-ACC-BANKREC-DUALWRITE asserts it is nil. While it stays nil the old table is provably redundant and the dual write can be deleted; the field goes with it. tsc + vite build clean.',
       'bankrec-stage4b-revert-write-gate',       //REVERT of my own stage-4 F-8 change, within the hour, before anyone used it. I swapped the bank-reconciliation WRITE routes onto `_acctOwnerOnly` to 'align' them with the read. That was wrong and RE-OPENED A KNOWN HOLE: the codebase documents, directly under the helper, that `_acctOwnerOnly` is a READ gate admitting >= View on ANY finance tab and 'must NOT guard writes — it let a role with Ledger & Books = View(1) post journals / record expenses / add loans'. `_acctCanWrite` requires ACCOUNTING >= Edit(2). They are a deliberate read/write split, not a loose and a tight version of one gate. The live TC-ACC-BANKREC-GATES run showed the effect: a MANAGER holding EXPENSE_JOURNAL and PROCUREMENT but NOT Accounting was allowed to WRITE. Writes are back on `_acctCanWrite`. F-8 in the review was a mischaracterisation — `_acctCanWrite` is STRICTER on permissions and broader only in admitting the built-in MANAGER role by name, which is a product-wide convention and not this route's to change unilaterally. F-4 (opening balance) and F-9 (account picker from `bank_accounts`) from stage 4 stand and are unaffected. tsc clean.',
       'bankrec-stage4-edges',                   //FIX (bank reconciliation remediation, stage 4 of 6, 11 Sep 2026). Three independent edges. **F-4:** the cumulative book balance sat above a WINDOWED list that could never add up to it, with nothing to bridge them — now returns `opening_balance` and `window_movement{debits,credits,net}`, and the invariant opening + net = book_balance is asserted by TC-ACC-BANKREC-OPENING; the UI spells out opening + received − paid = closing. **F-8:** the read was gated MORE TIGHTLY than the write (GET `_acctOwnerOnly`, POST `_acctCanWrite`, which admits MANAGER by role), so a manager was refused the screen but accepted on the save. Fixed AT THE CALL SITES — the shared helpers serve 26 and 17 other routes and were NOT touched. Direction: the WRITE was tightened to match the read, not the read loosened, because a reconciliation signs off the books and blanket role-based access is too loose; access stays grantable per role through Staff Access, which `_acctOwnerOnly` honours, and nobody loses a working workflow since a manager could not open the screen anyway. One line to reverse if managers should reconcile. The stage-3 status route was aligned the same way. **F-9:** the account picker offered two HARDCODED codes, and the second (`1020 Bank — OTA Receivable`) is seeded but never posted to by anything in the product, so choosing it always returned an empty screen — it is now driven from the `bank_accounts` table, deduped, with a fallback to 1010 so it can never render empty. New TC-ACC-BANKREC-GATES creates a throwaway MANAGER, logs in as them and asserts the read and write give that manager the SAME answer — a check an owner-only test could never have made — then deletes the account. tsc + vite build clean.',
       'bankrec-stage3c-coherent-ticks',          //BUGFIX of my own stage-1 change, caught by the stage-2 test on live. The tick DISPLAY unioned `bank_cleared` with the legacy `bank_rec_cleared` rows, while the ARITHMETIC read `bank_cleared` alone — and unticking deleted from the durable table only, leaving the legacy row behind to RESURRECT a tick the user had explicitly removed. Net effect: a line could render as cleared while still being counted as outstanding. Measured on the live tenant: 6 lines shown ticked, 333.00 Dr / 333.00 Cr of them still counted as uncleared, which is what made TC-ACC-BANKREC-TICK-MOVES report a 222 movement for a 111 line. THE INVARIANT THAT SHOULD HAVE EXISTED FROM THE START: the display and the arithmetic must use the SAME SET. `bank_cleared` is now the single source for both — the tenant migration already backfills every legacy row into it at boot, so the union added nothing but contradictions — and unticking now removes the legacy row too, so that table cannot hold a contradiction while it still exists. New TC-ACC-BANKREC-COHERENT reconstructs the uncleared totals from the rendered flags and requires them to equal the server's, which is the assertion that would have caught this immediately. tsc clean.',
@@ -57213,6 +57215,20 @@ ${data.tenant.name}`;
             AND NOT EXISTS (SELECT 1 FROM bank_cleared c WHERE c.account_code=e.account_code AND c.gl_entry_id=e.id)`,
         [req.params.id, account, to, from, to]).catch(() => ({ dr: 0, cr: 0 }));
 
+      // TEMPORARY, and it goes when the stage-1 dual write goes. The plan
+      // requires a row-count assertion before that retirement: every tick in
+      // the legacy per-reconciliation table must already exist in the durable
+      // per-account one. The tenant migration backfills them at boot and the
+      // save writes both, so this should be nil; if it is ever non-nil the
+      // backfill did not cover this tenant and the dual write must stay.
+      const legacyGap: any = await db.get(
+        `SELECT COUNT(*) AS n FROM bank_rec_cleared c
+           JOIN bank_reconciliations r ON r.id = c.rec_id
+          WHERE r.account_code = ?
+            AND NOT EXISTS (SELECT 1 FROM bank_cleared b
+                             WHERE b.account_code = r.account_code AND b.gl_entry_id = c.gl_entry_id)`,
+        [account]).catch(() => ({ n: 0 }));
+
       // The line list is capped. Say so, rather than showing a complete balance
       // beside an incomplete list with nothing to signal it.
       const difference = statement_closing_balance != null ? round(book_balance - statement_closing_balance) : null;
@@ -57231,6 +57247,7 @@ ${data.tenant.name}`;
         truncated: lines.length >= 1000,
         // opening_balance + window_movement.net === book_balance, always.
         opening_balance, window_movement,
+        legacy_ticks_unmigrated: Number(legacyGap?.n || 0),
         reconciliation: rec ? { id: rec.id, statement_date: rec.statement_date || to, status: rec.status || 'DRAFT', created_by: rec.created_by, created_at: rec.created_at } : null,
         locked: String(rec?.status || '') === 'FINAL',
         lines: withFlags,
@@ -57279,6 +57296,140 @@ ${data.tenant.name}`;
       }).catch(() => {});
       res.json({ id: req.params.recId, status: want });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── F-3: the reconciliation statement ────────────────────────────────
+  // Builds the document model. Pure read: it touches gl_entries, bank_cleared,
+  // bank_reconciliations and bank_accounts, and writes nothing anywhere.
+  //
+  // Stated in the conventional direction — bank balance, adjusted for what the
+  // bank has not seen, arriving at the books — which is the inverse of the
+  // adjusted_book_balance the screen shows, and agrees with it by construction:
+  //   screen:    adjusted book = book - deposits + cheques  (books -> bank)
+  //   statement: computed book = statement + deposits - cheques  (bank -> books)
+  const _buildBankRecStatement = async (
+    restaurantId: string, account: string, from: string, to: string,
+  ): Promise<BankRecStatementData> => {
+    const db = await getTenantDb(restaurantId);
+    const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+    // Long enough to be a complete document for any realistic month, capped so
+    // one neglected account cannot produce a thousand-page PDF.
+    const ITEM_CAP = 250;
+
+    const bookRow: any = await db.get(
+      `SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries
+        WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date <= ?`,
+      [restaurantId, account, to]).catch(() => ({ bal: 0 }));
+    const book_balance = round(bookRow?.bal || 0);
+
+    // The outstanding items, individually. Same predicate as the sums on the
+    // screen — uncleared, up to the statement date, over all history — so the
+    // document and the screen can never disagree about what is outstanding.
+    const uncleared: any[] = await db.query(
+      `SELECT id, journal_ref, entry_date, narration, dr_amount, cr_amount FROM gl_entries e
+        WHERE e.restaurant_id=? AND e.is_reversed=0 AND e.account_code=? AND e.entry_date <= ?
+          AND NOT EXISTS (SELECT 1 FROM bank_cleared c WHERE c.account_code=e.account_code AND c.gl_entry_id=e.id)
+        ORDER BY e.entry_date DESC, e.created_at DESC`,
+      [restaurantId, account, to]).catch(() => []);
+
+    const section = (pick: (r: any) => number) => {
+      const rows = (uncleared || []).filter(r => Number(pick(r) || 0) > 0);
+      const total = round(rows.reduce((a, r) => a + Number(pick(r) || 0), 0));
+      return {
+        count: rows.length,
+        total,
+        truncated: rows.length > ITEM_CAP,
+        items: rows.slice(0, ITEM_CAP).map(r => ({
+          entry_date: String(r.entry_date || '').slice(0, 10),
+          journal_ref: r.journal_ref || null,
+          narration: r.narration || null,
+          amount: round(pick(r)),
+        })),
+      };
+    };
+    const deposits_in_transit = section(r => r.dr_amount);
+    const outstanding_cheques = section(r => r.cr_amount);
+
+    let rec: any = await db.get(
+      "SELECT * FROM bank_reconciliations WHERE account_code=? AND statement_date=? ORDER BY created_at DESC LIMIT 1",
+      [account, to]).catch(() => null);
+    if (!rec) {
+      rec = await db.get("SELECT * FROM bank_reconciliations WHERE account_code=? AND period=? ORDER BY created_at DESC LIMIT 1",
+        [account, `${from}..${to}`]).catch(() => null);
+    }
+    const statement_closing_balance = rec ? round(rec.statement_closing_balance) : null;
+    const computed_book_balance = statement_closing_balance == null ? null
+      : round(statement_closing_balance + deposits_in_transit.total - outstanding_cheques.total);
+    const difference = computed_book_balance == null ? null : round(computed_book_balance - book_balance);
+
+    const acctRow: any = await db.get(
+      "SELECT label, bank_name FROM bank_accounts WHERE gl_account_code=? AND COALESCE(is_active,1)=1 ORDER BY is_default DESC LIMIT 1",
+      [account]).catch(() => null);
+    const propRow: any = await centralDb.get("SELECT name, gst_number FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+
+    return {
+      property_name: String(propRow?.name || 'Property'),
+      property_gstin: propRow?.gst_number || null,
+      account_code: account,
+      account_label: acctRow?.label || acctRow?.bank_name || null,
+      statement_date: to,
+      window_from: from,
+      window_to: to,
+      statement_closing_balance,
+      deposits_in_transit,
+      outstanding_cheques,
+      book_balance,
+      computed_book_balance,
+      difference,
+      reconciled: difference != null && Math.abs(difference) < 0.005,
+      status: String(rec?.status || 'DRAFT'),
+      prepared_by: rec?.created_by || null,
+      prepared_on: rec?.created_at ? String(rec.created_at).slice(0, 10) : null,
+      generated_at: new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
+    };
+  };
+
+  // The model, for the screen and for the tests. The arithmetic is asserted
+  // here rather than against the PDF, whose text is deflated and hex-encoded
+  // and so cannot be searched.
+  app.get("/api/restaurant/:id/accounting/bank-reconciliation/statement", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const q: any = req.query || {};
+      const model = await _buildBankRecStatement(
+        req.params.id,
+        String(q.account || '1010'),
+        String(q.from || (new Date().toISOString().slice(0, 7) + '-01')),
+        String(q.to || new Date().toISOString().slice(0, 10)),
+      );
+      res.json(model);
+    } catch (err: any) {
+      console.error('Bank rec statement error:', err);
+      // Never 502 — Cloudflare replaces the body with its own page.
+      res.status(400).json({ error: err?.message || 'Failed to build the reconciliation statement' });
+    }
+  });
+
+  // The printable document. On its own route, so a rendering failure cannot
+  // reach the screen that loads or saves a reconciliation.
+  app.get("/api/restaurant/:id/accounting/bank-reconciliation/statement.pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const q: any = req.query || {};
+      const account = String(q.account || '1010');
+      const to = String(q.to || new Date().toISOString().slice(0, 10));
+      const model = await _buildBankRecStatement(
+        req.params.id, account,
+        String(q.from || (new Date().toISOString().slice(0, 7) + '-01')), to,
+      );
+      const pdf = await generateBankRecStatementPdf(model);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="bank-reconciliation-${account}-${to}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) {
+      console.error('Bank rec statement PDF error:', err);
+      res.status(400).json({ error: 'Failed to generate the reconciliation statement' });
+    }
   });
 
   app.post("/api/restaurant/:id/accounting/bank-reconciliation", authenticate, async (req: AuthRequest, res: Response) => {
