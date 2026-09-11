@@ -2820,12 +2820,38 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (account_code, gl_entry_id)
     );
-    -- Carry every existing tick across. Idempotent, so it is safe on each boot.
+    -- One-time cleanup, and it MUST come before the backfill below.
+    -- If bank_cleared already holds anything, the backfill has already run in
+    -- this schema and carried every legitimate tick across. So a legacy row
+    -- missing from it now is not an unmigrated tick — it is one a user
+    -- UNTICKED, whose legacy shadow was left behind. Left in place, the
+    -- backfill reads it straight back in and the untick is silently undone.
+    DELETE FROM bank_rec_cleared c
+      USING bank_reconciliations r
+      WHERE r.id = c.rec_id
+        AND EXISTS (SELECT 1 FROM bank_cleared)
+        AND NOT EXISTS (SELECT 1 FROM bank_cleared b
+                         WHERE b.account_code = r.account_code AND b.gl_entry_id = c.gl_entry_id);
+
+    -- Carry every existing tick across — ONCE per schema, not on every boot.
+    -- The previous version ran unconditionally and was described as safe on the
+    -- grounds that it cannot duplicate rows. It could still do real damage:
+    -- bank_rec_cleared is ALLOWED to diverge from bank_cleared, because an
+    -- untick removes the durable row, so re-importing it at every start brought
+    -- removed ticks back. A migration that repeatedly re-imports from a table
+    -- permitted to diverge is unsound however it is written; one-shot removes
+    -- the whole class.
+    CREATE TABLE IF NOT EXISTS bank_cleared_backfill (
+      id      INTEGER PRIMARY KEY,
+      done_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     INSERT INTO bank_cleared (account_code, gl_entry_id, cleared_by)
       SELECT r.account_code, c.gl_entry_id, r.created_by
         FROM bank_rec_cleared c
         JOIN bank_reconciliations r ON r.id = c.rec_id
+      WHERE NOT EXISTS (SELECT 1 FROM bank_cleared_backfill)
       ON CONFLICT (account_code, gl_entry_id) DO NOTHING;
+    INSERT INTO bank_cleared_backfill (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
     -- Per-cashier EOD cash drawer: one till per cashier per shift. Lifecycle
     -- OPEN -> PENDING_APPROVAL -> APPROVED | REJECTED. Expected cash is derived

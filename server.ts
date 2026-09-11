@@ -54903,8 +54903,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage5-statement',
+    commit_marker: 'bankrec-stage5b-no-resurrect',
     code_features: [
+      'bankrec-stage5b-no-resurrect',      //FIX (bank reconciliation, stage 5b, 11 Sep 2026). A LATENT DATA-LOSS DEFECT, found by the assertion added hours earlier in stage 5 — which is the entire reason the plan demanded a row-count assertion before retiring the stage-1 dual write. **What was wrong:** unticking a cleared line deleted it from the durable `bank_cleared` but from the legacy `bank_rec_cleared` only for the reconciliation being SAVED. A tick made against September's reconciliation and removed while working on October's left September's legacy row behind. Harmless while the server is up — nothing has read that table since stage 3c — except that the boot-time backfill reads it, and its comment claimed it was safe on every boot because it cannot duplicate rows. It cannot; it can do worse. On every restart it re-imported those orphans into `bank_cleared`, RESURRECTING ticks a user had deliberately removed and silently changing a reconciliation's arithmetic. This is the stage-3c defect again (an untick undone by the legacy table) arriving through the migration rather than the read path. The live tenant already had 12 rows queued to come back at the next restart. **Three-part fix:** (1) unticking now clears the legacy shadow for the WHOLE ACCOUNT, not one reconciliation — clearing is per-account, so its shadow must be too, and no new orphans are created; (2) a one-time boot cleanup deletes orphaned legacy rows, safe because a non-empty `bank_cleared` proves the backfill already ran and carried every legitimate tick, so anything missing from it now can only be an untick — it runs BEFORE the backfill, or the backfill resurrects them one last time on this very deploy; (3) the backfill now runs ONCE per schema behind a `bank_cleared_backfill` marker instead of on every boot, because a migration that repeatedly re-imports from a table permitted to diverge is unsound however it is written. Also swapped the save's write order: the authoritative durable row is written FIRST and no longer inside a swallowed catch, while the legacy shadow becomes the best-effort one — previously a failed durable insert lost the tick silently and left exactly the orphan the new cleanup deletes. TC-ACC-BANKREC-DUALWRITE goes green. tsc + vite build clean.',
       'bankrec-stage5-statement',        //FEATURE (bank reconciliation remediation, stage 5 of 6, 11 Sep 2026). **F-3 — the deliverable.** The screen could reconcile but could not produce the DOCUMENT: the thing an auditor asks for and the thing properties were keeping on paper. Two new routes, `GET .../bank-reconciliation/statement` (the model, JSON) and `.../statement.pdf` (the printable document), plus a Statement (PDF) button on the worksheet. The document states the reconciliation in the conventional direction — bank statement balance, ADD deposits in transit, LESS cheques not yet presented, EQUALS the books — with every outstanding item listed under its own heading, and sign-off blocks. It is the inverse of the `adjusted_book_balance` the screen shows and agrees with it by construction. Deliberately on SEPARATE routes: the stage plan's guard was that a rendering failure must not be able to take the load or the save down with it, and a bad PDF now 400s on its own route while the screen stays up. Serving the MODEL as JSON is what makes it testable — a PDF's text is deflated and hex-encoded and cannot be read from a test, so TC-ACC-BANKREC-STATEMENT asserts the arithmetic against the JSON (and cross-checks the itemised totals against the main endpoint's uncleared sums, so the document and the screen can never drift apart), while TC-ACC-BANKREC-STATEMENT-PDF asserts only that a real PDF comes back. Rendered locally against four shapes before deploying — normal, no statement balance, 412 items over 7 pages, and empty. That caught a real defect: PDFKit's `ellipsis: true` does NOT truncate, it wrapped, and a long narration printed on top of the row beneath it; text is now clipped by measuring it with `widthOfString`. LANDMINE kept: built-in Helvetica has no rupee glyph U+20B9 and THROWS on it, so money is 'Rs.' — same fix as the hotel invoice and event quotation. **The stage-1 dual write is NOT retired here.** The plan gates that on a release having proved the new table, with a row-count assertion first; stage 1 went live only hours ago. The assertion is what ships instead: `legacy_ticks_unmigrated` on the reconciliation read counts legacy `bank_rec_cleared` ticks absent from durable `bank_cleared`, and TC-ACC-BANKREC-DUALWRITE asserts it is nil. While it stays nil the old table is provably redundant and the dual write can be deleted; the field goes with it. tsc + vite build clean.',
       'bankrec-stage4b-revert-write-gate',       //REVERT of my own stage-4 F-8 change, within the hour, before anyone used it. I swapped the bank-reconciliation WRITE routes onto `_acctOwnerOnly` to 'align' them with the read. That was wrong and RE-OPENED A KNOWN HOLE: the codebase documents, directly under the helper, that `_acctOwnerOnly` is a READ gate admitting >= View on ANY finance tab and 'must NOT guard writes — it let a role with Ledger & Books = View(1) post journals / record expenses / add loans'. `_acctCanWrite` requires ACCOUNTING >= Edit(2). They are a deliberate read/write split, not a loose and a tight version of one gate. The live TC-ACC-BANKREC-GATES run showed the effect: a MANAGER holding EXPENSE_JOURNAL and PROCUREMENT but NOT Accounting was allowed to WRITE. Writes are back on `_acctCanWrite`. F-8 in the review was a mischaracterisation — `_acctCanWrite` is STRICTER on permissions and broader only in admitting the built-in MANAGER role by name, which is a product-wide convention and not this route's to change unilaterally. F-4 (opening balance) and F-9 (account picker from `bank_accounts`) from stage 4 stand and are unaffected. tsc clean.',
       'bankrec-stage4-edges',                   //FIX (bank reconciliation remediation, stage 4 of 6, 11 Sep 2026). Three independent edges. **F-4:** the cumulative book balance sat above a WINDOWED list that could never add up to it, with nothing to bridge them — now returns `opening_balance` and `window_movement{debits,credits,net}`, and the invariant opening + net = book_balance is asserted by TC-ACC-BANKREC-OPENING; the UI spells out opening + received − paid = closing. **F-8:** the read was gated MORE TIGHTLY than the write (GET `_acctOwnerOnly`, POST `_acctCanWrite`, which admits MANAGER by role), so a manager was refused the screen but accepted on the save. Fixed AT THE CALL SITES — the shared helpers serve 26 and 17 other routes and were NOT touched. Direction: the WRITE was tightened to match the read, not the read loosened, because a reconciliation signs off the books and blanket role-based access is too loose; access stays grantable per role through Staff Access, which `_acctOwnerOnly` honours, and nobody loses a working workflow since a manager could not open the screen anyway. One line to reverse if managers should reconcile. The stage-3 status route was aligned the same way. **F-9:** the account picker offered two HARDCODED codes, and the second (`1020 Bank — OTA Receivable`) is seeded but never posted to by anything in the product, so choosing it always returned an empty screen — it is now driven from the `bank_accounts` table, deduped, with a fallback to 1010 so it can never render empty. New TC-ACC-BANKREC-GATES creates a throwaway MANAGER, logs in as them and asserts the read and write give that manager the SAME answer — a check an owner-only test could never have made — then deletes the account. tsc + vite build clean.',
@@ -57481,12 +57482,20 @@ ${data.tenant.name}`;
       const ids: string[] = Array.isArray(cleared_entry_ids) ? cleared_entry_ids.map((x: any) => String(x)) : [];
       const clearedOn = String(to || new Date().toISOString().slice(0, 10));
       for (const gid of ids) {
-        // Written to both for one release: the old table so a rollback keeps
-        // working, the new one so clearing outlives the period it was made in.
-        await db.run("INSERT INTO bank_rec_cleared (rec_id, gl_entry_id) VALUES (?, ?) ON CONFLICT (rec_id, gl_entry_id) DO NOTHING", [recId, gid]);
+        // Written to both for one release: the durable table because clearing
+        // has to outlive the period it was made in, the old one so a rollback
+        // to the previous release still finds the ticks.
+        //
+        // The authoritative row first, and NOT swallowed. It used to be the
+        // other way round — legacy unguarded, durable in a .catch — which meant
+        // a failed durable insert lost the tick silently (nothing reads the
+        // legacy table since stage 3c) and left an orphan shadow behind. The
+        // legacy write is the one allowed to be best-effort now; it is deleted
+        // outright next cycle.
         await db.run(
           "INSERT INTO bank_cleared (account_code, gl_entry_id, cleared_on, cleared_by) VALUES (?, ?, ?, ?) ON CONFLICT (account_code, gl_entry_id) DO NOTHING",
-          [acct, gid, clearedOn, by]).catch(() => {});
+          [acct, gid, clearedOn, by]);
+        await db.run("INSERT INTO bank_rec_cleared (rec_id, gl_entry_id) VALUES (?, ?) ON CONFLICT (rec_id, gl_entry_id) DO NOTHING", [recId, gid]).catch(() => {});
       }
       // Unticking has to stick too, or a mistake could never be undone.
       const idSet = new Set(ids);
@@ -57495,9 +57504,17 @@ ${data.tenant.name}`;
         const gid = String(r.gl_entry_id);
         if (!idSet.has(gid) && lineIds.has(gid)) {
           await db.run("DELETE FROM bank_cleared WHERE account_code=? AND gl_entry_id=?", [acct, gid]).catch(() => {});
-          // The legacy row goes too. Leaving it behind is what let an untick be
-          // undone by the fallback while that table still exists.
-          await db.run("DELETE FROM bank_rec_cleared WHERE rec_id=? AND gl_entry_id=?", [recId, gid]).catch(() => {});
+          // The legacy shadow goes too, for EVERY reconciliation on this
+          // account rather than just the one being saved. Clearing is a
+          // property of the account, so a tick made against September's
+          // reconciliation and removed while working on October's has to lose
+          // September's row as well. Scoping this to recId left those rows
+          // behind, and the boot-time backfill then read them straight back
+          // into bank_cleared — resurrecting ticks the user had removed.
+          await db.run(
+            `DELETE FROM bank_rec_cleared WHERE gl_entry_id=? AND rec_id IN (
+               SELECT id FROM bank_reconciliations WHERE account_code=?)`,
+            [gid, acct]).catch(() => {});
         }
       }
       const bookRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date <= ?`, [req.params.id, acct, String(to)]).catch(() => ({ bal: 0 }));
