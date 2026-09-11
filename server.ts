@@ -54903,8 +54903,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage5b-no-resurrect',
+    commit_marker: 'bankrec-stage6a-list',
     code_features: [
+      'bankrec-stage6a-list',               //FEATURE (bank reconciliation remediation, stage 6 of 6, part 1 of 2 — the line list. 11 Sep 2026). **F-11 paging**, **F-13 search / filter / sort / running balance**, **F-14 who cleared each line**. The list stopped dead at `LIMIT 1000` with a `truncated` flag bolted on in stage 2 so the failure was at least visible; it is now properly paged (`page`, `page_size`, `total_lines`, `has_more`), searchable on narration/journal/account, filterable to cleared or not-yet-cleared, sortable by date or amount, and carries a running balance — offered ONLY on the unfiltered date-ordered list, because that is the one arrangement in which it means anything (it exists to be read beside the bank's own statement). `cleared_on`/`cleared_by` have been written since stage 1 and never read back; they now appear under each tick. **TWO THINGS PAGING BROKE THAT HAD TO BE FIXED WITH IT.** (1) THE ARITHMETIC: the browser recomputed the worksheet by summing the unticked lines it had ON SCREEN plus a server figure for everything outside the window — correct only while the screen held every line in the window, and silently under-counting once paged, which is the exact failure F-11 is about, reintroduced by its own fix. Inverted: the server's whole-history totals are authoritative and the browser moves them only by ticks the USER has changed, so it no longer matters whether a line is on screen. (2) THE SAVE: the server unticked anything in the WINDOW absent from the payload, so a save from page 2 would have silently wiped every tick on page 1 — destroying reconciliation work with no error. The client now sends `visible_entry_ids` and only those may be unticked; absent the field the old window-wide rule stands, so a stale cached bundle behaves exactly as before. Guarded by TC-ACC-BANKREC-PAGESAFE, which reproduces that sequence. The pager, search and filters REFUSE to move while ticks are unsaved rather than reload over them. Tests: PAGING, PAGESAFE, FILTER, RUNNING, AUDIT. tsc + vite build clean.',
       'bankrec-stage5b-no-resurrect',      //FIX (bank reconciliation, stage 5b, 11 Sep 2026). A LATENT DATA-LOSS DEFECT, found by the assertion added hours earlier in stage 5 — which is the entire reason the plan demanded a row-count assertion before retiring the stage-1 dual write. **What was wrong:** unticking a cleared line deleted it from the durable `bank_cleared` but from the legacy `bank_rec_cleared` only for the reconciliation being SAVED. A tick made against September's reconciliation and removed while working on October's left September's legacy row behind. Harmless while the server is up — nothing has read that table since stage 3c — except that the boot-time backfill reads it, and its comment claimed it was safe on every boot because it cannot duplicate rows. It cannot; it can do worse. On every restart it re-imported those orphans into `bank_cleared`, RESURRECTING ticks a user had deliberately removed and silently changing a reconciliation's arithmetic. This is the stage-3c defect again (an untick undone by the legacy table) arriving through the migration rather than the read path. The live tenant already had 12 rows queued to come back at the next restart. **Three-part fix:** (1) unticking now clears the legacy shadow for the WHOLE ACCOUNT, not one reconciliation — clearing is per-account, so its shadow must be too, and no new orphans are created; (2) a one-time boot cleanup deletes orphaned legacy rows, safe because a non-empty `bank_cleared` proves the backfill already ran and carried every legitimate tick, so anything missing from it now can only be an untick — it runs BEFORE the backfill, or the backfill resurrects them one last time on this very deploy; (3) the backfill now runs ONCE per schema behind a `bank_cleared_backfill` marker instead of on every boot, because a migration that repeatedly re-imports from a table permitted to diverge is unsound however it is written. Also swapped the save's write order: the authoritative durable row is written FIRST and no longer inside a swallowed catch, while the legacy shadow becomes the best-effort one — previously a failed durable insert lost the tick silently and left exactly the orphan the new cleanup deletes. TC-ACC-BANKREC-DUALWRITE goes green. tsc + vite build clean.',
       'bankrec-stage5-statement',        //FEATURE (bank reconciliation remediation, stage 5 of 6, 11 Sep 2026). **F-3 — the deliverable.** The screen could reconcile but could not produce the DOCUMENT: the thing an auditor asks for and the thing properties were keeping on paper. Two new routes, `GET .../bank-reconciliation/statement` (the model, JSON) and `.../statement.pdf` (the printable document), plus a Statement (PDF) button on the worksheet. The document states the reconciliation in the conventional direction — bank statement balance, ADD deposits in transit, LESS cheques not yet presented, EQUALS the books — with every outstanding item listed under its own heading, and sign-off blocks. It is the inverse of the `adjusted_book_balance` the screen shows and agrees with it by construction. Deliberately on SEPARATE routes: the stage plan's guard was that a rendering failure must not be able to take the load or the save down with it, and a bad PDF now 400s on its own route while the screen stays up. Serving the MODEL as JSON is what makes it testable — a PDF's text is deflated and hex-encoded and cannot be read from a test, so TC-ACC-BANKREC-STATEMENT asserts the arithmetic against the JSON (and cross-checks the itemised totals against the main endpoint's uncleared sums, so the document and the screen can never drift apart), while TC-ACC-BANKREC-STATEMENT-PDF asserts only that a real PDF comes back. Rendered locally against four shapes before deploying — normal, no statement balance, 412 items over 7 pages, and empty. That caught a real defect: PDFKit's `ellipsis: true` does NOT truncate, it wrapped, and a long narration printed on top of the row beneath it; text is now clipped by measuring it with `widthOfString`. LANDMINE kept: built-in Helvetica has no rupee glyph U+20B9 and THROWS on it, so money is 'Rs.' — same fix as the hotel invoice and event quotation. **The stage-1 dual write is NOT retired here.** The plan gates that on a release having proved the new table, with a row-count assertion first; stage 1 went live only hours ago. The assertion is what ships instead: `legacy_ticks_unmigrated` on the reconciliation read counts legacy `bank_rec_cleared` ticks absent from durable `bank_cleared`, and TC-ACC-BANKREC-DUALWRITE asserts it is nil. While it stays nil the old table is provably redundant and the dual write can be deleted; the field goes with it. tsc + vite build clean.',
       'bankrec-stage4b-revert-write-gate',       //REVERT of my own stage-4 F-8 change, within the hour, before anyone used it. I swapped the bank-reconciliation WRITE routes onto `_acctOwnerOnly` to 'align' them with the read. That was wrong and RE-OPENED A KNOWN HOLE: the codebase documents, directly under the helper, that `_acctOwnerOnly` is a READ gate admitting >= View on ANY finance tab and 'must NOT guard writes — it let a role with Ledger & Books = View(1) post journals / record expenses / add loans'. `_acctCanWrite` requires ACCOUNTING >= Edit(2). They are a deliberate read/write split, not a loose and a tight version of one gate. The live TC-ACC-BANKREC-GATES run showed the effect: a MANAGER holding EXPENSE_JOURNAL and PROCUREMENT but NOT Accounting was allowed to WRITE. Writes are back on `_acctCanWrite`. F-8 in the review was a mischaracterisation — `_acctCanWrite` is STRICTER on permissions and broader only in admitting the built-in MANAGER role by name, which is a product-wide convention and not this route's to change unilaterally. F-4 (opening balance) and F-9 (account picker from `bank_accounts`) from stage 4 stand and are unaffected. tsc clean.',
@@ -57134,11 +57135,55 @@ ${data.tenant.name}`;
       const to = String((req.query as any).to || new Date().toISOString().slice(0, 10));
       const bookRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date <= ?`, [req.params.id, account, to]).catch(() => ({ bal: 0 }));
       const book_balance = round(bookRow?.bal || 0);
+      // ── F-13 / F-11: what to show, in what order, and which slice ──────
+      const q = String((req.query as any).q || '').trim();
+      const only = String((req.query as any).only || 'all').toLowerCase();      // all | uncleared | cleared
+      const sort = String((req.query as any).sort || 'date').toLowerCase();     // date | amount
+      const dir = String((req.query as any).dir || '').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+      const pageSize = Math.min(1000, Math.max(25, Number((req.query as any).page_size) || 200));
+      const page = Math.max(1, Number((req.query as any).page) || 1);
+      const offset = (page - 1) * pageSize;
+
+      // Built once and shared by the count, the page and the running-balance
+      // prefix, so the three can never disagree about what the list IS.
+      const whereParts = ['e.restaurant_id=?', 'e.is_reversed=0', 'e.account_code=?', 'e.entry_date >= ?', 'e.entry_date <= ?'];
+      const whereArgs: any[] = [req.params.id, account, from, to];
+      if (q) {
+        whereParts.push('(e.narration ILIKE ? OR e.journal_ref ILIKE ? OR e.account_name ILIKE ?)');
+        whereArgs.push(`%${q}%`, `%${q}%`, `%${q}%`);
+      }
+      const clearedExists = 'EXISTS (SELECT 1 FROM bank_cleared c WHERE c.account_code=e.account_code AND c.gl_entry_id=e.id)';
+      if (only === 'uncleared') whereParts.push('NOT ' + clearedExists);
+      else if (only === 'cleared') whereParts.push(clearedExists);
+      const whereSql = whereParts.join(' AND ');
+      // Amount sorts on the movement's size regardless of direction, which is
+      // how someone hunting "that 4,500 debit" actually looks for it.
+      const orderSql = sort === 'amount'
+        ? `ABS(e.dr_amount - e.cr_amount) ${dir}, e.entry_date DESC`
+        : `e.entry_date ${dir}, e.created_at ${dir}`;
+
+      const countRow: any = await db.get(
+        `SELECT COUNT(*) AS n FROM gl_entries e WHERE ${whereSql}`, whereArgs).catch(() => ({ n: 0 }));
+      const total_lines = Number(countRow?.n || 0);
+
+      // F-14: cleared_on / cleared_by have been written since stage 1 and never
+      // read back. A tick is an assertion a person made; the screen should say
+      // who made it.
       const lines: any[] = await db.query(
-        `SELECT id, journal_ref, entry_date, account_name, dr_amount, cr_amount, source_type, narration
-           FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date >= ? AND entry_date <= ?
-          ORDER BY entry_date DESC, created_at DESC LIMIT 1000`,
-        [req.params.id, account, from, to]).catch(() => []);
+        `SELECT e.id, e.journal_ref, e.entry_date, e.account_name, e.dr_amount, e.cr_amount, e.source_type, e.narration,
+                c.gl_entry_id IS NOT NULL AS cleared, c.cleared_on, c.cleared_by
+           FROM gl_entries e
+           LEFT JOIN bank_cleared c ON c.account_code = e.account_code AND c.gl_entry_id = e.id
+          WHERE ${whereSql}
+          ORDER BY ${orderSql}
+          LIMIT ? OFFSET ?`,
+        [...whereArgs, pageSize, offset]).catch(() => []);
+
+      // F-13: a running balance is only meaningful on the unfiltered list in
+      // date order — it exists to be read beside the bank's own statement — so
+      // it is offered there and withheld everywhere else rather than printed as
+      // a number that does not mean what it looks like.
+      const runningOk = sort === 'date' && !q && only === 'all';
       // What the account stood at before this window opened. Without it the
       // cumulative book balance sits above a windowed list that cannot explain
       // it, and a reader reasonably assumes the lines are the whole story.
@@ -57177,10 +57222,16 @@ ${data.tenant.name}`;
       // the sums still counted it as outstanding — unticking removed it from
       // one table and not the other. Legacy rows are already carried into
       // bank_cleared by the tenant migration at boot, so nothing is lost.
-      const clearedSet = new Set<string>();
-      const durable: any[] = await db.query("SELECT gl_entry_id FROM bank_cleared WHERE account_code=?", [account]).catch(() => []);
-      for (const r of (durable || [])) clearedSet.add(String(r.gl_entry_id));
-      const withFlags = lines.map((l: any) => ({ ...l, cleared: clearedSet.has(String(l.id)) }));
+      // The flag now comes from the LEFT JOIN above, in the same query that
+      // chose the rows — so the "is it cleared" the filter used and the one the
+      // row displays are by construction the same answer. (It used to be a
+      // second query building a Set, which is what let the two drift apart in
+      // stage 3.)
+      const withFlags = lines.map((l: any) => ({
+        ...l,
+        cleared: !!l.cleared,
+        cleared_on: l.cleared_on ? String(l.cleared_on).slice(0, 10) : null,
+      }));
       const statement_closing_balance = rec ? round(rec.statement_closing_balance) : null;
 
       // ── The reconciliation proper ──────────────────────────────────────
@@ -57232,6 +57283,26 @@ ${data.tenant.name}`;
 
       // The line list is capped. Say so, rather than showing a complete balance
       // beside an incomplete list with nothing to signal it.
+      // Everything on earlier pages, so page 3's first row continues where
+      // page 2's last row left off instead of restarting at the opening.
+      if (runningOk) {
+        const priorRow: any = offset === 0 ? { prior: 0 } : await db.get(
+          `SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS prior FROM (
+             SELECT e.dr_amount, e.cr_amount FROM gl_entries e
+              WHERE ${whereSql} ORDER BY ${orderSql} LIMIT ?
+           ) t`, [...whereArgs, offset]).catch(() => ({ prior: 0 }));
+        // Date DESC means the newest row is first, so the running balance walks
+        // DOWN from the closing balance rather than up from the opening.
+        let bal = dir === 'ASC'
+          ? round(opening_balance + Number(priorRow?.prior || 0))
+          : round(book_balance - Number(priorRow?.prior || 0));
+        for (const l of withFlags) {
+          const net = Number(l.dr_amount || 0) - Number(l.cr_amount || 0);
+          if (dir === 'ASC') { bal = round(bal + net); l.running_balance = bal; }
+          else { l.running_balance = bal; bal = round(bal - net); }
+        }
+      }
+
       const difference = statement_closing_balance != null ? round(book_balance - statement_closing_balance) : null;
       res.json({
         account_code: account, period: { from, to }, book_balance,
@@ -57245,7 +57316,13 @@ ${data.tenant.name}`;
         adjusted_book_balance, adjusted_difference,
         reconciled_adjusted: adjusted_difference != null && Math.abs(adjusted_difference) < 0.02,
         uncleared_outside_window: { deposits: round(outside?.dr || 0), withdrawals: round(outside?.cr || 0) },
-        truncated: lines.length >= 1000,
+        // `truncated` kept for one release so nothing consuming it breaks. It
+        // is now always false: the list is paged, not silently cut off.
+        truncated: false,
+        total_lines, page, page_size: pageSize,
+        has_more: offset + lines.length < total_lines,
+        running_balance_available: runningOk,
+        filters: { q, only, sort, dir: dir.toLowerCase() },
         // opening_balance + window_movement.net === book_balance, always.
         opening_balance, window_movement,
         legacy_ticks_unmigrated: Number(legacyGap?.n || 0),
@@ -57443,16 +57520,26 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
-      const { account, from, to, statement_closing_balance, cleared_entry_ids } = req.body || {};
+      const { account, from, to, statement_closing_balance, cleared_entry_ids, visible_entry_ids } = req.body || {};
       const acct = String(account || '1010');
       const period = `${String(from)}..${String(to)}`;
-      // Only entries inside the saved window were on screen, so only those may
-      // be UNticked by this save. Without this, saving September would clear
-      // every tick made in August.
-      const windowRows: any[] = await db.query(
-        `SELECT id FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date >= ? AND entry_date <= ?`,
-        [req.params.id, String(account || '1010'), String(from), String(to)]).catch(() => []);
-      const lineIds = new Set((windowRows || []).map((r: any) => String(r.id)));
+      // Only lines the user was actually SHOWN may be unticked by this save.
+      // Anything absent from cleared_entry_ids but also absent from the screen
+      // is not a removal — it is a line this save knows nothing about.
+      //
+      // The client states what it displayed (`visible_entry_ids`), which is one
+      // page of the list since stage 6. Without that field this falls back to
+      // the whole window, which is what stage 1 did and what an older cached
+      // bundle still sends — so a stale client keeps behaving exactly as it did.
+      let lineIds: Set<string>;
+      if (Array.isArray(visible_entry_ids) && visible_entry_ids.length) {
+        lineIds = new Set(visible_entry_ids.map((x: any) => String(x)));
+      } else {
+        const windowRows: any[] = await db.query(
+          `SELECT id FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date >= ? AND entry_date <= ?`,
+          [req.params.id, acct, String(from), String(to)]).catch(() => []);
+        lineIds = new Set((windowRows || []).map((r: any) => String(r.id)));
+      }
       const scb = round(Number(statement_closing_balance || 0));
       const by = (req.user as any)?.id || (req.user as any)?.email || null;
       const stmtDate = String(to);

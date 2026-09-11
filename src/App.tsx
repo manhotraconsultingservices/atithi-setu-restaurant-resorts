@@ -8352,6 +8352,11 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [bankRecHistory, setBankRecHistory] = useState<any[]>([]);
   const [bankRecAccounts, setBankRecAccounts] = useState<any[]>([]);
   const [bankRecStmtErr, setBankRecStmtErr] = useState<string | null>(null);
+  const [bankRecPage, setBankRecPage] = useState(1);
+  const [bankRecQ, setBankRecQ] = useState('');
+  const [bankRecOnly, setBankRecOnly] = useState<'all' | 'uncleared' | 'cleared'>('all');
+  const [bankRecSort, setBankRecSort] = useState<'date' | 'amount'>('date');
+  const [bankRecDir, setBankRecDir] = useState<'desc' | 'asc'>('desc');
   const [periods, setPeriods] = useState<any[]>([]);
   const [periodsExc, setPeriodsExc] = useState<any[]>([]);
   const [cashCount, setCashCount] = useState<any>(null);
@@ -8373,9 +8378,12 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const loadAgingAp = useCallback(() => { setLoading(true); acctApi(`/accounting/aging?type=AP&asOf=${asOfDate}`).then(d => { if (d && !d.error) setAgingAp(d); }).finally(() => setLoading(false)); }, [acctApi, asOfDate]);
   const loadBankRec = useCallback(() => {
     setLoading(true);
-    acctApi(`/accounting/bank-reconciliation?account=${bankRecAccount}&from=${tbFrom}&to=${tbTo}`).then(d => {
+    const listQs = `&page=${bankRecPage}&q=${encodeURIComponent(bankRecQ)}&only=${bankRecOnly}&sort=${bankRecSort}&dir=${bankRecDir}`;
+    acctApi(`/accounting/bank-reconciliation?account=${bankRecAccount}&from=${tbFrom}&to=${tbTo}${listQs}`).then(d => {
       if (d && !d.error) {
         setBankRec(d);
+        // Rebuilt from the server for the page just loaded. Changing page with
+        // unsaved ticks is blocked (see the pager), so nothing is lost here.
         const m: Record<string, boolean> = {};
         (d.lines || []).forEach((l: any) => { m[l.id] = !!l.cleared; });
         setBankRecCleared(m);
@@ -8390,7 +8398,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     acctApi('/accounting/bank-accounts')
       .then(a => setBankRecAccounts(Array.isArray(a) ? a : (a?.bank_accounts || a?.accounts || [])))
       .catch(() => {});
-  }, [acctApi, bankRecAccount, tbFrom, tbTo]);
+  }, [acctApi, bankRecAccount, tbFrom, tbTo, bankRecPage, bankRecQ, bankRecOnly, bankRecSort, bankRecDir]);
 
   // Sign a reconciliation off, or reopen it. A FINAL one refuses further saves.
   const setBankRecStatus = async (recId: string, status: string) => {
@@ -8530,6 +8538,21 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     if (res && !res.error) { setCcMsg({ type: 'ok', text: `Recorded. Variance ${fmtAmt(res.variance)}${res.variance_journal_ref ? ` · journal ${res.variance_journal_ref}` : ''}` }); setCcCounted(''); loadCashCount(); }
     else setCcMsg({ type: 'err', text: res?.error || 'Failed to record count' });
   };
+  // Lines whose tick differs from what the server last told us. One
+  // definition, used by the pager, the filters and the statement button.
+  const bankRecDirtyTicks = (bankRec?.lines || []).filter((l: any) => !!bankRecCleared[l.id] !== !!l.cleared).length;
+
+  // Changing page, searching or filtering all RELOAD the list, so unsaved ticks
+  // would vanish. Refuse rather than lose them.
+  const bankRecRelist = (fn: () => void) => {
+    if (bankRecDirtyTicks > 0) {
+      setBankRecStmtErr(`Save your ${bankRecDirtyTicks} changed tick${bankRecDirtyTicks === 1 ? '' : 's'} first — moving through the list reloads it.`);
+      return;
+    }
+    setBankRecStmtErr(null);
+    fn();
+  };
+
   // The statement is a document, not a page, so it is fetched as a blob and
   // opened rather than linked — a plain href would carry no Authorization
   // header and come back 401. Same shape as the folio invoice download.
@@ -8554,7 +8577,11 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   };
   const saveBankRec = async () => {
     const cleared_entry_ids = Object.entries(bankRecCleared).filter(([, v]) => v).map(([k]) => k);
-    await acctApi('/accounting/bank-reconciliation', { method: 'POST', body: JSON.stringify({ account: bankRecAccount, from: tbFrom, to: tbTo, statement_closing_balance: parseFloat(bankRecStmtBal) || 0, cleared_entry_ids }) });
+    // What was on screen, so the server unticks only within this page — it
+    // cannot tell "the user removed this tick" from "this line was on another
+    // page" unless we say which lines we showed.
+    const visible_entry_ids = (bankRec?.lines || []).map((l: any) => String(l.id));
+    await acctApi('/accounting/bank-reconciliation', { method: 'POST', body: JSON.stringify({ account: bankRecAccount, from: tbFrom, to: tbTo, statement_closing_balance: parseFloat(bankRecStmtBal) || 0, cleared_entry_ids, visible_entry_ids }) });
     loadBankRec();
   };
 
@@ -9419,17 +9446,61 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
             <button onClick={loadBankRec} className={AC_BTN}>Load</button>
           </div>
+          {bankRec && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                value={bankRecQ}
+                onChange={e => setBankRecQ(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') bankRecRelist(() => setBankRecPage(1)); }}
+                onBlur={() => { if (bankRecQ !== (bankRec.filters?.q || '')) bankRecRelist(() => setBankRecPage(1)); }}
+                placeholder="Search narration or journal…"
+                className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white w-64" />
+              <select value={bankRecOnly}
+                onChange={e => { const v = e.target.value as any; bankRecRelist(() => { setBankRecOnly(v); setBankRecPage(1); }); }}
+                className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
+                <option value="all">All movements</option>
+                <option value="uncleared">Not yet cleared</option>
+                <option value="cleared">Cleared</option>
+              </select>
+              <select value={`${bankRecSort}:${bankRecDir}`}
+                onChange={e => {
+                  const [sv, dv] = e.target.value.split(':') as any;
+                  bankRecRelist(() => { setBankRecSort(sv); setBankRecDir(dv); setBankRecPage(1); });
+                }}
+                className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
+                <option value="date:desc">Newest first</option>
+                <option value="date:asc">Oldest first</option>
+                <option value="amount:desc">Largest amount</option>
+                <option value="amount:asc">Smallest amount</option>
+              </select>
+              <span className="text-[11px] text-[#9c8e85]">
+                {Number(bankRec.total_lines || 0).toLocaleString('en-IN')} movement{Number(bankRec.total_lines) === 1 ? '' : 's'}
+                {bankRec.filters?.only !== 'all' || bankRec.filters?.q ? ' matching' : ''}
+              </span>
+            </div>
+          )}
           {bankRec ? (
             <>
               {(() => {
-                // Uncleared items inside the window come from the live tick
-                // state so the figures respond as boxes are ticked; the ones
-                // outside it come from the server, because they are not on
-                // screen to be counted.
-                const open = (bankRec.lines || []).filter((l: any) => !bankRecCleared[l.id]);
-                const outside = bankRec.uncleared_outside_window || { deposits: 0, withdrawals: 0 };
-                const depositsInTransit = open.reduce((a: number, l: any) => a + Number(l.dr_amount || 0), 0) + Number(outside.deposits || 0);
-                const outstandingCheques = open.reduce((a: number, l: any) => a + Number(l.cr_amount || 0), 0) + Number(outside.withdrawals || 0);
+                // The server's totals are the truth — they cover the whole
+                // history of the account, cleared or not, whether or not a line
+                // is on this page. The browser only has to move them by what
+                // the USER has changed since the page loaded.
+                //
+                // This used to sum the unticked lines on screen and add a
+                // server figure for everything outside the window, which was
+                // right only while the screen held every line in the window.
+                // Once the list is paged that under-counts silently, which is
+                // the very failure F-11 is about.
+                let depositsInTransit = Number(bankRec.uncleared_deposits || 0);
+                let outstandingCheques = Number(bankRec.uncleared_withdrawals || 0);
+                for (const l of (bankRec.lines || [])) {
+                  const now = !!bankRecCleared[l.id], was = !!l.cleared;
+                  if (now === was) continue;
+                  const sign = now ? -1 : 1;   // newly ticked removes it from outstanding
+                  depositsInTransit += sign * Number(l.dr_amount || 0);
+                  outstandingCheques += sign * Number(l.cr_amount || 0);
+                }
                 // statement + deposits in transit − outstanding cheques = book
                 const adjusted = Number(bankRec.book_balance || 0) - depositsInTransit + outstandingCheques;
                 const entered = bankRecStmtBal !== '';
@@ -9507,7 +9578,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                         // of printing something that contradicts what is being
                         // read on screen.
                         const savedBal = bankRec.statement_closing_balance;
-                        const dirty = (bankRec.lines || []).some((l: any) => !!bankRecCleared[l.id] !== !!l.cleared)
+                        const dirty = bankRecDirtyTicks > 0
                           || (String(bankRecStmtBal || '') !== '' && Math.abs((parseFloat(bankRecStmtBal) || 0) - Number(savedBal ?? NaN)) > 0.005)
                           || (savedBal == null && String(bankRecStmtBal || '') !== '');
                         return (
@@ -9534,19 +9605,55 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
               })()}
               <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
                 <table className="w-full text-sm border-collapse">
-                  <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Cleared</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Date</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Journal</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Narration</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr</th></tr></thead>
+                  <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Cleared</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Date</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Journal</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Narration</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr</th>{bankRec.running_balance_available && <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Balance</th>}</tr></thead>
                   <tbody>{bankRec.lines.length ? bankRec.lines.map((l: any) => (
                     <tr key={l.id} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]">
-                      <td className="px-3 py-2"><input type="checkbox" checked={!!bankRecCleared[l.id]} onChange={e => setBankRecCleared(m => ({ ...m, [l.id]: e.target.checked }))} /></td>
+                      <td className="px-3 py-2">
+                        <input type="checkbox" checked={!!bankRecCleared[l.id]} onChange={e => setBankRecCleared(m => ({ ...m, [l.id]: e.target.checked }))} />
+                        {/* F-14: a tick is an assertion someone made. Say who, and when. */}
+                        {l.cleared && l.cleared_by && (
+                          <span className="block text-[9px] text-[#9c8e85] leading-tight mt-0.5" title={`Cleared by ${l.cleared_by}${l.cleared_on ? ' on ' + l.cleared_on : ''}`}>
+                            {String(l.cleared_by).split('@')[0]}{l.cleared_on ? ` · ${l.cleared_on.slice(5)}` : ''}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2 whitespace-nowrap text-[#6b5d52]">{l.entry_date}</td>
                       <td className="px-3 py-2 font-mono text-xs text-[#6b5d52] whitespace-nowrap">{l.journal_ref}</td>
                       <td className="px-3 py-2 text-xs text-[#6b5d52] max-w-[14rem] truncate">{l.narration || '—'}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{Number(l.dr_amount) > 0 ? fmtAmt(l.dr_amount) : '—'}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{Number(l.cr_amount) > 0 ? fmtAmt(l.cr_amount) : '—'}</td>
+                      {bankRec.running_balance_available && (
+                        <td className="px-3 py-2 text-right tabular-nums text-[#6b5d52]">{l.running_balance == null ? '—' : fmtAmt(l.running_balance)}</td>
+                      )}
                     </tr>
-                  )) : (<tr><td colSpan={6} className="px-3 py-3 text-center text-[#9c8e85] italic">No bank movements in this window</td></tr>)}</tbody>
+                  )) : (<tr><td colSpan={bankRec.running_balance_available ? 7 : 6} className="px-3 py-3 text-center text-[#9c8e85] italic">
+                    {bankRec.filters?.q || bankRec.filters?.only !== 'all' ? 'Nothing matches that search or filter' : 'No bank movements in this window'}
+                  </td></tr>)}</tbody>
                 </table>
               </div>
+              {/* F-11: the list is paged now, not silently cut off at 1,000. */}
+              {(Number(bankRec.total_lines || 0) > Number(bankRec.page_size || 200)) && (
+                <div className="flex items-center justify-between gap-3 text-xs text-[#6b5d52]">
+                  <span>
+                    Showing {((Number(bankRec.page || 1) - 1) * Number(bankRec.page_size || 200) + 1).toLocaleString('en-IN')}
+                    –{((Number(bankRec.page || 1) - 1) * Number(bankRec.page_size || 200) + (bankRec.lines || []).length).toLocaleString('en-IN')}
+                    {' '}of {Number(bankRec.total_lines || 0).toLocaleString('en-IN')}
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <button disabled={Number(bankRec.page || 1) <= 1}
+                      onClick={() => bankRecRelist(() => setBankRecPage(p => Math.max(1, p - 1)))}
+                      className={'px-3 py-1 rounded-lg border border-[#d4c4a8] font-bold' + (Number(bankRec.page || 1) <= 1 ? ' opacity-40 cursor-not-allowed' : ' hover:bg-[#f5f0e8]')}>
+                      Previous
+                    </button>
+                    <span className="tabular-nums">Page {Number(bankRec.page || 1)}</span>
+                    <button disabled={!bankRec.has_more}
+                      onClick={() => bankRecRelist(() => setBankRecPage(p => p + 1))}
+                      className={'px-3 py-1 rounded-lg border border-[#d4c4a8] font-bold' + (!bankRec.has_more ? ' opacity-40 cursor-not-allowed' : ' hover:bg-[#f5f0e8]')}>
+                      Next
+                    </button>
+                  </span>
+                </div>
+              )}
               {bankRecHistory.length > 0 && (
                 <div className="rounded-lg border border-[#e8ded0] bg-white overflow-hidden">
                   <div className="px-4 py-2 bg-[#f5f0e8] border-b border-[#e8ded0] flex items-center justify-between">
@@ -9575,7 +9682,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   </div>
                 </div>
               )}
-              <p className="text-[11px] text-[#9c8e85]">Tick every line the bank has also processed. What stays unticked is the explanation for the gap between the two balances. Clearing is remembered per account, so an item ticked in one period stays ticked in the next. This screen never posts to the GL.</p>
+              <p className="text-[11px] text-[#9c8e85]">Tick every line the bank has also processed. What stays unticked is the explanation for the gap between the two balances. Clearing is remembered per account, so an item ticked in one period stays ticked in the next. The totals above cover the whole account whether or not a line is on this page. Save before changing page, searching or filtering — each reloads the list. This screen never posts to the GL.</p>
             </>
           ) : !loading && <p className="text-sm text-[#6b5d52] italic">Choose an account and load.</p>}
         </div>
