@@ -54902,8 +54902,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage4-edges',
+    commit_marker: 'bankrec-stage4b-revert-write-gate',
     code_features: [
+      'bankrec-stage4b-revert-write-gate',       //REVERT of my own stage-4 F-8 change, within the hour, before anyone used it. I swapped the bank-reconciliation WRITE routes onto `_acctOwnerOnly` to 'align' them with the read. That was wrong and RE-OPENED A KNOWN HOLE: the codebase documents, directly under the helper, that `_acctOwnerOnly` is a READ gate admitting >= View on ANY finance tab and 'must NOT guard writes — it let a role with Ledger & Books = View(1) post journals / record expenses / add loans'. `_acctCanWrite` requires ACCOUNTING >= Edit(2). They are a deliberate read/write split, not a loose and a tight version of one gate. The live TC-ACC-BANKREC-GATES run showed the effect: a MANAGER holding EXPENSE_JOURNAL and PROCUREMENT but NOT Accounting was allowed to WRITE. Writes are back on `_acctCanWrite`. F-8 in the review was a mischaracterisation — `_acctCanWrite` is STRICTER on permissions and broader only in admitting the built-in MANAGER role by name, which is a product-wide convention and not this route's to change unilaterally. F-4 (opening balance) and F-9 (account picker from `bank_accounts`) from stage 4 stand and are unaffected. tsc clean.',
       'bankrec-stage4-edges',                   //FIX (bank reconciliation remediation, stage 4 of 6, 11 Sep 2026). Three independent edges. **F-4:** the cumulative book balance sat above a WINDOWED list that could never add up to it, with nothing to bridge them — now returns `opening_balance` and `window_movement{debits,credits,net}`, and the invariant opening + net = book_balance is asserted by TC-ACC-BANKREC-OPENING; the UI spells out opening + received − paid = closing. **F-8:** the read was gated MORE TIGHTLY than the write (GET `_acctOwnerOnly`, POST `_acctCanWrite`, which admits MANAGER by role), so a manager was refused the screen but accepted on the save. Fixed AT THE CALL SITES — the shared helpers serve 26 and 17 other routes and were NOT touched. Direction: the WRITE was tightened to match the read, not the read loosened, because a reconciliation signs off the books and blanket role-based access is too loose; access stays grantable per role through Staff Access, which `_acctOwnerOnly` honours, and nobody loses a working workflow since a manager could not open the screen anyway. One line to reverse if managers should reconcile. The stage-3 status route was aligned the same way. **F-9:** the account picker offered two HARDCODED codes, and the second (`1020 Bank — OTA Receivable`) is seeded but never posted to by anything in the product, so choosing it always returned an empty screen — it is now driven from the `bank_accounts` table, deduped, with a fallback to 1010 so it can never render empty. New TC-ACC-BANKREC-GATES creates a throwaway MANAGER, logs in as them and asserts the read and write give that manager the SAME answer — a check an owner-only test could never have made — then deletes the account. tsc + vite build clean.',
       'bankrec-stage3c-coherent-ticks',          //BUGFIX of my own stage-1 change, caught by the stage-2 test on live. The tick DISPLAY unioned `bank_cleared` with the legacy `bank_rec_cleared` rows, while the ARITHMETIC read `bank_cleared` alone — and unticking deleted from the durable table only, leaving the legacy row behind to RESURRECT a tick the user had explicitly removed. Net effect: a line could render as cleared while still being counted as outstanding. Measured on the live tenant: 6 lines shown ticked, 333.00 Dr / 333.00 Cr of them still counted as uncleared, which is what made TC-ACC-BANKREC-TICK-MOVES report a 222 movement for a 111 line. THE INVARIANT THAT SHOULD HAVE EXISTED FROM THE START: the display and the arithmetic must use the SAME SET. `bank_cleared` is now the single source for both — the tenant migration already backfills every legacy row into it at boot, so the union added nothing but contradictions — and unticking now removes the legacy row too, so that table cannot hold a contradiction while it still exists. New TC-ACC-BANKREC-COHERENT reconstructs the uncleared totals from the rendered flags and requires them to equal the server's, which is the assertion that would have caught this immediately. tsc clean.',
       'bankrec-stage3b-history-distinct',        //FOLLOW-UP to stage 3, same day. The history list showed every historical row, and this tenant carries NINE for one statement date — left behind by the old always-insert behaviour and all stamped with the same date by the stage-3 backfill. The plan deliberately does NOT delete rows on a live tenant, so the LIST now returns DISTINCT ON (statement date), newest first; the older rows stay in the table and simply are not the ones shown. Also corrected MY OWN TEST: TC-ACC-BANKREC-UPSERT asserted exactly one row per statement date, which contradicts that very decision, and it failed on live for the right reason. It now saves a THIRD time and asserts the row count does NOT GROW and that all three saves return the same id — which is the actual guarantee the upsert makes. tsc clean.',
@@ -57260,8 +57261,9 @@ ${data.tenant.name}`;
   // Sign one off, or reopen it. A FINAL reconciliation refuses further saves,
   // and reopening is recorded rather than silent.
   app.post("/api/restaurant/:id/accounting/bank-reconciliation/:recId/status", authenticate, async (req: AuthRequest, res: Response) => {
-    // Signing off the books is at least as sensitive as saving; same gate.
-    if (!(await _acctOwnerOnly(req, res))) return;
+    // Signing off the books is at least as sensitive as saving — same WRITE
+    // gate, for the same reason as above.
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const want = String(req.body?.status || '').toUpperCase();
@@ -57280,12 +57282,12 @@ ${data.tenant.name}`;
   });
 
   app.post("/api/restaurant/:id/accounting/bank-reconciliation", authenticate, async (req: AuthRequest, res: Response) => {
-    // F-8: the same gate as the GET. This route used _acctCanWrite, which
-    // admits MANAGER by role, while the read used _acctOwnerOnly — so a manager
-    // was refused the screen but accepted on the save. Aligned here at the call
-    // site; the shared helpers serve 26 and 17 other routes and are untouched.
-    // Access remains grantable per role through Staff Access.
-    if (!(await _acctOwnerOnly(req, res))) return;
+    // Writes use _acctCanWrite, which requires ACCOUNTING at >= Edit. Do NOT
+    // swap this for _acctOwnerOnly: that is the READ gate and admits >= View on
+    // ANY finance tab, which would let a view-only role save and sign off a
+    // reconciliation. (Tried in stage 4 and reverted — see the note under
+    // _acctOwnerOnly's definition.)
+    if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
