@@ -4911,7 +4911,7 @@ async function settleFolioForBooking(
           glLines.push(..._tenderGlLines(mdrFolio, p.payment_method, amt, `${p.payment_method} ${folio.id}`));
           glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
         }
-        await _postGlEntries(tenantDb, restaurantId, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null);
+        await _postGlEntries(tenantDb, restaurantId, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null, _folioCostModule(folio));
       }
     } catch (glErr) {
       console.error('[GL] folio settlement error:', glErr);
@@ -4946,6 +4946,46 @@ const COST_MODULES = ['RESTAURANT', 'HOTEL', 'EVENTS', 'SPA', 'SHARED'] as const
 const _normaliseCostModule = (v: any, fallback = 'RESTAURANT'): string => {
   const up = String(v || '').toUpperCase();
   return (COST_MODULES as readonly string[]).includes(up) ? up : fallback;
+};
+
+// Which business module a journal belongs to, by the kind of event that raised
+// it. Most source types answer this on their own, which is what keeps tagging
+// the ledger from becoming an edit to all 31 posting sites.
+//
+// Deliberately ABSENT: FOLIO_SETTLEMENT / FOLIO_ADVANCE / FOLIO_PAYMENT (a
+// folio is hotel, event or spa — only `folio_kind` knows) and PETTY_CASH /
+// SUPPLIER_* (whose own row carries a module the user chose). Those sites pass
+// theirs explicitly. A source type in neither place stays NULL rather than
+// guessing: an untagged entry is honest, a wrongly tagged one is a wrong number
+// in someone's management accounts.
+const GL_SOURCE_MODULE: Record<string, string> = {
+  FNB_ORDER: 'RESTAURANT',
+  FNB_ORDER_CANCELLED: 'RESTAURANT',
+  EVENT_ADVANCE: 'EVENTS',
+  EVENT_ADVANCE_REVERSAL: 'EVENTS',
+  SPA_INTERIM: 'SPA',
+  BOOKING_CANCEL: 'HOTEL',
+  // Property-wide by nature: they fund or measure the whole business, and
+  // splitting them would be an allocation decision nobody asked this code to
+  // make.
+  PAYROLL_RUN: 'SHARED',
+  STAFF_PAYROLL: 'SHARED',
+  STAFF_PAYROLL_PAID: 'SHARED',
+  STAFF_ADVANCE: 'SHARED',
+  STAFF_ADVANCE_REVERSAL: 'SHARED',
+  EXPENSE_CLAIM: 'SHARED',
+  CASH_COUNT: 'SHARED',
+  CASH_DRAWER_DEPOSIT: 'SHARED',
+  CASH_DRAWER_VARIANCE: 'SHARED',
+  BANK_OPENING: 'SHARED',
+  INVEST: 'SHARED',
+  LOAN: 'SHARED',
+};
+
+// A folio is the one document that can belong to any of three modules.
+const _folioCostModule = (folio: any): string => {
+  const kind = String(folio?.folio_kind || 'HOTEL').toUpperCase();
+  return kind === 'EVENT' ? 'EVENTS' : kind === 'SPA' ? 'SPA' : 'HOTEL';
 };
 
 function _glAccountForPaymentMethod(method: string): { code: string; name: string } {
@@ -5155,6 +5195,9 @@ async function _postGlEntries(
   sourceId: string | null,
   lines: GlLine[],
   postedBy: string | null,
+  // Which module this journal belongs to. A line may still override it; absent
+  // both, it is derived from the source type, and absent that it stays NULL.
+  costCentre?: string | null,
 ): Promise<GlPostResult> {
   const meaningful = (lines || []).filter(l => (l.dr_amount || 0) !== 0 || (l.cr_amount || 0) !== 0);
   if (meaningful.length === 0) return { ok: true, posted: 0, dropped: false };
@@ -5178,7 +5221,7 @@ async function _postGlEntries(
        line.account_code, line.account_name,
        +(line.dr_amount || 0).toFixed(2), +(line.cr_amount || 0).toFixed(2),
        line.narration || null, sourceType, sourceId || null,
-       line.cost_centre || null, postedBy || null]
+       line.cost_centre || costCentre || GL_SOURCE_MODULE[sourceType] || null, postedBy || null]
     );
     posted++;
   }
@@ -23246,7 +23289,7 @@ ${data.tenant.name}`;
           if (sgst > 0) glLines.push({ account_code: '1310', account_name: 'ITC Receivable — SGST', dr_amount: sgst, cr_amount: 0, narration: `ITC SGST ${id}` });
         }
         glLines.push({ account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: 0, cr_amount: Number(total), narration: `AP invoice ${id}` });
-        await _postGlEntries(db, req.params.id, `SI-${id}`, invDate as string, 'SUPPLIER_INVOICE', id, glLines, (req as any).user?.email || (req as any).user?.id);
+        await _postGlEntries(db, req.params.id, `SI-${id}`, invDate as string, 'SUPPLIER_INVOICE', id, glLines, (req as any).user?.email || (req as any).user?.id, _normaliseCostModule(module));
       } catch (glErr) { console.error('[GL] supplier invoice error:', glErr); }
       const created: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [id]);
       res.status(201).json(created);
@@ -23381,7 +23424,7 @@ ${data.tenant.name}`;
         if (tds && tdsAmt > 0) {
           glLines.push({ account_code: tds.accountCode || '2300', account_name: tds.accountName || 'TDS Payable', dr_amount: 0, cr_amount: tdsAmt, narration: `TDS ${tds.section} withheld — supplier ${inv.supplier_id}` });
         }
-        await _postGlEntries(db, req.params.id, `SP-${pid}`, payDate, 'SUPPLIER_PAYMENT', pid, glLines, (req as any).user?.email || (req as any).user?.id);
+        await _postGlEntries(db, req.params.id, `SP-${pid}`, payDate, 'SUPPLIER_PAYMENT', pid, glLines, (req as any).user?.email || (req as any).user?.id, _normaliseCostModule(inv?.module));
         // Section-wise TDS detail (reconciles to the 2300 GL balance; feeds 26Q).
         if (tds && tdsAmt > 0) {
           const tdsId = `TDS-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -30349,7 +30392,7 @@ ${data.tenant.name}`;
             'SPA_INTERIM', (payment as any).id, [
               { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Spa interim: folio ${req.params.fid}` },
               { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Spa interim: folio ${req.params.fid}` },
-            ], req.user?.email || req.user?.id || null);
+            ], req.user?.email || req.user?.id || null, 'SPA');
         } catch (glErr) { console.error('[GL] spa interim payment error:', glErr); }
       }
       const out = await getFolioOutstanding(db, req.params.fid);
@@ -34073,7 +34116,7 @@ ${data.tenant.name}`;
       // GL: OUT → Dr Expense / Cr Cash;  IN → Dr Cash / Cr Bank (till top-up).
       try {
         const lines = _pettyCashGlLines(direction, amount, req.body?.category || null, req.body?.notes || null);
-        await _postGlEntries(tenantDb, req.params.id, `PC-${id}`, entry_date, 'PETTY_CASH', id, lines, req.user?.id || req.user?.email || null);
+        await _postGlEntries(tenantDb, req.params.id, `PC-${id}`, entry_date, 'PETTY_CASH', id, lines, req.user?.id || req.user?.email || null, module);
       } catch (glErr) { console.error('[GL] petty cash error:', glErr); }
       res.json({ success: true, id });
     } catch (err: any) {
@@ -34113,12 +34156,12 @@ ${data.tenant.name}`;
         try {
           // TO_CHAR: read the date back as a clean YYYY-MM-DD string (a raw DATE comes
           // back as a JS Date, which stringifies to a locale form the GL INSERT rejects).
-          const row: any = await tenantDb.get("SELECT direction, amount, category, notes, TO_CHAR(entry_date,'YYYY-MM-DD') AS entry_date FROM petty_cash WHERE id = ?", [req.params.entryId]);
+          const row: any = await tenantDb.get("SELECT direction, amount, category, notes, module, TO_CHAR(entry_date,'YYYY-MM-DD') AS entry_date FROM petty_cash WHERE id = ?", [req.params.entryId]);
           const lines = _pettyCashGlLines(String(row.direction), Math.abs(Number(row.amount || 0)), row.category, row.notes);
           const ref = `PC-${req.params.entryId}#${Date.now()}`;
           // Post the new journal FIRST; only retire the old one(s) once it lands, so a
           // failed re-post never leaves the entry with no live journal.
-          const posted = await _postGlEntries(tenantDb, req.params.id, ref, String(row.entry_date).slice(0, 10), 'PETTY_CASH', req.params.entryId, lines, req.user?.id || req.user?.email || null);
+          const posted = await _postGlEntries(tenantDb, req.params.id, ref, String(row.entry_date).slice(0, 10), 'PETTY_CASH', req.params.entryId, lines, req.user?.id || req.user?.email || null, _normaliseCostModule(row.module));
           if (posted?.ok) await _hidePettyCashGl(tenantDb, req.params.id, req.params.entryId, ref);
         } catch (glErr) { console.error('[GL] petty cash edit re-post error:', glErr); }
       }
@@ -45207,7 +45250,9 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const folio: any = await tenantDb.get("SELECT id, status FROM folios WHERE id = ?", [req.params.folioId]);
+      // folio_kind selected too: it is what decides whether this receipt is
+      // hotel, event or spa money in the ledger.
+      const folio: any = await tenantDb.get("SELECT id, status, folio_kind FROM folios WHERE id = ?", [req.params.folioId]);
       if (!folio) return res.status(404).json({ error: 'Folio not found' });
       if (folio.status === 'settled' || folio.status === 'voided') {
         return res.status(409).json({ error: `Folio is ${folio.status}; payments cannot be added.` });
@@ -45244,7 +45289,7 @@ ${data.tenant.name}`;
             'FOLIO_ADVANCE', (payment as any).id, [
               { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Advance: folio ${req.params.folioId}` },
               { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Advance: folio ${req.params.folioId}` },
-            ], req.user?.id || req.user?.email || null);
+            ], req.user?.id || req.user?.email || null, _folioCostModule(folio));
         } catch (glErr) { console.error('[GL] advance payment error:', glErr); }
       }
       // GL timing fix: an INTERIM (mid-stay) receipt is cash in the drawer NOW,
@@ -45261,7 +45306,7 @@ ${data.tenant.name}`;
             'FOLIO_PAYMENT', (payment as any).id, [
               { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Interim payment: folio ${req.params.folioId}` },
               { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Interim payment: folio ${req.params.folioId}` },
-            ], req.user?.id || req.user?.email || null);
+            ], req.user?.id || req.user?.email || null, _folioCostModule(folio));
         } catch (glErr) { console.error('[GL] interim payment error:', glErr); }
       }
       // Return the updated outstanding so the UI can update without
@@ -46500,7 +46545,7 @@ ${data.tenant.name}`;
             glLines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method} ${folio.id}` });
             glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
           }
-          await _postGlEntries(tenantDb, req.params.id, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null);
+          await _postGlEntries(tenantDb, req.params.id, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null, _folioCostModule(folio));
         }
       } catch (glErr) {
         console.error('[GL] standalone settle error:', glErr);
@@ -54926,8 +54971,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'cost-modules-events-spa',
+    commit_marker: 'gl-cost-centre-tagging',
     code_features: [
+      'gl-cost-centre-tagging',            //FEATURE (option B, part 1 of 2 — 11 Sep 2026). **The ledger now records which module a journal belongs to.** `gl_entries.cost_centre` has existed since the table was created — the column is there, `GlLine` declares it, `_postGlEntries` writes it — but NONE of the 31 posting call sites ever passed it, so it was NULL on 100% of rows and no GL-derived report could be split by module for ANY module, Restaurant and Hotel included. **Shape: NOT 31 edits.** `cost_centre` is a per-LINE field, so tagging line by line would mean touching every line literal in the file. Instead `_postGlEntries` gained an optional JOURNAL-level cost centre applied to any line without its own, and failing that derives one from the SOURCE TYPE via `GL_SOURCE_MODULE` — most types answer this themselves (an FNB_ORDER is always the restaurant; payroll, cash counts, drawers, loans and capital are SHARED by nature, because splitting them would be an allocation decision nobody asked this code to make). Only genuinely ambiguous sites pass a value: the FOLIO family (a folio is hotel, event OR spa — `_folioCostModule` reads `folio_kind`; the payments route now selects that column, which it did not before) and PETTY_CASH / SUPPLIER_INVOICE / SUPPLIER_PAYMENT / EXPENSE_PAYMENT, whose own row carries a module the user chose. **A source type in neither place stays NULL rather than guessing** — an untagged entry is honest, a wrongly tagged one is a wrong number in someone's management accounts. Reversals needed nothing: `_reverseJournal` already copies `cost_centre` from the original lines, so a reversal lands in the same bucket as what it undoes. **Nothing reads the column yet** — the report filters are part 2, deliberately separate so this is revertible on its own, and historical rows stay NULL until a marker-guarded backfill is decided on. TC-GL-COSTCENTRE asserts both halves: an explicitly chosen module reaches the journal, and a source type that implies its module is tagged with no caller help. tsc + vite build clean.',
       'cost-modules-events-spa',           //FIX (11 Sep 2026, from the owner's manual testing: 'accounting is not fully supported for Event & Convention and Wellness Spa' — confirmed, and it was worse than a missing dropdown entry). The accounting module recognised **three** cost buckets — RESTAURANT | HOTEL | SHARED — stated outright in the code: 'PETTY CASH / EXPENSE JOURNAL — per-module (RESTAURANT|HOTEL|SHARED) ledger'. **THE TRAP:** both petty-cash routes did not merely default an unknown module, they SILENTLY COERCED it (`includes(raw) ? raw : 'RESTAURANT'`), so adding EVENTS and SPA to the dropdowns alone would have filed every Events expense under Restaurant with no error and no trace — a wrong number in the books rather than a visibly missing option. The server allowlist had to move FIRST. All four business modules are now filable, across BOTH the create and the edit paths, and junk is still coerced (TC-EXPENSE-MODULES asserts both halves, reading the STORED value back rather than trusting the create response). **Root-cause shape:** the module list was hand-written in 2 places in server.ts and **NINE** in App.tsx — three separate Expense Journal surfaces, the Reports petty-cash view, and the supplier-invoice create + filter — which is exactly how some got HOTEL first, others RESTAURANT first, and none got EVENTS or SPA. There were even THREE independent copies of the badge-colour map, one of them named `modColor` (singular) driving the supplier-invoice screens, which a grep for `modColors` misses — found by grepping for what was LEFT rather than assuming the edits were complete. All of them now read one `COST_MODULES` constant per file, so the next module added is offered everywhere at once. **Payables gained a module dimension it never had:** `/reports/vendor-aging` did not even SELECT `si.module`, so an owner could not ask what the banquet side owes; it now returns the module per invoice and accepts an optional `?module=` (absent, the report is property-wide exactly as before). TC-PAYABLES-MODULE asserts a filtered ageing can never exceed the unfiltered one. **NOT done here and reported separately:** `gl_entries.cost_centre` — the ledger's OWN module dimension — is NULL on 100% of rows (2,000/2,000 sampled); the column exists and `_postGlEntries` writes it, but none of the 31 posting call sites passes it. Until that is populated, P&L / Cash Flow / GST Ledger / Ledger & Books cannot be split by module for ANY module, Restaurant and Hotel included. Event and Spa money DOES reach those reports (4050 Banquet & Events, 4040 Spa Revenue via folio settlement) — it simply cannot be told apart. tsc + vite build clean.',
       'event-special-note-visible',        //FIX (11 Sep 2026, reported by the owner). The **Special note** captured on the event booking form disappeared the moment the booking was saved. **It was never a data loss — it is a RENDER GAP,** established end to end on the live tenant before anything was touched: the note is persisted, returned by BOTH `GET /events/bookings/:id` and the list, unchanged through confirm -> start -> complete, and it is even printed on the BEO / function sheet PDF. It was simply never rendered on the booking detail view — the create form writes `special_requests` and nothing in the UI ever read it back. The comment beside the input even claimed it was 'shown on its detail view'; the storing half was built and the showing half never was. Now rendered on the detail view: an inline textarea saving on blur through the SAME `commitContact` auto-save the phone/email fields use (`special_requests` was already on the PUT allowlist and the edit is audited, so NO server change was needed), and read-only once COMPLETED or CANCELLED — which is exactly the state it was reported in. The UI's `editable` flag already mirrors the server's 409 on those statuses, so the editable control can never be offered where the save would fail. Hidden entirely when the booking is locked AND the note is empty, so a finished booking does not grow an empty row. New TC-EVT-SPECIAL-NOTE pins the contract the render depends on — present on create, on the single read and on the list, editable through the ordinary PUT without disturbing the rest of the booking, and unchanged after complete. **The lesson: a field that is written, stored and even printed can still be invisible where people actually work — 'it saved fine' is not evidence anyone can see it.** tsc + vite build clean.',
       'acct-reports-one-row-per-account',  //FIX (11 Sep 2026) — the GROUP BY that stage 6c reported and deliberately did not touch. **Five GL-derived reports keyed their grouping on `gl_entries.account_name` as well as `account_code`** — and that column is free text written by whichever caller posted the journal, with nothing forcing it to match `chart_of_accounts`. So the moment two callers spelled one code differently, that account SPLIT INTO TWO ROWS. Live on RESTO-1003 this was not the single known case but **four**: 1010 as "Bank — Main Account" + "Bank", 1000 as "Cash in Hand" + "Bank", 4000 as "Room Revenue" + "Sales", 5000 as "Cost of F&B Consumed" + "Expense". A trial balance listing an account twice is wrong on its face, and worse, every consumer doing `.find(r => r.account_code === X)` silently reads ONE of the two lines — which is exactly how TC-ACC-BANKREC came to report a false mismatch. All five now group on the code alone and take the display label from the chart of accounts (`COALESCE(c.name, MIN(g.account_name))`): trial balance, gst-outstanding, cash-book expenses, profit-loss, balance-sheet. c.name/c.type/c.display_order are functionally dependent on the code — `chart_of_accounts.code` is the PRIMARY KEY, so the join cannot fan out and grouping by them adds no rows — and a code the chart does not know keeps a GL-supplied name and still yields exactly one row. gst-outstanding gained the chart join it never had (its date predicates re-aliased to `g.` with it). **The P&L hid its own split**: the second 4000/5000 rows netted to zero and were filtered by the `|amt| >= 0.005` cut, so the report looked clean while the grouping was wrong — a reminder that "no visible duplicate" is not evidence of correct grouping. **Deliberately NOT done: normalising historical `gl_entries.account_name` to the chart name.** No report reads that column for display any more, so a backfill fixes nothing that is still broken; the stored label is the audit record of what the poster asserted at posting time and a financial ledger should not have its history rewritten; and a blanket UPDATE over the largest table, running in the tenant migration path on every boot with no user in the loop, is the exact shape of change that has bitten this codebase before. The as-posted label still shows in the GL ledger drill-down and journal exports, which is correct — if that ever reads as confusing, the fix is to display the chart name at render time, not to overwrite rows. Tests (these reports had NONE, which is why the split survived): TC-ACC-TB-UNIQ, TC-ACC-TB-NAME, TC-ACC-TB-BALANCED-UNIQ, TC-ACC-PNL-UNIQ, TC-ACC-BS-UNIQ, TC-ACC-GST-UNIQ, TC-ACC-CASHBOOK-UNIQ — asserted RED before the fix (TB-UNIQ 4 splits, TB-NAME 4 mislabels, BS-UNIQ 1 split) and green after, with the trial balance balancing either way. tsc + vite build clean.',
@@ -56022,7 +56068,9 @@ ${data.tenant.name}`;
 
       const ref = `PAY-${id}`;
       const lines: GlLine[] = [...debitLines, { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: amount, narration: `${category} paid via ${method}` }];
-      const posted = await _postGlEntries(db, req.params.id, ref, date, 'EXPENSE_PAYMENT', id, lines, by);
+      // SHARED unless the caller names a module — an expense paid from the
+      // office is property-wide until someone says otherwise.
+      const posted = await _postGlEntries(db, req.params.id, ref, date, 'EXPENSE_PAYMENT', id, lines, by, _normaliseCostModule(b.module, 'SHARED'));
       if (!posted?.ok) return res.status(422).json({ error: 'Could not post the journal (amounts do not balance).' });
 
       if ((category === 'EMI' || category === 'LOAN') && loanId && (principalAmt || 0) > 0) {
