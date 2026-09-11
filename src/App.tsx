@@ -9372,18 +9372,69 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
           </div>
           {bankRec ? (
             <>
-              <div className="grid sm:grid-cols-3 gap-3 items-end">
-                <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Book Balance (GL)</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(bankRec.book_balance)}</p></div>
-                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
-                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Statement Closing Balance</p>
-                  <input type="number" value={bankRecStmtBal} onChange={e => setBankRecStmtBal(e.target.value)} placeholder="0.00" className="mt-1 w-full text-lg font-bold border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums" />
-                </div>
-                <div className={`rounded-lg border-2 p-4 ${bankRecStmtBal !== '' && Math.abs(bankRec.book_balance - (parseFloat(bankRecStmtBal) || 0)) < 0.02 ? 'border-emerald-600 bg-emerald-50' : 'border-[#a0522d] bg-[#fdf6ef]'}`}>
-                  <p className="text-xs uppercase tracking-wide font-semibold text-[#6b5d52]">Difference</p>
-                  <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(bankRec.book_balance - (parseFloat(bankRecStmtBal) || 0))}</p>
-                </div>
-              </div>
-              <div className="flex justify-end"><button onClick={saveBankRec} className={AC_BTN}>Save reconciliation</button></div>
+              {(() => {
+                // Uncleared items inside the window come from the live tick
+                // state so the figures respond as boxes are ticked; the ones
+                // outside it come from the server, because they are not on
+                // screen to be counted.
+                const open = (bankRec.lines || []).filter((l: any) => !bankRecCleared[l.id]);
+                const outside = bankRec.uncleared_outside_window || { deposits: 0, withdrawals: 0 };
+                const depositsInTransit = open.reduce((a: number, l: any) => a + Number(l.dr_amount || 0), 0) + Number(outside.deposits || 0);
+                const outstandingCheques = open.reduce((a: number, l: any) => a + Number(l.cr_amount || 0), 0) + Number(outside.withdrawals || 0);
+                // statement + deposits in transit − outstanding cheques = book
+                const adjusted = Number(bankRec.book_balance || 0) - depositsInTransit + outstandingCheques;
+                const entered = bankRecStmtBal !== '';
+                const stmt = parseFloat(bankRecStmtBal) || 0;
+                const diff = entered ? adjusted - stmt : null;
+                const agreed = diff != null && Math.abs(diff) < 0.02;
+                return (
+                  <>
+                    <div className="grid sm:grid-cols-3 gap-3 items-end">
+                      <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                        <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Book Balance (GL)</p>
+                        <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(bankRec.book_balance)}</p>
+                        <p className="text-[10px] text-[#9c8e85] mt-1">All movements to {tbTo}, not just those listed below</p>
+                      </div>
+                      <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                        <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Statement Closing Balance</p>
+                        <input type="number" value={bankRecStmtBal} onChange={e => setBankRecStmtBal(e.target.value)} placeholder="Enter from your statement" className="mt-1 w-full text-lg font-bold border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums" />
+                      </div>
+                      <div className={`rounded-lg border-2 p-4 ${!entered ? 'border-[#e8ded0] bg-white' : agreed ? 'border-emerald-600 bg-emerald-50' : 'border-[#a0522d] bg-[#fdf6ef]'}`}>
+                        <p className="text-xs uppercase tracking-wide font-semibold text-[#6b5d52]">Unexplained Difference</p>
+                        {!entered
+                          ? <p className="text-sm text-[#9c8e85] mt-2 italic">Enter the statement balance</p>
+                          : <>
+                              <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(diff)}</p>
+                              <p className={`text-[11px] mt-1 font-semibold ${agreed ? 'text-emerald-700' : 'text-[#a0522d]'}`}>
+                                {agreed ? 'Reconciled — the gap is fully explained' : 'Not yet explained'}
+                              </p>
+                            </>}
+                      </div>
+                    </div>
+
+                    {/* The reconciliation statement itself. */}
+                    <div className="rounded-lg border border-[#e8ded0] bg-white overflow-hidden">
+                      <div className="px-4 py-2 bg-[#f5f0e8] border-b border-[#e8ded0]">
+                        <p className="text-xs font-semibold text-[#1a1208] uppercase tracking-wide">Reconciliation</p>
+                      </div>
+                      <div className="divide-y divide-[#f0e8d8] text-sm">
+                        <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Balance per bank statement</span><span className="tabular-nums">{entered ? fmtAmt(stmt) : '—'}</span></div>
+                        <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Add: deposits in transit <span className="text-[10px] text-[#9c8e85]">(banked, not yet credited)</span></span><span className="tabular-nums text-emerald-700">+ {fmtAmt(depositsInTransit)}</span></div>
+                        <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Less: outstanding cheques <span className="text-[10px] text-[#9c8e85]">(issued, not yet presented)</span></span><span className="tabular-nums text-[#a0522d]">− {fmtAmt(outstandingCheques)}</span></div>
+                        <div className="flex justify-between px-4 py-2 bg-[#fdfaf5] font-semibold"><span>Should equal the book balance</span><span className="tabular-nums">{entered ? fmtAmt(stmt + depositsInTransit - outstandingCheques) : '—'}</span></div>
+                        <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Book balance (GL)</span><span className="tabular-nums">{fmtAmt(bankRec.book_balance)}</span></div>
+                      </div>
+                    </div>
+
+                    {bankRec.truncated && (
+                      <div className="rounded-lg border border-[#a0522d] bg-[#fdf6ef] px-4 py-2 text-xs text-[#1a1208]">
+                        Showing the first 1,000 movements only. Narrow the date range — the book balance above covers everything, but this list does not.
+                      </div>
+                    )}
+                    <div className="flex justify-end"><button onClick={saveBankRec} className={AC_BTN}>Save reconciliation</button></div>
+                  </>
+                );
+              })()}
               <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
                 <table className="w-full text-sm border-collapse">
                   <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Cleared</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Date</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Journal</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Narration</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr</th></tr></thead>
@@ -9399,7 +9450,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   )) : (<tr><td colSpan={6} className="px-3 py-3 text-center text-[#9c8e85] italic">No bank movements in this window</td></tr>)}</tbody>
                 </table>
               </div>
-              <p className="text-[11px] text-[#9c8e85]">Manual reconciliation — tick cleared lines and save the statement balance. This marks lines cleared only; it never posts to the GL.</p>
+              <p className="text-[11px] text-[#9c8e85]">Tick every line the bank has also processed. What stays unticked is the explanation for the gap between the two balances. Clearing is remembered per account, so an item ticked in one period stays ticked in the next. This screen never posts to the GL.</p>
             </>
           ) : !loading && <p className="text-sm text-[#6b5d52] italic">Choose an account and load.</p>}
         </div>

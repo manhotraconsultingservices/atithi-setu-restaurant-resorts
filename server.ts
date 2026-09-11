@@ -54902,8 +54902,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage1-durable-clearing',
+    commit_marker: 'bankrec-stage2-real-arithmetic',
     code_features: [
+      'bankrec-stage2-real-arithmetic',           //FIX (bank reconciliation remediation, stage 2 of 6, 11 Sep 2026). **THE SCREEN NOW PERFORMS A RECONCILIATION INSTEAD OF A SUBTRACTION.** Findings F-1, F-2 and F-5. The cleared ticks were stored, read back, rendered — and excluded from every calculation: `difference` was just `book_balance - statement_closing_balance`, so ticking every line or none produced an identical answer, and `reconciled` meant book == statement, which at a real month end is almost never true (unpresented cheques and deposits in transit make a gap NORMAL). Now computed: an unclear DEBIT is a deposit in transit (our balance has it, the bank's does not), an uncleared CREDIT is an unpresented cheque, so **adjusted_book_balance = book - uncleared_deposits + uncleared_withdrawals**, which is what the statement must agree with. Summed over EVERY entry up to the statement date rather than only the displayed window — an item raised in August and still outstanding in September has to count and is not in September's list, which is exactly what stage 1's durable `bank_cleared` made possible. NOTHING EXISTING CHANGED MEANING: `difference` and `reconciled` keep their old definitions for one release so any consumer is unaffected, and the new figures (`uncleared_deposits`, `uncleared_withdrawals`, `adjusted_book_balance`, `adjusted_difference`, `reconciled_adjusted`) arrive alongside them. Also ships `truncated` (F-11) so a window over the 1,000-line cap says so instead of showing a complete balance beside an incomplete list. UI: the three cards become a reconciliation statement (balance per bank + deposits in transit - outstanding cheques = book balance), the difference stays BLANK until a statement balance is typed instead of rendering the entire book balance in an alarm colour (F-5), and the sums recompute in the browser from the live tick state - `uncleared_outside_window` supplies the part not on screen. New tests TC-ACC-BANKREC-ADJUSTED (the identity) and TC-ACC-BANKREC-TICK-MOVES (clearing one line moves the uncleared totals by exactly that line, which could not pass before this stage). tsc + vite build clean.',
       'bankrec-stage1-durable-clearing',          //REFACTOR (bank reconciliation remediation, stage 1 of 6, 11 Sep 2026). Groundwork only — no user-visible change. A cleared tick was stored as `bank_rec_cleared(rec_id, gl_entry_id)`, which ties it to the period it was made in. That is wrong for a reconciliation: a cheque issued on 28 Aug and cleared on 3 Sep is absent from September's window entirely, so nothing records that it has since cleared, and ANY adjusted-balance calculation built on a single window would treat it as cleared and get the answer wrong. Clearing is a durable property of a TRANSACTION, so it moves to `bank_cleared(account_code, gl_entry_id, cleared_on, cleared_by)` — a tick now means "this has cleared the bank", once, regardless of which window it was ticked in. Created in the TENANT MIGRATION PATH (never in a handler) with an idempotent INSERT..SELECT backfill of every existing tick. The GET reads the new table and folds in the old per-reconciliation rows so nothing saved before this release is lost; the POST writes BOTH for one release so a revert keeps working. Unticking is honoured too, but ONLY for entries inside the saved window — otherwise saving September would wipe every tick made in August. Blast radius checked before writing: these two tables are referenced in exactly 4 places in server.ts and defined once in db.ts, read by nothing else; `gl_entries.id` is a TEXT PRIMARY KEY and entries are reversed rather than deleted, so the references cannot orphan. Stage 0 (safety net) added TC-ACC-BANKREC-SAVE, TC-ACC-BANKREC-ISOLATION and TC-ACC-BANKREC-RBAC, and widened TC-ACC-BANKREC from a shape check into a cross-check of the book balance against the trial balance. tsc clean.',
       'wa-message-log-and-inbox',                    //FEATURE (10 Sep 2026), closing the gap against a dedicated BSP console. THREE THINGS THE LOG COULD NOT SHOW, because it never stored them: which approved TEMPLATE carried a message, WHO the contact is, and anything INBOUND at all — the webhook only stamped the 24-hour window and handled STOP, so replies vanished and there was no RECEIVED count or conversation to read. `notification_deliveries` now carries `template_name`, `contact_name` and `direction`; `logAndSend` fills the first two (the name via a new module-level `_logAndSendName`, set from `_resolveGuestContact` in the dispatcher's guest branch, so none of the 60 call sites changed); and an inbound WhatsApp message is filed as a `direction='IN'` row with status RECEIVED. Routing it needed a tenant, which a reply does not carry because the sender is shared — so `wa_message_index`, a table ensureWaTables has created since stage D but which was NEVER WRITTEN OR READ (routing actually went through messaging_usage), is now populated on every WhatsApp send and answers exactly that question. `/api/owner/messaging/summary` reports the six counters a console is read through — today, sent, delivered, read, failed, received — plus people and per-template totals; `/api/owner/notification-deliveries` gains `direction`, `template` and free-text `q` filters. NEW `/api/owner/messaging/threads` (every WhatsApp contact, last line, and whether the 24-hour window is open — resolved in ONE central query rather than one per row) and `/api/owner/messaging/thread?contact=` (one conversation, oldest first). UI: the console is now Compose / Message log / Inbox. The log gained the six counters, status chips including Received, a template filter, and rows showing the contact's name, a template chip and the direction. The Inbox reads the same rows as conversations with a window badge per contact and, when it has closed, the plain statement that WhatsApp blocks free-form replies and only an approved template will reach them. Compose gained a template-registry line (total vs approved). New tests TC-MSG-INBOX and TC-MSG-LOG-COUNTERS. STILL OPEN vs the reference console: audience segments for bulk sends and a grouped broadcast history. tsc + vite build clean.',
       'wa-approved-templates-only',                   //CHANGE (owner decision, 10 Sep 2026). **NO COMPOSE BOX FOR WHATSAPP — every WhatsApp message the property starts uses wording Meta has approved.** The messaging console shipped earlier the same day allowed free-form text when the guest had written first, which Meta does permit inside the 24-hour service window. Removed deliberately: whether that window happens to be open is invisible to the person composing, so one button would sometimes send their own words and sometimes an approved template, and only the delivery log would say which. Now `POST /api/owner/messaging/send` REQUIRES `template_name` for WhatsApp (400 otherwise), always sends `type: 'template'`, and always bills at the template's category — the free-form branch and its SKIPPED outside-the-window path are both gone. The compose textarea is hidden for WhatsApp in the UI and replaced by a mandatory approved-template picker, its variable inputs, and a live preview of exactly what the guest will receive (with the property name already filling {{1}}); the Send button stays disabled until a template is chosen, and an empty template list says so plainly. Email and SMS are untouched — neither is Meta and neither has a template regime. Automatic notifications still use the tenant's own wording inside the window; that surface was not part of this decision. New test TC-MSG-WA-TEMPLATE-ONLY. tsc + vite build clean.',
@@ -57146,8 +57147,58 @@ ${data.tenant.name}`;
       }
       const withFlags = lines.map((l: any) => ({ ...l, cleared: clearedSet.has(String(l.id)) }));
       const statement_closing_balance = rec ? round(rec.statement_closing_balance) : null;
+
+      // ── The reconciliation proper ──────────────────────────────────────
+      // statement + deposits in transit − outstanding cheques = book balance.
+      // A banked receipt the bank has not credited is an uncleared DEBIT (our
+      // balance has it, theirs does not); an unpresented cheque is an uncleared
+      // CREDIT (ours has already lost it, theirs has not). Rearranged:
+      //   adjusted book balance = book − uncleared debits + uncleared credits.
+      //
+      // Summed over EVERY entry up to the statement date, not just the window —
+      // an item raised in August and still outstanding in September has to
+      // count, and it is not in September's list. That is what the durable
+      // bank_cleared table (stage 1) exists to make possible.
+      const unc: any = await db.get(
+        `SELECT COALESCE(SUM(e.dr_amount),0) AS dr, COALESCE(SUM(e.cr_amount),0) AS cr
+           FROM gl_entries e
+          WHERE e.restaurant_id=? AND e.is_reversed=0 AND e.account_code=? AND e.entry_date <= ?
+            AND NOT EXISTS (SELECT 1 FROM bank_cleared c WHERE c.account_code=e.account_code AND c.gl_entry_id=e.id)`,
+        [req.params.id, account, to]).catch(() => ({ dr: 0, cr: 0 }));
+      const uncleared_deposits = round(unc?.dr || 0);
+      const uncleared_withdrawals = round(unc?.cr || 0);
+      const adjusted_book_balance = round(book_balance - uncleared_deposits + uncleared_withdrawals);
+      const adjusted_difference = statement_closing_balance != null
+        ? round(adjusted_book_balance - statement_closing_balance) : null;
+
+      // The browser recomputes this live as boxes are ticked, so it needs the
+      // part it cannot see: uncleared items OUTSIDE the displayed window.
+      const outside: any = await db.get(
+        `SELECT COALESCE(SUM(e.dr_amount),0) AS dr, COALESCE(SUM(e.cr_amount),0) AS cr
+           FROM gl_entries e
+          WHERE e.restaurant_id=? AND e.is_reversed=0 AND e.account_code=? AND e.entry_date <= ?
+            AND NOT (e.entry_date >= ? AND e.entry_date <= ?)
+            AND NOT EXISTS (SELECT 1 FROM bank_cleared c WHERE c.account_code=e.account_code AND c.gl_entry_id=e.id)`,
+        [req.params.id, account, to, from, to]).catch(() => ({ dr: 0, cr: 0 }));
+
+      // The line list is capped. Say so, rather than showing a complete balance
+      // beside an incomplete list with nothing to signal it.
       const difference = statement_closing_balance != null ? round(book_balance - statement_closing_balance) : null;
-      res.json({ account_code: account, period: { from, to }, book_balance, statement_closing_balance, difference, reconciled: difference != null && Math.abs(difference) < 0.02, lines: withFlags });
+      res.json({
+        account_code: account, period: { from, to }, book_balance,
+        statement_closing_balance,
+        // Unchanged for one release: the plain subtraction, and the old test of
+        // it. Kept so nothing consuming them breaks; the UI now uses the
+        // adjusted figures below.
+        difference, reconciled: difference != null && Math.abs(difference) < 0.02,
+        // The real reconciliation.
+        uncleared_deposits, uncleared_withdrawals,
+        adjusted_book_balance, adjusted_difference,
+        reconciled_adjusted: adjusted_difference != null && Math.abs(adjusted_difference) < 0.02,
+        uncleared_outside_window: { deposits: round(outside?.dr || 0), withdrawals: round(outside?.cr || 0) },
+        truncated: lines.length >= 1000,
+        lines: withFlags,
+      });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
