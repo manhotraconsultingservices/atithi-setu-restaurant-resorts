@@ -1494,6 +1494,32 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             )}
           </div>
 
+          {/* Special note. It was captured on the booking form, stored, and
+              printed on the BEO — but never shown HERE, so the moment a booking
+              was saved the note vanished from the screen the team actually works
+              from. Editable inline while the booking is (same blur-to-save path
+              as the contact fields above; `special_requests` is already on the
+              PUT allowlist and the edit is audited). Read-only once COMPLETED or
+              CANCELLED — which is exactly when someone goes looking for it, and
+              `editable` already mirrors the 409 the server returns for those
+              statuses. Hidden only when the booking is locked AND there is no
+              note, so a finished booking does not grow an empty row. */}
+          {(editable || bk.special_requests) && (
+            <div className="rounded-xl bg-[#faf7f2] border border-[#e8dccf] p-3">
+              <div className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e]">
+                <ClipboardList size={11} />{t('events.bookings.specialNote')}
+              </div>
+              {editable ? (
+                <textarea defaultValue={bk.special_requests || ''} rows={2}
+                  onBlur={e => commitContact('special_requests', e.target.value)}
+                  placeholder={t('events.bookings.specialNoteHint')}
+                  className="mt-1 w-full px-2 py-1 rounded-lg border border-[#e8dccf] text-xs bg-white" />
+              ) : (
+                <p className="mt-1 text-xs text-[#6b5d52] whitespace-pre-wrap">{bk.special_requests}</p>
+              )}
+            </div>
+          )}
+
           {/* Bill summary — category-wise (Event vs Hotel rooms), each with its own
               pre-GST discount, plus a rate-wise GST breakup so the tax is never a
               mystery. Falls back to a flat summary for older API responses. */}
