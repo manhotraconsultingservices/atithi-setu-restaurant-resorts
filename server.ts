@@ -57220,8 +57220,12 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const account = String((req.query as any).account || '1010');
+      // One row per statement date. Repeated saves under the old behaviour left
+      // duplicates behind; the plan keeps them rather than deleting rows on a
+      // live tenant, so the newest per date is what gets shown.
       const rows = await db.query(
-        `SELECT id, account_code, period, statement_date, statement_closing_balance, status, created_by, created_at
+        `SELECT DISTINCT ON (COALESCE(statement_date, period))
+                id, account_code, period, statement_date, statement_closing_balance, status, created_by, created_at
            FROM bank_reconciliations WHERE account_code=?
           ORDER BY COALESCE(statement_date, period) DESC, created_at DESC LIMIT 60`,
         [account]).catch(() => []);
