@@ -5042,6 +5042,7 @@ function _glAccountForExpenseCategory(category: string): { code: string; name: s
   if (/PROFESSIONAL|CONSULTANT|AUDIT/.test(c))              return { code: '5900', name: 'Professional Fees' };
   if (/LEGAL/.test(c))                                      return { code: '5910', name: 'Legal & Compliance Fees' };
   if (/RENT|LEASE/.test(c))                                 return { code: '5250', name: 'Rent' };
+  if (/BANK.?(CHARGE|FEE)|NEFT|RTGS|IMPS.?CHARGE/.test(c))  return { code: '5520', name: 'Bank Charges' };
   if (/INTEREST/.test(c))                                   return { code: '5460', name: 'Interest on Loans' };
   return { code: '5800', name: 'Petty Cash Expenses' };
 }
@@ -54903,8 +54904,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bankrec-stage6a2-list-fix',
+    commit_marker: 'bankrec-stage6b-import-charges',
     code_features: [
+      'bankrec-stage6b-import-charges',    //FEATURE (bank reconciliation remediation, stage 6 of 6, part 2 of 2 — COMPLETES THE PLAN. 11 Sep 2026). **F-10 CSV statement import with auto-match** and **F-12 post bank charges and interest from the screen**. *Import:* `POST .../bank-reconciliation/match` parses a bank CSV and pairs its rows with UNCLEARED ledger movements — exact on amount, within N days on date (default 3, capped at 15), each entry claimable once, closest date wins, and a tie is returned flagged `ambiguous` rather than silently picked. **IT WRITES NOTHING** — no tick, no journal. It returns a proposal; the user reviews matched and unmatched rows and the ORDINARY save is what clears anything. An importer that ticks by itself is one that can silently reconcile the books to whatever file it was handed, so TC-ACC-BANKREC-IMPORT-SAFE asserts cleared-line count and GL-exception count are both unmoved by a match. Parser handles the shapes Indian statements actually arrive in: dd/mm/yyyy and dd-mm-yy as well as ISO, separate Debit/Credit columns or one signed Amount, thousands separators and Rs. prefixes, quoted narrations containing commas, and **preamble lines above the header** (account number / customer name — it scans the first 12 lines for the row that looks like a header, otherwise every real export failed with 'no date column'). **Sign convention: a statement DEBIT is money leaving the bank = a CREDIT in our books**; get it backwards and nothing matches. A row splitting into more columns than the header is REFUSED with a reason — an unquoted `Rs. 2,100.00` shears on its comma and yields amounts wrong by orders of magnitude, and reporting that as 'nothing matched' sends someone hunting the wrong problem. *Charges:* posted through the EXISTING `expense-payments` route (and, for interest credited, the existing manual-journal route) rather than a private path, so the entry lands in the Expense Journal where it is visible and reversible like every other expense — which is what the plan required and why. New COA account **5520 Bank Charges** (the nearest before were 'Petty Cash Expenses', the catch-all default, and 'Card & UPI Charges' — both mislabel the P&L). One additive server change: `expense-payments` accepts an optional `bank_account_code`, because it always credited 1010 and a property with two bank accounts had every expense booked against the first; it is VALIDATED against `bank_accounts` so it cannot credit an arbitrary GL account (TC-ACC-BANKREC-CHARGE-ACCT tries to pay from 4000 Room Revenue and must be refused). Tests: IMPORT, IMPORT-SAFE, IMPORT-BADCSV, CHARGE, CHARGE-ACCT. **All 14 review findings are now closed.** tsc + vite build clean.',
       'bankrec-stage6a2-list-fix',           //FIX (stage 6a follow-up, 11 Sep 2026). Two corrections, caught by TC-ACC-BANKREC-COHERENT going red on the stage-6a deploy. (1) I had redefined `truncated` to a constant false, reasoning that a paged list is not a truncated one. But `truncated` never meant 'we hit the 1000 cap' — it meant THE LIST YOU ARE HOLDING IS NOT THE WHOLE WINDOW, and COHERENT depends on exactly that to know whether it may reconstruct the totals from the rows it holds. Pinning it false did not retire a stale flag, it deleted a live signal and let a test run on a premise that no longer held. It is now `has_more` — the same fact, stated properly. (2) COHERENT asked for the DEFAULT response, which since stage 6a is one page, and compared a page against whole-account totals; it now requests a full-window page and skips honestly if the window exceeds one page. Also retired the old 'showing the first 1,000 movements — narrow the date range' banner (there is a pager now; telling someone to narrow the dates when they can click Next is worse than saying nothing), and made TC-ACC-BANKREC-AUDIT create and restore its own tick rather than skipping whenever the account happens to be clean — a test that skips itself on clean data is a test that never runs.',
       'bankrec-stage6a-list',               //FEATURE (bank reconciliation remediation, stage 6 of 6, part 1 of 2 — the line list. 11 Sep 2026). **F-11 paging**, **F-13 search / filter / sort / running balance**, **F-14 who cleared each line**. The list stopped dead at `LIMIT 1000` with a `truncated` flag bolted on in stage 2 so the failure was at least visible; it is now properly paged (`page`, `page_size`, `total_lines`, `has_more`), searchable on narration/journal/account, filterable to cleared or not-yet-cleared, sortable by date or amount, and carries a running balance — offered ONLY on the unfiltered date-ordered list, because that is the one arrangement in which it means anything (it exists to be read beside the bank's own statement). `cleared_on`/`cleared_by` have been written since stage 1 and never read back; they now appear under each tick. **TWO THINGS PAGING BROKE THAT HAD TO BE FIXED WITH IT.** (1) THE ARITHMETIC: the browser recomputed the worksheet by summing the unticked lines it had ON SCREEN plus a server figure for everything outside the window — correct only while the screen held every line in the window, and silently under-counting once paged, which is the exact failure F-11 is about, reintroduced by its own fix. Inverted: the server's whole-history totals are authoritative and the browser moves them only by ticks the USER has changed, so it no longer matters whether a line is on screen. (2) THE SAVE: the server unticked anything in the WINDOW absent from the payload, so a save from page 2 would have silently wiped every tick on page 1 — destroying reconciliation work with no error. The client now sends `visible_entry_ids` and only those may be unticked; absent the field the old window-wide rule stands, so a stale cached bundle behaves exactly as before. Guarded by TC-ACC-BANKREC-PAGESAFE, which reproduces that sequence. The pager, search and filters REFUSE to move while ticks are unsaved rather than reload over them. Tests: PAGING, PAGESAFE, FILTER, RUNNING, AUDIT. tsc + vite build clean.',
       'bankrec-stage5b-no-resurrect',      //FIX (bank reconciliation, stage 5b, 11 Sep 2026). A LATENT DATA-LOSS DEFECT, found by the assertion added hours earlier in stage 5 — which is the entire reason the plan demanded a row-count assertion before retiring the stage-1 dual write. **What was wrong:** unticking a cleared line deleted it from the durable `bank_cleared` but from the legacy `bank_rec_cleared` only for the reconciliation being SAVED. A tick made against September's reconciliation and removed while working on October's left September's legacy row behind. Harmless while the server is up — nothing has read that table since stage 3c — except that the boot-time backfill reads it, and its comment claimed it was safe on every boot because it cannot duplicate rows. It cannot; it can do worse. On every restart it re-imported those orphans into `bank_cleared`, RESURRECTING ticks a user had deliberately removed and silently changing a reconciliation's arithmetic. This is the stage-3c defect again (an untick undone by the legacy table) arriving through the migration rather than the read path. The live tenant already had 12 rows queued to come back at the next restart. **Three-part fix:** (1) unticking now clears the legacy shadow for the WHOLE ACCOUNT, not one reconciliation — clearing is per-account, so its shadow must be too, and no new orphans are created; (2) a one-time boot cleanup deletes orphaned legacy rows, safe because a non-empty `bank_cleared` proves the backfill already ran and carried every legitimate tick, so anything missing from it now can only be an untick — it runs BEFORE the backfill, or the backfill resurrects them one last time on this very deploy; (3) the backfill now runs ONCE per schema behind a `bank_cleared_backfill` marker instead of on every boot, because a migration that repeatedly re-imports from a table permitted to diverge is unsound however it is written. Also swapped the save's write order: the authoritative durable row is written FIRST and no longer inside a swallowed catch, while the legacy shadow becomes the best-effort one — previously a failed durable insert lost the tick silently and left exactly the orphan the new cleanup deletes. TC-ACC-BANKREC-DUALWRITE goes green. tsc + vite build clean.',
@@ -55923,7 +55925,19 @@ ${data.tenant.name}`;
       const category = String(b.category || '').trim().toUpperCase();
       if (!category) return res.status(400).json({ error: 'Category is required.' });
       const method = String(b.payment_method || 'CASH').toUpperCase();
-      const cashAcct = _glAccountForPaymentMethod(method);
+      let cashAcct = _glAccountForPaymentMethod(method);
+      // Non-cash payments always credited 1010, so a property with two bank
+      // accounts had every expense posted against the first one. A caller may
+      // now name the account paying — VALIDATED against bank_accounts, so this
+      // cannot be used to credit an arbitrary GL account.
+      if (method !== 'CASH' && b.bank_account_code) {
+        const wanted = String(b.bank_account_code);
+        const known: any = await db.get(
+          "SELECT label, bank_name FROM bank_accounts WHERE gl_account_code=? AND COALESCE(is_active,1)=1 LIMIT 1",
+          [wanted]).catch(() => null);
+        if (!known) return res.status(400).json({ error: 'That bank account is not on file for this property.' });
+        cashAcct = { code: wanted, name: String(known.label || known.bank_name || 'Bank') };
+      }
       const date = String(b.entry_date || new Date().toISOString().slice(0, 10));
       const by = (req.user as any)?.id || (req.user as any)?.email || null;
       const id = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -57471,6 +57485,219 @@ ${data.tenant.name}`;
       generated_at: new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
     };
   };
+
+  // ─── F-10: read a bank statement and PROPOSE what it clears ───────────
+  // Parses a CSV and pairs its rows against uncleared ledger movements. It
+  // WRITES NOTHING — not a tick, not a journal, nothing. It returns a proposal;
+  // the ordinary save is what marks anything cleared, after a person has looked
+  // at it. That separation is the whole safety property: an importer that ticks
+  // by itself is an importer that can silently reconcile the books to a file.
+  const _parseStatementCsv = (csv: string): { rows: any[]; detected: any; error?: string } => {
+    const text = String(csv || '').replace(/\r\n/g, '\n').trim();
+    if (!text) return { rows: [], detected: {}, error: 'The file is empty.' };
+    // Split on commas outside double quotes, so a quoted narration containing a
+    // comma (which is most of them) does not shear into extra columns.
+    const splitLine = (line: string): string[] => {
+      const out: string[] = []; let cur = '', inQ = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') { if (inQ && line[i + 1] === '"') { cur += '"'; i++; } else inQ = !inQ; }
+        else if (ch === ',' && !inQ) { out.push(cur); cur = ''; }
+        else cur += ch;
+      }
+      out.push(cur);
+      return out.map(v => v.trim().replace(/^"|"$/g, ''));
+    };
+    const rawLines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    if (rawLines.length < 2) return { rows: [], detected: {}, error: 'The file needs a header row and at least one movement.' };
+    // Bank exports usually carry a preamble — account number, customer name, a
+    // date range — above the real header. Taking line 1 blindly made every one
+    // of those files fail with "no date column", so find the line that actually
+    // looks like a header: one carrying both a date-ish and an amount-ish column.
+    const looksLikeHeader = (cells: string[]) => {
+      const h = cells.map(c => c.toLowerCase());
+      const hasDate = h.some(c => /date/.test(c));
+      const hasAmt = h.some(c => /^debit$|^credit$|^dr$|^cr$|withdraw|deposit|paid.?in|paid.?out|^amount$|^amt$|value/.test(c));
+      return hasDate && hasAmt;
+    };
+    let headerAt = 0;
+    for (let i = 0; i < Math.min(12, rawLines.length); i++) {
+      if (looksLikeHeader(splitLine(rawLines[i]))) { headerAt = i; break; }
+    }
+    const allLines = rawLines.slice(headerAt);
+    if (allLines.length < 2) return { rows: [], detected: {}, error: 'The file needs a header row and at least one movement.' };
+    const header = splitLine(allLines[0]).map(h => h.toLowerCase());
+    const find = (...pats: RegExp[]) => header.findIndex(h => pats.some(p => p.test(h)));
+    const iDate = find(/^date$/, /date/);
+    const iDebit = find(/^debit$/, /withdraw/, /paid.?out/, /^dr$/);
+    const iCredit = find(/^credit$/, /deposit/, /paid.?in/, /^cr$/);
+    const iAmount = find(/^amount$/, /^amt$/, /value/);
+    const iDesc = find(/desc/, /narrat/, /particular/, /details/);
+    const iRef = find(/ref/, /cheque/, /chq/, /utr/, /transaction.?id/);
+    if (iDate < 0) return { rows: [], detected: { header }, error: 'No date column found. Expected a column called Date.' };
+    if (iDebit < 0 && iCredit < 0 && iAmount < 0) {
+      return { rows: [], detected: { header }, error: 'No amount column found. Expected Amount, or Debit and Credit.' };
+    }
+    const num = (v: string) => {
+      // Indian statements arrive with thousands separators, currency prefixes
+      // and trailing Dr/Cr markers.
+      const cleaned = String(v || '').replace(/[^0-9.\-]/g, '');
+      const n = Number(cleaned);
+      return isNaN(n) ? 0 : n;
+    };
+    const toIso = (v: string): string | null => {
+      const t = String(v || '').trim();
+      let m = t.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+      if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+      // dd/mm/yyyy — the Indian bank default, and the one that silently becomes
+      // a different date if read as US order.
+      m = t.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})/);
+      if (m) {
+        const yr = m[3].length === 2 ? '20' + m[3] : m[3];
+        return `${yr}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+      }
+      const d = new Date(t);
+      return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+    };
+    const rows: any[] = [];
+    for (let i = 1; i < allLines.length; i++) {
+      const c = splitLine(allLines[i]);
+      // More fields than the header means a value contained a comma and was not
+      // quoted — `Rs. 2,100.00` becomes "Rs. 2" and "100.00", and the amounts
+      // come out wrong by orders of magnitude. Nothing would be ticked (no
+      // ledger entry matches), but "nothing matched" is a terrible way to tell
+      // someone their file is malformed. Refuse it and say what is wrong.
+      if (c.length > header.length) {
+        return {
+          rows: [], detected: { header },
+          error: `Line ${headerAt + i + 1} has ${c.length} columns but the header has ${header.length}. A value probably contains a comma that is not inside quotes — re-export the statement as a standard CSV.`,
+        };
+      }
+      const date = toIso(c[iDate]);
+      if (!date) continue;
+      // A statement DEBIT is money leaving the bank, which is a CREDIT in our
+      // books — the ledger is written from the property's side, not the bank's.
+      let dr = 0, cr = 0;
+      if (iDebit >= 0 || iCredit >= 0) {
+        cr = iDebit >= 0 ? Math.abs(num(c[iDebit])) : 0;
+        dr = iCredit >= 0 ? Math.abs(num(c[iCredit])) : 0;
+      } else {
+        const a = num(c[iAmount]);
+        if (a >= 0) dr = Math.abs(a); else cr = Math.abs(a);
+      }
+      if (dr === 0 && cr === 0) continue;
+      rows.push({
+        line: headerAt + i + 1, date,
+        dr_amount: Math.round(dr * 100) / 100,
+        cr_amount: Math.round(cr * 100) / 100,
+        description: iDesc >= 0 ? c[iDesc] : null,
+        reference: iRef >= 0 ? c[iRef] : null,
+      });
+    }
+    return {
+      rows,
+      detected: {
+        date: iDate >= 0 ? header[iDate] : null,
+        debit: iDebit >= 0 ? header[iDebit] : null,
+        credit: iCredit >= 0 ? header[iCredit] : null,
+        amount: iAmount >= 0 ? header[iAmount] : null,
+        description: iDesc >= 0 ? header[iDesc] : null,
+        reference: iRef >= 0 ? header[iRef] : null,
+      },
+    };
+  };
+
+  // Exact on amount, within a few days on date. Each ledger entry may be
+  // claimed by at most one statement row and vice versa, so a repeated amount
+  // cannot be matched twice. Closest date wins.
+  const _matchStatementRows = (stmtRows: any[], entries: any[], toleranceDays: number) => {
+    const taken = new Set<string>();
+    const matched: any[] = [];
+    const unmatched: any[] = [];
+    const dayNum = (d: string) => Math.floor(new Date(String(d).slice(0, 10) + 'T00:00:00Z').getTime() / 86400000);
+    for (const r of stmtRows) {
+      const rd = dayNum(r.date);
+      const cands = entries
+        .filter(e => !taken.has(String(e.id))
+          && Math.abs(Number(e.dr_amount || 0) - r.dr_amount) < 0.005
+          && Math.abs(Number(e.cr_amount || 0) - r.cr_amount) < 0.005)
+        .map(e => ({ e, gap: Math.abs(dayNum(String(e.entry_date).slice(0, 10)) - rd) }))
+        .filter(x => x.gap <= toleranceDays)
+        .sort((a, b) => a.gap - b.gap);
+      if (cands.length) {
+        taken.add(String(cands[0].e.id));
+        matched.push({
+          statement: r,
+          entry_id: String(cands[0].e.id),
+          entry_date: String(cands[0].e.entry_date).slice(0, 10),
+          journal_ref: cands[0].e.journal_ref,
+          narration: cands[0].e.narration,
+          dr_amount: Number(cands[0].e.dr_amount || 0),
+          cr_amount: Number(cands[0].e.cr_amount || 0),
+          day_gap: cands[0].gap,
+          // A second candidate at the same amount and distance means the pairing
+          // is a coin toss. Say so rather than quietly picking one.
+          ambiguous: cands.length > 1 && cands[1].gap === cands[0].gap,
+        });
+      } else {
+        unmatched.push(r);
+      }
+    }
+    return { matched, unmatched };
+  };
+
+  app.post("/api/restaurant/:id/accounting/bank-reconciliation/match", authenticate, async (req: AuthRequest, res: Response) => {
+    // A READ that happens to take a body: it proposes and stores nothing, so it
+    // is gated like the screen it belongs to.
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const account = String(b.account || '1010');
+      const to = String(b.to || new Date().toISOString().slice(0, 10));
+      const tolerance = Math.min(15, Math.max(0, Number(b.tolerance_days) || 3));
+      const parsed = _parseStatementCsv(String(b.csv || ''));
+      if (parsed.error) return res.status(400).json({ error: parsed.error, detected: parsed.detected });
+      if (!parsed.rows.length) return res.status(400).json({ error: 'No movements could be read from that file.', detected: parsed.detected });
+
+      // Only UNCLEARED entries are matchable — something already ticked is not
+      // waiting to be found. Bounded by the statement window plus the tolerance
+      // so a rogue file cannot pull the whole ledger into memory.
+      const dates = parsed.rows.map(r => r.date).sort();
+      const pad = (d: string, days: number) => new Date(new Date(d + 'T00:00:00Z').getTime() + days * 86400000).toISOString().slice(0, 10);
+      const lo = pad(dates[0], -tolerance - 1);
+      const hi = pad(dates[dates.length - 1], tolerance + 1);
+      const entries: any[] = await db.query(
+        `SELECT e.id, e.journal_ref, e.entry_date, e.narration, e.dr_amount, e.cr_amount FROM gl_entries e
+          WHERE e.restaurant_id=? AND e.is_reversed=0 AND e.account_code=?
+            AND e.entry_date >= ? AND e.entry_date <= ?
+            AND NOT EXISTS (SELECT 1 FROM bank_cleared c WHERE c.account_code=e.account_code AND c.gl_entry_id=e.id)
+          ORDER BY e.entry_date LIMIT 5000`,
+        [req.params.id, account, lo, hi]).catch(() => []);
+
+      const { matched, unmatched } = _matchStatementRows(parsed.rows, entries || [], tolerance);
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      res.json({
+        account_code: account, statement_date: to, tolerance_days: tolerance,
+        detected: parsed.detected,
+        parsed_rows: parsed.rows.length,
+        candidates_considered: (entries || []).length,
+        matched, unmatched,
+        summary: {
+          matched: matched.length,
+          ambiguous: matched.filter(m => m.ambiguous).length,
+          unmatched: unmatched.length,
+          matched_value: round2(matched.reduce((a, m) => a + m.dr_amount + m.cr_amount, 0)),
+          unmatched_value: round2(unmatched.reduce((a, r) => a + r.dr_amount + r.cr_amount, 0)),
+        },
+        // Said plainly, because it is the point.
+        note: 'Nothing has been marked cleared. Review the matches, then save the reconciliation to apply them.',
+      });
+    } catch (err: any) {
+      console.error('Bank rec match error:', err);
+      res.status(400).json({ error: err?.message || 'Could not read that statement file' });
+    }
+  });
 
   // The model, for the screen and for the tests. The arithmetic is asserted
   // here rather than against the PDF, whose text is deflated and hex-encoded

@@ -3039,6 +3039,7 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['5420','Internet & Telecom','EXPENSE',680],
     ['5500','OTA Commission Expense','EXPENSE',690],
     ['5510','Card & UPI Charges','EXPENSE',695],
+    ['5520','Bank Charges','EXPENSE',697],
     ['5600','Marketing & Advertising','EXPENSE',700],
     ['5700','Administrative & Office Expenses','EXPENSE',710],
     ['5800','Petty Cash Expenses','EXPENSE',720],

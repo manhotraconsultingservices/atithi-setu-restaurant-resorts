@@ -8357,6 +8357,14 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [bankRecOnly, setBankRecOnly] = useState<'all' | 'uncleared' | 'cleared'>('all');
   const [bankRecSort, setBankRecSort] = useState<'date' | 'amount'>('date');
   const [bankRecDir, setBankRecDir] = useState<'desc' | 'asc'>('desc');
+  const [bankRecMatch, setBankRecMatch] = useState<any>(null);
+  const [bankRecMatching, setBankRecMatching] = useState(false);
+  const [bankRecChargeOpen, setBankRecChargeOpen] = useState(false);
+  const [bankRecChargeKind, setBankRecChargeKind] = useState<'CHARGE' | 'INTEREST'>('CHARGE');
+  const [bankRecChargeAmt, setBankRecChargeAmt] = useState('');
+  const [bankRecChargeDate, setBankRecChargeDate] = useState('');
+  const [bankRecChargeNote, setBankRecChargeNote] = useState('');
+  const [bankRecChargeMsg, setBankRecChargeMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [periods, setPeriods] = useState<any[]>([]);
   const [periodsExc, setPeriodsExc] = useState<any[]>([]);
   const [cashCount, setCashCount] = useState<any>(null);
@@ -8551,6 +8559,78 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     }
     setBankRecStmtErr(null);
     fn();
+  };
+
+  // F-10. Read a statement file and ask the server what it thinks matches.
+  // This marks NOTHING cleared — it returns a proposal. Applying it is a
+  // separate, deliberate act (tick the matches, then Save).
+  const importBankStatement = async (file: File) => {
+    setBankRecMatching(true);
+    setBankRecMatch(null);
+    setBankRecStmtErr(null);
+    try {
+      const csv = await file.text();
+      const r = await acctApi('/accounting/bank-reconciliation/match', {
+        method: 'POST',
+        body: JSON.stringify({ account: bankRecAccount, to: tbTo, csv, tolerance_days: 3 }),
+      });
+      if (r?.error) { setBankRecStmtErr(r.error); return; }
+      setBankRecMatch(r);
+    } catch (err: any) {
+      setBankRecStmtErr(err?.message || 'Could not read that file');
+    } finally { setBankRecMatching(false); }
+  };
+
+  // Tick what the import found. Still only a tick — the user saves.
+  const applyBankRecMatches = () => {
+    if (!bankRecMatch) return;
+    const ids = (bankRecMatch.matched || []).map((m: any) => String(m.entry_id));
+    setBankRecCleared(m => { const n = { ...m }; for (const id of ids) n[id] = true; return n; });
+    setBankRecMatch(null);
+    setBankRecStmtErr(null);
+  };
+
+  // F-12. A charge on the statement that is not in the books yet. Posted
+  // through the ORDINARY expense route (or, for interest received, the ordinary
+  // manual journal) so it lands where every other entry lands and is reversible
+  // by the machinery that already exists — not in a private corner of this
+  // screen.
+  const postBankRecCharge = async () => {
+    const amt = parseFloat(bankRecChargeAmt);
+    if (!(amt > 0)) { setBankRecChargeMsg({ type: 'err', text: 'Enter an amount greater than zero.' }); return; }
+    const date = bankRecChargeDate || tbTo;
+    const note = bankRecChargeNote.trim() || (bankRecChargeKind === 'CHARGE' ? 'Bank charges' : 'Interest credited by bank');
+    setBankRecChargeMsg(null);
+    try {
+      let r: any;
+      if (bankRecChargeKind === 'CHARGE') {
+        r = await acctApi('/accounting/expense-payments', {
+          method: 'POST',
+          body: JSON.stringify({
+            category: 'BANK_CHARGES', amount: amt, entry_date: date,
+            payment_method: 'BANK_TRANSFER', bank_account_code: bankRecAccount, notes: note,
+          }),
+        });
+      } else {
+        // Dr the bank, Cr other income — the exact mirror of a charge.
+        r = await acctApi('/accounting/journal-entries', {
+          method: 'POST',
+          body: JSON.stringify({
+            entry_date: date, narration: note,
+            lines: [
+              { account_code: bankRecAccount, account_name: 'Bank', dr_amount: amt, cr_amount: 0 },
+              { account_code: '4900', account_name: 'Other Income', dr_amount: 0, cr_amount: amt },
+            ],
+          }),
+        });
+      }
+      if (r?.error) { setBankRecChargeMsg({ type: 'err', text: r.error }); return; }
+      setBankRecChargeMsg({ type: 'ok', text: `Posted ${fmtAmt(amt)}. It now appears as a movement below — tick it once the statement agrees.` });
+      setBankRecChargeAmt(''); setBankRecChargeNote('');
+      loadBankRec();
+    } catch (err: any) {
+      setBankRecChargeMsg({ type: 'err', text: err?.message || 'Could not post that entry' });
+    }
   };
 
   // The statement is a document, not a page, so it is fetched as a blob and
@@ -9579,6 +9659,15 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                         return (
                           <>
                             {dirty && <span className="text-[11px] text-[#a0522d]">Save first — the statement is built from saved work</span>}
+                            <button onClick={() => { setBankRecChargeOpen(o => !o); setBankRecChargeMsg(null); }}
+                              className="px-3 py-1.5 rounded-lg border border-[#d4c4a8] text-[#6b5d52] text-xs font-bold hover:bg-[#f5f0e8]">
+                              Bank charge / interest
+                            </button>
+                            <label className={'px-3 py-1.5 rounded-lg border border-[#d4c4a8] text-[#6b5d52] text-xs font-bold hover:bg-[#f5f0e8] cursor-pointer' + (bankRecMatching ? ' opacity-50 cursor-wait' : '')}>
+                              {bankRecMatching ? 'Reading…' : 'Import statement (CSV)'}
+                              <input type="file" accept=".csv,text/csv,text/plain" className="hidden" disabled={bankRecMatching}
+                                onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) importBankStatement(f); }} />
+                            </label>
                             <button onClick={openBankRecStatement}
                               className="px-3 py-1.5 rounded-lg border border-[#d4c4a8] text-[#6b5d52] text-xs font-bold hover:bg-[#f5f0e8]">
                               Statement (PDF)
@@ -9598,6 +9687,113 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   </>
                 );
               })()}
+              {/* F-12 — post what the statement shows and the books do not have. */}
+              {bankRecChargeOpen && (
+                <div className="rounded-lg border border-[#e8ded0] bg-white overflow-hidden">
+                  <div className="px-4 py-2 bg-[#f5f0e8] border-b border-[#e8ded0]">
+                    <p className="text-xs font-semibold text-[#1a1208] uppercase tracking-wide">On the statement, not in the books</p>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    <div className="flex flex-wrap items-end gap-3">
+                      <label className="text-xs text-[#6b5d52]">
+                        <span className="block mb-1">What is it</span>
+                        <select value={bankRecChargeKind} onChange={e => setBankRecChargeKind(e.target.value as any)}
+                          className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
+                          <option value="CHARGE">Bank charge (money out)</option>
+                          <option value="INTEREST">Interest credited (money in)</option>
+                        </select>
+                      </label>
+                      <label className="text-xs text-[#6b5d52]">
+                        <span className="block mb-1">Amount</span>
+                        <input type="number" step="0.01" min="0" value={bankRecChargeAmt} onChange={e => setBankRecChargeAmt(e.target.value)}
+                          className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white w-32" />
+                      </label>
+                      <label className="text-xs text-[#6b5d52]">
+                        <span className="block mb-1">Date on the statement</span>
+                        <input type="date" value={bankRecChargeDate || tbTo} onChange={e => setBankRecChargeDate(e.target.value)}
+                          className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+                      </label>
+                      <label className="text-xs text-[#6b5d52] flex-1 min-w-[12rem]">
+                        <span className="block mb-1">Narration</span>
+                        <input value={bankRecChargeNote} onChange={e => setBankRecChargeNote(e.target.value)}
+                          placeholder={bankRecChargeKind === 'CHARGE' ? 'Bank charges' : 'Interest credited by bank'}
+                          className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white w-full" />
+                      </label>
+                      <button onClick={postBankRecCharge} className={AC_BTN}>Post it</button>
+                    </div>
+                    {bankRecChargeMsg && (
+                      <p className={'text-xs ' + (bankRecChargeMsg.type === 'ok' ? 'text-emerald-700' : 'text-[#a0522d]')}>{bankRecChargeMsg.text}</p>
+                    )}
+                    <p className="text-[11px] text-[#9c8e85]">
+                      This posts a real journal — a charge through the Expense Journal, interest as a manual journal — so it appears in the ledger and can be reversed there like any other entry. It is not a note to self.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* F-10 — what the imported statement matched. Nothing is ticked until Apply, and nothing is saved until Save. */}
+              {bankRecMatch && (
+                <div className="rounded-lg border border-[#cc5a16] bg-white overflow-hidden">
+                  <div className="px-4 py-2 bg-[#fdf6ef] border-b border-[#e8ded0] flex items-center justify-between gap-3">
+                    <p className="text-xs font-semibold text-[#1a1208] uppercase tracking-wide">Imported statement — nothing cleared yet</p>
+                    <button onClick={() => setBankRecMatch(null)} className="text-[11px] font-bold text-[#6b5d52] hover:underline">Discard</button>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                      <span className="text-[#6b5d52]">Read <b className="text-[#1a1208]">{bankRecMatch.parsed_rows}</b> movements</span>
+                      <span className="text-emerald-700">Matched <b>{bankRecMatch.summary?.matched}</b></span>
+                      {Number(bankRecMatch.summary?.ambiguous) > 0 && (
+                        <span className="text-[#a0522d]">Ambiguous <b>{bankRecMatch.summary.ambiguous}</b></span>
+                      )}
+                      <span className="text-[#a0522d]">Unmatched <b>{bankRecMatch.summary?.unmatched}</b></span>
+                    </div>
+                    {Number(bankRecMatch.summary?.ambiguous) > 0 && (
+                      <p className="text-[11px] text-[#a0522d]">
+                        Some rows matched more than one movement at the same amount and date. Those are marked below — check them before applying.
+                      </p>
+                    )}
+                    {(bankRecMatch.unmatched || []).length > 0 && (
+                      <div className="rounded border border-[#e8ded0] overflow-hidden">
+                        <p className="px-3 py-1.5 bg-[#f5f0e8] text-[11px] font-semibold text-[#1a1208]">Nothing in the books matches these — they may need posting</p>
+                        <div className="max-h-40 overflow-y-auto divide-y divide-[#f0e8d8]">
+                          {(bankRecMatch.unmatched || []).slice(0, 50).map((r: any, i: number) => (
+                            <div key={i} className="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                              <span className="text-[#6b5d52]">{r.date}</span>
+                              <span className="flex-1 truncate text-[#6b5d52]">{r.description || '—'}</span>
+                              <span className="tabular-nums">{fmtAmt(r.dr_amount || r.cr_amount)}</span>
+                              <span className="text-[10px] text-[#9c8e85] w-16 text-right">{r.dr_amount ? 'received' : 'paid'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(bankRecMatch.matched || []).length > 0 && (
+                      <div className="rounded border border-[#e8ded0] overflow-hidden">
+                        <p className="px-3 py-1.5 bg-[#f5f0e8] text-[11px] font-semibold text-[#1a1208]">These pair up with movements already in the books</p>
+                        <div className="max-h-56 overflow-y-auto divide-y divide-[#f0e8d8]">
+                          {(bankRecMatch.matched || []).slice(0, 100).map((m: any, i: number) => (
+                            <div key={i} className="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                              <span className="text-[#6b5d52]">{m.statement?.date}</span>
+                              <span className="flex-1 truncate text-[#6b5d52]">{m.narration || m.statement?.description || '—'}</span>
+                              {m.ambiguous && <span className="text-[10px] font-bold text-[#a0522d]">ambiguous</span>}
+                              {m.day_gap > 0 && <span className="text-[10px] text-[#9c8e85]">{m.day_gap}d apart</span>}
+                              <span className="tabular-nums">{fmtAmt(m.dr_amount || m.cr_amount)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-end gap-3">
+                      <span className="text-[11px] text-[#9c8e85]">Applying only ticks the boxes — you still have to save.</span>
+                      <button onClick={applyBankRecMatches} disabled={!(bankRecMatch.matched || []).length}
+                        className={AC_BTN + (!(bankRecMatch.matched || []).length ? ' opacity-40 cursor-not-allowed' : '')}>
+                        Tick the {bankRecMatch.summary?.matched} matched
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
                 <table className="w-full text-sm border-collapse">
                   <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Cleared</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Date</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Journal</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Narration</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr</th><th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr</th>{bankRec.running_balance_available && <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Balance</th>}</tr></thead>
