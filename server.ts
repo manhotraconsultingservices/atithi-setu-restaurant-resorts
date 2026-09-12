@@ -19089,9 +19089,30 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const includeInactive = String(req.query.include_inactive || '') === '1';
-      const where = includeInactive ? '' : 'WHERE is_active = 1';
+      // Per-module item list. `include_shared=1` widens the result to SHARED
+      // items — the ones belonging to no single module (cleaning chemicals,
+      // bin liners) which would otherwise vanish from every module's list.
+      //
+      // The conditions and their bound values are built in ONE place, appended
+      // together, because adding a `?` to the SQL and forgetting the matching
+      // param is exactly how the purchase-order module filter silently
+      // returned zero rows instead of erroring. An unrecognised ?module= falls
+      // back to NO filter rather than being coerced to RESTAURANT, so a typo
+      // shows everything (obvious) instead of the wrong module (invisible).
+      const conds: string[] = [];
+      const params: any[] = [];
+      if (!includeInactive) conds.push('is_active = 1');
+      const wantModule = _normaliseCostModule(req.query.module, '');
+      if (wantModule) {
+        conds.push(String(req.query.include_shared || '') === '1'
+          ? "(COALESCE(module, 'RESTAURANT') = ? OR COALESCE(module, 'RESTAURANT') = 'SHARED')"
+          : "COALESCE(module, 'RESTAURANT') = ?");
+        params.push(wantModule);
+      }
+      const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
       const rows = await db.query(
-        `SELECT * FROM ingredients ${where} ORDER BY category, name`
+        `SELECT * FROM ingredients ${where} ORDER BY category, name`,
+        params
       );
       res.json(rows);
     } catch (err) {
@@ -19121,14 +19142,29 @@ ${data.tenant.name}`;
         default_supplier_id, default_unit_price, gst_percent,
         sku, image_url, notes, is_active,
       } = req.body;
+      // Renamed out of `module` deliberately: destructuring a bare `module`
+      // shadows the CommonJS module object in this scope.
+      const moduleRaw = req.body?.module;
 
       if (!name || !unit) {
         return res.status(400).json({ error: "name and unit are required" });
       }
-      const allowedTypes = new Set(['RAW', 'PACKAGED']);
+      // SPA_PRODUCT / SPA_RETAIL were readable by the spa screen but NOT
+      // creatable: this allowlist admitted only RAW and PACKAGED, so a spa
+      // product posted here was silently coerced to RAW and disappeared from
+      // the spa list. Same shape of bug as the expense/invoice module
+      // allowlists that sat behind their own dropdowns.
+      const allowedTypes = new Set(['RAW', 'PACKAGED', 'SPA_PRODUCT', 'SPA_RETAIL']);
       const allowedUnits = new Set(['kg', 'g', 'l', 'ml', 'unit', 'bottle', 'piece', 'pack', 'dozen']);
       const safeType = allowedTypes.has(String(item_type || '').toUpperCase()) ? String(item_type).toUpperCase() : 'RAW';
       const safeUnit = allowedUnits.has(String(unit || '').toLowerCase()) ? String(unit).toLowerCase() : 'unit';
+      // Default the module from the item type when the caller did not say, so
+      // the create route files a spa product the same way the one-shot
+      // backfill did — one rule, not two that can drift apart.
+      const safeModule = _normaliseCostModule(
+        moduleRaw,
+        (safeType === 'SPA_PRODUCT' || safeType === 'SPA_RETAIL') ? 'SPA' : 'RESTAURANT'
+      );
 
       const db = await getTenantDb(req.params.id);
 
@@ -19151,11 +19187,11 @@ ${data.tenant.name}`;
 
       await db.run(
         `INSERT INTO ingredients
-          (id, name, item_type, category, unit, current_stock_qty, reorder_point, par_level,
+          (id, name, item_type, module, category, unit, current_stock_qty, reorder_point, par_level,
            default_supplier_id, default_unit_price, gst_percent, sku, image_url, notes, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          id, String(name).trim(), safeType, category || null, safeUnit,
+          id, String(name).trim(), safeType, safeModule, category || null, safeUnit,
           Number(current_stock_qty || 0),
           Number(reorder_point || 0),
           Number(par_level || 0),
@@ -19195,7 +19231,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const allowed = [
-        'name', 'item_type', 'category', 'unit',
+        'name', 'item_type', 'module', 'category', 'unit',
         'reorder_point', 'par_level',
         'default_supplier_id', 'default_unit_price', 'gst_percent',
         'sku', 'image_url', 'notes', 'is_active',
@@ -19205,7 +19241,11 @@ ${data.tenant.name}`;
       for (const k of allowed) {
         if (req.body[k] !== undefined) {
           updates.push(`${k} = ?`);
-          params.push(req.body[k]);
+          // `module` is the one value here that steers which list an item
+          // appears in, so it goes through the shared allowlist instead of
+          // being trusted: an unknown string would be stored happily and then
+          // match no module filter, making the item vanish from every screen.
+          params.push(k === 'module' ? _normaliseCostModule(req.body[k]) : req.body[k]);
         }
       }
       if (updates.length === 0) return res.status(400).json({ error: "Nothing to update" });
@@ -29856,7 +29896,10 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      res.json(await db.query("SELECT * FROM ingredients WHERE item_type IN ('SPA_PRODUCT','SPA_RETAIL') AND is_active = 1 ORDER BY name"));
+      // Reads the module column, falling back to the legacy item_type so this
+      // keeps working on a tenant whose one-shot backfill has not run yet and
+      // for any row an owner re-typed without re-filing.
+      res.json(await db.query("SELECT * FROM ingredients WHERE (COALESCE(module, 'RESTAURANT') = 'SPA' OR item_type IN ('SPA_PRODUCT','SPA_RETAIL')) AND is_active = 1 ORDER BY name"));
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch spa inventory" }); }
   });
 
@@ -55046,8 +55089,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'po-module-filter-bind',
+    commit_marker: 'inventory-module-dimension',
     code_features: [
+      'inventory-module-dimension',        //FEATURE (inventory remediation, stage 1 of 5 - 12 Sep 2026). Consumables can finally say WHICH PART OF THE BUSINESS they belong to, and Events gets an inventory screen for the first time. **The finding behind it:** there was never one inventory system - there were three and a hole. `ingredients` (+ stock_movements, batches, recipes, suppliers, POs, counts) is the real engine and served Restaurant AND Spa, separated only by `item_type`; the hotel ran a PARALLEL `hotel_inventory_items` table with a thin movement log and no supplier / PO / batch / count / auto-PO support; Events had nothing at all (`event_inventory`, `events/inventory`, `event_stock` = 0 hits). So an item list could not be kept per module for ANY module. Now `ingredients.module` carries the same COST_MODULES allowlist as expenses, supplier invoices and purchase orders; the list endpoint takes `?module=` + `include_shared=1`; create and PATCH both coerce through `_normaliseCostModule`. **Events Inventory is a module-scoped VIEW over the shared item master, NOT a fourth silo** - it reuses the same ledger, so it inherits GRN, wastage, counts, par levels and the audit trail on day one. THREE LANDMINES defused: (1) the tab id is `INVENTORY_EVENTS`, not `EVENTS_INVENTORY`, because an `EVENTS_` prefix is read as an Events-module grant by `hasEventsGrant` AND by the server tab->module mapper - the other spelling would have handed the Events nav group and the Events API gate to every role with inventory access, which is exactly the EVENTS_CHECKLISTS leak. (2) `pageVisible` had branches for hotel/restaurant/spa but NOT events, so a `requires:'events'` tab would have shown on every tenant; added with the first such tab. (3) the backfill stamping module='SPA' from the legacy item_type is guarded by a marker table so it runs ONCE - unguarded it would drag a re-filed item back to SPA on every boot, the same defect as the bank-rec backfill that resurrected unticked lines. Also fixed in passing: the create route's item_type allowlist admitted only RAW and PACKAGED, so a SPA_PRODUCT posted to it was silently coerced to RAW and vanished from the spa list. The INSERT went 15->16 columns and the patch script ASSERTED columns==placeholders==values before writing, because that exact mismatch shipped twice on the PO route.',
       'po-module-filter-bind',           //FIX — the SAME mistake as `po-module-insert-fix`, made twice in one change and caught only by testing the live endpoint. The PO list gained a `?module=` condition with a `?` placeholder, but `filterParams` was still `allowedStatuses.has(status) ? [status] : []` — the value was never bound, so the filter silently returned ZERO rows instead of erroring. `filterParams` is now built from the same conditions as `filterSql`, in the same order. **The test did not catch it because the test was vacuous:** it asserted `rows.every(r => r.module === 'EVENTS')`, and `every()` on an EMPTY array is true — a filter returning nothing passed. It now requires the list to CONTAIN the PO it just created. It was also skipping entirely, because it read `/ingredients` (404) instead of `/inventory/ingredients`, so it had never actually run. **The pattern worth remembering: adding a condition to a query means touching TWO lists — the SQL and the bound values — and neither tsc nor a vacuous `every()` can see the mismatch.**',
       'po-module-insert-fix',              //FIX (urgent, minutes after `po-module-attribution`, which I shipped BROKEN). I added `module` to the manual PO INSERT column list and added a placeholder for it, but never added the value to the params array — 10 columns, 10 placeholders, 9 values — so every parameter after `expected_delivery_date` shifted by one and the statement failed. **Purchase order creation returned 500 with total=NaN on production until this landed.** Caught by TC-PROC-PO-GST, which asserts a PO totals correctly and went from pass to a 500. The auto-draft INSERT on the same table was fine: 10 columns against 7 placeholders plus 'DRAFT', 0 and 'RESTAURANT' as literals, 7 params — verified by counting the value slots BY HAND, because a script that counts only quoted literals misreads the bare `0` and reports a false mismatch. **Lesson worth keeping: adding a column to an INSERT means touching THREE lists — columns, placeholders and values — and a type check cannot see any of them.**',
       'po-module-attribution',             //FIX (accounting module-coverage audit, stage 2 of 4 — 12 Sep 2026). A purchase order can finally say which part of the business it is for. **CORRECTION TO MY OWN AUDIT:** I reported that `purchase_orders` had no module column at all. It does — added long ago in `b279fd9` as `ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'`; my scan read only the CREATE TABLE and missed the ALTER. The real defect was narrower and matches the reported symptom exactly: **the create route never SET the column**, so every PO silently took the RESTAURANT default and Hotel / Events / Spa procurement could not be told apart. Now: the manual create accepts `module` (coerced through `_normaliseCostModule`, same rule as expenses and invoices), the PO form has a picker driven by the shared `COST_MODULES` constant, the list accepts `?module=`, and PATCH may change it. The par-level auto-draft states RESTAURANT explicitly rather than leaning on the default — it is raised from INGREDIENT par levels, so it is a kitchen replenishment by construction. **THE LINK THAT MATTERS:** a supplier invoice raised FROM a PO now inherits that PO's module instead of defaulting to RESTAURANT. Without it the module was chosen on the PO and thrown away at the one moment it starts affecting the ledger, since the invoice is what posts to the GL. Explicit module wins, else the PO's, else RESTAURANT. TC-PO-MODULE asserts the module is stored and that the list filter narrows on it. tsc + vite build clean.',

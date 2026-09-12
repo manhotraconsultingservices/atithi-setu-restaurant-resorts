@@ -1874,6 +1874,41 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_display_order ON ingredients (display_order)`).catch(() => {});
+
+  // ── Inventory module dimension (inventory remediation, stage 1) ──────────
+  // Which part of the business a consumable belongs to. Until now the item
+  // master had NO module column at all: the restaurant and the spa shared one
+  // `ingredients` table separated only by `item_type`, the hotel ran a parallel
+  // `hotel_inventory_items` table of its own, and Events had nowhere to put an
+  // item. That is why an item list could not be maintained per module.
+  //
+  // Same allowlist as expenses, supplier invoices and purchase orders
+  // (COST_MODULES in server.ts) so one item can be filed the same way its
+  // spend is, and DEFAULT 'RESTAURANT' so every existing row stays valid.
+  await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'").catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_module ON ingredients (module)`).catch(() => {});
+
+  // ONE-SHOT backfill of the new column from the only module signal the old
+  // rows carried: item_type 'SPA_PRODUCT' / 'SPA_RETAIL' meant spa, everything
+  // else was kitchen. Stamping it once means existing tenants open the new
+  // per-module lists already populated instead of empty.
+  //
+  // GUARDED BY A MARKER TABLE, and that guard is the point: this must run
+  // exactly once, never on every boot. An owner who re-files a spa product
+  // under another module would otherwise have it silently dragged back to SPA
+  // on the next restart — the same class of defect as the bank-reconciliation
+  // backfill that resurrected unticked lines after they were cleared.
+  await db.exec(`CREATE TABLE IF NOT EXISTS inventory_module_backfill (
+    id TEXT PRIMARY KEY,
+    done_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  const _invModuleBackfilled: any = await db.get(
+    "SELECT id FROM inventory_module_backfill WHERE id = 'once'"
+  ).catch(() => null);
+  if (!_invModuleBackfilled) {
+    await db.exec("UPDATE ingredients SET module = 'SPA' WHERE item_type IN ('SPA_PRODUCT','SPA_RETAIL')").catch(() => {});
+    await db.exec("INSERT INTO inventory_module_backfill (id) VALUES ('once')").catch(() => {});
+  }
   // Supplier Master — identity, compliance & relationship fields (Part 1A)
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS pan_number TEXT").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS msme_registered INT DEFAULT 0").catch(() => {});

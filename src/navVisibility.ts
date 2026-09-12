@@ -118,6 +118,21 @@ export function computeTabVisibility(id: string, ctx: NavVisibilityCtx): boolean
   // Spa Billing — module-gated + permissionable.
   if (id === 'SPA_BILLING') return isSpaEnabled && (isOwnerOrAdmin || baseTabVisible(id));
 
+  // Events Inventory is a DERIVED tab: it renders the shared item master
+  // scoped to module=EVENTS and calls the same /inventory/* endpoints, which
+  // are gated on the INVENTORY tab. So it borrows the INVENTORY permission
+  // rather than carrying one of its own — granting it separately would have
+  // produced a visible screen whose every API call 403s.
+  //
+  // It also requires the Events module to be ON. Note the id is deliberately
+  // NOT `EVENTS_`-prefixed: that prefix is read as an Events-module grant by
+  // hasEventsGrant here and by the server's tab -> module mapper, so the other
+  // spelling would have handed the Events nav group and the Events API gate to
+  // every role with inventory access.
+  if (id === 'INVENTORY_EVENTS') {
+    return isEventsEnabled && (isOwnerOrAdmin || baseTabVisible('INVENTORY'));
+  }
+
   // Events "Cleaning Checklist" reuses the HOUSEKEEPING permission but lives
   // under the Events nav — so it must ALSO require some Events access, or a
   // hotel role with Housekeeping but Events = N/A pulls the Events group in.

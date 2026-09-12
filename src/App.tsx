@@ -16290,7 +16290,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // now group every destination into SIX left-sidebar modules by
         // operator job-to-be-done. The activeTab state machine and all
         // ~30 view components are untouched — only the nav chrome changed.
-        type NavTab = { id: string; label: string; mode?: 'RESTAURANT' | 'HOTEL'; requires?: 'hotel' | 'restaurant' | 'spa' };
+        type NavTab = { id: string; label: string; mode?: 'RESTAURANT' | 'HOTEL'; requires?: 'hotel' | 'restaurant' | 'spa' | 'events' };
         type NavModule = {
           id: string;
           label: string;
@@ -16463,6 +16463,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             tabs: [
               { id: 'HOTEL_INVENTORY', label: 'Hotel Inventory',   requires: 'hotel' },
               { id: 'INVENTORY',       label: 'Kitchen Inventory', requires: 'restaurant' },
+              // Events consumables — crockery, linen, decor, disposables.
+              // The id is INVENTORY_EVENTS, NOT EVENTS_INVENTORY, and that is
+              // load-bearing: an `EVENTS_` prefix is treated as an Events-module
+              // grant in two places (hasEventsGrant below, and the server's
+              // tab -> module mapper), so naming it the other way round would
+              // hand every role with inventory access the Events nav group and
+              // the Events API gate — the exact leak EVENTS_CHECKLISTS caused.
+              // It is an inventory permission, and it is named like one.
+              { id: 'INVENTORY_EVENTS', label: 'Events Inventory',  requires: 'events' },
               { id: 'SPA_INVENTORY',   label: 'Spa Inventory',     requires: 'spa' },
             ],
           },
@@ -16551,6 +16560,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           if (t.requires === 'hotel' && !isHotelEnabled) return false;
           if (t.requires === 'restaurant' && !isRestaurantEnabled) return false;
           if (t.requires === 'spa' && !isSpaEnabled) return false;
+          // `events` was missing from this list while three other module gates
+          // were present, so a tab marked requires:'events' fell straight
+          // through to isVisible() and would have shown on EVERY tenant,
+          // Events enabled or not. Added with the first such tab.
+          if (t.requires === 'events' && !isEventsEnabled) return false;
           return isVisible(t.id);
         };
         // A mode-stamped trio entry is "active" only when BOTH the tab and
@@ -17278,6 +17292,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </LanguageProvider>
       ) : activeTab === 'HOTEL_INVENTORY' ? (
         <HotelInventoryView restaurantId={restaurantId} token={token!} />
+      ) : activeTab === 'INVENTORY_EVENTS' && isEventsEnabled ? (
+        <ModuleInventoryView
+          restaurantId={restaurantId} token={token!} module="EVENTS"
+          title="Events Inventory"
+          subtitle="Event consumables — crockery, linen, decor, disposables"
+        />
       ) : activeTab === 'INVENTORY' ? (
         <div className="space-y-5">
           {/* ── Inventory Header ── */}
@@ -57191,14 +57211,262 @@ function FormField({ label, children, required, hint }: { label: string; childre
 }
 const inputClass = "w-full px-4 py-3 rounded-2xl border border-[#cc5a16]/15 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 text-sm";
 
+// ─── Module-scoped inventory (Events today; reusable for any cost module) ──
+// Events & Convention had NO inventory surface at all — no item list, no live
+// stock, no consumption trail — so event consumables (crockery, linen, decor,
+// gas, disposables) were either mis-filed under the kitchen or tracked off
+// the system entirely.
+//
+// This is deliberately NOT a fourth inventory silo. The hotel already runs a
+// parallel `hotel_inventory_items` table with its own thin movement log and no
+// supplier, PO, batch or stock-count support; cloning that shape for Events
+// would have repeated the mistake a third time. This is a module-scoped view
+// over the SAME item master and the SAME `stock_movements` ledger the kitchen
+// uses, so Events inherits GRN, wastage, physical counts, par levels and the
+// audit trail on day one, and `module` is the only Events-specific thing here.
+function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
+  restaurantId: string; token: string; module: string; title: string; subtitle: string;
+}) {
+  const toast = useToast();
+  type MTab = 'ITEMS' | 'LOW_STOCK' | 'MOVEMENTS';
+  const [tab, setTab] = useState<MTab>('ITEMS');
+  const [items, setItems] = useState<any[]>([]);
+  const [movements, setMovements] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+  const [editing, setEditing] = useState<any | null>(null);
+  const [showEditor, setShowEditor] = useState(false);
+  const [adjItem, setAdjItem] = useState<any>(null);
+  const [adjQty, setAdjQty] = useState('');
+  const [adjReason, setAdjReason] = useState('');
+  const [adjSaving, setAdjSaving] = useState(false);
+
+  const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const canWrite = canWriteTab('INVENTORY');
+
+  // include_shared=1 so property-wide consumables (cleaning chemicals, bin
+  // liners) show here too instead of being invisible to every module.
+  const load = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients?module=${encodeURIComponent(module)}&include_shared=1`, { headers: auth });
+      setItems(r.ok ? await r.json() : []);
+    } catch { /* silent */ } finally { setLoading(false); }
+  };
+
+  // The consumption trail, filtered to this module's items. The audit endpoint
+  // is module-agnostic, so we scope it here by the ids we already hold.
+  const loadMovements = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/audit-log?limit=400`, { headers: auth });
+      const rows: any[] = r.ok ? await r.json() : [];
+      const mine = new Set(items.map((i: any) => i.id));
+      setMovements(rows.filter(m => mine.has(m.ingredient_id)));
+    } catch { /* silent */ }
+  };
+
+  useEffect(() => { load(); }, [module]);
+  useEffect(() => { if (tab === 'MOVEMENTS') loadMovements(); }, [tab, items]);
+
+  const filtered = items.filter((i: any) =>
+    !search || String(i.name || '').toLowerCase().includes(search.toLowerCase()));
+  const isLow = (i: any) => {
+    const qty = Number(i.current_stock_qty || 0);
+    const reorder = Number(i.reorder_point || 0);
+    const par = Number(i.par_level || 0);
+    return (reorder > 0 && qty <= reorder) || (par > 0 && qty < par);
+  };
+  const lowStock = items.filter(isLow);
+
+  const saveAdjust = async () => {
+    if (!adjItem || adjQty === '') return;
+    setAdjSaving(true);
+    try {
+      const r = await fetch(`/api/inventory/ingredients/${adjItem.id}/adjust-stock`, {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ new_qty: Number(adjQty), reason: adjReason || 'Manual adjustment' }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Failed'); }
+      setAdjItem(null); setAdjQty(''); setAdjReason('');
+      await load();
+      toast.success('Stock updated');
+    } catch (e: any) { toast.error(e.message); } finally { setAdjSaving(false); }
+  };
+
+  const TABS: { k: MTab; label: string; count?: number }[] = [
+    { k: 'ITEMS', label: 'Items', count: items.length },
+    { k: 'LOW_STOCK', label: 'Low Stock', count: lowStock.length },
+    { k: 'MOVEMENTS', label: 'Usage Log' },
+  ];
+
+  const rows = tab === 'LOW_STOCK' ? lowStock.filter((i: any) =>
+    !search || String(i.name || '').toLowerCase().includes(search.toLowerCase())) : filtered;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 className="text-3xl font-bold font-serif">{title}</h2>
+          <p className="text-sm text-[#6b5d52] mt-0.5">{subtitle}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={load} className="px-3 py-2 rounded-2xl text-xs font-bold bg-[#faf7f2] border border-[#cc5a16]/15 hover:bg-white">Refresh</button>
+          {canWrite && (
+            <button
+              onClick={() => { setEditing(null); setShowEditor(true); }}
+              className="px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white hover:bg-[#b34d12]"
+            >+ Add Item</button>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        {TABS.map(t => (
+          <button
+            key={t.k} onClick={() => setTab(t.k)}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${tab === t.k ? 'bg-[#cc5a16]/15 text-[#cc5a16]' : 'bg-[#0d0a07]/5 text-[#9c8e85] hover:bg-[#0d0a07]/10'}`}
+          >
+            {t.label}{t.count != null ? ` (${t.count})` : ''}
+          </button>
+        ))}
+        <input
+          value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Search items…"
+          className="ml-auto px-4 py-2 rounded-2xl border border-[#cc5a16]/15 text-sm focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20"
+        />
+      </div>
+
+      {loading ? (
+        <div className="p-8 text-center text-sm text-[#9c8e85]">Loading…</div>
+      ) : tab === 'MOVEMENTS' ? (
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#6b5d52]">
+              <tr>
+                <th className="text-left px-4 py-3">When</th>
+                <th className="text-left px-4 py-3">Item</th>
+                <th className="text-left px-4 py-3">Type</th>
+                <th className="text-right px-4 py-3">Qty</th>
+                <th className="text-right px-4 py-3">Balance</th>
+                <th className="text-left px-4 py-3">By</th>
+                <th className="text-left px-4 py-3">Reference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {movements.length === 0 ? (
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85]">No stock movements recorded yet.</td></tr>
+              ) : movements.map((m: any) => (
+                <tr key={m.id} className="border-t border-[#cc5a16]/5">
+                  <td className="px-4 py-2.5 whitespace-nowrap">{String(m.recorded_at || '').slice(0, 16).replace('T', ' ')}</td>
+                  <td className="px-4 py-2.5 font-medium">{m.ingredient_name || m.ingredient_id}</td>
+                  <td className="px-4 py-2.5">
+                    <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-[#0d0a07]/5">{m.movement_type}</span>
+                  </td>
+                  <td className={`px-4 py-2.5 text-right font-mono ${Number(m.qty_delta) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
+                    {Number(m.qty_delta) > 0 ? '+' : ''}{Number(m.qty_delta)} {m.unit}
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-mono">{Number(m.balance_after)}</td>
+                  <td className="px-4 py-2.5 text-[#6b5d52]">{m.recorded_by_user_id || '—'}</td>
+                  <td className="px-4 py-2.5 text-[#9c8e85] text-xs">{m.reference_type ? `${m.reference_type} ${m.reference_id || ''}` : (m.notes || '—')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#6b5d52]">
+              <tr>
+                <th className="text-left px-4 py-3">Item</th>
+                <th className="text-left px-4 py-3">Category</th>
+                <th className="text-right px-4 py-3">In Stock</th>
+                <th className="text-right px-4 py-3">Reorder</th>
+                <th className="text-right px-4 py-3">Par</th>
+                <th className="text-left px-4 py-3">Module</th>
+                {canWrite && <th className="text-right px-4 py-3">Actions</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr><td colSpan={canWrite ? 7 : 6} className="px-4 py-8 text-center text-[#9c8e85]">
+                  No items yet. Add the consumables this module uses to start tracking stock.
+                </td></tr>
+              ) : rows.map((i: any) => (
+                <tr key={i.id} className="border-t border-[#cc5a16]/5">
+                  <td className="px-4 py-2.5 font-medium">
+                    {i.name}
+                    {isLow(i) && <span className="ml-2 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-red-50 text-red-600">LOW</span>}
+                  </td>
+                  <td className="px-4 py-2.5 text-[#6b5d52]">{i.category || '—'}</td>
+                  <td className="px-4 py-2.5 text-right font-mono">{Number(i.current_stock_qty || 0)} {i.unit}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-[#9c8e85]">{Number(i.reorder_point || 0)}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-[#9c8e85]">{Number(i.par_level || 0)}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${COST_MODULE_BADGE[i.module || 'RESTAURANT'] || 'bg-gray-100 text-gray-700'}`}>
+                      {COST_MODULE_LABEL[i.module || 'RESTAURANT'] || i.module}
+                    </span>
+                  </td>
+                  {canWrite && (
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => { setAdjItem(i); setAdjQty(String(i.current_stock_qty || 0)); setAdjReason(''); }}
+                        className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-bold mr-1">Adjust</button>
+                      <button onClick={() => { setEditing(i); setShowEditor(true); }}
+                        className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#6b5d52] text-xs font-bold">Edit</button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {showEditor && (
+        <IngredientEditorModal
+          token={token} restaurantId={restaurantId} ingredient={editing}
+          presetModule={module}
+          onClose={() => { setShowEditor(false); setEditing(null); }}
+          onSaved={() => { setShowEditor(false); setEditing(null); load(); }}
+        />
+      )}
+
+      {adjItem && (
+        <InventoryModalShell title="Adjust Stock" subtitle={adjItem.name} onClose={() => setAdjItem(null)}>
+          <div className="space-y-4">
+            <FormField label="New Quantity" required hint={`Current: ${Number(adjItem.current_stock_qty || 0)} ${adjItem.unit}`}>
+              <input type="number" step="0.01" value={adjQty} onChange={e => setAdjQty(e.target.value)} className={inputClass} />
+            </FormField>
+            <FormField label="Reason" hint="Recorded against your name in the usage log">
+              <input value={adjReason} onChange={e => setAdjReason(e.target.value)} className={inputClass} placeholder="e.g. Breakage during setup" />
+            </FormField>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setAdjItem(null)} className="px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#faf7f2]">Cancel</button>
+              <button onClick={saveAdjust} disabled={adjSaving}
+                className="px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white disabled:opacity-50">
+                {adjSaving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </InventoryModalShell>
+      )}
+    </div>
+  );
+}
+
 // ─── Ingredient editor (create + edit) ─────────────────────────────────────
-function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSaved }: {
+function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSaved, presetModule }: {
   token: string; restaurantId: string; ingredient: any | null; onClose: () => void; onSaved: () => void;
+  presetModule?: string;
 }) {
   const isEdit = !!ingredient?.id;
   const [form, setForm] = useState({
     name: ingredient?.name || '',
     item_type: ingredient?.item_type || 'RAW',
+    // Which part of the business the item belongs to. `presetModule` is passed
+    // by a module-scoped screen so an item added from Events Inventory is
+    // filed as EVENTS without the user having to remember to pick it.
+    module: ingredient?.module || presetModule || 'RESTAURANT',
     category: ingredient?.category || '',
     unit: ingredient?.unit || 'kg',
     current_stock_qty: ingredient?.current_stock_qty ?? 0,
@@ -57253,6 +57521,11 @@ function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSav
             <select value={form.item_type} onChange={e => setForm({ ...form, item_type: e.target.value })} className={inputClass}>
               <option value="RAW">Raw (recipe ingredient)</option>
               <option value="PACKAGED">Packaged (sold direct, e.g. water)</option>
+            </select>
+          </FormField>
+          <FormField label="Module" required hint="Which part of the business consumes this">
+            <select value={form.module} onChange={e => setForm({ ...form, module: e.target.value })} className={inputClass}>
+              {costModuleOptions()}
             </select>
           </FormField>
           <FormField label="Category">
