@@ -16425,7 +16425,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // (1-3), watch what is owed and owing (4-5), read the quick
               // numbers (6-7), then the full books (8). Every id is unchanged —
               // they are RBAC keys, so this is labels and order only.
-              { id: 'RECEIVABLES',     label: 'Receivables (AR)', requires: 'hotel' },
+              // NOT "Receivables (AR)": this route reads only
+              // `ota_commission_entries`. Customer AR lives in the ledger (1100)
+              // and is read under Receivables Ageing; there is no operational
+              // screen for it yet. Do not let this label claim otherwise.
+              { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
               { id: 'PROCUREMENT',     label: 'Purchases & Payables (AP)' },
               { id: 'EXPENSE_JOURNAL', label: 'Expenses' },
               // Always present; isVisible() gates them to owner / MANAGER / a role the
