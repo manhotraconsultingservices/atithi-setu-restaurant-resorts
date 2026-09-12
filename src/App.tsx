@@ -57779,6 +57779,22 @@ function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSav
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
+  // Categories follow the item's MODULE. This picker used to render one
+  // hardcoded kitchen list — Dairy, Meat, Produce, Grains, Spices — for every
+  // module, so filing a spa oil or a hotel towel meant choosing from a larder,
+  // and those items ended up mis-filed or blank. Re-fetched when the module
+  // changes, because changing it changes which vocabulary applies.
+  const [moduleCategories, setModuleCategories] = useState<any[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/restaurant/${restaurantId}/inventory/item-categories?module=${encodeURIComponent(form.module || 'RESTAURANT')}`,
+      { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => { if (!cancelled) setModuleCategories(Array.isArray(d) ? d : []); })
+      .catch(() => { if (!cancelled) setModuleCategories([]); });
+    return () => { cancelled = true; };
+  }, [form.module, restaurantId, token]);
+
   const save = async () => {
     if (!form.name.trim() || !form.unit) { setErr('Name and unit are required'); return; }
     setSaving(true); setErr('');
@@ -57827,10 +57843,17 @@ function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSav
               {costModuleOptions()}
             </select>
           </FormField>
-          <FormField label="Category">
+          <FormField label="Category" hint="Managed per module — add your own under Settings">
             <select value={form.category} onChange={e => setForm({ ...form, category: e.target.value })} className={inputClass}>
               <option value="">— Select —</option>
-              {INGREDIENT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              {moduleCategories.map((c: any) => (
+                <option key={c.id} value={c.name}>{c.name}{c.module === 'SHARED' ? ' (shared)' : ''}</option>
+              ))}
+              {/* An item filed under a category since retired keeps showing its
+                  own value, so opening the editor cannot silently re-file it. */}
+              {form.category && !moduleCategories.some((c: any) => c.name === form.category) && (
+                <option value={form.category}>{form.category} (not in list)</option>
+              )}
             </select>
           </FormField>
           <FormField label="Unit" required>

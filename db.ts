@@ -1956,6 +1956,67 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   )`).catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_inv_period_lines ON inventory_period_lines (period_id)`).catch(() => {});
 
+  // ── Item categories, per module, owner-editable ──────────────────────────
+  // The category list was a hardcoded array in the front end — Dairy, Meat,
+  // Produce, Grains, Spices — offered to EVERY module. So filing a spa massage
+  // oil or a hotel bath towel meant picking from a kitchen larder, and the
+  // category field on those items was therefore either wrong or blank. That is
+  // why categories "don't show correctly" outside the kitchen.
+  //
+  // Categories are a business's own vocabulary: one property files by storage
+  // location, another by supplier, another by menu section. So this is a master
+  // the owner edits, seeded per module with a sensible starting set rather than
+  // imposed.
+  await db.exec(`CREATE TABLE IF NOT EXISTS item_categories (
+    id TEXT PRIMARY KEY,
+    module TEXT NOT NULL,
+    name TEXT NOT NULL,
+    sort_order INT DEFAULT 0,
+    is_active INT DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_item_categories_mod ON item_categories (module, is_active)`).catch(() => {});
+  // The pair is the identity: one "Linen" per module, not one per typo.
+  await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_item_categories_pair ON item_categories (module, name)`).catch(() => {});
+
+  // Seed each module's starting vocabulary ONCE. Marker-guarded like every other
+  // backfill here: without it, a category the owner deleted would reappear on
+  // the next restart, which is the same defect class as the stock backfill that
+  // resurrected re-filed items.
+  await db.exec(`CREATE TABLE IF NOT EXISTS item_categories_seed (
+    id TEXT PRIMARY KEY,
+    done_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  const _catSeeded: any = await db.get("SELECT id FROM item_categories_seed WHERE id = 'once'").catch(() => null);
+  if (!_catSeeded) {
+    const seed: Array<[string, string[]]> = [
+      ['RESTAURANT', ['Dairy', 'Meat & Poultry', 'Seafood', 'Produce', 'Grains & Pulses', 'Oils & Fats', 'Spices & Masala', 'Beverages', 'Bakery', 'Frozen', 'Packaged', 'Disposables']],
+      ['HOTEL', ['Linen', 'Toiletries & Amenities', 'Housekeeping Chemicals', 'Guest Supplies', 'Minibar', 'Maintenance']],
+      ['SPA', ['Back-bar Oils', 'Creams & Lotions', 'Linen & Towels', 'Retail Products', 'Disposables', 'Equipment']],
+      ['EVENTS', ['Crockery & Cutlery', 'Linen & Drapes', 'Decor & Florals', 'Disposables', 'Fuel & Gas', 'Equipment']],
+      ['SHARED', ['Cleaning Chemicals', 'Stationery', 'Packaging', 'General']],
+    ];
+    for (const [mod, names] of seed) {
+      for (let i = 0; i < names.length; i++) {
+        await db.run(
+          `INSERT INTO item_categories (id, module, name, sort_order) VALUES (?, ?, ?, ?)
+           ON CONFLICT DO NOTHING`,
+          [`CAT-${mod}-${i}`, mod, names[i], (i + 1) * 10]
+        ).catch(() => {});
+      }
+    }
+    // Anything already filed under a category nobody declared becomes a real
+    // category rather than being silently dropped from the picker — the data is
+    // the better authority on what this property actually uses.
+    await db.exec(`INSERT INTO item_categories (id, module, name, sort_order)
+      SELECT 'CAT-EXIST-' || MD5(COALESCE(i.module,'RESTAURANT') || ':' || i.category),
+             COALESCE(i.module, 'RESTAURANT'), i.category, 900
+        FROM (SELECT DISTINCT COALESCE(module,'RESTAURANT') AS module, category FROM ingredients
+               WHERE category IS NOT NULL AND TRIM(category) <> '') i
+      ON CONFLICT DO NOTHING`).catch(() => {});
+    await db.exec("INSERT INTO item_categories_seed (id) VALUES ('once')").catch(() => {});
+  }
+
   // The events booking list sorts on these two and now pages over them.
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_event_bookings_date ON event_bookings (event_date DESC, created_at DESC)`).catch(() => {});
 

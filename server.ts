@@ -19605,6 +19605,92 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: 'Failed to fetch the period' }); }
   });
 
+  // ── Item categories, per module (owner-editable master) ─────────────────
+  app.get("/api/restaurant/:id/inventory/item-categories", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const mod = req.query.module ? _normaliseCostModule(req.query.module, '') : '';
+      const conds: string[] = ['is_active = 1'];
+      const params: any[] = [];
+      if (mod) {
+        // SHARED rides along with every module: a property-wide category like
+        // "Cleaning Chemicals" is usable from any screen, and hiding it would
+        // push people into inventing a near-duplicate per module.
+        conds.push("(module = ? OR module = 'SHARED')");
+        params.push(mod);
+      }
+      const rows = await db.query(
+        `SELECT * FROM item_categories WHERE ${conds.join(' AND ')} ORDER BY module = 'SHARED', sort_order, name`,
+        params
+      ).catch(() => []);
+      res.json(rows);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch categories' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/inventory/item-categories", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'name is required' });
+      const mod = _normaliseCostModule(req.body?.module, 'RESTAURANT');
+      const db = await getTenantDb(req.params.id);
+      // Re-adding a name that exists REVIVES it instead of failing: the common
+      // case is un-retiring a category, and a 409 there leaves the user stuck
+      // with a name they cannot use and cannot create.
+      const existing: any = await db.get(
+        "SELECT id FROM item_categories WHERE module = ? AND LOWER(name) = LOWER(?)", [mod, name]).catch(() => null);
+      if (existing) {
+        await db.run("UPDATE item_categories SET is_active = 1 WHERE id = ?", [existing.id]);
+        return res.json({ success: true, id: existing.id, revived: true });
+      }
+      const id = `CAT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        "INSERT INTO item_categories (id, module, name, sort_order) VALUES (?, ?, ?, ?)",
+        [id, mod, name, Number(req.body?.sort_order) || 500]);
+      res.json({ success: true, id });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to create the category' });
+    }
+  });
+
+  app.patch("/api/inventory/item-categories/:catId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const sets: string[] = [];
+      const params: any[] = [];
+      if (req.body?.name !== undefined) { sets.push('name = ?'); params.push(String(req.body.name).trim()); }
+      if (req.body?.sort_order !== undefined) { sets.push('sort_order = ?'); params.push(Number(req.body.sort_order) || 0); }
+      if (req.body?.is_active !== undefined) { sets.push('is_active = ?'); params.push(req.body.is_active ? 1 : 0); }
+      if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
+      params.push(req.params.catId);
+      await db.run(`UPDATE item_categories SET ${sets.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update the category' });
+    }
+  });
+
+  // Retire, never delete. Items already filed under a category keep their label:
+  // a hard delete would blank the category on historical stock and silently
+  // change what past reports say.
+  app.delete("/api/inventory/item-categories/:catId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const cat: any = await db.get("SELECT * FROM item_categories WHERE id = ?", [req.params.catId]).catch(() => null);
+      if (!cat) return res.status(404).json({ error: 'Category not found' });
+      const inUse: any = await db.get(
+        "SELECT COUNT(*)::int AS c FROM ingredients WHERE category = ? AND COALESCE(module,'RESTAURANT') = ? AND is_active = 1",
+        [cat.name, cat.module]).catch(() => ({ c: 0 }));
+      await db.run("UPDATE item_categories SET is_active = 0 WHERE id = ?", [req.params.catId]);
+      res.json({ success: true, retired: true, items_still_using: Number(inUse?.c || 0) });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to retire the category' });
+    }
+  });
+
   // ── Approved supplier list per item (stage 3) ───────────────────────────
   // GET — who may supply this item, best source first. Returns the supplier's
   // name so the caller does not have to join it back itself.
@@ -55920,8 +56006,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-close-post-date',
+    commit_marker: 'inventory-item-categories',
     code_features: [
+      'inventory-item-categories',      //FEATURE (owner-reported: 'category of items are not correctly showing'). The category picker was a HARDCODED array in the front end - Dairy, Meat, Produce, Grains, Spices - rendered for EVERY module. So filing a spa massage oil or a hotel bath towel meant choosing from a kitchen larder, and those items ended up mis-filed or blank; that is the whole reason categories looked wrong outside the kitchen. Categories are a business's own vocabulary - one property files by storage location, another by supplier, another by menu section - so this is now an owner-editable MASTER (`item_categories`), unique on (module, name) so there is one 'Linen' per module and not one per typo. Seeded ONCE per module with a sensible starting set (kitchen larder / hotel linen+amenities / spa back-bar+retail / events crockery+decor / shared chemicals+packaging), marker-guarded so a category the owner DELETES does not reappear on the next restart - the same defect class as the stock backfill that resurrected re-filed items. **Existing values are ADOPTED, not discarded:** every distinct category already on an item becomes a real category for its module, because the data is the better authority on what a property actually uses. SHARED categories appear from every module, otherwise people invent a near-duplicate per screen. Deleting RETIRES rather than removes, and reports how many items still carry it - a hard delete would blank the category on historical stock and silently change what past reports say; the editor likewise keeps showing an item's own value even if that category was retired, so opening the form cannot quietly re-file it.',
       'inventory-close-post-date',      //FIX (caught by TC-INV-PERIOD-GL, and the diagnosis matters more than the fix). The close dated its journal at the PERIOD END, so closing September on the 12th posted to the 30th - a FUTURE date. The entries were in the ledger and correct, but every report run 'up to today' excluded them, so the trial balance showed no movement at all: present and invisible, which is the worst of both. Now posts on min(period_end, today), which is unchanged for a real month-end close and correct for an early one. **The GL result is now CHECKED too** - `_postGlEntries` REFUSES an unbalanced journal and records a GL exception rather than throwing, so ignoring its return let the period row claim a `gl_journal_ref` for a posting that may never have happened. **What the investigation actually proved:** reading the raw entries over a wider window showed the posting and the reversal chain working exactly as designed - close 1 Dr 1630 600; close 2 reverses it and posts 1000; closes 3 and 4 each reverse their immediate predecessor - net 1000 on the asset, only the last close standing. The unique-ref-per-close design holds. The failure was the test's window, not the ledger.',
       'inventory-close-gl-posting',      //FEATURE (inventory gap review, phase C part 2 - stock finally reaches the BOOKS). `1600 Inventory - F&B Stock` and `1610 Inventory - Housekeeping & Amenities` were seeded in the chart of accounts and referenced NOWHERE in the server: goods receipt moved quantities and posted no journal at all, so a property holding lakhs of stock showed NONE of it on the balance sheet, and COGS was everything BOUGHT rather than what was USED - buy a quarter of rice in March and March looks unprofitable while April looks excellent. Closing a month now posts the periodic pair: **Dr consumption / Cr inventory for the OPENING stock (releasing last month's), Dr inventory / Cr consumption for the CLOSING stock**. Purchases are already expensed as supplier invoices post, so the net is COGS = purchases + opening - closing. Two COA accounts each added for Spa and Events (1620/5210, 1630/5220) rather than folding their stock into housekeeping, which would have put massage oil and banquet crockery under 'Housekeeping & Amenities' on the balance sheet; every line is also cost-centre tagged. **A DEFECT CAUGHT IN MY OWN FIRST DRAFT, before it shipped:** I used one fixed journal ref per module-month and reversed it on re-close. That breaks on the THIRD close - `_reverseJournal` is idempotent, deriving `REV-<ref>` and returning early once a journal by that name exists, and it never marks the originals `is_reversed` - so the reversal would silently short-circuit as 'already_reversed' while the new journal posted anyway, CAPITALISING THE STOCK TWICE. Both journals are individually balanced, so the trial balance would still tie and nothing would flag it. Every close now gets its OWN ref and a re-close reverses the exact ref stored on that period row. TC-INV-PERIOD-GL closes the same month THREE times and asserts the asset moves exactly once.',
       'inventory-monthly-close',         //FEATURE (inventory gap review, phase C part 1 - the owner's FIRST complaint). The system tracked stock PERPETUALLY - a recipe fires on every order and depletes ingredients in real time - but had NO periodic half whatsoever: searching the codebase for opening stock, closing stock, an inventory period or theoretical consumption returned nothing at all. So it could never answer the one question F&B control runs on: **did we use what the recipes say we used?** New `inventory_periods` + `inventory_period_lines`, one period per module per month (the kitchen and the spa are counted by different people on different days), and `_computeInventoryPeriod` derives every figure from ONE bucketed pass over `stock_movements` so the components cannot disagree with the totals they add up to: opening (everything before the window), purchases (GRN/RECEIVE), other-in (MANUAL/ADJUST/COUNT_ADJUSTMENT/REVERSAL), wastage, closing (everything up to the end), and theoretical = the CONSUMPTION rows the recipe explosion writes. **actual = opening + purchases + other-in - wastage - closing; variance = actual - theoretical**, and a positive variance is stock that left the building without a recipe to account for it - over-portioning, unlogged spoilage, or theft. Lines are STORED at close rather than recomputed on demand, because a close is a statement about a moment and recomputing it later would silently restate a signed-off month as stock moves underneath it; re-closing rewrites the same row (a correction, not a second period). BIND ORDER is commented at the query: eleven placeholders in one statement, and Postgres binds by position - reorder them and you get a plausible, wrong statement rather than an error. TC-INV-PERIOD-CLOSE asserts the IDENTITY line by line rather than an HTTP status, because a report whose parts do not add up to its own totals is worse than no report. **STILL TO COME (phase C part 2): the GL posting.** 1600/1610 remain seeded-but-unposted, so stock is still absent from the balance sheet and COGS is still everything BOUGHT rather than what was USED.',
