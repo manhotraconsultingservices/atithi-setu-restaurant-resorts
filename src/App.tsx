@@ -8846,30 +8846,46 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const AC_BTN = 'px-3 py-1.5 bg-[#a0522d] text-white text-sm rounded hover:bg-[#8b4513] disabled:opacity-40';
 
   // Two-tier accounting nav: a group row + the active group's sub-tabs.
+  // Named as Tally Prime / Zoho Books / QuickBooks name them. "GL Ledger" read
+  // as "General Ledger Ledger"; "Manual Entry" is a Journal Entry everywhere
+  // else in the profession; "GST Outstanding" is the GST Summary. The ageing
+  // reports use the SAME words as their sidebar counterparts so staff can see
+  // they are the same report rather than guessing.
   const TAB_LABEL: Record<SubTab, string> = {
-    TRIAL: 'Trial Balance', GL: 'GL Ledger', DAYBOOK: 'Day Book', JOURNAL: 'Manual Entry',
-    PNL: 'Profit & Loss', BALANCESHEET: 'Balance Sheet', CASHFLOW: 'Cash Flow',
-    GST: 'GST Outstanding', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
-    CASHBOOK: 'Cash Book', AGING_AR: 'AR Aging', AGING_AP: 'AP Aging', BANKREC: 'Bank Reconciliation',
-    BANK_ACCOUNTS: 'Bank Accounts', OWNER_EQUITY: 'Owners & Equity',
+    TRIAL: 'Trial Balance', GL: 'General Ledger', DAYBOOK: 'Day Book', JOURNAL: 'Journal Entry',
+    PNL: 'Profit & Loss', BALANCESHEET: 'Balance Sheet', CASHFLOW: 'Cash Flow Statement',
+    GST: 'GST Summary', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
+    CASHBOOK: 'Cash Book', AGING_AR: 'Receivables Ageing', AGING_AP: 'Payables Ageing', BANKREC: 'Bank Reconciliation',
+    BANK_ACCOUNTS: 'Bank Accounts', OWNER_EQUITY: "Owners' Equity",
     TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
-    EXPENSES: 'Expenses & Payments', LOANS: 'Loans / EMI',
+    EXPENSES: 'Expenses', LOANS: 'Loans / EMI',
   };
+  // Regrouped onto concepts an accountant already has a name for. What moved
+  // and why:
+  //   * "Working Capital" was doing two unrelated jobs — it held the bank/cash
+  //     tools AND the ageing reports. Split into Banking & Cash and
+  //     Receivables & Payables, which is how every ledger product divides them.
+  //   * Cash Drawers and Cash Count sat under "Controls". They are cash
+  //     handling, not controls, and belong beside the Cash Book.
+  //   * "Ownership" held one tab; folded in with Period Close as Capital & Close.
+  //   * Expenses and Loans join Receivables & Payables — both are the payable
+  //     side of the business.
+  // Every SubTab appears in exactly one group: `activeGroup` resolves the open
+  // tab by membership, so a tab missing from this list becomes unreachable.
   const ACCT_GROUPS: { key: string; label: string; tabs: SubTab[] }[] = [
     { key: 'LEDGER', label: 'Ledger', tabs: ['TRIAL', 'GL', 'DAYBOOK', 'JOURNAL'] },
-    { key: 'STATEMENTS', label: 'Statements', tabs: ['PNL', 'BALANCESHEET', 'CASHFLOW'] },
-    { key: 'GST', label: 'GST', tabs: ['GST', 'GSTR1', 'GSTR3B'] },
-    { key: 'WORKING', label: 'Working Capital', tabs: ['CASHBOOK', 'BANK_ACCOUNTS', 'AGING_AR', 'AGING_AP', 'BANKREC'] },
-    { key: 'SPEND', label: 'Expenses & Loans', tabs: ['EXPENSES', 'LOANS'] },
-    { key: 'OWNERSHIP', label: 'Ownership', tabs: ['OWNER_EQUITY'] },
-    { key: 'CONTROLS', label: 'Controls', tabs: ['CASHDRAWER', 'CASHCOUNT', 'PERIODS', 'TDS'] },
+    { key: 'STATEMENTS', label: 'Financial Statements', tabs: ['PNL', 'BALANCESHEET', 'CASHFLOW'] },
+    { key: 'ARAP', label: 'Receivables & Payables', tabs: ['AGING_AR', 'AGING_AP', 'EXPENSES', 'LOANS'] },
+    { key: 'BANKING', label: 'Banking & Cash', tabs: ['CASHBOOK', 'BANK_ACCOUNTS', 'BANKREC', 'CASHDRAWER', 'CASHCOUNT'] },
+    { key: 'TAX', label: 'GST & Tax', tabs: ['GST', 'GSTR1', 'GSTR3B', 'TDS'] },
+    { key: 'CLOSE', label: 'Capital & Close', tabs: ['OWNER_EQUITY', 'PERIODS'] },
   ];
   const activeGroup = ACCT_GROUPS.find(g => g.tabs.includes(acctTab)) || ACCT_GROUPS[0];
 
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{cashierMode ? (acctTab === 'CASHCOUNT' ? 'Cash Count' : 'Cash Drawer & Shift Handover') : 'Ledger & Books'}</h2>
+        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{cashierMode ? (acctTab === 'CASHCOUNT' ? 'Cash Count' : 'Cash Drawer & Shift Handover') : 'Accounting & Reports'}</h2>
         <p className="text-sm text-[#6b5d52] mt-1">{cashierMode ? (acctTab === 'CASHCOUNT' ? 'Count the till and post the over/short variance to the ledger' : 'Open your till · count & close · hand over to the next shift') : 'Double-entry GL · Trial balance · TDS tracker · Manual journals'}</p>
       </div>
 
@@ -16405,17 +16421,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             id: 'ACCOUNTS', label: 'Accounts', icon: <IndianRupee size={16} />,
             visible: true,
             tabs: [
-              { id: 'PROCUREMENT',     label: 'Payables & Procurement' },
-              { id: 'EXPENSE_JOURNAL', label: 'Expense Journal' },
-              { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
+              // Ordered the way the work actually happens: record the money
+              // (1-3), watch what is owed and owing (4-5), read the quick
+              // numbers (6-7), then the full books (8). Every id is unchanged —
+              // they are RBAC keys, so this is labels and order only.
+              { id: 'RECEIVABLES',     label: 'Receivables (AR)', requires: 'hotel' },
+              { id: 'PROCUREMENT',     label: 'Purchases & Payables (AP)' },
+              { id: 'EXPENSE_JOURNAL', label: 'Expenses' },
               // Always present; isVisible() gates them to owner / MANAGER / a role the
               // owner EXPLICITLY granted the tab in Staff Access — so finance is
               // controllable per-role, not owner-hardcoded. Others never see them.
-              { id: 'ACCOUNTS_VENDOR_AGING', label: 'Vendor Aging' },
-              { id: 'ACCOUNTS_PNL',          label: 'P&L Report' },
-              { id: 'ACCOUNTS_CASHFLOW',     label: 'Cash Flow' },
-              { id: 'ACCOUNTS_GST',          label: 'GST Ledger' },
-              { id: 'ACCOUNTING',            label: 'Ledger & Books' },
+              { id: 'ACCOUNTS_VENDOR_AGING', label: 'Payables Ageing' },
+              { id: 'ACCOUNTS_GST',          label: 'GST Summary' },
+              // "Snapshot" because these are the OPERATIONAL views, computed
+              // from the source tables (/reports/pnl, /reports/cash-flow) — not
+              // the statutory statements, which are GL-derived and live under
+              // Accounting & Reports -> Financial Statements. They are allowed
+              // to differ; the names now say which is which instead of showing
+              // two profit figures called the same thing.
+              { id: 'ACCOUNTS_PNL',          label: 'P&L Snapshot' },
+              { id: 'ACCOUNTS_CASHFLOW',     label: 'Cash Flow Snapshot' },
+              { id: 'ACCOUNTING',            label: 'Accounting & Reports' },
             ],
           },
           {

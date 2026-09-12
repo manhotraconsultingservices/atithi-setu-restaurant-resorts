@@ -330,6 +330,18 @@ export const hi: Record<string, string> = {
   'Spa & Wellness': 'स्पा और वेलनेस', 'Appointment Calendar': 'अपॉइंटमेंट कैलेंडर', 'Appointments': 'अपॉइंटमेंट', 'Service Menu': 'सेवा मेन्यू', 'Therapists & Cabins': 'थेरेपिस्ट और केबिन', 'Clients': 'ग्राहक', 'Packages & Memberships': 'पैकेज और सदस्यता', 'Spa Reports': 'स्पा रिपोर्ट', 'Invoices & Payments': 'इनवॉइस और भुगतान',
   'Reservations': 'बुकिंग', 'Room Availability': 'कमरा उपलब्धता', 'Status Board': 'स्थिति बोर्ड', 'Room Setup': 'कमरा सेटअप', 'Hotel Reports': 'होटल रिपोर्ट', 'Guest Requests': 'अतिथि अनुरोध', 'Housekeeping': 'हाउसकीपिंग', 'Service Catalogue': 'सेवा सूची', 'Guest Bills': 'अतिथि बिल', 'Guest Compliance': 'अतिथि अनुपालन', 'Concierge': 'कंसीयज',
   'Events & Convention': 'इवेंट्स और कन्वेंशन', 'Dashboard': 'डैशबोर्ड', 'Event Calendar': 'इवेंट कैलेंडर', 'Bookings': 'बुकिंग', 'Halls & Venues': 'हॉल और स्थान', 'Rental Inventory': 'किराया इन्वेंटरी', 'Add-on Services': 'ऐड-ऑन सेवाएं', 'Catering Menus': 'कैटरिंग मेन्यू', 'Quotations': 'कोटेशन', 'Cleaning Checklist': 'सफाई चेकलिस्ट', 'Events Reports': 'इवेंट रिपोर्ट', 'Data Migration': 'डेटा माइग्रेशन', 'Public Page Settings': 'सार्वजनिक पेज सेटिंग्स',
+  // Accounts nav, renamed to standard accounting terms (Sep 2026). These
+  // labels ARE the i18n keys, so a rename without an entry here silently
+  // shows English. Old keys kept above — harmless, and nothing proves they
+  // are unused elsewhere.
+  'Receivables (AR)': 'प्राप्य (AR)',
+  'Purchases & Payables (AP)': 'खरीद और देय (AP)',
+  'Expenses': 'व्यय',
+  'Payables Ageing': 'देय एजिंग',
+  'GST Summary': 'GST सारांश',
+  'P&L Snapshot': 'लाभ-हानि झलक',
+  'Cash Flow Snapshot': 'कैश फ्लो झलक',
+  'Accounting & Reports': 'लेखांकन और रिपोर्ट',
   'Accounts': 'खाते', 'Payables & Procurement': 'देय और खरीद', 'Expense Journal': 'व्यय जर्नल', 'OTA & Agent Receivables': 'OTA और एजेंट प्राप्य', 'Vendor Aging': 'वेंडर एजिंग', 'P&L Report': 'लाभ-हानि रिपोर्ट', 'Cash Flow': 'कैश फ्लो', 'GST Ledger': 'GST लेजर', 'Ledger & Books': 'लेजर और बही',
   'Cash': 'नकद', 'Cash Drawer': 'कैश ड्रॉअर',
   'Inventory': 'इन्वेंटरी', 'Hotel Inventory': 'होटल इन्वेंटरी', 'Kitchen Inventory': 'किचन इन्वेंटरी', 'Spa Inventory': 'स्पा इन्वेंटरी',
