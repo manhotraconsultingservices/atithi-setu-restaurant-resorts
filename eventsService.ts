@@ -665,6 +665,20 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // requiring one would be wrong for them.
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS account_id TEXT`).catch(() => {});
   await tenantDb.exec(`CREATE INDEX IF NOT EXISTS idx_event_bookings_account ON event_bookings(account_id) WHERE account_id IS NOT NULL`).catch(() => {});
+
+  // Revising a COMPLETED booking. An event that is over can still be wrong -
+  // the client added twenty covers on the night, a service was not delivered,
+  // a rate was agreed and not applied - and until now the only way to correct
+  // it was to cancel the invoice and leave the booking frozen, because a
+  // COMPLETED booking refuses every edit.
+  //
+  // How many times it has been revised, why the last time, and by whom. Kept
+  // on the booking rather than only in the audit log so the figures can carry
+  // their own explanation on screen.
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS revision_number INT DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS revise_reason TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS revised_by TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS revised_at TIMESTAMP`).catch(() => {});
   // GST portion of the (now tax-inclusive) total_amount, so the booking screen
   // and reports can show tax separately and net it out of revenue. total_amount
   // = subtotal + tax_amount − discount (matches the quotation/invoice model).

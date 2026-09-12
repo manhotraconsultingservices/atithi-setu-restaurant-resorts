@@ -28758,6 +28758,117 @@ ${data.tenant.name}`;
   });
 
   // ─── BOOKINGS ──────────────────────────────────────────────────────────────
+  // Void an event's live invoice and take its journal back out. Shared by
+  // cancelling an invoice and revising a completed booking, because they do the
+  // same thing to the ledger and a billing rule with two copies is a billing
+  // rule that will disagree with itself.
+  const _voidEventInvoice = async (
+    db: DbInterface, req: AuthRequest, bookingId: string, reason: string, action: 'CANCELLED' | 'SUPERSEDED',
+  ): Promise<{ ok: boolean; status?: number; error?: string; folio?: any; rev?: any }> => {
+    await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP").catch(() => {});
+    await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancelled_by TEXT").catch(() => {});
+    await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancel_reason TEXT").catch(() => {});
+    const folio: any = await db.get(
+      "SELECT * FROM folios WHERE folio_kind = 'EVENT' AND event_booking_id = ? AND status NOT IN ('voided','cancelled') ORDER BY created_at DESC LIMIT 1",
+      [bookingId]);
+    if (!folio) return { ok: false, status: 404, error: 'No active invoice for this booking' };
+    const by = req.user?.email || req.user?.id || null;
+    // A credit note already reversed this one; reversing again would double it.
+    const cnChild = await db.get("SELECT id FROM folios WHERE parent_folio_id = ? AND doc_type = 'CREDIT_NOTE' LIMIT 1", [folio.id]).catch(() => null);
+    let rev: any = { reversed: 0, reversalRef: null };
+    const verb = action === 'CANCELLED' ? 'cancelled' : 'superseded';
+    if (!cnChild) {
+      rev = await _reverseJournal(db, req.params.id, `FOLIO-${folio.id}`, {
+        sourceType: 'FOLIO_CANCELLED', sourceId: folio.id,
+        reason: `Invoice ${verb} — ${reason}`, postedBy: by,
+      });
+    }
+    await db.run("UPDATE folios SET status = 'voided', cancelled_at = NOW(), cancelled_by = ?, cancel_reason = ? WHERE id = ?",
+      [by, reason, folio.id]);
+    await writeObjectAudit(db, req, {
+      objectType: 'FOLIO', objectId: folio.id, action,
+      summary: `Event invoice ${folio.invoice_number || folio.id} ${verb} — ${reason}${rev?.reversed ? ` · GL reversed (${rev.reversalRef})` : ''}`,
+      before: { status: folio.status }, after: { status: 'voided' },
+    }).catch(() => {});
+    await writeObjectAudit(db, req, {
+      objectType: 'EVENT_BOOKING', objectId: bookingId,
+      action: action === 'CANCELLED' ? 'INVOICE_CANCELLED' : 'INVOICE_SUPERSEDED',
+      summary: `Invoice ${folio.invoice_number || folio.id} ${verb} — ${reason}`,
+    }).catch(() => {});
+    return { ok: true, folio, rev };
+  };
+
+  // ─── Revise a completed event ──────────────────────────────────────
+  // An event that is over can still be billed wrong: twenty covers added on
+  // the night, a service not delivered, a rate agreed and never applied. Until
+  // now a COMPLETED booking refused every edit, so the only way to correct one
+  // was to cancel its invoice and leave the booking frozen and unbillable.
+  //
+  // Revising reopens the booking for editing and takes the old invoice out of
+  // the books in the same step — it does NOT edit a tax invoice in place,
+  // which would be the wrong thing to do to a document already issued. The
+  // sequence is: revise → change the items or the pricing → re-issue the
+  // invoice (checkout) → complete. Each of those already exists and each of
+  // their guards already passes for an IN_PROGRESS booking, which is why this
+  // returns the booking to that state rather than inventing a new one.
+  app.post("/api/restaurant/:id/events/bookings/:bid/revise", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const reason = String(req.body?.reason || '').trim();
+    // Reopening a signed-off event and its invoice is exactly the act that
+    // needs explaining later.
+    if (reason.length < 3) return res.status(400).json({ error: 'A reason is required to revise a completed booking (it goes on the booking and in the audit trail).' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: 'Booking not found' });
+      const status = String(bk.status || '').toUpperCase();
+      if (status === 'CANCELLED') return res.status(409).json({ error: 'A cancelled booking cannot be revised. Create a new booking instead.' });
+      if (status !== 'COMPLETED') {
+        return res.status(409).json({
+          error: `Only a completed booking needs revising — this one is ${status}, so it can still be edited directly.`,
+          status,
+        });
+      }
+
+      // Take the issued invoice out of the books. A completed booking normally
+      // has one; if it was already cancelled there is nothing to reverse and
+      // reopening is still the right outcome.
+      let invoice: any = null, reversed: any = null;
+      const voided = await _voidEventInvoice(db, req, req.params.bid, reason, 'SUPERSEDED');
+      if (voided.ok) { invoice = voided.folio; reversed = voided.rev; }
+
+      const nextRev = Number(bk.revision_number || 0) + 1;
+      await db.run(
+        `UPDATE event_bookings
+            SET status = 'IN_PROGRESS', folio_id = NULL,
+                revision_number = ?, revise_reason = ?, revised_by = ?, revised_at = CURRENT_TIMESTAMP
+          WHERE id = ?`,
+        [nextRev, reason, req.user?.email || req.user?.id || null, req.params.bid]);
+
+      // The company no longer owes the superseded invoice; the sync reads the
+      // folio and clears the statement row until a new invoice is raised.
+      await _syncAccountInvoiceForEvent(db, req.params.bid);
+
+      await writeObjectAudit(db, req, {
+        objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'REVISED',
+        summary: `Reopened for revision ${nextRev} — ${reason}${invoice ? ` · invoice ${invoice.invoice_number || invoice.id} superseded` : ' · no live invoice'}`,
+        before: { status: 'COMPLETED', folio_id: bk.folio_id }, after: { status: 'IN_PROGRESS', revision_number: nextRev },
+      }).catch(() => {});
+
+      const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      res.json({
+        success: true, booking: row, revision_number: nextRev,
+        superseded_invoice: invoice ? { id: invoice.id, invoice_number: invoice.invoice_number } : null,
+        gl_reversed: !!reversed?.reversed,
+        next_steps: 'Adjust the items or pricing, re-issue the invoice, then mark the event complete again.',
+      });
+    } catch (err: any) {
+      console.error('/events/bookings revise error:', err);
+      res.status(500).json({ error: 'Failed to reopen the booking for revision' });
+    }
+  });
+
   // ─── Events ↔ Company Accounts ─────────────────────────────────────
   // Resolve and vet the account a booking is billed to. Returns the account so
   // callers can echo its name, plus a WARNING (never a refusal) when the
@@ -29314,18 +29425,9 @@ ${data.tenant.name}`;
     if (reason.length < 3) return res.status(400).json({ error: 'A cancellation reason is required (for the audit trail).' });
     try {
       const db = await getTenantDb(req.params.id);
-      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP").catch(() => {});
-      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancelled_by TEXT").catch(() => {});
-      await db.exec("ALTER TABLE folios ADD COLUMN IF NOT EXISTS cancel_reason TEXT").catch(() => {});
-      const folio: any = await db.get("SELECT * FROM folios WHERE folio_kind = 'EVENT' AND event_booking_id = ? AND status NOT IN ('voided','cancelled') ORDER BY created_at DESC LIMIT 1", [req.params.bid]);
-      if (!folio) return res.status(404).json({ error: 'No active invoice for this booking' });
-      const by = req.user?.email || req.user?.id || null;
-      const cnChild = await db.get("SELECT id FROM folios WHERE parent_folio_id = ? AND doc_type = 'CREDIT_NOTE' LIMIT 1", [folio.id]).catch(() => null);
-      let rev: any = { reversed: 0, reversalRef: null };
-      if (!cnChild) rev = await _reverseJournal(db, req.params.id, `FOLIO-${folio.id}`, { sourceType: 'FOLIO_CANCELLED', sourceId: folio.id, reason: `Invoice cancelled — ${reason}`, postedBy: by });
-      await db.run("UPDATE folios SET status = 'voided', cancelled_at = NOW(), cancelled_by = ?, cancel_reason = ? WHERE id = ?", [by, reason, folio.id]);
-      await writeObjectAudit(db, req, { objectType: 'FOLIO', objectId: folio.id, action: 'CANCELLED', summary: `Event invoice ${folio.invoice_number || folio.id} cancelled — ${reason}${rev?.reversed ? ` · GL reversed (${rev.reversalRef})` : ''}`, before: { status: folio.status }, after: { status: 'voided' } }).catch(() => {});
-      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICE_CANCELLED', summary: `Invoice ${folio.invoice_number || folio.id} cancelled — ${reason}` }).catch(() => {});
+      const out = await _voidEventInvoice(db, req, req.params.bid, reason, 'CANCELLED');
+      if (!out.ok) return res.status(out.status!).json({ error: out.error });
+      const { folio, rev } = out;
       // The invoice is void, so the company no longer owes it. _sync reads the
       // folio status and removes the statement row.
       await _syncAccountInvoiceForEvent(db, req.params.bid);
@@ -57020,8 +57122,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'midnight-hour-is-zero',
+    commit_marker: 'event-revise-completed',
     code_features: [
+      'event-revise-completed: a COMPLETED event booking froze - PUT refused every edit - so a bill that turned out wrong after the night (covers added on the day, a service not delivered, an agreed rate never applied) had nowhere to go except cancelling the invoice and leaving the booking stuck and unbillable. New POST /events/bookings/:bid/revise requires a REASON, supersedes the issued invoice (voided + GL reversed + audited) and returns the booking to IN_PROGRESS with folio_id cleared, recording revision_number / revise_reason / revised_by / revised_at on the booking itself. It deliberately reuses IN_PROGRESS rather than inventing a status: every downstream guard (PUT, checkout, complete) already passes for it, so nothing else had to be threaded. It NEVER edits a tax invoice in place - the old one is superseded and a fresh number is minted at re-checkout. The void-and-reverse is now ONE helper _voidEventInvoice shared with /invoice/cancel, because a billing rule with two copies is one that will disagree with itself. Account statements re-sync automatically (the Stage 3 helper reads the folio status). UI: a Revise Booking action on a completed booking plus a revision note carrying the reason. Smoke: TC-EVT-REVISE (only completed, only with a reason, and an edit IS refused while completed), -REVERSES (the superseded journal really is out of the ledger), -REISSUE (price corrected, fresh invoice number, completed again), -LEDGER (the books hold the REVISED figure, not the original and not the sum of both).',
       'midnight-hour-is-zero: toLocaleString(..., {hour12:false}) reports the MIDNIGHT hour as 24, not 00 - the h24 cycle, and on that cycle midnight also belongs to the PREVIOUS date (2026-09-12, 24:38). Three call sites parsed that string. (1) computeEarlyCheckinFee: between 00:00 and 00:59 IST an arrival read as 1440-1499 minutes - later than any configurable cut-off - AND its date failed to match the arrival date, so an early arrival in that hour was never charged. (2) computeLateCheckoutFee: the same hour fed the hours-late arithmetic, adding 24. (3) the peak-hours analytics bucketed every midnight order into an hour 24 that does not exist, so the 00:00 bar always read zero. One helper _istNowParts() now uses hourCycle h23 (with a %24 guard for engines that ignore it) and returns date/hour/minute/minutes/hhmm. FOUND by refusing to write off TC-HOTEL-EARLY-CHECKIN-CHARGE as a flaky test: it only fails when the suite runs between midnight and 1am IST, which is when this run happened. NOTE: the quirk does NOT reproduce on the dev machine Node - both spellings give 00:30 there - so it is ICU-version dependent and the fix is validated against the server, not locally.',
       'close-shows-its-identity: FOUND BY DRIVING THE REAL UI, not by a test. The Kitchen month-end screen showed opening Rs.99,231.50 rising to closing Rs.668,751.50 with purchases, wastage and usage all zero - figures that visibly do not add up, on the screen whose entire job is to be believed. Cause: _computeInventoryPeriod computes other_in_qty per line (stock that arrived WITHOUT being a purchase - opening balances, transfers, positive corrections) and never valued it, so neither the lines nor the totals carried other_in_value and the close could not reconcile its own identity. Server now values it per line and in totals. The screen leads with the identity in words (opening + purchases + other in - wastage - closing = used) and orders the tiles to match, so the arithmetic reads left to right; the line table splits its old combined In column into Bought and Other in. Also confirmed in the same pass: the Kitchen closing figure Rs.668,751.50 matches the dashboard stock value exactly, so the valuation-at-cost change flows through the close as intended.',
       'batches-scoped-abc-everywhere: (1) LEAK CLOSED - /inventory/batches was the ONE inventory read carrying no module filter, so it returned every module batches AND their unit costs to whoever asked; a spa screen could list the kitchen stock and what it cost. It already joined ingredients, so the standard _invModuleFilter applies directly; the response now also carries the module per row. (2) InventoryAnalyticsView takes a module (plus include_shared) and passes it to all of abc-analysis, expiring, dead-stock and batches. Without it those endpoints return the WHOLE property - so the kitchen ABC classification had been silently ranking hotel linen and spa oils against its own ingredients. The kitchen mount now declares module=RESTAURANT include_shared. (3) The same component is mounted on the shared module screen as an Analysis tab, so Hotel, Spa and Events can finally see ABC, open batches, expiry and dead stock - all of which the API had been computing per module all along with no way to reach it. A batch panel was added showing remaining qty, unit cost and expiry, which is also what the stock is now valued at. Smoke: TC-INV-BATCHES-SCOPED - and it asserts a module with NO batches gets FEWER rows than the unfiltered call, because every() on an empty array is true and a match-only assertion would pass while the leak stayed open.',

@@ -1906,7 +1906,37 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             finally { setBusy(false); }
           }}>Cancel Invoice</button>
         )}
+        {/* Revising a COMPLETED event. The booking is frozen once complete —
+            every edit is refused — so a bill that turns out wrong after the
+            night (covers added on the day, a service not delivered, an agreed
+            rate never applied) had nowhere to go. This reopens it and takes the
+            issued invoice out of the books in the same step; it never edits a
+            tax invoice in place. */}
+        {bk.status === 'COMPLETED' && evCanEdit('EVENTS_BOOKINGS') && (
+          <button className={`${BTN_GHOST} !text-amber-800 !border-amber-300 hover:!bg-amber-50`} disabled={busy}
+            title="Reopen this completed booking so the items or pricing can be corrected, then re-issue the invoice"
+            onClick={async () => {
+              const reason = window.prompt('Revise this completed booking?\n\nThe booking reopens for editing and the issued invoice is superseded — reversed in the accounts and kept for audit. You then adjust the items or pricing, re-issue the invoice, and mark the event complete again.\n\nEnter a reason (required):');
+              if (reason === null) return;
+              if (reason.trim().length < 3) { alert('A reason is required to revise a completed booking.'); return; }
+              setBusy(true);
+              try {
+                const r: any = await api(`/events/bookings/${bookingId}/revise`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) });
+                await load();
+                alert(`Reopened for revision ${r?.revision_number ?? ''}.\n\n${r?.superseded_invoice?.invoice_number ? `Invoice ${r.superseded_invoice.invoice_number} superseded and reversed in the accounts.` : 'There was no live invoice to reverse.'}\n\nNext: adjust the items or pricing, re-issue the invoice, then mark the event complete.`);
+              }
+              catch (e: any) { alert('Revise failed: ' + (e?.message || 'error')); }
+              finally { setBusy(false); }
+            }}>Revise Booking</button>
+        )}
       </div>
+
+      {Number(bk.revision_number || 0) > 0 && (
+        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mt-2">
+          <strong>Revision {bk.revision_number}.</strong>{bk.revise_reason ? ` ${bk.revise_reason}` : ''}
+          {bk.status !== 'COMPLETED' && ' — adjust the items or pricing, re-issue the invoice, then mark the event complete.'}
+        </p>
+      )}
 
       {showCancel && (
         <CancelEventDialog restaurantId={restaurantId} token={token} bookingId={bookingId}
