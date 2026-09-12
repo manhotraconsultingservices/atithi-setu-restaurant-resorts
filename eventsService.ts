@@ -654,6 +654,17 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // raised for a company was missing a mandatory field. Blank for a walk-in
   // consumer, and the invoice then prints no GST bill-to block at all.
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS customer_address TEXT`).catch(() => {});
+  // Which COMPANY this event is billed to, when it is not a walk-in consumer.
+  // The customer_* columns above are a name and a phone number typed onto one
+  // booking; they cannot carry payment terms, a credit limit, or the other
+  // events the same company ran last year. account_id points at the account
+  // master (travel_agents, see db.ts createAccountTables) so a corporate event
+  // lands on that company's statement beside its room nights.
+  //
+  // NULLABLE on purpose: most events are consumer weddings with no account, and
+  // requiring one would be wrong for them.
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS account_id TEXT`).catch(() => {});
+  await tenantDb.exec(`CREATE INDEX IF NOT EXISTS idx_event_bookings_account ON event_bookings(account_id) WHERE account_id IS NOT NULL`).catch(() => {});
   // GST portion of the (now tax-inclusive) total_amount, so the booking screen
   // and reports can show tax separately and net it out of revenue. total_amount
   // = subtotal + tax_amount − discount (matches the quotation/invoice model).

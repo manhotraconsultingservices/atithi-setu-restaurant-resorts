@@ -28655,6 +28655,89 @@ ${data.tenant.name}`;
   });
 
   // ─── BOOKINGS ──────────────────────────────────────────────────────────────
+  // ─── Events ↔ Company Accounts ─────────────────────────────────────
+  // Resolve and vet the account a booking is billed to. Returns the account so
+  // callers can echo its name, plus a WARNING (never a refusal) when the
+  // company is on credit hold or past its limit: the person taking the booking
+  // should see it, but a booking is not necessarily on credit terms, and
+  // refusing here would block cash business with a company that happens to owe
+  // money. Enforcement at the point of extending credit is a separate decision.
+  const _checkAccountLink = async (db: DbInterface, accountId: any): Promise<{ ok: boolean; error?: string; account?: any; warning?: string | null }> => {
+    const id = String(accountId || '').trim();
+    if (!id) return { ok: true, account: null, warning: null };
+    const acc: any = await db.get("SELECT * FROM travel_agents WHERE id = ?", [id]).catch(() => null);
+    if (!acc) return { ok: false, error: `Account ${id} not found` };
+    if (Number(acc.is_active) === 0) return { ok: false, error: `${acc.name} is no longer an active account` };
+    const bal: any = await db.get(
+      `SELECT COALESCE(SUM(net_due - COALESCE(net_received, 0)), 0) AS outstanding
+         FROM partner_invoices
+        WHERE partner_type = 'AGENT' AND partner_code = ?
+          AND status NOT IN ('PAID', 'WRITTEN_OFF')
+          AND (net_due - COALESCE(net_received, 0)) > 0`, [id]).catch(() => null);
+    const outstanding = Math.round(Number(bal?.outstanding || 0) * 100) / 100;
+    // A NULL limit means "not set", which is NOT zero — a zero limit would read
+    // as "no credit at all" and flag every account.
+    const limit = acc.credit_limit == null ? null : Number(acc.credit_limit);
+    let warning: string | null = null;
+    if (String(acc.credit_status || 'ACTIVE').toUpperCase() === 'HOLD') {
+      warning = `${acc.name} is on CREDIT HOLD. Take payment on the day unless the owner clears the hold.`;
+    } else if (limit != null && outstanding > limit) {
+      warning = `${acc.name} already owes Rs.${outstanding.toFixed(2)} against a limit of Rs.${limit.toFixed(2)}.`;
+    }
+    return { ok: true, account: acc, warning };
+  };
+
+  // Put this booking on its company statement, or take it off again. Called
+  // wherever the amount owed can change: invoicing, receipts, cancellation.
+  //
+  // Keyed on a DERIVED id (PINV-EVT-<booking>) rather than a fresh one, so it
+  // is an upsert and calling it twice cannot bill a company twice — which
+  // matters because /checkout is re-entrant and /payments fires per receipt.
+  const _syncAccountInvoiceForEvent = async (db: DbInterface, bookingId: string): Promise<void> => {
+    try {
+      const bk: any = await db.get("SELECT id, account_id, folio_id, customer_name FROM event_bookings WHERE id = ?", [bookingId]);
+      if (!bk || !String(bk.account_id || '').trim()) return;
+      const pinvId = `PINV-EVT-${bookingId}`;
+      const folio: any = bk.folio_id ? await db.get("SELECT * FROM folios WHERE id = ?", [bk.folio_id]).catch(() => null) : null;
+      // No invoice raised, or it was cancelled: nothing should be sitting on
+      // the company's statement, so remove any row a previous state left.
+      if (!folio || ['voided', 'cancelled'].includes(String(folio.status || '').toLowerCase())) {
+        await db.run("DELETE FROM partner_invoices WHERE id = ?", [pinvId]).catch(() => {});
+        return;
+      }
+      const acc: any = await db.get("SELECT id, name, payment_terms_days FROM travel_agents WHERE id = ?", [bk.account_id]).catch(() => null);
+      if (!acc) return;
+      const paidRow: any = await db.get(
+        "SELECT COALESCE(SUM(amount), 0) AS t FROM event_payments WHERE booking_id = ?", [bookingId]).catch(() => null);
+      const gross = Math.round(Number(folio.grand_total || 0) * 100) / 100;
+      const received = Math.round(Number(paidRow?.t || 0) * 100) / 100;
+      const invDate = _glPostDate(folio.created_at);
+      const terms = Number(acc.payment_terms_days || 30);
+      const due = new Date(Date.parse(`${invDate}T00:00:00Z`) + terms * 86400000).toISOString().slice(0, 10);
+      const status = received >= gross - 0.01 ? 'PAID' : received > 0.01 ? 'PARTIAL' : 'PENDING';
+      // 14 columns = 11 placeholders + 3 literals ('AGENT', 0, 'AUTO'); the 11
+      // bound values below are in exactly that order.
+      await db.run(
+        `INSERT INTO partner_invoices
+           (id, partner_type, partner_code, partner_name, invoice_number, invoice_date,
+            gross_amount, commission_amount, net_due, net_received, due_date, status,
+            source, booking_ids_json)
+         VALUES (?, 'AGENT', ?, ?, ?, ?::date, ?, 0, ?, ?, ?::date, ?, 'AUTO', ?)
+         ON CONFLICT (id) DO UPDATE SET
+            partner_code = EXCLUDED.partner_code, partner_name = EXCLUDED.partner_name,
+            invoice_number = EXCLUDED.invoice_number, invoice_date = EXCLUDED.invoice_date,
+            gross_amount = EXCLUDED.gross_amount, net_due = EXCLUDED.net_due,
+            net_received = EXCLUDED.net_received, due_date = EXCLUDED.due_date,
+            status = EXCLUDED.status, booking_ids_json = EXCLUDED.booking_ids_json,
+            updated_at = CURRENT_TIMESTAMP`,
+        [pinvId, acc.id, acc.name, folio.invoice_number || null, invDate,
+         gross, gross, received, due, status, JSON.stringify([bookingId])]);
+    } catch (err) {
+      // Never fail the operational request over the statement mirror.
+      console.warn(`[events] account statement sync failed for ${bookingId}:`, err);
+    }
+  };
+
   app.get("/api/restaurant/:id/events/bookings", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -28664,9 +28747,11 @@ ${data.tenant.name}`;
       const from = String(req.query.from || '').trim();
       const to = String(req.query.to || '').trim();
       const search = String(req.query.search || '').trim();
-      let sql = `SELECT b.*, v.name AS venue_name, v.category AS venue_category, v.ac_type
+      let sql = `SELECT b.*, v.name AS venue_name, v.category AS venue_category, v.ac_type,
+                        a.name AS account_name, a.credit_status AS account_credit_status
                    FROM event_bookings b
                    LEFT JOIN event_venues v ON v.id = b.venue_id
+                   LEFT JOIN travel_agents a ON a.id = b.account_id
                   WHERE 1=1`;
       const params: any[] = [];
       if (status) { sql += ` AND b.status = ?`; params.push(status); }
@@ -28813,25 +28898,35 @@ ${data.tenant.name}`;
         }
       }
 
+      // Billed to a company? Vet it before the row exists, so a bad link is a
+      // 400 rather than a booking pointing at nothing.
+      const acctLink = await _checkAccountLink(db, b.account_id);
+      if (!acctLink.ok) return res.status(400).json({ error: acctLink.error });
+
       const id = mkEventId('EVT');
+      // account_id is appended LAST in both the column list and the values, so
+      // the existing 22 bindings keep their positions.
       await db.run(
         `INSERT INTO event_bookings
           (id, venue_id, customer_name, customer_phone, customer_email, customer_gstin, customer_address, event_type, status,
            event_date, end_date, start_time, end_time, venue_rate_basis, half_day_slot, guest_count, booking_source,
-           venue_rate, discount, advance_amount, special_requests, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           venue_rate, discount, advance_amount, special_requests, created_by, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, b.venue_id || null, b.customer_name, b.customer_phone || null, b.customer_email || null,
          b.customer_gstin || null, b.customer_address || null, b.event_type || null, targetStatus,
          b.event_date, b.end_date || null, startTime, endTime, rateBasis, slot, Number(b.guest_count || 0),
          b.booking_source || 'DIRECT', round2(venueRate), Number(b.discount || 0),
-         Number(b.advance_amount || 0), b.special_requests || null, req.user?.email || null]
+         Number(b.advance_amount || 0), b.special_requests || null, req.user?.email || null,
+         acctLink.account?.id || null]
       );
       await insertEventLines(db, id, b);
       await recomputeEventTotal(db, id);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [id]);
-      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: id, action: 'CREATED', summary: `Booking created for ${b.customer_name} on ${b.event_date} (${targetStatus})`, after: row });
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: id, action: 'CREATED', summary: `Booking created for ${b.customer_name} on ${b.event_date} (${targetStatus})${acctLink.account ? ` — billed to ${acctLink.account.name}` : ''}`, after: row });
       notifyEvent(req.params.id, 'EVENT_BOOKING_CREATED', row);
-      res.status(201).json(row);
+      // The warning rides along with the created booking rather than blocking
+      // it — the person on the phone gets to see it and decide.
+      res.status(201).json(acctLink.warning ? { ...row, credit_warning: acctLink.warning } : row);
     } catch (err: any) {
       console.error("/events/bookings create error:", err);
       res.status(500).json({ error: "Failed to create booking" });
@@ -28907,10 +29002,20 @@ ${data.tenant.name}`;
         }
       }
 
+      // Re-vetted on every edit: an account can be deactivated between the
+      // booking being taken and being changed.
+      let acctWarning: string | null = null;
+      if (b.account_id !== undefined) {
+        const link = await _checkAccountLink(db, b.account_id);
+        if (!link.ok) return res.status(400).json({ error: link.error });
+        acctWarning = link.warning || null;
+        b.account_id = link.account?.id || null;
+      }
+
       const fields: string[] = []; const vals: any[] = [];
       const allow = ['venue_id','customer_name','customer_phone','customer_email','customer_gstin','customer_address','event_type',
         'event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot','guest_count','booking_source',
-        'venue_rate','discount','discount_hotel','advance_amount','special_requests'];
+        'venue_rate','discount','discount_hotel','advance_amount','special_requests','account_id'];
       for (const k of allow) {
         if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(b[k]); }
       }
@@ -28934,7 +29039,10 @@ ${data.tenant.name}`;
       await recomputeEventTotal(db, req.params.bid);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'EDITED', summary: `Booking details updated`, before: existing, after: row });
-      res.json(row);
+      // Re-pointing a booking at a different company (or the total changing)
+      // moves what is owed, so the statement is refreshed here too.
+      await _syncAccountInvoiceForEvent(db, req.params.bid);
+      res.json(acctWarning ? { ...row, credit_warning: acctWarning } : row);
     } catch (err: any) {
       console.error("/events/bookings update error:", err);
       res.status(500).json({ error: "Failed to update booking" });
@@ -29115,6 +29223,9 @@ ${data.tenant.name}`;
       await db.run("UPDATE folios SET status = 'voided', cancelled_at = NOW(), cancelled_by = ?, cancel_reason = ? WHERE id = ?", [by, reason, folio.id]);
       await writeObjectAudit(db, req, { objectType: 'FOLIO', objectId: folio.id, action: 'CANCELLED', summary: `Event invoice ${folio.invoice_number || folio.id} cancelled — ${reason}${rev?.reversed ? ` · GL reversed (${rev.reversalRef})` : ''}`, before: { status: folio.status }, after: { status: 'voided' } }).catch(() => {});
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICE_CANCELLED', summary: `Invoice ${folio.invoice_number || folio.id} cancelled — ${reason}` }).catch(() => {});
+      // The invoice is void, so the company no longer owes it. _sync reads the
+      // folio status and removes the statement row.
+      await _syncAccountInvoiceForEvent(db, req.params.bid);
       res.json({ success: true, folio_id: folio.id, status: 'voided', gl_reversed: !!rev?.reversed });
     } catch (err: any) { console.error('[event-invoice-cancel] error:', err); res.status(500).json({ error: err?.message || 'Failed to cancel invoice' }); }
   });
@@ -29278,6 +29389,9 @@ ${data.tenant.name}`;
         [pid, req.params.bid, b.schedule_id || null, amount, b.method || 'CASH', b.reference || null, b.paid_at || new Date().toISOString().slice(0, 10), b.note || null, req.user?.email || null]
       );
       const paid = await recomputeEventPaid(db, req.params.bid);
+      // Money in against an event reduces what its company owes. Without this
+      // the statement would keep showing the full amount after it was paid.
+      await _syncAccountInvoiceForEvent(db, req.params.bid);
       // Re-project the whole schedule from total receipts (oldest instalment first).
       // Single source of truth for instalment status — a full payment marks every
       // instalment PAID regardless of whether a specific one was chosen, so the
@@ -30497,6 +30611,11 @@ ${data.tenant.name}`;
         revenueCode: '4050', revenueName: 'Banquet & Events Revenue',
         sourceType: 'EVENT_SETTLEMENT', postedBy: req.user?.email || req.user?.id || null,
       });
+      // Raising the invoice is what puts the amount on the company's statement,
+      // with a due date from that company's own payment terms. Until now an
+      // event billed to a corporate left a receivable in the ledger with no
+      // owner attached — the GL knew somebody owed it, nothing knew who.
+      await _syncAccountInvoiceForEvent(db, req.params.bid);
       res.status(201).json(folio);
     } catch (err: any) {
       console.error("/events checkout error:", err);
@@ -56618,8 +56737,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'company-accounts-master',
+    commit_marker: 'events-billed-to-accounts',
     code_features: [
+      'events-billed-to-accounts (CRM stage 3): an event sold to a company now lands on that company statement. event_bookings.account_id (nullable - most events are consumer weddings) points at the account master, is vetted on create AND on every edit (an account can be deactivated in between), and the bookings list carries account_name. One helper _syncAccountInvoiceForEvent(db, bookingId) is called wherever the amount owed can change - invoicing at /checkout, each receipt at /payments, an edit, and /invoice/cancel - and is keyed on a DERIVED id (PINV-EVT-<booking>) so it is an upsert: /checkout is re-entrant and /payments fires per receipt, and neither can bill a company twice. Due date comes from that company payment_terms_days, not a global default. Cancelling the invoice DELETES the statement row, because a voided invoice nobody owes must not keep ageing against them. Credit hold is a WARNING on the booking, never a refusal - a company that owes money may still pay cash on the day, and refusing there would stop business the owner never asked to stop; enforcement at the point of extending credit is a separate decision. Smoke: TC-EVT-ACCOUNT-LINK, -STATEMENT (asserts single billing after a repeat checkout), -RECEIPT, -CANCEL, -HOLD-WARNS.',
       'company-accounts-master (CRM stage 2): the credit-sales ledger already existed - travel_agents carries type CORPORATE, credit_limit and payment_terms_days, with partner_invoices / partner_payments behind it giving statements, ageing and per-invoice allocation - but EVERY door into it sat behind hotelStaff + ensureHotelEnabled, and the schema itself was created in createHotelTables, which only runs for property_type HOTEL or BOTH. An events-only property therefore had no account master AT ALL and could not bill a company on terms. Fixed at the schema level first: travel_agents + partner_invoices + partner_payments moved OUT of createHotelTables into db.ts createAccountTables(), called from _initTenantDb so every tenant gets them; the hotel copy was deleted rather than left to drift (room_bookings ALTERs and partner_accounts stay, they are genuinely hotel). New module-neutral /api/restaurant/:id/accounts API - list with outstanding roll-up and over-limit flag, detail, upsert, soft delete, statement with ageing, contacts (exactly one primary), and a hand-written interaction log with follow-up dates and a cross-account due list - gated on the new CUSTOMER_ACCOUNTS tab ALONE, no module gate. Table keeps its name because the id is stored as partner_invoices.partner_code and room_bookings.agent_id; new ids keep the AGT- prefix so existing statements keep resolving. Tab id is CUSTOMER_ACCOUNTS, NOT CUSTOMERS - that string is already the Loyalty screen local sub-tab union. Unknown type / credit_status are REJECTED with 400, never coerced. /hotel/agents/* untouched. Smoke: TC-ACCOUNT-CRUD, TC-ACCOUNT-CREDIT-HOLD, TC-ACCOUNT-CONTACTS, TC-ACCOUNT-INTERACTIONS, TC-ACCOUNT-STATEMENT, TC-ACCOUNT-404.',
       'inventory-period-reopen: the period lock shipped WITHOUT a key. There was a close route and no reopen route, so the 409 the guard returns - reopen that period before changing stock dated inside it - described something the owner could not do, and a closed month was closed for good. The smoke suite found it on the very next run by locking its own tenant out: it closes the current EVENTS month, never reopened it, and every later inventory write was then refused (TC-INV-PERIOD-CLOSE read 100 instead of 60, TC-INV-ITEM-TRACE lost 2 of its 3 movements). New POST /inventory/periods/:pid/reopen requires a REASON (undoing a signed-off month with no explanation is the audit hole the close was raised to shut), reverses the close journal, and only then flips the period to OPEN - and CLEARS gl_journal_ref, which is load-bearing: _reverseJournal short-circuits on an existing REV-<ref>, so leaving the ref would let the next close skip its reversal and capitalise the same stock twice, with both journals balanced so the trial balance would still tie. The close test now reopens what it closed and clears a prior run stale close. Smoke: TC-INV-PERIOD-LOCK asserts the lock HOLDS (409 INVENTORY_PERIOD_CLOSED), needs a reason, reopens, lets the write through, and leaves no journal behind.',
       'credit-sale-not-a-tender: settling a bill on CREDIT no longer books the money into the bank. The hotel settle dialog offered Credit, the route never validated the method against the allowlist every other payment route uses, and _glAccountForPaymentMethod returns the BANK for anything that is not CASH - so a sale on credit to a company posted Dr 1010 Bank / Cr 1100 AR: cash overstated, debtors wiped, and nothing for bank reconciliation to ever match. Now: one FOLIO_TENDERS allowlist (CREDIT explicitly legal, junk refused with 400 instead of silently coerced); all three tender loops skip a CREDIT payment, so the Dr 1100 raised by the invoice block stays standing and each journal stays balanced - including _postFolioGl, which is the path EVENT and SPA folios settle through; and a credit settlement writes no folio_payments row at all, because that table records money RECEIVED. The invoice is still issued and the revenue still recognised on the settle date, so every revenue report is unchanged; the bill simply reads as owed. It surfaces today in the GL-derived Receivables Ageing, which ages accounts 1100/1110. Smoke: TC-CREDIT-SALE-TENDER, TC-CREDIT-SALE-GL, TC-CREDIT-SALE-OUTSTANDING.',
