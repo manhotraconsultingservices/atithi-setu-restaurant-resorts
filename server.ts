@@ -19614,6 +19614,58 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: 'Failed to fetch the period' }); }
   });
 
+  // Where an item is committed: which dishes consume it, and what is already
+  // on order. Both questions get asked before anyone deletes an item or
+  // changes its unit, and today neither is answerable without leaving the
+  // screen and guessing.
+  app.get("/api/restaurant/:id/inventory/ingredients/:ingredientId/where-used", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const ingId = req.params.ingredientId;
+
+      // Only recipe rows that are CURRENTLY in force. A superseded version
+      // is history, not a commitment, and listing it would overstate what
+      // this item is actually used by today.
+      const recipes: any[] = await db.query(
+        `SELECT r.menu_item_id, m.name AS menu_item_name, r.qty_per_serving, r.unit, r.size_variant
+           FROM recipes r
+           LEFT JOIN menu m ON m.id = r.menu_item_id
+          WHERE r.ingredient_id = ?
+            AND (r.effective_from IS NULL OR r.effective_from <= NOW())
+            AND (r.effective_to   IS NULL OR r.effective_to   >  NOW())
+          ORDER BY m.name`,
+        [ingId]
+      ).catch(() => [] as any[]);
+
+      const onOrder: any[] = await db.query(
+        `SELECT po.id AS po_id, po.status, po.expected_delivery_date, s.name AS supplier_name,
+                poi.qty_ordered, poi.qty_received, poi.unit,
+                (poi.qty_ordered - COALESCE(poi.qty_received, 0)) AS qty_outstanding
+           FROM purchase_order_items poi
+           JOIN purchase_orders po ON po.id = poi.po_id
+           LEFT JOIN suppliers s ON s.id = po.supplier_id
+          WHERE poi.ingredient_id = ?
+            AND po.status IN ('DRAFT','SENT','PARTIAL')
+          ORDER BY po.expected_delivery_date NULLS LAST`,
+        [ingId]
+      ).catch(() => [] as any[]);
+
+      const suppliers: any[] = await db.query(
+        `SELECT isup.is_approved, isup.preference_rank, s.name AS supplier_name
+           FROM ingredient_suppliers isup
+           JOIN suppliers s ON s.id = isup.supplier_id
+          WHERE isup.ingredient_id = ? AND isup.is_active = 1
+          ORDER BY isup.is_approved DESC, isup.preference_rank`,
+        [ingId]
+      ).catch(() => [] as any[]);
+
+      res.json({ recipes, on_order: onOrder, suppliers });
+    } catch (err) {
+      console.error("Where-used error:", err);
+      res.status(500).json({ error: "Failed to compute where-used" });
+    }
+  });
+
   // ── Item categories, per module (owner-editable master) ─────────────────
   app.get("/api/restaurant/:id/inventory/item-categories", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
@@ -56049,8 +56101,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-hotel-on-shared-screen',
+    commit_marker: 'inventory-item-drawer',
     code_features: [
+      'inventory-item-drawer',        //FEATURE (owner-reported: 'there should be history or audit log for each item with complete traceability who when and why'). The data existed - `stock_movements` carries the actor, the timestamp, the reference and the reason - but the only way to see it was a flat, PROPERTY-WIDE usage log that a human had to scan by eye, and traceability that needs an eye-scan is not traceability. Clicking an item now opens it as an OBJECT over the list (never a new page, so the list is not lost) answering the four questions people actually ask: **Overview** levels/par/value, **Suppliers** (reusing the approved-supplier panel), **History** every movement with who / when / what / balance / WHY, and **Where used** - which dishes consume it and what is already on order, both of which get asked before anyone deletes an item or changes its unit and neither of which was answerable without leaving the screen. The WHY is assembled from whichever trace the row has: wastage stores 'REASON: note', a manual adjustment stores its reason or a before->after, a consumption carries the order that caused it. New `/inventory/ingredients/:id/where-used` returns only CURRENTLY-IN-FORCE recipe rows - a superseded version is history, not a commitment, and listing it would overstate what the item is used by today. TC-INV-ITEM-TRACE writes two movements with DIFFERENT reasons and asserts both are recoverable, that every row names a person, and that the trail carries only this item - a per-item trail that leaks other items is just the flat log again.',
       'inventory-hotel-on-shared-screen', //FEATURE (the last bespoke inventory screen is gone). Hotel ran its own component with FOUR tabs and no receiving, no wastage and no stock takes; it now runs the same `ModuleInventoryView` as Restaurant-adjacent, Spa and Events, so all four modules are ONE component and cannot drift into four different ways of receiving a delivery - which was the reported problem. Nothing that was visible yesterday is missing today, and that took two pieces of care: **(1)** the hotel screen's one genuinely useful exclusive, its quick-setup seed of common housekeeping supplies, is GENERALISED into `STARTER_ITEMS` per module and offered from the empty state - Spa and Events open just as empty and deserve the same help; it skips anything already present by name, so pressing it twice cannot duplicate a shelf. **(2)** the hotel's PRE-FOLD movements live in the legacy `hotel_stock_movements` table and are absent from `stock_movements`, so a usage log built only from the shared ledger would begin the day the silo was folded in and show nothing before it; they are now UNIONed into the shared audit log and projected into the same shape, never rewritten. **Also fixed, a silent coercion:** the unit allowlist was the kitchen's, so housekeeping stock entered in rolls or sachets was quietly saved as 'unit' and its par levels then meant something other than what was typed - the same shape as the SPA_PRODUCT bug. Widened with the vocabulary housekeeping, spa and banquets actually use. The old `HotelInventoryView` stays in the file, unreachable, rather than being deleted in the same change.',
       'inventory-lifecycle-parity',    //FEATURE (owner-reported: no consistency between Kitchen and the other modules, and no end-to-end process). Receiving, wastage and stock-takes existed for the KITCHEN ONLY - Kitchen had 9 tabs, Spa/Events 5, Hotel 4 - so every other module could add stock and watch it deplete but never RECEIVE a delivery, write off spoilage, or count the shelf. The lifecycle was broken for three of four modules. The shared screen now carries all of it: Receive against an open PO (or ad-hoc) from the Purchasing tab, Log wastage from the Usage Log, and a Stock Takes tab that starts a module-scoped count and opens straight into the sheet rather than making you find it in a list afterwards. **These reuse the KITCHEN'S OWN modals** - `GRNCreateModal`, `WastageLogModal`, `PhysicalCountModal` - passed module-scoped data, rather than module-specific copies, so the four screens cannot drift into four different ways of receiving a delivery; that drift is the reported problem, and re-implementing would have recreated it. The counts LIST is now module-filtered too, with NULL-module counts (taken before counts were scoped) still visible under every module rather than vanishing behind a filter that did not exist when they were made. The GRN endpoint needed no change - it was already module-agnostic, taking a PO or a supplier plus lines; the gap was never the engine, only the surface.',
       'inventory-item-categories',      //FEATURE (owner-reported: 'category of items are not correctly showing'). The category picker was a HARDCODED array in the front end - Dairy, Meat, Produce, Grains, Spices - rendered for EVERY module. So filing a spa massage oil or a hotel bath towel meant choosing from a kitchen larder, and those items ended up mis-filed or blank; that is the whole reason categories looked wrong outside the kitchen. Categories are a business's own vocabulary - one property files by storage location, another by supplier, another by menu section - so this is now an owner-editable MASTER (`item_categories`), unique on (module, name) so there is one 'Linen' per module and not one per typo. Seeded ONCE per module with a sensible starting set (kitchen larder / hotel linen+amenities / spa back-bar+retail / events crockery+decor / shared chemicals+packaging), marker-guarded so a category the owner DELETES does not reappear on the next restart - the same defect class as the stock backfill that resurrected re-filed items. **Existing values are ADOPTED, not discarded:** every distinct category already on an item becomes a real category for its module, because the data is the better authority on what a property actually uses. SHARED categories appear from every module, otherwise people invent a near-duplicate per screen. Deleting RETIRES rather than removes, and reports how many items still carry it - a hard delete would blank the category on historical stock and silently change what past reports say; the editor likewise keeps showing an item's own value even if that category was retired, so opening the form cannot quietly re-file it.',

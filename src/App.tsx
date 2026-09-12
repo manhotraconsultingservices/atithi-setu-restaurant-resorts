@@ -57404,6 +57404,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   // Seeds this module's starting set, skipping anything already present by
   // name so pressing it twice cannot duplicate a shelf.
   const [seeding, setSeeding] = useState(false);
+  const [drawerItem, setDrawerItem] = useState<any>(null);
   const addStarterItems = async () => {
     const seed = STARTER_ITEMS[module] || [];
     if (!seed.length) return;
@@ -57740,7 +57741,10 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
               ) : rows.map((i: any) => (
                 <tr key={i.id} className="border-t border-[#cc5a16]/5">
                   <td className="px-4 py-2.5 font-medium">
-                    {i.name}
+                    <button onClick={() => setDrawerItem(i)}
+                      className="text-left hover:text-[#cc5a16] hover:underline">
+                      {i.name}
+                    </button>
                     {isLow(i) && <span className="ml-2 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-red-50 text-red-600">LOW</span>}
                   </td>
                   <td className="px-4 py-2.5 text-[#6b5d52]">{i.category || '—'}</td>
@@ -57765,6 +57769,14 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
             </tbody>
           </table>
         </div>
+      )}
+
+      {drawerItem && (
+        <ItemDrawer
+          restaurantId={restaurantId} token={token} item={drawerItem}
+          onClose={() => setDrawerItem(null)}
+          onChanged={load}
+        />
       )}
 
       {showGrn && (
@@ -57830,6 +57842,198 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
           </div>
         </InventoryModalShell>
       )}
+    </div>
+  );
+}
+
+// ─── One item, everything about it ─────────────────────────────────────────
+// "Who used this, when, and why" could only be answered by reading a flat,
+// property-wide usage log and filtering by eye. Traceability that takes a human
+// scan is not traceability. This is the item as an OBJECT rather than a row:
+// opened over the list so the list is never lost, and closing the four questions
+// people actually ask of a stock item.
+function ItemDrawer({ restaurantId, token, item, onClose, onChanged }: {
+  restaurantId: string; token: string; item: any; onClose: () => void; onChanged: () => void;
+}) {
+  type DTab = 'OVERVIEW' | 'SUPPLIERS' | 'HISTORY' | 'WHERE';
+  const [tab, setTab] = useState<DTab>('OVERVIEW');
+  const [history, setHistory] = useState<any[]>([]);
+  const [whereUsed, setWhereUsed] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+
+  useEffect(() => {
+    if (tab !== 'HISTORY') return;
+    setLoading(true);
+    fetch(`/api/restaurant/${restaurantId}/inventory/audit-log?ingredient_id=${item.id}&limit=300`, { headers: auth })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setHistory(Array.isArray(d) ? d : []))
+      .catch(() => setHistory([]))
+      .finally(() => setLoading(false));
+  }, [tab, item.id]);
+
+  useEffect(() => {
+    if (tab !== 'WHERE' || whereUsed) return;
+    fetch(`/api/restaurant/${restaurantId}/inventory/ingredients/${item.id}/where-used`, { headers: auth })
+      .then(r => r.ok ? r.json() : null)
+      .then(setWhereUsed)
+      .catch(() => setWhereUsed({ recipes: [], on_order: [], suppliers: [] }));
+  }, [tab, item.id]);
+
+  // The reason a movement happened. Wastage stores "REASON: note", a manual
+  // adjustment stores its reason or a before→after, and a consumption carries
+  // the order that caused it — so the "why" is assembled from whichever of
+  // those this row has, rather than left blank.
+  const whyOf = (m: any): string => {
+    const n = String(m.notes || '').trim();
+    if (n) return n;
+    if (m.reference_type && m.reference_id) return `${m.reference_type} ${m.reference_id}`;
+    if (m.reference_type) return String(m.reference_type);
+    return '—';
+  };
+
+  const TABS: { k: DTab; label: string }[] = [
+    { k: 'OVERVIEW', label: 'Overview' },
+    { k: 'SUPPLIERS', label: 'Suppliers' },
+    { k: 'HISTORY', label: 'History' },
+    { k: 'WHERE', label: 'Where used' },
+  ];
+
+  const qty = Number(item.current_stock_qty || 0);
+  const reorder = Number(item.reorder_point || 0);
+  const par = Number(item.par_level || 0);
+  const low = (reorder > 0 && qty <= reorder) || (par > 0 && qty < par);
+
+  return (
+    <div className="fixed inset-0 z-[70] flex justify-end bg-black/40" onClick={onClose}>
+      <div
+        className="w-full max-w-2xl h-full bg-[#fdfbf8] shadow-2xl overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-[#fdfbf8] border-b border-[#cc5a16]/15 px-6 pt-5 pb-0 z-10">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-2xl font-bold font-serif text-[#0d0a07]">{item.name}</h3>
+              <p className="text-xs text-[#6b5d52] mt-0.5">
+                {item.category || 'Uncategorised'} · {COST_MODULE_LABEL[item.module || 'RESTAURANT'] || item.module}
+              </p>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-full hover:bg-[#0d0a07]/5"><X size={20} /></button>
+          </div>
+          <div className="flex gap-1 mt-4">
+            {TABS.map(t => (
+              <button key={t.k} onClick={() => setTab(t.k)}
+                className={`px-4 py-2 rounded-t-xl text-xs font-bold ${tab === t.k ? 'bg-[#cc5a16]/12 text-[#cc5a16]' : 'text-[#9c8e85] hover:bg-[#0d0a07]/5'}`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="p-6">
+          {tab === 'OVERVIEW' && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {[
+                ['In stock', `${qty} ${item.unit || ''}`],
+                ['Reorder at', String(reorder || '—')],
+                ['Par level', String(par || '—')],
+                ['Last price', item.default_unit_price != null ? `Rs.${Number(item.default_unit_price).toFixed(2)}` : '—'],
+                ['Stock value', `Rs.${(qty * Number(item.default_unit_price || 0)).toFixed(2)}`],
+                ['SKU', item.sku || '—'],
+              ].map(([k, v]) => (
+                <div key={k} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                  <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">{k}</p>
+                  <p className="text-lg font-bold text-[#0d0a07] mt-1 font-mono">{v}</p>
+                </div>
+              ))}
+              {low && (
+                <div className="col-span-2 sm:col-span-3 rounded-2xl bg-red-50 border border-red-100 px-4 py-3 text-sm text-red-700 font-semibold">
+                  Below its reorder point — this item is due to be ordered.
+                </div>
+              )}
+              {item.notes && (
+                <div className="col-span-2 sm:col-span-3 bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                  <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1">Notes</p>
+                  <p className="text-sm">{item.notes}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'SUPPLIERS' && (
+            <ApprovedSuppliersPanel restaurantId={restaurantId} token={token} ingredientId={item.id} />
+          )}
+
+          {tab === 'HISTORY' && (
+            loading ? <p className="text-sm text-[#9c8e85] text-center py-8">Loading…</p> : (
+              <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#6b5d52]">
+                    <tr>
+                      <th className="text-left px-3 py-3">When</th>
+                      <th className="text-left px-3 py-3">What</th>
+                      <th className="text-right px-3 py-3">Qty</th>
+                      <th className="text-right px-3 py-3">Balance</th>
+                      <th className="text-left px-3 py-3">Who</th>
+                      <th className="text-left px-3 py-3">Why</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.length === 0 ? (
+                      <tr><td colSpan={6} className="px-3 py-8 text-center text-[#9c8e85]">
+                        Nothing has moved yet for this item.
+                      </td></tr>
+                    ) : history.map((m: any) => (
+                      <tr key={m.id} className="border-t border-[#cc5a16]/5">
+                        <td className="px-3 py-2.5 whitespace-nowrap text-xs">{String(m.recorded_at || '').slice(0, 16).replace('T', ' ')}</td>
+                        <td className="px-3 py-2.5"><span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-[#0d0a07]/5">{m.movement_type}</span></td>
+                        <td className={`px-3 py-2.5 text-right font-mono ${Number(m.qty_delta) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
+                          {Number(m.qty_delta) > 0 ? '+' : ''}{Number(m.qty_delta)}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono text-[#6b5d52]">{m.balance_after == null ? '—' : Number(m.balance_after)}</td>
+                        <td className="px-3 py-2.5 text-[#6b5d52]">
+                          {m.recorded_by_name || (m.reference_type === 'order' ? 'Automatic (order)' : '—')}
+                        </td>
+                        <td className="px-3 py-2.5 text-xs text-[#6b5d52]">{whyOf(m)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          )}
+
+          {tab === 'WHERE' && (
+            !whereUsed ? <p className="text-sm text-[#9c8e85] text-center py-8">Loading…</p> : (
+              <div className="space-y-4">
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                  <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-2">
+                    Used by {whereUsed.recipes.length} dish(es)
+                  </p>
+                  {whereUsed.recipes.length === 0
+                    ? <p className="text-xs text-[#9c8e85] italic">No recipe uses this item — it will not deplete automatically.</p>
+                    : <ul className="space-y-1 text-sm">{whereUsed.recipes.map((r: any, i: number) => (
+                        <li key={i}>{r.menu_item_name || r.menu_item_id} — {Number(r.qty_per_serving)} {r.unit} per serving{r.size_variant && r.size_variant !== 'BOTH' ? ` (${r.size_variant})` : ''}</li>
+                      ))}</ul>}
+                </div>
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                  <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-2">
+                    On order ({whereUsed.on_order.length})
+                  </p>
+                  {whereUsed.on_order.length === 0
+                    ? <p className="text-xs text-[#9c8e85] italic">Nothing on order.</p>
+                    : <ul className="space-y-1 text-sm">{whereUsed.on_order.map((p: any, i: number) => (
+                        <li key={i}>
+                          <span className="font-mono text-xs">{p.po_id}</span> · {p.supplier_name || '—'} · {Number(p.qty_outstanding)} {p.unit} outstanding
+                          <span className="text-[#9c8e85]"> ({p.status}{p.expected_delivery_date ? `, due ${String(p.expected_delivery_date).slice(0, 10)}` : ''})</span>
+                        </li>
+                      ))}</ul>}
+                </div>
+              </div>
+            )
+          )}
+        </div>
+      </div>
     </div>
   );
 }
