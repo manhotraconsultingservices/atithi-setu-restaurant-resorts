@@ -25143,6 +25143,40 @@ ${data.tenant.name}`;
   // name is resolved at read time from the staff directory. hkActor stays for
   // audit-trail NARRATION, where a sentence is wanted rather than a key.
   const hkActorId = (req: AuthRequest): string => String(req.user?.id || '').trim() || hkActor(req);
+
+  // Turn every stored identity on a set of checklist jobs into a person's name:
+  // the job's own `completed_by`, and each task's `done_by`. Done in ONE pass
+  // over all the ids on the page rather than per row, because these screens
+  // routinely carry 300-500 jobs with several tasks each.
+  //
+  // A value that is not an id is a legacy row that stored a display string —
+  // sometimes a role like 'OWNER'. Those cannot be resolved backwards (a role
+  // has no person inside it) so they are shown exactly as recorded rather than
+  // replaced with a guess.
+  const _hkNameJobs = async (db: DbInterface, jobs: any[]): Promise<void> => {
+    if (!Array.isArray(jobs) || jobs.length === 0) return;
+    const ids: string[] = [];
+    for (const j of jobs) {
+      const c = String(j?.completed_by ?? '').trim();
+      if (c && HK_ACTOR_ID_RE.test(c)) ids.push(c);
+      for (const t of (j?.tasks || [])) {
+        const d = String(t?.done_by ?? '').trim();
+        if (d && HK_ACTOR_ID_RE.test(d)) ids.push(d);
+      }
+    }
+    if (ids.length === 0) return;
+    const names = await _resolveActorNames(db, ids);
+    const label = (v: any): any => {
+      const x = String(v ?? '').trim();
+      if (!x) return v;
+      if (!HK_ACTOR_ID_RE.test(x)) return x;      // already a name (or a legacy role)
+      return names.get(x) || 'Former staff';      // an id nobody answers to
+    };
+    for (const j of jobs) {
+      if (j?.completed_by) j.completed_by = label(j.completed_by);
+      for (const t of (j?.tasks || [])) if (t?.done_by) t.done_by = label(t.done_by);
+    }
+  };
   // Permission-aware (was a fixed requireRole allowlist that 403'd custom roles the
   // owner granted HOUSEKEEPING). Built-in housekeeping ops roles + any custom role
   // granted the tab; requireTabAccess('HOUSEKEEPING') enforces the exact grant on top.
@@ -25667,7 +25701,7 @@ ${data.tenant.name}`;
       if (!taskRow) return res.status(404).json({ error: "That task is not on this checklist", code: 'TASK_NOT_FOUND' });
       const done = req.body?.is_done ? 1 : 0;
       await db.run("UPDATE housekeeping_job_tasks SET is_done = ?, done_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, done_by = ? WHERE id = ? AND job_id = ?",
-        [done, done, done ? hkActor(req) : null, req.params.tid, req.params.jid]);
+        [done, done, done ? hkActorId(req) : null, req.params.tid, req.params.jid]);
       if (!job.started_at) await db.run("UPDATE housekeeping_jobs SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL", [req.params.jid]);
       await writeObjectAudit(db, req, { objectType: 'CHECKLIST_JOB', objectId: req.params.jid, action: done ? 'STEP_DONE' : 'STEP_UNDONE', summary: `${done ? 'Completed' : 'Reopened'} a step on "${job.template_name || 'checklist'}" (${job.facility_label || job.facility_type})` });
       res.json({ success: true });
@@ -26212,6 +26246,7 @@ ${data.tenant.name}`;
         j.done_count = t.filter((x: any) => Number(x.is_done) === 1).length;
         j.pending_mandatory = t.filter((x: any) => Number(x.is_mandatory) === 1 && Number(x.is_done) === 0).length;
       }
+      await _hkNameJobs(db, jobs || []);
       res.json({ role, is_manager: isMgr, state, jobs: jobs || [] });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to load my checklists' }); }
   });
@@ -26227,7 +26262,9 @@ ${data.tenant.name}`;
       // checklist must be a 404, not a silent success.
       const myTask: any = await db.get("SELECT id FROM housekeeping_job_tasks WHERE id = ? AND job_id = ?", [req.params.tid, req.params.jid]).catch(() => null);
       if (!myTask) return res.status(404).json({ error: 'That task is not on this checklist', code: 'TASK_NOT_FOUND' });
-      const actor = req.user?.email || req.user?.id || null;
+      // Was `email || id`, so a staff login without an email stamped a raw id
+      // onto every task they ticked — the same defect as the job-level actor.
+      const actor = hkActorId(req);
       // Body may carry is_done (tick/untick) and/or remark (free-text note). Both optional.
       if (req.body?.is_done !== undefined) {
         const done = req.body.is_done ? 1 : 0;
@@ -26355,6 +26392,7 @@ ${data.tenant.name}`;
         const t: any[] = await db.query('SELECT id, label, is_mandatory, is_done, remark, done_by, done_at, sort_order FROM housekeeping_job_tasks WHERE job_id = ? ORDER BY sort_order, id', [j.id]).catch(() => []);
         j.tasks = t; j.task_count = t.length; j.done_count = t.filter((x: any) => Number(x.is_done) === 1).length; j.pending_mandatory = t.filter((x: any) => Number(x.is_mandatory) === 1 && Number(x.is_done) === 0).length;
       }
+      await _hkNameJobs(db, jobs || []);
       res.json({ jobs: jobs || [] });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to load checklist board' }); }
   });
@@ -55580,8 +55618,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'housekeeping-log-real-names',
+    commit_marker: 'checklist-actor-names-everywhere',
     code_features: [
+      'checklist-actor-names-everywhere', //FIX (completes `housekeeping-log-real-names`). The cleaning log was only ONE of four surfaces answering 'who did this'. The personal worklist (`/checklists/my`) and the manager Checklist Board (`/checklists/board`) both select `completed_by` AND each task's `done_by` and returned them raw, so the same uuids the log was fixed for were still on screen two clicks away. Both now run a new `_hkNameJobs`, which collects every id on the page - job-level and task-level - and resolves them in ONE pass via `_resolveActorNames` rather than per row, because these screens routinely carry 300-500 jobs with several tasks each. The two TASK-tick paths also stored the wrong thing: one used `hkActor` (which degrades to a ROLE) and the other `email || id` (a raw id for the many staff who sign in with a login id and no email); both now store `hkActorId`. So the identity is kept at every write and the name is resolved at every read. Legacy values that are not ids - including role strings like 'OWNER' - are shown exactly as recorded, because a role cannot be resolved backwards into the person who held it. TC-CHK-ACTOR-NAME sweeps ALL FOUR surfaces for anything still uuid-shaped and, critically, FAILS IF IT CHECKED NOTHING - an empty property would otherwise report a clean pass forever.',
       'housekeeping-log-real-names',    //BUGFIX (reported: the cleaning log shows `user-7db771f6-...` instead of a person). THREE layers were wrong. **(1) The write side stored a DISPLAY STRING, not an identity.** `hkActor(req)` renders userName -> email -> Title-Cased ROLE -> 'Staff', so the log filled with 'OWNER' and, for custom roles, 'CUSTOM CHK OVR FULL 710 MTYAKJE6'. A role is not a person and cannot answer 'who cleaned 302 on the 4th', which is the only question this log exists to answer - and unlike an id, a role can NEVER be turned back into the person who held it. New `hkActorId(req)` stores `req.user.id`; all FIVE completion paths use it (they previously used three different spellings). **(2) Two paths wrote a raw id directly** - `/checklists/my/jobs/:jid/complete` and the hotel check-in both did `req.user?.email || req.user?.id`, and most staff sign in with a login id and no email address, so the id got stamped in. That my-checklist route is the one housekeepers actually use, which is why it produced the majority of the unreadable rows. **(3) The read-side rescue never fired** because `HK_UUID_RE` required a BARE uuid while this app mints ids as `user-<uuid>` - so every real staff id sailed past the 'unknown id -> Staff' fallback and was printed verbatim. The prefix is now optional. Reads resolve through the same `_resolveActorNames` the stock ledger uses (tenant `attendance_staff`, then central `users`, batched), so **existing id rows become real names with no data migration**. A resolved name beats even the owner special-case, because the owner's actual name is more useful than the word 'Owner'. Legacy rows holding a role string are shown as recorded rather than replaced with a guess - they cannot be resolved backwards - and an id nobody answers to reads 'Former staff' instead of a uuid.',
       'events-bookings-list-paging',     //BUGFIX (silent truncation). The events bookings list was a flat `LIMIT 1000` with no total and no way to ask for the rest, so a property past a thousand bookings simply stopped seeing some of them - and because the order is `event_date DESC`, the rows that fell off were NOT the oldest but the NEAREST-TERM, so a booking taken today could be absent from the list the same day. Nothing anywhere said the list was partial, which is the worst part: staff would have concluded the booking was lost. Found because TC-EVT-SPECIAL-NOTE passed in the morning and failed in the afternoon - the tenant crossed 1000 bookings between the two runs. Now: `?limit` (clamped 1..2000) + `?offset`, and `?paged=1` returns `{rows, total, limit, offset, has_more}`; `X-Total-Count` is set on every response so even an array caller can tell it holds a slice. **The default response is still a PLAIN ARRAY and the default limit is still 1000** - both deliberate, because two screens consume this endpoint and the quotations view walks the whole list, so lowering the default would have quietly shrunk what it shows. The change is purely additive. Limits are clamped and INTERPOLATED rather than bound, also deliberately: they are already integers, and keeping them out of the params array means the filter binds cannot be pushed out of order - the mistake that has cost this project three separate defects. The count query is derived from the same SQL and the same params as the page, so the total can never describe a different set than the rows. Front end: the bookings screen pages 200 at a time and shows 'Showing N of M' with a Load more, so a partial list is now visible as partial. New index on event_bookings(event_date DESC, created_at DESC) backs the sort. TC-EVT-LIST-PAGING asserts the envelope, that a second page is DISJOINT from the first (an ignored offset would pass every other check), and that the un-paged call still answers with a bare array.',
       'event-complete-no-venue-no-job',   //BUGFIX + DATA CLEANUP (orphan housekeeping jobs). Completing an event raised its venue cleaning job with `facility_id: evBk?.venue_id || null` - so a booking with NO venue (a public inquiry, or a catering-only event) produced a cleaning job for no facility, labelled 'Event venue'. Such a job can never be actioned against a facility, never appears on any venue's worklist, and is never matched by the release gate (which looks up BY facility_id), so **nothing could ever close it** - it simply accumulated on the housekeeping board forever. There is nothing to clean when there is no hall, so no job is now raised. Found while investigating the event-booking checklist alert: the tenant held 455 open jobs of which 72 named no facility. 71 of those (all EVENT, all blocks_release=1, raised 15 Aug - 4 Sep) were closed via the product's OWN override endpoint with a stated reason rather than deleted - audited, reversible in the sense that the row and its history survive, and OVERRIDDEN is the honest end state for work that was never actionable. The 72nd was deliberately LEFT ALONE: a non-blocking ROOM 'Kitchen Inspection' with no facility is a legitimate general inspection, not an orphan. Open jobs 455 -> 386.',
