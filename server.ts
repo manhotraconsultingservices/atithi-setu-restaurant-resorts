@@ -19439,6 +19439,53 @@ ${data.tenant.name}`;
     };
   };
 
+  // Would this stock movement land inside a month that has already been closed
+  // and posted to the ledger? Returns the offending period, or null.
+  //
+  // WHAT THIS DELIBERATELY DOES NOT GUARD: automatic consumption. An order
+  // firing its recipes, or a spa appointment completing, must never be refused
+  // because accounts closed the month — you cannot stop a kitchen serving to
+  // protect a report. Those movements make the close STALE, not wrong, and
+  // staleness is surfaced on the period itself and fixed by re-closing, which
+  // reverses the old journal and posts a new one. A MANUAL write into a closed
+  // month is a different thing: somebody is deliberately changing a signed-off
+  // figure, and that is what gets refused.
+  const _inventoryPeriodBlock = async (
+    db: DbInterface, ingredientIds: string[], dateIso: string,
+  ): Promise<any | null> => {
+    const ids = Array.from(new Set((ingredientIds || []).filter(Boolean).map(String)));
+    if (!ids.length || !dateIso) return null;
+    const holes = ids.map(() => '?').join(', ');
+    const mods: any[] = await db.query(
+      `SELECT DISTINCT COALESCE(module, 'RESTAURANT') AS module FROM ingredients WHERE id IN (${holes})`,
+      ids
+    ).catch(() => [] as any[]);
+    if (!mods.length) return null;
+    const modHoles = mods.map(() => '?').join(', ');
+    // Date bound LAST: its placeholder follows the module list in the statement.
+    return await db.get(
+      `SELECT * FROM inventory_periods
+        WHERE status = 'CLOSED' AND module IN (${modHoles})
+          AND ?::date BETWEEN period_from AND period_to
+        LIMIT 1`,
+      [...mods.map((m: any) => m.module), dateIso]
+    ).catch(() => null);
+  };
+
+  // One place to refuse, so every path says the same thing and offers the same
+  // way out.
+  const _blockIfClosed = async (
+    res: Response, db: DbInterface, ingredientIds: string[], dateIso: string,
+  ): Promise<boolean> => {
+    const p = await _inventoryPeriodBlock(db, ingredientIds, dateIso);
+    if (!p) return false;
+    res.status(409).json({
+      error: `${p.module} stock is closed for ${p.period_key} and posted to the ledger. Reopen that period before changing stock dated inside it.`,
+      code: 'INVENTORY_PERIOD_CLOSED', period_id: p.id, period_key: p.period_key, module: p.module,
+    });
+    return true;
+  };
+
   // Preview — compute WITHOUT writing anything. A close is a statement about a
   // month; it should be looked at before it is made.
   app.get("/api/restaurant/:id/inventory/periods/preview", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
@@ -19881,6 +19928,8 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.user!.restaurantId);
       const ing: any = await db.get("SELECT * FROM ingredients WHERE id = ?", [req.params.id]);
       if (!ing) return res.status(404).json({ error: "Ingredient not found" });
+      const _today = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      if (await _blockIfClosed(res, db, [req.params.id], _today)) return;
 
       const currentQty = Number(ing.current_stock_qty || 0);
       const targetQty  = Number(new_qty);
@@ -20703,6 +20752,11 @@ ${data.tenant.name}`;
       // Sequential GRN ID — atomic counter per tenant (GRN-0001, GRN-0002, …)
       const seq = await getNextTenantSequence(db, 'grn');
       const grnId = `GRN-${String(seq).padStart(4, '0')}`;
+
+      // Receiving into a closed month would change that month's purchases after
+      // its cost of goods was posted.
+      const _gToday = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      if (await _blockIfClosed(res, db, items.map((x: any) => x?.ingredient_id), _gToday)) return;
 
       let totalAmount = 0;
       const allowedConditions = new Set(['GOOD', 'DAMAGED', 'PARTIAL']);
@@ -22571,6 +22625,8 @@ ${data.tenant.name}`;
         ? String(reason).toUpperCase()
         : 'OTHER';
       const wQty = Math.max(0, Number(qty));
+      const _wToday = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      if (await _blockIfClosed(res, await getTenantDb(req.params.id), [ingredient_id], _wToday)) return;
       if (wQty <= 0) return res.status(400).json({ error: "qty must be > 0" });
 
       const db = await getTenantDb(req.params.id);
@@ -22671,6 +22727,20 @@ ${data.tenant.name}`;
       // linen and toilet paper to weigh.
       const countModule = _normaliseCostModule(req.body?.module, 'RESTAURANT');
       const db = await getTenantDb(req.params.id);
+      // A count reconciles stock to what was physically found, so completing one
+      // inside a closed month would move that month's closing figure after it
+      // was signed off.
+      const _cDate = (req.body?.count_date && /^\d{4}-\d{2}-\d{2}$/.test(req.body.count_date))
+        ? req.body.count_date : new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      const _cClosed: any = await db.get(
+        `SELECT * FROM inventory_periods WHERE status = 'CLOSED' AND module = ? AND ?::date BETWEEN period_from AND period_to LIMIT 1`,
+        [countModule, _cDate]).catch(() => null);
+      if (_cClosed) {
+        return res.status(409).json({
+          error: `${countModule} stock is closed for ${_cClosed.period_key} and posted to the ledger. Reopen that period before counting into it.`,
+          code: 'INVENTORY_PERIOD_CLOSED', period_id: _cClosed.id, period_key: _cClosed.period_key,
+        });
+      }
       const seq = await getNextTenantSequence(db, 'count');
       const countId = `COUNT-${String(seq).padStart(4, '0')}`;
       const today = (count_date && /^\d{4}-\d{2}-\d{2}$/.test(count_date)) ? count_date : new Date().toISOString().slice(0, 10);
@@ -24008,6 +24078,11 @@ ${data.tenant.name}`;
       // signed qty_delta is the ledger's convention; the hotel table stored an
       // absolute quantity plus a direction in movement_type, which is why the
       // two could never be read together.
+      // The date the user picked is honoured — it was read and then dropped when
+      // this route moved onto the shared ledger, so a movement back-dated to the
+      // 5th was silently recorded as today. And because it CAN be back-dated,
+      // this is the one path that can reach into a prior month, so it is guarded.
+      if (await _blockIfClosed(res, db, [req.params.itemId], movement_date)) return;
       const updated: any[] = await db.query(
         `UPDATE ingredients
             SET current_stock_qty = current_stock_qty + ?, updated_at = CURRENT_TIMESTAMP
@@ -24019,10 +24094,10 @@ ${data.tenant.name}`;
       const balanceAfter = Number(updated[0].current_stock_qty);
       await db.run(
         `INSERT INTO stock_movements
-          (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
-         VALUES (?, ?, ?, ?, ?, 'hotel', ?, ?, ?, ?, ?)`,
+          (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes, recorded_at)
+         VALUES (?, ?, ?, ?, ?, 'hotel', ?, ?, ?, ?, ?, ?)`,
         [mid, req.params.itemId, delta, updated[0].unit || 'unit', movement_type,
-         null, balanceAfter, unit_price, req.user?.id || null, notes]
+         null, balanceAfter, unit_price, req.user?.id || null, notes, movement_date]
       );
       res.json({ success: true, id: mid, new_stock_qty: balanceAfter });
     } catch (err: any) {
@@ -56101,8 +56176,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-item-drawer',
+    commit_marker: 'inventory-period-lock',
     code_features: [
+      'inventory-period-lock: a CLOSED inventory month refuses MANUAL stock writes dated inside it (adjust, wastage, GRN receipt, stock count, hotel movement) with 409 INVENTORY_PERIOD_CLOSED. Automatic consumption is never blocked - it makes a close stale, fixed by re-closing. Also restores the hotel stock movement date, which was read at the route and then dropped, so a back-dated hotel movement was silently recorded as today.',
       'inventory-item-drawer',        //FEATURE (owner-reported: 'there should be history or audit log for each item with complete traceability who when and why'). The data existed - `stock_movements` carries the actor, the timestamp, the reference and the reason - but the only way to see it was a flat, PROPERTY-WIDE usage log that a human had to scan by eye, and traceability that needs an eye-scan is not traceability. Clicking an item now opens it as an OBJECT over the list (never a new page, so the list is not lost) answering the four questions people actually ask: **Overview** levels/par/value, **Suppliers** (reusing the approved-supplier panel), **History** every movement with who / when / what / balance / WHY, and **Where used** - which dishes consume it and what is already on order, both of which get asked before anyone deletes an item or changes its unit and neither of which was answerable without leaving the screen. The WHY is assembled from whichever trace the row has: wastage stores 'REASON: note', a manual adjustment stores its reason or a before->after, a consumption carries the order that caused it. New `/inventory/ingredients/:id/where-used` returns only CURRENTLY-IN-FORCE recipe rows - a superseded version is history, not a commitment, and listing it would overstate what the item is used by today. TC-INV-ITEM-TRACE writes two movements with DIFFERENT reasons and asserts both are recoverable, that every row names a person, and that the trail carries only this item - a per-item trail that leaks other items is just the flat log again.',
       'inventory-hotel-on-shared-screen', //FEATURE (the last bespoke inventory screen is gone). Hotel ran its own component with FOUR tabs and no receiving, no wastage and no stock takes; it now runs the same `ModuleInventoryView` as Restaurant-adjacent, Spa and Events, so all four modules are ONE component and cannot drift into four different ways of receiving a delivery - which was the reported problem. Nothing that was visible yesterday is missing today, and that took two pieces of care: **(1)** the hotel screen's one genuinely useful exclusive, its quick-setup seed of common housekeeping supplies, is GENERALISED into `STARTER_ITEMS` per module and offered from the empty state - Spa and Events open just as empty and deserve the same help; it skips anything already present by name, so pressing it twice cannot duplicate a shelf. **(2)** the hotel's PRE-FOLD movements live in the legacy `hotel_stock_movements` table and are absent from `stock_movements`, so a usage log built only from the shared ledger would begin the day the silo was folded in and show nothing before it; they are now UNIONed into the shared audit log and projected into the same shape, never rewritten. **Also fixed, a silent coercion:** the unit allowlist was the kitchen's, so housekeeping stock entered in rolls or sachets was quietly saved as 'unit' and its par levels then meant something other than what was typed - the same shape as the SPA_PRODUCT bug. Widened with the vocabulary housekeeping, spa and banquets actually use. The old `HotelInventoryView` stays in the file, unreachable, rather than being deleted in the same change.',
       'inventory-lifecycle-parity',    //FEATURE (owner-reported: no consistency between Kitchen and the other modules, and no end-to-end process). Receiving, wastage and stock-takes existed for the KITCHEN ONLY - Kitchen had 9 tabs, Spa/Events 5, Hotel 4 - so every other module could add stock and watch it deplete but never RECEIVE a delivery, write off spoilage, or count the shelf. The lifecycle was broken for three of four modules. The shared screen now carries all of it: Receive against an open PO (or ad-hoc) from the Purchasing tab, Log wastage from the Usage Log, and a Stock Takes tab that starts a module-scoped count and opens straight into the sheet rather than making you find it in a list afterwards. **These reuse the KITCHEN'S OWN modals** - `GRNCreateModal`, `WastageLogModal`, `PhysicalCountModal` - passed module-scoped data, rather than module-specific copies, so the four screens cannot drift into four different ways of receiving a delivery; that drift is the reported problem, and re-implementing would have recreated it. The counts LIST is now module-filtered too, with NULL-module counts (taken before counts were scoped) still visible under every module rather than vanishing behind a filter that did not exist when they were made. The GRN endpoint needed no change - it was already module-agnostic, taking a PO or a supplier plus lines; the gap was never the engine, only the surface.',
