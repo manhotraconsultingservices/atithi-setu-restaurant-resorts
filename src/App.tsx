@@ -57522,6 +57522,10 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
 }) {
   const [supplierId, setSupplierId] = useState(suppliers[0]?.id || '');
   const [expectedDate, setExpectedDate] = useState('');
+  // Which part of the business this PO is for. The column existed all along
+  // but nothing ever set it, so every PO silently took the RESTAURANT default
+  // and Hotel / Events / Spa procurement could not be told apart.
+  const [poModule, setPoModule] = useState<string>('RESTAURANT');
   const [notes, setNotes] = useState('');
   const [lines, setLines] = useState<any[]>([{ ingredient_id: '', qty_ordered: 1, unit_price: 0, gst_percent: 0 }]);
   const [saving, setSaving] = useState(false);
@@ -57578,6 +57582,7 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
           supplier_id: supplierId,
           expected_delivery_date: expectedDate || null,
           notes: notes || null,
+          module: poModule,
           items: validLines.map(l => {
             const ing = ingredients.find(x => x.id === l.ingredient_id);
             return {
@@ -57607,6 +57612,11 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
           </FormField>
           <FormField label="Expected Delivery Date">
             <input type="date" value={expectedDate} onChange={e => setExpectedDate(e.target.value)} className={inputClass} />
+          </FormField>
+          <FormField label="For which module" required>
+            <select value={poModule} onChange={e => setPoModule(e.target.value)} className={inputClass}>
+              {costModuleOptions()}
+            </select>
           </FormField>
         </div>
 

@@ -19533,7 +19533,13 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const status = String(req.query.status || '').toUpperCase();
       const allowedStatuses = new Set(['DRAFT', 'SENT', 'PARTIAL', 'RECEIVED', 'CANCELLED']);
-      const filterSql = allowedStatuses.has(status) ? `WHERE po.status = ?` : '';
+      // Optional module filter, so "what has the banquet side ordered" is a
+      // question the list can answer.
+      const poMod = req.query.module ? _normaliseCostModule(req.query.module, '') : '';
+      const conds: string[] = [];
+      if (allowedStatuses.has(status)) conds.push('po.status = ?');
+      if (poMod) conds.push("COALESCE(po.module,'RESTAURANT') = ?");
+      const filterSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
       const filterParams = allowedStatuses.has(status) ? [status] : [];
 
       const rows = await db.query(
@@ -19618,6 +19624,9 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/inventory/purchase-orders", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { supplier_id, expected_delivery_date, notes, items } = req.body;
+      // Which part of the business this PO is for. Unrecognised values coerce
+      // to RESTAURANT, the same rule the expense and invoice routes use.
+      const poModule = _normaliseCostModule(req.body?.module);
       if (!supplier_id) return res.status(400).json({ error: "supplier_id is required" });
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: "items array (with at least 1 line) is required" });
@@ -19669,8 +19678,8 @@ ${data.tenant.name}`;
         `INSERT INTO purchase_orders
           (id, supplier_id, status, expected_delivery_date,
            total_amount, gst_amount, grand_total,
-           raised_by_user_id, notes)
-         VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?)`,
+           raised_by_user_id, notes, module)
+         VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?)`,
         [
           poId, supplier_id, expected_delivery_date || null,
           totalAmount, gstAmount, grandTotal,
@@ -19707,7 +19716,7 @@ ${data.tenant.name}`;
       if (po.status !== 'DRAFT') {
         return res.status(409).json({ error: `PO is in status ${po.status}, only DRAFT POs are editable` });
       }
-      const allowed = ['supplier_id', 'expected_delivery_date', 'notes'];
+      const allowed = ['supplier_id', 'expected_delivery_date', 'notes', 'module'];
       const updates: string[] = [];
       const params: any[] = [];
       for (const k of allowed) {
@@ -20641,9 +20650,11 @@ ${data.tenant.name}`;
     const expectedDelivery = new Date();
     expectedDelivery.setDate(expectedDelivery.getDate() + Number(supplier.lead_time_days || 1));
     await db.run(
+      // RESTAURANT, stated rather than assumed: this draft is raised from
+      // INGREDIENT par levels, so it is a kitchen replenishment by construction.
       `INSERT INTO purchase_orders (id, supplier_id, status, expected_delivery_date,
-                                    total_amount, gst_amount, grand_total, raised_by_user_id, notes)
-       VALUES (?, ?, 'DRAFT', ?, ?, 0, ?, ?, ?)`,
+                                    total_amount, gst_amount, grand_total, raised_by_user_id, notes, module)
+       VALUES (?, ?, 'DRAFT', ?, ?, 0, ?, ?, ?, 'RESTAURANT')`,
       [poId, supplierId, expectedDelivery.toISOString().slice(0, 10),
        subtotal, subtotal, raisedByUserId,
        `Auto-generated draft — ${lines.length} ingredients below par. Review and click Send.`]
@@ -23283,13 +23294,23 @@ ${data.tenant.name}`;
       const gst = Number(gst_amount || 0);
       const total = Number(total_amount);
       const outstanding = total;
+      // An invoice raised FROM a purchase order inherits that PO's module.
+      // Without this the module is chosen on the PO and then thrown away at the
+      // one moment it starts affecting the ledger — every PO-derived invoice
+      // silently became RESTAURANT.
+      let invModule = module ? _normaliseCostModule(module) : '';
+      if (!invModule && po_id) {
+        const poRow: any = await db.get("SELECT module FROM purchase_orders WHERE id = ?", [po_id]).catch(() => null);
+        if (poRow?.module) invModule = _normaliseCostModule(poRow.module);
+      }
+      if (!invModule) invModule = 'RESTAURANT';
       await db.run(
         `INSERT INTO supplier_invoices
           (id, supplier_id, invoice_number, invoice_date, due_date, po_id, grn_id, module,
            subtotal, gst_amount, total_amount, paid_amount, outstanding_amount, status, notes, created_by)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,'UNPAID',?,?)`,
         [id, supplier_id, invoice_number || null, invoice_date || new Date().toISOString().slice(0,10),
-         due_date || null, po_id || null, grn_id || null, module || 'RESTAURANT',
+         due_date || null, po_id || null, grn_id || null, invModule,
          sub, gst, total, outstanding, notes || null, (req as any).user?.email || (req as any).user?.id]
       );
       // GL: Dr Expense + ITC Receivable, Cr Accounts Payable
@@ -55020,8 +55041,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'reports-events-inflow-line',
+    commit_marker: 'po-module-attribution',
     code_features: [
+      'po-module-attribution',             //FIX (accounting module-coverage audit, stage 2 of 4 — 12 Sep 2026). A purchase order can finally say which part of the business it is for. **CORRECTION TO MY OWN AUDIT:** I reported that `purchase_orders` had no module column at all. It does — added long ago in `b279fd9` as `ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'`; my scan read only the CREATE TABLE and missed the ALTER. The real defect was narrower and matches the reported symptom exactly: **the create route never SET the column**, so every PO silently took the RESTAURANT default and Hotel / Events / Spa procurement could not be told apart. Now: the manual create accepts `module` (coerced through `_normaliseCostModule`, same rule as expenses and invoices), the PO form has a picker driven by the shared `COST_MODULES` constant, the list accepts `?module=`, and PATCH may change it. The par-level auto-draft states RESTAURANT explicitly rather than leaning on the default — it is raised from INGREDIENT par levels, so it is a kitchen replenishment by construction. **THE LINK THAT MATTERS:** a supplier invoice raised FROM a PO now inherits that PO's module instead of defaulting to RESTAURANT. Without it the module was chosen on the PO and thrown away at the one moment it starts affecting the ledger, since the invoice is what posts to the GL. Explicit module wins, else the PO's, else RESTAURANT. TC-PO-MODULE asserts the module is stored and that the list filter narrows on it. tsc + vite build clean.',
       'reports-events-inflow-line',        //FIX (minutes after `reports-events-coverage`, same audit). I added event collections to the cash-flow `net_cash_in` but NOT to the `inflows` breakdown array, which is built separately further down the route. Measured on the live response: `summary.cash_in` 631788.33 against an inflows array summing 541788.33 — a 90000.00 gap that WAS the event money. The report stated a total its own breakdown could not account for, which is precisely the failure TC-RPT-CASHFLOW-SYMMETRY exists to catch, and it was caught here by reading the live response rather than trusting the edit. Event collections are now listed as well as summed. **Note for whoever reads the events line and expects a number:** the managerial P&L shows events at 0 on this tenant while the GL shows 366100. That is not a bug — this report family is CASH basis (settled folios) and the GL is accrual (recognised at invoicing). Events here are invoiced but only part-paid (90000 collected of 441700 invoiced), so no event folio has reached 'settled' and the cash line is correctly zero. Whether the managerial view should switch events to an accrual basis is a product decision, not a defect.',
       'reports-events-coverage',           //FIX (accounting module-coverage audit, stage 1 of 4 — 12 Sep 2026). **Events & Convention was missing from every managerial report.** The `/reports/*` family was written module by module (orders for restaurant, `folio_kind='HOTEL'`, `folio_kind='SPA'`) before Events existed and was never extended — there was no `folio_kind='EVENT'` anywhere in the block — so the owner's three separate bug reports (P&L, Cash Flow, GST) were ONE omission repeated. A property running banquets read a P&L that left out its largest line. **Cash Flow was the worst case and not merely incomplete:** the INFLOW queries filtered to HOTEL and SPA while the REFUND query had no `folio_kind` filter at all, and neither did the daily series — so an event refund already counted as cash OUT while the matching receipt was never counted as cash IN, and the chart contradicted its own headline. Adding the event inflow makes all three consistent rather than needing a separate fix. **Basis:** every line in this family is cash-ish (hotel 'settled', restaurant orders PAID, spa 'closed'), so Events counts SETTLED event folios to match its neighbours — NOT the GL basis, which recognises event revenue at invoicing and is a different report by design. `status IN ('settled','closed')` defensively, because the settled/closed split is a documented landmine in this file and a folio has exactly one status so it cannot double count. **No double count with hotel** — verified on live data that account 4000 Room Revenue has no event-driven source_type, because rooms sold as part of an event are billed inside the event folio (4050), not as separate hotel folios. **Also fixes a gap in the cost-centre work from the day before, found while tracing this:** `_postFolioGl` posts EVENT_SETTLEMENT (4050) and spa settlement (4040) revenue and was never passed a cost centre, so the two modules with the least coverage were also the only ones whose revenue journals stayed untagged. Tests TC-RPT-MODULE-LINES (every module has a line AND the parts sum to the stated total — what breaks when a breakdown gains a line the total forgets) and TC-RPT-CASHFLOW-SYMMETRY (no module whose refunds are counted out while its receipts are not counted in). Deliberately NOT asserted: that the event figure is non-zero — these are cash-basis reports, so a tenant with invoiced-but-unpaid events legitimately shows zero and such a test would pass or fail on somebody's bookings rather than on the code. tsc + vite build clean.',
       'accounts-nav-ar-label',             //FIX (12 Sep 2026) — correcting a label from the nav regroup hours earlier. I renamed the RECEIVABLES tab to 'Receivables (AR)' assuming it was the accounts-receivable screen. It is NOT: the route behind it reads ONE table, `ota_commission_entries`, so it is an OTA/agent commission screen. Real customer AR — a corporate billed for an event, a company account for rooms, a spa package on credit — is not on it. Telling a user the product has an AR ledger it does not have is worse than the original name, so it is back to 'OTA & Agent Receivables'. Customer AR IS recorded (folio settlement posts to 1100 Accounts Receivable) and IS readable under Accounting & Reports -> Receivables & Payables -> Receivables Ageing; what is missing is an OPERATIONAL screen for it, which is a real gap and is reported rather than papered over with a label.',
