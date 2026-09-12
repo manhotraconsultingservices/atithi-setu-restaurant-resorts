@@ -4908,6 +4908,9 @@ async function settleFolioForBooking(
         for (const p of nonAdv) {
           const amt = Number(p.amount);
           if (amt <= 0) continue;
+          // Sold on credit: no money moved, so the AR raised by the invoice block
+          // above stays open instead of being cleared into the bank.
+          if (_isCreditTender(p.payment_method)) continue;
           glLines.push(..._tenderGlLines(mdrFolio, p.payment_method, amt, `${p.payment_method} ${folio.id}`));
           glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
         }
@@ -5056,6 +5059,27 @@ const _folioCostModule = (folio: any): string => {
   const kind = String(folio?.folio_kind || 'HOTEL').toUpperCase();
   return kind === 'EVENT' ? 'EVENTS' : kind === 'SPA' ? 'SPA' : 'HOTEL';
 };
+
+// A credit sale is NOT a tender. Settling a bill on CREDIT means it was invoiced
+// to a company on its payment terms: the revenue and the GST are earned, but no
+// money has arrived, so the receivable has to stay standing in AR.
+//
+// It was being recorded the other way round. The settle dialog offers "Credit",
+// the route never validated the method against the allowlist every other payment
+// route uses, and _glAccountForPaymentMethod below returns the BANK for anything
+// that is not CASH. So a credit sale posted Dr 1010 Bank / Cr 1100 AR: the money
+// read as already in the account, the debt vanished, and bank reconciliation
+// could never match it because no bank line existed to match.
+//
+// Every tender loop therefore skips a CREDIT payment. Skipping leaves the
+// original Dr 1100 from the invoice block untouched, which is exactly the
+// intended end state, and each journal stays balanced because the AR credit that
+// pairs with the tender is skipped in the same step.
+const CREDIT_TENDER = 'CREDIT';
+const _isCreditTender = (m: any): boolean => String(m || '').toUpperCase() === CREDIT_TENDER;
+// One allowlist for folio tenders. CREDIT is legal and explicit; anything else
+// is rejected rather than silently coerced to a bank receipt.
+const FOLIO_TENDERS = new Set(['CASH', 'CARD', 'UPI', 'BANK_TRANSFER', 'CHEQUE', 'OTHER', CREDIT_TENDER]);
 
 function _glAccountForPaymentMethod(method: string): { code: string; name: string } {
   return String(method || '').toUpperCase() === 'CASH'
@@ -5530,6 +5554,8 @@ async function _postFolioGl(
     for (const p of nonAdv) {
       const amt = +Number(p.amount || 0).toFixed(2);
       if (amt <= 0) continue;
+      // Same rule for event and spa folios, which both settle through here.
+      if (_isCreditTender(p.payment_method)) continue;
       lines.push(..._tenderGlLines(mdrF, p.payment_method, amt, `${p.payment_method || 'CASH'} ${folioId}`));
       lines.push({ account_code: arCode, account_name: arName, dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folioId}` });
     }
@@ -47662,6 +47688,10 @@ ${data.tenant.name}`;
     try {
       const { payment_method, discount } = req.body || {};
       if (!payment_method) return res.status(400).json({ error: 'payment_method is required' });
+      const _method = String(payment_method).toUpperCase();
+      if (!FOLIO_TENDERS.has(_method)) {
+        return res.status(400).json({ error: `payment_method must be one of ${Array.from(FOLIO_TENDERS).join(', ')}` });
+      }
       const tenantDb = await getTenantDb(req.params.id);
       const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [req.params.folioId]);
       if (!folio) return res.status(404).json({ error: "Folio not found" });
@@ -47690,7 +47720,11 @@ ${data.tenant.name}`;
       const refreshed: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
       const outstanding = await getFolioOutstanding(tenantDb, folio.id);
       const balanceDue = outstanding ? Math.max(0, outstanding.outstanding) : Number(refreshed.grand_total || 0);
-      if (balanceDue > 0) {
+      // folio_payments is the record of money RECEIVED. A credit sale receives
+      // nothing, so it gets no row: the balance stays outstanding and the bill
+      // reads as owed rather than paid. The invoice is still issued and the
+      // revenue still recognised on this date - only the receipt is absent.
+      if (balanceDue > 0 && !_isCreditTender(_method)) {
         const pid = `FP-SETTLE-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
         await tenantDb.run(
           `INSERT INTO folio_payments (id, folio_id, payment_type, payment_method, amount, recorded_by, recorded_at)
@@ -47733,6 +47767,7 @@ ${data.tenant.name}`;
           for (const p of nonAdv) {
             const amt = Number(p.amount);
             if (amt <= 0) continue;
+            if (_isCreditTender(p.payment_method)) continue;
             const cashAcct = _glAccountForPaymentMethod(p.payment_method);
             glLines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method} ${folio.id}` });
             glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
@@ -56176,8 +56211,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-period-lock',
+    commit_marker: 'credit-sale-not-a-tender',
     code_features: [
+      'credit-sale-not-a-tender: settling a bill on CREDIT no longer books the money into the bank. The hotel settle dialog offered Credit, the route never validated the method against the allowlist every other payment route uses, and _glAccountForPaymentMethod returns the BANK for anything that is not CASH - so a sale on credit to a company posted Dr 1010 Bank / Cr 1100 AR: cash overstated, debtors wiped, and nothing for bank reconciliation to ever match. Now: one FOLIO_TENDERS allowlist (CREDIT explicitly legal, junk refused with 400 instead of silently coerced); all three tender loops skip a CREDIT payment, so the Dr 1100 raised by the invoice block stays standing and each journal stays balanced - including _postFolioGl, which is the path EVENT and SPA folios settle through; and a credit settlement writes no folio_payments row at all, because that table records money RECEIVED. The invoice is still issued and the revenue still recognised on the settle date, so every revenue report is unchanged; the bill simply reads as owed. It surfaces today in the GL-derived Receivables Ageing, which ages accounts 1100/1110. Smoke: TC-CREDIT-SALE-TENDER, TC-CREDIT-SALE-GL, TC-CREDIT-SALE-OUTSTANDING.',
       'inventory-period-lock: a CLOSED inventory month refuses MANUAL stock writes dated inside it (adjust, wastage, GRN receipt, stock count, hotel movement) with 409 INVENTORY_PERIOD_CLOSED. Automatic consumption is never blocked - it makes a close stale, fixed by re-closing. Also restores the hotel stock movement date, which was read at the route and then dropped, so a back-dated hotel movement was silently recorded as today.',
       'inventory-item-drawer',        //FEATURE (owner-reported: 'there should be history or audit log for each item with complete traceability who when and why'). The data existed - `stock_movements` carries the actor, the timestamp, the reference and the reason - but the only way to see it was a flat, PROPERTY-WIDE usage log that a human had to scan by eye, and traceability that needs an eye-scan is not traceability. Clicking an item now opens it as an OBJECT over the list (never a new page, so the list is not lost) answering the four questions people actually ask: **Overview** levels/par/value, **Suppliers** (reusing the approved-supplier panel), **History** every movement with who / when / what / balance / WHY, and **Where used** - which dishes consume it and what is already on order, both of which get asked before anyone deletes an item or changes its unit and neither of which was answerable without leaving the screen. The WHY is assembled from whichever trace the row has: wastage stores 'REASON: note', a manual adjustment stores its reason or a before->after, a consumption carries the order that caused it. New `/inventory/ingredients/:id/where-used` returns only CURRENTLY-IN-FORCE recipe rows - a superseded version is history, not a commitment, and listing it would overstate what the item is used by today. TC-INV-ITEM-TRACE writes two movements with DIFFERENT reasons and asserts both are recoverable, that every row names a person, and that the trail carries only this item - a per-item trail that leaks other items is just the flat log again.',
       'inventory-hotel-on-shared-screen', //FEATURE (the last bespoke inventory screen is gone). Hotel ran its own component with FOUR tabs and no receiving, no wastage and no stock takes; it now runs the same `ModuleInventoryView` as Restaurant-adjacent, Spa and Events, so all four modules are ONE component and cannot drift into four different ways of receiving a delivery - which was the reported problem. Nothing that was visible yesterday is missing today, and that took two pieces of care: **(1)** the hotel screen's one genuinely useful exclusive, its quick-setup seed of common housekeeping supplies, is GENERALISED into `STARTER_ITEMS` per module and offered from the empty state - Spa and Events open just as empty and deserve the same help; it skips anything already present by name, so pressing it twice cannot duplicate a shelf. **(2)** the hotel's PRE-FOLD movements live in the legacy `hotel_stock_movements` table and are absent from `stock_movements`, so a usage log built only from the shared ledger would begin the day the silo was folded in and show nothing before it; they are now UNIONed into the shared audit log and projected into the same shape, never rewritten. **Also fixed, a silent coercion:** the unit allowlist was the kitchen's, so housekeeping stock entered in rolls or sachets was quietly saved as 'unit' and its par levels then meant something other than what was typed - the same shape as the SPA_PRODUCT bug. Widened with the vocabulary housekeeping, spa and banquets actually use. The old `HotelInventoryView` stays in the file, unreachable, rather than being deleted in the same change.',
