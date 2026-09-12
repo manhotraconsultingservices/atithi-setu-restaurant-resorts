@@ -701,9 +701,23 @@ function EventBookings({ restaurantId, token }: Props) {
   const BOOKINGS_PAGE = 200;
   const [bookingsTotal, setBookingsTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
-  const load = async (offset = 0) => {
+  // SERVER-SIDE SEARCH. The box used to filter the 200 rows already loaded,
+  // out of 2,828 — so a booking that was not on the page could not be found at
+  // all, and the list gave no sign it was only looking at a slice. The term now
+  // goes to the server, which searches every booking.
+  //
+  // It is kept in a ref as well as in state because load() is called with no
+  // arguments from a dozen places (after create / cancel / confirm, on return
+  // from a detail view, from the refresh button). Every one of those must stay
+  // inside the search the user is looking at rather than silently reverting to
+  // the full list.
+  const [bookingSearch, setBookingSearch] = useState('');
+  const searchRef = useRef('');
+  const load = async (offset = 0, q?: string) => {
+    const term = q === undefined ? searchRef.current : q;
+    searchRef.current = term;
     try {
-      const d: any = await api(`/events/bookings?paged=1&limit=${BOOKINGS_PAGE}&offset=${offset}`);
+      const d: any = await api(`/events/bookings?paged=1&limit=${BOOKINGS_PAGE}&offset=${offset}${term ? `&search=${encodeURIComponent(term)}` : ''}`);
       const page: any[] = Array.isArray(d) ? d : (d?.rows || []);
       // offset 0 replaces, anything else appends — so every existing caller of
       // load() (after create, cancel, confirm…) still gets a clean first page.
@@ -715,6 +729,9 @@ function EventBookings({ restaurantId, token }: Props) {
     setLoadingMore(true);
     try { await load(rows.length); } finally { setLoadingMore(false); }
   };
+  // Every search starts a fresh first page — paging on from an old offset would
+  // read the new result set at the old position and skip its opening rows.
+  const runBookingSearch = (q: string) => { setBookingSearch(q); load(0, q); };
   const loadVenues = async () => { try { setVenues(await api('/events/venues')); } catch { /* */ } };
   useEffect(() => { load(); loadVenues(); }, []);
 
@@ -758,7 +775,7 @@ function EventBookings({ restaurantId, token }: Props) {
   return (
     <div>
       <SectionHeader icon={<CalendarRange size={18} />} title={t('events.bookings.title')} sub={t('events.bookings.sub')}
-        action={<div className="flex gap-2"><button className={BTN_GHOST} onClick={load}><RefreshCw size={13} /></button>{evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} onClick={() => { setForm(blank); setShowNew(true); }}><Plus size={14} />{t('events.bookings.new')}</button>}</div>} />
+        action={<div className="flex gap-2"><button className={BTN_GHOST} onClick={() => load(0)}><RefreshCw size={13} /></button>{evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_PRIMARY} onClick={() => { setForm(blank); setShowNew(true); }}><Plus size={14} />{t('events.bookings.new')}</button>}</div>} />
 
       {showNew && (
         <div className={`${CARD} mb-4`}>
@@ -827,7 +844,7 @@ function EventBookings({ restaurantId, token }: Props) {
       {bookingsTotal > rows.length && (
         <div className="flex items-center justify-between gap-3 flex-wrap mb-2 px-3 py-2 rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15">
           <span className="text-xs text-[#6b5d52]">
-            Showing <b>{rows.length}</b> of <b>{bookingsTotal}</b> bookings
+            Showing <b>{rows.length}</b> of <b>{bookingsTotal}</b> {bookingSearch ? 'matching bookings' : 'bookings'}
           </span>
           <button
             type="button" onClick={loadMore} disabled={loadingMore}
@@ -839,7 +856,9 @@ function EventBookings({ restaurantId, token }: Props) {
       <DataTable
         data={rows}
         rowKey={(r: any) => r.id}
-        emptyMessage={t('events.bookings.empty')}
+        onSearch={runBookingSearch}
+        searchPlaceholder="Search all bookings — name, phone, email, booking ID, venue"
+        emptyMessage={bookingSearch ? `No booking matches "${bookingSearch}".` : t('events.bookings.empty')}
         columnChooser
         columnFilters
         tableId="events-bookings"

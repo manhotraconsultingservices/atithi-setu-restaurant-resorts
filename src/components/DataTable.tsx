@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronUp, ChevronDown, ChevronsUpDown, Download, Search, X, ChevronLeft, ChevronRight, SlidersHorizontal, Check } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -42,6 +42,13 @@ interface DataTableProps<T = any> {
   hideSearch?: boolean;
   hideExport?: boolean;
   hidePagination?: boolean;
+  // SERVER-SIDE SEARCH. Give this and the search box queries the SERVER
+  // instead of filtering the rows already on screen. The distinction stops
+  // mattering the moment a table holds more rows than one page carries: a
+  // client-side box can only ever find what has already been loaded, so on a
+  // list of thousands it silently fails to find most of what is there.
+  // Without it, nothing changes — every existing table keeps filtering locally.
+  onSearch?: (query: string) => void;
   columnChooser?: boolean;      // show a gear that adds/removes columns
   columnFilters?: boolean;      // show a per-column filter row
   tableId?: string;             // localStorage key so the column choice sticks per user
@@ -101,6 +108,7 @@ export function DataTable<T = any>({
   hideSearch = false,
   hideExport = false,
   hidePagination = false,
+  onSearch,
   columnChooser = false,
   columnFilters = false,
   tableId,
@@ -112,6 +120,20 @@ export function DataTable<T = any>({
   const [pageSize, setPageSize] = useState(defaultPageSize);
   const [colFilters, setColFilters] = useState<Record<string, string>>({});
   const [chooserOpen, setChooserOpen] = useState(false);
+
+  // Debounced hand-off to the server. Held through a ref so a caller that
+  // re-creates its handler each render does not restart the timer, and skipped
+  // on the first run because the caller has already loaded its first page —
+  // firing here too would just fetch it twice.
+  const onSearchRef = useRef(onSearch);
+  useEffect(() => { onSearchRef.current = onSearch; });
+  const firstSearchRun = useRef(true);
+  useEffect(() => {
+    if (!onSearchRef.current) return;
+    if (firstSearchRun.current) { firstSearchRun.current = false; return; }
+    const h = setTimeout(() => onSearchRef.current?.(query.trim()), 350);
+    return () => clearTimeout(h);
+  }, [query]);
 
   const storageKey = tableId ? `dt:cols:${tableId}` : null;
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => {
@@ -166,7 +188,11 @@ export function DataTable<T = any>({
   );
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    // When the server is doing the searching, re-applying the term here would
+    // be wrong as well as redundant: the server matches fields this table may
+    // not even be showing (a hidden column, or the venue name), and filtering
+    // again locally would throw those matches away. Column filters still run.
+    const q = onSearch ? '' : query.trim().toLowerCase();
     if (!q && activeFilters.length === 0) return data;
     return data.filter(row => {
       if (q) {
@@ -186,7 +212,7 @@ export function DataTable<T = any>({
       }
       return true;
     });
-  }, [data, query, visible, activeFilters, columns]);
+  }, [data, query, visible, activeFilters, columns, !!onSearch]);
 
   const sorted = useMemo(() => {
     if (!sortCol) return filtered;
@@ -244,7 +270,9 @@ export function DataTable<T = any>({
             </div>
           )}
           <span className="text-xs text-[#9c8e85] hidden sm:inline tabular-nums">
-            {query || activeFilters.length ? `${filtered.length} of ${data.length}` : `${data.length} record${data.length !== 1 ? 's' : ''}`}
+            {(onSearch ? activeFilters.length > 0 : Boolean(query) || activeFilters.length > 0)
+              ? `${filtered.length} of ${data.length}`
+              : `${data.length} record${data.length !== 1 ? 's' : ''}`}
           </span>
           {toolbarRight}
           {columnChooser && (

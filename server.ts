@@ -26204,6 +26204,11 @@ ${data.tenant.name}`;
   //     the open worklist (status = 'OPEN') and out of the cleaning log
   //     (status IN ('DONE','OVERRIDDEN')), so it is neither outstanding nor
   //     counted as cleaned.
+  //
+  // Run it from the nightly cron AND from POST /checklists/run-scheduled. It
+  // lived only in the cron, which meant two things: an owner looking at a board
+  // full of dead rows had to wait until 05:00 for anything to happen, and the
+  // sweep could not be exercised — it had never once run against real data.
   const _expireStaleChecklistJobs = async (db: any, ymd: string, graceDays = 7): Promise<number> => {
     try {
       await db.exec("ALTER TABLE housekeeping_jobs ADD COLUMN IF NOT EXISTS expired_at TIMESTAMP").catch(() => {});
@@ -26880,9 +26885,19 @@ ${data.tenant.name}`;
       // already existed (a repeat run of the same day is 0 raised / N skipped, not
       // "N raised" again).
       const stats = { created: 0, deduped: 0 };
+      // Sweep BEFORE raising, exactly as the 05:00 cron does — so this route
+      // runs the same sequence the nightly job runs, and is a real rehearsal of
+      // it rather than an approximation. `expire_grace_days` is how many days
+      // past its due date a non-blocking job has to be before it is considered
+      // dead; it defaults to the cron's 7 and is clamped at 0 so a caller can
+      // ask for "everything already overdue" but never for a negative window
+      // that would expire work that is not yet due.
+      const graceDays = req.body?.expire_grace_days === undefined
+        ? 7 : Math.max(0, Number(req.body.expire_grace_days) || 0);
+      const expired = await _expireStaleChecklistJobs(db, ymd, graceDays);
       const raised = await runTenantScheduledChecklists(db, { isHotel, isEvents, isRestaurant, isSpa, ymd }, stats);
       const overdue_notified = await notifyOverdueChecklists(db, req.params.id, ymd);
-      res.json({ raised, skipped: stats.deduped, overdue_notified, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
+      res.json({ raised, skipped: stats.deduped, expired, expire_grace_days: graceDays, overdue_notified, as_of: ymd, property_type: rest?.property_type || null, events_enabled: isEvents });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to run scheduled checklists' }); }
   });
 
@@ -29057,7 +29072,18 @@ ${data.tenant.name}`;
       if (status) { sql += ` AND b.status = ?`; params.push(status); }
       if (from) { sql += ` AND b.event_date >= ?`; params.push(from); }
       if (to) { sql += ` AND b.event_date <= ?`; params.push(to); }
-      if (search) { sql += ` AND (b.customer_name ILIKE ? OR b.customer_phone ILIKE ?)`; params.push(`%${search}%`, `%${search}%`); }
+      if (search) {
+        // SEARCH_FIELDS — the list had only name and phone, which is not how
+        // anyone actually looks a booking up: the ID is the column staff read
+        // off an invoice or a WhatsApp message, and the hall is how they find
+        // "that wedding in Emerald". Email is here because the public enquiry
+        // form captures it and often nothing else.
+        //
+        // BIND ORDER IS POSITIONAL — one param per placeholder, in this order.
+        const like = `%${search}%`;
+        sql += ` AND (b.customer_name ILIKE ? OR b.customer_phone ILIKE ? OR b.customer_email ILIKE ? OR b.id ILIKE ? OR v.name ILIKE ?)`;
+        params.push(like, like, like, like, like);
+      }
       // PAGING. This was a flat `LIMIT 1000` with no total and no way to ask
       // for the rest, so a property that crossed a thousand bookings simply
       // stopped seeing some of them — and because the order is by EVENT DATE,
@@ -57221,8 +57247,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-room-lines-honest',
+    commit_marker: 'search-the-whole-table-TEMP-CRON',
     code_features: [
+      'search-the-whole-table-TEMP-CRON. (A) SERVER-SIDE BOOKING SEARCH. The Event Bookings list loads 200 rows of 2,828 and its search box filtered only those, so a booking not already on the page could not be found at all and nothing on screen said the box was looking at a slice. DataTable takes an optional onSearch: given it, the box debounces (350ms) to the SERVER and the local filter skips the term - re-applying it would be wrong as well as redundant, because the server matches fields the table may not be showing (venue name, email). Without onSearch every other table is untouched. The server search itself was only customer_name + phone, which is not how anyone looks a booking up: widened to booking ID (the column staff read off an invoice), email and venue name. EventViews holds the term in a REF as well as state because load() is called with no arguments from a dozen places (after create / cancel / confirm, on back from a detail view) and every one must stay inside the search the user is looking at. FOUND WHILE THERE: the list refresh button was onClick={load}, which hands React the MouseEvent as `offset` - so `offset === 0` was false and refreshing APPENDED page 1 to itself instead of replacing it, duplicating every row. Now onClick={() => load(0)}. Smoke: TC-EVT-BOOKINGS-SEARCH asserts BOTH halves of each match (the booking that should match is returned AND the one that should not is absent - a search returning everything would pass a find-only test), plus -TOTAL (the count describes the match, not the table). (B) THE EXPIRY SWEEP WAS UNREACHABLE. _expireStaleChecklistJobs had exactly ONE call site, the 05:00 cron, so it had never run against real data and an owner staring at a board of dead rows had to wait for the morning. POST /checklists/run-scheduled now runs the sweep BEFORE the raise - the same sequence the cron runs, so the route is a real rehearsal of it - and reports `expired`. New optional expire_grace_days (default 7, clamped at >= 0 so nobody can ask for a negative window that would expire work not yet due). Smoke: TC-CHK-EXPIRY-SWEEP raises a PAIR of daily jobs on the same past day for the same hall, identical except blocks_release, and asserts one is EXPIRED (not DONE) while the other is left OPEN - a sweep that cleared everything, or nothing, fails one half. Plus -OFF-WORKLIST. (C) TEMPORARY: the checklist cron is on */3 * * * * instead of 0 5 * * * so the real nightly path can be watched end to end. THIS MUST BE REVERTED IN THE NEXT DEPLOY.',
       'event-room-lines-honest (reported: on a quotation, a hotel room that FAILED to book is still costed, there is no way to remove it, and a DAY event cannot take rooms at all). FOUR defects, three of them one screen. (1) FAILED ROOMS WERE COSTED ON SCREEN ONLY. Every money query on the server already excludes them - assembleEventQuoteLines, computeEventBill and the revenue scalar all read status NOT IN (CANCELLED,FAILED) - but GET /events/bookings/:bid returns the rooms UNFILTERED (correctly: the screen must still SHOW a room that failed) and EventViews summed (bk.rooms || []) with no filter into the Room Totals line. So the invoice was right and the SCREEN lied - staff read and quoted from a figure the customer would never be billed. The detail read now returns is_chargeable per row and the totals skip a row that is not chargeable; the row still renders, dimmed and labelled not charged, because a failed reservation is something staff must SEE. (2) NO WAY TO REMOVE ONE. DELETE /events/bookings/:bid/rooms/:rid has always existed and handles a FAILED row cleanly (no hotel_booking_id, so nothing to release) - the UI simply never rendered a control for it: removal was offered only for QUOTED (X) and BOOKED (minus), and a FAILED row got a blank spacer. It now gets the X. (3) A DAY EVENT COULD NOT TAKE ROOMS. reserveEventHotelRooms built its payload with NO booking_type, so the hotel validator defaulted to OVERNIGHT, which requires check-out strictly AFTER check-in - and a one-day event has check_in == check_out (checkOut falls back to end_date || event_date). The hotel refused with Use the Day-Use option, advice the caller could not follow because this path never sent a booking_type at all; the room line was then rolled back atomically and the user saw that message. The payload now sends DAY_USE when the two ISO dates match and OVERNIGHT otherwise - derived from the SAME isoOf outputs already being sent, so no date behaviour changed. (4) GENERATE QUOTATION stayed on offer once the event had started. A quotation is a pre-sale document; hidden for IN_PROGRESS / COMPLETED / CANCELLED, matching the gating already used for Cancel Invoice. Smoke: TC-EVT-ROOM-DAY-USE (a same-day event reserves a real room; an empty hotel SKIPS rather than passes, and the overnight wording is detected as the bug rather than as no inventory), TC-EVT-ROOM-FAILED-NOT-BILLED (asserted as an EXCLUSION: the total is read before the line, again while QUOTED where it must RISE - otherwise the line carries no money and the test proves nothing - and again after the reservation fails, where it must fall back), TC-EVT-ROOM-FAILED-REMOVABLE.',
       'checklist-noise-at-source: the cleaning board refilled because the product created work nobody asked for. runTenantScheduledChecklists raised a DAILY job for EVERY room and EVERY active venue every day with no check that anything happened there - four idle halls produced four dead jobs a day, which is how this tenant reached 433 open jobs. (1) Rooms now only get a daily when OCCUPIED or CLEANING (daily servicing of occupied rooms is the real practice; a vacant clean room needs nothing). Venues only when a non-cancelled booking covers today or yesterday - yesterday counts because the hall used last night is the one needing clearing this morning. (2) New _expireStaleChecklistJobs sweep in the 05:00 cron, BEFORE the raise, ages out open jobs whose due_date passed more than 7 days ago. TWO DELIBERATE RULES: blocks_release jobs are NEVER touched (closing one releases a facility nobody cleaned - the system would assert a physical untruth), and the status is EXPIRED not DONE (recording work as done when it was not is the worse lie). EXPIRED drops out of both the open worklist (status=OPEN) and the cleaning log (status IN DONE,OVERRIDDEN). LANDMINE: housekeeping_jobs.due_date is TEXT not DATE, so interval arithmetic throws a text-vs-timestamp operator error that the helper would have swallowed, expiring nothing forever; the cut-off is computed in JS and compared as an ISO string instead.',
       'avail-cleaning-gate-scope (reported: booking form says Not available - Hall has an open cleaning checklist from a prior event). THE SAME DEFECT AS event-confirm-no-checklist-gate, fixed on /confirm and MISSED on the endpoint the booking FORM actually calls. hasOpenHousekeepingJob is WHERE facility_id = ? AND status = OPEN AND blocks_release = 1 with NO DATE SCOPE, and the system template that fires after every event is itself blocks_release = 1 - so one post-event checklist nobody closed made the hall report Not available on EVERY date, forever. Emerald Hall on this tenant had 113 open jobs and was unsellable for any date. /events/venues/:vid/availability-check now scopes the cleaning gate to a booking that RUNS TODAY, exactly like the Hall Status board gate immediately beneath it (which already carried the right reasoning in a comment: a now state must not govern a future date). The useful half is kept - selling the hall for today still warns - and the permanent unsellability is gone. Also switched its todayIst to _istNowParts() so it cannot inherit the midnight-hour-24 bug. Smoke: TC-EVT-AVAIL-CLEANING-SCOPE completes a real event to raise a real blocks_release job, then asserts the hall is still sellable 120 days out.',
@@ -60727,7 +60754,13 @@ ${data.tenant.name}`;
   // For hotel/events tenants with active DAILY / MID_STAY templates, raise the
   // day's Daily checklists per room/venue and the recurring mid-stay checklists
   // for in-house guests. Dedupe keys make every run idempotent (safe to re-run).
-  cron.schedule('0 5 * * *', async () => {
+  // ╔════════════════════════════════════════════════════════════════════╗
+  // ║ TEMPORARY — every 3 minutes instead of 05:00 IST, to watch the real ║
+  // ║ nightly path run end to end. REVERT TO '0 5 * * *' IN THE NEXT      ║
+  // ║ DEPLOY. Safe to repeat: the raise dedupes per day and the sweep only ║
+  // ║ touches rows it has not already expired.                            ║
+  // ╚════════════════════════════════════════════════════════════════════╝
+  cron.schedule('*/3 * * * *', async () => {
     try {
       const ymd = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
       const restaurants = await centralDb.query("SELECT id, property_type, events_enabled, spa_enabled FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'");
@@ -60751,7 +60784,7 @@ ${data.tenant.name}`;
       if (raised > 0 || expired > 0) console.log(`[checklist-cron] raised ${raised} daily/mid-stay job(s), expired ${expired} stale non-blocking job(s)`);
     } catch (err) { console.error('[checklist-cron] cron error:', err); }
   }, { timezone: 'Asia/Kolkata' });
-  console.log('[checklist-cron] Daily + mid-stay checklist cron started — 05:00 IST');
+  console.log('[checklist-cron] TEMPORARY every-3-minutes schedule (revert to 05:00 IST)');
 
   // ─── Inventory: morning stock-low scan (09:00 IST) ──────────────────────
   // Fires STOCK_LOW notification for ingredients that crossed below their
