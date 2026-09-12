@@ -14030,9 +14030,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   // ─── Inventory fetchers ───────────────────────────────────────────────────
+  // Kitchen Inventory is the KITCHEN's screen, so it asks for the kitchen's
+  // items — plus SHARED, the property-wide consumables (cleaning chemicals,
+  // bin liners) that belong to no single module and would otherwise be
+  // invisible everywhere.
+  //
+  // This filter is load-bearing, not cosmetic. While the hotel kept its own
+  // `hotel_inventory_items` table, an unfiltered request happened to return
+  // only kitchen items; once that silo was folded into the shared master,
+  // the same unfiltered request started returning housekeeping supplies —
+  // toilet paper and floor cleaner in the chef's ingredient list, and in the
+  // stock-value, below-reorder and food-cost figures computed from it.
   const fetchInventoryIngredients = async () => {
     try {
-      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients`, {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients?module=RESTAURANT&include_shared=1`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (r.ok) setInventoryIngredients(await r.json());
