@@ -10656,7 +10656,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
   const [inventorySubTab, setInventorySubTab] = useState<
-    'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS' | 'ANALYTICS' | 'INSIGHTS' | 'SETTINGS'
+    'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS' | 'ANALYTICS' | 'INSIGHTS' | 'MONTH_END' | 'SETTINGS'
   >('DASHBOARD');
   // Delivery integration — sub-navigation
   const [deliverySubTab, setDeliverySubTab] = useState<
@@ -17404,6 +17404,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['WASTAGE', 'Wastage', inventoryWastage.length],
               ['PHYSICAL_COUNTS', 'Physical Counts', inventoryCounts.length],
               ['ANALYTICS', 'Analytics', 0],
+              ['MONTH_END', 'Month End', 0],
               ['SETTINGS', 'Settings', 0],
             ] as [typeof inventorySubTab, string, number][]).map(([id, label, count]) => (
               <button
@@ -18687,6 +18688,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           })()}
 
           {/* ── PHYSICAL COUNTS sub-view ── */}
+          {inventorySubTab === 'MONTH_END' && (
+            // The SAME component the other three modules use. The kitchen keeps
+            // its own richer screen, but month end is one thing and must not be
+            // a thing only some modules can do.
+            <InventoryMonthEnd restaurantId={restaurantId} token={token!} module="RESTAURANT" />
+          )}
+
           {inventorySubTab === 'PHYSICAL_COUNTS' && (() => {
             const search = countSearch.toLowerCase().trim();
             const filtered = inventoryCounts.filter((c: any) => {
@@ -57322,7 +57330,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   restaurantId: string; token: string; module: string; title: string; subtitle: string;
 }) {
   const toast = useToast();
-  type MTab = 'ITEMS' | 'LOW_STOCK' | 'PURCHASING' | 'MOVEMENTS' | 'COUNTS' | 'REPORTS';
+  type MTab = 'ITEMS' | 'LOW_STOCK' | 'PURCHASING' | 'MOVEMENTS' | 'COUNTS' | 'REPORTS' | 'MONTH_END';
   const [tab, setTab] = useState<MTab>('ITEMS');
   const [items, setItems] = useState<any[]>([]);
   const [movements, setMovements] = useState<any[]>([]);
@@ -57495,6 +57503,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
     { k: 'MOVEMENTS', label: 'Usage Log' },
     { k: 'COUNTS', label: 'Stock Takes', count: counts.length },
     { k: 'REPORTS', label: 'Reports' },
+    { k: 'MONTH_END', label: 'Month End' },
   ];
 
   const rows = tab === 'LOW_STOCK' ? lowStock.filter((i: any) =>
@@ -57612,8 +57621,17 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
                   </div>
                 ))}
               </div>
-              {/* Food cost % is deliberately absent for a non-restaurant module:
-                  it would divide this module's consumption by restaurant sales. */}
+              {/* Consumption over THIS module's own revenue. It was withheld here
+                  because the denominator used to be restaurant sales whatever the
+                  module — that is fixed, so the ratio is shown. */}
+              <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">Consumption vs revenue</p>
+                <p className="text-xl font-bold text-[#0d0a07] mt-1 font-mono">{Number(modReports.kpis?.food_cost_pct || 0)}%</p>
+                <p className="text-[11px] text-[#9c8e85] mt-1">
+                  Rs.{Number(modReports.kpis?.consumed_value_this_month || 0).toFixed(2)} used against
+                  Rs.{Number(modReports.kpis?.revenue_this_month || 0).toFixed(2)} of {(COST_MODULE_LABEL[module] || module).toLowerCase()} sales
+                </p>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {[
                   ['Not moved in 30 days', modReports.dead, (r: any) => `${r.name} · ${Number(r.stock_qty || 0)} ${r.unit}`],
@@ -57632,6 +57650,8 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
             </>
           )}
         </div>
+      ) : tab === 'MONTH_END' ? (
+        <InventoryMonthEnd restaurantId={restaurantId} token={token} module={module} />
       ) : tab === 'COUNTS' ? (
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -66653,6 +66673,234 @@ function AccountDrawer({ restaurantId, token, accountId, onClose, onChanged }: {
           </>)}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── InventoryMonthEnd ──────────────────────────────────────────────────────
+// Valuing a month, posting it to the ledger, and undoing that. All of it
+// existed as API and NONE of it had a screen, for any module — so nobody using
+// the product could run a close, see one, or reopen one.
+//
+// Written as its own component rather than inside a tab because the Restaurant
+// kitchen screen and the shared module screen are still two different
+// components, and month end must not be a thing only three of the four modules
+// can do. One definition, mounted twice.
+function InventoryMonthEnd({ restaurantId, token, module }: { restaurantId: string; token: string; module: string }) {
+  const toast = useToast();
+  const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const [period, setPeriod] = useState(() => new Date().toISOString().slice(0, 7));
+  const [preview, setPreview] = useState<any>(null);
+  const [history, setHistory] = useState<any[]>([]);
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [pv, hist] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/inventory/periods/preview?module=${module}&period=${period}`, { headers: auth })
+          .then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(`/api/restaurant/${restaurantId}/inventory/periods?module=${module}`, { headers: auth })
+          .then(r => r.ok ? r.json() : []).catch(() => []),
+      ]);
+      setPreview(pv);
+      setHistory(Array.isArray(hist) ? hist : []);
+    } finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, [module, period]);
+
+  const money = (v: any) => `Rs.${Number(v || 0).toFixed(2)}`;
+  const closed = history.find((p: any) => p.period_key === period && String(p.status).toUpperCase() === 'CLOSED');
+  const t = preview?.totals || {};
+  const lines = preview?.lines || [];
+  // Last day of the chosen month against today. Closing a month that has not
+  // finished is legal and sometimes deliberate, but it refuses every manual
+  // stock entry for the rest of it — so it is said out loud beforehand rather
+  // than discovered when a wastage entry is rejected next week.
+  const [yy, mm] = period.split('-').map(Number);
+  const periodEnd = (yy && mm) ? new Date(Date.UTC(yy, mm, 0)).toISOString().slice(0, 10) : '';
+  const inProgress = !!periodEnd && periodEnd > new Date().toISOString().slice(0, 10);
+
+  const runClose = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/periods/close`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ module, period, notes: notes || null }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || 'Could not close the period');
+      toast.success(d.reclosed
+        ? `${period} re-closed — the previous journal was reversed and replaced`
+        : `${period} closed${d.gl_journal_ref ? ` and posted (${d.gl_journal_ref})` : ''}`);
+      setNotes('');
+      await load();
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+
+  const runReopen = async (pid: string) => {
+    const reason = window.prompt('Why is this month being reopened? (recorded on the period and in the audit trail)');
+    if (!reason || !reason.trim()) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/periods/${pid}/reopen`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ reason: reason.trim() }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || 'Could not reopen the period');
+      toast.success(`Reopened — the close journal was reversed${d.reversal_ref ? ` (${d.reversal_ref})` : ''}`);
+      await load();
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-end gap-3 flex-wrap">
+        <label className="block">
+          <span className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">Month</span>
+          <input type="month" value={period} onChange={e => setPeriod(e.target.value)}
+            className="block mt-1 px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm bg-white" />
+        </label>
+        <p className="text-xs text-[#6b5d52] flex-1 min-w-[240px]">
+          Closing a month values the stock on hand, posts it to the ledger, and refuses any further
+          <strong> manual</strong> stock entry dated inside it. Orders and appointments keep depleting
+          stock as normal — that makes a close stale, which re-closing fixes.
+        </p>
+      </div>
+
+      {inProgress && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <strong>{period} has not finished yet.</strong> You can close it, but every manual stock
+          correction, wastage entry, goods receipt and stock take dated in the rest of this month
+          will be refused until it is reopened.
+        </div>
+      )}
+
+      {closed && (
+        <div className="rounded-2xl border border-[#cc5a16]/20 bg-[#fdf6ef] px-4 py-3 flex items-start justify-between gap-3 flex-wrap">
+          <div className="text-sm text-[#3d332a]">
+            <strong>{period} is closed.</strong>{' '}
+            {closed.gl_journal_ref
+              ? <>Posted to the ledger as <code className="font-mono text-xs">{closed.gl_journal_ref}</code>.</>
+              : 'No journal was posted — there was nothing to value.'}
+            <span className="block text-xs text-[#9c8e85] mt-0.5">
+              Closing stock {money(closed.closing_value)} · used {money(closed.actual_consumption_value)} · variance {money(closed.variance_value)}
+            </span>
+          </div>
+          <button onClick={() => runReopen(closed.id)} disabled={busy}
+            className="px-3 py-2 rounded-2xl border border-[#cc5a16]/25 text-[#cc5a16] text-xs font-bold hover:bg-white disabled:opacity-50">
+            Reopen this month
+          </button>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="p-8 text-center text-sm text-[#9c8e85]">Loading…</div>
+      ) : !preview ? (
+        <div className="p-8 text-center text-sm text-[#9c8e85]">Nothing to preview for {period}.</div>
+      ) : (<>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            ['Opening stock', t.opening_value], ['Purchases', t.purchases_value],
+            ['Closing stock', t.closing_value], ['Used', t.actual_consumption_value],
+            ['Should have used', t.theoretical_consumption_value], ['Wastage', t.wastage_value],
+            ['Variance', t.variance_value],
+          ].map(([label, v]: any) => (
+            <div key={label} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+              <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">{label}</p>
+              <p className="text-xl font-bold text-[#0d0a07] mt-1 font-mono">{money(v)}</p>
+            </div>
+          ))}
+        </div>
+
+        {Number(t.theoretical_consumption_value || 0) === 0 && Number(t.actual_consumption_value || 0) > 0 && (
+          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3">
+            Nothing in this module has a recipe, so &ldquo;should have used&rdquo; is zero and the whole of
+            consumption reads as variance. The close itself is still correct; the variance figure is
+            not meaningful until recipes exist.
+          </p>
+        )}
+
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-[#faf7f2] text-[10px] uppercase tracking-widest text-[#9c8e85]">
+              <tr>
+                <th className="px-3 py-2 text-left font-bold">Item</th>
+                <th className="px-3 py-2 text-right font-bold">Opening</th>
+                <th className="px-3 py-2 text-right font-bold">In</th>
+                <th className="px-3 py-2 text-right font-bold">Wastage</th>
+                <th className="px-3 py-2 text-right font-bold">Closing</th>
+                <th className="px-3 py-2 text-right font-bold">Used</th>
+                <th className="px-3 py-2 text-right font-bold">Unit cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.length === 0 ? (
+                <tr><td colSpan={7} className="px-3 py-8 text-center text-[#9c8e85]">
+                  Nothing in this module moved or was held in {period}.
+                </td></tr>
+              ) : lines.slice(0, 200).map((l: any) => (
+                <tr key={l.ingredient_id} className="border-t border-[#f0e8d8]">
+                  <td className="px-3 py-2 text-[#0d0a07]">{l.ingredient_name}</td>
+                  <td className="px-3 py-2 text-right font-mono">{Number(l.opening_qty || 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono">{Number(l.purchases_qty || 0) + Number(l.other_in_qty || 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono">{Number(l.wastage_qty || 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono">{Number(l.closing_qty || 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono">{Number(l.actual_consumption_qty || 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-[#6b5d52]">{money(l.unit_price)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {lines.length > 200 && (
+            <p className="px-3 py-2 text-xs text-[#9c8e85]">
+              Showing the first 200 of {lines.length} lines. Every one of them is stored on the close.
+            </p>
+          )}
+        </div>
+
+        <div className="flex items-end gap-3 flex-wrap">
+          <label className="flex-1 min-w-[220px]">
+            <span className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">Note (optional)</span>
+            <input value={notes} onChange={e => setNotes(e.target.value)}
+              placeholder="Anything worth remembering about this month"
+              className="w-full mt-1 px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm bg-white" />
+          </label>
+          <button onClick={runClose} disabled={busy}
+            className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#b04e12] disabled:opacity-50">
+            {busy ? 'Working…' : closed ? `Re-close ${period}` : `Close ${period}`}
+          </button>
+        </div>
+        {closed && (
+          <p className="text-xs text-[#9c8e85]">
+            Re-closing replaces this month rather than adding a second one: the previous journal is
+            reversed and a new one posted, so the stock is never capitalised twice.
+          </p>
+        )}
+      </>)}
+
+      {history.length > 0 && (
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+          <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-2">
+            Closes for {COST_MODULE_LABEL[module] || module}
+          </p>
+          <ul className="space-y-1">
+            {history.slice(0, 12).map((p: any) => (
+              <li key={p.id} className="flex items-center justify-between gap-3 text-sm border-t border-[#f0e8d8] pt-1 first:border-0">
+                <span className="text-[#3d332a]">
+                  <button onClick={() => setPeriod(p.period_key)} className="font-semibold hover:text-[#cc5a16]">{p.period_key}</button>
+                  <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold ${String(p.status).toUpperCase() === 'CLOSED' ? 'bg-emerald-100 text-emerald-700' : 'bg-[#f0e8d8] text-[#6b5d52]'}`}>
+                    {String(p.status).toUpperCase() === 'CLOSED' ? 'Closed' : 'Reopened'}
+                  </span>
+                  {p.reopen_reason && <span className="block text-[11px] text-[#9c8e85]">Reopened: {p.reopen_reason}</span>}
+                </span>
+                <span className="font-mono text-xs text-[#6b5d52]">{money(p.closing_value)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
