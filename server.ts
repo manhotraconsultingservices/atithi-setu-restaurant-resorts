@@ -27767,21 +27767,36 @@ ${data.tenant.name}`;
       const excludeId = req.query.exclude ? String(req.query.exclude) : undefined;
       const conflict = await venueBookingConflict(db, req.params.vid, eventDate, endDate, startTime, endTime, excludeId, bufferMin);
       const blocked = conflict ? null : await venueBlockConflict(db, req.params.vid, eventDate);
-      const cleaning = (!conflict && !blocked) ? await hasOpenHousekeepingJob(db, req.params.vid).catch(() => false) : false;
       // Hall Status board gate — a hall currently marked OCCUPIED/CLEANING/MAINTENANCE/
       // BLOCKED is unavailable for a booking that RUNS TODAY. This flag is a "now"
       // operational state (set at event check-in), so it is scoped to today only:
       // future-dated bookings remain governed purely by the date-overlap conflict
       // above, and a hall busy today never blocks next week's booking.
-      const todayIst = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const todayIst = _istNowParts().date;
       const spansToday = String(eventDate).slice(0, 10) <= todayIst && todayIst <= String(endDate || eventDate).slice(0, 10);
+      // The cleaning checklist is the SAME kind of "now" state, and must be
+      // scoped the same way.
+      //
+      // It was not. `hasOpenHousekeepingJob` is `WHERE facility_id = ? AND
+      // status = 'OPEN' AND blocks_release = 1` with NO date, and the system
+      // template that fires after every event is itself blocks_release = 1 - so
+      // one post-event checklist nobody closed made the hall report "Not
+      // available" for EVERY date, forever. A booking a year out was refused
+      // because a hall needed sweeping today.
+      //
+      // That exact defect was found and fixed on /confirm, and the gate moved to
+      // /start where the hall is actually handed over. This endpoint - the one
+      // the booking FORM calls - was missed, so the front door still had it.
+      const cleaning = (!conflict && !blocked && spansToday)
+        ? await hasOpenHousekeepingJob(db, req.params.vid).catch(() => false)
+        : false;
       const boardStatus = String(venue.status || 'VACANT').toUpperCase();
       const occupiedNow = spansToday && ['OCCUPIED', 'CLEANING', 'MAINTENANCE', 'BLOCKED'].includes(boardStatus);
       const rate = resolveVenueCharge(venue, rateBasis, startTime, endTime, { slot, eventDate, endDate, profile });
       const available = !conflict && !blocked && !cleaning && !occupiedNow;
       const reason = conflict ? `Clashes with an existing booking (incl. ${bufferMin}-min turnaround)`
         : blocked ? `Hall blocked: ${blocked.reason || 'maintenance'}`
-        : cleaning ? 'Hall has an open cleaning checklist from a prior event'
+        : cleaning ? 'Hall still has an open cleaning checklist from a prior event today'
         : occupiedNow ? `Hall is currently ${boardStatus.toLowerCase()} and unavailable for a booking today`
         : 'Available';
       res.json({ available, reason, rate: round2(rate), start_time: startTime, end_time: endTime, slot, buffer_min: bufferMin });
@@ -57126,8 +57141,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-revise-actor-name',
+    commit_marker: 'avail-cleaning-gate-scope',
     code_features: [
+      'avail-cleaning-gate-scope (reported: booking form says Not available - Hall has an open cleaning checklist from a prior event). THE SAME DEFECT AS event-confirm-no-checklist-gate, fixed on /confirm and MISSED on the endpoint the booking FORM actually calls. hasOpenHousekeepingJob is WHERE facility_id = ? AND status = OPEN AND blocks_release = 1 with NO DATE SCOPE, and the system template that fires after every event is itself blocks_release = 1 - so one post-event checklist nobody closed made the hall report Not available on EVERY date, forever. Emerald Hall on this tenant had 113 open jobs and was unsellable for any date. /events/venues/:vid/availability-check now scopes the cleaning gate to a booking that RUNS TODAY, exactly like the Hall Status board gate immediately beneath it (which already carried the right reasoning in a comment: a now state must not govern a future date). The useful half is kept - selling the hall for today still warns - and the permanent unsellability is gone. Also switched its todayIst to _istNowParts() so it cannot inherit the midnight-hour-24 bug. Smoke: TC-EVT-AVAIL-CLEANING-SCOPE completes a real event to raise a real blocks_release job, then asserts the hall is still sellable 120 days out.',
       'event-revise-actor-name: revised_by stored `req.user?.email || req.user?.id`, and this app mints ids as `user-<uuid>`, so a staff account with no email on the token recorded the raw user-c192c760-... - the same defect that once printed UUIDs in the cleaning log. Now hkActor(req): display name, then email, then a Title-Cased role. Caught by reading the stored row after driving the real UI, not by a test.',
       'event-revise-completed: a COMPLETED event booking froze - PUT refused every edit - so a bill that turned out wrong after the night (covers added on the day, a service not delivered, an agreed rate never applied) had nowhere to go except cancelling the invoice and leaving the booking stuck and unbillable. New POST /events/bookings/:bid/revise requires a REASON, supersedes the issued invoice (voided + GL reversed + audited) and returns the booking to IN_PROGRESS with folio_id cleared, recording revision_number / revise_reason / revised_by / revised_at on the booking itself. It deliberately reuses IN_PROGRESS rather than inventing a status: every downstream guard (PUT, checkout, complete) already passes for it, so nothing else had to be threaded. It NEVER edits a tax invoice in place - the old one is superseded and a fresh number is minted at re-checkout. The void-and-reverse is now ONE helper _voidEventInvoice shared with /invoice/cancel, because a billing rule with two copies is one that will disagree with itself. Account statements re-sync automatically (the Stage 3 helper reads the folio status). UI: a Revise Booking action on a completed booking plus a revision note carrying the reason. Smoke: TC-EVT-REVISE (only completed, only with a reason, and an edit IS refused while completed), -REVERSES (the superseded journal really is out of the ledger), -REISSUE (price corrected, fresh invoice number, completed again), -LEDGER (the books hold the REVISED figure, not the original and not the sum of both).',
       'midnight-hour-is-zero: toLocaleString(..., {hour12:false}) reports the MIDNIGHT hour as 24, not 00 - the h24 cycle, and on that cycle midnight also belongs to the PREVIOUS date (2026-09-12, 24:38). Three call sites parsed that string. (1) computeEarlyCheckinFee: between 00:00 and 00:59 IST an arrival read as 1440-1499 minutes - later than any configurable cut-off - AND its date failed to match the arrival date, so an early arrival in that hour was never charged. (2) computeLateCheckoutFee: the same hour fed the hours-late arithmetic, adding 24. (3) the peak-hours analytics bucketed every midnight order into an hour 24 that does not exist, so the 00:00 bar always read zero. One helper _istNowParts() now uses hourCycle h23 (with a %24 guard for engines that ignore it) and returns date/hour/minute/minutes/hhmm. FOUND by refusing to write off TC-HOTEL-EARLY-CHECKIN-CHARGE as a flaky test: it only fails when the suite runs between midnight and 1am IST, which is when this run happened. NOTE: the quirk does NOT reproduce on the dev machine Node - both spellings give 00:30 there - so it is ICU-version dependent and the fix is validated against the server, not locally.',
