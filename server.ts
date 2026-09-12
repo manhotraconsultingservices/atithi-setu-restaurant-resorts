@@ -19683,7 +19683,7 @@ ${data.tenant.name}`;
         [
           poId, supplier_id, expected_delivery_date || null,
           totalAmount, gstAmount, grandTotal,
-          req.user!.id, notes || null,
+          req.user!.id, notes || null, poModule,
         ]
       );
 
