@@ -66191,6 +66191,10 @@ function CustomerAccountsView({ restaurantId, token }: { restaurantId: string; t
   const [q, setQ] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
+  // Two views of the same accounts: the directory, and the list of people who
+  // owe money past their due date. The second is the one that gets worked.
+  const [view, setView] = useState<'ALL' | 'CHASE'>('ALL');
+  const [chase, setChase] = useState<any>(null);
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 
   const load = async () => {
@@ -66205,6 +66209,17 @@ function CustomerAccountsView({ restaurantId, token }: { restaurantId: string; t
   };
   // Search is debounced so typing does not fire a request per keystroke.
   useEffect(() => { const t = setTimeout(load, q ? 300 : 0); return () => clearTimeout(t); }, [q, typeFilter]);
+
+  // The chase list is loaded once on mount rather than only when its tab is
+  // opened, because its count is on the tab itself — a badge you have to click
+  // to populate tells you nothing.
+  const loadChase = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/accounts/overdue`, { headers: auth });
+      setChase(r.ok ? await r.json() : null);
+    } catch { setChase(null); }
+  };
+  useEffect(() => { loadChase(); }, []);
 
   let totalOwed = 0, overLimit = 0, onHold = 0;
   for (const a of rows) {
@@ -66243,6 +66258,56 @@ function CustomerAccountsView({ restaurantId, token }: { restaurantId: string; t
           <p className={`text-2xl font-bold mt-1 tabular-nums ${onHold > 0 ? 'text-amber-600' : 'text-[#1a1208]'}`}>{onHold}</p>
         </div>
       </div>
+
+      <div className="flex gap-1">
+        {([['ALL', 'All accounts'], ['CHASE', `Needs chasing${chase?.account_count ? ` (${chase.account_count})` : ''}`]] as const).map(([k, label]) => (
+          <button key={k} onClick={() => setView(k as any)}
+            className={`px-4 py-2 rounded-2xl text-xs font-bold ${view === k ? 'bg-[#cc5a16] text-white' : 'bg-[#f0e8d8] text-[#6b5d52] hover:bg-[#e5d9c3]'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'CHASE' ? (
+        !chase ? <p className="text-sm text-[#9c8e85]">Loading…</p> : chase.accounts?.length === 0 ? (
+          <div className="rounded-2xl border border-[#e8e0d8] bg-white p-8 text-center text-[#9c8e85] text-sm">
+            Nothing overdue. Every company is inside its payment terms.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-sm text-[#6b5d52]">
+              <strong className="text-[#1a1208]">{inr(chase.total_overdue)}</strong> overdue across {chase.account_count} {chase.account_count === 1 ? 'company' : 'companies'}.
+              Oldest debt first — an invoice ignored for months is the one at risk, not the biggest one raised last week.
+            </p>
+            {(chase.accounts || []).map((a: any) => (
+              <div key={a.account_id} onClick={() => setOpenId(a.account_id)}
+                className="rounded-2xl border border-[#e8e0d8] bg-white px-4 py-3 hover:bg-[#faf7f2] cursor-pointer">
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <div>
+                    <span className="font-semibold text-[#1a1208]">{a.account_name}</span>
+                    <span className={`ml-2 px-2 py-0.5 rounded-full text-[11px] font-bold ${a.days_overdue >= 90 ? 'bg-rose-100 text-rose-700' : a.days_overdue >= 30 ? 'bg-amber-100 text-amber-800' : 'bg-[#f0e8d8] text-[#6b5d52]'}`}>
+                      {a.days_overdue}d overdue
+                    </span>
+                    {String(a.credit_status) === 'HOLD' && (
+                      <span className="ml-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold">On hold</span>
+                    )}
+                    <p className="text-xs text-[#9c8e85] mt-1">
+                      {a.invoice_count} invoice{a.invoice_count === 1 ? '' : 's'} · oldest due {a.oldest_due}
+                      {a.phone ? ` · ${a.phone}` : ''}
+                    </p>
+                    {a.last_contact && (
+                      <p className="text-xs text-[#6b5d52] mt-0.5">
+                        Last spoken to {a.last_contact.on}{a.last_contact.subject ? ` — ${a.last_contact.subject}` : ''}
+                      </p>
+                    )}
+                  </div>
+                  <span className="text-lg font-bold text-rose-600 tabular-nums">{inr(a.overdue_amount)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      ) : (<>
 
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 min-w-[200px]">
@@ -66304,10 +66369,12 @@ function CustomerAccountsView({ restaurantId, token }: { restaurantId: string; t
         </table>
       </div>
 
+      </>)}
+
       {openId && (
         <AccountDrawer restaurantId={restaurantId} token={token} accountId={openId}
           onClose={() => setOpenId(null)}
-          onChanged={() => { load(); }} />
+          onChanged={() => { load(); loadChase(); }} />
       )}
     </div>
   );

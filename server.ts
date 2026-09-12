@@ -30007,6 +30007,34 @@ ${data.tenant.name}`;
       if (bk.status === 'CANCELLED' || bk.status === 'COMPLETED') {
         return res.status(409).json({ error: `Cannot confirm a ${bk.status} booking` });
       }
+      // ── Credit gate ────────────────────────────────────────────────────
+      // Confirming is the moment the property COMMITS to doing the work, and
+      // for a company booking it is the moment credit is actually extended. It
+      // is therefore the only honest place to refuse: the booking stage is too
+      // early (the job may still be paid in cash on the day), and invoicing is
+      // far too late — the event has happened and the bill must be raised
+      // whatever the balance says.
+      //
+      // The projection includes THIS booking, so an account cannot creep past
+      // its limit one confirmed event at a time.
+      if (String(bk.account_id || '').trim()) {
+        const credit = await _accountCreditCheck(db, bk.account_id, Number(bk.total_amount || 0));
+        if (credit?.blocked) {
+          const canOverride = _canOverrideCredit(req);
+          if (!req.body?.override_credit || !canOverride) {
+            return res.status(409).json({
+              error: `${credit.reason} Take payment up front, or ask a manager to override.`,
+              code: credit.code, credit_blocked: true, can_override: canOverride, credit,
+            });
+          }
+          await writeObjectAudit(db, req, {
+            objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'CREDIT_OVERRIDE',
+            summary: `Confirmed past a credit block by ${hkActor(req)} — ${credit.reason}`,
+            after: { code: credit.code, outstanding: credit.outstanding, projected: credit.projected, credit_limit: credit.credit_limit },
+          }).catch(() => {});
+        }
+      }
+
       // Re-check venue availability at confirm time.
       if (bk.venue_id) {
         const conflict = await venueBookingConflict(db, bk.venue_id, bk.event_date, bk.end_date || null, bk.start_time, bk.end_time, bk.id);
@@ -38589,6 +38617,146 @@ ${data.tenant.name}`;
       over_limit: limit == null ? false : outstanding > limit,
     };
   };
+
+  // ONE place decides whether a company may be sold to on credit, so the
+  // warning on a booking, the gate at confirm and the chase list can never
+  // disagree about the same company.
+  //
+  // `addAmount` is what this transaction would ADD to their balance, so the
+  // limit is tested against where they would END UP, not where they are now —
+  // testing the current balance lets an account sail past its limit one
+  // booking at a time and only trip afterwards, which is exactly too late.
+  const _accountCreditCheck = async (
+    db: DbInterface, accountId: any, addAmount = 0,
+  ): Promise<any | null> => {
+    const id = String(accountId || '').trim();
+    if (!id) return null;
+    const acc: any = await db.get("SELECT * FROM travel_agents WHERE id = ?", [id]).catch(() => null);
+    if (!acc) return null;
+    const bal: any = await db.get(
+      `SELECT COALESCE(SUM(net_due - COALESCE(net_received, 0)), 0) AS outstanding
+         FROM partner_invoices
+        WHERE partner_type = 'AGENT' AND partner_code = ?
+          AND status NOT IN ('PAID', 'WRITTEN_OFF')
+          AND (net_due - COALESCE(net_received, 0)) > 0`, [id]).catch(() => null);
+    const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+    const outstanding = r2(bal?.outstanding);
+    const add = Math.max(0, r2(addAmount));
+    const projected = r2(outstanding + add);
+    // NULL limit means "not set", which is not zero. A zero limit would read as
+    // "no credit at all" and stop every account the owner never configured.
+    const limit = acc.credit_limit == null ? null : Number(acc.credit_limit);
+    const onHold = String(acc.credit_status || 'ACTIVE').toUpperCase() === 'HOLD';
+    const overLimit = limit != null && projected > limit;
+    let reason: string | null = null;
+    let code: string | null = null;
+    if (onHold) {
+      reason = `${acc.name} is on credit hold.`;
+      code = 'ACCOUNT_ON_CREDIT_HOLD';
+    } else if (overLimit) {
+      reason = add > 0
+        ? `${acc.name} owes Rs.${outstanding.toFixed(2)} and this would take them to Rs.${projected.toFixed(2)}, past their Rs.${limit!.toFixed(2)} limit.`
+        : `${acc.name} owes Rs.${outstanding.toFixed(2)}, past their Rs.${limit!.toFixed(2)} limit.`;
+      code = 'ACCOUNT_OVER_CREDIT_LIMIT';
+    }
+    return {
+      account_id: acc.id, account_name: acc.name,
+      credit_status: acc.credit_status || 'ACTIVE',
+      outstanding, added: add, projected, credit_limit: limit,
+      credit_available: limit == null ? null : r2(limit - outstanding),
+      blocked: !!code, reason, code,
+    };
+  };
+
+  // Only a manager decides to extend credit past a limit or a hold. It is a
+  // money decision, not an operational one, so it does not follow the
+  // housekeeping-override rule of "anyone with Full access to the screen".
+  const _canOverrideCredit = (req: AuthRequest): boolean =>
+    ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(String(req.user?.role || '').toUpperCase());
+
+  // Ask before committing. The UI calls this to warn while a booking is being
+  // taken, rather than letting someone reach confirm and be refused.
+  app.get("/api/restaurant/:id/accounts/:accountId/credit-check", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const amount = Number((req.query as any).amount || 0);
+      const chk = await _accountCreditCheck(db, req.params.accountId, Number.isFinite(amount) ? amount : 0);
+      if (!chk) return res.status(404).json({ error: 'Account not found' });
+      res.json(chk);
+    } catch (err: any) {
+      console.error('Account credit-check error:', err);
+      res.status(500).json({ error: 'Failed to check credit' });
+    }
+  });
+
+  // The chase list: who is overdue, by how much, for how long, and who to ring.
+  // Ordered by the OLDEST debt rather than the largest, because an invoice that
+  // has been ignored for 120 days is the one at risk, not the big one raised
+  // last week.
+  app.get("/api/restaurant/:id/accounts/overdue", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const asOf = /^\d{4}-\d{2}-\d{2}$/.test(String((req.query as any).as_of || ''))
+        ? String((req.query as any).as_of)
+        : new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      const rows: any[] = await db.query(
+        `SELECT pi.partner_code, pi.id AS invoice_id, pi.invoice_number, pi.due_date,
+                (pi.net_due - COALESCE(pi.net_received, 0)) AS open_amount,
+                a.name AS account_name, a.phone, a.email, a.credit_status, a.credit_limit,
+                a.payment_terms_days
+           FROM partner_invoices pi
+           JOIN travel_agents a ON a.id = pi.partner_code
+          WHERE pi.partner_type = 'AGENT'
+            AND pi.status NOT IN ('PAID', 'WRITTEN_OFF')
+            AND (pi.net_due - COALESCE(pi.net_received, 0)) > 0
+            AND pi.due_date IS NOT NULL
+            AND pi.due_date < ?::date
+          ORDER BY pi.due_date ASC`, [asOf]).catch(() => [] as any[]);
+
+      const asOfMs = Date.parse(`${asOf}T00:00:00Z`);
+      const byAccount = new Map<string, any>();
+      for (const r of rows) {
+        const key = String(r.partner_code);
+        const days = Math.floor((asOfMs - Date.parse(String(r.due_date).slice(0, 10) + 'T00:00:00Z')) / 86400000);
+        const open = Math.round(Number(r.open_amount || 0) * 100) / 100;
+        if (!byAccount.has(key)) {
+          byAccount.set(key, {
+            account_id: key, account_name: r.account_name, phone: r.phone, email: r.email,
+            credit_status: r.credit_status || 'ACTIVE',
+            payment_terms_days: Number(r.payment_terms_days || 30),
+            overdue_amount: 0, invoice_count: 0, oldest_due: String(r.due_date).slice(0, 10),
+            days_overdue: days, invoices: [] as any[],
+          });
+        }
+        const acc = byAccount.get(key);
+        acc.overdue_amount = Math.round((acc.overdue_amount + open) * 100) / 100;
+        acc.invoice_count += 1;
+        acc.days_overdue = Math.max(acc.days_overdue, days);
+        acc.invoices.push({ id: r.invoice_id, invoice_number: r.invoice_number, due_date: String(r.due_date).slice(0, 10), open_amount: open, days_overdue: days });
+      }
+      // A follow-up already logged against this account is worth knowing before
+      // ringing again — chasing someone twice in a day is how goodwill goes.
+      const ids = Array.from(byAccount.keys());
+      if (ids.length) {
+        const holes = ids.map(() => '?').join(', ');
+        const last: any[] = await db.query(
+          `SELECT DISTINCT ON (account_id) account_id, occurred_at, subject, follow_up_date
+             FROM account_interactions
+            WHERE account_id IN (${holes})
+            ORDER BY account_id, occurred_at DESC, created_at DESC`, ids).catch(() => [] as any[]);
+        for (const l of last) {
+          const acc = byAccount.get(String(l.account_id));
+          if (acc) acc.last_contact = { on: String(l.occurred_at || '').slice(0, 10), subject: l.subject || null, follow_up_date: l.follow_up_date ? String(l.follow_up_date).slice(0, 10) : null };
+        }
+      }
+      const accounts = Array.from(byAccount.values()).sort((a, b) => b.days_overdue - a.days_overdue);
+      const total = accounts.reduce((t, a) => t + a.overdue_amount, 0);
+      res.json({ as_of: asOf, total_overdue: Math.round(total * 100) / 100, account_count: accounts.length, accounts });
+    } catch (err: any) {
+      console.error('Accounts overdue error:', err);
+      res.status(500).json({ error: 'Failed to build the chase list' });
+    }
+  });
 
   app.get("/api/restaurant/:id/accounts", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
     try {
@@ -56737,8 +56905,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'relationships-nav',
+    commit_marker: 'credit-control-and-chasing',
     code_features: [
+      'credit-control-and-chasing (CRM stage 5): ONE helper _accountCreditCheck(db, accountId, addAmount) decides whether a company may be sold to on credit, so the booking warning, the gate at confirm and the chase list can never disagree. It judges the PROJECTED balance (outstanding + this transaction), not the current one - testing the current balance lets an account creep past its limit one booking at a time and only trip afterwards, which is too late. NULL limit still means not-set, not zero. THE GATE SITS AT /events/bookings/:bid/confirm and nowhere else: booking is too early (the job may still be paid cash on the day) and invoicing is far too late (the event has happened and must be billed whatever the balance says), so confirm - the moment the property commits to doing the work - is the only honest place to refuse. 409 with code ACCOUNT_ON_CREDIT_HOLD or ACCOUNT_OVER_CREDIT_LIMIT, overridable ONLY by owner/manager (a money decision, so NOT the housekeeping rule of anyone with Full access to the screen) and the override is audited as CREDIT_OVERRIDE. New GET /accounts/:id/credit-check so the UI can warn before anyone reaches a refusal, and GET /accounts/overdue - the chase list, grouped by company with days overdue, amount, who to ring and when they were last spoken to, ordered OLDEST FIRST because an invoice ignored for months is the one at risk, not the biggest one raised last week. Customers screen gains a Needs chasing view carrying that count on the tab. Smoke: TC-ACCOUNT-CREDIT-CHECK, TC-ACCOUNT-CREDIT-HOLD-BLOCKS, TC-ACCOUNT-OVERDUE, TC-EVT-CREDIT-GATE.',
       'relationships-nav (CRM stage 4, the first stage with UI): new Suppliers & Customers nav group. CUSTOMER_ACCOUNTS gets a real screen - CustomerAccountsView: a list with outstanding, credit limit, terms and a status chip (on hold / over limit / OK), three figures that decide who to ring today, and an AccountDrawer over the list (Overview / Contacts / Activity / Statement with ageing buckets), the same object-over-list shape as the stock ItemDrawer. Until now the whole account API had no UI at all. PROCUREMENT MOVED from Accounts into the new group and relabelled Suppliers & Purchasing - its ID IS UNCHANGED, because ids are RBAC keys, so every grant, the TAB_MODULE mapping and the route keep working; only where it sits and what it is called changed. CUSTOMER_ACCOUNTS added to FINANCE_TABS in navVisibility so it is hard-gated to owner / MANAGER / an explicit grant and never leaks under a fail-open null list - it carries credit limits and who owes what. Nav labels ARE the i18n keys, so all three new labels were added to hi.ts and pa.ts; without that a Hindi tenant silently reverts to English and nothing catches it. Verified each of PROCUREMENT and CUSTOMER_ACCOUNTS sits in exactly one nav group - a labelled tab in no group becomes unreachable.',
       'events-billed-to-accounts (CRM stage 3): an event sold to a company now lands on that company statement. event_bookings.account_id (nullable - most events are consumer weddings) points at the account master, is vetted on create AND on every edit (an account can be deactivated in between), and the bookings list carries account_name. One helper _syncAccountInvoiceForEvent(db, bookingId) is called wherever the amount owed can change - invoicing at /checkout, each receipt at /payments, an edit, and /invoice/cancel - and is keyed on a DERIVED id (PINV-EVT-<booking>) so it is an upsert: /checkout is re-entrant and /payments fires per receipt, and neither can bill a company twice. Due date comes from that company payment_terms_days, not a global default. Cancelling the invoice DELETES the statement row, because a voided invoice nobody owes must not keep ageing against them. Credit hold is a WARNING on the booking, never a refusal - a company that owes money may still pay cash on the day, and refusing there would stop business the owner never asked to stop; enforcement at the point of extending credit is a separate decision. Smoke: TC-EVT-ACCOUNT-LINK, -STATEMENT (asserts single billing after a repeat checkout), -RECEIPT, -CANCEL, -HOLD-WARNS.',
       'company-accounts-master (CRM stage 2): the credit-sales ledger already existed - travel_agents carries type CORPORATE, credit_limit and payment_terms_days, with partner_invoices / partner_payments behind it giving statements, ageing and per-invoice allocation - but EVERY door into it sat behind hotelStaff + ensureHotelEnabled, and the schema itself was created in createHotelTables, which only runs for property_type HOTEL or BOTH. An events-only property therefore had no account master AT ALL and could not bill a company on terms. Fixed at the schema level first: travel_agents + partner_invoices + partner_payments moved OUT of createHotelTables into db.ts createAccountTables(), called from _initTenantDb so every tenant gets them; the hotel copy was deleted rather than left to drift (room_bookings ALTERs and partner_accounts stay, they are genuinely hotel). New module-neutral /api/restaurant/:id/accounts API - list with outstanding roll-up and over-limit flag, detail, upsert, soft delete, statement with ageing, contacts (exactly one primary), and a hand-written interaction log with follow-up dates and a cross-account due list - gated on the new CUSTOMER_ACCOUNTS tab ALONE, no module gate. Table keeps its name because the id is stored as partner_invoices.partner_code and room_bookings.agent_id; new ids keep the AGT- prefix so existing statements keep resolving. Tab id is CUSTOMER_ACCOUNTS, NOT CUSTOMERS - that string is already the Loyalty screen local sub-tab union. Unknown type / credit_status are REJECTED with 400, never coerced. /hotel/agents/* untouched. Smoke: TC-ACCOUNT-CRUD, TC-ACCOUNT-CREDIT-HOLD, TC-ACCOUNT-CONTACTS, TC-ACCOUNT-INTERACTIONS, TC-ACCOUNT-STATEMENT, TC-ACCOUNT-404.',
