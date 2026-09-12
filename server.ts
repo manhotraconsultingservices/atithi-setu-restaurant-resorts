@@ -28006,8 +28006,41 @@ ${data.tenant.name}`;
       if (from) { sql += ` AND b.event_date >= ?`; params.push(from); }
       if (to) { sql += ` AND b.event_date <= ?`; params.push(to); }
       if (search) { sql += ` AND (b.customer_name ILIKE ? OR b.customer_phone ILIKE ?)`; params.push(`%${search}%`, `%${search}%`); }
-      sql += ` ORDER BY b.event_date DESC, b.created_at DESC LIMIT 1000`;
-      const rows = await db.query(sql, params);
+      // PAGING. This was a flat `LIMIT 1000` with no total and no way to ask
+      // for the rest, so a property that crossed a thousand bookings simply
+      // stopped seeing some of them — and because the order is by EVENT DATE,
+      // the ones that fell off were not the oldest but the nearest-term, so a
+      // booking taken today could be missing from the list that same day.
+      // Silent truncation is the worst form of it: nothing said the list was
+      // partial.
+      //
+      // The default response stays a PLAIN ARRAY so every existing caller is
+      // untouched; `?paged=1` opts into the envelope that carries the total.
+      // Limits are clamped and interpolated rather than bound, deliberately:
+      // they are already integers, and keeping them out of the params array
+      // means the filter binds above cannot be thrown out of order.
+      // Default stays at the historic 1000 ON PURPOSE. Lowering it would
+      // quietly shrink what existing screens show - the quotations view walks
+      // this list - so the change here is purely additive: the same default,
+      // plus the ability to ask for a different slice and to learn the total.
+      const limit = Math.min(2000, Math.max(1, Number(req.query.limit) || 1000));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const bookingsPaged = ['1', 'true', 'yes'].includes(String(req.query.paged || '').toLowerCase());
+
+      // The count uses the SAME where-clause and the SAME params, built above,
+      // so the total can never describe a different set than the rows.
+      const totalRow: any = await db.get(
+        sql.replace(/^SELECT[\s\S]*?FROM/, 'SELECT COUNT(*)::int AS n FROM'), params
+      ).catch(() => null);
+      const total = Number(totalRow?.n ?? 0);
+
+      sql += ` ORDER BY b.event_date DESC, b.created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+      const rows: any[] = await db.query(sql, params);
+      // Always advertised, so even an array caller can tell it has a slice.
+      res.set('X-Total-Count', String(total));
+      if (bookingsPaged) {
+        return res.json({ rows, total, limit, offset, has_more: offset + rows.length < total });
+      }
       res.json(rows);
     } catch (err: any) {
       console.error("/events/bookings list error:", err);
@@ -55504,8 +55537,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-complete-no-venue-no-job',
+    commit_marker: 'events-bookings-list-paging',
     code_features: [
+      'events-bookings-list-paging',     //BUGFIX (silent truncation). The events bookings list was a flat `LIMIT 1000` with no total and no way to ask for the rest, so a property past a thousand bookings simply stopped seeing some of them - and because the order is `event_date DESC`, the rows that fell off were NOT the oldest but the NEAREST-TERM, so a booking taken today could be absent from the list the same day. Nothing anywhere said the list was partial, which is the worst part: staff would have concluded the booking was lost. Found because TC-EVT-SPECIAL-NOTE passed in the morning and failed in the afternoon - the tenant crossed 1000 bookings between the two runs. Now: `?limit` (clamped 1..2000) + `?offset`, and `?paged=1` returns `{rows, total, limit, offset, has_more}`; `X-Total-Count` is set on every response so even an array caller can tell it holds a slice. **The default response is still a PLAIN ARRAY and the default limit is still 1000** - both deliberate, because two screens consume this endpoint and the quotations view walks the whole list, so lowering the default would have quietly shrunk what it shows. The change is purely additive. Limits are clamped and INTERPOLATED rather than bound, also deliberately: they are already integers, and keeping them out of the params array means the filter binds cannot be pushed out of order - the mistake that has cost this project three separate defects. The count query is derived from the same SQL and the same params as the page, so the total can never describe a different set than the rows. Front end: the bookings screen pages 200 at a time and shows 'Showing N of M' with a Load more, so a partial list is now visible as partial. New index on event_bookings(event_date DESC, created_at DESC) backs the sort. TC-EVT-LIST-PAGING asserts the envelope, that a second page is DISJOINT from the first (an ignored offset would pass every other check), and that the un-paged call still answers with a bare array.',
       'event-complete-no-venue-no-job',   //BUGFIX + DATA CLEANUP (orphan housekeeping jobs). Completing an event raised its venue cleaning job with `facility_id: evBk?.venue_id || null` - so a booking with NO venue (a public inquiry, or a catering-only event) produced a cleaning job for no facility, labelled 'Event venue'. Such a job can never be actioned against a facility, never appears on any venue's worklist, and is never matched by the release gate (which looks up BY facility_id), so **nothing could ever close it** - it simply accumulated on the housekeeping board forever. There is nothing to clean when there is no hall, so no job is now raised. Found while investigating the event-booking checklist alert: the tenant held 455 open jobs of which 72 named no facility. 71 of those (all EVENT, all blocks_release=1, raised 15 Aug - 4 Sep) were closed via the product's OWN override endpoint with a stated reason rather than deleted - audited, reversible in the sense that the row and its history survive, and OVERRIDDEN is the honest end state for work that was never actionable. The 72nd was deliberately LEFT ALONE: a non-blocking ROOM 'Kitchen Inspection' with no facility is a legitimate general inspection, not an orphan. Open jobs 455 -> 386.',
       'event-confirm-no-checklist-gate',   //BUGFIX (reported: booking an event throws a checklist alert). A venue could become PERMANENTLY UNSELLABLE after one unclosed cleaning checklist. `POST /events/bookings/:bid/confirm` called `hasOpenHousekeepingJob(venue_id)`, whose query is `WHERE facility_id = ? AND status = 'OPEN' AND blocks_release = 1` - **with no date scope at all**. The system template that fires after every event, TPL-SYS-EVENT-COMPLETE, is itself seeded blocks_release = 1, so the moment one post-event cleaning job went unclosed, EVERY later booking for that venue was refused with a checklist error - a booking six months out was blocked by a hall that needed sweeping today. Two things were wrong at once: the check had no relationship to the booking's date, and it sat on the wrong endpoint. Confirming is a COMMERCIAL act that holds a venue for a future date; whether the hall is clean today says nothing about whether it can be sold for March. The gate is now on `/start`, where the venue is actually handed over and where 'is this hall clean?' is the real question - and where there was previously NO housekeeping check whatsoever, which is the other half of the defect. The manager override and its audit entry moved with it, still honoured only for someone entitled to skip a checklist (the F-C3 rule). The front-end prompt said 'Confirm this booking anyway'; it is now neutral, since it fires on start. tsc + vite build clean.',
       'inventory-module-scoped-reports',    //FEATURE (inventory remediation, phase A of the gap review - 12 Sep 2026). Every inventory report can finally be asked about ONE part of the business. **The finding:** 10 of 12 inventory reports took no module parameter at all, so every one of them was the kitchen's report - which is most of what the owner meant by 'reporting is missing' for Spa and for Events. The reports were not missing, they were UNADDRESSABLE. New `_invModuleFilter` mirrors `_glModuleFilter` with one deliberate difference: a NULL module is NOT excluded as untagged, because `ingredients.module` was added after the fact with DEFAULT 'RESTAURANT' and a row predating it is a kitchen item that never got stamped - COALESCE, or every pre-existing ingredient vanishes from the kitchen's own reports. A companion `_invModuleExists` covers queries that hold stock_movements or goods receipts with no ingredients join, via EXISTS rather than a new join, because several of them already aggregate and a join would change the grouping. Applied to dashboard (7 queries, 3 different join shapes), audit-log, wastage, variance, ABC, dead-stock and expiring. **BIND ORDER IS THE TRAP HERE and is commented at each site:** in dead-stock the module placeholder lands in the WHERE while the existing one sits in the HAVING, so module binds FIRST; in expiring both are in the WHERE and days binds first. Postgres binds by position, and getting it backwards reads a day count as a module name and silently returns nothing. Food cost % is now WITHHELD under a non-restaurant filter rather than printed: the numerator would be that module's consumption over restaurant sales, which is not a ratio of anything. **Physical counts are now scoped to a module too** (+ SHARED) - counting the whole property in one sheet stopped being workable the moment the hotel silo was folded in, since a kitchen count handed the chef 21 rows of linen. **And the PO builder regression from stage 4 is fixed:** it inherited the Kitchen Inventory list, which had to be scoped to the kitchen, leaving the form able to raise a PO FOR Events or Spa while offering only restaurant items to put ON it; it now loads items by the module chosen on the PO itself, and clears any line picked from the previous list rather than saving a line its own filter excludes. tsc + vite build clean.',

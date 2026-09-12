@@ -693,7 +693,28 @@ function EventBookings({ restaurantId, token }: Props) {
   const [form, setForm] = useState<any>(blank);
   const [avail, setAvail] = useState<{ available: boolean; reason: string; rate: number } | null>(null);
 
-  const load = async () => { try { setRows(await api('/events/bookings')); } catch { /* */ } };
+  // Paged. The list used to ask for everything and the server quietly returned
+  // at most 1000 rows with nothing to say so — and since the order is by event
+  // date, the rows that fell off were the nearest-term ones, so a booking taken
+  // today could be missing from this screen the same day. Now the total comes
+  // back with the page and the footer always says how much is being shown.
+  const BOOKINGS_PAGE = 200;
+  const [bookingsTotal, setBookingsTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const load = async (offset = 0) => {
+    try {
+      const d: any = await api(`/events/bookings?paged=1&limit=${BOOKINGS_PAGE}&offset=${offset}`);
+      const page: any[] = Array.isArray(d) ? d : (d?.rows || []);
+      // offset 0 replaces, anything else appends — so every existing caller of
+      // load() (after create, cancel, confirm…) still gets a clean first page.
+      setRows(prev => offset === 0 ? page : [...prev, ...page]);
+      setBookingsTotal(Array.isArray(d) ? page.length : Number(d?.total || 0));
+    } catch { /* */ }
+  };
+  const loadMore = async () => {
+    setLoadingMore(true);
+    try { await load(rows.length); } finally { setLoadingMore(false); }
+  };
   const loadVenues = async () => { try { setVenues(await api('/events/venues')); } catch { /* */ } };
   useEffect(() => { load(); loadVenues(); }, []);
 
@@ -800,6 +821,18 @@ function EventBookings({ restaurantId, token }: Props) {
             <button className={BTN_PRIMARY} onClick={create}>{t('common.save')}</button>
             <button className={BTN_GHOST} onClick={() => setShowNew(false)}>{t('common.cancel')}</button>
           </div>
+        </div>
+      )}
+
+      {bookingsTotal > rows.length && (
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-2 px-3 py-2 rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15">
+          <span className="text-xs text-[#6b5d52]">
+            Showing <b>{rows.length}</b> of <b>{bookingsTotal}</b> bookings
+          </span>
+          <button
+            type="button" onClick={loadMore} disabled={loadingMore}
+            className="px-3 py-1.5 rounded-xl text-xs font-bold bg-[#cc5a16] text-white disabled:opacity-50"
+          >{loadingMore ? 'Loading…' : `Load ${Math.min(BOOKINGS_PAGE, bookingsTotal - rows.length)} more`}</button>
         </div>
       )}
 

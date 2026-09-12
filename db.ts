@@ -1895,6 +1895,9 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // module rather than hiding history behind a filter that did not exist yet.
   await db.exec("ALTER TABLE physical_counts ADD COLUMN IF NOT EXISTS module TEXT").catch(() => {});
 
+  // The events booking list sorts on these two and now pages over them.
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_event_bookings_date ON event_bookings (event_date DESC, created_at DESC)`).catch(() => {});
+
   // ── Approved supplier list (inventory remediation, stage 3) ──────────────
   // An item can be bought from SEVERAL suppliers, and which of them are
   // APPROVED to supply it is a purchasing decision, not a guess. Until now the
