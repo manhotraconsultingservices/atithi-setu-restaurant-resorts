@@ -6859,7 +6859,7 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
                 { key: 'quantity', label: 'Qty', sortable: true, align: 'right', getValue: (m: any) => Number(m.quantity), render: (m: any) => <span className={cn('font-mono font-bold', m.movement_type === 'RECEIVE' ? 'text-emerald-700' : 'text-rose-700')}>{m.movement_type === 'CONSUME' ? '-' : '+'}{Math.abs(Number(m.quantity))}</span> },
                 { key: 'unit_price', label: 'Unit Price', sortable: true, align: 'right', getValue: (m: any) => Number(m.unit_price || 0), render: (m: any) => <span className="text-xs">{m.unit_price ? fmtAmt(m.unit_price) : '—'}</span> },
                 { key: 'notes', label: 'Notes', render: (m: any) => <span className="text-xs text-[#6b5d52]">{m.notes || '—'}</span> },
-                { key: 'recorded_by', label: 'Recorded by', sortable: true, render: (m: any) => <span className="text-xs text-[#9c8e85]">{m.recorded_by || '—'}</span> },
+                { key: 'recorded_by', label: 'Recorded by', sortable: true, render: (m: any) => <span className="text-xs text-[#9c8e85]">{m.recorded_by_name || m.recorded_by || '—'}</span> },
               ]}
             />
           )}
@@ -7156,7 +7156,7 @@ function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, o
                     <td className="py-1 pr-3 text-right font-mono">{m.movement_type === 'CONSUME' ? '-' : '+'}{Number(m.quantity).toFixed(0)}</td>
                     <td className="py-1 pr-3 text-right font-mono">{m.unit_price ? `₹${Number(m.unit_price).toFixed(2)}` : '—'}</td>
                     <td className="py-1 pr-3 text-[#6b5d52]">{m.notes || '—'}</td>
-                    <td className="py-1 pr-3 text-[#9c8e85]">{m.recorded_by || '—'}</td>
+                    <td className="py-1 pr-3 text-[#9c8e85]">{m.recorded_by_name || m.recorded_by || '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -57366,7 +57366,12 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
                     {Number(m.qty_delta) > 0 ? '+' : ''}{Number(m.qty_delta)} {m.unit}
                   </td>
                   <td className="px-4 py-2.5 text-right font-mono">{Number(m.balance_after)}</td>
-                  <td className="px-4 py-2.5 text-[#6b5d52]">{m.recorded_by_user_id || '—'}</td>
+                  <td className="px-4 py-2.5 text-[#6b5d52]">
+                    {/* A blank here is meaningful: no human performed the
+                        movement (a platform order or webhook did), which is
+                        different from "we forgot to record it". */}
+                    {m.recorded_by_name || (m.reference_type === 'order' ? 'Automatic (order)' : '—')}
+                  </td>
                   <td className="px-4 py-2.5 text-[#9c8e85] text-xs">{m.reference_type ? `${m.reference_type} ${m.reference_id || ''}` : (m.notes || '—')}</td>
                 </tr>
               ))}

@@ -19040,7 +19040,7 @@ ${data.tenant.name}`;
 
             // Fire-and-forget inventory deduction (only if explicitly opted in)
             if (deductInventory) {
-              deductIngredientsForOrder(db, orderId, orderItems, req.params.id).catch(() => {});
+              deductIngredientsForOrder(db, orderId, orderItems, req.params.id, req.user?.id || null).catch(() => {});
             }
           } catch (err: any) {
             // Most likely cause: unique-index collision on external_id_hash. Skip and continue.
@@ -20351,7 +20351,8 @@ ${data.tenant.name}`;
   // raw items array (already JSON-stringified into the order row).
   // Items shape: [{ id?: string, name?: string, quantity: number, size?: 'HALF'|'FULL', ... }]
   async function deductIngredientsForOrder(
-    db: DbInterface, orderId: string, items: any[], _restaurantId: string
+    db: DbInterface, orderId: string, items: any[], _restaurantId: string,
+    actorUserId: string | null = null
   ): Promise<void> {
     if (!Array.isArray(items) || items.length === 0) return;
     for (const it of items) {
@@ -20408,9 +20409,9 @@ ${data.tenant.name}`;
         // matches the ingredient's natural unit and reversal works correctly.
         await db.run(
           `INSERT INTO stock_movements
-            (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after)
-           VALUES (?, ?, ?, ?, 'CONSUMPTION', 'order', ?, ?)`,
-          [movId(), r.ingredient_id, -consumed, unit, orderId, balanceAfter]
+            (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, recorded_by_user_id)
+           VALUES (?, ?, ?, ?, 'CONSUMPTION', 'order', ?, ?, ?)`,
+          [movId(), r.ingredient_id, -consumed, unit, orderId, balanceAfter, actorUserId]
         ).catch(() => {});
 
         // Tier-2: FIFO batch decrement — draw `consumed` qty from oldest
@@ -20503,7 +20504,7 @@ ${data.tenant.name}`;
   // truth) rather than re-deriving from recipes, because recipes may have
   // changed since the order was placed.
   async function revertIngredientsForOrder(
-    db: DbInterface, orderId: string
+    db: DbInterface, orderId: string, actorUserId: string | null = null
   ): Promise<{ reverted: boolean; lines: number }> {
     // Guard: only revert once per order
     const order: any = await db.get(
@@ -20545,9 +20546,9 @@ ${data.tenant.name}`;
       const balanceAfter = Number(updated[0].current_stock_qty);
       await db.run(
         `INSERT INTO stock_movements
-          (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, notes)
-         VALUES (?, ?, ?, ?, 'REVERSAL', 'order', ?, ?, 'Order cancellation reversal')`,
-        [movId(), c.ingredient_id, qtyToReturn, c.unit, orderId, balanceAfter]
+          (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, notes, recorded_by_user_id)
+         VALUES (?, ?, ?, ?, 'REVERSAL', 'order', ?, ?, 'Order cancellation reversal', ?)`,
+        [movId(), c.ingredient_id, qtyToReturn, c.unit, orderId, balanceAfter, actorUserId]
       ).catch(() => {});
       lines++;
     }
@@ -22636,6 +22637,38 @@ ${data.tenant.name}`;
   // ─── Stock Movement Audit Log feed ──────────────────────────────────────
   // Append-only stream of every stock change. Filterable by ingredient, type,
   // date range. Joins ingredient name + recorded-by user for display.
+  // Turn the user ids on stock movements into names people recognise.
+  // An id lives in EITHER the tenant's own staff table or the central users
+  // table, so both are consulted — the same order the object audit log uses.
+  //
+  // Batched on purpose: the audit log pages up to 1000 rows, and a per-row
+  // lookup would be 1000 round-trips to render one screen. Built with an
+  // explicit IN list rather than ANY(?) because not every driver binds an
+  // array. Never throws: an unresolved id falls back to the raw id, which is
+  // still more honest than a blank column.
+  async function _resolveActorNames(db: DbInterface, ids: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const unique = Array.from(new Set(ids.filter(Boolean).map(String)));
+    if (unique.length === 0) return out;
+    const holes = unique.map(() => '?').join(', ');
+    const staff: any[] = await db.query(
+      `SELECT id, name FROM attendance_staff WHERE id IN (${holes})`, unique
+    ).catch(() => [] as any[]);
+    for (const r of staff) if (r?.name) out.set(String(r.id), String(r.name));
+    const missing = unique.filter(id => !out.has(id));
+    if (missing.length) {
+      const holes2 = missing.map(() => '?').join(', ');
+      const cu: any[] = await centralDb.query(
+        `SELECT id, name, email FROM users WHERE id IN (${holes2})`, missing
+      ).catch(() => [] as any[]);
+      for (const r of cu) {
+        const n = r?.name || r?.email;
+        if (n) out.set(String(r.id), String(n));
+      }
+    }
+    return out;
+  }
+
   app.get("/api/restaurant/:id/inventory/audit-log", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
@@ -22662,11 +22695,19 @@ ${data.tenant.name}`;
           LIMIT ${lim}`,
         params
       );
+      // WHO, as a name. The column stored only an id, so every consumer of
+      // this log was showing a raw identifier (or nothing) where a person was
+      // meant to be. A null here is truthful, not missing data: it means no
+      // human performed the movement — a platform order or a webhook did.
+      const actorNames = await _resolveActorNames(db, rows.map(r => r.recorded_by_user_id));
       res.json(rows.map(r => ({
         ...r,
         qty_delta: Number(r.qty_delta),
         balance_after: Number(r.balance_after),
         unit_cost: r.unit_cost == null ? null : Number(r.unit_cost),
+        recorded_by_name: r.recorded_by_user_id
+          ? (actorNames.get(String(r.recorded_by_user_id)) || String(r.recorded_by_user_id))
+          : null,
       })));
     } catch (err) {
       console.error("Audit log error:", err);
@@ -23260,7 +23301,16 @@ ${data.tenant.name}`;
          LIMIT ?`,
         [limit]
       ).catch(() => []);
-      res.json(rows);
+      // Same name resolution as the kitchen audit log, so the hotel movement
+      // trail reads as people rather than ids. This column already stored the
+      // actor (id, or email on older rows) — it was simply never resolved.
+      const hNames = await _resolveActorNames(db, rows.map((r: any) => r.recorded_by));
+      res.json(rows.map((r: any) => ({
+        ...r,
+        recorded_by_name: r.recorded_by
+          ? (hNames.get(String(r.recorded_by)) || String(r.recorded_by))
+          : null,
+      })));
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to fetch movements" });
     }
@@ -48335,7 +48385,7 @@ ${data.tenant.name}`;
       }
       await db.run("UPDATE orders SET status = 'CANCELLED' WHERE id = ?", [req.params.orderId]);
       // Same reversals as the staff cancel path (PATCH /api/orders/:id).
-      revertIngredientsForOrder(db, req.params.orderId).catch(err =>
+      revertIngredientsForOrder(db, req.params.orderId, _optionalStaffUser(req, req.params.id)?.id || null).catch(err =>
         console.warn(`[inventory] customer-cancel reversal failed for order ${req.params.orderId}:`, err));
       reverseOrderFolioPosting(req.params.id, req.params.orderId, 'Cancelled by guest', 'CUSTOMER').catch(err =>
         console.warn(`[folio] customer-cancel reversal failed for order ${req.params.orderId}:`, err));
@@ -50237,7 +50287,17 @@ ${data.tenant.name}`;
       // Fire-and-forget — must NEVER fail an order. If recipes don't exist for
       // an item, that's fine; we silently skip. If the deduction throws, the
       // order is already INSERTed and the response sent.
-      deductIngredientsForOrder(db, id, orderItems, req.params.id).catch(err => {
+      // The acting user is threaded through so the stock ledger can answer
+      // "who consumed this". This route is PUBLIC by construction — it serves
+      // both the staff POS and a guest scanning a QR code — so there is no
+      // req.user to read. `staffUser` is the already-resolved optional token
+      // (the same one that decides whether custom prices are allowed): a staff
+      // order is attributed to that person, a guest self-order is genuinely
+      // null and renders as "Automatic (order)". Deliberately NOT inferred
+      // from tables.assigned_waiter_id — the assigned waiter is not
+      // necessarily whoever punched the order, and orders.waiter_id is a
+      // declared-but-never-written column.
+      deductIngredientsForOrder(db, id, orderItems, req.params.id, staffUser?.id || null).catch(err => {
         console.warn(`[inventory] Deduction failed for order ${id}:`, err);
       });
 
@@ -50543,7 +50603,9 @@ ${data.tenant.name}`;
     ]);
 
     // Fire-and-forget inventory deduction (matches public POST behaviour)
-    deductIngredientsForOrder(db, id, opts.items, restaurantId).catch(err => {
+    // No human actor: this is a cloud-kitchen platform order ingested by the
+    // system, so the ledger records null rather than inventing a user.
+    deductIngredientsForOrder(db, id, opts.items, restaurantId, null).catch(err => {
       console.warn(`[inventory] Deduction failed for platform order ${id}:`, err);
     });
 
@@ -50865,7 +50927,8 @@ ${data.tenant.name}`;
           // Cancellation → reuse existing reversal (idempotent via inventory_reverted flag)
           if (upd.newStatus === 'CANCELLED') {
             try {
-              await revertIngredientsForOrder(db, localOrder.id);
+              // Delivery-platform webhook — machine actor, so no user id.
+              await revertIngredientsForOrder(db, localOrder.id, null);
             } catch (revertErr) {
               console.warn(`[webhook] Reversal failed for ${localOrder.id}:`, revertErr);
             }
@@ -51530,8 +51593,8 @@ ${data.tenant.name}`;
       // returns the original consumption, which is what we want then).
       if (editedItems && !(status && String(status).toUpperCase() === 'CANCELLED')) {
         try {
-          await revertIngredientsForOrder(db, req.params.id);
-          await deductIngredientsForOrder(db, req.params.id, editedItems, req.user!.restaurantId);
+          await revertIngredientsForOrder(db, req.params.id, req.user?.id || null);
+          await deductIngredientsForOrder(db, req.params.id, editedItems, req.user!.restaurantId, req.user?.id || null);
           await db.run("UPDATE orders SET inventory_reverted = 0 WHERE id = ?", [req.params.id]);
         } catch (e) {
           console.warn(`[inventory] edit re-sync failed for order ${req.params.id}:`, e);
@@ -51543,7 +51606,7 @@ ${data.tenant.name}`;
       // that was deducted when the order was originally placed. Guarded by
       // orders.inventory_reverted so a second cancel is a no-op.
       if (status && String(status).toUpperCase() === 'CANCELLED') {
-        revertIngredientsForOrder(db, req.params.id).catch(err => {
+        revertIngredientsForOrder(db, req.params.id, req.user?.id || null).catch(err => {
           console.warn(`[inventory] Reversal failed for order ${req.params.id}:`, err);
         });
         // CANCEL-REVERSAL (16 Jun 2026): F&B now posts to the folio at order
@@ -55089,8 +55152,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-module-dimension',
+    commit_marker: 'inventory-consumption-actor',
     code_features: [
+      'inventory-consumption-actor',       //FIX (inventory remediation, stage 2 of 5 - 12 Sep 2026). The stock ledger can now answer WHO consumed an item on the path that does almost all the consuming. `stock_movements` already carried `recorded_by_user_id`, and GRN, wastage, physical counts, manual adjust, spa appointment-complete and spa retail-sale all populated it - but `deductIngredientsForOrder`, the recipe explosion that fires on EVERY restaurant order, omitted the column from its INSERT entirely, as did the matching REVERSAL in `revertIngredientsForOrder`. So the single highest-volume movement type in the system recorded what and when but never by whom. Both functions now take an `actorUserId` and all 8 call sites pass one: `req.user?.id` where a human acted, and an EXPLICIT null on the two machine paths (a cloud-kitchen platform order and a delivery-platform webhook) rather than inventing a user - a public QR self-order is legitimately null too, and its `reference_id` still ties the movement to the order. **CORRECTION TO MY OWN STAGE-1 AUDIT:** I reported that `hotel_stock_movements.recorded_by` was never populated. It is - `req.user?.id || req.user?.email` - my scan tested for `by_user` in the column list and the column is named `recorded_by`. What was actually missing there was the READ side. Both logs now resolve ids to NAMES via a new `_resolveActorNames`, which checks the tenant's `attendance_staff` then central `users`, batched in one IN query because the audit log pages up to 1000 rows and a per-row lookup would be 1000 round-trips per screen; an unresolved id falls back to the raw id, and a null renders as 'Automatic (order)' because no-human is a real answer, not missing data. tsc + vite build clean.',
       'inventory-module-dimension',        //FEATURE (inventory remediation, stage 1 of 5 - 12 Sep 2026). Consumables can finally say WHICH PART OF THE BUSINESS they belong to, and Events gets an inventory screen for the first time. **The finding behind it:** there was never one inventory system - there were three and a hole. `ingredients` (+ stock_movements, batches, recipes, suppliers, POs, counts) is the real engine and served Restaurant AND Spa, separated only by `item_type`; the hotel ran a PARALLEL `hotel_inventory_items` table with a thin movement log and no supplier / PO / batch / count / auto-PO support; Events had nothing at all (`event_inventory`, `events/inventory`, `event_stock` = 0 hits). So an item list could not be kept per module for ANY module. Now `ingredients.module` carries the same COST_MODULES allowlist as expenses, supplier invoices and purchase orders; the list endpoint takes `?module=` + `include_shared=1`; create and PATCH both coerce through `_normaliseCostModule`. **Events Inventory is a module-scoped VIEW over the shared item master, NOT a fourth silo** - it reuses the same ledger, so it inherits GRN, wastage, counts, par levels and the audit trail on day one. THREE LANDMINES defused: (1) the tab id is `INVENTORY_EVENTS`, not `EVENTS_INVENTORY`, because an `EVENTS_` prefix is read as an Events-module grant by `hasEventsGrant` AND by the server tab->module mapper - the other spelling would have handed the Events nav group and the Events API gate to every role with inventory access, which is exactly the EVENTS_CHECKLISTS leak. (2) `pageVisible` had branches for hotel/restaurant/spa but NOT events, so a `requires:'events'` tab would have shown on every tenant; added with the first such tab. (3) the backfill stamping module='SPA' from the legacy item_type is guarded by a marker table so it runs ONCE - unguarded it would drag a re-filed item back to SPA on every boot, the same defect as the bank-rec backfill that resurrected unticked lines. Also fixed in passing: the create route's item_type allowlist admitted only RAW and PACKAGED, so a SPA_PRODUCT posted to it was silently coerced to RAW and vanished from the spa list. The INSERT went 15->16 columns and the patch script ASSERTED columns==placeholders==values before writing, because that exact mismatch shipped twice on the PO route.',
       'po-module-filter-bind',           //FIX — the SAME mistake as `po-module-insert-fix`, made twice in one change and caught only by testing the live endpoint. The PO list gained a `?module=` condition with a `?` placeholder, but `filterParams` was still `allowedStatuses.has(status) ? [status] : []` — the value was never bound, so the filter silently returned ZERO rows instead of erroring. `filterParams` is now built from the same conditions as `filterSql`, in the same order. **The test did not catch it because the test was vacuous:** it asserted `rows.every(r => r.module === 'EVENTS')`, and `every()` on an EMPTY array is true — a filter returning nothing passed. It now requires the list to CONTAIN the PO it just created. It was also skipping entirely, because it read `/ingredients` (404) instead of `/inventory/ingredients`, so it had never actually run. **The pattern worth remembering: adding a condition to a query means touching TWO lists — the SQL and the bound values — and neither tsc nor a vacuous `every()` can see the mismatch.**',
       'po-module-insert-fix',              //FIX (urgent, minutes after `po-module-attribution`, which I shipped BROKEN). I added `module` to the manual PO INSERT column list and added a placeholder for it, but never added the value to the params array — 10 columns, 10 placeholders, 9 values — so every parameter after `expected_delivery_date` shifted by one and the statement failed. **Purchase order creation returned 500 with total=NaN on production until this landed.** Caught by TC-PROC-PO-GST, which asserts a PO totals correctly and went from pass to a 500. The auto-draft INSERT on the same table was fine: 10 columns against 7 placeholders plus 'DRAFT', 0 and 'RESTAURANT' as literals, 7 params — verified by counting the value slots BY HAND, because a script that counts only quoted literals misreads the bare `0` and reports a false mismatch. **Lesson worth keeping: adding a column to an INSERT means touching THREE lists — columns, placeholders and values — and a type check cannot see any of them.**',
