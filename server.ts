@@ -29188,20 +29188,22 @@ ${data.tenant.name}`;
         if (conflict) return res.status(409).json({ error: "Venue is no longer available for this date/time" });
         const blocked = await venueBlockConflict(db, bk.venue_id, bk.event_date);
         if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
-        // Housekeeping gate: the venue must be cleaned after the previous event
-        // before this one is confirmed. A manager can override (body.override_cleaning).
-        const openHk = await hasOpenHousekeepingJob(db, bk.venue_id);
-        if (openHk) {
-          // F-C3 (same family) — `override_cleaning` used to skip this gate for ANY
-          // caller who could confirm an event: the role was only consulted to word the
-          // message, never to authorise the bypass. Now the flag is honoured only for
-          // someone who may skip a checklist, and the bypass is audited.
-          const isMgr = await _canOverrideChecklist(req);
-          if (!req.body?.override_cleaning || !isMgr) {
-            return res.status(409).json({ error: `This venue still has an open cleaning checklist from a previous event. Complete housekeeping first${isMgr ? ', or confirm again to override.' : '.'}`, housekeeping_blocked: true, can_override: isMgr });
-          }
-          await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'HOUSEKEEPING_OVERRIDE', summary: `Confirmed over an open venue cleaning checklist by ${hkActor(req)}` }).catch(() => {});
-        }
+        // NO HOUSEKEEPING GATE HERE — deliberately. It used to sit on this route
+        // and it was wrong in two ways at once.
+        //
+        // Confirming is a COMMERCIAL act: it holds the venue for a date that is
+        // usually weeks or months away. Whether the hall is clean *today* says
+        // nothing about whether it can be sold for March. And the check had no
+        // date scope at all — `hasOpenHousekeepingJob` matches ANY open
+        // release-blocking job on the venue, with no reference to this booking's
+        // date. Since the system template that fires after every event
+        // (TPL-SYS-EVENT-COMPLETE) is itself blocks_release = 1, a single
+        // post-event cleaning checklist nobody closed made the venue
+        // permanently unsellable: every subsequent booking was refused with a
+        // checklist error, however far in the future it was.
+        //
+        // The gate now lives on /start, where the venue is actually being
+        // handed over and where "is this hall clean?" is the real question.
       }
 
       // Create real hotel bookings for each QUOTED room line via the Hotel API. A line
@@ -29709,6 +29711,23 @@ ${data.tenant.name}`;
       }
       if (String(bk.status) !== 'CONFIRMED') {
         return res.status(409).json({ error: "Only a confirmed booking can be started. Confirm the booking first." });
+      }
+      // Housekeeping gate, moved here from /confirm: this is the moment the
+      // venue is actually being handed over, so this is where an unfinished
+      // cleaning checklist genuinely matters. A manager may override, and the
+      // override is audited — `override_cleaning` is honoured only for someone
+      // entitled to skip a checklist, never for any caller who can start an
+      // event (that was the F-C3 defect).
+      const bkFull: any = await db.get("SELECT venue_id FROM event_bookings WHERE id = ?", [req.params.bid]).catch(() => null);
+      if (bkFull?.venue_id && await hasOpenHousekeepingJob(db, bkFull.venue_id)) {
+        const isMgr = await _canOverrideChecklist(req);
+        if (!req.body?.override_cleaning || !isMgr) {
+          return res.status(409).json({
+            error: `This venue still has an open cleaning checklist. Complete housekeeping before starting the event${isMgr ? ', or start again to override.' : '.'}`,
+            housekeeping_blocked: true, can_override: isMgr,
+          });
+        }
+        await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'HOUSEKEEPING_OVERRIDE', summary: `Event started over an open venue cleaning checklist by ${hkActor(req)}` }).catch(() => {});
       }
       await db.run("UPDATE event_bookings SET status = 'IN_PROGRESS' WHERE id = ?", [req.params.bid]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: 'Event started — In Progress', before: { status: bk.status }, after: { status: 'IN_PROGRESS' } });
@@ -55474,8 +55493,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-module-scoped-reports',
+    commit_marker: 'event-confirm-no-checklist-gate',
     code_features: [
+      'event-confirm-no-checklist-gate',   //BUGFIX (reported: booking an event throws a checklist alert). A venue could become PERMANENTLY UNSELLABLE after one unclosed cleaning checklist. `POST /events/bookings/:bid/confirm` called `hasOpenHousekeepingJob(venue_id)`, whose query is `WHERE facility_id = ? AND status = 'OPEN' AND blocks_release = 1` - **with no date scope at all**. The system template that fires after every event, TPL-SYS-EVENT-COMPLETE, is itself seeded blocks_release = 1, so the moment one post-event cleaning job went unclosed, EVERY later booking for that venue was refused with a checklist error - a booking six months out was blocked by a hall that needed sweeping today. Two things were wrong at once: the check had no relationship to the booking's date, and it sat on the wrong endpoint. Confirming is a COMMERCIAL act that holds a venue for a future date; whether the hall is clean today says nothing about whether it can be sold for March. The gate is now on `/start`, where the venue is actually handed over and where 'is this hall clean?' is the real question - and where there was previously NO housekeeping check whatsoever, which is the other half of the defect. The manager override and its audit entry moved with it, still honoured only for someone entitled to skip a checklist (the F-C3 rule). The front-end prompt said 'Confirm this booking anyway'; it is now neutral, since it fires on start. tsc + vite build clean.',
       'inventory-module-scoped-reports',    //FEATURE (inventory remediation, phase A of the gap review - 12 Sep 2026). Every inventory report can finally be asked about ONE part of the business. **The finding:** 10 of 12 inventory reports took no module parameter at all, so every one of them was the kitchen's report - which is most of what the owner meant by 'reporting is missing' for Spa and for Events. The reports were not missing, they were UNADDRESSABLE. New `_invModuleFilter` mirrors `_glModuleFilter` with one deliberate difference: a NULL module is NOT excluded as untagged, because `ingredients.module` was added after the fact with DEFAULT 'RESTAURANT' and a row predating it is a kitchen item that never got stamped - COALESCE, or every pre-existing ingredient vanishes from the kitchen's own reports. A companion `_invModuleExists` covers queries that hold stock_movements or goods receipts with no ingredients join, via EXISTS rather than a new join, because several of them already aggregate and a join would change the grouping. Applied to dashboard (7 queries, 3 different join shapes), audit-log, wastage, variance, ABC, dead-stock and expiring. **BIND ORDER IS THE TRAP HERE and is commented at each site:** in dead-stock the module placeholder lands in the WHERE while the existing one sits in the HAVING, so module binds FIRST; in expiring both are in the WHERE and days binds first. Postgres binds by position, and getting it backwards reads a day count as a module name and silently returns nothing. Food cost % is now WITHHELD under a non-restaurant filter rather than printed: the numerator would be that module's consumption over restaurant sales, which is not a ratio of anything. **Physical counts are now scoped to a module too** (+ SHARED) - counting the whole property in one sheet stopped being workable the moment the hotel silo was folded in, since a kitchen count handed the chef 21 rows of linen. **And the PO builder regression from stage 4 is fixed:** it inherited the Kitchen Inventory list, which had to be scoped to the kitchen, leaving the form able to raise a PO FOR Events or Spa while offering only restaurant items to put ON it; it now loads items by the module chosen on the PO itself, and clears any line picked from the previous list rather than saving a line its own filter excludes. tsc + vite build clean.',
       'inventory-autopo-module-bind',       //FIX (minutes after stages 3-5, caught by TC-INV-AUTOPO-MODULE going to 500). The per-module auto-PO selection scoped its module filter with `AND (? IS NULL OR COALESCE(i.module,'RESTAURANT') = ?)`, passing the same value twice so one query could serve both the filtered and unfiltered case. Postgres cannot infer the type of a bare parameter in `$n IS NULL` and REJECTS THE WHOLE STATEMENT, so `/inventory/auto-po/generate` 500'd and raised no drafts at all - the feature was dead on arrival, not merely mis-scoped. The clause is now appended only when there IS a module to filter on, which is the same conditional-build pattern the ingredients list already uses. **Also fixed a real regression from stage 4:** folding the hotel silo into `ingredients` meant the Kitchen Inventory screen, which fetched the item list UNFILTERED, suddenly showed 21 housekeeping items - toilet paper and floor cleaner in the chef's ingredient list, and inside the stock-value, below-reorder and food-cost figures derived from it. That request now asks for `?module=RESTAURANT&include_shared=1`. The unfiltered fetch was harmless only because the hotel kept its own table; folding the silo is exactly what made it wrong. Caught by driving the real UI, not by any test. tsc + vite build clean.',
       'inventory-suppliers-and-fold',      //FEATURE (inventory remediation, stages 3-5 of 5 - 12 Sep 2026). Closes the last three gaps from the inventory audit in one pass. **(3) APPROVED SUPPLIER LIST** - the item master held exactly ONE `default_supplier_id`, so a second source for an item could not be recorded at all; `supplier_prices` looks like it fills that gap but it is a price-observation HISTORY (what was paid, when) with no notion of approval, preference, lead time or MOQ. New `ingredient_suppliers` (unique on the item+supplier pair, so a double-click cannot create two competing ranks) with is_approved / preference_rank / lead_time_days / moq / last_unit_price, seeded ONCE from every item's existing default supplier as its rank-1 approved source so nothing changes on day one. **(5) AUTO-PO NOW BUYS FROM THE APPROVED SOURCE AND SPLITS BY MODULE** - the selection predicate `_PREFERRED_SUPPLIER_SQL` is written ONCE and shared by the generator and its preview, because those two kept independent copies of the same query and a change to one silently made the preview lie about what would actually be raised; it takes the lowest-ranked APPROVED supplier and falls back to the legacy `default_supplier_id` for uncurated items, so un-approving a vendor redirects replenishment with no other edit. The draft's module is now derived from its lines instead of the hardcoded 'RESTAURANT' - defensible while ingredients had no module, but now it would file spa and hotel replenishment as kitchen spend the moment the invoice hits the GL - and one draft is raised PER MODULE, because a mixed PO cannot be filed against a cost centre without being split by hand, which is the manual step this feature exists to remove. **(4) THE HOTEL SILO IS FOLDED IN** - `hotel_inventory_items` was a thinner parallel copy of `ingredients` with no supplier, PO, batch, count or auto-PO support, and its par_level / reorder_point columns were read by NOTHING, so low-stock replenishment for the hotel could never have worked however the data was filled in. Rows migrate into `ingredients` as module='HOTEL' KEEPING THEIR ORIGINAL ids (load-bearing: `hotel_stock_movements` references items by id, so the existing history stays resolvable), the 7 `/hotel-inventory/*` routes become adapters over the shared master with UNCHANGED response shapes so the existing screen keeps working, and hotel stock changes now write the SHARED ledger. Legacy movements are NOT rewritten - a movement is a historical fact and restating one in a different table with a different sign convention (absolute qty + direction, vs signed qty_delta) is how an audit trail stops being trustworthy - they are UNIONed into the same shape at read time and age out on their own. The old table is left in place, unread, rather than dropped. All three backfills are marker-guarded one-shots. tsc + vite build clean.',

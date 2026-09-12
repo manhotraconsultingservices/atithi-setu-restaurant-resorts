@@ -1349,15 +1349,18 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       await runAct(path, { ...(extraBody || {}) }, okMsg);
     } catch (e: any) {
       const d = e?.data;
-      // Housekeeping gate: the venue still has an open cleaning job from a prior
-      // event. A manager/owner may override — re-send confirm with override_cleaning.
+      // Housekeeping gate: the venue still has an open cleaning job. This is
+      // raised when an event is STARTED, not when it is booked — a hall that
+      // needs cleaning today has no bearing on a date months away, and gating
+      // the sale on it made a venue permanently unsellable after one unclosed
+      // checklist. A manager/owner may override — re-send with override_cleaning.
       if (d?.housekeeping_blocked && d?.can_override) {
-        if (window.confirm(`${d.error}\n\nConfirm this booking anyway and override the venue's pending housekeeping?`)) {
+        if (window.confirm(`${d.error}\n\nProceed anyway and override the venue's pending housekeeping?`)) {
           try { await runAct(path, { ...(extraBody || {}), override_cleaning: true }, okMsg); }
           catch (e2: any) { alert(e2.message); }
         }
       } else if (d?.housekeeping_blocked) {
-        alert(`${d.error}\n\nOpen Housekeeping → Worklist (or Events → Cleaning Checklist) to finish the venue's cleaning, then confirm again.`);
+        alert(`${d.error}\n\nOpen Housekeeping → Worklist (or Events → Cleaning Checklist) to finish the venue's cleaning, then try again.`);
       } else {
         alert(e.message);
       }
