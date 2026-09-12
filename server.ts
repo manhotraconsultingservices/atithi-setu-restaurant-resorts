@@ -19335,6 +19335,18 @@ ${data.tenant.name}`;
   // A positive variance means more stock left the building than the recipes
   // account for: over-portioning, spoilage nobody logged, or theft. That single
   // number is the reason F&B operations count stock every month.
+  // Which pair of accounts a module's stock lives in. Each module has its own,
+  // so the balance sheet shows what is held WHERE and the P&L shows what was
+  // consumed WHERE, without anyone having to read a cost centre to find out.
+  // SHARED rides with housekeeping: property-wide consumables are amenities.
+  const _INVENTORY_GL_ACCOUNTS: Record<string, { asset: string; assetName: string; expense: string; expenseName: string }> = {
+    RESTAURANT: { asset: '1600', assetName: 'Inventory — F&B Stock', expense: '5000', expenseName: 'Cost of F&B Consumed' },
+    HOTEL: { asset: '1610', assetName: 'Inventory — Housekeeping & Amenities', expense: '5200', expenseName: 'Housekeeping & Laundry Expenses' },
+    SPA: { asset: '1620', assetName: 'Inventory — Spa & Wellness Stock', expense: '5210', expenseName: 'Cost of Spa Consumables' },
+    EVENTS: { asset: '1630', assetName: 'Inventory — Events & Banquet Stock', expense: '5220', expenseName: 'Cost of Events Consumables' },
+    SHARED: { asset: '1610', assetName: 'Inventory — Housekeeping & Amenities', expense: '5200', expenseName: 'Housekeeping & Laundry Expenses' },
+  };
+
   const _computeInventoryPeriod = async (
     tenantId: string, mod: string, from: string, to: string,
   ): Promise<any> => {
@@ -19446,7 +19458,7 @@ ${data.tenant.name}`;
       // Re-closing a month is a CORRECTION, not a second period: the same row is
       // rewritten and its lines replaced, so history stays readable.
       const prior: any = await db.get(
-        "SELECT id FROM inventory_periods WHERE module = ? AND period_key = ?", [mod, key]).catch(() => null);
+        "SELECT id, gl_journal_ref FROM inventory_periods WHERE module = ? AND period_key = ?", [mod, key]).catch(() => null);
       const pid = prior?.id || `INVP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       if (prior) {
         await db.run(
@@ -19484,13 +19496,70 @@ ${data.tenant.name}`;
            l.actual_consumption_qty, l.theoretical_consumption_qty, l.variance_qty, l.variance_value]);
       }
 
+      // ── Post the close to the ledger ──────────────────────────────────
+      // Until now the two inventory asset accounts were seeded and referenced
+      // NOWHERE: goods receipt moved quantities and posted no journal, so stock
+      // never reached the balance sheet and COGS was everything BOUGHT rather
+      // than what was USED. Buy a quarter of rice in March and March looked
+      // unprofitable while April looked excellent.
+      //
+      // The periodic pair, which is how stock-take accounting has always worked:
+      //   release last month's stock : Dr consumption, Cr inventory  (opening)
+      //   capitalise this month's    : Dr inventory,   Cr consumption (closing)
+      // Purchases are already expensed as the supplier invoices post, so the net
+      // effect is COGS = purchases + opening - closing. Exactly right.
+      const acct = _INVENTORY_GL_ACCOUNTS[mod] || _INVENTORY_GL_ACCOUNTS.SHARED;
+      // EVERY close gets its OWN journal ref, and a re-close reverses the exact
+      // ref the previous close recorded on this period.
+      //
+      // The obvious design — one fixed ref per module-month, reversed and
+      // re-posted — is quietly broken, and the third close is where it bites.
+      // `_reverseJournal` is idempotent: it derives `REV-<ref>` and returns
+      // early if a journal by that name already exists, and it does NOT mark
+      // the originals is_reversed. So on a third close the reversal would
+      // short-circuit as "already_reversed" while the new journal posted
+      // anyway, capitalising the stock twice. The books would gain an asset
+      // that does not exist and nothing would flag it, because both journals
+      // are individually balanced.
+      const glRef = `INVCLOSE-${mod}-${key}-${Date.now()}`;
+      const priorGlRef = String(prior?.gl_journal_ref || '').trim();
+      if (priorGlRef) {
+        await _reverseJournal(db, req.params.id, priorGlRef, {
+          reversalRef: `REV-${priorGlRef}`,
+          date: to,
+          sourceType: 'INVENTORY_CLOSE_REVERSAL', sourceId: pid,
+          reason: `Re-close of ${mod} stock for ${key}`,
+          postedBy: req.user?.email || req.user?.id || null,
+        }).catch(() => {});
+      }
+      const glLines: GlLine[] = [];
+      if (t.opening_value > 0) {
+        glLines.push(
+          { account_code: acct.expense, account_name: acct.expenseName, dr_amount: t.opening_value, cr_amount: 0, narration: `Opening stock released — ${key}`, cost_centre: mod },
+          { account_code: acct.asset, account_name: acct.assetName, dr_amount: 0, cr_amount: t.opening_value, narration: `Opening stock released — ${key}`, cost_centre: mod },
+        );
+      }
+      if (t.closing_value > 0) {
+        glLines.push(
+          { account_code: acct.asset, account_name: acct.assetName, dr_amount: t.closing_value, cr_amount: 0, narration: `Closing stock on hand — ${key}`, cost_centre: mod },
+          { account_code: acct.expense, account_name: acct.expenseName, dr_amount: 0, cr_amount: t.closing_value, narration: `Closing stock on hand — ${key}`, cost_centre: mod },
+        );
+      }
+      let posted: string | null = null;
+      if (glLines.length) {
+        await _postGlEntries(db, req.params.id, glRef, to, 'INVENTORY_CLOSE', pid, glLines,
+          req.user?.email || req.user?.id || null, mod);
+        posted = glRef;
+        await db.run("UPDATE inventory_periods SET gl_journal_ref = ? WHERE id = ?", [glRef, pid]);
+      }
+
       await writeObjectAudit(db, req, {
         objectType: 'INVENTORY_PERIOD', objectId: pid,
         action: prior ? 'RECLOSED' : 'CLOSED',
-        summary: `${mod} stock closed for ${key} — consumption Rs.${t.actual_consumption_value}, variance Rs.${t.variance_value}`,
+        summary: `${mod} stock closed for ${key} — consumption Rs.${t.actual_consumption_value}, variance Rs.${t.variance_value}${posted ? ` · posted ${posted}` : ''}`,
       }).catch(() => {});
 
-      res.json({ success: true, id: pid, module: mod, period_key: key, reclosed: !!prior, totals: t, line_count: computed.line_count });
+      res.json({ success: true, id: pid, module: mod, period_key: key, reclosed: !!prior, gl_journal_ref: posted, totals: t, line_count: computed.line_count });
     } catch (err: any) {
       console.error('Inventory period close error:', err);
       res.status(500).json({ error: 'Failed to close the period' });
@@ -55838,8 +55907,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-monthly-close',
+    commit_marker: 'inventory-close-gl-posting',
     code_features: [
+      'inventory-close-gl-posting',      //FEATURE (inventory gap review, phase C part 2 - stock finally reaches the BOOKS). `1600 Inventory - F&B Stock` and `1610 Inventory - Housekeeping & Amenities` were seeded in the chart of accounts and referenced NOWHERE in the server: goods receipt moved quantities and posted no journal at all, so a property holding lakhs of stock showed NONE of it on the balance sheet, and COGS was everything BOUGHT rather than what was USED - buy a quarter of rice in March and March looks unprofitable while April looks excellent. Closing a month now posts the periodic pair: **Dr consumption / Cr inventory for the OPENING stock (releasing last month's), Dr inventory / Cr consumption for the CLOSING stock**. Purchases are already expensed as supplier invoices post, so the net is COGS = purchases + opening - closing. Two COA accounts each added for Spa and Events (1620/5210, 1630/5220) rather than folding their stock into housekeeping, which would have put massage oil and banquet crockery under 'Housekeeping & Amenities' on the balance sheet; every line is also cost-centre tagged. **A DEFECT CAUGHT IN MY OWN FIRST DRAFT, before it shipped:** I used one fixed journal ref per module-month and reversed it on re-close. That breaks on the THIRD close - `_reverseJournal` is idempotent, deriving `REV-<ref>` and returning early once a journal by that name exists, and it never marks the originals `is_reversed` - so the reversal would silently short-circuit as 'already_reversed' while the new journal posted anyway, CAPITALISING THE STOCK TWICE. Both journals are individually balanced, so the trial balance would still tie and nothing would flag it. Every close now gets its OWN ref and a re-close reverses the exact ref stored on that period row. TC-INV-PERIOD-GL closes the same month THREE times and asserts the asset moves exactly once.',
       'inventory-monthly-close',         //FEATURE (inventory gap review, phase C part 1 - the owner's FIRST complaint). The system tracked stock PERPETUALLY - a recipe fires on every order and depletes ingredients in real time - but had NO periodic half whatsoever: searching the codebase for opening stock, closing stock, an inventory period or theoretical consumption returned nothing at all. So it could never answer the one question F&B control runs on: **did we use what the recipes say we used?** New `inventory_periods` + `inventory_period_lines`, one period per module per month (the kitchen and the spa are counted by different people on different days), and `_computeInventoryPeriod` derives every figure from ONE bucketed pass over `stock_movements` so the components cannot disagree with the totals they add up to: opening (everything before the window), purchases (GRN/RECEIVE), other-in (MANUAL/ADJUST/COUNT_ADJUSTMENT/REVERSAL), wastage, closing (everything up to the end), and theoretical = the CONSUMPTION rows the recipe explosion writes. **actual = opening + purchases + other-in - wastage - closing; variance = actual - theoretical**, and a positive variance is stock that left the building without a recipe to account for it - over-portioning, unlogged spoilage, or theft. Lines are STORED at close rather than recomputed on demand, because a close is a statement about a moment and recomputing it later would silently restate a signed-off month as stock moves underneath it; re-closing rewrites the same row (a correction, not a second period). BIND ORDER is commented at the query: eleven placeholders in one statement, and Postgres binds by position - reorder them and you get a plausible, wrong statement rather than an error. TC-INV-PERIOD-CLOSE asserts the IDENTITY line by line rather than an HTTP status, because a report whose parts do not add up to its own totals is worse than no report. **STILL TO COME (phase C part 2): the GL posting.** 1600/1610 remain seeded-but-unposted, so stock is still absent from the balance sheet and COGS is still everything BOUGHT rather than what was USED.',
       'inventory-spa-events-parity',     //FEATURE (inventory gap review, phase B). Spa and Events now run the SAME inventory screen, and it gained the two things the owner reported missing from both: PURCHASING and REPORTING. **Spa was a read-only list** - the source literally described itself as a 'read-only view of SPA_PRODUCT / SPA_RETAIL ingredients' - so it could show stock and nothing else: no adding an item, no supplier, no purchasing, no usage trail, while the engine beneath it supported all four. It is now routed to `ModuleInventoryView` AHEAD of the spa group, so one component serves Spa and Events and neither can drift from the other; the old `SpaInventory` in SpaViews.tsx is left in place but is no longer reachable. **New Purchasing tab**: purchase orders filtered to the module, with the auto-PO drafts raised from par levels shown for review - those already existed but were only visible under Procurement, so nobody working the spa or the banquet side ever saw them - plus Raise PO through the shared POCreateModal, which now loads items by the PO's own module. **New Reports tab**: stock value, below-reorder, 30-day wastage and month-to-date consumption, plus not-moved-in-30-days and expiring-within-14-days, every one of them scoped by the `?module=` that phase A added. Food cost % is deliberately ABSENT here: it would divide this module's consumption by restaurant sales, which is not a ratio of anything. TC-INV-MODULE-SURFACES asserts both modules answer on all five endpoints the screen calls AND that every PO listed under a module actually belongs to it - a filter quietly returning everything would still answer 200.',
       'checklist-actor-names-everywhere', //FIX (completes `housekeeping-log-real-names`). The cleaning log was only ONE of four surfaces answering 'who did this'. The personal worklist (`/checklists/my`) and the manager Checklist Board (`/checklists/board`) both select `completed_by` AND each task's `done_by` and returned them raw, so the same uuids the log was fixed for were still on screen two clicks away. Both now run a new `_hkNameJobs`, which collects every id on the page - job-level and task-level - and resolves them in ONE pass via `_resolveActorNames` rather than per row, because these screens routinely carry 300-500 jobs with several tasks each. The two TASK-tick paths also stored the wrong thing: one used `hkActor` (which degrades to a ROLE) and the other `email || id` (a raw id for the many staff who sign in with a login id and no email); both now store `hkActorId`. So the identity is kept at every write and the name is resolved at every read. Legacy values that are not ids - including role strings like 'OWNER' - are shown exactly as recorded, because a role cannot be resolved backwards into the person who held it. TC-CHK-ACTOR-NAME sweeps ALL FOUR surfaces for anything still uuid-shaped and, critically, FAILS IF IT CHECKED NOTHING - an empty property would otherwise report a clean pass forever.',

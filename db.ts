@@ -3200,6 +3200,13 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['1500','Prepaid Expenses','ASSET',90],
     ['1600','Inventory — F&B Stock','ASSET',100],
     ['1610','Inventory — Housekeeping & Amenities','ASSET',110],
+    // Spa and Events hold real consumable stock too, and folding it into the
+    // housekeeping line would put massage oil and banquet crockery under
+    // 'Housekeeping & Amenities' on the balance sheet. Each module carries its
+    // own asset and its own consumption expense, so the P&L says what was used
+    // WHERE without anyone having to read a cost centre to find out.
+    ['1620','Inventory — Spa & Wellness Stock','ASSET',120],
+    ['1630','Inventory — Events & Banquet Stock','ASSET',130],
     ['2000','Accounts Payable — Suppliers','LIABILITY',200],
     ['2100','Advances from Guests','LIABILITY',210],
     ['2200','GST Payable — CGST','LIABILITY',220],
@@ -3233,6 +3240,8 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['5110','EPF — Employer Contribution','EXPENSE',620],
     ['5120','ESI — Employer Contribution','EXPENSE',630],
     ['5200','Housekeeping & Laundry Expenses','EXPENSE',640],
+    ['5210','Cost of Spa Consumables','EXPENSE',641],
+    ['5220','Cost of Events Consumables','EXPENSE',642],
     ['5300','Repairs & Maintenance','EXPENSE',650],
     ['5400','Electricity & Power','EXPENSE',660],
     ['5410','Water & Utilities','EXPENSE',670],
