@@ -5002,6 +5002,37 @@ const _glModuleFilter = (req: any, col = 'cost_centre'): { sql: string; params: 
   return { sql: ` AND ${col} = ?`, params: [mod], module: mod, includeShared: false };
 };
 
+// Optional module filter for any INVENTORY report. Mirrors _glModuleFilter, but
+// with one deliberate difference: a NULL module here is NOT "untagged, exclude".
+// `ingredients.module` was added after the fact with DEFAULT 'RESTAURANT', so a
+// row predating the column is a kitchen item that simply never got stamped —
+// hence COALESCE rather than exclusion. Getting this wrong would silently hide
+// every pre-existing ingredient from the kitchen's own reports.
+//
+// `col` takes the alias the calling query already uses (i.module, mi.module).
+const _invModuleFilter = (req: any, col = 'i.module'): { sql: string; params: any[]; module: string | null } => {
+  const q = (req && req.query) || {};
+  const mod = q.module ? _normaliseCostModule(q.module, '') : '';
+  if (!mod) return { sql: '', params: [], module: null };
+  const inc = ['1', 'true', 'yes'].includes(String(q.include_shared || '').toLowerCase());
+  if (inc && mod !== 'SHARED') {
+    return { sql: ` AND COALESCE(${col}, 'RESTAURANT') IN (?, 'SHARED')`, params: [mod], module: mod };
+  }
+  return { sql: ` AND COALESCE(${col}, 'RESTAURANT') = ?`, params: [mod], module: mod };
+};
+
+// The same filter for a query that has stock_movements but no ingredients join.
+// An EXISTS keeps the caller's FROM/GROUP BY untouched, which matters when the
+// query already aggregates — adding a join there would change the grouping.
+const _invModuleExists = (req: any, idCol = 'sm.ingredient_id'): { sql: string; params: any[]; module: string | null } => {
+  const f = _invModuleFilter(req, 'mi.module');
+  if (!f.module) return { sql: '', params: [], module: null };
+  return {
+    sql: ` AND EXISTS (SELECT 1 FROM ingredients mi WHERE mi.id = ${idCol}${f.sql})`,
+    params: f.params, module: f.module,
+  };
+};
+
 // A folio is the one document that can belong to any of three modules.
 const _folioCostModule = (folio: any): string => {
   const kind = String(folio?.folio_kind || 'HOTEL').toUpperCase();
@@ -22063,11 +22094,14 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/inventory/wastage", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
+      const wmf = _invModuleFilter(req, 'i.module');
       const rows = await db.query(
         `SELECT w.*, i.name AS ingredient_name, i.category AS ingredient_category
            FROM wastage_logs w
            LEFT JOIN ingredients i ON i.id = w.ingredient_id
-          ORDER BY w.logged_at DESC`
+          ${wmf.module ? 'WHERE 1=1' + wmf.sql : ''}
+          ORDER BY w.logged_at DESC`,
+        wmf.params
       );
       res.json(rows);
     } catch (err) {
@@ -22175,20 +22209,31 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/inventory/counts", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const { count_date, notes } = req.body;
+      // A stock-take belongs to ONE part of the business. Counting the whole
+      // property in one sheet stopped being workable the moment the hotel item
+      // silo was folded in: a kitchen count would hand the chef 21 rows of
+      // linen and toilet paper to weigh.
+      const countModule = _normaliseCostModule(req.body?.module, 'RESTAURANT');
       const db = await getTenantDb(req.params.id);
       const seq = await getNextTenantSequence(db, 'count');
       const countId = `COUNT-${String(seq).padStart(4, '0')}`;
       const today = (count_date && /^\d{4}-\d{2}-\d{2}$/.test(count_date)) ? count_date : new Date().toISOString().slice(0, 10);
 
       await db.run(
-        `INSERT INTO physical_counts (id, count_date, status, counted_by_user_id, notes)
-         VALUES (?, ?, 'IN_PROGRESS', ?, ?)`,
-        [countId, today, req.user!.id || null, notes || null]
+        `INSERT INTO physical_counts (id, count_date, status, counted_by_user_id, notes, module)
+         VALUES (?, ?, 'IN_PROGRESS', ?, ?, ?)`,
+        [countId, today, req.user!.id || null, notes || null, countModule]
       );
 
-      // Snapshot every active ingredient
+      // Snapshot the active ingredients OF THAT MODULE, plus SHARED — the
+      // property-wide consumables, which belong to no one module and would
+      // otherwise never be counted by anybody.
       const ingredients: any[] = await db.query(
-        "SELECT id, current_stock_qty, unit FROM ingredients WHERE is_active = 1 ORDER BY name"
+        `SELECT id, current_stock_qty, unit FROM ingredients
+          WHERE is_active = 1
+            AND COALESCE(module, 'RESTAURANT') IN (?, 'SHARED')
+          ORDER BY name`,
+        [countModule]
       );
       for (const ing of ingredients) {
         await db.run(
@@ -22200,7 +22245,7 @@ ${data.tenant.name}`;
           ]
         );
       }
-      res.json({ success: true, id: countId, line_count: ingredients.length });
+      res.json({ success: true, id: countId, module: countModule, line_count: ingredients.length });
     } catch (err) {
       console.error("Start count error:", err);
       res.status(500).json({ error: "Failed to start count" });
@@ -22616,22 +22661,28 @@ ${data.tenant.name}`;
       const horizon = String(req.query.horizon || 'daily').toLowerCase();
       const validHorizon: 'daily' | 'weekly' | 'monthly' =
         horizon === 'weekly' ? 'weekly' : horizon === 'monthly' ? 'monthly' : 'daily';
+      // Three shapes of the same filter, because the queries below reach
+      // ingredients three different ways: directly (no alias), through an
+      // alias, and not at all (goods receipts, which key by ingredient id).
+      const dmf2 = _invModuleFilter(req, 'module');
+      const dmfI = _invModuleFilter(req, 'i.module');
+      const dmfE = _invModuleExists(req, 'gri.ingredient_id');
 
       // 1. KPIs
       // Stock value = sum(current_stock_qty × default_unit_price)
       const stockValueRow: any = await db.get(
         `SELECT COALESCE(SUM(current_stock_qty * COALESCE(default_unit_price, 0)), 0) AS v
-           FROM ingredients WHERE is_active = 1`
+           FROM ingredients WHERE is_active = 1${dmf2.sql}`, dmf2.params
       );
       const belowReorderRow: any = await db.get(
         `SELECT COUNT(*) AS c FROM ingredients
-          WHERE is_active = 1 AND reorder_point > 0 AND current_stock_qty <= reorder_point`
+          WHERE is_active = 1 AND reorder_point > 0 AND current_stock_qty <= reorder_point${dmf2.sql}`, dmf2.params
       );
       const expiringRow: any = await db.get(
-        `SELECT COUNT(DISTINCT ingredient_id) AS c FROM goods_receipt_items
-          WHERE expiry_date IS NOT NULL
-            AND expiry_date <= CURRENT_DATE + INTERVAL '7 days'
-            AND expiry_date >= CURRENT_DATE`
+        `SELECT COUNT(DISTINCT gri.ingredient_id) AS c FROM goods_receipt_items gri
+          WHERE gri.expiry_date IS NOT NULL
+            AND gri.expiry_date <= CURRENT_DATE + INTERVAL '7 days'
+            AND gri.expiry_date >= CURRENT_DATE${dmfE.sql}`, dmfE.params
       );
       // Use stock_movements (always in stock unit) instead of wastage_logs
       // (which stores qty in the user-entered unit — would cause 1000× over-
@@ -22641,14 +22692,14 @@ ${data.tenant.name}`;
            FROM stock_movements sm
            LEFT JOIN ingredients i ON i.id = sm.ingredient_id
           WHERE sm.movement_type = 'WASTAGE'
-            AND sm.recorded_at >= NOW() - INTERVAL '30 days'`
+            AND sm.recorded_at >= NOW() - INTERVAL '30 days'${dmfI.sql}`, dmfI.params
       );
       const consumedValueRow: any = await db.get(
         `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS v
            FROM stock_movements sm
            LEFT JOIN ingredients i ON i.id = sm.ingredient_id
           WHERE sm.movement_type = 'CONSUMPTION'
-            AND sm.recorded_at >= DATE_TRUNC('month', CURRENT_DATE)`
+            AND sm.recorded_at >= DATE_TRUNC('month', CURRENT_DATE)${dmfI.sql}`, dmfI.params
       );
       const revenueRow: any = await db.get(
         `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
@@ -22656,12 +22707,20 @@ ${data.tenant.name}`;
             AND deleted_at IS NULL  -- T1-L1: exclude soft-deleted invoices
             AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`
       );
+      // Purchase orders carry their own module column, so this filters direct.
+      const poMf = _invModuleFilter(req, 'module');
       const pendingPORow: any = await db.get(
         `SELECT COALESCE(SUM(grand_total), 0) AS v FROM purchase_orders
-          WHERE status IN ('SENT', 'PARTIAL')`
+          WHERE status IN ('SENT', 'PARTIAL')${poMf.sql}`, poMf.params
       );
 
-      const foodCostPct = Number(revenueRow.v) > 0
+      // Food cost is consumption over RESTAURANT revenue. Under a
+      // non-restaurant filter the numerator becomes that module's consumption
+      // while the denominator is still restaurant sales, which is not a ratio
+      // of anything - so it is withheld rather than shown as a confident wrong
+      // number.
+      const foodCostApplies = !dmf2.module || dmf2.module === 'RESTAURANT';
+      const foodCostPct = (foodCostApplies && Number(revenueRow.v) > 0)
         ? Math.round((Number(consumedValueRow.v) / Number(revenueRow.v)) * 1000) / 10
         : 0;
 
@@ -22857,6 +22916,10 @@ ${data.tenant.name}`;
       if (type) { conds.push("sm.movement_type = ?"); params.push(String(type).toUpperCase()); }
       if (from) { conds.push("sm.recorded_at >= ?"); params.push(String(from)); }
       if (to) { conds.push("sm.recorded_at < ?::timestamp + INTERVAL '1 day'"); params.push(String(to)); }
+      // Scope to one module. Appended to the SAME conds/params pair the other
+      // filters use, so the SQL and its bound values cannot drift apart.
+      const amf = _invModuleFilter(req, 'i.module');
+      if (amf.module) { conds.push(amf.sql.replace(/^ AND /, '')); params.push(...amf.params); }
       const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
       const rows: any[] = await db.query(
@@ -22901,6 +22964,7 @@ ${data.tenant.name}`;
       const { from, to } = req.query as any;
       const fromDate = from || '1970-01-01';
       const toDate = to || '2099-12-31';
+      const vmf = _invModuleFilter(req, 'i.module');
 
       const rows: any[] = await db.query(
         `SELECT pci.ingredient_id, i.name AS ingredient_name, i.category, i.unit,
@@ -22914,10 +22978,12 @@ ${data.tenant.name}`;
            LEFT JOIN ingredients i ON i.id = pci.ingredient_id
           WHERE pc.status = 'COMPLETED'
             AND pc.count_date BETWEEN ?::date AND ?::date
-            AND pci.actual_qty IS NOT NULL
+            AND pci.actual_qty IS NOT NULL${vmf.sql}
           GROUP BY pci.ingredient_id, i.name, i.category, i.unit, i.default_unit_price
           ORDER BY ABS(SUM(pci.variance) * COALESCE(i.default_unit_price, 0)) DESC`,
-        [fromDate, toDate]
+        // module param goes LAST: its placeholder sits after the two dates in
+        // the statement text, and Postgres binds by position, not by name.
+        [fromDate, toDate, ...vmf.params]
       );
 
       const totalShrinkageValue = rows.reduce((s, r) => s + (Number(r.variance_value) < 0 ? Number(r.variance_value) : 0), 0);
@@ -24257,16 +24323,17 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/inventory/abc-analysis", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
+      const amf2 = _invModuleFilter(req, 'i.module');
       const rows: any[] = await db.query(`
         SELECT i.id, i.name, i.category, i.unit,
           COALESCE(SUM(CASE WHEN sm.qty_delta < 0 THEN ABS(sm.qty_delta) * COALESCE(sm.unit_cost, i.default_unit_price, 0) ELSE 0 END), 0) AS consumed_value,
           COALESCE(SUM(CASE WHEN sm.qty_delta < 0 THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS consumed_qty
         FROM ingredients i
         LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id AND sm.recorded_at >= NOW() - INTERVAL '90 days'
-        WHERE i.is_active = 1
+        WHERE i.is_active = 1${amf2.sql}
         GROUP BY i.id
         ORDER BY consumed_value DESC
-      `);
+      `, amf2.params);
       const total = rows.reduce((s: number, r: any) => s + Number(r.consumed_value), 0);
       let cumulative = 0;
       const items = rows.map((r: any, idx: number) => {
@@ -24288,6 +24355,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+      const emf = _invModuleFilter(req, 'i.module');
       const items: any[] = await db.query(
         `SELECT sb.id, sb.batch_number, sb.expiry_date, sb.remaining_qty, sb.unit, sb.unit_cost,
                 i.name AS item_name, i.category,
@@ -24300,9 +24368,10 @@ ${data.tenant.name}`;
          WHERE sb.expiry_date IS NOT NULL
            AND sb.expiry_date::date >= CURRENT_DATE
            AND sb.expiry_date::date <= CURRENT_DATE + (? * INTERVAL '1 day')
-           AND sb.remaining_qty > 0
+           AND sb.remaining_qty > 0${emf.sql}
          ORDER BY sb.expiry_date ASC`,
-        [days]
+        // days first here: its placeholder appears earlier in the statement.
+        [days, ...emf.params]
       );
       res.json({ days, count: items.length, items });
     } catch (err: any) {
@@ -24314,6 +24383,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const days = Math.min(180, Math.max(7, Number(req.query.days) || 30));
+      const dmf = _invModuleFilter(req, 'i.module');
       const items: any[] = await db.query(
         `SELECT i.id, i.name, i.category, i.unit,
                 i.current_stock_qty AS stock_qty,
@@ -24325,11 +24395,14 @@ ${data.tenant.name}`;
                 END AS days_idle
          FROM ingredients i
          LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id
-         WHERE i.is_active = 1 AND i.current_stock_qty > 0
+         WHERE i.is_active = 1 AND i.current_stock_qty > 0${dmf.sql}
          GROUP BY i.id
          HAVING MAX(sm.recorded_at) IS NULL OR EXTRACT(DAY FROM (NOW() - MAX(sm.recorded_at)))::integer >= ?
          ORDER BY stock_value DESC`,
-        [days]
+        // The module placeholder lands in the WHERE, which precedes the HAVING
+        // in the statement, so it must be bound FIRST. Swapping these two binds
+        // the day count as a module name and silently returns nothing.
+        [...dmf.params, days]
       );
       res.json({ days, count: items.length, items });
     } catch (err: any) {
@@ -55401,8 +55474,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-autopo-module-bind',
+    commit_marker: 'inventory-module-scoped-reports',
     code_features: [
+      'inventory-module-scoped-reports',    //FEATURE (inventory remediation, phase A of the gap review - 12 Sep 2026). Every inventory report can finally be asked about ONE part of the business. **The finding:** 10 of 12 inventory reports took no module parameter at all, so every one of them was the kitchen's report - which is most of what the owner meant by 'reporting is missing' for Spa and for Events. The reports were not missing, they were UNADDRESSABLE. New `_invModuleFilter` mirrors `_glModuleFilter` with one deliberate difference: a NULL module is NOT excluded as untagged, because `ingredients.module` was added after the fact with DEFAULT 'RESTAURANT' and a row predating it is a kitchen item that never got stamped - COALESCE, or every pre-existing ingredient vanishes from the kitchen's own reports. A companion `_invModuleExists` covers queries that hold stock_movements or goods receipts with no ingredients join, via EXISTS rather than a new join, because several of them already aggregate and a join would change the grouping. Applied to dashboard (7 queries, 3 different join shapes), audit-log, wastage, variance, ABC, dead-stock and expiring. **BIND ORDER IS THE TRAP HERE and is commented at each site:** in dead-stock the module placeholder lands in the WHERE while the existing one sits in the HAVING, so module binds FIRST; in expiring both are in the WHERE and days binds first. Postgres binds by position, and getting it backwards reads a day count as a module name and silently returns nothing. Food cost % is now WITHHELD under a non-restaurant filter rather than printed: the numerator would be that module's consumption over restaurant sales, which is not a ratio of anything. **Physical counts are now scoped to a module too** (+ SHARED) - counting the whole property in one sheet stopped being workable the moment the hotel silo was folded in, since a kitchen count handed the chef 21 rows of linen. **And the PO builder regression from stage 4 is fixed:** it inherited the Kitchen Inventory list, which had to be scoped to the kitchen, leaving the form able to raise a PO FOR Events or Spa while offering only restaurant items to put ON it; it now loads items by the module chosen on the PO itself, and clears any line picked from the previous list rather than saving a line its own filter excludes. tsc + vite build clean.',
       'inventory-autopo-module-bind',       //FIX (minutes after stages 3-5, caught by TC-INV-AUTOPO-MODULE going to 500). The per-module auto-PO selection scoped its module filter with `AND (? IS NULL OR COALESCE(i.module,'RESTAURANT') = ?)`, passing the same value twice so one query could serve both the filtered and unfiltered case. Postgres cannot infer the type of a bare parameter in `$n IS NULL` and REJECTS THE WHOLE STATEMENT, so `/inventory/auto-po/generate` 500'd and raised no drafts at all - the feature was dead on arrival, not merely mis-scoped. The clause is now appended only when there IS a module to filter on, which is the same conditional-build pattern the ingredients list already uses. **Also fixed a real regression from stage 4:** folding the hotel silo into `ingredients` meant the Kitchen Inventory screen, which fetched the item list UNFILTERED, suddenly showed 21 housekeeping items - toilet paper and floor cleaner in the chef's ingredient list, and inside the stock-value, below-reorder and food-cost figures derived from it. That request now asks for `?module=RESTAURANT&include_shared=1`. The unfiltered fetch was harmless only because the hotel kept its own table; folding the silo is exactly what made it wrong. Caught by driving the real UI, not by any test. tsc + vite build clean.',
       'inventory-suppliers-and-fold',      //FEATURE (inventory remediation, stages 3-5 of 5 - 12 Sep 2026). Closes the last three gaps from the inventory audit in one pass. **(3) APPROVED SUPPLIER LIST** - the item master held exactly ONE `default_supplier_id`, so a second source for an item could not be recorded at all; `supplier_prices` looks like it fills that gap but it is a price-observation HISTORY (what was paid, when) with no notion of approval, preference, lead time or MOQ. New `ingredient_suppliers` (unique on the item+supplier pair, so a double-click cannot create two competing ranks) with is_approved / preference_rank / lead_time_days / moq / last_unit_price, seeded ONCE from every item's existing default supplier as its rank-1 approved source so nothing changes on day one. **(5) AUTO-PO NOW BUYS FROM THE APPROVED SOURCE AND SPLITS BY MODULE** - the selection predicate `_PREFERRED_SUPPLIER_SQL` is written ONCE and shared by the generator and its preview, because those two kept independent copies of the same query and a change to one silently made the preview lie about what would actually be raised; it takes the lowest-ranked APPROVED supplier and falls back to the legacy `default_supplier_id` for uncurated items, so un-approving a vendor redirects replenishment with no other edit. The draft's module is now derived from its lines instead of the hardcoded 'RESTAURANT' - defensible while ingredients had no module, but now it would file spa and hotel replenishment as kitchen spend the moment the invoice hits the GL - and one draft is raised PER MODULE, because a mixed PO cannot be filed against a cost centre without being split by hand, which is the manual step this feature exists to remove. **(4) THE HOTEL SILO IS FOLDED IN** - `hotel_inventory_items` was a thinner parallel copy of `ingredients` with no supplier, PO, batch, count or auto-PO support, and its par_level / reorder_point columns were read by NOTHING, so low-stock replenishment for the hotel could never have worked however the data was filled in. Rows migrate into `ingredients` as module='HOTEL' KEEPING THEIR ORIGINAL ids (load-bearing: `hotel_stock_movements` references items by id, so the existing history stays resolvable), the 7 `/hotel-inventory/*` routes become adapters over the shared master with UNCHANGED response shapes so the existing screen keeps working, and hotel stock changes now write the SHARED ledger. Legacy movements are NOT rewritten - a movement is a historical fact and restating one in a different table with a different sign convention (absolute qty + direction, vs signed qty_delta) is how an audit trail stops being trustworthy - they are UNIONed into the same shape at read time and age out on their own. The old table is left in place, unread, rather than dropped. All three backfills are marker-guarded one-shots. tsc + vite build clean.',
       'inventory-consumption-actor',       //FIX (inventory remediation, stage 2 of 5 - 12 Sep 2026). The stock ledger can now answer WHO consumed an item on the path that does almost all the consuming. `stock_movements` already carried `recorded_by_user_id`, and GRN, wastage, physical counts, manual adjust, spa appointment-complete and spa retail-sale all populated it - but `deductIngredientsForOrder`, the recipe explosion that fires on EVERY restaurant order, omitted the column from its INSERT entirely, as did the matching REVERSAL in `revertIngredientsForOrder`. So the single highest-volume movement type in the system recorded what and when but never by whom. Both functions now take an `actorUserId` and all 8 call sites pass one: `req.user?.id` where a human acted, and an EXPLICIT null on the two machine paths (a cloud-kitchen platform order and a delivery-platform webhook) rather than inventing a user - a public QR self-order is legitimately null too, and its `reference_id` still ties the movement to the order. **CORRECTION TO MY OWN STAGE-1 AUDIT:** I reported that `hotel_stock_movements.recorded_by` was never populated. It is - `req.user?.id || req.user?.email` - my scan tested for `by_user` in the column list and the column is named `recorded_by`. What was actually missing there was the READ side. Both logs now resolve ids to NAMES via a new `_resolveActorNames`, which checks the tenant's `attendance_staff` then central `users`, batched in one IN query because the audit log pages up to 1000 rows and a per-row lookup would be 1000 round-trips per screen; an unresolved id falls back to the raw id, and a null renders as 'Automatic (order)' because no-human is a real answer, not missing data. tsc + vite build clean.',

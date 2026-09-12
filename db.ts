@@ -1888,6 +1888,13 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'").catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_module ON ingredients (module)`).catch(() => {});
 
+  // Which module a stock-take covers. Deliberately NULLABLE with no default:
+  // a NULL is a count taken BEFORE counts were scoped, and it genuinely spanned
+  // every item in the property. Stamping those 'RESTAURANT' would rewrite what
+  // was actually counted, so they keep NULL and the list shows them under every
+  // module rather than hiding history behind a filter that did not exist yet.
+  await db.exec("ALTER TABLE physical_counts ADD COLUMN IF NOT EXISTS module TEXT").catch(() => {});
+
   // ── Approved supplier list (inventory remediation, stage 3) ──────────────
   // An item can be bought from SEVERAL suppliers, and which of them are
   // APPROVED to supply it is a purchasing decision, not a guess. Until now the

@@ -57945,7 +57945,7 @@ function SupplierEditorModal({ token, restaurantId, supplier, onClose, onSaved }
 }
 
 // ─── PO create modal — multi-line ─────────────────────────────────────────
-function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, onSaved }: {
+function POCreateModal({ token, restaurantId, suppliers, ingredients: seedIngredients, onClose, onSaved }: {
   token: string; restaurantId: string; suppliers: any[]; ingredients: any[]; onClose: () => void; onSaved: () => void;
 }) {
   const [supplierId, setSupplierId] = useState(suppliers[0]?.id || '');
@@ -57958,6 +57958,47 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
   const [lines, setLines] = useState<any[]>([{ ingredient_id: '', qty_ordered: 1, unit_price: 0, gst_percent: 0 }]);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+
+  // The item list follows the module chosen ON THIS PO, instead of inheriting
+  // whatever list the screen that opened the form happens to hold.
+  //
+  // It used to take the Kitchen Inventory list, which worked only while that
+  // list was unfiltered. Once the hotel item silo was folded into the shared
+  // master, the kitchen list had to be scoped to the kitchen — which left this
+  // form able to raise a PO *for* Events or Spa while offering only restaurant
+  // items to put *on* it. Loading per module is the right behaviour regardless:
+  // choosing Hotel should offer housekeeping supplies, not produce.
+  //
+  // The prop is kept as the seed so the first paint has something to show
+  // before the scoped fetch returns.
+  const [moduleIngredients, setModuleIngredients] = useState<any[]>(seedIngredients);
+  const [loadingItems, setLoadingItems] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingItems(true);
+    fetch(`/api/restaurant/${restaurantId}/inventory/ingredients?module=${encodeURIComponent(poModule)}&include_shared=1`,
+      { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => { if (!cancelled) setModuleIngredients(Array.isArray(d) ? d : []); })
+      .catch(() => { if (!cancelled) setModuleIngredients([]); })
+      .finally(() => { if (!cancelled) setLoadingItems(false); });
+    return () => { cancelled = true; };
+  }, [poModule, restaurantId, token]);
+
+  // Shadowed under the name the rest of this component already uses, so every
+  // lookup and the picker below read the scoped list without touching a line
+  // of the code that consumes it.
+  const ingredients = moduleIngredients;
+
+  // Changing the module invalidates any line chosen from the previous list, so
+  // those are cleared rather than left pointing at an item this PO can no
+  // longer contain — which would save a line its own module filter excludes.
+  const onModuleChange = (next: string) => {
+    setPoModule(next);
+    setLines(prev => prev.some(l => l.ingredient_id)
+      ? [{ ingredient_id: '', qty_ordered: 1, unit_price: 0, gst_percent: 0 }]
+      : prev);
+  };
 
   const updateLine = (idx: number, key: string, value: any) => {
     setLines(prev => prev.map((l, i) => {
@@ -58042,7 +58083,7 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
             <input type="date" value={expectedDate} onChange={e => setExpectedDate(e.target.value)} className={inputClass} />
           </FormField>
           <FormField label="For which module" required>
-            <select value={poModule} onChange={e => setPoModule(e.target.value)} className={inputClass}>
+            <select value={poModule} onChange={e => onModuleChange(e.target.value)} className={inputClass}>
               {costModuleOptions()}
             </select>
           </FormField>
