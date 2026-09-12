@@ -28183,7 +28183,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
             Server ignores OWNER/SUPER_ADMIN rows from save payloads as a
             defensive lockout-prevention. */
-        <div className="max-w-7xl space-y-6">
+        <div className="space-y-6">
           {!isOwnerOrAdmin ? (
             // CRITICAL OWNER-ONLY GATE — non-owner reached this branch
             // somehow (cached activeTab, direct ?tab=STAFF_ACCESS URL,
@@ -66658,6 +66658,13 @@ function AccountDrawer({ restaurantId, token, accountId, onClose, onChanged }: {
 }
 
 // ── ProcurementView ────────────────────────────────────────────────────────
+// NOTE ON WIDTH: this used to wrap itself in `p-4 md:p-6 max-w-7xl mx-auto`,
+// which capped a table-dense page at 1280px, centred it, and added a SECOND
+// layer of padding on top of the page shell's own. Command Centre does none of
+// that, which is why it filled the screen and this did not. Page-level width
+// and padding belong to the shell; a view that sets its own fights it.
+// Settings FORMS may still hold a narrow column deliberately — a 2000px-wide
+// text input is worse, not better.
 // Unified Procurement & Accounts Payable module.
 // Visible to ALL property types (HOTEL, RESTAURANT, BOTH).
 // Sub-tabs: Suppliers | Purchase Orders | Invoices | Payments | Ledger | Reports
@@ -66992,7 +66999,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   ];
 
   return (
-    <div className="p-4 md:p-6 max-w-7xl mx-auto">
+    <div className="space-y-6">
       {/* Header */}
       <div className="mb-5">
         <h2 className="text-2xl font-bold font-serif text-[#1a1208]">Procurement & Payables</h2>
