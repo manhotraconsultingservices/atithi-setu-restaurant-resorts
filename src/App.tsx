@@ -57459,6 +57459,141 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   );
 }
 
+// ─── Approved supplier list for one item (stage 3) ─────────────────────────
+// An item can legitimately have several sources, and WHICH of them are
+// approved to supply it is a purchasing decision. The item master only ever
+// held a single `default_supplier_id`, so a second source could not be
+// recorded at all — and `supplier_prices`, which looks like it fills the gap,
+// is a record of prices PAID, with no notion of approval or preference.
+//
+// Rank 1 is the primary source: auto-PO buys from the lowest-ranked APPROVED
+// supplier, so un-approving a vendor here redirects replenishment to the next
+// one down without touching a single item or purchase order.
+function ApprovedSuppliersPanel({ restaurantId, token, ingredientId }: {
+  restaurantId: string; token: string; ingredientId: string;
+}) {
+  const toast = useToast();
+  const [links, setLinks] = useState<any[]>([]);
+  const [suppliers, setSuppliers] = useState<any[]>([]);
+  const [pick, setPick] = useState('');
+  const [busy, setBusy] = useState(false);
+  const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const canWrite = canWriteTab('INVENTORY');
+
+  const load = async () => {
+    try {
+      const [l, s2] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/inventory/ingredients/${ingredientId}/suppliers`, { headers: auth }),
+        fetch(`/api/restaurant/${restaurantId}/inventory/suppliers`, { headers: auth }),
+      ]);
+      setLinks(l.ok ? await l.json() : []);
+      setSuppliers(s2.ok ? await s2.json() : []);
+    } catch { /* silent — the panel simply shows empty */ }
+  };
+  useEffect(() => { load(); }, [ingredientId]);
+
+  const add = async () => {
+    if (!pick) return;
+    setBusy(true);
+    try {
+      // Rank defaults to one past the current list so a newly added source is
+      // an alternative, never a silent replacement for the primary one.
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients/${ingredientId}/suppliers`, {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ supplier_id: pick, preference_rank: links.length + 1 }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Failed'); }
+      setPick(''); await load();
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+
+  const patch = async (id: string, body: any) => {
+    setBusy(true);
+    try {
+      await fetch(`/api/inventory/ingredient-suppliers/${id}`, {
+        method: 'PATCH', headers: auth, body: JSON.stringify(body),
+      });
+      await load();
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+
+  const remove = async (id: string) => {
+    setBusy(true);
+    try {
+      await fetch(`/api/inventory/ingredient-suppliers/${id}`, { method: 'DELETE', headers: auth });
+      await load();
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+
+  const linkedIds = new Set(links.map(l => String(l.supplier_id)));
+  const available = suppliers.filter(s2 => !linkedIds.has(String(s2.id)));
+
+  return (
+    <div className="rounded-2xl border border-[#cc5a16]/15 p-4 space-y-3">
+      <div>
+        <h4 className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Approved Suppliers</h4>
+        <p className="text-[10px] text-[#9c8e85] mt-0.5">
+          Auto-PO buys from the highest-ranked approved supplier.
+        </p>
+      </div>
+
+      {links.length === 0 ? (
+        <p className="text-xs text-[#9c8e85] italic">No approved suppliers yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {links.map((l, idx) => (
+            <div key={l.id} className="flex items-center gap-2 text-sm bg-[#faf7f2] rounded-xl px-3 py-2">
+              <span className="w-6 text-center text-[10px] font-bold text-[#9c8e85]">#{l.preference_rank ?? idx + 1}</span>
+              <span className="flex-1 font-medium truncate">{l.supplier_name || l.supplier_id}</span>
+              {l.last_unit_price != null && (
+                <span className="text-xs text-[#6b5d52] font-mono">Rs.{Number(l.last_unit_price).toFixed(2)}</span>
+              )}
+              <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${Number(l.is_approved) === 1 ? 'bg-emerald-50 text-emerald-700' : 'bg-[#0d0a07]/5 text-[#9c8e85]'}`}>
+                {Number(l.is_approved) === 1 ? 'Approved' : 'Not approved'}
+              </span>
+              {canWrite && (
+                <>
+                  <button
+                    type="button" disabled={busy}
+                    onClick={() => patch(l.id, { is_approved: Number(l.is_approved) === 1 ? 0 : 1 })}
+                    className="px-2 py-1 rounded-lg bg-white border border-[#cc5a16]/15 text-[10px] font-bold disabled:opacity-50"
+                  >{Number(l.is_approved) === 1 ? 'Un-approve' : 'Approve'}</button>
+                  {idx > 0 && (
+                    <button
+                      type="button" disabled={busy}
+                      title="Make primary"
+                      onClick={() => patch(l.id, { preference_rank: 0 })}
+                      className="px-2 py-1 rounded-lg bg-white border border-[#cc5a16]/15 text-[10px] font-bold disabled:opacity-50"
+                    >↑</button>
+                  )}
+                  <button
+                    type="button" disabled={busy}
+                    onClick={() => remove(l.id)}
+                    className="px-2 py-1 rounded-lg bg-red-50 text-red-600 text-[10px] font-bold disabled:opacity-50"
+                  >Remove</button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {canWrite && available.length > 0 && (
+        <div className="flex items-center gap-2">
+          <select value={pick} onChange={e => setPick(e.target.value)} className={inputClass + ' flex-1'}>
+            <option value="">— Add a supplier —</option>
+            {available.map(s2 => <option key={s2.id} value={s2.id}>{s2.name}</option>)}
+          </select>
+          <button
+            type="button" onClick={add} disabled={!pick || busy}
+            className="px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white disabled:opacity-40"
+          >Add</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Ingredient editor (create + edit) ─────────────────────────────────────
 function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSaved, presetModule }: {
   token: string; restaurantId: string; ingredient: any | null; onClose: () => void; onSaved: () => void;
@@ -57545,6 +57680,10 @@ function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSav
             </select>
           </FormField>
         </div>
+
+        {isEdit && (
+          <ApprovedSuppliersPanel restaurantId={restaurantId} token={token} ingredientId={ingredient.id} />
+        )}
 
         {!isEdit && (
           <FormField label="Opening Stock" hint="Qty currently on hand. Logged as audit movement.">

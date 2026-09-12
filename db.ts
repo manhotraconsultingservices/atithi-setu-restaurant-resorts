@@ -1888,6 +1888,100 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'").catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_module ON ingredients (module)`).catch(() => {});
 
+  // ── Approved supplier list (inventory remediation, stage 3) ──────────────
+  // An item can be bought from SEVERAL suppliers, and which of them are
+  // APPROVED to supply it is a purchasing decision, not a guess. Until now the
+  // item master carried exactly one `default_supplier_id`, so a second source
+  // could not be recorded at all; `supplier_prices` looks like it fills the gap
+  // but it is a price-observation HISTORY (what was paid, when) — it has no
+  // notion of approval, preference, lead time or minimum order quantity.
+  //
+  // preference_rank 1 = the primary source. Auto-PO buys from the lowest-ranked
+  // APPROVED supplier, so de-approving a vendor immediately redirects
+  // replenishment to the next one down without editing a single item.
+  await db.exec(`CREATE TABLE IF NOT EXISTS ingredient_suppliers (
+    id TEXT PRIMARY KEY,
+    ingredient_id TEXT NOT NULL,
+    supplier_id TEXT NOT NULL,
+    is_approved INT DEFAULT 1,
+    preference_rank INT DEFAULT 1,
+    lead_time_days INT,
+    moq DOUBLE PRECISION,
+    last_unit_price DOUBLE PRECISION,
+    supplier_sku TEXT,
+    notes TEXT,
+    is_active INT DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_ing_sup_ingredient ON ingredient_suppliers (ingredient_id)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_ing_sup_supplier ON ingredient_suppliers (supplier_id)`).catch(() => {});
+  // One row per (item, supplier) — the pair IS the identity, and without this
+  // a double-click on "add supplier" silently creates two competing ranks.
+  await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ing_sup_pair ON ingredient_suppliers (ingredient_id, supplier_id)`).catch(() => {});
+
+  // ONE-SHOT seed: every item that already names a default supplier gets that
+  // supplier as its rank-1 approved source, so the new screen opens populated
+  // and auto-PO keeps buying exactly what it bought yesterday.
+  //
+  // Marker-guarded for the same reason as the module backfill: re-running it
+  // on every boot would resurrect a link the owner deliberately removed or
+  // de-approved. `ON CONFLICT DO NOTHING` additionally makes the insert itself
+  // safe against the unique index above.
+  await db.exec(`CREATE TABLE IF NOT EXISTS ingredient_suppliers_backfill (
+    id TEXT PRIMARY KEY,
+    done_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  const _ingSupSeeded: any = await db.get(
+    "SELECT id FROM ingredient_suppliers_backfill WHERE id = 'once'"
+  ).catch(() => null);
+  if (!_ingSupSeeded) {
+    await db.exec(`INSERT INTO ingredient_suppliers
+        (id, ingredient_id, supplier_id, is_approved, preference_rank, last_unit_price)
+      SELECT 'ISUP-' || i.id, i.id, i.default_supplier_id, 1, 1, i.default_unit_price
+        FROM ingredients i
+       WHERE i.default_supplier_id IS NOT NULL AND i.default_supplier_id <> ''
+      ON CONFLICT DO NOTHING`).catch(() => {});
+    await db.exec("INSERT INTO ingredient_suppliers_backfill (id) VALUES ('once')").catch(() => {});
+  }
+
+  // ── Fold the hotel item silo into the shared master (stage 4) ────────────
+  // `hotel_inventory_items` was a parallel, thinner copy of `ingredients`: no
+  // supplier link, no purchase orders, no batches, no physical counts, no
+  // auto-PO. Its `par_level` / `reorder_point` columns existed but nothing on
+  // earth read them, so "raise a PO when hotel stock runs low" could not work
+  // however the data was filled in.
+  //
+  // The rows move into `ingredients` with module='HOTEL', KEEPING THEIR
+  // ORIGINAL ids. That is the load-bearing detail: `hotel_stock_movements`
+  // references items by id, so preserving them keeps the whole existing
+  // movement history resolvable instead of orphaning it.
+  //
+  // The old table is left in place, unread and unwritten, rather than dropped.
+  // A destructive drop buys nothing here and makes the change irreversible if
+  // a tenant turns out to hold something unexpected.
+  await db.exec(`CREATE TABLE IF NOT EXISTS hotel_items_fold_backfill (
+    id TEXT PRIMARY KEY,
+    done_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  const _hotelFolded: any = await db.get(
+    "SELECT id FROM hotel_items_fold_backfill WHERE id = 'once'"
+  ).catch(() => null);
+  if (!_hotelFolded) {
+    // item_type PACKAGED: a hotel consumable is a bought-in finished good
+    // (soap, linen, a water bottle), never a recipe component.
+    await db.exec(`INSERT INTO ingredients
+        (id, name, item_type, module, category, unit, current_stock_qty,
+         reorder_point, par_level, default_unit_price, sku, notes, is_active)
+      SELECT h.id, h.name, 'PACKAGED', 'HOTEL', h.category, COALESCE(h.unit, 'unit'),
+             COALESCE(h.current_stock_qty, 0), COALESCE(h.reorder_point, 0),
+             COALESCE(h.par_level, 0), h.default_unit_price, h.sku, h.notes,
+             COALESCE(h.is_active, 1)
+        FROM hotel_inventory_items h
+       WHERE NOT EXISTS (SELECT 1 FROM ingredients i WHERE i.id = h.id)`).catch(() => {});
+    await db.exec("INSERT INTO hotel_items_fold_backfill (id) VALUES ('once')").catch(() => {});
+  }
+
   // ONE-SHOT backfill of the new column from the only module signal the old
   // rows carried: item_type 'SPA_PRODUCT' / 'SPA_RETAIL' meant spa, everything
   // else was kitchen. Stamping it once means existing tenants open the new

@@ -19272,6 +19272,123 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Approved supplier list per item (stage 3) ───────────────────────────
+  // GET — who may supply this item, best source first. Returns the supplier's
+  // name so the caller does not have to join it back itself.
+  app.get("/api/restaurant/:id/inventory/ingredients/:ingredientId/suppliers", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT isup.*, s.name AS supplier_name, s.phone AS supplier_phone,
+                s.lead_time_days AS supplier_lead_time_days
+           FROM ingredient_suppliers isup
+           JOIN suppliers s ON s.id = isup.supplier_id
+          WHERE isup.ingredient_id = ? AND isup.is_active = 1
+          ORDER BY isup.is_approved DESC, isup.preference_rank ASC, s.name ASC`,
+        [req.params.ingredientId]
+      ).catch(() => [] as any[]);
+      res.json(rows);
+    } catch (err) {
+      console.error("List ingredient suppliers error:", err);
+      res.status(500).json({ error: "Failed to fetch approved suppliers" });
+    }
+  });
+
+  // POST — approve a supplier for this item.
+  app.post("/api/restaurant/:id/inventory/ingredients/:ingredientId/suppliers", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const { supplier_id, preference_rank, lead_time_days, moq, last_unit_price, supplier_sku, notes, is_approved } = req.body || {};
+      if (!supplier_id) return res.status(400).json({ error: "supplier_id is required" });
+      const db = await getTenantDb(req.params.id);
+      // Both sides must exist in THIS tenant — without these checks a typo'd
+      // id creates a link to nothing that then silently drops out of every
+      // join, which reads as "the supplier I added vanished".
+      const ing: any = await db.get("SELECT id FROM ingredients WHERE id = ?", [req.params.ingredientId]);
+      if (!ing) return res.status(404).json({ error: "Ingredient not found" });
+      const sup: any = await db.get("SELECT id FROM suppliers WHERE id = ?", [supplier_id]);
+      if (!sup) return res.status(404).json({ error: "Supplier not found" });
+
+      const exists: any = await db.get(
+        "SELECT id FROM ingredient_suppliers WHERE ingredient_id = ? AND supplier_id = ?",
+        [req.params.ingredientId, supplier_id]
+      ).catch(() => null);
+      if (exists) {
+        // Re-adding an existing pair REVIVES it rather than 409-ing: a supplier
+        // that was de-activated and is being re-approved is the common case,
+        // and an error there would leave the user unable to proceed at all.
+        await db.run(
+          `UPDATE ingredient_suppliers
+              SET is_active = 1, is_approved = ?, preference_rank = COALESCE(?, preference_rank),
+                  lead_time_days = COALESCE(?, lead_time_days), moq = COALESCE(?, moq),
+                  last_unit_price = COALESCE(?, last_unit_price),
+                  supplier_sku = COALESCE(?, supplier_sku), notes = COALESCE(?, notes),
+                  updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?`,
+          [is_approved === 0 ? 0 : 1,
+           preference_rank != null ? Number(preference_rank) : null,
+           lead_time_days != null ? Number(lead_time_days) : null,
+           moq != null ? Number(moq) : null,
+           last_unit_price != null ? Number(last_unit_price) : null,
+           supplier_sku || null, notes || null, exists.id]
+        );
+        return res.json({ success: true, id: exists.id, revived: true });
+      }
+
+      const linkId = `ISUP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO ingredient_suppliers
+          (id, ingredient_id, supplier_id, is_approved, preference_rank, lead_time_days, moq, last_unit_price, supplier_sku, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [linkId, req.params.ingredientId, supplier_id,
+         is_approved === 0 ? 0 : 1,
+         preference_rank != null ? Number(preference_rank) : 1,
+         lead_time_days != null ? Number(lead_time_days) : null,
+         moq != null ? Number(moq) : null,
+         last_unit_price != null ? Number(last_unit_price) : null,
+         supplier_sku || null, notes || null]
+      );
+      res.json({ success: true, id: linkId });
+    } catch (err) {
+      console.error("Add ingredient supplier error:", err);
+      res.status(500).json({ error: "Failed to approve supplier" });
+    }
+  });
+
+  // PATCH — change approval, preference, lead time, MOQ or price.
+  app.patch("/api/inventory/ingredient-suppliers/:linkId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const allowed = ['is_approved', 'preference_rank', 'lead_time_days', 'moq', 'last_unit_price', 'supplier_sku', 'notes', 'is_active'];
+      const updates: string[] = [];
+      const params: any[] = [];
+      for (const k of allowed) {
+        if (req.body[k] !== undefined) { updates.push(`${k} = ?`); params.push(req.body[k]); }
+      }
+      if (updates.length === 0) return res.status(400).json({ error: "Nothing to update" });
+      updates.push("updated_at = CURRENT_TIMESTAMP");
+      params.push(req.params.linkId);
+      await db.run(`UPDATE ingredient_suppliers SET ${updates.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Update ingredient supplier error:", err);
+      res.status(500).json({ error: "Failed to update approved supplier" });
+    }
+  });
+
+  // DELETE — soft-remove the link. Soft, because purchase history and the
+  // price observations reference this pairing.
+  app.delete("/api/inventory/ingredient-suppliers/:linkId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await db.run("UPDATE ingredient_suppliers SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.linkId]);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to remove approved supplier" });
+    }
+  });
+
   // Ingredients: bulk stock adjustment (manual override)
   // Used for ad-hoc corrections. Logs MANUAL movement with a "before/after" note.
   app.post("/api/inventory/ingredients/:id/adjust-stock", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
@@ -20650,11 +20767,29 @@ ${data.tenant.name}`;
   // assigned to that supplier are below par. Returns the PO id (or null if
   // nothing to order). Used by the auto-PO cron AND exposed via a manual
   // POST endpoint so owners can trigger draft generation on demand.
+  // Which supplier actually sources an item: the lowest-ranked APPROVED entry
+  // in the approved-supplier list, falling back to the legacy single
+  // `default_supplier_id` for items nobody has curated yet. Written ONCE and
+  // shared by the auto-PO generator AND its preview, because those two kept
+  // independent copies of the same query - and a change to one silently made
+  // the preview lie about what the generator would actually raise.
+  const _PREFERRED_SUPPLIER_SQL = `COALESCE(
+      (SELECT isup.supplier_id
+         FROM ingredient_suppliers isup
+        WHERE isup.ingredient_id = i.id
+          AND isup.is_approved = 1
+          AND isup.is_active = 1
+        ORDER BY isup.preference_rank ASC, isup.created_at ASC
+        LIMIT 1),
+      i.default_supplier_id
+    )`;
+
   async function _generateDraftPoForSupplier(
     tenantId: string,
     supplierId: string,
     raisedByUserId: string | null = null,
-  ): Promise<{ po_id: string | null; line_count: number; total: number; ingredients: any[] }> {
+    moduleFilter: string | null = null,
+  ): Promise<{ po_id: string | null; line_count: number; total: number; ingredients: any[]; module?: string }> {
     const db = await getTenantDb(tenantId);
     const supplier: any = await db.get(
       "SELECT id, name, lead_time_days, po_ordering_minimum FROM suppliers WHERE id = ? AND is_active = 1",
@@ -20662,14 +20797,16 @@ ${data.tenant.name}`;
     );
     if (!supplier) return { po_id: null, line_count: 0, total: 0, ingredients: [] };
     const below: any[] = await db.query(
-      `SELECT id, name, unit, current_stock_qty, par_level, reorder_point,
-              COALESCE(default_unit_price, 0) AS unit_price
-         FROM ingredients
-        WHERE default_supplier_id = ?
-          AND is_active = 1
-          AND par_level > 0
-          AND current_stock_qty < par_level`,
-      [supplierId]
+      `SELECT i.id, i.name, i.unit, i.current_stock_qty, i.par_level, i.reorder_point,
+              COALESCE(i.module, 'RESTAURANT') AS module,
+              COALESCE(i.default_unit_price, 0) AS unit_price
+         FROM ingredients i
+        WHERE ${_PREFERRED_SUPPLIER_SQL} = ?
+          AND i.is_active = 1
+          AND i.par_level > 0
+          AND i.current_stock_qty < i.par_level
+          AND (? IS NULL OR COALESCE(i.module, 'RESTAURANT') = ?)`,
+      [supplierId, moduleFilter, moduleFilter]
     );
     if (!below || below.length === 0) {
       return { po_id: null, line_count: 0, total: 0, ingredients: [] };
@@ -20695,15 +20832,21 @@ ${data.tenant.name}`;
     const poId = `PO-DRAFT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
     const expectedDelivery = new Date();
     expectedDelivery.setDate(expectedDelivery.getDate() + Number(supplier.lead_time_days || 1));
+    // The draft's module now comes from the items ON it rather than a
+    // hardcoded 'RESTAURANT'. That constant was defensible while ingredients
+    // had no module at all; now that they do, leaving it would file spa and
+    // hotel replenishment as kitchen spend the moment its invoice hits the GL.
+    // Callers group by module first, so every line here shares one.
+    const draftModule = _normaliseCostModule(moduleFilter || below[0]?.module, 'RESTAURANT');
+    const _unitWord = draftModule === 'RESTAURANT' ? 'ingredients' : 'items';
     await db.run(
-      // RESTAURANT, stated rather than assumed: this draft is raised from
-      // INGREDIENT par levels, so it is a kitchen replenishment by construction.
       `INSERT INTO purchase_orders (id, supplier_id, status, expected_delivery_date,
                                     total_amount, gst_amount, grand_total, raised_by_user_id, notes, module)
-       VALUES (?, ?, 'DRAFT', ?, ?, 0, ?, ?, ?, 'RESTAURANT')`,
+       VALUES (?, ?, 'DRAFT', ?, ?, 0, ?, ?, ?, ?)`,
       [poId, supplierId, expectedDelivery.toISOString().slice(0, 10),
        subtotal, subtotal, raisedByUserId,
-       `Auto-generated draft — ${lines.length} ingredients below par. Review and click Send.`]
+       `Auto-generated draft — ${lines.length} ${_unitWord} below par. Review and click Send.`,
+       draftModule]
     );
     for (const l of lines) {
       await db.run(
@@ -20712,9 +20855,35 @@ ${data.tenant.name}`;
         [`${poId}-${l.ingredient_id.slice(-6)}`, poId, l.ingredient_id, l.qty, l.unit, l.unit_price]
       );
     }
-    return { po_id: poId, line_count: lines.length, total: subtotal, ingredients: lines };
+    return { po_id: poId, line_count: lines.length, total: subtotal, ingredients: lines, module: draftModule };
   }
   (globalThis as any).__generateDraftPoForSupplier = _generateDraftPoForSupplier;
+
+  // One supplier can serve several parts of the business, so replenishment is
+  // raised as ONE DRAFT PER MODULE rather than a single mixed order. A PO is
+  // what eventually posts to the ledger through its supplier invoice, and a
+  // mixed one cannot be filed against a cost centre without being split by
+  // hand - which is the manual step this feature exists to remove.
+  async function _generateDraftPosForSupplier(
+    tenantId: string, supplierId: string, raisedByUserId: string | null = null,
+  ): Promise<Array<{ po_id: string | null; line_count: number; total: number; ingredients: any[]; module?: string }>> {
+    const db = await getTenantDb(tenantId);
+    const mods: any[] = await db.query(
+      `SELECT DISTINCT COALESCE(i.module, 'RESTAURANT') AS module
+         FROM ingredients i
+        WHERE ${_PREFERRED_SUPPLIER_SQL} = ?
+          AND i.is_active = 1
+          AND i.par_level > 0
+          AND i.current_stock_qty < i.par_level`,
+      [supplierId]
+    ).catch(() => [] as any[]);
+    const out = [];
+    for (const m of (mods || [])) {
+      const d = await _generateDraftPoForSupplier(tenantId, supplierId, raisedByUserId, String(m.module));
+      if (d.po_id) out.push(d);
+    }
+    return out;
+  }
 
   // POST /inventory/auto-po/preview — owner-triggered: see what auto-PO
   // WOULD generate without committing. Useful before enabling the cron.
@@ -20727,13 +20896,14 @@ ${data.tenant.name}`;
       const previews = [];
       for (const sup of (suppliers || [])) {
         const low: any[] = await db.query(
-          `SELECT id, name, unit, current_stock_qty, par_level,
-                  COALESCE(default_unit_price, 0) AS unit_price
-             FROM ingredients
-            WHERE default_supplier_id = ?
-              AND is_active = 1
-              AND par_level > 0
-              AND current_stock_qty < par_level`,
+          `SELECT i.id, i.name, i.unit, i.current_stock_qty, i.par_level,
+                  COALESCE(i.module, 'RESTAURANT') AS module,
+                  COALESCE(i.default_unit_price, 0) AS unit_price
+             FROM ingredients i
+            WHERE ${_PREFERRED_SUPPLIER_SQL} = ?
+              AND i.is_active = 1
+              AND i.par_level > 0
+              AND i.current_stock_qty < i.par_level`,
           [sup.id]
         );
         const lines = (low || []).map(ing => {
@@ -20794,8 +20964,8 @@ ${data.tenant.name}`;
         : await db.query("SELECT id FROM suppliers WHERE is_active = 1");
       const drafts = [];
       for (const sup of (suppliers || [])) {
-        const draft = await _generateDraftPoForSupplier(req.params.id, sup.id, req.user?.email || null);
-        if (draft.po_id) drafts.push(draft);
+        // One draft per module this supplier serves.
+        drafts.push(...await _generateDraftPosForSupplier(req.params.id, sup.id, req.user?.email || null));
       }
       res.json({ success: true, drafts_created: drafts.length, drafts });
     } catch (err) {
@@ -23171,11 +23341,19 @@ ${data.tenant.name}`;
   });
 
   // ─── Hotel Inventory CRUD (linens, mini-bar, amenity restocking) ────────
+  // These are now hotel-inventory adapters over the SHARED item master. The
+  // rows they serve live in `ingredients` with module='HOTEL' (migrated once,
+  // ids preserved), so hotel consumables finally get suppliers, purchase
+  // orders, batches, physical counts, auto-PO and the unified audit trail
+  // instead of the thin parallel table they had before.
+  //
+  // The response shapes are deliberately UNCHANGED so the existing Hotel
+  // Inventory screen keeps working untouched.
   app.get("/api/restaurant/:id/hotel-inventory", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
-        "SELECT * FROM hotel_inventory_items WHERE is_active = 1 ORDER BY category NULLS LAST, name"
+        "SELECT * FROM ingredients WHERE COALESCE(module, 'RESTAURANT') = 'HOTEL' AND is_active = 1 ORDER BY category NULLS LAST, name"
       );
       res.json(rows);
     } catch (err) {
@@ -23189,11 +23367,13 @@ ${data.tenant.name}`;
       const { name, category, unit, current_stock_qty, par_level, reorder_point, default_unit_price, sku, notes } = req.body;
       if (!name) return res.status(400).json({ error: "name is required" });
       const db = await getTenantDb(req.params.id);
+      // Keeps the HI- prefix so ids stay recognisable and any existing
+      // hotel_stock_movements rows keep matching.
       const id = `HI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
-        `INSERT INTO hotel_inventory_items
-          (id, name, category, unit, current_stock_qty, par_level, reorder_point, default_unit_price, sku, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO ingredients
+          (id, name, item_type, module, category, unit, current_stock_qty, par_level, reorder_point, default_unit_price, sku, notes)
+         VALUES (?, ?, 'PACKAGED', 'HOTEL', ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id, name, category || null, unit || 'unit',
           Number(current_stock_qty || 0), Number(par_level || 0), Number(reorder_point || 0),
@@ -23201,6 +23381,19 @@ ${data.tenant.name}`;
           sku || null, notes || null,
         ]
       );
+      // Opening stock is an auditable event, exactly as it is for a kitchen
+      // item — the hotel table never logged one, so a hotel item's ledger used
+      // to begin only at its first movement.
+      const openingQty = Number(current_stock_qty || 0);
+      if (openingQty > 0) {
+        await db.run(
+          `INSERT INTO stock_movements
+            (id, ingredient_id, qty_delta, unit, movement_type, balance_after, recorded_by_user_id, notes)
+           VALUES (?, ?, ?, ?, 'MANUAL', ?, ?, 'Opening stock')`,
+          [`MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+           id, openingQty, unit || 'unit', openingQty, req.user?.id || null]
+        ).catch(() => {});
+      }
       res.json({ success: true, id });
     } catch (err) {
       console.error("Hotel inventory create error:", err);
@@ -23220,7 +23413,7 @@ ${data.tenant.name}`;
       if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
       updates.push("updated_at = CURRENT_TIMESTAMP");
       params.push(req.params.itemId);
-      await db.run(`UPDATE hotel_inventory_items SET ${updates.join(', ')} WHERE id = ?`, params);
+      await db.run(`UPDATE ingredients SET ${updates.join(', ')} WHERE id = ?`, params);
       res.json({ success: true });
     } catch (err) {
       console.error("Hotel inventory update error:", err);
@@ -23231,7 +23424,7 @@ ${data.tenant.name}`;
   app.delete("/api/restaurant/:id/hotel-inventory/:itemId", authenticate, restaurantStaff, requireTabAction('HOTEL_INVENTORY', 'DELETE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      await db.run("UPDATE hotel_inventory_items SET is_active = 0 WHERE id = ?", [req.params.itemId]);
+      await db.run("UPDATE ingredients SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.itemId]);
       res.json({ success: true });
     } catch (err) {
       console.error("Hotel inventory delete error:", err);
@@ -23255,18 +23448,28 @@ ${data.tenant.name}`;
       const delta = movement_type === 'CONSUME' ? -Math.abs(quantity)
                   : movement_type === 'ADJUST'  ? quantity
                   : Math.abs(quantity);
-      await db.run(
-        `INSERT INTO hotel_stock_movements (id, item_id, movement_type, quantity, unit_price, notes, recorded_by, movement_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [mid, req.params.itemId, movement_type, Math.abs(quantity), unit_price, notes,
-         req.user?.id || req.user?.email || null, movement_date]
-      );
-      await db.run(
-        `UPDATE hotel_inventory_items SET current_stock_qty = current_stock_qty + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      // Writes the SHARED ledger now, so a hotel movement shows up in the same
+      // audit log, variance report and COGS view as everything else. The
+      // signed qty_delta is the ledger's convention; the hotel table stored an
+      // absolute quantity plus a direction in movement_type, which is why the
+      // two could never be read together.
+      const updated: any[] = await db.query(
+        `UPDATE ingredients
+            SET current_stock_qty = current_stock_qty + ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        RETURNING current_stock_qty, unit`,
         [delta, req.params.itemId]
+      ).catch(() => [] as any[]);
+      if (!updated[0]) return res.status(404).json({ error: "Item not found" });
+      const balanceAfter = Number(updated[0].current_stock_qty);
+      await db.run(
+        `INSERT INTO stock_movements
+          (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
+         VALUES (?, ?, ?, ?, ?, 'hotel', ?, ?, ?, ?, ?)`,
+        [mid, req.params.itemId, delta, updated[0].unit || 'unit', movement_type,
+         null, balanceAfter, unit_price, req.user?.id || null, notes]
       );
-      const item: any = await db.get(`SELECT * FROM hotel_inventory_items WHERE id = ?`, [req.params.itemId]).catch(() => null);
-      res.json({ success: true, id: mid, new_stock_qty: item?.current_stock_qty });
+      res.json({ success: true, id: mid, new_stock_qty: balanceAfter });
     } catch (err: any) {
       console.error("Hotel stock movement error:", err);
       res.status(500).json({ error: err?.message || "Failed to record stock movement" });
@@ -23278,9 +23481,28 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const limit = Math.min(Number(req.query.limit || 50), 200);
+      // per-item hotel movements, same union as the cross-item log: the
+      // shared ledger plus whatever legacy rows predate the fold.
       const rows: any[] = await db.query(
-        `SELECT * FROM hotel_stock_movements WHERE item_id = ? ORDER BY movement_date DESC, created_at DESC LIMIT ?`,
-        [req.params.itemId, limit]
+        `SELECT * FROM (
+           SELECT sm.id, sm.ingredient_id AS item_id, sm.movement_type,
+                  ABS(sm.qty_delta) AS quantity, sm.unit_cost AS unit_price,
+                  sm.notes, sm.recorded_by_user_id AS recorded_by,
+                  sm.recorded_at AS movement_date, sm.recorded_at AS created_at
+             FROM stock_movements sm
+            WHERE sm.ingredient_id = ?
+           UNION ALL
+           SELECT hm.id, hm.item_id, hm.movement_type,
+                  hm.quantity, hm.unit_price,
+                  hm.notes, hm.recorded_by,
+                  hm.movement_date, hm.created_at
+             FROM hotel_stock_movements hm
+            WHERE hm.item_id = ?
+              AND NOT EXISTS (SELECT 1 FROM stock_movements s2 WHERE s2.id = hm.id)
+         ) x
+         ORDER BY x.movement_date DESC, x.created_at DESC
+         LIMIT ?`,
+        [req.params.itemId, req.params.itemId, limit]
       ).catch(() => []);
       res.json(rows);
     } catch (err: any) {
@@ -23293,11 +23515,32 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const limit = Math.min(Number(req.query.limit || 200), 500);
+      // UNION of the shared ledger and the legacy hotel table. The old rows
+      // are never migrated — a movement is a historical fact and rewriting one
+      // into a different table with a different sign convention is how an
+      // audit trail stops being trustworthy. They are simply read alongside,
+      // projected into the same shape, and will age out on their own.
       const rows: any[] = await db.query(
-        `SELECT m.*, i.name AS item_name, i.unit
-         FROM hotel_stock_movements m
-         JOIN hotel_inventory_items i ON i.id = m.item_id
-         ORDER BY m.movement_date DESC, m.created_at DESC
+        `SELECT * FROM (
+           SELECT sm.id, sm.ingredient_id AS item_id, sm.movement_type,
+                  ABS(sm.qty_delta) AS quantity, sm.unit_cost AS unit_price,
+                  sm.notes, sm.recorded_by_user_id AS recorded_by,
+                  sm.recorded_at AS movement_date, sm.recorded_at AS created_at,
+                  i.name AS item_name, i.unit
+             FROM stock_movements sm
+             JOIN ingredients i ON i.id = sm.ingredient_id
+            WHERE COALESCE(i.module, 'RESTAURANT') = 'HOTEL'
+           UNION ALL
+           SELECT hm.id, hm.item_id, hm.movement_type,
+                  hm.quantity, hm.unit_price,
+                  hm.notes, hm.recorded_by,
+                  hm.movement_date, hm.created_at,
+                  hi.name AS item_name, hi.unit
+             FROM hotel_stock_movements hm
+             JOIN hotel_inventory_items hi ON hi.id = hm.item_id
+            WHERE NOT EXISTS (SELECT 1 FROM stock_movements s2 WHERE s2.id = hm.id)
+         ) x
+         ORDER BY x.movement_date DESC, x.created_at DESC
          LIMIT ?`,
         [limit]
       ).catch(() => []);
@@ -55152,8 +55395,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-consumption-actor',
+    commit_marker: 'inventory-suppliers-and-fold',
     code_features: [
+      'inventory-suppliers-and-fold',      //FEATURE (inventory remediation, stages 3-5 of 5 - 12 Sep 2026). Closes the last three gaps from the inventory audit in one pass. **(3) APPROVED SUPPLIER LIST** - the item master held exactly ONE `default_supplier_id`, so a second source for an item could not be recorded at all; `supplier_prices` looks like it fills that gap but it is a price-observation HISTORY (what was paid, when) with no notion of approval, preference, lead time or MOQ. New `ingredient_suppliers` (unique on the item+supplier pair, so a double-click cannot create two competing ranks) with is_approved / preference_rank / lead_time_days / moq / last_unit_price, seeded ONCE from every item's existing default supplier as its rank-1 approved source so nothing changes on day one. **(5) AUTO-PO NOW BUYS FROM THE APPROVED SOURCE AND SPLITS BY MODULE** - the selection predicate `_PREFERRED_SUPPLIER_SQL` is written ONCE and shared by the generator and its preview, because those two kept independent copies of the same query and a change to one silently made the preview lie about what would actually be raised; it takes the lowest-ranked APPROVED supplier and falls back to the legacy `default_supplier_id` for uncurated items, so un-approving a vendor redirects replenishment with no other edit. The draft's module is now derived from its lines instead of the hardcoded 'RESTAURANT' - defensible while ingredients had no module, but now it would file spa and hotel replenishment as kitchen spend the moment the invoice hits the GL - and one draft is raised PER MODULE, because a mixed PO cannot be filed against a cost centre without being split by hand, which is the manual step this feature exists to remove. **(4) THE HOTEL SILO IS FOLDED IN** - `hotel_inventory_items` was a thinner parallel copy of `ingredients` with no supplier, PO, batch, count or auto-PO support, and its par_level / reorder_point columns were read by NOTHING, so low-stock replenishment for the hotel could never have worked however the data was filled in. Rows migrate into `ingredients` as module='HOTEL' KEEPING THEIR ORIGINAL ids (load-bearing: `hotel_stock_movements` references items by id, so the existing history stays resolvable), the 7 `/hotel-inventory/*` routes become adapters over the shared master with UNCHANGED response shapes so the existing screen keeps working, and hotel stock changes now write the SHARED ledger. Legacy movements are NOT rewritten - a movement is a historical fact and restating one in a different table with a different sign convention (absolute qty + direction, vs signed qty_delta) is how an audit trail stops being trustworthy - they are UNIONed into the same shape at read time and age out on their own. The old table is left in place, unread, rather than dropped. All three backfills are marker-guarded one-shots. tsc + vite build clean.',
       'inventory-consumption-actor',       //FIX (inventory remediation, stage 2 of 5 - 12 Sep 2026). The stock ledger can now answer WHO consumed an item on the path that does almost all the consuming. `stock_movements` already carried `recorded_by_user_id`, and GRN, wastage, physical counts, manual adjust, spa appointment-complete and spa retail-sale all populated it - but `deductIngredientsForOrder`, the recipe explosion that fires on EVERY restaurant order, omitted the column from its INSERT entirely, as did the matching REVERSAL in `revertIngredientsForOrder`. So the single highest-volume movement type in the system recorded what and when but never by whom. Both functions now take an `actorUserId` and all 8 call sites pass one: `req.user?.id` where a human acted, and an EXPLICIT null on the two machine paths (a cloud-kitchen platform order and a delivery-platform webhook) rather than inventing a user - a public QR self-order is legitimately null too, and its `reference_id` still ties the movement to the order. **CORRECTION TO MY OWN STAGE-1 AUDIT:** I reported that `hotel_stock_movements.recorded_by` was never populated. It is - `req.user?.id || req.user?.email` - my scan tested for `by_user` in the column list and the column is named `recorded_by`. What was actually missing there was the READ side. Both logs now resolve ids to NAMES via a new `_resolveActorNames`, which checks the tenant's `attendance_staff` then central `users`, batched in one IN query because the audit log pages up to 1000 rows and a per-row lookup would be 1000 round-trips per screen; an unresolved id falls back to the raw id, and a null renders as 'Automatic (order)' because no-human is a real answer, not missing data. tsc + vite build clean.',
       'inventory-module-dimension',        //FEATURE (inventory remediation, stage 1 of 5 - 12 Sep 2026). Consumables can finally say WHICH PART OF THE BUSINESS they belong to, and Events gets an inventory screen for the first time. **The finding behind it:** there was never one inventory system - there were three and a hole. `ingredients` (+ stock_movements, batches, recipes, suppliers, POs, counts) is the real engine and served Restaurant AND Spa, separated only by `item_type`; the hotel ran a PARALLEL `hotel_inventory_items` table with a thin movement log and no supplier / PO / batch / count / auto-PO support; Events had nothing at all (`event_inventory`, `events/inventory`, `event_stock` = 0 hits). So an item list could not be kept per module for ANY module. Now `ingredients.module` carries the same COST_MODULES allowlist as expenses, supplier invoices and purchase orders; the list endpoint takes `?module=` + `include_shared=1`; create and PATCH both coerce through `_normaliseCostModule`. **Events Inventory is a module-scoped VIEW over the shared item master, NOT a fourth silo** - it reuses the same ledger, so it inherits GRN, wastage, counts, par levels and the audit trail on day one. THREE LANDMINES defused: (1) the tab id is `INVENTORY_EVENTS`, not `EVENTS_INVENTORY`, because an `EVENTS_` prefix is read as an Events-module grant by `hasEventsGrant` AND by the server tab->module mapper - the other spelling would have handed the Events nav group and the Events API gate to every role with inventory access, which is exactly the EVENTS_CHECKLISTS leak. (2) `pageVisible` had branches for hotel/restaurant/spa but NOT events, so a `requires:'events'` tab would have shown on every tenant; added with the first such tab. (3) the backfill stamping module='SPA' from the legacy item_type is guarded by a marker table so it runs ONCE - unguarded it would drag a re-filed item back to SPA on every boot, the same defect as the bank-rec backfill that resurrected unticked lines. Also fixed in passing: the create route's item_type allowlist admitted only RAW and PACKAGED, so a SPA_PRODUCT posted to it was silently coerced to RAW and vanished from the spa list. The INSERT went 15->16 columns and the patch script ASSERTED columns==placeholders==values before writing, because that exact mismatch shipped twice on the PO route.',
       'po-module-filter-bind',           //FIX — the SAME mistake as `po-module-insert-fix`, made twice in one change and caught only by testing the live endpoint. The PO list gained a `?module=` condition with a `?` placeholder, but `filterParams` was still `allowedStatuses.has(status) ? [status] : []` — the value was never bound, so the filter silently returned ZERO rows instead of erroring. `filterParams` is now built from the same conditions as `filterSql`, in the same order. **The test did not catch it because the test was vacuous:** it asserted `rows.every(r => r.module === 'EVENTS')`, and `every()` on an EMPTY array is true — a filter returning nothing passed. It now requires the list to CONTAIN the PO it just created. It was also skipping entirely, because it read `/ingredients` (404) instead of `/inventory/ingredients`, so it had never actually run. **The pattern worth remembering: adding a condition to a query means touching TWO lists — the SQL and the bound values — and neither tsc nor a vacuous `every()` can see the mismatch.**',
@@ -59801,8 +60045,8 @@ ${data.tenant.name}`;
             [todayDow]
           );
           for (const sup of (suppliers || [])) {
-            const draft = await _generateDraftPoForSupplier(t.id, sup.id, 'auto-po-cron');
-            if (draft.po_id) {
+            const drafts = await _generateDraftPosForSupplier(t.id, sup.id, 'auto-po-cron');
+            for (const draft of drafts) {
               totalDrafts++;
               triggerNotification(t.id, 'STOCK_LOW_REPORT', {
                 report_type: 'AUTO_PO_DRAFT',
