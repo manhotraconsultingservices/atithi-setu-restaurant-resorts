@@ -26188,6 +26188,48 @@ ${data.tenant.name}`;
     catch { return false; }
   };
 
+  // Age out checklist jobs nobody is ever going to do.
+  //
+  // A job whose due date passed a week ago is not outstanding work, it is
+  // noise, and noise on this board is not harmless: it hides the jobs that
+  // actually gate a room or a hall.
+  //
+  // TWO RULES, both deliberate:
+  //   • blocks_release jobs are NEVER touched. Closing one releases a facility
+  //     that nobody cleaned — the system would be asserting a physical fact
+  //     that is not true. Those stay open until a human closes or overrides
+  //     them, which is the whole point of that flag.
+  //   • the status is EXPIRED, not DONE. Recording work as completed when it
+  //     was not is a worse lie than leaving the row open. EXPIRED drops out of
+  //     the open worklist (status = 'OPEN') and out of the cleaning log
+  //     (status IN ('DONE','OVERRIDDEN')), so it is neither outstanding nor
+  //     counted as cleaned.
+  const _expireStaleChecklistJobs = async (db: any, ymd: string, graceDays = 7): Promise<number> => {
+    try {
+      await db.exec("ALTER TABLE housekeeping_jobs ADD COLUMN IF NOT EXISTS expired_at TIMESTAMP").catch(() => {});
+      // due_date is TEXT holding 'YYYY-MM-DD', NOT a DATE column. Comparing it
+      // against interval arithmetic asks Postgres for a text-vs-timestamp
+      // operator that does not exist, and the statement throws — which this
+      // function would have swallowed, expiring nothing for ever. ISO dates
+      // sort lexicographically the same as chronologically, so the cut-off is
+      // computed here and compared as a plain string.
+      const cutoff = new Date(Date.parse(`${ymd}T00:00:00Z`) - graceDays * 86400000).toISOString().slice(0, 10);
+      const r: any = await db.run(
+        `UPDATE housekeeping_jobs
+            SET status = 'EXPIRED', expired_at = CURRENT_TIMESTAMP
+          WHERE status = 'OPEN'
+            AND COALESCE(blocks_release, 0) = 0
+            AND due_date IS NOT NULL AND due_date <> ''
+            AND due_date < ?`,
+        [cutoff]
+      );
+      return Number(r?.changes || r?.rowCount || 0);
+    } catch (err) {
+      console.error('[checklist-expiry] sweep failed:', err);
+      return 0;
+    }
+  };
+
   // Raise the day's DAILY checklists (per room + venue) and the recurring
   // MID_STAY checklists (per in-house stay) for one tenant. Idempotent via dedupe
   // keys — safe to run repeatedly. Used by the 05:00 cron AND the owner-triggered
@@ -26203,13 +26245,38 @@ ${data.tenant.name}`;
     const has: any = await db.get("SELECT (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='DAILY') AS daily, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='MID_STAY') AS midstay, (SELECT COUNT(*)::int FROM checklist_templates WHERE is_active=1 AND trigger_event='CLEANING') AS cleaning").catch(() => ({ daily: 0, midstay: 0, cleaning: 0 }));
     if (Number(has?.daily || 0) === 0 && Number(has?.midstay || 0) === 0 && Number(has?.cleaning || 0) === 0) return 0;
     if (o.isHotel && s.HOTEL && Number(has?.daily || 0) > 0) {
-      const rooms: any[] = await db.query("SELECT id, name, room_number, type_id FROM rooms").catch(() => []);
+      // ONLY rooms that are in use or awaiting cleaning.
+      //
+      // This used to be every room, every day, whether or not anybody had slept
+      // in it. A vacant, clean room does not need a daily housekeeping
+      // checklist, and raising one produces a job nobody will ever close — on
+      // this tenant that had built a backlog of hundreds, which then buries the
+      // jobs that DO matter. Daily servicing of occupied rooms is the actual
+      // practice; this now matches it.
+      const rooms: any[] = await db.query(
+        "SELECT id, name, room_number, type_id FROM rooms WHERE UPPER(COALESCE(status, '')) IN ('OCCUPIED', 'CLEANING')"
+      ).catch(() => []);
       for (const rm of rooms) {
         await raiseChecklistJobs(db, { facility_type: 'ROOM', facility_id: rm.id, facility_label: rm.name || (rm.room_number ? `Room ${rm.room_number}` : rm.id), room_type_id: rm.type_id || null, trigger: 'DAILY', dedupe_key: `DAILY:ROOM:${rm.id}:${o.ymd}`, due_date: o.ymd }, acc);
       }
     }
     if (o.isEvents && s.EVENTS && Number(has?.daily || 0) > 0) {
-      const venues: any[] = await db.query("SELECT id, name FROM event_venues WHERE is_active = 1").catch(() => []);
+      // ONLY halls with something in them today, or used yesterday.
+      //
+      // Same defect as the rooms above: a daily checklist was raised for every
+      // active hall every day regardless of whether an event took place, so
+      // four idle halls produced four dead jobs a day. Yesterday counts because
+      // the hall used last night is the one that needs clearing this morning.
+      const venues: any[] = await db.query(
+        `SELECT DISTINCT v.id, v.name
+           FROM event_venues v
+           JOIN event_bookings b ON b.venue_id = v.id
+          WHERE v.is_active = 1
+            AND UPPER(COALESCE(b.status, '')) NOT IN ('CANCELLED', 'INQUIRY', 'QUOTED')
+            AND b.event_date <= ?::date
+            AND COALESCE(b.end_date, b.event_date) >= (?::date - INTERVAL '1 day')`,
+        [o.ymd, o.ymd]
+      ).catch(() => []);
       for (const v of venues) {
         await raiseChecklistJobs(db, { facility_type: 'EVENT', facility_id: v.id, facility_label: v.name || v.id, trigger: 'DAILY', dedupe_key: `DAILY:VENUE:${v.id}:${o.ymd}`, due_date: o.ymd }, acc);
       }
@@ -57141,8 +57208,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'avail-cleaning-gate-scope',
+    commit_marker: 'checklist-noise-at-source',
     code_features: [
+      'checklist-noise-at-source: the cleaning board refilled because the product created work nobody asked for. runTenantScheduledChecklists raised a DAILY job for EVERY room and EVERY active venue every day with no check that anything happened there - four idle halls produced four dead jobs a day, which is how this tenant reached 433 open jobs. (1) Rooms now only get a daily when OCCUPIED or CLEANING (daily servicing of occupied rooms is the real practice; a vacant clean room needs nothing). Venues only when a non-cancelled booking covers today or yesterday - yesterday counts because the hall used last night is the one needing clearing this morning. (2) New _expireStaleChecklistJobs sweep in the 05:00 cron, BEFORE the raise, ages out open jobs whose due_date passed more than 7 days ago. TWO DELIBERATE RULES: blocks_release jobs are NEVER touched (closing one releases a facility nobody cleaned - the system would assert a physical untruth), and the status is EXPIRED not DONE (recording work as done when it was not is the worse lie). EXPIRED drops out of both the open worklist (status=OPEN) and the cleaning log (status IN DONE,OVERRIDDEN). LANDMINE: housekeeping_jobs.due_date is TEXT not DATE, so interval arithmetic throws a text-vs-timestamp operator error that the helper would have swallowed, expiring nothing forever; the cut-off is computed in JS and compared as an ISO string instead.',
       'avail-cleaning-gate-scope (reported: booking form says Not available - Hall has an open cleaning checklist from a prior event). THE SAME DEFECT AS event-confirm-no-checklist-gate, fixed on /confirm and MISSED on the endpoint the booking FORM actually calls. hasOpenHousekeepingJob is WHERE facility_id = ? AND status = OPEN AND blocks_release = 1 with NO DATE SCOPE, and the system template that fires after every event is itself blocks_release = 1 - so one post-event checklist nobody closed made the hall report Not available on EVERY date, forever. Emerald Hall on this tenant had 113 open jobs and was unsellable for any date. /events/venues/:vid/availability-check now scopes the cleaning gate to a booking that RUNS TODAY, exactly like the Hall Status board gate immediately beneath it (which already carried the right reasoning in a comment: a now state must not govern a future date). The useful half is kept - selling the hall for today still warns - and the permanent unsellability is gone. Also switched its todayIst to _istNowParts() so it cannot inherit the midnight-hour-24 bug. Smoke: TC-EVT-AVAIL-CLEANING-SCOPE completes a real event to raise a real blocks_release job, then asserts the hall is still sellable 120 days out.',
       'event-revise-actor-name: revised_by stored `req.user?.email || req.user?.id`, and this app mints ids as `user-<uuid>`, so a staff account with no email on the token recorded the raw user-c192c760-... - the same defect that once printed UUIDs in the cleaning log. Now hkActor(req): display name, then email, then a Title-Cased role. Caught by reading the stored row after driving the real UI, not by a test.',
       'event-revise-completed: a COMPLETED event booking froze - PUT refused every edit - so a bill that turned out wrong after the night (covers added on the day, a service not delivered, an agreed rate never applied) had nowhere to go except cancelling the invoice and leaving the booking stuck and unbillable. New POST /events/bookings/:bid/revise requires a REASON, supersedes the issued invoice (voided + GL reversed + audited) and returns the booking to IN_PROGRESS with folio_id cleared, recording revision_number / revise_reason / revised_by / revised_at on the booking itself. It deliberately reuses IN_PROGRESS rather than inventing a status: every downstream guard (PUT, checkout, complete) already passes for it, so nothing else had to be threaded. It NEVER edits a tax invoice in place - the old one is superseded and a fresh number is minted at re-checkout. The void-and-reverse is now ONE helper _voidEventInvoice shared with /invoice/cancel, because a billing rule with two copies is one that will disagree with itself. Account statements re-sync automatically (the Stage 3 helper reads the folio status). UI: a Revise Booking action on a completed booking plus a revision note carrying the reason. Smoke: TC-EVT-REVISE (only completed, only with a reason, and an edit IS refused while completed), -REVERSES (the superseded journal really is out of the ledger), -REISSUE (price corrected, fresh invoice number, completed again), -LEDGER (the books hold the REVISED figure, not the original and not the sum of both).',
@@ -60649,7 +60717,7 @@ ${data.tenant.name}`;
     try {
       const ymd = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
       const restaurants = await centralDb.query("SELECT id, property_type, events_enabled, spa_enabled FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'");
-      let raised = 0;
+      let raised = 0, expired = 0;
       for (const r of restaurants) {
         try {
           const isHotel = ['HOTEL', 'BOTH'].includes(String(r.property_type || ''));
@@ -60659,11 +60727,14 @@ ${data.tenant.name}`;
           // Every tenant is at least a restaurant, so we no longer skip non-hotel/
           // non-events tenants — the module toggles inside decide what actually runs.
           const db = await getTenantDb(r.id);
+          // Sweep BEFORE raising, so the morning's board is today's real work
+          // rather than today's work buried under a month of dead rows.
+          expired += await _expireStaleChecklistJobs(db, ymd);
           raised += await runTenantScheduledChecklists(db, { isHotel, isEvents, isRestaurant, isSpa, ymd });
           await notifyOverdueChecklists(db, r.id, ymd);
         } catch (tenantErr) { console.error(`[checklist-cron] tenant ${r.id} error:`, tenantErr); }
       }
-      if (raised > 0) console.log(`[checklist-cron] raised ${raised} daily/mid-stay checklist job(s)`);
+      if (raised > 0 || expired > 0) console.log(`[checklist-cron] raised ${raised} daily/mid-stay job(s), expired ${expired} stale non-blocking job(s)`);
     } catch (err) { console.error('[checklist-cron] cron error:', err); }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[checklist-cron] Daily + mid-stay checklist cron started — 05:00 IST');
