@@ -57250,7 +57250,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   restaurantId: string; token: string; module: string; title: string; subtitle: string;
 }) {
   const toast = useToast();
-  type MTab = 'ITEMS' | 'LOW_STOCK' | 'PURCHASING' | 'MOVEMENTS' | 'REPORTS';
+  type MTab = 'ITEMS' | 'LOW_STOCK' | 'PURCHASING' | 'MOVEMENTS' | 'COUNTS' | 'REPORTS';
   const [tab, setTab] = useState<MTab>('ITEMS');
   const [items, setItems] = useState<any[]>([]);
   const [movements, setMovements] = useState<any[]>([]);
@@ -57271,6 +57271,18 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [showPo, setShowPo] = useState(false);
   const [modReports, setModReports] = useState<any>(null);
+  // The rest of the lifecycle: receiving what was ordered, writing off what was
+  // spoiled, and counting what is actually on the shelf. All three existed for
+  // the kitchen only, which is why every other module could add stock and watch
+  // it deplete but never account for it.
+  //
+  // These reuse the kitchen's OWN modals rather than module-specific copies —
+  // same component, module-scoped data — so the four screens cannot drift into
+  // four different ways of receiving a delivery.
+  const [showGrn, setShowGrn] = useState<{ poId: string | null } | null>(null);
+  const [showWastage, setShowWastage] = useState(false);
+  const [counts, setCounts] = useState<any[]>([]);
+  const [openCount, setOpenCount] = useState<any>(null);
 
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   const canWrite = canWriteTab('INVENTORY');
@@ -57330,8 +57342,32 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
 
   useEffect(() => { load(); }, [module]);
   useEffect(() => { if (tab === 'MOVEMENTS') loadMovements(); }, [tab, items]);
+  const loadCounts = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/counts?module=${encodeURIComponent(module)}`, { headers: auth });
+      setCounts(r.ok ? await r.json() : []);
+    } catch { /* silent */ }
+  };
   useEffect(() => { if (tab === 'PURCHASING') loadPurchasing(); }, [tab, module]);
   useEffect(() => { if (tab === 'REPORTS') loadReports(); }, [tab, module]);
+  useEffect(() => { if (tab === 'COUNTS') loadCounts(); }, [tab, module]);
+
+  const startCount = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/counts`, {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ module, notes: `${COST_MODULE_LABEL[module] || module} stock-take` }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Failed'); }
+      const d = await r.json();
+      await loadCounts();
+      // Straight into the sheet — starting a count and then having to find it
+      // in a list is a click that exists only because the code was written that
+      // way, not because anyone wants it.
+      const got = await fetch(`/api/inventory/counts/${d.id}`, { headers: auth });
+      if (got.ok) setOpenCount(await got.json());
+    } catch (e: any) { toast.error(e.message); }
+  };
 
   const filtered = items.filter((i: any) =>
     !search || String(i.name || '').toLowerCase().includes(search.toLowerCase()));
@@ -57363,6 +57399,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
     { k: 'LOW_STOCK', label: 'Low Stock', count: lowStock.length },
     { k: 'PURCHASING', label: 'Purchasing' },
     { k: 'MOVEMENTS', label: 'Usage Log' },
+    { k: 'COUNTS', label: 'Stock Takes', count: counts.length },
     { k: 'REPORTS', label: 'Reports' },
   ];
 
@@ -57412,8 +57449,12 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
               Purchase orders for {COST_MODULE_LABEL[module] || module}. Drafts raised automatically from par levels appear here for review.
             </p>
             {canWrite && suppliers.length > 0 && (
-              <button onClick={() => setShowPo(true)}
-                className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white">+ Raise PO</button>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setShowGrn({ poId: null })}
+                  className="px-4 py-2 rounded-2xl text-xs font-bold bg-white border border-[#cc5a16]/25 text-[#cc5a16]">Receive stock</button>
+                <button onClick={() => setShowPo(true)}
+                  className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white">+ Raise PO</button>
+              </div>
             )}
           </div>
           <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
@@ -57425,11 +57466,12 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
                   <th className="text-left px-4 py-3">Status</th>
                   <th className="text-left px-4 py-3">Expected</th>
                   <th className="text-right px-4 py-3">Total</th>
+                  {canWrite && <th className="text-right px-4 py-3">Receive</th>}
                 </tr>
               </thead>
               <tbody>
                 {pos.length === 0 ? (
-                  <tr><td colSpan={5} className="px-4 py-8 text-center text-[#9c8e85]">
+                  <tr><td colSpan={canWrite ? 6 : 5} className="px-4 py-8 text-center text-[#9c8e85]">
                     No purchase orders for this module yet.
                   </td></tr>
                 ) : pos.map((p: any) => (
@@ -57443,6 +57485,14 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
                     </td>
                     <td className="px-4 py-2.5 text-[#6b5d52]">{String(p.expected_delivery_date || '').slice(0, 10) || '—'}</td>
                     <td className="px-4 py-2.5 text-right font-mono">Rs.{Number(p.grand_total ?? p.total_amount ?? 0).toFixed(2)}</td>
+                    {canWrite && (
+                      <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                        {['SENT', 'PARTIAL', 'DRAFT'].includes(String(p.status)) && (
+                          <button onClick={() => setShowGrn({ poId: p.id })}
+                            className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-bold">Receive</button>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -57488,7 +57538,70 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
             </>
           )}
         </div>
+      ) : tab === 'COUNTS' ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-xs text-[#6b5d52]">
+              Count what is physically on the shelf; the difference against the system is this module's shrinkage.
+            </p>
+            {canWrite && (
+              <button onClick={startCount}
+                className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white">Start a stock take</button>
+            )}
+          </div>
+          <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#6b5d52]">
+                <tr>
+                  <th className="text-left px-4 py-3">Count</th>
+                  <th className="text-left px-4 py-3">Date</th>
+                  <th className="text-left px-4 py-3">Status</th>
+                  <th className="text-right px-4 py-3">Counted</th>
+                  <th className="text-right px-4 py-3">Variance</th>
+                  <th className="text-right px-4 py-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {counts.length === 0 ? (
+                  <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">
+                    No stock takes yet. Counting is what turns a stock figure into a fact.
+                  </td></tr>
+                ) : counts.map((c: any) => (
+                  <tr key={c.id} className="border-t border-[#cc5a16]/5">
+                    <td className="px-4 py-2.5 font-mono text-xs">{c.id}</td>
+                    <td className="px-4 py-2.5">{String(c.count_date || '').slice(0, 10)}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${c.status === 'COMPLETED' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{c.status}</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono">{Number(c.counted_lines || 0)}/{Number(c.line_count || 0)}</td>
+                    <td className="px-4 py-2.5 text-right font-mono">{Number(c.total_abs_variance || 0).toFixed(2)}</td>
+                    <td className="px-4 py-2.5 text-right">
+                      <button
+                        onClick={async () => {
+                          const r = await fetch(`/api/inventory/counts/${c.id}`, { headers: auth });
+                          if (r.ok) setOpenCount(await r.json());
+                        }}
+                        className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#6b5d52] text-xs font-bold">
+                        {c.status === 'COMPLETED' ? 'View' : 'Continue'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       ) : tab === 'MOVEMENTS' ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-xs text-[#6b5d52]">
+              Every movement of this module's stock — what left, when, who did it and why.
+            </p>
+            {canWrite && items.length > 0 && (
+              <button onClick={() => setShowWastage(true)}
+                className="px-4 py-2 rounded-2xl text-xs font-bold bg-white border border-[#cc5a16]/25 text-[#cc5a16]">Log wastage</button>
+            )}
+          </div>
         <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#6b5d52]">
@@ -57527,6 +57640,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
               ))}
             </tbody>
           </table>
+        </div>
         </div>
       ) : (
         <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
@@ -57575,6 +57689,32 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
             </tbody>
           </table>
         </div>
+      )}
+
+      {showGrn && (
+        <GRNCreateModal
+          token={token} restaurantId={restaurantId}
+          suppliers={suppliers} ingredients={items} poId={showGrn.poId}
+          onClose={() => setShowGrn(null)}
+          onSaved={() => { setShowGrn(null); load(); loadPurchasing(); }}
+        />
+      )}
+
+      {showWastage && (
+        <WastageLogModal
+          token={token} restaurantId={restaurantId} ingredients={items}
+          onClose={() => setShowWastage(false)}
+          onSaved={() => { setShowWastage(false); load(); loadMovements(); }}
+        />
+      )}
+
+      {openCount && (
+        <PhysicalCountModal
+          token={token} count={openCount}
+          onClose={() => setOpenCount(null)}
+          onUpdated={loadCounts}
+          onCompleted={() => { setOpenCount(null); loadCounts(); load(); }}
+        />
       )}
 
       {showPo && (
