@@ -66858,16 +66858,25 @@ function InventoryMonthEnd({ restaurantId, token, module }: { restaurantId: stri
       ) : !preview ? (
         <div className="p-8 text-center text-sm text-[#9c8e85]">Nothing to preview for {period}.</div>
       ) : (<>
+        {/* Ordered so the month's arithmetic reads left to right, because a
+            close whose figures visibly do not add up is not believed. The
+            first five tiles ARE the identity; the last two judge it. */}
+        <p className="text-[11px] text-[#9c8e85] font-mono">
+          opening + purchases + other in − wastage − closing = used
+        </p>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {[
             ['Opening stock', t.opening_value], ['Purchases', t.purchases_value],
+            ['Other in', t.other_in_value], ['Wastage', t.wastage_value],
             ['Closing stock', t.closing_value], ['Used', t.actual_consumption_value],
-            ['Should have used', t.theoretical_consumption_value], ['Wastage', t.wastage_value],
-            ['Variance', t.variance_value],
+            ['Should have used', t.theoretical_consumption_value], ['Variance', t.variance_value],
           ].map(([label, v]: any) => (
             <div key={label} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
               <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">{label}</p>
               <p className="text-xl font-bold text-[#0d0a07] mt-1 font-mono">{money(v)}</p>
+              {label === 'Other in' && Number(v || 0) > 0 && (
+                <p className="text-[10px] text-[#9c8e85] mt-1">Opening balances, transfers and corrections — not bought</p>
+              )}
             </div>
           ))}
         </div>
@@ -66886,7 +66895,8 @@ function InventoryMonthEnd({ restaurantId, token, module }: { restaurantId: stri
               <tr>
                 <th className="px-3 py-2 text-left font-bold">Item</th>
                 <th className="px-3 py-2 text-right font-bold">Opening</th>
-                <th className="px-3 py-2 text-right font-bold">In</th>
+                <th className="px-3 py-2 text-right font-bold">Bought</th>
+                <th className="px-3 py-2 text-right font-bold">Other in</th>
                 <th className="px-3 py-2 text-right font-bold">Wastage</th>
                 <th className="px-3 py-2 text-right font-bold">Closing</th>
                 <th className="px-3 py-2 text-right font-bold">Used</th>
@@ -66895,14 +66905,15 @@ function InventoryMonthEnd({ restaurantId, token, module }: { restaurantId: stri
             </thead>
             <tbody>
               {lines.length === 0 ? (
-                <tr><td colSpan={7} className="px-3 py-8 text-center text-[#9c8e85]">
+                <tr><td colSpan={8} className="px-3 py-8 text-center text-[#9c8e85]">
                   Nothing in this module moved or was held in {period}.
                 </td></tr>
               ) : lines.slice(0, 200).map((l: any) => (
                 <tr key={l.ingredient_id} className="border-t border-[#f0e8d8]">
                   <td className="px-3 py-2 text-[#0d0a07]">{l.ingredient_name}</td>
                   <td className="px-3 py-2 text-right font-mono">{Number(l.opening_qty || 0)}</td>
-                  <td className="px-3 py-2 text-right font-mono">{Number(l.purchases_qty || 0) + Number(l.other_in_qty || 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono">{Number(l.purchases_qty || 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono">{Number(l.other_in_qty || 0)}</td>
                   <td className="px-3 py-2 text-right font-mono">{Number(l.wastage_qty || 0)}</td>
                   <td className="px-3 py-2 text-right font-mono">{Number(l.closing_qty || 0)}</td>
                   <td className="px-3 py-2 text-right font-mono">{Number(l.actual_consumption_qty || 0)}</td>
