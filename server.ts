@@ -4179,13 +4179,7 @@ async function computeLateCheckoutFee(
   }
 
   // All comparisons use Asia/Kolkata to match the rest of the system.
-  const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata', hour12: false });
-  // tzDate format: "2026-05-18, 14:30:00"
-  const [datePart, timePart] = tzDate.split(',').map(s => s.trim());
-  const todayIST = datePart;
-  const [hhStr, mmStr] = (timePart || '00:00:00').split(':');
-  const nowHour = Number(hhStr || 0);
-  const nowMin  = Number(mmStr || 0);
+  const { date: todayIST, hour: nowHour, minute: nowMin, hhmm: nowHHMM } = _istNowParts();
 
   const checkoutISO = normaliseDateIso(booking.check_out_date);
 
@@ -4216,7 +4210,7 @@ async function computeLateCheckoutFee(
         applies: true,
         fee_amount: Math.round(rate * 100) / 100,
         late_by_hours: Math.round(lateBy * 10) / 10,
-        policy_text: `Checkout at ${timePart?.slice(0,5)} is past the ${cutoff} cutoff (${lateBy.toFixed(1)}h late). Adding 1 extra night at ₹${rate.toFixed(2)}.`,
+        policy_text: `Checkout at ${nowHHMM} is past the ${cutoff} cutoff (${lateBy.toFixed(1)}h late). Adding 1 extra night at ₹${rate.toFixed(2)}.`,
         late_checkout_time: cutoff,
       };
     }
@@ -4645,11 +4639,7 @@ async function computeEarlyCheckinFee(
   if (!chargeOn) {
     return { ...base, applies: false, policy_text: `Check-in from ${cutoff}. Early arrivals are not charged.` };
   }
-  const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata', hour12: false });
-  const [datePart, timePart] = tzDate.split(',').map(s => s.trim());
-  const todayIST = datePart;
-  const [hhStr, mmStr] = (timePart || '00:00:00').split(':');
-  const nowMinutes = Number(hhStr || 0) * 60 + Number(mmStr || 0);
+  const { date: todayIST, minutes: nowMinutes, hhmm: nowHHMM } = _istNowParts();
   const arrivalISO = normaliseDateIso(booking.check_in_date);
 
   if (todayIST === arrivalISO) {
@@ -4662,7 +4652,7 @@ async function computeEarlyCheckinFee(
         applies: true,
         fee_amount: Math.round(rate * 100) / 100,
         early_by_hours: Math.round(earlyBy * 10) / 10,
-        policy_text: `Arrival at ${timePart?.slice(0, 5)} is before the ${cutoff} check-in time (${earlyBy.toFixed(1)}h early). Adding 1 extra night at ₹${rate.toFixed(2)}.`,
+        policy_text: `Arrival at ${nowHHMM} is before the ${cutoff} check-in time (${earlyBy.toFixed(1)}h early). Adding 1 extra night at ₹${rate.toFixed(2)}.`,
       };
     }
   }
@@ -5013,6 +5003,33 @@ const _isCreditTender = (m: any): boolean => String(m || '').toUpperCase() === C
 // One allowlist for folio tenders. CREDIT is legal and explicit; anything else
 // is rejected rather than silently coerced to a bank receipt.
 const FOLIO_TENDERS = new Set(['CASH', 'CARD', 'UPI', 'BANK_TRANSFER', 'CHEQUE', 'OTHER', CREDIT_TENDER]);
+
+// The wall clock in Asia/Kolkata, split into parts a comparison can use.
+//
+// WHY THIS EXISTS: `toLocaleString(..., { hour12: false })` reports the
+// MIDNIGHT hour as 24, not 00 - it is the h24 cycle, and it is a long-standing
+// JavaScript trap. Every caller here turned that string into minutes, so
+// between 00:00 and 00:59 IST "now" evaluated to 1440-1499 minutes: later than
+// any cut-off that can be configured.
+//
+// It was live in three places. An early arrival between midnight and 1am was
+// never charged, because the guest read as arriving AFTER a 23:59 check-in
+// time. A late checkout in the same hour had 24 hours added to how late it
+// was. And the peak-hours chart bucketed every midnight order into an hour 24
+// that does not exist, so the 00:00 bar always read zero.
+//
+// hourCycle 'h23' asks for 0-23 directly; the % 24 is belt and braces for any
+// engine that ignores it.
+function _istNowParts(): { date: string; hour: number; minute: number; minutes: number; hhmm: string } {
+  const s = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata', hourCycle: 'h23' } as any);
+  // "2026-05-18, 14:30:00"
+  const [datePart, timePart] = s.split(',').map(x => x.trim());
+  const [hh, mm] = (timePart || '00:00:00').split(':');
+  const hour = (Number(hh) || 0) % 24;
+  const minute = Number(mm) || 0;
+  const hhmm = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  return { date: datePart, hour, minute, minutes: hour * 60 + minute, hhmm };
+}
 
 function _glAccountForPaymentMethod(method: string): { code: string; name: string } {
   return String(method || '').toUpperCase() === 'CASH'
@@ -53936,10 +53953,13 @@ ${data.tenant.name}`;
         monthlyMap[monthStr].orders++;
 
         // Peak hours — use IST timezone for local business context
+        // % 24 because `hour12: false` reports the MIDNIGHT hour as 24 (see
+        // _istNowParts) - without it every midnight order landed in a
+        // non-existent hour 24 and the 00:00 bar always read zero.
         const hour = parseInt(
           new Date(o.created_at).toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false }),
           10
-        );
+        ) % 24;
         hourMap[isNaN(hour) ? 0 : hour] = (hourMap[isNaN(hour) ? 0 : hour] || 0) + 1;
 
         // Payment method
@@ -57000,8 +57020,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'close-shows-its-identity',
+    commit_marker: 'midnight-hour-is-zero',
     code_features: [
+      'midnight-hour-is-zero: toLocaleString(..., {hour12:false}) reports the MIDNIGHT hour as 24, not 00 - the h24 cycle, and on that cycle midnight also belongs to the PREVIOUS date (2026-09-12, 24:38). Three call sites parsed that string. (1) computeEarlyCheckinFee: between 00:00 and 00:59 IST an arrival read as 1440-1499 minutes - later than any configurable cut-off - AND its date failed to match the arrival date, so an early arrival in that hour was never charged. (2) computeLateCheckoutFee: the same hour fed the hours-late arithmetic, adding 24. (3) the peak-hours analytics bucketed every midnight order into an hour 24 that does not exist, so the 00:00 bar always read zero. One helper _istNowParts() now uses hourCycle h23 (with a %24 guard for engines that ignore it) and returns date/hour/minute/minutes/hhmm. FOUND by refusing to write off TC-HOTEL-EARLY-CHECKIN-CHARGE as a flaky test: it only fails when the suite runs between midnight and 1am IST, which is when this run happened. NOTE: the quirk does NOT reproduce on the dev machine Node - both spellings give 00:30 there - so it is ICU-version dependent and the fix is validated against the server, not locally.',
       'close-shows-its-identity: FOUND BY DRIVING THE REAL UI, not by a test. The Kitchen month-end screen showed opening Rs.99,231.50 rising to closing Rs.668,751.50 with purchases, wastage and usage all zero - figures that visibly do not add up, on the screen whose entire job is to be believed. Cause: _computeInventoryPeriod computes other_in_qty per line (stock that arrived WITHOUT being a purchase - opening balances, transfers, positive corrections) and never valued it, so neither the lines nor the totals carried other_in_value and the close could not reconcile its own identity. Server now values it per line and in totals. The screen leads with the identity in words (opening + purchases + other in - wastage - closing = used) and orders the tiles to match, so the arithmetic reads left to right; the line table splits its old combined In column into Bought and Other in. Also confirmed in the same pass: the Kitchen closing figure Rs.668,751.50 matches the dashboard stock value exactly, so the valuation-at-cost change flows through the close as intended.',
       'batches-scoped-abc-everywhere: (1) LEAK CLOSED - /inventory/batches was the ONE inventory read carrying no module filter, so it returned every module batches AND their unit costs to whoever asked; a spa screen could list the kitchen stock and what it cost. It already joined ingredients, so the standard _invModuleFilter applies directly; the response now also carries the module per row. (2) InventoryAnalyticsView takes a module (plus include_shared) and passes it to all of abc-analysis, expiring, dead-stock and batches. Without it those endpoints return the WHOLE property - so the kitchen ABC classification had been silently ranking hotel linen and spa oils against its own ingredients. The kitchen mount now declares module=RESTAURANT include_shared. (3) The same component is mounted on the shared module screen as an Analysis tab, so Hotel, Spa and Events can finally see ABC, open batches, expiry and dead stock - all of which the API had been computing per module all along with no way to reach it. A batch panel was added showing remaining qty, unit cost and expiry, which is also what the stock is now valued at. Smoke: TC-INV-BATCHES-SCOPED - and it asserts a module with NO batches gets FEWER rows than the unfiltered call, because every() on an empty array is true and a match-only assertion would pass while the leak stayed open.',
       'month-end-close-ui: the monthly inventory close posts to the ledger and locks manual stock writes, and it had NO screen for ANY module - it could only be run by calling the API. New InventoryMonthEnd component: month picker, full preview before committing (opening / purchases / closing / used / should-have-used / wastage / variance plus the line-by-line table with unit cost), close with an optional note, re-close, and reopen with a required reason. It shows the journal reference once posted, and the close history with reopen reasons. DELIBERATELY ONE COMPONENT MOUNTED TWICE: the Restaurant kitchen screen and the shared module screen are still two different components, and month end must not be something only three of the four modules can do - so it is a Month End tab on BOTH, and the kitchen keeps its own richer screen otherwise. Warns before closing a month that has not finished, because that refuses every manual stock entry for the rest of it. Warns when theoretical consumption is zero, because then the whole of consumption reads as variance and that figure is not meaningful until recipes exist. Also surfaces the consumption-vs-revenue ratio on the module Reports tab, which was withheld while the revenue denominator was wrong. Smoke: TC-INV-PERIODS-SCOPED asserts the period list is scoped to the module that asked, so one module cannot see or reopen another one months.',
