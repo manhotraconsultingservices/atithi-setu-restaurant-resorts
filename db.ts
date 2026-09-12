@@ -1933,6 +1933,12 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // One close per module per month. Closing twice is a correction, not a second
   // period, so the pair is the identity and a re-close updates in place.
   await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inv_period_key ON inventory_periods (module, period_key)`).catch(() => {});
+  // Reopening is an exceptional act - it undoes a signed-off month - so who did
+  // it, when, and WHY are recorded on the period itself rather than only in the
+  // audit log, where they would not be visible beside the figures they explain.
+  await db.exec("ALTER TABLE inventory_periods ADD COLUMN IF NOT EXISTS reopened_by TEXT").catch(() => {});
+  await db.exec("ALTER TABLE inventory_periods ADD COLUMN IF NOT EXISTS reopened_at TIMESTAMP").catch(() => {});
+  await db.exec("ALTER TABLE inventory_periods ADD COLUMN IF NOT EXISTS reopen_reason TEXT").catch(() => {});
 
   // The line-by-line evidence. Stored rather than recomputed on demand because a
   // close is a STATEMENT ABOUT A MOMENT: recomputing it later would silently

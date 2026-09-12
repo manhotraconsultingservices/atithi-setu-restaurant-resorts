@@ -19661,6 +19661,75 @@ ${data.tenant.name}`;
     }
   });
 
+  // Reopen a closed period. The close guard refuses manual stock writes dated
+  // inside a CLOSED month and tells the user to reopen it first - so without
+  // this route that instruction is impossible to follow and the month is locked
+  // for good. A lock needs a key.
+  //
+  // Reopening REVERSES the close journal, and then CLEARS gl_journal_ref. The
+  // clearing is load-bearing, not tidiness: _reverseJournal is idempotent on
+  // REV-<ref> and returns early if that reversal already exists. Leave the ref
+  // in place and the next close would try to reverse an already-reversed
+  // journal, short-circuit as 'already_reversed', and post its new journal
+  // anyway - capitalising the stock twice, with both journals individually
+  // balanced so the trial balance would still tie and nothing would flag it.
+  // That is the same trap the per-close journal ref above was written to avoid.
+  app.post("/api/restaurant/:id/inventory/periods/:pid/reopen", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const reason = String(req.body?.reason || '').trim();
+      // A reason is required. Undoing a signed-off month with no explanation is
+      // exactly the audit hole the close was raised to shut.
+      if (!reason) return res.status(400).json({ error: 'A reason is required to reopen a closed period' });
+      const period: any = await db.get("SELECT * FROM inventory_periods WHERE id = ?", [req.params.pid]);
+      if (!period) return res.status(404).json({ error: 'Period not found' });
+      if (String(period.status).toUpperCase() !== 'CLOSED') {
+        return res.status(409).json({ error: `Period is already ${period.status}`, code: 'INVENTORY_PERIOD_NOT_CLOSED' });
+      }
+
+      const priorGlRef = String(period.gl_journal_ref || '').trim();
+      let reversed: string | null = null;
+      if (priorGlRef) {
+        const rev = await _reverseJournal(db, req.params.id, priorGlRef, {
+          reversalRef: `REV-${priorGlRef}`,
+          date: period.period_to,
+          sourceType: 'INVENTORY_CLOSE_REVERSAL', sourceId: period.id,
+          reason: `Reopen of ${period.module} stock for ${period.period_key}: ${reason}`,
+          postedBy: req.user?.email || req.user?.id || null,
+        }).catch(() => null);
+        // Only clear the ref once the reversal is actually in the ledger. If it
+        // failed, the period stays CLOSED and the books stay consistent rather
+        // than the stock being released with nothing to release it.
+        if (!rev?.ok) {
+          return res.status(409).json({
+            error: 'Could not reverse the close journal, so the period was left closed',
+            code: 'INVENTORY_REOPEN_GL_FAILED', period_id: period.id,
+          });
+        }
+        reversed = rev.reversalRef;
+      }
+
+      await db.run(
+        `UPDATE inventory_periods
+            SET status = 'OPEN', gl_journal_ref = NULL,
+                reopened_by = ?, reopened_at = CURRENT_TIMESTAMP, reopen_reason = ?
+          WHERE id = ?`,
+        [req.user?.id || null, reason, period.id]);
+
+      await writeObjectAudit(db, req, {
+        objectType: 'INVENTORY_PERIOD', objectId: period.id, action: 'REOPENED',
+        summary: `${period.module} stock reopened for ${period.period_key} - ${reason}${reversed ? ` (journal ${reversed})` : ''}`,
+        before: { status: 'CLOSED', gl_journal_ref: priorGlRef || null },
+        after: { status: 'OPEN', gl_journal_ref: null },
+      }).catch(() => {});
+
+      res.json({ success: true, id: period.id, module: period.module, period_key: period.period_key, reversal_ref: reversed });
+    } catch (err: any) {
+      console.error('Inventory period reopen error:', err);
+      res.status(500).json({ error: 'Failed to reopen the period' });
+    }
+  });
+
   // History
   app.get("/api/restaurant/:id/inventory/periods", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
@@ -56211,8 +56280,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'credit-sale-not-a-tender',
+    commit_marker: 'inventory-period-reopen',
     code_features: [
+      'inventory-period-reopen: the period lock shipped WITHOUT a key. There was a close route and no reopen route, so the 409 the guard returns - reopen that period before changing stock dated inside it - described something the owner could not do, and a closed month was closed for good. The smoke suite found it on the very next run by locking its own tenant out: it closes the current EVENTS month, never reopened it, and every later inventory write was then refused (TC-INV-PERIOD-CLOSE read 100 instead of 60, TC-INV-ITEM-TRACE lost 2 of its 3 movements). New POST /inventory/periods/:pid/reopen requires a REASON (undoing a signed-off month with no explanation is the audit hole the close was raised to shut), reverses the close journal, and only then flips the period to OPEN - and CLEARS gl_journal_ref, which is load-bearing: _reverseJournal short-circuits on an existing REV-<ref>, so leaving the ref would let the next close skip its reversal and capitalise the same stock twice, with both journals balanced so the trial balance would still tie. The close test now reopens what it closed and clears a prior run stale close. Smoke: TC-INV-PERIOD-LOCK asserts the lock HOLDS (409 INVENTORY_PERIOD_CLOSED), needs a reason, reopens, lets the write through, and leaves no journal behind.',
       'credit-sale-not-a-tender: settling a bill on CREDIT no longer books the money into the bank. The hotel settle dialog offered Credit, the route never validated the method against the allowlist every other payment route uses, and _glAccountForPaymentMethod returns the BANK for anything that is not CASH - so a sale on credit to a company posted Dr 1010 Bank / Cr 1100 AR: cash overstated, debtors wiped, and nothing for bank reconciliation to ever match. Now: one FOLIO_TENDERS allowlist (CREDIT explicitly legal, junk refused with 400 instead of silently coerced); all three tender loops skip a CREDIT payment, so the Dr 1100 raised by the invoice block stays standing and each journal stays balanced - including _postFolioGl, which is the path EVENT and SPA folios settle through; and a credit settlement writes no folio_payments row at all, because that table records money RECEIVED. The invoice is still issued and the revenue still recognised on the settle date, so every revenue report is unchanged; the bill simply reads as owed. It surfaces today in the GL-derived Receivables Ageing, which ages accounts 1100/1110. Smoke: TC-CREDIT-SALE-TENDER, TC-CREDIT-SALE-GL, TC-CREDIT-SALE-OUTSTANDING.',
       'inventory-period-lock: a CLOSED inventory month refuses MANUAL stock writes dated inside it (adjust, wastage, GRN receipt, stock count, hotel movement) with 409 INVENTORY_PERIOD_CLOSED. Automatic consumption is never blocked - it makes a close stale, fixed by re-closing. Also restores the hotel stock movement date, which was read at the route and then dropped, so a back-dated hotel movement was silently recorded as today.',
       'inventory-item-drawer',        //FEATURE (owner-reported: 'there should be history or audit log for each item with complete traceability who when and why'). The data existed - `stock_movements` carries the actor, the timestamp, the reference and the reason - but the only way to see it was a flat, PROPERTY-WIDE usage log that a human had to scan by eye, and traceability that needs an eye-scan is not traceability. Clicking an item now opens it as an OBJECT over the list (never a new page, so the list is not lost) answering the four questions people actually ask: **Overview** levels/par/value, **Suppliers** (reusing the approved-supplier panel), **History** every movement with who / when / what / balance / WHY, and **Where used** - which dishes consume it and what is already on order, both of which get asked before anyone deletes an item or changes its unit and neither of which was answerable without leaving the screen. The WHY is assembled from whichever trace the row has: wastage stores 'REASON: note', a manual adjustment stores its reason or a before->after, a consumption carries the order that caused it. New `/inventory/ingredients/:id/where-used` returns only CURRENTLY-IN-FORCE recipe rows - a superseded version is history, not a commitment, and listing it would overstate what the item is used by today. TC-INV-ITEM-TRACE writes two movements with DIFFERENT reasons and asserts both are recoverable, that every row names a person, and that the trail carries only this item - a per-item trail that leaks other items is just the flat log again.',
