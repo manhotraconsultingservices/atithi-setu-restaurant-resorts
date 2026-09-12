@@ -19204,7 +19204,16 @@ ${data.tenant.name}`;
       // the spa list. Same shape of bug as the expense/invoice module
       // allowlists that sat behind their own dropdowns.
       const allowedTypes = new Set(['RAW', 'PACKAGED', 'SPA_PRODUCT', 'SPA_RETAIL']);
-      const allowedUnits = new Set(['kg', 'g', 'l', 'ml', 'unit', 'bottle', 'piece', 'pack', 'dozen']);
+      // Widened beyond the kitchen's vocabulary. Housekeeping counts rolls and
+      // sachets, the spa counts jars and sets, banquets count covers — and a
+      // unit outside this list was silently coerced to 'unit', so a hotel item
+      // stocked in 'pcs' quietly became 'unit' and its par levels read as a
+      // different thing than they were entered as. Same class of kitchen
+      // assumption as the hardcoded category list.
+      const allowedUnits = new Set([
+        'kg', 'g', 'l', 'ml', 'unit', 'bottle', 'piece', 'pack', 'dozen',
+        'pcs', 'roll', 'set', 'pair', 'sachet', 'bar', 'kit', 'box', 'can', 'jar', 'bag', 'tube', 'cover',
+      ]);
       const safeType = allowedTypes.has(String(item_type || '').toUpperCase()) ? String(item_type).toUpperCase() : 'RAW';
       const safeUnit = allowedUnits.has(String(unit || '').toLowerCase()) ? String(unit).toLowerCase() : 'unit';
       // Default the module from the item type when the caller did not say, so
@@ -23329,6 +23338,33 @@ ${data.tenant.name}`;
           LIMIT ${lim}`,
         params
       );
+      // The hotel's PRE-FOLD movements live in the legacy `hotel_stock_movements`
+      // table and are not in stock_movements at all, so a hotel usage log built
+      // only from the shared ledger would start the day the silo was folded in
+      // and show nothing before it. They are read alongside and projected into
+      // the same shape — never rewritten, because restating a movement under a
+      // different sign convention is how an audit trail stops being trustworthy.
+      if (amf.module === 'HOTEL' || !amf.module) {
+        const legacy: any[] = await db.query(
+          `SELECT hm.id, hm.item_id AS ingredient_id,
+                  CASE WHEN hm.movement_type = 'CONSUME' THEN -ABS(hm.quantity) ELSE ABS(hm.quantity) END AS qty_delta,
+                  hi.unit, hm.movement_type, 'hotel-legacy' AS reference_type, NULL AS reference_id,
+                  NULL AS balance_after, hm.unit_price AS unit_cost,
+                  hm.movement_date AS recorded_at, hm.recorded_by AS recorded_by_user_id, hm.notes,
+                  hi.name AS ingredient_name, hi.category AS ingredient_category
+             FROM hotel_stock_movements hm
+             JOIN hotel_inventory_items hi ON hi.id = hm.item_id
+            WHERE NOT EXISTS (SELECT 1 FROM stock_movements s2 WHERE s2.id = hm.id)
+            ORDER BY hm.movement_date DESC
+            LIMIT ${lim}`
+        ).catch(() => [] as any[]);
+        if (legacy.length) {
+          rows.push(...legacy);
+          rows.sort((a: any, b: any) => String(b.recorded_at || '').localeCompare(String(a.recorded_at || '')));
+          rows.splice(lim);
+        }
+      }
+
       // WHO, as a name. The column stored only an id, so every consumer of
       // this log was showing a raw identifier (or nothing) where a person was
       // meant to be. A null here is truthful, not missing data: it means no
@@ -56013,8 +56049,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-lifecycle-parity',
+    commit_marker: 'inventory-hotel-on-shared-screen',
     code_features: [
+      'inventory-hotel-on-shared-screen', //FEATURE (the last bespoke inventory screen is gone). Hotel ran its own component with FOUR tabs and no receiving, no wastage and no stock takes; it now runs the same `ModuleInventoryView` as Restaurant-adjacent, Spa and Events, so all four modules are ONE component and cannot drift into four different ways of receiving a delivery - which was the reported problem. Nothing that was visible yesterday is missing today, and that took two pieces of care: **(1)** the hotel screen's one genuinely useful exclusive, its quick-setup seed of common housekeeping supplies, is GENERALISED into `STARTER_ITEMS` per module and offered from the empty state - Spa and Events open just as empty and deserve the same help; it skips anything already present by name, so pressing it twice cannot duplicate a shelf. **(2)** the hotel's PRE-FOLD movements live in the legacy `hotel_stock_movements` table and are absent from `stock_movements`, so a usage log built only from the shared ledger would begin the day the silo was folded in and show nothing before it; they are now UNIONed into the shared audit log and projected into the same shape, never rewritten. **Also fixed, a silent coercion:** the unit allowlist was the kitchen's, so housekeeping stock entered in rolls or sachets was quietly saved as 'unit' and its par levels then meant something other than what was typed - the same shape as the SPA_PRODUCT bug. Widened with the vocabulary housekeeping, spa and banquets actually use. The old `HotelInventoryView` stays in the file, unreachable, rather than being deleted in the same change.',
       'inventory-lifecycle-parity',    //FEATURE (owner-reported: no consistency between Kitchen and the other modules, and no end-to-end process). Receiving, wastage and stock-takes existed for the KITCHEN ONLY - Kitchen had 9 tabs, Spa/Events 5, Hotel 4 - so every other module could add stock and watch it deplete but never RECEIVE a delivery, write off spoilage, or count the shelf. The lifecycle was broken for three of four modules. The shared screen now carries all of it: Receive against an open PO (or ad-hoc) from the Purchasing tab, Log wastage from the Usage Log, and a Stock Takes tab that starts a module-scoped count and opens straight into the sheet rather than making you find it in a list afterwards. **These reuse the KITCHEN'S OWN modals** - `GRNCreateModal`, `WastageLogModal`, `PhysicalCountModal` - passed module-scoped data, rather than module-specific copies, so the four screens cannot drift into four different ways of receiving a delivery; that drift is the reported problem, and re-implementing would have recreated it. The counts LIST is now module-filtered too, with NULL-module counts (taken before counts were scoped) still visible under every module rather than vanishing behind a filter that did not exist when they were made. The GRN endpoint needed no change - it was already module-agnostic, taking a PO or a supplier plus lines; the gap was never the engine, only the surface.',
       'inventory-item-categories',      //FEATURE (owner-reported: 'category of items are not correctly showing'). The category picker was a HARDCODED array in the front end - Dairy, Meat, Produce, Grains, Spices - rendered for EVERY module. So filing a spa massage oil or a hotel bath towel meant choosing from a kitchen larder, and those items ended up mis-filed or blank; that is the whole reason categories looked wrong outside the kitchen. Categories are a business's own vocabulary - one property files by storage location, another by supplier, another by menu section - so this is now an owner-editable MASTER (`item_categories`), unique on (module, name) so there is one 'Linen' per module and not one per typo. Seeded ONCE per module with a sensible starting set (kitchen larder / hotel linen+amenities / spa back-bar+retail / events crockery+decor / shared chemicals+packaging), marker-guarded so a category the owner DELETES does not reappear on the next restart - the same defect class as the stock backfill that resurrected re-filed items. **Existing values are ADOPTED, not discarded:** every distinct category already on an item becomes a real category for its module, because the data is the better authority on what a property actually uses. SHARED categories appear from every module, otherwise people invent a near-duplicate per screen. Deleting RETIRES rather than removes, and reports how many items still carry it - a hard delete would blank the category on historical stock and silently change what past reports say; the editor likewise keeps showing an item's own value even if that category was retired, so opening the form cannot quietly re-file it.',
       'inventory-close-post-date',      //FIX (caught by TC-INV-PERIOD-GL, and the diagnosis matters more than the fix). The close dated its journal at the PERIOD END, so closing September on the 12th posted to the 30th - a FUTURE date. The entries were in the ledger and correct, but every report run 'up to today' excluded them, so the trial balance showed no movement at all: present and invisible, which is the worst of both. Now posts on min(period_end, today), which is unchanged for a real month-end close and correct for an early one. **The GL result is now CHECKED too** - `_postGlEntries` REFUSES an unbalanced journal and records a GL exception rather than throwing, so ignoring its return let the period row claim a `gl_journal_ref` for a posting that may never have happened. **What the investigation actually proved:** reading the raw entries over a wider window showed the posting and the reversal chain working exactly as designed - close 1 Dr 1630 600; close 2 reverses it and posts 1000; closes 3 and 4 each reverse their immediate predecessor - net 1000 on the asset, only the last close standing. The unique-ref-per-close design holds. The failure was the test's window, not the ledger.',

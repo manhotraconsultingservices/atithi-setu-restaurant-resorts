@@ -17313,7 +17313,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <EventsModule restaurantId={restaurantId} token={token!} tab={activeTab} />
         </LanguageProvider>
       ) : activeTab === 'HOTEL_INVENTORY' ? (
-        <HotelInventoryView restaurantId={restaurantId} token={token!} />
+        // Hotel now runs the SAME screen as every other module. It had its own
+        // component with four tabs and no receiving, no wastage and no stock
+        // takes, so three of the four modules could not complete a stock
+        // lifecycle at all. Its one distinctive feature — the quick-setup seed —
+        // is generalised into STARTER_ITEMS for every module, and its pre-fold
+        // movement history is unioned into the shared audit log, so nothing that
+        // was visible yesterday is missing today. The old component stays in the
+        // file, unreachable, rather than being deleted in the same change.
+        <ModuleInventoryView
+          restaurantId={restaurantId} token={token!} module="HOTEL"
+          title="Hotel Inventory"
+          subtitle="Linen, toiletries, housekeeping supplies — stock, suppliers, purchasing and usage"
+        />
       ) : activeTab === 'INVENTORY_EVENTS' && isEventsEnabled ? (
         <ModuleInventoryView
           restaurantId={restaurantId} token={token!} module="EVENTS"
@@ -57192,7 +57204,12 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
 // ─── Inventory Module Modals ────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
 
-const ALLOWED_UNITS = ['kg', 'g', 'l', 'ml', 'unit', 'bottle', 'piece', 'pack', 'dozen'];
+const ALLOWED_UNITS = [
+  'kg', 'g', 'l', 'ml', 'unit', 'bottle', 'piece', 'pack', 'dozen',
+  // Housekeeping, spa and banquet vocabulary. Without these a hotel item
+  // stocked in 'pcs' was coerced to 'unit' on save.
+  'pcs', 'roll', 'set', 'pair', 'sachet', 'bar', 'kit', 'box', 'can', 'jar', 'bag', 'tube', 'cover',
+];
 const INGREDIENT_CATEGORIES = ['Dairy', 'Meat', 'Produce', 'Grains', 'Oils & Fats', 'Spices', 'Beverages', 'Packaged', 'Frozen', 'Other'];
 
 // Generic modal shell — backdrop, centered card, max-h scrollable
@@ -57232,6 +57249,38 @@ function FormField({ label, children, required, hint }: { label: string; childre
   );
 }
 const inputClass = "w-full px-4 py-3 rounded-2xl border border-[#cc5a16]/15 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 text-sm";
+
+// A starting set of items per module, so a new module is not an empty table
+// with no clue what belongs in it. Generalised from the hotel screen's "Quick
+// Setup", which seeded common housekeeping supplies and was the one genuinely
+// useful thing that screen had which the shared one did not — the other modules
+// open just as empty and deserve the same help.
+const STARTER_ITEMS: Record<string, Array<{ name: string; category: string; unit: string; par_level: number; reorder_point: number }>> = {
+  HOTEL: [
+    { name: 'Bed Sheets (Double)', category: 'Linen', unit: 'pcs', par_level: 20, reorder_point: 8 },
+    { name: 'Pillow Covers', category: 'Linen', unit: 'pcs', par_level: 40, reorder_point: 15 },
+    { name: 'Bath Towels', category: 'Linen', unit: 'pcs', par_level: 30, reorder_point: 10 },
+    { name: 'Shampoo (Sachet)', category: 'Toiletries & Amenities', unit: 'sachet', par_level: 100, reorder_point: 30 },
+    { name: 'Soap Bar', category: 'Toiletries & Amenities', unit: 'bar', par_level: 100, reorder_point: 30 },
+    { name: 'Toilet Paper Roll', category: 'Housekeeping Chemicals', unit: 'roll', par_level: 200, reorder_point: 60 },
+    { name: 'Floor Cleaner', category: 'Housekeeping Chemicals', unit: 'l', par_level: 10, reorder_point: 3 },
+  ],
+  SPA: [
+    { name: 'Massage Oil — Sesame', category: 'Back-bar Oils', unit: 'l', par_level: 5, reorder_point: 2 },
+    { name: 'Massage Oil — Coconut', category: 'Back-bar Oils', unit: 'l', par_level: 5, reorder_point: 2 },
+    { name: 'Face Pack', category: 'Creams & Lotions', unit: 'jar', par_level: 10, reorder_point: 3 },
+    { name: 'Spa Towels', category: 'Linen & Towels', unit: 'pcs', par_level: 40, reorder_point: 15 },
+    { name: 'Disposable Slippers', category: 'Disposables', unit: 'pair', par_level: 50, reorder_point: 20 },
+  ],
+  EVENTS: [
+    { name: 'Dinner Plates', category: 'Crockery & Cutlery', unit: 'pcs', par_level: 300, reorder_point: 100 },
+    { name: 'Cutlery Sets', category: 'Crockery & Cutlery', unit: 'set', par_level: 300, reorder_point: 100 },
+    { name: 'Table Linen', category: 'Linen & Drapes', unit: 'pcs', par_level: 60, reorder_point: 20 },
+    { name: 'Chair Covers', category: 'Linen & Drapes', unit: 'cover', par_level: 300, reorder_point: 100 },
+    { name: 'LPG Cylinder', category: 'Fuel & Gas', unit: 'unit', par_level: 6, reorder_point: 2 },
+    { name: 'Disposable Glasses', category: 'Disposables', unit: 'pack', par_level: 40, reorder_point: 15 },
+  ],
+};
 
 // ─── Module-scoped inventory (Events today; reusable for any cost module) ──
 // Events & Convention had NO inventory surface at all — no item list, no live
@@ -57351,6 +57400,27 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   useEffect(() => { if (tab === 'PURCHASING') loadPurchasing(); }, [tab, module]);
   useEffect(() => { if (tab === 'REPORTS') loadReports(); }, [tab, module]);
   useEffect(() => { if (tab === 'COUNTS') loadCounts(); }, [tab, module]);
+
+  // Seeds this module's starting set, skipping anything already present by
+  // name so pressing it twice cannot duplicate a shelf.
+  const [seeding, setSeeding] = useState(false);
+  const addStarterItems = async () => {
+    const seed = STARTER_ITEMS[module] || [];
+    if (!seed.length) return;
+    setSeeding(true);
+    try {
+      const have = new Set(items.map((i: any) => String(i.name || '').toLowerCase()));
+      for (const it of seed) {
+        if (have.has(it.name.toLowerCase())) continue;
+        await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients`, {
+          method: 'POST', headers: auth,
+          body: JSON.stringify({ ...it, module, item_type: 'PACKAGED', current_stock_qty: 0 }),
+        }).catch(() => {});
+      }
+      await load();
+      toast.success('Starter items added — set your par levels and prices');
+    } catch (e: any) { toast.error(e.message); } finally { setSeeding(false); }
+  };
 
   const startCount = async () => {
     try {
@@ -57659,7 +57729,13 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
             <tbody>
               {rows.length === 0 ? (
                 <tr><td colSpan={canWrite ? 7 : 6} className="px-4 py-8 text-center text-[#9c8e85]">
-                  No items yet. Add the consumables this module uses to start tracking stock.
+                  <p className="mb-3">No items yet. Add the consumables this module uses to start tracking stock.</p>
+                  {canWrite && (STARTER_ITEMS[module] || []).length > 0 && (
+                    <button onClick={addStarterItems} disabled={seeding}
+                      className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white disabled:opacity-50">
+                      {seeding ? 'Adding…' : `Add ${(STARTER_ITEMS[module] || []).length} common ${(COST_MODULE_LABEL[module] || module).toLowerCase()} items`}
+                    </button>
+                  )}
                 </td></tr>
               ) : rows.map((i: any) => (
                 <tr key={i.id} className="border-t border-[#cc5a16]/5">
