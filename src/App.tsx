@@ -17295,7 +17295,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="ALL" present={{ ROOM: isHotelEnabled, EVENT: isEventsEnabled, RESTAURANT: isRestaurantEnabled, SPA: isSpaEnabled }} /></div>
       ) : activeTab === 'EVENTS_CHECKLISTS' && isEventsEnabled ? (
         <div className="p-1"><ChecklistTemplates restaurantId={restaurantId} token={token!} facilityScope="EVENT" /></div>
-      ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
+      ) : activeTab === 'SPA_INVENTORY' && isSpaEnabled ? (
+        // Spa now runs the SAME screen as Events rather than its own read-only
+        // list. That list could show stock and nothing else — no adding an item,
+        // no supplier, no purchasing, no usage trail — while the engine beneath
+        // it supported all four. Routed here, ahead of the spa group, so the one
+        // component serves both modules and neither can drift from the other.
+        <ModuleInventoryView
+          restaurantId={restaurantId} token={token!} module="SPA"
+          title="Spa Inventory"
+          subtitle="Back-bar consumables & retail — stock, suppliers, purchasing and usage"
+        />
+      ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
       ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS' || (activeTab === 'EVENTS_MIGRATION' && isPlatformAdmin)) && isEventsEnabled ? (
         <LanguageProvider secondary={secondaryLanguage}>
@@ -57239,7 +57250,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   restaurantId: string; token: string; module: string; title: string; subtitle: string;
 }) {
   const toast = useToast();
-  type MTab = 'ITEMS' | 'LOW_STOCK' | 'MOVEMENTS';
+  type MTab = 'ITEMS' | 'LOW_STOCK' | 'PURCHASING' | 'MOVEMENTS' | 'REPORTS';
   const [tab, setTab] = useState<MTab>('ITEMS');
   const [items, setItems] = useState<any[]>([]);
   const [movements, setMovements] = useState<any[]>([]);
@@ -57252,6 +57263,15 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   const [adjReason, setAdjReason] = useState('');
   const [adjSaving, setAdjSaving] = useState(false);
 
+  // Purchasing + reporting for THIS module. Both were the gap the owner
+  // reported for Spa and Events: the engine could already do all of it, but
+  // neither screen exposed any of it, so buying anything meant leaving for
+  // Procurement and every figure was the kitchen's.
+  const [pos, setPos] = useState<any[]>([]);
+  const [suppliers, setSuppliers] = useState<any[]>([]);
+  const [showPo, setShowPo] = useState(false);
+  const [modReports, setModReports] = useState<any>(null);
+
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   const canWrite = canWriteTab('INVENTORY');
 
@@ -57263,6 +57283,38 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
       const r = await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients?module=${encodeURIComponent(module)}&include_shared=1`, { headers: auth });
       setItems(r.ok ? await r.json() : []);
     } catch { /* silent */ } finally { setLoading(false); }
+  };
+
+  // Purchase orders raised FOR this module — including the drafts auto-PO
+  // raises from par levels, which previously existed but were only visible
+  // under Procurement, so nobody working this module ever saw them.
+  const loadPurchasing = async () => {
+    try {
+      const [p, sup] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/inventory/purchase-orders?module=${encodeURIComponent(module)}`, { headers: auth }),
+        fetch(`/api/restaurant/${restaurantId}/inventory/suppliers`, { headers: auth }),
+      ]);
+      setPos(p.ok ? await p.json() : []);
+      setSuppliers(sup.ok ? await sup.json() : []);
+    } catch { /* silent */ }
+  };
+
+  // Every figure scoped to this module — possible only since the reports
+  // learned to take a ?module=.
+  const loadReports = async () => {
+    try {
+      const q = `module=${encodeURIComponent(module)}`;
+      const [d, dead, exp] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/inventory/dashboard?${q}`, { headers: auth }),
+        fetch(`/api/restaurant/${restaurantId}/inventory/dead-stock?days=30&${q}`, { headers: auth }),
+        fetch(`/api/restaurant/${restaurantId}/inventory/expiring?days=14&${q}`, { headers: auth }),
+      ]);
+      setModReports({
+        kpis: d.ok ? (await d.json())?.kpis || null : null,
+        dead: dead.ok ? (await dead.json())?.items || [] : [],
+        expiring: exp.ok ? (await exp.json())?.items || [] : [],
+      });
+    } catch { /* silent */ }
   };
 
   // The consumption trail, filtered to this module's items. The audit endpoint
@@ -57278,6 +57330,8 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
 
   useEffect(() => { load(); }, [module]);
   useEffect(() => { if (tab === 'MOVEMENTS') loadMovements(); }, [tab, items]);
+  useEffect(() => { if (tab === 'PURCHASING') loadPurchasing(); }, [tab, module]);
+  useEffect(() => { if (tab === 'REPORTS') loadReports(); }, [tab, module]);
 
   const filtered = items.filter((i: any) =>
     !search || String(i.name || '').toLowerCase().includes(search.toLowerCase()));
@@ -57307,7 +57361,9 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   const TABS: { k: MTab; label: string; count?: number }[] = [
     { k: 'ITEMS', label: 'Items', count: items.length },
     { k: 'LOW_STOCK', label: 'Low Stock', count: lowStock.length },
+    { k: 'PURCHASING', label: 'Purchasing' },
     { k: 'MOVEMENTS', label: 'Usage Log' },
+    { k: 'REPORTS', label: 'Reports' },
   ];
 
   const rows = tab === 'LOW_STOCK' ? lowStock.filter((i: any) =>
@@ -57349,6 +57405,89 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
 
       {loading ? (
         <div className="p-8 text-center text-sm text-[#9c8e85]">Loading…</div>
+      ) : tab === 'PURCHASING' ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-xs text-[#6b5d52]">
+              Purchase orders for {COST_MODULE_LABEL[module] || module}. Drafts raised automatically from par levels appear here for review.
+            </p>
+            {canWrite && suppliers.length > 0 && (
+              <button onClick={() => setShowPo(true)}
+                className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white">+ Raise PO</button>
+            )}
+          </div>
+          <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#6b5d52]">
+                <tr>
+                  <th className="text-left px-4 py-3">PO</th>
+                  <th className="text-left px-4 py-3">Supplier</th>
+                  <th className="text-left px-4 py-3">Status</th>
+                  <th className="text-left px-4 py-3">Expected</th>
+                  <th className="text-right px-4 py-3">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pos.length === 0 ? (
+                  <tr><td colSpan={5} className="px-4 py-8 text-center text-[#9c8e85]">
+                    No purchase orders for this module yet.
+                  </td></tr>
+                ) : pos.map((p: any) => (
+                  <tr key={p.id} className="border-t border-[#cc5a16]/5">
+                    <td className="px-4 py-2.5 font-mono text-xs">{p.id}</td>
+                    <td className="px-4 py-2.5 font-medium">{p.supplier_name || p.supplier_id || '—'}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${String(p.status) === 'DRAFT' ? 'bg-amber-50 text-amber-700' : String(p.status) === 'RECEIVED' ? 'bg-emerald-50 text-emerald-700' : 'bg-[#0d0a07]/5 text-[#6b5d52]'}`}>
+                        {p.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-[#6b5d52]">{String(p.expected_delivery_date || '').slice(0, 10) || '—'}</td>
+                    <td className="px-4 py-2.5 text-right font-mono">Rs.{Number(p.grand_total ?? p.total_amount ?? 0).toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : tab === 'REPORTS' ? (
+        <div className="space-y-4">
+          {!modReports ? (
+            <div className="p-8 text-center text-sm text-[#9c8e85]">Loading…</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {[
+                  ['Stock value', `Rs.${Number(modReports.kpis?.total_stock_value || 0).toFixed(2)}`],
+                  ['Below reorder', String(modReports.kpis?.items_below_reorder ?? 0)],
+                  ['Wastage 30d', `Rs.${Number(modReports.kpis?.wastage_value_30d || 0).toFixed(2)}`],
+                  ['Consumed this month', `Rs.${Number(modReports.kpis?.consumed_value_this_month || 0).toFixed(2)}`],
+                ].map(([label, val]) => (
+                  <div key={label} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">{label}</p>
+                    <p className="text-xl font-bold text-[#0d0a07] mt-1 font-mono">{val}</p>
+                  </div>
+                ))}
+              </div>
+              {/* Food cost % is deliberately absent for a non-restaurant module:
+                  it would divide this module's consumption by restaurant sales. */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {[
+                  ['Not moved in 30 days', modReports.dead, (r: any) => `${r.name} · ${Number(r.stock_qty || 0)} ${r.unit}`],
+                  ['Expiring within 14 days', modReports.expiring, (r: any) => `${r.item_name} · ${String(r.expiry_date || '').slice(0, 10)}`],
+                ].map(([title, rows, fmt]: any) => (
+                  <div key={title} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-2">{title} ({rows.length})</p>
+                    {rows.length === 0
+                      ? <p className="text-xs text-[#9c8e85] italic">Nothing to report.</p>
+                      : <ul className="space-y-1">{rows.slice(0, 8).map((r: any, i: number) => (
+                          <li key={r.id || i} className="text-sm text-[#3d332a]">{fmt(r)}</li>
+                        ))}</ul>}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       ) : tab === 'MOVEMENTS' ? (
         <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
           <table className="w-full text-sm">
@@ -57436,6 +57575,15 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
             </tbody>
           </table>
         </div>
+      )}
+
+      {showPo && (
+        <POCreateModal
+          token={token} restaurantId={restaurantId}
+          suppliers={suppliers} ingredients={items}
+          onClose={() => setShowPo(false)}
+          onSaved={() => { setShowPo(false); loadPurchasing(); }}
+        />
       )}
 
       {showEditor && (
