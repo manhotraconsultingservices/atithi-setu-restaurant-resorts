@@ -1448,6 +1448,10 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     )
   `);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_suppliers_active ON suppliers (is_active)`);
+
+  // Suppliers are who we BUY from. Accounts are who we SELL to on credit, and
+  // they belong in exactly the same place: every tenant gets both.
+  await createAccountTables(db);
   // Phase I2 supplier auto-PO controls. Owner opts a supplier into the
   // weekly draft-PO cron and picks which weekday to fire on.
   //   auto_po_enabled         0 (default) = owner raises POs manually
@@ -3360,4 +3364,144 @@ export async function getNextTenantSequence(tenantDb: DbInterface, name: string)
     RETURNING current_value
   `, [name]);
   return rows[0].current_value;
+}
+
+
+// ─── Company Accounts — the customer master ──────────────────────────────────
+// Who the property SELLS to on credit: corporates, travel agents, tour
+// operators. Called from _initTenantDb so EVERY tenant has it, and from
+// createHotelTables so the hotel path still asserts its own schema.
+//
+// WHY IT LIVES HERE AND NOT IN createHotelTables, where it was born:
+// createHotelTables only runs for tenants whose property_type is HOTEL or BOTH.
+// An events-only property therefore had no `travel_agents` and no
+// `partner_invoices` at all - so the one part of the product that can bill a
+// company on terms was unreachable from the module most likely to need it, and
+// nothing said so. This is the single definition now; the hotel copy was
+// removed rather than left to drift.
+//
+// WHY THE TABLE IS STILL CALLED travel_agents: its id is stored as
+// `partner_invoices.partner_code` and `room_bookings.agent_id`, and read by the
+// receivables dashboard, the partner portal logins and the OTA-360 report.
+// Renaming buys nothing those readers want. The API in front of it says
+// "accounts", which is the name everyone outside this file sees, and new ids
+// keep the AGT- prefix so existing statements keep resolving.
+export async function createAccountTables(db: DbInterface): Promise<void> {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS travel_agents (
+      id                  TEXT PRIMARY KEY,
+      name                TEXT NOT NULL,
+      type                TEXT DEFAULT 'TRAVEL_AGENT',
+      contact_person      TEXT,
+      phone               TEXT,
+      email               TEXT,
+      gstin               TEXT,
+      address             TEXT,
+      commission_pct      DOUBLE PRECISION DEFAULT 0,
+      payment_terms_days  INT DEFAULT 30,
+      credit_limit        DOUBLE PRECISION,
+      notes               TEXT,
+      is_active           INT DEFAULT 1,
+      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_travel_agents_active ON travel_agents (is_active, name)`).catch(() => {});
+
+  // What a company buying on credit needs that the travel-trade row lacked:
+  //   credit_status       selling on credit STOPS when an account is on hold
+  //   pan_number          India - the customer master carries it for TDS/TCS
+  //   account_manager_id  who on our side owns the relationship
+  await db.exec("ALTER TABLE travel_agents ADD COLUMN IF NOT EXISTS credit_status TEXT DEFAULT 'ACTIVE'").catch(() => {});
+  await db.exec("ALTER TABLE travel_agents ADD COLUMN IF NOT EXISTS pan_number TEXT").catch(() => {});
+  await db.exec("ALTER TABLE travel_agents ADD COLUMN IF NOT EXISTS account_manager_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE travel_agents ADD COLUMN IF NOT EXISTS created_by TEXT").catch(() => {});
+
+  // One row per statement raised on an account (or per OTA month).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS partner_invoices (
+      id                  TEXT PRIMARY KEY,
+      partner_type        TEXT NOT NULL,
+      partner_code        TEXT NOT NULL,
+      partner_name        TEXT,
+      invoice_number      TEXT,
+      invoice_date        DATE NOT NULL,
+      period_start        DATE,
+      period_end          DATE,
+      gross_amount        DOUBLE PRECISION DEFAULT 0,
+      commission_amount   DOUBLE PRECISION DEFAULT 0,
+      net_due             DOUBLE PRECISION DEFAULT 0,
+      net_received        DOUBLE PRECISION DEFAULT 0,
+      due_date            DATE,
+      status              TEXT DEFAULT 'PENDING',
+      source              TEXT DEFAULT 'MANUAL',
+      booking_ids_json    TEXT,
+      notes               TEXT,
+      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_partner_invoices_partner ON partner_invoices (partner_type, partner_code, due_date)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_partner_invoices_status ON partner_invoices (status, due_date)`).catch(() => {});
+
+  // One row per actual receipt, allocated to an invoice by hand.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS partner_payments (
+      id                       TEXT PRIMARY KEY,
+      partner_type             TEXT NOT NULL,
+      partner_code             TEXT NOT NULL,
+      payment_date             DATE NOT NULL,
+      amount_received          DOUBLE PRECISION NOT NULL,
+      payment_method           TEXT,
+      reference_number         TEXT,
+      allocated_to_invoice_id  TEXT,
+      notes                    TEXT,
+      created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_partner_payments_partner ON partner_payments (partner_type, partner_code, payment_date DESC)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_partner_payments_invoice ON partner_payments (allocated_to_invoice_id)`).catch(() => {});
+
+  // People at the account. `contact_person` on the account row is ONE name, and
+  // a company that books events has several - the person who signs, the person
+  // who pays, the person on site on the day. Losing the last two is how a chase
+  // call goes to the wrong desk.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS account_contacts (
+      id           TEXT PRIMARY KEY,
+      account_id   TEXT NOT NULL,
+      name         TEXT NOT NULL,
+      designation  TEXT,
+      phone        TEXT,
+      email        TEXT,
+      is_primary   INT DEFAULT 0,
+      is_active    INT DEFAULT 1,
+      notes        TEXT,
+      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_account_contacts_account ON account_contacts (account_id, is_active, is_primary DESC)`).catch(() => {});
+
+  // The relationship trail: calls, visits, quotes sent, complaints, and the
+  // chase notes that decide whether to keep extending credit. Deliberately NOT
+  // object_audit_log - that records what the SYSTEM did, this records what a
+  // PERSON did and is written by hand.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS account_interactions (
+      id              TEXT PRIMARY KEY,
+      account_id      TEXT NOT NULL,
+      kind            TEXT DEFAULT 'NOTE',
+      subject         TEXT,
+      body            TEXT,
+      occurred_at     DATE,
+      follow_up_date  DATE,
+      created_by      TEXT,
+      created_by_name TEXT,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_account_interactions_account ON account_interactions (account_id, occurred_at DESC)`).catch(() => {});
+  // Answers "who do I owe a call back this week" across every account at once.
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_account_interactions_followup ON account_interactions (follow_up_date) WHERE follow_up_date IS NOT NULL`).catch(() => {});
 }

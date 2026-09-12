@@ -11,7 +11,7 @@ import cookieParser from "cookie-parser";
 import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash, timingSafeEqual } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
-import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
+import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, createAccountTables, DbInterface } from "./db.ts";
 import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, sendTelegramDetailed, buildNotificationContent, sendWhatsAppDetailed, sendSMSDetailed, sendEmailAs, verifyTenantSmtp, type TenantSmtpConfig } from "./notificationService.ts";
 import { getChannelAdapter, ChannelCredentials, AdapterAvailabilityPayload, AdapterResult } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
@@ -1338,29 +1338,13 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     --   • Aging buckets (Current / 30-60d / 60-90d / 90+d)
     -- Drives the Receivables Dashboard + Partner Statement modal.
 
-    -- Travel agents master — sits alongside OTA channels as a third-party
-    -- distribution channel. Types: TRAVEL_AGENT (FIT bookings), CORPORATE
-    -- (negotiated room rates for one company), TOUR_OPERATOR (group
-    -- bookings, inbound DMCs).
-    CREATE TABLE IF NOT EXISTS travel_agents (
-      id                  TEXT PRIMARY KEY,           -- 'AGT-001'
-      name                TEXT NOT NULL,
-      type                TEXT DEFAULT 'TRAVEL_AGENT',
-      contact_person      TEXT,
-      phone               TEXT,
-      email               TEXT,
-      gstin               TEXT,
-      address             TEXT,
-      commission_pct      DOUBLE PRECISION DEFAULT 0,
-      payment_terms_days  INT DEFAULT 30,
-      credit_limit        DOUBLE PRECISION,
-      notes               TEXT,
-      is_active           INT DEFAULT 1,
-      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_travel_agents_active
-      ON travel_agents (is_active, name);
+    -- travel_agents, partner_invoices and partner_payments used to be defined
+    -- here. They are the ACCOUNT MASTER - who the property sells to on credit -
+    -- and this function only runs for property_type HOTEL or BOTH, so an
+    -- events-only property had none of them and could not bill a company on
+    -- terms at all. They now live in db.ts createAccountTables(), which runs
+    -- inside _initTenantDb: for EVERY tenant, and always before this function
+    -- is reached, since every caller passes a db obtained from getTenantDb().
 
     -- Tag bookings with the specific travel agent (in addition to or
     -- instead of booking_source). Lets the same OTA channel show up as
@@ -1378,57 +1362,6 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_room_bookings_agent
       ON room_bookings (agent_id, status);
 
-    -- Partner invoices/statements. One row per OTA monthly statement OR
-    -- per-agent invoice. The auto-generator cron creates one row per
-    -- OTA per month aggregating last-month's checked-out bookings.
-    -- Owner can edit / mark disputed / mark written-off.
-    --   source: 'AUTO'   → cron-generated from local bookings
-    --           'MANUAL' → owner-entered from OTA's actual PDF
-    CREATE TABLE IF NOT EXISTS partner_invoices (
-      id                  TEXT PRIMARY KEY,
-      partner_type        TEXT NOT NULL,          -- 'OTA' | 'AGENT'
-      partner_code        TEXT NOT NULL,          -- 'BOOKING' or 'AGT-001'
-      partner_name        TEXT,                   -- denormalised for display
-      invoice_number      TEXT,
-      invoice_date        DATE NOT NULL,
-      period_start        DATE,
-      period_end          DATE,
-      gross_amount        DOUBLE PRECISION DEFAULT 0,
-      commission_amount   DOUBLE PRECISION DEFAULT 0,
-      net_due             DOUBLE PRECISION DEFAULT 0,
-      net_received        DOUBLE PRECISION DEFAULT 0,
-      due_date            DATE,
-      status              TEXT DEFAULT 'PENDING',
-        -- PENDING | PARTIAL | PAID | OVERDUE | DISPUTED | WRITTEN_OFF
-      source              TEXT DEFAULT 'MANUAL',  -- AUTO | MANUAL
-      booking_ids_json    TEXT,                   -- which bookings this invoice covers
-      notes               TEXT,
-      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_partner_invoices_partner
-      ON partner_invoices (partner_type, partner_code, due_date);
-    CREATE INDEX IF NOT EXISTS idx_partner_invoices_status
-      ON partner_invoices (status, due_date);
-
-    -- Payment receipts. One row per actual bank transfer received.
-    -- Manual allocation per user's choice (selected option 3 questions ago).
-    CREATE TABLE IF NOT EXISTS partner_payments (
-      id                       TEXT PRIMARY KEY,
-      partner_type             TEXT NOT NULL,
-      partner_code             TEXT NOT NULL,
-      payment_date             DATE NOT NULL,
-      amount_received          DOUBLE PRECISION NOT NULL,
-      payment_method           TEXT,              -- BANK_TRANSFER|UPI|CHEQUE|NETBANKING
-      reference_number         TEXT,              -- UTR / cheque no.
-      allocated_to_invoice_id  TEXT,              -- nullable; manual pick
-      notes                    TEXT,
-      created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_partner_payments_partner
-      ON partner_payments (partner_type, partner_code, payment_date DESC);
-    CREATE INDEX IF NOT EXISTS idx_partner_payments_invoice
-      ON partner_payments (allocated_to_invoice_id);
 
     -- ─── Partner portal logins — OTA / Travel-Agent B2B view (12 Jun 2026) ──
     -- A partner (an OTA channel or a travel agent) gets a login to a
@@ -38490,6 +38423,411 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
+  // ════════════════════════════════════════════════════════════════════
+  // ─── COMPANY ACCOUNTS (CRM) — module-neutral ───────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  // Who the property SELLS to on credit. The same account can owe for room
+  // nights, a banquet, a spa package and a restaurant bill, so these routes
+  // are gated on the CUSTOMER_ACCOUNTS tab ALONE — no hotelStaff, no
+  // ensureHotelEnabled. That is the whole point of the stage: the credit
+  // ledger already existed but every door into it was behind the hotel
+  // module, so an events-only property could not reach the one feature it
+  // most needed.
+  //
+  // The /hotel/agents/* routes below are left exactly as they were. They are
+  // a narrower view of the same table and nothing that works today changes.
+  const ACCOUNT_TYPES = new Set(['CORPORATE', 'TRAVEL_AGENT', 'TOUR_OPERATOR', 'OTA']);
+  const CREDIT_STATUSES = new Set(['ACTIVE', 'HOLD']);
+  const INTERACTION_KINDS = new Set(['CALL', 'EMAIL', 'MEETING', 'VISIT', 'QUOTE', 'COMPLAINT', 'PAYMENT_CHASE', 'NOTE']);
+
+  // Outstanding per account, straight off the statements. Written once because
+  // the list, the detail and the credit check must never disagree about what a
+  // company owes.
+  const _ACCOUNT_BALANCE_SQL = `
+    SELECT partner_code,
+           SUM(net_due - COALESCE(net_received, 0)) AS outstanding,
+           COUNT(*)                                 AS open_invoices,
+           MIN(due_date)                            AS oldest_due
+      FROM partner_invoices
+     WHERE partner_type = 'AGENT'
+       AND status NOT IN ('PAID', 'WRITTEN_OFF')
+       AND (net_due - COALESCE(net_received, 0)) > 0
+     GROUP BY partner_code`;
+
+  // An account is over its limit when what it owes exceeds the limit it was
+  // given. A NULL limit means "not set", which is NOT the same as zero — a
+  // zero limit would read as "no credit at all" and put every account on stop.
+  const _decorateAccount = (a: any, bal: any) => {
+    const outstanding = Math.round(Number(bal?.outstanding || 0) * 100) / 100;
+    const limit = a.credit_limit == null ? null : Number(a.credit_limit);
+    return {
+      ...a,
+      credit_status: a.credit_status || 'ACTIVE',
+      outstanding,
+      open_invoices: Number(bal?.open_invoices || 0),
+      oldest_due: bal?.oldest_due || null,
+      credit_available: limit == null ? null : Math.round((limit - outstanding) * 100) / 100,
+      over_limit: limit == null ? false : outstanding > limit,
+    };
+  };
+
+  app.get("/api/restaurant/:id/accounts", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const q = String((req.query as any).q || '').trim();
+      const type = String((req.query as any).type || '').trim().toUpperCase();
+      const includeInactive = String((req.query as any).include_inactive || '') === '1';
+
+      // Clauses are assembled in JS. The tempting `AND (? IS NULL OR col = ?)`
+      // is fatal on Postgres — it cannot infer a bare parameter's type inside
+      // `$n IS NULL` and rejects the whole statement, which is how the auto-PO
+      // generator once 500'd and silently raised no drafts.
+      const where: string[] = [];
+      const args: any[] = [];
+      if (!includeInactive) where.push('a.is_active = 1');
+      if (type) {
+        if (!ACCOUNT_TYPES.has(type)) return res.status(400).json({ error: `type must be one of ${Array.from(ACCOUNT_TYPES).join(', ')}` });
+        where.push('a.type = ?'); args.push(type);
+      }
+      if (q) {
+        const like = `%${q.toLowerCase()}%`;
+        where.push("(LOWER(a.name) LIKE ? OR LOWER(COALESCE(a.contact_person, '')) LIKE ? OR COALESCE(a.phone, '') LIKE ? OR LOWER(COALESCE(a.gstin, '')) LIKE ?)");
+        // Four placeholders, four values, in the order they appear above. The
+        // phone one is NOT lower-cased because digits have no case and the
+        // column is not wrapped in LOWER().
+        args.push(like, like, `%${q}%`, like);
+      }
+      const sql = `SELECT a.* FROM travel_agents a${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY a.is_active DESC, a.name`;
+      const rows: any[] = await db.query(sql, args).catch(() => [] as any[]);
+      const bals: any[] = await db.query(_ACCOUNT_BALANCE_SQL, []).catch(() => [] as any[]);
+      const byCode = new Map(bals.map((b: any) => [String(b.partner_code), b]));
+      res.json(rows.map((a: any) => _decorateAccount(a, byCode.get(String(a.id)))));
+    } catch (err: any) {
+      console.error('Accounts list error:', err);
+      res.status(500).json({ error: 'Failed to load accounts' });
+    }
+  });
+
+  // Follow-ups due across EVERY account. Registered before the /:accountId
+  // routes purely for readability — the paths do not actually collide, since
+  // the third segment here is a literal.
+  app.get("/api/restaurant/:id/accounts/follow-ups", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const upto = String((req.query as any).upto || '').trim();
+      const where: string[] = ['i.follow_up_date IS NOT NULL'];
+      const args: any[] = [];
+      if (/^\d{4}-\d{2}-\d{2}$/.test(upto)) { where.push('i.follow_up_date <= ?::date'); args.push(upto); }
+      const rows: any[] = await db.query(
+        `SELECT i.*, a.name AS account_name, a.phone AS account_phone
+           FROM account_interactions i
+           LEFT JOIN travel_agents a ON a.id = i.account_id
+          WHERE ${where.join(' AND ')}
+          ORDER BY i.follow_up_date ASC
+          LIMIT 500`, args).catch(() => [] as any[]);
+      const names = await _resolveActorNames(db, rows.map((r: any) => r.created_by));
+      res.json(rows.map((r: any) => ({ ...r, created_by_name: names.get(String(r.created_by)) || r.created_by_name || null })));
+    } catch (err: any) {
+      console.error('Account follow-ups error:', err);
+      res.status(500).json({ error: 'Failed to load follow-ups' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/accounts/:accountId", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const a: any = await db.get("SELECT * FROM travel_agents WHERE id = ?", [req.params.accountId]);
+      if (!a) return res.status(404).json({ error: 'Account not found' });
+      const bal: any = await db.get(
+        `SELECT SUM(net_due - COALESCE(net_received, 0)) AS outstanding,
+                COUNT(*) AS open_invoices, MIN(due_date) AS oldest_due
+           FROM partner_invoices
+          WHERE partner_type = 'AGENT' AND partner_code = ?
+            AND status NOT IN ('PAID', 'WRITTEN_OFF')
+            AND (net_due - COALESCE(net_received, 0)) > 0`, [req.params.accountId]).catch(() => null);
+      const contacts: any[] = await db.query(
+        "SELECT * FROM account_contacts WHERE account_id = ? AND is_active = 1 ORDER BY is_primary DESC, name",
+        [req.params.accountId]).catch(() => [] as any[]);
+      const interactions: any[] = await db.query(
+        "SELECT * FROM account_interactions WHERE account_id = ? ORDER BY COALESCE(occurred_at, created_at::date) DESC, created_at DESC LIMIT 50",
+        [req.params.accountId]).catch(() => [] as any[]);
+      const names = await _resolveActorNames(db, interactions.map((r: any) => r.created_by));
+      res.json({
+        ..._decorateAccount(a, bal),
+        contacts,
+        interactions: interactions.map((r: any) => ({ ...r, created_by_name: names.get(String(r.created_by)) || r.created_by_name || null })),
+      });
+    } catch (err: any) {
+      console.error('Account detail error:', err);
+      res.status(500).json({ error: 'Failed to load the account' });
+    }
+  });
+
+  // Upsert. 'new' as the id mints one, mirroring PUT /hotel/agents/:agentId so
+  // the two doors onto this table behave the same way.
+  app.put("/api/restaurant/:id/accounts/:accountId", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const type = String(b.type || 'CORPORATE').toUpperCase();
+    // REJECTED, not coerced. A silently corrected type files a corporate
+    // customer under travel trade and nothing ever says so — the same trap the
+    // petty-cash module allowlist sprang.
+    if (!ACCOUNT_TYPES.has(type)) return res.status(400).json({ error: `type must be one of ${Array.from(ACCOUNT_TYPES).join(', ')}` });
+    const creditStatus = String(b.credit_status || 'ACTIVE').toUpperCase();
+    if (!CREDIT_STATUSES.has(creditStatus)) return res.status(400).json({ error: `credit_status must be one of ${Array.from(CREDIT_STATUSES).join(', ')}` });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const isNew = req.params.accountId === 'new';
+      // AGT- prefix kept deliberately: the id is stored as
+      // partner_invoices.partner_code and room_bookings.agent_id, and a new
+      // prefix would split the receivables ledger in two.
+      const id = isNew ? `AGT-${Date.now()}-${Math.floor(Math.random() * 1000)}` : req.params.accountId;
+      const before: any = isNew ? null : await db.get("SELECT * FROM travel_agents WHERE id = ?", [id]).catch(() => null);
+      if (!isNew && !before) return res.status(404).json({ error: 'Account not found' });
+      // Bind order follows the column list exactly:
+      //   id, name, type, contact_person, phone, email, gstin, pan_number,
+      //   address, commission_pct, payment_terms_days, credit_limit,
+      //   credit_status, account_manager_id, notes, is_active, created_by
+      await db.run(
+        `INSERT INTO travel_agents
+            (id, name, type, contact_person, phone, email, gstin, pan_number, address,
+             commission_pct, payment_terms_days, credit_limit, credit_status,
+             account_manager_id, notes, is_active, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name, type = EXCLUDED.type,
+             contact_person = EXCLUDED.contact_person, phone = EXCLUDED.phone,
+             email = EXCLUDED.email, gstin = EXCLUDED.gstin,
+             pan_number = EXCLUDED.pan_number, address = EXCLUDED.address,
+             commission_pct = EXCLUDED.commission_pct,
+             payment_terms_days = EXCLUDED.payment_terms_days,
+             credit_limit = EXCLUDED.credit_limit,
+             credit_status = EXCLUDED.credit_status,
+             account_manager_id = EXCLUDED.account_manager_id,
+             notes = EXCLUDED.notes, is_active = EXCLUDED.is_active,
+             updated_at = CURRENT_TIMESTAMP`,
+        [id, name, type, b.contact_person || null, b.phone || null, b.email || null,
+         b.gstin || null, b.pan_number || null, b.address || null,
+         Number(b.commission_pct || 0), Number(b.payment_terms_days || 30),
+         b.credit_limit == null || b.credit_limit === '' ? null : Number(b.credit_limit),
+         creditStatus, b.account_manager_id || null, b.notes || null,
+         b.is_active === 0 ? 0 : 1, req.user?.id || null]);
+
+      await writeObjectAudit(db, req, {
+        objectType: 'ACCOUNT', objectId: id, action: isNew ? 'CREATED' : 'UPDATED',
+        summary: `${type} account ${name}${creditStatus === 'HOLD' ? ' — CREDIT ON HOLD' : ''}`,
+        before: before || undefined,
+        after: { name, type, credit_status: creditStatus, credit_limit: b.credit_limit ?? null },
+      }).catch(() => {});
+      res.json({ success: true, id });
+    } catch (err: any) {
+      console.error('Account save error:', err);
+      res.status(500).json({ error: 'Failed to save the account' });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/accounts/:accountId", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      // Soft-delete only. Bookings and statements reference this id, and a hard
+      // delete would orphan every one of them.
+      const r: any = await db.run("UPDATE travel_agents SET is_active = 0 WHERE id = ?", [req.params.accountId]);
+      if (!Number(r?.changes || r?.rowCount || 0)) return res.status(404).json({ error: 'Account not found' });
+      await writeObjectAudit(db, req, {
+        objectType: 'ACCOUNT', objectId: req.params.accountId, action: 'DEACTIVATED',
+        summary: 'Account marked inactive',
+      }).catch(() => {});
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error('Account delete error:', err);
+      res.status(500).json({ error: 'Failed to deactivate the account' });
+    }
+  });
+
+  // The statement an owner actually chases with: every open invoice, every
+  // receipt, and the ageing that decides which call to make first.
+  app.get("/api/restaurant/:id/accounts/:accountId/statement", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const a: any = await db.get("SELECT * FROM travel_agents WHERE id = ?", [req.params.accountId]);
+      if (!a) return res.status(404).json({ error: 'Account not found' });
+      const invoices: any[] = await db.query(
+        `SELECT * FROM partner_invoices
+          WHERE partner_type = 'AGENT' AND partner_code = ?
+          ORDER BY invoice_date DESC, created_at DESC LIMIT 500`, [req.params.accountId]).catch(() => [] as any[]);
+      const payments: any[] = await db.query(
+        `SELECT * FROM partner_payments
+          WHERE partner_type = 'AGENT' AND partner_code = ?
+          ORDER BY payment_date DESC LIMIT 500`, [req.params.accountId]).catch(() => [] as any[]);
+
+      const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+      const today = new Date();
+      const buckets = { current: 0, d30_60: 0, d60_90: 0, d90_plus: 0 };
+      let outstanding = 0;
+      for (const inv of invoices) {
+        if (['PAID', 'WRITTEN_OFF'].includes(String(inv.status))) continue;
+        const open = Number(inv.net_due || 0) - Number(inv.net_received || 0);
+        if (!(open > 0)) continue;
+        outstanding += open;
+        // No due date means nothing is overdue YET — treat it as current rather
+        // than guessing a date and reporting a debt as 90 days old.
+        const due = inv.due_date ? new Date(inv.due_date) : today;
+        const days = Math.floor((today.getTime() - due.getTime()) / 86400000);
+        if (days < 30) buckets.current += open;
+        else if (days < 60) buckets.d30_60 += open;
+        else if (days < 90) buckets.d60_90 += open;
+        else buckets.d90_plus += open;
+      }
+      for (const k of Object.keys(buckets)) (buckets as any)[k] = round((buckets as any)[k]);
+      const limit = a.credit_limit == null ? null : Number(a.credit_limit);
+      res.json({
+        account: { id: a.id, name: a.name, type: a.type, gstin: a.gstin,
+                   credit_limit: limit, credit_status: a.credit_status || 'ACTIVE',
+                   payment_terms_days: Number(a.payment_terms_days || 30) },
+        as_of: today.toISOString().slice(0, 10),
+        outstanding: round(outstanding),
+        credit_available: limit == null ? null : round(limit - outstanding),
+        over_limit: limit == null ? false : round(outstanding) > limit,
+        ageing: buckets, invoices, payments,
+      });
+    } catch (err: any) {
+      console.error('Account statement error:', err);
+      res.status(500).json({ error: 'Failed to build the statement' });
+    }
+  });
+
+  // ─── Contacts ──────────────────────────────────────────────────────
+  app.post("/api/restaurant/:id/accounts/:accountId/contacts", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const acc: any = await db.get("SELECT id FROM travel_agents WHERE id = ?", [req.params.accountId]);
+      if (!acc) return res.status(404).json({ error: 'Account not found' });
+      const id = `ACON-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const primary = b.is_primary ? 1 : 0;
+      // Exactly one primary per account: demote the others FIRST, so a failure
+      // here leaves the old primary standing rather than none at all.
+      if (primary) await db.run("UPDATE account_contacts SET is_primary = 0 WHERE account_id = ?", [req.params.accountId]);
+      await db.run(
+        `INSERT INTO account_contacts (id, account_id, name, designation, phone, email, is_primary, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, req.params.accountId, name, b.designation || null, b.phone || null, b.email || null, primary, b.notes || null]);
+      res.status(201).json({ success: true, id });
+    } catch (err: any) {
+      console.error('Account contact create error:', err);
+      res.status(500).json({ error: 'Failed to add the contact' });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/accounts/contacts/:contactId", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const b = req.body || {};
+    try {
+      const db = await getTenantDb(req.params.id);
+      const c: any = await db.get("SELECT * FROM account_contacts WHERE id = ?", [req.params.contactId]);
+      if (!c) return res.status(404).json({ error: 'Contact not found' });
+      if (b.is_primary) await db.run("UPDATE account_contacts SET is_primary = 0 WHERE account_id = ?", [c.account_id]);
+      // COALESCE on every field so a partial PATCH cannot blank what it did not
+      // mention — the defect PATCH /api/restaurant/:id still has.
+      await db.run(
+        `UPDATE account_contacts
+            SET name = COALESCE(?, name), designation = COALESCE(?, designation),
+                phone = COALESCE(?, phone), email = COALESCE(?, email),
+                notes = COALESCE(?, notes),
+                is_primary = COALESCE(?, is_primary), is_active = COALESCE(?, is_active),
+                updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?`,
+        [b.name == null ? null : String(b.name).trim(), b.designation ?? null,
+         b.phone ?? null, b.email ?? null, b.notes ?? null,
+         b.is_primary == null ? null : (b.is_primary ? 1 : 0),
+         b.is_active == null ? null : (b.is_active ? 1 : 0),
+         req.params.contactId]);
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error('Account contact update error:', err);
+      res.status(500).json({ error: 'Failed to update the contact' });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/accounts/contacts/:contactId", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const r: any = await db.run("UPDATE account_contacts SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.contactId]);
+      if (!Number(r?.changes || r?.rowCount || 0)) return res.status(404).json({ error: 'Contact not found' });
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error('Account contact delete error:', err);
+      res.status(500).json({ error: 'Failed to remove the contact' });
+    }
+  });
+
+  // ─── Interaction log ───────────────────────────────────────────────
+  app.get("/api/restaurant/:id/accounts/:accountId/interactions", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const lim = Math.min(500, Math.max(1, Number((req.query as any).limit) || 100));
+      const rows: any[] = await db.query(
+        `SELECT * FROM account_interactions WHERE account_id = ?
+          ORDER BY COALESCE(occurred_at, created_at::date) DESC, created_at DESC LIMIT ${lim}`,
+        [req.params.accountId]).catch(() => [] as any[]);
+      const names = await _resolveActorNames(db, rows.map((r: any) => r.created_by));
+      // Resolve the CURRENT name, falling back to the snapshot taken when the
+      // note was written — so a note by someone who has since left still says
+      // who wrote it instead of showing a raw id.
+      res.json(rows.map((r: any) => ({ ...r, created_by_name: names.get(String(r.created_by)) || r.created_by_name || null })));
+    } catch (err: any) {
+      console.error('Account interactions error:', err);
+      res.status(500).json({ error: 'Failed to load the interaction log' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/accounts/:accountId/interactions", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const b = req.body || {};
+    const kind = String(b.kind || 'NOTE').toUpperCase();
+    if (!INTERACTION_KINDS.has(kind)) return res.status(400).json({ error: `kind must be one of ${Array.from(INTERACTION_KINDS).join(', ')}` });
+    const body = String(b.body || '').trim();
+    const subject = String(b.subject || '').trim();
+    if (!body && !subject) return res.status(400).json({ error: 'subject or body is required' });
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    const occurred = dateRe.test(String(b.occurred_at || '')) ? String(b.occurred_at)
+      : new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+    const followUp = dateRe.test(String(b.follow_up_date || '')) ? String(b.follow_up_date) : null;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const acc: any = await db.get("SELECT id FROM travel_agents WHERE id = ?", [req.params.accountId]);
+      if (!acc) return res.status(404).json({ error: 'Account not found' });
+      const actorId = String(req.user?.id || '').trim() || null;
+      const names = actorId ? await _resolveActorNames(db, [actorId]) : new Map<string, string>();
+      const id = `AINT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      // Bind order: id, account_id, kind, subject, body, occurred_at,
+      //             follow_up_date, created_by, created_by_name
+      await db.run(
+        `INSERT INTO account_interactions
+           (id, account_id, kind, subject, body, occurred_at, follow_up_date, created_by, created_by_name)
+         VALUES (?, ?, ?, ?, ?, ?::date, ?::date, ?, ?)`,
+        [id, req.params.accountId, kind, subject || null, body || null, occurred, followUp,
+         actorId, names.get(String(actorId)) || req.user?.email || null]);
+      res.status(201).json({ success: true, id });
+    } catch (err: any) {
+      console.error('Account interaction create error:', err);
+      res.status(500).json({ error: 'Failed to log the interaction' });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/accounts/interactions/:interactionId", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const r: any = await db.run("DELETE FROM account_interactions WHERE id = ?", [req.params.interactionId]);
+      if (!Number(r?.changes || r?.rowCount || 0)) return res.status(404).json({ error: 'Interaction not found' });
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error('Account interaction delete error:', err);
+      res.status(500).json({ error: 'Failed to delete the interaction' });
+    }
+  });
+
   // ─── PARTNER INVOICES ──────────────────────────────────────────────
   app.get("/api/restaurant/:id/hotel/partner-invoices", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -56280,8 +56618,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-period-reopen',
+    commit_marker: 'company-accounts-master',
     code_features: [
+      'company-accounts-master (CRM stage 2): the credit-sales ledger already existed - travel_agents carries type CORPORATE, credit_limit and payment_terms_days, with partner_invoices / partner_payments behind it giving statements, ageing and per-invoice allocation - but EVERY door into it sat behind hotelStaff + ensureHotelEnabled, and the schema itself was created in createHotelTables, which only runs for property_type HOTEL or BOTH. An events-only property therefore had no account master AT ALL and could not bill a company on terms. Fixed at the schema level first: travel_agents + partner_invoices + partner_payments moved OUT of createHotelTables into db.ts createAccountTables(), called from _initTenantDb so every tenant gets them; the hotel copy was deleted rather than left to drift (room_bookings ALTERs and partner_accounts stay, they are genuinely hotel). New module-neutral /api/restaurant/:id/accounts API - list with outstanding roll-up and over-limit flag, detail, upsert, soft delete, statement with ageing, contacts (exactly one primary), and a hand-written interaction log with follow-up dates and a cross-account due list - gated on the new CUSTOMER_ACCOUNTS tab ALONE, no module gate. Table keeps its name because the id is stored as partner_invoices.partner_code and room_bookings.agent_id; new ids keep the AGT- prefix so existing statements keep resolving. Tab id is CUSTOMER_ACCOUNTS, NOT CUSTOMERS - that string is already the Loyalty screen local sub-tab union. Unknown type / credit_status are REJECTED with 400, never coerced. /hotel/agents/* untouched. Smoke: TC-ACCOUNT-CRUD, TC-ACCOUNT-CREDIT-HOLD, TC-ACCOUNT-CONTACTS, TC-ACCOUNT-INTERACTIONS, TC-ACCOUNT-STATEMENT, TC-ACCOUNT-404.',
       'inventory-period-reopen: the period lock shipped WITHOUT a key. There was a close route and no reopen route, so the 409 the guard returns - reopen that period before changing stock dated inside it - described something the owner could not do, and a closed month was closed for good. The smoke suite found it on the very next run by locking its own tenant out: it closes the current EVENTS month, never reopened it, and every later inventory write was then refused (TC-INV-PERIOD-CLOSE read 100 instead of 60, TC-INV-ITEM-TRACE lost 2 of its 3 movements). New POST /inventory/periods/:pid/reopen requires a REASON (undoing a signed-off month with no explanation is the audit hole the close was raised to shut), reverses the close journal, and only then flips the period to OPEN - and CLEARS gl_journal_ref, which is load-bearing: _reverseJournal short-circuits on an existing REV-<ref>, so leaving the ref would let the next close skip its reversal and capitalise the same stock twice, with both journals balanced so the trial balance would still tie. The close test now reopens what it closed and clears a prior run stale close. Smoke: TC-INV-PERIOD-LOCK asserts the lock HOLDS (409 INVENTORY_PERIOD_CLOSED), needs a reason, reopens, lets the write through, and leaves no journal behind.',
       'credit-sale-not-a-tender: settling a bill on CREDIT no longer books the money into the bank. The hotel settle dialog offered Credit, the route never validated the method against the allowlist every other payment route uses, and _glAccountForPaymentMethod returns the BANK for anything that is not CASH - so a sale on credit to a company posted Dr 1010 Bank / Cr 1100 AR: cash overstated, debtors wiped, and nothing for bank reconciliation to ever match. Now: one FOLIO_TENDERS allowlist (CREDIT explicitly legal, junk refused with 400 instead of silently coerced); all three tender loops skip a CREDIT payment, so the Dr 1100 raised by the invoice block stays standing and each journal stays balanced - including _postFolioGl, which is the path EVENT and SPA folios settle through; and a credit settlement writes no folio_payments row at all, because that table records money RECEIVED. The invoice is still issued and the revenue still recognised on the settle date, so every revenue report is unchanged; the bill simply reads as owed. It surfaces today in the GL-derived Receivables Ageing, which ages accounts 1100/1110. Smoke: TC-CREDIT-SALE-TENDER, TC-CREDIT-SALE-GL, TC-CREDIT-SALE-OUTSTANDING.',
       'inventory-period-lock: a CLOSED inventory month refuses MANUAL stock writes dated inside it (adjust, wastage, GRN receipt, stock count, hotel movement) with 409 INVENTORY_PERIOD_CLOSED. Automatic consumption is never blocked - it makes a close stale, fixed by re-closing. Also restores the hotel stock movement date, which was read at the route and then dropped, so a back-dated hotel movement was silently recorded as today.',

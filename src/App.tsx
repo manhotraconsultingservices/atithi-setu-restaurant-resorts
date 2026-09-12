@@ -28238,6 +28238,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EXPENSE_JOURNAL',      label: 'Expense Journal',       description: 'Daily operating expenses, petty cash entries, vendor payments, expense reports and approval.' },
               { id: 'PROCUREMENT',          label: 'Procurement & AP',      description: 'Purchase orders, supplier invoices, goods-received notes, accounts payable aging.' },
               { id: 'RECEIVABLES',          label: 'Receivables (AR)',      description: 'Customer / OTA receivables — agents, invoices, payments, aging, collection.' },
+              // Grantable now; the screen itself lands with the Relationships
+              // nav group. The permission ships with the API rather than after
+              // it, so staff access is decided by the owner from day one
+              // instead of the routes being owner-only by accident.
+              { id: 'CUSTOMER_ACCOUNTS',    label: 'Customers & Credit Accounts', description: 'Companies the property sells to on credit — corporates, travel agents, tour operators. Contacts, credit limit and terms, interaction log, statements and ageing. Used by Hotel and Events alike.' },
               // ── Completeness pass (2026-08-28): every remaining nav tab is now
               // grantable so the owner can control ALL menus/commands from here. ──
               { id: 'CHECKLIST_BOARD',      label: 'Checklist Board',       description: 'Manager/owner cockpit over every checklist instance across the property — status, overdue, room/venue release gating.' },
@@ -28302,7 +28307,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ORDERS: 'RESTAURANT', MENU: 'RESTAURANT', DELIVERY: 'RESTAURANT', QR: 'RESTAURANT', BOOKINGS: 'RESTAURANT', RESTAURANT_REPORTS: 'RESTAURANT',
               SPA_CALENDAR: 'SPA', SPA_APPOINTMENTS: 'SPA', SPA_CATALOG: 'SPA', SPA_RESOURCES: 'SPA', SPA_CLIENTS: 'SPA', SPA_PACKAGES: 'SPA', SPA_REPORTS: 'SPA', SPA_BILLING: 'SPA', SPA_SETTINGS: 'SPA',
               EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_ADDONS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
-              EXPENSE_JOURNAL: 'ACCOUNTS', PROCUREMENT: 'ACCOUNTS', RECEIVABLES: 'ACCOUNTS',
+              EXPENSE_JOURNAL: 'ACCOUNTS', PROCUREMENT: 'ACCOUNTS', RECEIVABLES: 'ACCOUNTS', CUSTOMER_ACCOUNTS: 'ACCOUNTS',
               ACCOUNTING: 'ACCOUNTS', ACCOUNTS_PNL: 'ACCOUNTS', ACCOUNTS_CASHFLOW: 'ACCOUNTS', ACCOUNTS_GST: 'ACCOUNTS', ACCOUNTS_VENDOR_AGING: 'ACCOUNTS', CASH_DRAWER: 'ACCOUNTS',
               CHECKLIST_BOARD: 'OVERVIEW', STATUS_BOARD: 'FRONTDESK',
               LOYALTY: 'SALES', FEEDBACK: 'SALES', CHANNEL_MANAGER: 'SALES', PUBLIC_BOOKING_PAGE: 'SALES',
