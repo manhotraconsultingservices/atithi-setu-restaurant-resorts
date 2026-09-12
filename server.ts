@@ -38717,14 +38717,19 @@ ${data.tenant.name}`;
       const byAccount = new Map<string, any>();
       for (const r of rows) {
         const key = String(r.partner_code);
-        const days = Math.floor((asOfMs - Date.parse(String(r.due_date).slice(0, 10) + 'T00:00:00Z')) / 86400000);
+        // pg hands a DATE back as a Date object built from LOCAL components, so
+        // String(d).slice(0,10) yields "Fri Oct 24" — Date.parse of that is NaN
+        // and every day count came back null. _pgYmd is the one safe reader.
+        const dueYmd = _pgYmd(r.due_date);
+        if (!dueYmd) continue;
+        const days = Math.floor((asOfMs - Date.parse(`${dueYmd}T00:00:00Z`)) / 86400000);
         const open = Math.round(Number(r.open_amount || 0) * 100) / 100;
         if (!byAccount.has(key)) {
           byAccount.set(key, {
             account_id: key, account_name: r.account_name, phone: r.phone, email: r.email,
             credit_status: r.credit_status || 'ACTIVE',
             payment_terms_days: Number(r.payment_terms_days || 30),
-            overdue_amount: 0, invoice_count: 0, oldest_due: String(r.due_date).slice(0, 10),
+            overdue_amount: 0, invoice_count: 0, oldest_due: dueYmd,
             days_overdue: days, invoices: [] as any[],
           });
         }
@@ -38732,7 +38737,7 @@ ${data.tenant.name}`;
         acc.overdue_amount = Math.round((acc.overdue_amount + open) * 100) / 100;
         acc.invoice_count += 1;
         acc.days_overdue = Math.max(acc.days_overdue, days);
-        acc.invoices.push({ id: r.invoice_id, invoice_number: r.invoice_number, due_date: String(r.due_date).slice(0, 10), open_amount: open, days_overdue: days });
+        acc.invoices.push({ id: r.invoice_id, invoice_number: r.invoice_number, due_date: dueYmd, open_amount: open, days_overdue: days });
       }
       // A follow-up already logged against this account is worth knowing before
       // ringing again — chasing someone twice in a day is how goodwill goes.
@@ -38746,7 +38751,7 @@ ${data.tenant.name}`;
             ORDER BY account_id, occurred_at DESC, created_at DESC`, ids).catch(() => [] as any[]);
         for (const l of last) {
           const acc = byAccount.get(String(l.account_id));
-          if (acc) acc.last_contact = { on: String(l.occurred_at || '').slice(0, 10), subject: l.subject || null, follow_up_date: l.follow_up_date ? String(l.follow_up_date).slice(0, 10) : null };
+          if (acc) acc.last_contact = { on: _pgYmd(l.occurred_at), subject: l.subject || null, follow_up_date: _pgYmd(l.follow_up_date) };
         }
       }
       const accounts = Array.from(byAccount.values()).sort((a, b) => b.days_overdue - a.days_overdue);
@@ -39859,8 +39864,12 @@ ${data.tenant.name}`;
         if (inv) {
           invoiceId     = inv.id;
           invoiceNumber = inv.invoice_number || inv.id;
-          invoiceDate   = inv.invoice_date ? String(inv.invoice_date).slice(0, 10) : null;
-          dueDate       = inv.due_date     ? String(inv.due_date).slice(0, 10)     : null;
+          // _pgYmd, not String(...).slice(0,10): pg returns a DATE as a Date
+          // built from LOCAL components, so the slice yields "Fri Oct 24" and
+          // `new Date(dueDate)` below resolved to the year 2001 — which made
+          // daysOverdue about nine thousand on every overdue OTA invoice.
+          invoiceDate   = _pgYmd(inv.invoice_date);
+          dueDate       = _pgYmd(inv.due_date);
           // Apportion the invoice's net_received across its bookings
           // pro-rata by commission_amount. Approximation — exact
           // booking-level allocation requires per-booking payment
@@ -39878,7 +39887,7 @@ ${data.tenant.name}`;
           else                                          status = 'OPEN';
           if (dueDate && dueDate < todayIso && status !== 'PAID') {
             status = 'OVERDUE';
-            daysOverdue = Math.floor((today.getTime() - new Date(dueDate).getTime()) / 86400000);
+            daysOverdue = Math.floor((today.getTime() - Date.parse(`${dueDate}T00:00:00Z`)) / 86400000);
           }
         } else {
           // No invoice yet → UNBILLED. Compute the *expected* due date
@@ -56905,8 +56914,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'credit-control-and-chasing',
+    commit_marker: 'credit-chase-date-fix',
     code_features: [
+      'credit-chase-date-fix: the chase list reported days_overdue NULL on every row. pg returns a DATE as a Date built from LOCAL components, so String(d).slice(0,10) yields "Fri Oct 24" and Date.parse of that is NaN. Now read through _pgYmd. THE SAME TRAP WAS ALREADY LIVE in the OTA outstanding report (/hotel/.../outstanding): it sliced the same way and then called new Date(dueDate), which resolves to the YEAR 2001 - so every overdue OTA invoice reported about nine thousand days overdue. Both fixed.',
       'credit-control-and-chasing (CRM stage 5): ONE helper _accountCreditCheck(db, accountId, addAmount) decides whether a company may be sold to on credit, so the booking warning, the gate at confirm and the chase list can never disagree. It judges the PROJECTED balance (outstanding + this transaction), not the current one - testing the current balance lets an account creep past its limit one booking at a time and only trip afterwards, which is too late. NULL limit still means not-set, not zero. THE GATE SITS AT /events/bookings/:bid/confirm and nowhere else: booking is too early (the job may still be paid cash on the day) and invoicing is far too late (the event has happened and must be billed whatever the balance says), so confirm - the moment the property commits to doing the work - is the only honest place to refuse. 409 with code ACCOUNT_ON_CREDIT_HOLD or ACCOUNT_OVER_CREDIT_LIMIT, overridable ONLY by owner/manager (a money decision, so NOT the housekeeping rule of anyone with Full access to the screen) and the override is audited as CREDIT_OVERRIDE. New GET /accounts/:id/credit-check so the UI can warn before anyone reaches a refusal, and GET /accounts/overdue - the chase list, grouped by company with days overdue, amount, who to ring and when they were last spoken to, ordered OLDEST FIRST because an invoice ignored for months is the one at risk, not the biggest one raised last week. Customers screen gains a Needs chasing view carrying that count on the tab. Smoke: TC-ACCOUNT-CREDIT-CHECK, TC-ACCOUNT-CREDIT-HOLD-BLOCKS, TC-ACCOUNT-OVERDUE, TC-EVT-CREDIT-GATE.',
       'relationships-nav (CRM stage 4, the first stage with UI): new Suppliers & Customers nav group. CUSTOMER_ACCOUNTS gets a real screen - CustomerAccountsView: a list with outstanding, credit limit, terms and a status chip (on hold / over limit / OK), three figures that decide who to ring today, and an AccountDrawer over the list (Overview / Contacts / Activity / Statement with ageing buckets), the same object-over-list shape as the stock ItemDrawer. Until now the whole account API had no UI at all. PROCUREMENT MOVED from Accounts into the new group and relabelled Suppliers & Purchasing - its ID IS UNCHANGED, because ids are RBAC keys, so every grant, the TAB_MODULE mapping and the route keep working; only where it sits and what it is called changed. CUSTOMER_ACCOUNTS added to FINANCE_TABS in navVisibility so it is hard-gated to owner / MANAGER / an explicit grant and never leaks under a fail-open null list - it carries credit limits and who owes what. Nav labels ARE the i18n keys, so all three new labels were added to hi.ts and pa.ts; without that a Hindi tenant silently reverts to English and nothing catches it. Verified each of PROCUREMENT and CUSTOMER_ACCOUNTS sits in exactly one nav group - a labelled tab in no group becomes unreachable.',
       'events-billed-to-accounts (CRM stage 3): an event sold to a company now lands on that company statement. event_bookings.account_id (nullable - most events are consumer weddings) points at the account master, is vetted on create AND on every edit (an account can be deactivated in between), and the bookings list carries account_name. One helper _syncAccountInvoiceForEvent(db, bookingId) is called wherever the amount owed can change - invoicing at /checkout, each receipt at /payments, an edit, and /invoice/cancel - and is keyed on a DERIVED id (PINV-EVT-<booking>) so it is an upsert: /checkout is re-entrant and /payments fires per receipt, and neither can bill a company twice. Due date comes from that company payment_terms_days, not a global default. Cancelling the invoice DELETES the statement row, because a voided invoice nobody owes must not keep ageing against them. Credit hold is a WARNING on the booking, never a refusal - a company that owes money may still pay cash on the day, and refusing there would stop business the owner never asked to stop; enforcement at the point of extending credit is a separate decision. Smoke: TC-EVT-ACCOUNT-LINK, -STATEMENT (asserts single billing after a repeat checkout), -RECEIPT, -CANCEL, -HOLD-WARNS.',
