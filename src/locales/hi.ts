@@ -336,6 +336,9 @@ export const hi: Record<string, string> = {
   // are unused elsewhere.
   'Receivables (AR)': 'प्राप्य (AR)',
   'Purchases & Payables (AP)': 'खरीद और देय (AP)',
+  'Suppliers & Customers': 'सप्लायर और ग्राहक',
+  'Suppliers & Purchasing': 'सप्लायर और खरीद',
+  'Customers & Credit': 'ग्राहक और उधार',
   'Expenses': 'व्यय',
   'Payables Ageing': 'देय एजिंग',
   'GST Summary': 'GST सारांश',

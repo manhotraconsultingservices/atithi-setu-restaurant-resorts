@@ -16441,7 +16441,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // and is read under Receivables Ageing; there is no operational
               // screen for it yet. Do not let this label claim otherwise.
               { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
-              { id: 'PROCUREMENT',     label: 'Purchases & Payables (AP)' },
+              // PROCUREMENT moved to the Relationships group below. Its id is
+              // unchanged — ids are RBAC keys — so every existing grant, the
+              // TAB_MODULE mapping and the route all keep working; only where
+              // it SITS in the menu and what it is CALLED have changed.
               { id: 'EXPENSE_JOURNAL', label: 'Expenses' },
               // Always present; isVisible() gates them to owner / MANAGER / a role the
               // owner EXPLICITLY granted the tab in Staff Access — so finance is
@@ -16484,6 +16487,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // It is an inventory permission, and it is named like one.
               { id: 'INVENTORY_EVENTS', label: 'Events Inventory',  requires: 'events' },
               { id: 'SPA_INVENTORY',   label: 'Spa Inventory',     requires: 'spa' },
+            ],
+          },
+          {
+            // The two sides of every trading relationship in one place. Before
+            // this, "who we buy from" was a sub-tab of Accounts called
+            // Purchases & Payables, and "who we sell to on terms" had no screen
+            // at all — its ledger was reachable only through Channel Manager,
+            // and only for room nights.
+            id: 'RELATIONSHIPS', label: 'Suppliers & Customers', icon: <Users size={16} />,
+            visible: true,
+            tabs: [
+              { id: 'PROCUREMENT',       label: 'Suppliers & Purchasing' },
+              { id: 'CUSTOMER_ACCOUNTS', label: 'Customers & Credit' },
             ],
           },
           {
@@ -20179,6 +20195,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <ExpenseJournalView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'PROCUREMENT' ? (
         <ProcurementView restaurantId={restaurantId} token={token!} />
+      ) : activeTab === 'CUSTOMER_ACCOUNTS' ? (
+        <CustomerAccountsView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'RECEIVABLES' && isHotelEnabled ? (
         /* ══ OTA & AGENT RECEIVABLES — Accounts module entry point ══
            Financial aging view for the business owner / accountant.
@@ -66152,6 +66170,426 @@ function _formatTimeRange(start: string, end: string): string {
 // HR & Payroll Module (Phase 1, 10 Jun 2026)
 // ════════════════════════════════════════════════════════════════════════
 // Top-level tab with sub-tabs. Phase 1 ships the Employees sub-tab
+// ── CustomerAccountsView ───────────────────────────────────────────────────
+// Companies the property sells to, and what they owe. Everything behind this
+// screen already existed as a ledger - statements, receipts, ageing - reachable
+// only through the hotel module and only for room nights. This is the first
+// place the whole relationship is visible in one object: who they are, who to
+// ring, what was said last, and what is outstanding.
+const ACCOUNT_TYPE_LABEL: Record<string, string> = {
+  CORPORATE: 'Corporate', TRAVEL_AGENT: 'Travel agent', TOUR_OPERATOR: 'Tour operator', OTA: 'OTA',
+};
+const INTERACTION_LABEL: Record<string, string> = {
+  CALL: 'Call', EMAIL: 'Email', MEETING: 'Meeting', VISIT: 'Visit', QUOTE: 'Quote',
+  COMPLAINT: 'Complaint', PAYMENT_CHASE: 'Payment chase', NOTE: 'Note',
+};
+const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+
+function CustomerAccountsView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [q, setQ] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [openId, setOpenId] = useState<string | null>(null);
+  const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (q.trim()) params.set('q', q.trim());
+      if (typeFilter) params.set('type', typeFilter);
+      const r = await fetch(`/api/restaurant/${restaurantId}/accounts?${params.toString()}`, { headers: auth });
+      setRows(r.ok ? await r.json() : []);
+    } catch { setRows([]); } finally { setLoading(false); }
+  };
+  // Search is debounced so typing does not fire a request per keystroke.
+  useEffect(() => { const t = setTimeout(load, q ? 300 : 0); return () => clearTimeout(t); }, [q, typeFilter]);
+
+  let totalOwed = 0, overLimit = 0, onHold = 0;
+  for (const a of rows) {
+    totalOwed += Number(a.outstanding || 0);
+    if (a.over_limit) overLimit += 1;
+    if (String(a.credit_status || 'ACTIVE') === 'HOLD') onHold += 1;
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Customers &amp; Credit</h2>
+          <p className="text-sm text-[#6b5d52] mt-1">
+            Companies you sell to on terms — corporates, travel agents and tour operators. Used by Hotel and Events alike.
+          </p>
+        </div>
+        <button onClick={() => setOpenId('new')}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#b04e12]">
+          <Plus size={14} /> New account
+        </button>
+      </div>
+
+      {/* Three figures that decide who to ring today. */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="rounded-2xl border border-[#e8e0d8] bg-white p-4">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Outstanding</p>
+          <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{inr(totalOwed)}</p>
+        </div>
+        <div className="rounded-2xl border border-[#e8e0d8] bg-white p-4">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Over credit limit</p>
+          <p className={`text-2xl font-bold mt-1 tabular-nums ${overLimit > 0 ? 'text-rose-600' : 'text-[#1a1208]'}`}>{overLimit}</p>
+        </div>
+        <div className="rounded-2xl border border-[#e8e0d8] bg-white p-4">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">On credit hold</p>
+          <p className={`text-2xl font-bold mt-1 tabular-nums ${onHold > 0 ? 'text-amber-600' : 'text-[#1a1208]'}`}>{onHold}</p>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85]" />
+          <input value={q} onChange={e => setQ(e.target.value)}
+            placeholder="Search by company, contact, phone or GSTIN"
+            className="w-full pl-9 pr-3 py-2 rounded-2xl border border-[#e8e0d8] text-sm bg-white" />
+        </div>
+        <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
+          className="px-3 py-2 rounded-2xl border border-[#e8e0d8] text-sm bg-white">
+          <option value="">All types</option>
+          {Object.keys(ACCOUNT_TYPE_LABEL).map(k => <option key={k} value={k}>{ACCOUNT_TYPE_LABEL[k]}</option>)}
+        </select>
+        <button onClick={load} title="Refresh"
+          className="p-2 rounded-2xl border border-[#e8e0d8] bg-white text-[#6b5d52] hover:bg-[#faf7f2]"><RefreshCw size={14} /></button>
+      </div>
+
+      <div className="rounded-2xl border border-[#e8e0d8] bg-white overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#9c8e85]">
+            <tr>
+              <th className="px-4 py-3 text-left font-bold">Company</th>
+              <th className="px-4 py-3 text-left font-bold">Type</th>
+              <th className="px-4 py-3 text-right font-bold">Outstanding</th>
+              <th className="px-4 py-3 text-right font-bold">Credit limit</th>
+              <th className="px-4 py-3 text-left font-bold">Terms</th>
+              <th className="px-4 py-3 text-left font-bold">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">Loading…</td></tr>
+            ) : rows.length === 0 ? (
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">
+                {q || typeFilter ? 'No account matches that search.' : 'No company accounts yet. Add the companies you invoice on terms.'}
+              </td></tr>
+            ) : rows.map(a => (
+              <tr key={a.id} onClick={() => setOpenId(a.id)}
+                className="border-t border-[#f0e8d8] hover:bg-[#faf7f2] cursor-pointer">
+                <td className="px-4 py-3">
+                  <span className="font-semibold text-[#1a1208]">{a.name}</span>
+                  {a.contact_person && <span className="block text-xs text-[#9c8e85]">{a.contact_person}{a.phone ? ` · ${a.phone}` : ''}</span>}
+                </td>
+                <td className="px-4 py-3 text-[#6b5d52]">{ACCOUNT_TYPE_LABEL[a.type] || a.type}</td>
+                <td className={`px-4 py-3 text-right tabular-nums font-semibold ${a.over_limit ? 'text-rose-600' : 'text-[#1a1208]'}`}>{inr(a.outstanding)}</td>
+                {/* A null limit is "not set", which is not the same as zero. */}
+                <td className="px-4 py-3 text-right tabular-nums text-[#6b5d52]">{a.credit_limit == null ? '—' : inr(a.credit_limit)}</td>
+                <td className="px-4 py-3 text-[#6b5d52]">{Number(a.payment_terms_days || 0)} days</td>
+                <td className="px-4 py-3">
+                  {String(a.credit_status || 'ACTIVE') === 'HOLD'
+                    ? <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold">On hold</span>
+                    : a.over_limit
+                      ? <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 text-[11px] font-bold">Over limit</span>
+                      : <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[11px] font-bold">OK</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {openId && (
+        <AccountDrawer restaurantId={restaurantId} token={token} accountId={openId}
+          onClose={() => setOpenId(null)}
+          onChanged={() => { load(); }} />
+      )}
+    </div>
+  );
+}
+
+// The account as an OBJECT rather than a row, opened over the list so the list
+// is never lost — the same shape as the stock ItemDrawer, for the same reason.
+function AccountDrawer({ restaurantId, token, accountId, onClose, onChanged }: {
+  restaurantId: string; token: string; accountId: string; onClose: () => void; onChanged: () => void;
+}) {
+  type ATab = 'OVERVIEW' | 'CONTACTS' | 'ACTIVITY' | 'STATEMENT';
+  const isNew = accountId === 'new';
+  const toast = useToast();
+  const [tab, setTab] = useState<ATab>('OVERVIEW');
+  const [acc, setAcc] = useState<any>(isNew
+    ? { name: '', type: 'CORPORATE', credit_status: 'ACTIVE', payment_terms_days: 30 }
+    : null);
+  const [statement, setStatement] = useState<any>(null);
+  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+
+  const reload = async () => {
+    if (isNew) return;
+    const r = await fetch(`/api/restaurant/${restaurantId}/accounts/${accountId}`, { headers: auth });
+    setAcc(r.ok ? await r.json() : null);
+  };
+  useEffect(() => { reload(); }, [accountId]);
+  useEffect(() => {
+    if (tab !== 'STATEMENT' || isNew) return;
+    fetch(`/api/restaurant/${restaurantId}/accounts/${accountId}/statement`, { headers: auth })
+      .then(r => r.ok ? r.json() : null).then(setStatement).catch(() => setStatement(null));
+  }, [tab, accountId]);
+
+  const save = async () => {
+    if (!String(acc?.name || '').trim()) { toast.error('Company name is required'); return; }
+    setSaving(true);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/accounts/${isNew ? 'new' : accountId}`, {
+        method: 'PUT', headers: auth, body: JSON.stringify(acc),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || 'Could not save');
+      toast.success(isNew ? 'Account created' : 'Account saved');
+      onChanged();
+      if (isNew) onClose(); else await reload();
+    } catch (e: any) { toast.error(e.message); } finally { setSaving(false); }
+  };
+
+  const addContact = async () => {
+    const name = window.prompt('Contact name');
+    if (!name || !name.trim()) return;
+    const designation = window.prompt('Role (optional)') || '';
+    const phone = window.prompt('Phone (optional)') || '';
+    setBusy(true);
+    try {
+      await fetch(`/api/restaurant/${restaurantId}/accounts/${accountId}/contacts`, {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ name: name.trim(), designation, phone, is_primary: (acc?.contacts || []).length === 0 ? 1 : 0 }),
+      });
+      await reload();
+    } finally { setBusy(false); }
+  };
+
+  const logInteraction = async () => {
+    const subject = window.prompt('What happened? (e.g. Chased October statement)');
+    if (!subject || !subject.trim()) return;
+    const followUp = window.prompt('Follow up on (YYYY-MM-DD, blank for none)') || '';
+    setBusy(true);
+    try {
+      await fetch(`/api/restaurant/${restaurantId}/accounts/${accountId}/interactions`, {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({
+          kind: 'NOTE', subject: subject.trim(),
+          follow_up_date: /^\d{4}-\d{2}-\d{2}$/.test(followUp) ? followUp : null,
+        }),
+      });
+      await reload();
+    } finally { setBusy(false); }
+  };
+
+  const TABS: { k: ATab; label: string }[] = [
+    { k: 'OVERVIEW', label: 'Overview' },
+    { k: 'CONTACTS', label: 'Contacts' },
+    { k: 'ACTIVITY', label: 'Activity' },
+    { k: 'STATEMENT', label: 'Statement' },
+  ];
+  const field = (k: string, v: any) => setAcc((p: any) => ({ ...(p || {}), [k]: v }));
+
+  return (
+    <div className="fixed inset-0 z-[70] flex justify-end bg-black/40" onClick={onClose}>
+      <div className="w-full max-w-2xl h-full bg-[#fdfbf8] shadow-2xl overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="sticky top-0 bg-[#fdfbf8] border-b border-[#cc5a16]/15 px-6 pt-5 pb-0 z-10">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-2xl font-bold font-serif text-[#0d0a07]">{isNew ? 'New company account' : (acc?.name || '…')}</h3>
+              {!isNew && acc && (
+                <p className="text-xs text-[#6b5d52] mt-0.5">
+                  {ACCOUNT_TYPE_LABEL[acc.type] || acc.type} · owes {inr(acc.outstanding)}
+                  {acc.credit_limit != null && ` of a ${inr(acc.credit_limit)} limit`}
+                  {String(acc.credit_status) === 'HOLD' && ' · ON CREDIT HOLD'}
+                </p>
+              )}
+            </div>
+            <button onClick={onClose} className="p-2 rounded-full hover:bg-[#0d0a07]/5"><X size={20} /></button>
+          </div>
+          <div className="flex gap-1 mt-4">
+            {TABS.map(t => (
+              <button key={t.k} onClick={() => setTab(t.k)} disabled={isNew && t.k !== 'OVERVIEW'}
+                className={`px-4 py-2 rounded-t-xl text-xs font-bold disabled:opacity-30 ${tab === t.k ? 'bg-[#cc5a16]/12 text-[#cc5a16]' : 'text-[#9c8e85] hover:bg-[#0d0a07]/5'}`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="px-6 py-5 space-y-4">
+          {!acc ? <p className="text-sm text-[#9c8e85]">Loading…</p> : (<>
+            {tab === 'OVERVIEW' && (
+              <div className="space-y-3">
+                {acc.over_limit && (
+                  <div className="flex items-start gap-2 rounded-2xl bg-rose-50 border border-rose-200 px-4 py-3 text-sm text-rose-800">
+                    <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                    <span>This company owes {inr(acc.outstanding)} against a limit of {inr(acc.credit_limit)}.</span>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {[
+                    ['name', 'Company name', 'text'], ['contact_person', 'Main contact', 'text'],
+                    ['phone', 'Phone', 'text'], ['email', 'Email', 'text'],
+                    ['gstin', 'GSTIN', 'text'], ['pan_number', 'PAN', 'text'],
+                  ].map(([k, label]) => (
+                    <label key={k} className="block">
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">{label}</span>
+                      <input value={acc[k] || ''} onChange={e => field(k, e.target.value)}
+                        className="w-full mt-1 px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm bg-white" />
+                    </label>
+                  ))}
+                  <label className="block">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Type</span>
+                    <select value={acc.type || 'CORPORATE'} onChange={e => field('type', e.target.value)}
+                      className="w-full mt-1 px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm bg-white">
+                      {Object.keys(ACCOUNT_TYPE_LABEL).map(k => <option key={k} value={k}>{ACCOUNT_TYPE_LABEL[k]}</option>)}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Payment terms (days)</span>
+                    <input type="number" value={acc.payment_terms_days ?? 30} onChange={e => field('payment_terms_days', e.target.value)}
+                      className="w-full mt-1 px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm bg-white" />
+                  </label>
+                  <label className="block">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Credit limit (blank = not set)</span>
+                    <input type="number" value={acc.credit_limit ?? ''} onChange={e => field('credit_limit', e.target.value === '' ? null : e.target.value)}
+                      className="w-full mt-1 px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm bg-white" />
+                  </label>
+                  <label className="block">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Credit status</span>
+                    <select value={acc.credit_status || 'ACTIVE'} onChange={e => field('credit_status', e.target.value)}
+                      className="w-full mt-1 px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm bg-white">
+                      <option value="ACTIVE">Active — may be sold to on credit</option>
+                      <option value="HOLD">On hold — take payment on the day</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="block">
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Billing address</span>
+                  <textarea value={acc.address || ''} onChange={e => field('address', e.target.value)} rows={2}
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm bg-white" />
+                </label>
+                <label className="block">
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Notes</span>
+                  <textarea value={acc.notes || ''} onChange={e => field('notes', e.target.value)} rows={2}
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-[#e8e0d8] text-sm bg-white" />
+                </label>
+                <button onClick={save} disabled={saving}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold disabled:opacity-50">
+                  <Save size={14} /> {saving ? 'Saving…' : isNew ? 'Create account' : 'Save changes'}
+                </button>
+              </div>
+            )}
+
+            {tab === 'CONTACTS' && (
+              <div className="space-y-3">
+                <button onClick={addContact} disabled={busy}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold disabled:opacity-50">
+                  <Plus size={14} /> Add contact
+                </button>
+                {(acc.contacts || []).length === 0 ? (
+                  <p className="text-sm text-[#9c8e85]">
+                    No contacts yet. A company that books events usually has several — the person who signs, the person who pays, the person on site.
+                  </p>
+                ) : (acc.contacts || []).map((c: any) => (
+                  <div key={c.id} className="rounded-2xl border border-[#e8e0d8] bg-white px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-[#1a1208]">{c.name}</span>
+                      {Number(c.is_primary) === 1 && <span className="px-2 py-0.5 rounded-full bg-[#cc5a16]/12 text-[#cc5a16] text-[10px] font-bold">Primary</span>}
+                    </div>
+                    <p className="text-xs text-[#6b5d52] mt-0.5">
+                      {[c.designation, c.phone, c.email].filter(Boolean).join(' · ') || 'No details'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {tab === 'ACTIVITY' && (
+              <div className="space-y-3">
+                <button onClick={logInteraction} disabled={busy}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold disabled:opacity-50">
+                  <Plus size={14} /> Log a note
+                </button>
+                {(acc.interactions || []).length === 0 ? (
+                  <p className="text-sm text-[#9c8e85]">Nothing logged yet. Calls, visits, quotes and chase notes go here.</p>
+                ) : (acc.interactions || []).map((it: any) => (
+                  <div key={it.id} className="rounded-2xl border border-[#e8e0d8] bg-white px-4 py-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-[#cc5a16]">{INTERACTION_LABEL[it.kind] || it.kind}</span>
+                      <span className="text-xs text-[#9c8e85]">
+                        {String(it.occurred_at || '').slice(0, 10)}{it.created_by_name ? ` · ${it.created_by_name}` : ''}
+                      </span>
+                    </div>
+                    {it.subject && <p className="text-sm font-semibold text-[#1a1208] mt-1">{it.subject}</p>}
+                    {it.body && <p className="text-sm text-[#6b5d52] mt-0.5">{it.body}</p>}
+                    {it.follow_up_date && (
+                      <p className="text-xs text-amber-700 mt-1 flex items-center gap-1">
+                        <Clock size={12} /> Follow up {String(it.follow_up_date).slice(0, 10)}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {tab === 'STATEMENT' && (
+              !statement ? <p className="text-sm text-[#9c8e85]">Loading…</p> : (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {[['Current', statement.ageing?.current], ['31–60 days', statement.ageing?.d30_60],
+                      ['61–90 days', statement.ageing?.d60_90], ['90+ days', statement.ageing?.d90_plus]].map(([l, v]: any) => (
+                      <div key={l} className="rounded-2xl border border-[#e8e0d8] bg-white p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{l}</p>
+                        <p className="text-lg font-bold text-[#1a1208] tabular-nums">{inr(v)}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-sm text-[#6b5d52]">Outstanding <strong className="text-[#1a1208]">{inr(statement.outstanding)}</strong></p>
+                  <div className="rounded-2xl border border-[#e8e0d8] bg-white overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#9c8e85]">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-bold">Invoice</th>
+                          <th className="px-3 py-2 text-left font-bold">Due</th>
+                          <th className="px-3 py-2 text-right font-bold">Due amt</th>
+                          <th className="px-3 py-2 text-right font-bold">Received</th>
+                          <th className="px-3 py-2 text-left font-bold">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(statement.invoices || []).length === 0 ? (
+                          <tr><td colSpan={5} className="px-3 py-6 text-center text-[#9c8e85]">Nothing invoiced to this company yet.</td></tr>
+                        ) : (statement.invoices || []).map((i: any) => (
+                          <tr key={i.id} className="border-t border-[#f0e8d8]">
+                            <td className="px-3 py-2 text-[#1a1208]">{i.invoice_number || i.id}</td>
+                            <td className="px-3 py-2 text-[#6b5d52]">{String(i.due_date || '').slice(0, 10) || '—'}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{inr(i.net_due)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums text-[#6b5d52]">{inr(i.net_received)}</td>
+                            <td className="px-3 py-2 text-[#6b5d52]">{i.status}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )
+            )}
+          </>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── ProcurementView ────────────────────────────────────────────────────────
 // Unified Procurement & Accounts Payable module.
 // Visible to ALL property types (HOTEL, RESTAURANT, BOTH).

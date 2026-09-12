@@ -297,6 +297,9 @@ export const pa: Record<string, string> = {
   // are unused elsewhere.
   'Receivables (AR)': 'ਪ੍ਰਾਪਤੀਆਂ (AR)',
   'Purchases & Payables (AP)': 'ਖਰੀਦ ਤੇ ਦੇਣਦਾਰੀਆਂ (AP)',
+  'Suppliers & Customers': 'ਸਪਲਾਇਰ ਤੇ ਗਾਹਕ',
+  'Suppliers & Purchasing': 'ਸਪਲਾਇਰ ਤੇ ਖਰੀਦ',
+  'Customers & Credit': 'ਗਾਹਕ ਤੇ ਉਧਾਰ',
   'Expenses': 'ਖਰਚੇ',
   'Payables Ageing': 'ਦੇਣਦਾਰੀ ਏਜਿੰਗ',
   'GST Summary': 'GST ਸਾਰ',
