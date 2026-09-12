@@ -5484,7 +5484,11 @@ async function _postFolioGl(
       lines.push(..._tenderGlLines(mdrF, p.payment_method, amt, `${p.payment_method || 'CASH'} ${folioId}`));
       lines.push({ account_code: arCode, account_name: arName, dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folioId}` });
     }
-    await _postGlEntries(db, restaurantId, journalRef, entryDate, opts.sourceType, folioId, lines, opts.postedBy || null);
+    // The folio decides the module: this same wrapper posts hotel settlement,
+    // EVENT_SETTLEMENT (4050) and spa settlement (4040). Without this the two
+    // modules with the least accounting coverage were also the only ones whose
+    // revenue journals carried no cost centre.
+    await _postGlEntries(db, restaurantId, journalRef, entryDate, opts.sourceType, folioId, lines, opts.postedBy || null, _folioCostModule(folio));
   } catch (e) {
     console.error(`[GL] _postFolioGl(${folioId}) failed:`, e);
   }
@@ -37523,12 +37527,21 @@ ${data.tenant.name}`;
       const f = from || new Date().toISOString().slice(0, 7) + '-01';
       const t = to   || new Date().toISOString().slice(0, 10);
 
-      const [hotelFolio, spaFolio, restaurantOrders, procurement, petty, payroll] = await Promise.all([
+      const [hotelFolio, spaFolio, eventFolio, restaurantOrders, procurement, petty, payroll] = await Promise.all([
         // Hotel folios settle with status='settled' (see server ~4301/37500/42831);
         // 'closed' is the SPA/table-session vocabulary. Filtering hotel on 'closed'
         // matched zero rows → Hotel Room Revenue always showed ₹0.
         db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        // Events & Convention — absent from this report until Sep 2026, which is
+        // why an owner running banquets saw revenue that was missing their
+        // largest line. Cash basis like its neighbours (settled folios), NOT the
+        // GL's accrual-at-invoice basis. Both statuses accepted because the
+        // settled/closed split has bitten this file before and a folio has one
+        // status, so it cannot double count. Room nights sold as part of an
+        // event are billed inside the event folio, so this does not overlap the
+        // hotel line above.
+        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
@@ -37538,12 +37551,13 @@ ${data.tenant.name}`;
       const round = (n: number) => Math.round(Number(n) * 100) / 100;
       const hotel_room_revenue  = round(Number((hotelFolio as any)?.val || 0));
       const spa_revenue         = round(Number((spaFolio as any)?.val || 0));
+      const event_revenue       = round(Number((eventFolio as any)?.val || 0));
       const restaurant_revenue  = round(Number((restaurantOrders as any)?.val || 0));
       const procurement_cost    = round(Number((procurement as any)?.val || 0));
       const expense_opex        = round(Number((petty as any)?.val || 0));
       const payroll_cost        = round(Number((payroll as any)?.val || 0));
 
-      const total_revenue = round(hotel_room_revenue + spa_revenue + restaurant_revenue);
+      const total_revenue = round(hotel_room_revenue + spa_revenue + event_revenue + restaurant_revenue);
       const total_cogs    = procurement_cost;
       const gross_profit  = round(total_revenue - total_cogs);
       const total_opex    = round(expense_opex + payroll_cost);
@@ -37551,7 +37565,7 @@ ${data.tenant.name}`;
 
       res.json({
         period: { from: f, to: t },
-        revenue: { hotel_room: hotel_room_revenue, spa: spa_revenue, restaurant: restaurant_revenue, total: total_revenue },
+        revenue: { hotel_room: hotel_room_revenue, spa: spa_revenue, events: event_revenue, restaurant: restaurant_revenue, total: total_revenue },
         cogs: { procurement: procurement_cost, total: total_cogs },
         gross_profit,
         opex: { expenses: expense_opex, payroll: payroll_cost, total: total_opex },
@@ -37568,10 +37582,16 @@ ${data.tenant.name}`;
       const f = from || new Date().toISOString().slice(0, 7) + '-01';
       const t = to   || new Date().toISOString().slice(0, 10);
 
-      const [hotelIn, spaIn, hotelRefund, restCash, procPaid, opexPaid, payrollPaid,
+      const [hotelIn, spaIn, eventIn, hotelRefund, restCash, procPaid, opexPaid, payrollPaid,
              dailyHotel, dailyRest, dailyProcOut, dailyOpex, dailyPayroll] = await Promise.all([
         db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND (fl.folio_kind IS NULL OR fl.folio_kind='HOTEL') AND DATE(fp.recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND fl.folio_kind='SPA' AND DATE(fp.recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        // Event receipts. Their ABSENCE was not merely an omission: the refund
+        // query below and the daily series further down carry no folio_kind
+        // filter, so an event refund already counted as cash OUT while the
+        // matching receipt was never counted as cash IN, and the chart
+        // contradicted its own headline. With this line the three agree.
+        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND fl.folio_kind='EVENT' AND DATE(fp.recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM folio_payments WHERE is_voided=0 AND payment_type='REFUND' AND DATE(recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM supplier_payments WHERE DATE(payment_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
@@ -37587,13 +37607,14 @@ ${data.tenant.name}`;
       const round = (n: number) => Math.round(Number(n) * 100) / 100;
       const hotel_collections = round(Number((hotelIn as any)?.val || 0));
       const spa_collections   = round(Number((spaIn as any)?.val || 0));
+      const event_collections = round(Number((eventIn as any)?.val || 0));
       const refunds_out       = round(Number((hotelRefund as any)?.val || 0));
       const restaurant_cash   = round(Number((restCash as any)?.val || 0));
       const procurement_paid  = round(Number((procPaid as any)?.val || 0));
       const opex_paid         = round(Number((opexPaid as any)?.val || 0));
       const payroll_paid      = round(Number((payrollPaid as any)?.val || 0));
 
-      const net_cash_in  = round(hotel_collections + spa_collections + restaurant_cash - refunds_out);
+      const net_cash_in  = round(hotel_collections + spa_collections + event_collections + restaurant_cash - refunds_out);
       const net_cash_out = round(procurement_paid + opex_paid + payroll_paid);
       const net_position = round(net_cash_in - net_cash_out);
 
@@ -37655,9 +37676,12 @@ ${data.tenant.name}`;
       const f = month + '-01';
       const t = month + '-31';
 
-      const [hotelGst, spaGst, restaurantGst, procItc] = await Promise.all([
+      const [hotelGst, spaGst, eventGst, restaurantGst, procItc] = await Promise.all([
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        // Banquet GST was missing entirely, so a property running events was
+        // under-declaring output tax on this sheet. Same basis as its neighbours.
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
       ]);
@@ -37665,16 +37689,17 @@ ${data.tenant.name}`;
       const round = (n: number) => Math.round(Number(n) * 100) / 100;
       const hotel_gst      = round(Number((hotelGst as any)?.val || 0));
       const spa_gst        = round(Number((spaGst as any)?.val || 0));
+      const event_gst      = round(Number((eventGst as any)?.val || 0));
       const restaurant_gst = round(Number((restaurantGst as any)?.val || 0));
       const procurement_itc = round(Number((procItc as any)?.val || 0));
 
-      const total_output  = round(hotel_gst + spa_gst + restaurant_gst);
+      const total_output  = round(hotel_gst + spa_gst + event_gst + restaurant_gst);
       const total_itc     = procurement_itc;
       const net_liability = round(total_output - total_itc);
 
       res.json({
         month,
-        output: { hotel: hotel_gst, spa: spa_gst, restaurant: restaurant_gst, total: total_output },
+        output: { hotel: hotel_gst, spa: spa_gst, events: event_gst, restaurant: restaurant_gst, total: total_output },
         itc: { procurement: procurement_itc, total: total_itc },
         net_liability,
       });
@@ -54991,8 +55016,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'accounts-nav-ar-label',
+    commit_marker: 'reports-events-coverage',
     code_features: [
+      'reports-events-coverage',           //FIX (accounting module-coverage audit, stage 1 of 4 — 12 Sep 2026). **Events & Convention was missing from every managerial report.** The `/reports/*` family was written module by module (orders for restaurant, `folio_kind='HOTEL'`, `folio_kind='SPA'`) before Events existed and was never extended — there was no `folio_kind='EVENT'` anywhere in the block — so the owner's three separate bug reports (P&L, Cash Flow, GST) were ONE omission repeated. A property running banquets read a P&L that left out its largest line. **Cash Flow was the worst case and not merely incomplete:** the INFLOW queries filtered to HOTEL and SPA while the REFUND query had no `folio_kind` filter at all, and neither did the daily series — so an event refund already counted as cash OUT while the matching receipt was never counted as cash IN, and the chart contradicted its own headline. Adding the event inflow makes all three consistent rather than needing a separate fix. **Basis:** every line in this family is cash-ish (hotel 'settled', restaurant orders PAID, spa 'closed'), so Events counts SETTLED event folios to match its neighbours — NOT the GL basis, which recognises event revenue at invoicing and is a different report by design. `status IN ('settled','closed')` defensively, because the settled/closed split is a documented landmine in this file and a folio has exactly one status so it cannot double count. **No double count with hotel** — verified on live data that account 4000 Room Revenue has no event-driven source_type, because rooms sold as part of an event are billed inside the event folio (4050), not as separate hotel folios. **Also fixes a gap in the cost-centre work from the day before, found while tracing this:** `_postFolioGl` posts EVENT_SETTLEMENT (4050) and spa settlement (4040) revenue and was never passed a cost centre, so the two modules with the least coverage were also the only ones whose revenue journals stayed untagged. Tests TC-RPT-MODULE-LINES (every module has a line AND the parts sum to the stated total — what breaks when a breakdown gains a line the total forgets) and TC-RPT-CASHFLOW-SYMMETRY (no module whose refunds are counted out while its receipts are not counted in). Deliberately NOT asserted: that the event figure is non-zero — these are cash-basis reports, so a tenant with invoiced-but-unpaid events legitimately shows zero and such a test would pass or fail on somebody's bookings rather than on the code. tsc + vite build clean.',
       'accounts-nav-ar-label',             //FIX (12 Sep 2026) — correcting a label from the nav regroup hours earlier. I renamed the RECEIVABLES tab to 'Receivables (AR)' assuming it was the accounts-receivable screen. It is NOT: the route behind it reads ONE table, `ota_commission_entries`, so it is an OTA/agent commission screen. Real customer AR — a corporate billed for an event, a company account for rooms, a spa package on credit — is not on it. Telling a user the product has an AR ledger it does not have is worse than the original name, so it is back to 'OTA & Agent Receivables'. Customer AR IS recorded (folio settlement posts to 1100 Accounts Receivable) and IS readable under Accounting & Reports -> Receivables & Payables -> Receivables Ageing; what is missing is an OPERATIONAL screen for it, which is a real gap and is reported rather than papered over with a label.',
       'accounts-nav-regroup',              //UX (Accounts navigation review, 12 Sep 2026). Regrouped and relabelled the Accounts menu to standard accounting terms. **NO tab id, route, endpoint or component changed** — ids are RBAC keys (permissions, `TAB_MODULE`, nav visibility all key off the exact string), so this is order and labels only and nothing a role could reach yesterday moved. **THE REAL FINDING: the sidebar and Ledger & Books looked like duplicates and are NOT.** They are different reports on different bases, shown under names that gave no clue which was which — `/reports/pnl` returns {revenue, cogs, gross_profit, opex, ebitda} (managerial, from source tables) while `/accounting/profit-loss` returns {total_revenue, total_expense, ...} (statutory, GL-derived); same for `/reports/cash-flow` vs `/accounting/cash-flow-gl`. They are ALLOWED to differ, so the fix was to NAME them, not delete one: the operational views are now 'P&L Snapshot' / 'Cash Flow Snapshot' and the statutory ones keep the formal names under Financial Statements. **Sidebar** reordered to how the work happens — Receivables (AR), Purchases & Payables (AP), Expenses, Payables Ageing, GST Summary, the two Snapshots, then Accounting & Reports. **Inside, 7 groups became 6:** 'Working Capital' was doing two unrelated jobs (bank/cash tools AND ageing reports) and split into Banking & Cash + Receivables & Payables; Cash Drawers and Cash Count moved out of 'Controls' (they are cash handling, not controls) to sit beside the Cash Book; one-tab 'Ownership' folded into Capital & Close. **Renames follow Tally Prime / Zoho Books / QuickBooks:** 'GL Ledger' -> General Ledger (it read as 'General Ledger Ledger'), 'Manual Entry' -> Journal Entry, 'GST Outstanding' -> GST Summary, AR/AP Aging -> Receivables/Payables Ageing using the SAME words as their sidebar counterparts so staff can see they are the same report. **Two regressions avoided:** (1) nav labels ARE the i18n keys (`tr(t.label)`), so every renamed label was added to hi.ts and pa.ts — without that a Hindi tenant silently reverts to English and no type check or smoke test notices; (2) `activeGroup` resolves the open tab by group MEMBERSHIP, so a labelled tab in no group becomes unreachable — a structural check confirms all 22 sub-tabs sit in exactly one of the 6 groups. tsc + vite build clean.',
       'gl-reports-by-module',              //FEATURE (option B, part 2 of 2 — 12 Sep 2026). **The GL-derived reports can now be read PER MODULE.** Part 1 made journals carry a cost centre; this spends it. Trial balance, P&L, Balance Sheet, GST Ledger, Cash Book, Cash Flow (GL) and Ledger & Books all take an optional `?module=`, and `&include_shared=1` folds in the property-wide costs — which is how a module P&L is normally read (the banquet side's own costs plus its share of what nobody splits). **Without the parameter every report runs the SAME SQL and returns the SAME rows as before**; this had to be additive on a live ledger. **THE INVARIANT THAT DICTATED THE SHAPE:** Cash Book and Cash Flow do not merely list rows, they assert `closing = opening + in − out` and that their buckets partition `closing − opening`. Filtering only the MOVEMENTS while leaving opening and closing property-wide would have made those reports state something false, so the clause is applied to the opening and closing balances too and the identity then holds WITHIN the module — the only reading of it that means anything. **Why a filtered trial balance still BALANCES:** a cost centre is journal-level (every line of a journal shares one — the only per-line setter is `_reverseJournal`, which copies the original's), so a filter can never cut a journal in half and leave a one-sided entry. TC-ACC-MODULE-FILTER asserts exactly that for all five modules, plus that a filtered view never exceeds the whole and that `include_shared` can only widen; it goes red the day someone sets a per-line centre that differs within a journal, which is precisely when someone needs to know. TC-ACC-MODULE-FILTER-REPORTS asserts all six report routes accept the filter without erroring — a 500 there would kill a report screen the moment an owner picked a module. **Two honest limits.** (1) Rows posted before part 1 have a NULL cost centre and are EXCLUDED by any filter: they belong to no known module and folding them into one would be an invention, not a report. A marker-guarded historical backfill is the remaining piece. (2) `/reports/cash-flow` (Reports → Cash Flow) is NOT ledger-derived at all — it reads `folio_payments`, `orders`, `supplier_payments`, `petty_cash` and `payroll_runs` directly — so a cost-centre filter cannot apply to it; `/accounting/cash-flow-gl` is the GL one and is filtered. tsc + vite build clean.',
