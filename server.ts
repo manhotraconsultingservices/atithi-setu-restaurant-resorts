@@ -29113,7 +29113,12 @@ ${data.tenant.name}`;
       if (!bk) return res.status(404).json({ error: "Booking not found" });
       const items = await db.query("SELECT * FROM event_booking_items WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
       const services = await db.query("SELECT * FROM event_booking_services WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
-      const rooms = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
+      // Every money query in this file excludes CANCELLED and FAILED rooms; this
+      // read returns them all, because the screen must still SHOW a room that
+      // failed to reserve. It now says so per row, so a reader cannot mistake
+      // "present in the list" for "being charged".
+      const rooms = (await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? ORDER BY created_at", [req.params.bid]))
+        .map((r: any) => ({ ...r, is_chargeable: !['CANCELLED', 'FAILED'].includes(String(r.status || '').toUpperCase()) }));
       const catering = await db.query("SELECT * FROM event_booking_catering WHERE booking_id = ? ORDER BY created_at", [req.params.bid]).catch(() => []);
       // Add-ons / supplements (append-only, added live during the event). Defensive
       // .catch so an older tenant schema without the table still returns the booking.
@@ -29954,10 +29959,18 @@ ${data.tenant.name}`;
     const ids: string[] = [];
     let lastError: string | null = null, lastStatus = 0;
     for (let i = 0; i < Math.max(1, count); i++) {
+      // DAY_USE_WHEN_SAME_DAY — a one-day event's rooms check in and out on the
+      // same date, and the hotel validator defaults to OVERNIGHT, which requires
+      // check-out to be strictly AFTER check-in. So adding rooms to a day event
+      // was refused with "Check-out date must be after the check-in date for
+      // overnight stays. Use the Day-Use option" — advice the caller had no way
+      // to follow, because this payload never sent a booking_type at all.
+      const ci = isoOf(line.check_in_date), co = isoOf(line.check_out_date);
       const payload = {
         room_type_id: line.room_type_id || null,
         guest_name: bk.customer_name, guest_phone: bk.customer_phone, guest_email: bk.customer_email,
-        check_in_date: isoOf(line.check_in_date), check_out_date: isoOf(line.check_out_date),
+        check_in_date: ci, check_out_date: co,
+        booking_type: ci === co ? 'DAY_USE' : 'OVERNIGHT',
         booking_source: 'EVENT', room_rate: Number(line.quoted_rate) || undefined,
         special_requests: `Event booking ${bk.id} — ${bk.customer_name}`,
       };
@@ -57208,8 +57221,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checklist-noise-at-source',
+    commit_marker: 'event-room-lines-honest',
     code_features: [
+      'event-room-lines-honest (reported: on a quotation, a hotel room that FAILED to book is still costed, there is no way to remove it, and a DAY event cannot take rooms at all). FOUR defects, three of them one screen. (1) FAILED ROOMS WERE COSTED ON SCREEN ONLY. Every money query on the server already excludes them - assembleEventQuoteLines, computeEventBill and the revenue scalar all read status NOT IN (CANCELLED,FAILED) - but GET /events/bookings/:bid returns the rooms UNFILTERED (correctly: the screen must still SHOW a room that failed) and EventViews summed (bk.rooms || []) with no filter into the Room Totals line. So the invoice was right and the SCREEN lied - staff read and quoted from a figure the customer would never be billed. The detail read now returns is_chargeable per row and the totals skip a row that is not chargeable; the row still renders, dimmed and labelled not charged, because a failed reservation is something staff must SEE. (2) NO WAY TO REMOVE ONE. DELETE /events/bookings/:bid/rooms/:rid has always existed and handles a FAILED row cleanly (no hotel_booking_id, so nothing to release) - the UI simply never rendered a control for it: removal was offered only for QUOTED (X) and BOOKED (minus), and a FAILED row got a blank spacer. It now gets the X. (3) A DAY EVENT COULD NOT TAKE ROOMS. reserveEventHotelRooms built its payload with NO booking_type, so the hotel validator defaulted to OVERNIGHT, which requires check-out strictly AFTER check-in - and a one-day event has check_in == check_out (checkOut falls back to end_date || event_date). The hotel refused with Use the Day-Use option, advice the caller could not follow because this path never sent a booking_type at all; the room line was then rolled back atomically and the user saw that message. The payload now sends DAY_USE when the two ISO dates match and OVERNIGHT otherwise - derived from the SAME isoOf outputs already being sent, so no date behaviour changed. (4) GENERATE QUOTATION stayed on offer once the event had started. A quotation is a pre-sale document; hidden for IN_PROGRESS / COMPLETED / CANCELLED, matching the gating already used for Cancel Invoice. Smoke: TC-EVT-ROOM-DAY-USE (a same-day event reserves a real room; an empty hotel SKIPS rather than passes, and the overnight wording is detected as the bug rather than as no inventory), TC-EVT-ROOM-FAILED-NOT-BILLED (asserted as an EXCLUSION: the total is read before the line, again while QUOTED where it must RISE - otherwise the line carries no money and the test proves nothing - and again after the reservation fails, where it must fall back), TC-EVT-ROOM-FAILED-REMOVABLE.',
       'checklist-noise-at-source: the cleaning board refilled because the product created work nobody asked for. runTenantScheduledChecklists raised a DAILY job for EVERY room and EVERY active venue every day with no check that anything happened there - four idle halls produced four dead jobs a day, which is how this tenant reached 433 open jobs. (1) Rooms now only get a daily when OCCUPIED or CLEANING (daily servicing of occupied rooms is the real practice; a vacant clean room needs nothing). Venues only when a non-cancelled booking covers today or yesterday - yesterday counts because the hall used last night is the one needing clearing this morning. (2) New _expireStaleChecklistJobs sweep in the 05:00 cron, BEFORE the raise, ages out open jobs whose due_date passed more than 7 days ago. TWO DELIBERATE RULES: blocks_release jobs are NEVER touched (closing one releases a facility nobody cleaned - the system would assert a physical untruth), and the status is EXPIRED not DONE (recording work as done when it was not is the worse lie). EXPIRED drops out of both the open worklist (status=OPEN) and the cleaning log (status IN DONE,OVERRIDDEN). LANDMINE: housekeeping_jobs.due_date is TEXT not DATE, so interval arithmetic throws a text-vs-timestamp operator error that the helper would have swallowed, expiring nothing forever; the cut-off is computed in JS and compared as an ISO string instead.',
       'avail-cleaning-gate-scope (reported: booking form says Not available - Hall has an open cleaning checklist from a prior event). THE SAME DEFECT AS event-confirm-no-checklist-gate, fixed on /confirm and MISSED on the endpoint the booking FORM actually calls. hasOpenHousekeepingJob is WHERE facility_id = ? AND status = OPEN AND blocks_release = 1 with NO DATE SCOPE, and the system template that fires after every event is itself blocks_release = 1 - so one post-event checklist nobody closed made the hall report Not available on EVERY date, forever. Emerald Hall on this tenant had 113 open jobs and was unsellable for any date. /events/venues/:vid/availability-check now scopes the cleaning gate to a booking that RUNS TODAY, exactly like the Hall Status board gate immediately beneath it (which already carried the right reasoning in a comment: a now state must not govern a future date). The useful half is kept - selling the hall for today still warns - and the permanent unsellability is gone. Also switched its todayIst to _istNowParts() so it cannot inherit the midnight-hour-24 bug. Smoke: TC-EVT-AVAIL-CLEANING-SCOPE completes a real event to raise a real blocks_release job, then asserts the hall is still sellable 120 days out.',
       'event-revise-actor-name: revised_by stored `req.user?.email || req.user?.id`, and this app mints ids as `user-<uuid>`, so a staff account with no email on the token recorded the raw user-c192c760-... - the same defect that once printed UUIDs in the cleaning log. Now hkActor(req): display name, then email, then a Title-Cased role. Caught by reading the stored row after driving the real UI, not by a test.',

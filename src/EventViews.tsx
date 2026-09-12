@@ -1756,12 +1756,20 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               const gstPct = Number(ln.gst_percent || 0);
               const base = Number(ln.line_total || 0);              // ex-GST rent (rate × qty × nights)
               const gstAmt = Math.round(base * gstPct) / 100;        // gstPct is a %, so /100
-              tBase += base; tGst += gstAmt;
+              // A room that could not be reserved, or was cancelled, is NOT
+              // charged — every money query on the server already excludes it.
+              // This total did not, so a failed reservation still inflated the
+              // room figure staff read and quoted from. The row stays visible
+              // (they need to know it failed); it just stops being counted.
+              const chargeable = ln.is_chargeable !== false
+                && !['FAILED', 'CANCELLED'].includes(String(ln.status || '').toUpperCase());
+              if (chargeable) { tBase += base; tGst += gstAmt; }
               const quotedEditable = editable && ln.status === 'QUOTED';
               const bookedEditable = editable && ln.status === 'BOOKED';
               return (
-                <div key={ln.ids[0]} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
-                  <span className="flex-1 min-w-0 truncate">{ln.room_type_snapshot} <span className="text-[#9d8b7e]">({dOnly(ln.check_in_date)} → {dOnly(ln.check_out_date)})</span> <Pill status={ln.status} /></span>
+                <div key={ln.ids[0]} className={`flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df] ${chargeable ? '' : 'opacity-60'}`}>
+                  <span className="flex-1 min-w-0 truncate">{ln.room_type_snapshot} <span className="text-[#9d8b7e]">({dOnly(ln.check_in_date)} → {dOnly(ln.check_out_date)})</span> <Pill status={ln.status} />
+                    {!chargeable && <span className="ml-1 text-[10px] text-[#9d8b7e]">not charged</span>}</span>
                   {quotedEditable
                     ? <input type="number" min={0} defaultValue={ln.quoted_rate} title="Base rate / night (ex-GST)" onBlur={e => updateRoom(ln.ids[0], { quoted_rate: Number(e.target.value) })} className="w-14 px-1 py-0.5 rounded border border-[#e8dccf] text-right tabular-nums" />
                     : <span className="w-14 text-right text-[#9d8b7e] tabular-nums" title="Base rate / night (ex-GST)">{money(ln.quoted_rate)}</span>}
@@ -1782,8 +1790,14 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
                     <span className="block text-[9px] text-[#9d8b7e]">@ {gstPct}%</span>
                   </span>
                   <span className="w-16 text-right font-semibold tabular-nums" title="Total incl. GST">{money(base + gstAmt)}</span>
-                  {quotedEditable
-                    ? <button onClick={() => removeRoom(ln.ids[0])}><X size={12} className="text-rose-500" /></button>
+                  {/* Removable when it is NOT a live reservation. A QUOTED line is
+                      a proposal; a FAILED or CANCELLED line is dead weight that
+                      previously had no remove control at all, so a room that
+                      failed to book could never be taken off the booking. A
+                      BOOKED row keeps its −/+ release controls instead. */}
+                  {editable && (quotedEditable || !chargeable)
+                    ? <button title={chargeable ? 'Remove this quoted room' : 'Remove this line — it was never reserved'}
+                        onClick={() => removeRoom(ln.ids[0])}><X size={12} className="text-rose-500" /></button>
                     : <span className="w-3.5 flex-none" aria-hidden />}
                 </div>
               );
@@ -1891,7 +1905,13 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       {/* Document actions — quotation / BEO / invoice / email (lifecycle status
           actions live in the Lifecycle bar at the top of the overview). */}
       <div className="flex flex-wrap gap-2 mt-1">
-        <button className={BTN_GHOST} disabled={busy} onClick={genQuote}><FileText size={13} />{t('events.bookings.generateQuote')}</button>
+        {/* A quotation is a pre-sale document. Once the event is under way or
+            over, the thing to produce is the invoice, and offering to quote for
+            work already delivered only invites someone to send the wrong
+            document. */}
+        {!['IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(String(bk.status || '').toUpperCase()) && (
+          <button className={BTN_GHOST} disabled={busy} onClick={genQuote}><FileText size={13} />{t('events.bookings.generateQuote')}</button>
+        )}
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/beo.pdf`, token)}><ClipboardList size={13} />{t('events.bookings.beo')}</button>
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/invoice.pdf${gstQuery()}`, token)}><FileText size={13} />{t('events.bookings.invoice')}</button>
         <button className={BTN_GHOST} onClick={() => setEmailInvoice(true)}><Send size={13} />{t('events.bookings.emailInvoice')}</button>
