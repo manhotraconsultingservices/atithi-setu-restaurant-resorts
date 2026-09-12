@@ -19307,6 +19307,37 @@ ${data.tenant.name}`;
   // so the balance sheet shows what is held WHERE and the P&L shows what was
   // consumed WHERE, without anyone having to read a cost centre to find out.
   // SHARED rides with housekeeping: property-wide consumables are amenities.
+  // What one unit of an item is WORTH, as a SQL fragment correlated on `i.id`.
+  //
+  // Stock was previously valued at `default_unit_price` — a static list price
+  // typed on the item, not a cost derived from anything bought. Two consequences
+  // were visible on live data: an item received in two batches at Rs.150 and
+  // Rs.120 was carried at whatever its list price happened to say, and every
+  // item with no list price at all (the entire folded-in Hotel catalogue)
+  // valued at zero. The close posts that same figure to the inventory asset
+  // account, so the balance sheet inherited it.
+  //
+  // The cascade, best evidence first:
+  //   1. weighted-average cost of the OPEN batches — what the stock on the
+  //      shelf actually cost, which is the right answer when it is available
+  //   2. the most recent movement that carried a unit cost — covers items
+  //      received through paths that do not raise batches (the hotel stock
+  //      route records unit_cost on the movement)
+  //   3. the list price — the old behaviour, now the last resort
+  //   4. zero, so the expression is never NULL inside a SUM
+  //
+  // Written ONCE because the dashboard and the monthly close must agree; two
+  // copies of a valuation rule is how a report and the ledger drift apart.
+  const _INV_UNIT_COST_SQL = `COALESCE(
+    (SELECT SUM(b.remaining_qty * b.unit_cost) / NULLIF(SUM(b.remaining_qty), 0)
+       FROM stock_batches b
+      WHERE b.ingredient_id = i.id AND b.remaining_qty > 0 AND b.unit_cost IS NOT NULL),
+    (SELECT m.unit_cost FROM stock_movements m
+      WHERE m.ingredient_id = i.id AND COALESCE(m.unit_cost, 0) > 0
+      ORDER BY m.recorded_at DESC LIMIT 1),
+    i.default_unit_price,
+    0)`;
+
   const _INVENTORY_GL_ACCOUNTS: Record<string, { asset: string; assetName: string; expense: string; expenseName: string }> = {
     RESTAURANT: { asset: '1600', assetName: 'Inventory — F&B Stock', expense: '5000', expenseName: 'Cost of F&B Consumed' },
     HOTEL: { asset: '1610', assetName: 'Inventory — Housekeeping & Amenities', expense: '5200', expenseName: 'Housekeeping & Laundry Expenses' },
@@ -19332,7 +19363,7 @@ ${data.tenant.name}`;
     //   11 module
     // Anything reordered here silently produces a plausible, wrong statement.
     const rows: any[] = await db.query(
-      `SELECT i.id, i.name, i.unit, COALESCE(i.default_unit_price, 0) AS unit_price,
+      `SELECT i.id, i.name, i.unit, ${_INV_UNIT_COST_SQL} AS unit_price,
               COALESCE(SUM(CASE WHEN sm.recorded_at < ?::date THEN sm.qty_delta ELSE 0 END), 0) AS opening_qty,
               COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
                                  AND sm.movement_type IN ('GRN','RECEIVE') THEN sm.qty_delta ELSE 0 END), 0) AS purchases_qty,
@@ -23225,8 +23256,11 @@ ${data.tenant.name}`;
       // 1. KPIs
       // Stock value = sum(current_stock_qty × default_unit_price)
       const stockValueRow: any = await db.get(
-        `SELECT COALESCE(SUM(current_stock_qty * COALESCE(default_unit_price, 0)), 0) AS v
-           FROM ingredients WHERE is_active = 1${dmf2.sql}`, dmf2.params
+        // The cost fragment correlates on `i.id`, so the table needs an alias.
+        // Unqualified `is_active` / `module` still resolve - one table - so the
+        // module filter, which builds an unaliased clause, is unaffected.
+        `SELECT COALESCE(SUM(i.current_stock_qty * ${_INV_UNIT_COST_SQL}), 0) AS v
+           FROM ingredients i WHERE is_active = 1${dmf2.sql}`, dmf2.params
       );
       const belowReorderRow: any = await db.get(
         `SELECT COUNT(*) AS c FROM ingredients
@@ -23255,12 +23289,40 @@ ${data.tenant.name}`;
           WHERE sm.movement_type = 'CONSUMPTION'
             AND sm.recorded_at >= DATE_TRUNC('month', CURRENT_DATE)${dmfI.sql}`, dmfI.params
       );
-      const revenueRow: any = await db.get(
-        `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
+      // Revenue for THIS module. It used to be the tenant's restaurant orders
+      // with no filter at all, while every figure beside it was filtered — so
+      // Hotel, Spa and Events each displayed restaurant revenue as their own,
+      // identical to the rupee. Each module now reads its own sales:
+      //   RESTAURANT  → orders
+      //   HOTEL/SPA/EVENTS → settled folios of that kind, net of GST
+      //   no module / SHARED → the property, which is what no filter means
+      // The folio basis matches the /reports/* family, which already counts
+      // module revenue this way; net of GST because the numerator (consumption)
+      // carries no tax either, and a ratio must compare like with like.
+      const _MODULE_FOLIO_KIND: Record<string, string> = { HOTEL: 'HOTEL', SPA: 'SPA', EVENTS: 'EVENT' };
+      const _ordersRevSql = `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
           WHERE status != 'CANCELLED'
             AND deleted_at IS NULL  -- T1-L1: exclude soft-deleted invoices
-            AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`
-      );
+            AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`;
+      const _folioRevSql = (kindClause: string) => `SELECT COALESCE(SUM(grand_total - COALESCE(gst_amount, 0)), 0) AS v
+          FROM folios
+         WHERE status IN ('settled', 'closed')
+           AND settled_at >= DATE_TRUNC('month', CURRENT_DATE)${kindClause}`;
+      let revenueRow: any;
+      const _revKind = dmf2.module ? _MODULE_FOLIO_KIND[dmf2.module] : null;
+      if (_revKind) {
+        revenueRow = await db.get(_folioRevSql(' AND folio_kind = ?'), [_revKind]);
+      } else if (dmf2.module === 'RESTAURANT') {
+        revenueRow = await db.get(_ordersRevSql);
+      } else {
+        // Unfiltered, or SHARED, whose stock feeds every module: the honest
+        // denominator is the whole property, not one part of it.
+        const [ord, fol]: any[] = await Promise.all([
+          db.get(_ordersRevSql).catch(() => ({ v: 0 })),
+          db.get(_folioRevSql('')).catch(() => ({ v: 0 })),
+        ]);
+        revenueRow = { v: Number(ord?.v || 0) + Number(fol?.v || 0) };
+      }
       // Purchase orders carry their own module column, so this filters direct.
       const poMf = _invModuleFilter(req, 'module');
       const pendingPORow: any = await db.get(
@@ -23268,13 +23330,18 @@ ${data.tenant.name}`;
           WHERE status IN ('SENT', 'PARTIAL')${poMf.sql}`, poMf.params
       );
 
-      // Food cost is consumption over RESTAURANT revenue. Under a
-      // non-restaurant filter the numerator becomes that module's consumption
-      // while the denominator is still restaurant sales, which is not a ratio
-      // of anything - so it is withheld rather than shown as a confident wrong
-      // number.
-      const foodCostApplies = !dmf2.module || dmf2.module === 'RESTAURANT';
-      const foodCostPct = (foodCostApplies && Number(revenueRow.v) > 0)
+      // Consumption over that module's OWN revenue. This used to be withheld
+      // for every module but Restaurant, and rightly so: the numerator was the
+      // module's consumption while the denominator was restaurant sales, which
+      // is not a ratio of anything. Now that revenue is the module's own, the
+      // ratio is meaningful everywhere and is published everywhere.
+      //
+      // The key stays `food_cost_pct` because callers read it by name; for a
+      // hotel or a banquet it is a consumables-cost ratio, and the screen that
+      // shows it should say so.
+      // Still guarded on revenue > 0 — a module with no sales this month has no
+      // ratio, and 0 is the honest answer rather than a division by zero.
+      const foodCostPct = (Number(revenueRow.v) > 0)
         ? Math.round((Number(consumedValueRow.v) / Number(revenueRow.v)) * 1000) / 10
         : 0;
 
@@ -56914,8 +56981,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'page-width-parity',
+    commit_marker: 'inventory-valuation-at-cost',
     code_features: [
+      'inventory-valuation-at-cost + revenue-per-module (from the supply-chain review). (1) VALUATION: stock was valued at default_unit_price - a static list price typed on the item, not a cost derived from anything bought - in BOTH the dashboard and the monthly close, which posts that figure to the inventory asset account. Live data showed the damage: an item received in two batches at Rs.150 and Rs.120 carried at whatever its list price said, and the entire folded-in Hotel catalogue (21 items, zero list prices) valued at Rs.0. New _INV_UNIT_COST_SQL - written ONCE and shared, because two copies of a valuation rule is how a report and the ledger drift apart - cascades: weighted-average cost of OPEN batches, else the most recent movement carrying a unit cost (covers the hotel stock route, which records cost without raising a batch), else the list price, else 0. (2) REVENUE: the dashboard revenue query had NO module filter while every figure beside it was filtered, so Hotel, Spa and Events each displayed restaurant revenue as their own - identical to the rupee on live data. Now RESTAURANT reads orders, HOTEL/SPA/EVENTS read their own settled folios net of GST (the basis the /reports/* family already uses), and an unfiltered or SHARED request reads the whole property. Because the denominator is finally the module own, the consumption-cost ratio is published for all four modules instead of being withheld for three. Smoke: TC-INV-VALUATION-AT-COST, TC-INV-CLOSE-SAME-BASIS (asserts the close and the dashboard agree), TC-INV-REVENUE-PER-MODULE (four identical revenues IS the bug signature).',
       'page-width-parity (reported: Command Centre fills the screen, other nav pages leave white space). CONFIRMED and structural, not cosmetic: Command Centre renders straight into the page shell with no width constraint, while a few views wrapped THEMSELVES in p-4 md:p-6 max-w-7xl mx-auto - capping a table-dense page at 1280px, centring it, and adding a SECOND layer of padding on top of the shell own. Suppliers & Purchasing (ProcurementView) and the Staff Access matrix - a roles x tabs grid, the last thing that should be capped narrower than the screen - now fill the width like Command Centre. Page width and padding belong to the shell; a view that sets its own fights it. Settings FORMS (QR codes, Public Booking Page) deliberately KEEP a narrow column - a 2000px-wide text input is worse, not better - so this is not a blanket removal.',
       'credit-chase-date-fix: the chase list reported days_overdue NULL on every row. pg returns a DATE as a Date built from LOCAL components, so String(d).slice(0,10) yields "Fri Oct 24" and Date.parse of that is NaN. Now read through _pgYmd. THE SAME TRAP WAS ALREADY LIVE in the OTA outstanding report (/hotel/.../outstanding): it sliced the same way and then called new Date(dueDate), which resolves to the YEAR 2001 - so every overdue OTA invoice reported about nine thousand days overdue. Both fixed.',
       'credit-control-and-chasing (CRM stage 5): ONE helper _accountCreditCheck(db, accountId, addAmount) decides whether a company may be sold to on credit, so the booking warning, the gate at confirm and the chase list can never disagree. It judges the PROJECTED balance (outstanding + this transaction), not the current one - testing the current balance lets an account creep past its limit one booking at a time and only trip afterwards, which is too late. NULL limit still means not-set, not zero. THE GATE SITS AT /events/bookings/:bid/confirm and nowhere else: booking is too early (the job may still be paid cash on the day) and invoicing is far too late (the event has happened and must be billed whatever the balance says), so confirm - the moment the property commits to doing the work - is the only honest place to refuse. 409 with code ACCOUNT_ON_CREDIT_HOLD or ACCOUNT_OVER_CREDIT_LIMIT, overridable ONLY by owner/manager (a money decision, so NOT the housekeeping rule of anyone with Full access to the screen) and the override is audited as CREDIT_OVERRIDE. New GET /accounts/:id/credit-check so the UI can warn before anyone reaches a refusal, and GET /accounts/overdue - the chase list, grouped by company with days overdue, amount, who to ring and when they were last spoken to, ordered OLDEST FIRST because an invoice ignored for months is the one at risk, not the biggest one raised last week. Customers screen gains a Needs chasing view carrying that count on the tab. Smoke: TC-ACCOUNT-CREDIT-CHECK, TC-ACCOUNT-CREDIT-HOLD-BLOCKS, TC-ACCOUNT-OVERDUE, TC-EVT-CREDIT-GATE.',
