@@ -23942,18 +23942,28 @@ ${data.tenant.name}`;
       const params: any[] = [];
       if (ingredient_id) { conds.push("sb.ingredient_id = ?"); params.push(String(ingredient_id)); }
       if (!include_empty) conds.push("sb.remaining_qty > 0");
-      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      // This was the ONE inventory read with no module filter, so it handed
+      // every module's batches to whoever asked — a spa screen could list the
+      // kitchen's stock and what it cost. The ingredients join is already here,
+      // so the standard filter applies directly.
+      //
+      // `WHERE 1=1` rather than a conditional WHERE: the filter clause arrives
+      // pre-joined as " AND …", and its parameters go LAST because its clause
+      // is appended last — bind order is positional.
+      const bmf = _invModuleFilter(req, 'i.module');
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : 'WHERE 1=1';
       const rows: any[] = await db.query(
-        `SELECT sb.*, i.name AS ingredient_name, s.name AS supplier_name
+        `SELECT sb.*, i.name AS ingredient_name, s.name AS supplier_name,
+                COALESCE(i.module, 'RESTAURANT') AS module
            FROM stock_batches sb
            LEFT JOIN ingredients i ON i.id = sb.ingredient_id
            LEFT JOIN suppliers s ON s.id = sb.supplier_id
-           ${whereSql}
+           ${whereSql}${bmf.sql}
           ORDER BY
             CASE WHEN sb.expiry_date IS NOT NULL AND sb.expiry_date <= CURRENT_DATE + INTERVAL '7 days' THEN 0 ELSE 1 END,
             COALESCE(sb.expiry_date, '2099-12-31'::date) ASC,
             sb.received_at ASC`,
-        params
+        [...params, ...bmf.params]
       );
       res.json(rows.map(r => ({
         ...r,
@@ -56981,8 +56991,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'month-end-close-ui',
+    commit_marker: 'batches-scoped-abc-everywhere',
     code_features: [
+      'batches-scoped-abc-everywhere: (1) LEAK CLOSED - /inventory/batches was the ONE inventory read carrying no module filter, so it returned every module batches AND their unit costs to whoever asked; a spa screen could list the kitchen stock and what it cost. It already joined ingredients, so the standard _invModuleFilter applies directly; the response now also carries the module per row. (2) InventoryAnalyticsView takes a module (plus include_shared) and passes it to all of abc-analysis, expiring, dead-stock and batches. Without it those endpoints return the WHOLE property - so the kitchen ABC classification had been silently ranking hotel linen and spa oils against its own ingredients. The kitchen mount now declares module=RESTAURANT include_shared. (3) The same component is mounted on the shared module screen as an Analysis tab, so Hotel, Spa and Events can finally see ABC, open batches, expiry and dead stock - all of which the API had been computing per module all along with no way to reach it. A batch panel was added showing remaining qty, unit cost and expiry, which is also what the stock is now valued at. Smoke: TC-INV-BATCHES-SCOPED - and it asserts a module with NO batches gets FEWER rows than the unfiltered call, because every() on an empty array is true and a match-only assertion would pass while the leak stayed open.',
       'month-end-close-ui: the monthly inventory close posts to the ledger and locks manual stock writes, and it had NO screen for ANY module - it could only be run by calling the API. New InventoryMonthEnd component: month picker, full preview before committing (opening / purchases / closing / used / should-have-used / wastage / variance plus the line-by-line table with unit cost), close with an optional note, re-close, and reopen with a required reason. It shows the journal reference once posted, and the close history with reopen reasons. DELIBERATELY ONE COMPONENT MOUNTED TWICE: the Restaurant kitchen screen and the shared module screen are still two different components, and month end must not be something only three of the four modules can do - so it is a Month End tab on BOTH, and the kitchen keeps its own richer screen otherwise. Warns before closing a month that has not finished, because that refuses every manual stock entry for the rest of it. Warns when theoretical consumption is zero, because then the whole of consumption reads as variance and that figure is not meaningful until recipes exist. Also surfaces the consumption-vs-revenue ratio on the module Reports tab, which was withheld while the revenue denominator was wrong. Smoke: TC-INV-PERIODS-SCOPED asserts the period list is scoped to the module that asked, so one module cannot see or reopen another one months.',
       'inventory-valuation-at-cost + revenue-per-module (from the supply-chain review). (1) VALUATION: stock was valued at default_unit_price - a static list price typed on the item, not a cost derived from anything bought - in BOTH the dashboard and the monthly close, which posts that figure to the inventory asset account. Live data showed the damage: an item received in two batches at Rs.150 and Rs.120 carried at whatever its list price said, and the entire folded-in Hotel catalogue (21 items, zero list prices) valued at Rs.0. New _INV_UNIT_COST_SQL - written ONCE and shared, because two copies of a valuation rule is how a report and the ledger drift apart - cascades: weighted-average cost of OPEN batches, else the most recent movement carrying a unit cost (covers the hotel stock route, which records cost without raising a batch), else the list price, else 0. (2) REVENUE: the dashboard revenue query had NO module filter while every figure beside it was filtered, so Hotel, Spa and Events each displayed restaurant revenue as their own - identical to the rupee on live data. Now RESTAURANT reads orders, HOTEL/SPA/EVENTS read their own settled folios net of GST (the basis the /reports/* family already uses), and an unfiltered or SHARED request reads the whole property. Because the denominator is finally the module own, the consumption-cost ratio is published for all four modules instead of being withheld for three. Smoke: TC-INV-VALUATION-AT-COST, TC-INV-CLOSE-SAME-BASIS (asserts the close and the dashboard agree), TC-INV-REVENUE-PER-MODULE (four identical revenues IS the bug signature).',
       'page-width-parity (reported: Command Centre fills the screen, other nav pages leave white space). CONFIRMED and structural, not cosmetic: Command Centre renders straight into the page shell with no width constraint, while a few views wrapped THEMSELVES in p-4 md:p-6 max-w-7xl mx-auto - capping a table-dense page at 1280px, centring it, and adding a SECOND layer of padding on top of the shell own. Suppliers & Purchasing (ProcurementView) and the Staff Access matrix - a roles x tabs grid, the last thing that should be capped narrower than the screen - now fill the width like Command Centre. Page width and padding belong to the shell; a view that sets its own fights it. Settings FORMS (QR codes, Public Booking Page) deliberately KEEP a narrow column - a 2000px-wide text input is worse, not better - so this is not a blanket removal.',

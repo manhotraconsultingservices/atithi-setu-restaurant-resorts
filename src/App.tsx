@@ -19549,7 +19549,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
           {/* ── ANALYTICS sub-tab — ABC analysis · Expiry alert · Dead stock ── */}
           {inventorySubTab === 'ANALYTICS' && (
-            <InventoryAnalyticsView restaurantId={restaurantId} token={token!} />
+            <InventoryAnalyticsView restaurantId={restaurantId} token={token!} module="RESTAURANT" includeShared />
           )}
 
           {/* ── SETTINGS sub-tab — Seasonality · Notification Templates · Hotel Inventory · Storage Locations ── */}
@@ -48052,10 +48052,17 @@ function ChannelPnlReport({ restaurantId, token }: { restaurantId: string; token
 
 // ─── Restaurant Reports (separate line from Hotel — BCG review 11 Jun 2026) ──
 // ── Inventory Analytics (ABC · Expiry · Dead Stock) — used in Kitchen Inventory ANALYTICS sub-tab ──
-function InventoryAnalyticsView({ restaurantId, token }: { restaurantId: string; token: string }) {
+// `module` is optional only for callers that predate it. Every mount passes
+// one now: without it the endpoints return the WHOLE property, so the kitchen's
+// ABC classification silently ranked hotel linen and spa oils alongside its own
+// ingredients, and the other three modules could not see this screen at all.
+function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: {
+  restaurantId: string; token: string; module?: string; includeShared?: boolean;
+}) {
   const [abcData, setAbcData] = useState<any>(null);
   const [expiringData, setExpiringData] = useState<any>(null);
   const [deadStockData, setDeadStockData] = useState<any>(null);
+  const [batches, setBatches] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState<string[]>([]);
   const api = async (path: string) => {
@@ -48070,21 +48077,30 @@ function InventoryAnalyticsView({ restaurantId, token }: { restaurantId: string;
     // whole tab. A 500 on /inventory/expiring used to reject Promise.all, the
     // .catch swallowed it, and all three sections stayed null → "Analytics page is
     // blank" even though ABC + dead-stock loaded fine. Each section loads on its own.
-    Promise.allSettled([api('/inventory/abc-analysis'), api('/inventory/expiring?days=7'), api('/inventory/dead-stock?days=30')])
-      .then(([abc, exp, dead]) => {
+    const q = module ? `module=${encodeURIComponent(module)}${includeShared ? '&include_shared=1' : ''}` : '';
+    const amp = q ? `&${q}` : '';
+    const qs = q ? `?${q}` : '';
+    Promise.allSettled([
+      api(`/inventory/abc-analysis${qs}`),
+      api(`/inventory/expiring?days=7${amp}`),
+      api(`/inventory/dead-stock?days=30${amp}`),
+      api(`/inventory/batches${qs}`),
+    ])
+      .then(([abc, exp, dead, bat]: any[]) => {
         const failed: string[] = [];
         if (abc.status === 'fulfilled') setAbcData(abc.value); else failed.push('ABC analysis');
         if (exp.status === 'fulfilled') setExpiringData(exp.value); else failed.push('expiry alerts');
         if (dead.status === 'fulfilled') setDeadStockData(dead.value); else failed.push('dead stock');
+        if (bat.status === 'fulfilled') setBatches(Array.isArray(bat.value) ? bat.value : []); else failed.push('batches');
         setErrored(failed);
       })
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [restaurantId]);
+  }, [restaurantId, module, includeShared]);
 
   if (loading) return <div className="text-center py-16"><RefreshCw size={28} className="mx-auto animate-spin text-[#9c8e85]" /></div>;
 
-  const nothingLoaded = !abcData && !expiringData && !deadStockData;
+  const nothingLoaded = !abcData && !expiringData && !deadStockData && batches.length === 0;
 
   return (
     <div className="space-y-5">
@@ -48098,6 +48114,42 @@ function InventoryAnalyticsView({ restaurantId, token }: { restaurantId: string;
         <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-8 text-center">
           <p className="text-sm text-[#6b5d52] font-medium">No inventory analytics to display yet.</p>
           <p className="text-xs text-[#9c8e85] mt-1">Analytics build up from your inventory, purchase orders, goods receipts, wastage, and stock counts.</p>
+        </div>
+      )}
+      {batches.length > 0 && (
+        <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+          <h3 className="text-sm font-bold text-[#1a1208] mb-1">Open batches</h3>
+          <p className="text-xs text-[#9c8e85] mb-3">
+            What is on the shelf and what each lot cost. Stock is drawn oldest-first, and these costs
+            are what the stock is valued at.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-[10px] uppercase tracking-widest text-[#9c8e85]">
+                <tr>
+                  <th className="px-2 py-1.5 text-left font-bold">Item</th>
+                  <th className="px-2 py-1.5 text-left font-bold">Supplier</th>
+                  <th className="px-2 py-1.5 text-right font-bold">Remaining</th>
+                  <th className="px-2 py-1.5 text-right font-bold">Unit cost</th>
+                  <th className="px-2 py-1.5 text-left font-bold">Expires</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batches.slice(0, 50).map((b: any) => (
+                  <tr key={b.id} className="border-t border-[#f0e8d8]">
+                    <td className="px-2 py-1.5 text-[#1a1208]">{b.ingredient_name || b.ingredient_id}</td>
+                    <td className="px-2 py-1.5 text-[#6b5d52]">{b.supplier_name || '—'}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{Number(b.remaining_qty || 0)} {b.unit}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{b.unit_cost == null ? '—' : `Rs.${Number(b.unit_cost).toFixed(2)}`}</td>
+                    <td className="px-2 py-1.5 text-[#6b5d52]">{b.expiry_date ? String(b.expiry_date).slice(0, 10) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {batches.length > 50 && (
+            <p className="text-xs text-[#9c8e85] mt-2">Showing the 50 nearest expiry of {batches.length} open batches.</p>
+          )}
         </div>
       )}
       {expiringData && expiringData.count > 0 && (
@@ -57330,7 +57382,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   restaurantId: string; token: string; module: string; title: string; subtitle: string;
 }) {
   const toast = useToast();
-  type MTab = 'ITEMS' | 'LOW_STOCK' | 'PURCHASING' | 'MOVEMENTS' | 'COUNTS' | 'REPORTS' | 'MONTH_END';
+  type MTab = 'ITEMS' | 'LOW_STOCK' | 'PURCHASING' | 'MOVEMENTS' | 'COUNTS' | 'REPORTS' | 'ANALYTICS' | 'MONTH_END';
   const [tab, setTab] = useState<MTab>('ITEMS');
   const [items, setItems] = useState<any[]>([]);
   const [movements, setMovements] = useState<any[]>([]);
@@ -57503,6 +57555,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
     { k: 'MOVEMENTS', label: 'Usage Log' },
     { k: 'COUNTS', label: 'Stock Takes', count: counts.length },
     { k: 'REPORTS', label: 'Reports' },
+    { k: 'ANALYTICS', label: 'Analysis' },
     { k: 'MONTH_END', label: 'Month End' },
   ];
 
@@ -57650,6 +57703,11 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
             </>
           )}
         </div>
+      ) : tab === 'ANALYTICS' ? (
+        // The same component the kitchen uses, scoped to this module. ABC, open
+        // batches, expiry and dead stock were Restaurant-only in the interface
+        // even though the API had computed them per module all along.
+        <InventoryAnalyticsView restaurantId={restaurantId} token={token} module={module} includeShared />
       ) : tab === 'MONTH_END' ? (
         <InventoryMonthEnd restaurantId={restaurantId} token={token} module={module} />
       ) : tab === 'COUNTS' ? (
