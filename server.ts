@@ -5002,6 +5002,24 @@ const _glModuleFilter = (req: any, col = 'cost_centre'): { sql: string; params: 
   return { sql: ` AND ${col} = ?`, params: [mod], module: mod, includeShared: false };
 };
 
+// Resolve a period to a concrete window. `period=YYYY-MM` is the normal call —
+// a month — and explicit from/to exist for a part-month or a stock-take that
+// straddles one. The month form derives its own last day, so February and the
+// 31-day months are right without the caller counting.
+const _periodWindow = (period?: string, from?: string, to?: string): { from: string; to: string; key: string } => {
+  const p = String(period || '').trim();
+  if (/^\d{4}-\d{2}$/.test(p)) {
+    const [y, m] = p.split('-').map(Number);
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();   // day 0 of next month = last of this
+    return { from: `${p}-01`, to: `${p}-${String(last).padStart(2, '0')}`, key: p };
+  }
+  const f = String(from || '').trim(), t = String(to || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(f) && /^\d{4}-\d{2}-\d{2}$/.test(t)) {
+    return { from: f, to: t, key: f.slice(0, 7) };
+  }
+  return { from: '', to: '', key: '' };
+};
+
 // Optional module filter for any INVENTORY report. Mirrors _glModuleFilter, but
 // with one deliberate difference: a NULL module here is NOT "untagged, exclude".
 // `ingredients.module` was added after the fact with DEFAULT 'RESTAURANT', so a
@@ -19301,6 +19319,208 @@ ${data.tenant.name}`;
     } catch (err) {
       res.status(500).json({ error: "Failed to deactivate ingredient" });
     }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // MONTHLY INVENTORY CLOSE (phase C) — periodic control over perpetual stock
+  // ══════════════════════════════════════════════════════════════════════
+  // Perpetual tracking answers "what is on the shelf right now". It cannot
+  // answer "did we use what the recipes say we used", because it only ever sees
+  // what was recorded. The periodic view is the check on it:
+  //
+  //   opening + purchases + other-in - wastage - closing = ACTUAL consumption
+  //   CONSUMPTION movements (recipe explosions)          = THEORETICAL
+  //   the gap                                            = the problem
+  //
+  // A positive variance means more stock left the building than the recipes
+  // account for: over-portioning, spoilage nobody logged, or theft. That single
+  // number is the reason F&B operations count stock every month.
+  const _computeInventoryPeriod = async (
+    tenantId: string, mod: string, from: string, to: string,
+  ): Promise<any> => {
+    const db = await getTenantDb(tenantId);
+    const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+
+    // ONE pass over the ledger, bucketed by movement type. Every figure below
+    // comes from the same rows, so the components cannot disagree with the
+    // totals they add up to.
+    //
+    // BIND ORDER — the placeholders appear in this order in the statement and
+    // Postgres binds by position:
+    //   1 from (opening)   2 from, 3 to (purchases)   4 from, 5 to (other-in)
+    //   6 from, 7 to (wastage)   8 from, 9 to (theoretical)   10 to (closing)
+    //   11 module
+    // Anything reordered here silently produces a plausible, wrong statement.
+    const rows: any[] = await db.query(
+      `SELECT i.id, i.name, i.unit, COALESCE(i.default_unit_price, 0) AS unit_price,
+              COALESCE(SUM(CASE WHEN sm.recorded_at < ?::date THEN sm.qty_delta ELSE 0 END), 0) AS opening_qty,
+              COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
+                                 AND sm.movement_type IN ('GRN','RECEIVE') THEN sm.qty_delta ELSE 0 END), 0) AS purchases_qty,
+              COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
+                                 AND sm.movement_type IN ('MANUAL','ADJUST','COUNT_ADJUSTMENT','REVERSAL')
+                                 THEN sm.qty_delta ELSE 0 END), 0) AS other_in_qty,
+              COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
+                                 AND sm.movement_type = 'WASTAGE' THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS wastage_qty,
+              COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
+                                 AND sm.movement_type = 'CONSUMPTION' THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS theoretical_qty,
+              COALESCE(SUM(CASE WHEN sm.recorded_at < ?::date + INTERVAL '1 day' THEN sm.qty_delta ELSE 0 END), 0) AS closing_qty
+         FROM ingredients i
+         LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id
+        WHERE i.is_active = 1 AND COALESCE(i.module, 'RESTAURANT') = ?
+        GROUP BY i.id, i.name, i.unit, i.default_unit_price
+        ORDER BY i.name`,
+      [from, from, to, from, to, from, to, from, to, to, mod]
+    ).catch(() => [] as any[]);
+
+    const lines = (rows || []).map((r: any) => {
+      const opening = Number(r.opening_qty || 0);
+      const purchases = Number(r.purchases_qty || 0);
+      const otherIn = Number(r.other_in_qty || 0);
+      const wastage = Number(r.wastage_qty || 0);
+      const closing = Number(r.closing_qty || 0);
+      const theoretical = Number(r.theoretical_qty || 0);
+      const price = Number(r.unit_price || 0);
+      // What actually left the shelf for service, once stock known to have been
+      // thrown away or corrected is accounted for separately.
+      const actual = opening + purchases + otherIn - wastage - closing;
+      const variance = actual - theoretical;
+      return {
+        ingredient_id: r.id, ingredient_name: r.name, unit: r.unit, unit_price: price,
+        opening_qty: r2(opening), purchases_qty: r2(purchases), other_in_qty: r2(otherIn),
+        wastage_qty: r2(wastage), closing_qty: r2(closing),
+        actual_consumption_qty: r2(actual),
+        theoretical_consumption_qty: r2(theoretical),
+        variance_qty: r2(variance),
+        variance_value: r2(variance * price),
+        opening_value: r2(opening * price),
+        purchases_value: r2(purchases * price),
+        closing_value: r2(closing * price),
+        actual_consumption_value: r2(actual * price),
+        theoretical_consumption_value: r2(theoretical * price),
+        wastage_value: r2(wastage * price),
+      };
+    });
+
+    const sum = (k: string) => r2(lines.reduce((a: number, l: any) => a + Number(l[k] || 0), 0));
+    return {
+      module: mod, period: { from, to },
+      totals: {
+        opening_value: sum('opening_value'),
+        purchases_value: sum('purchases_value'),
+        closing_value: sum('closing_value'),
+        actual_consumption_value: sum('actual_consumption_value'),
+        theoretical_consumption_value: sum('theoretical_consumption_value'),
+        wastage_value: sum('wastage_value'),
+        variance_value: sum('variance_value'),
+      },
+      line_count: lines.length,
+      lines,
+    };
+  };
+
+  // Preview — compute WITHOUT writing anything. A close is a statement about a
+  // month; it should be looked at before it is made.
+  app.get("/api/restaurant/:id/inventory/periods/preview", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const mod = _normaliseCostModule(req.query.module, 'RESTAURANT');
+      const { from, to } = _periodWindow(req.query.period as any, req.query.from as any, req.query.to as any);
+      if (!from || !to) return res.status(400).json({ error: 'period (YYYY-MM) or from/to (YYYY-MM-DD) is required' });
+      res.json(await _computeInventoryPeriod(req.params.id, mod, from, to));
+    } catch (err: any) {
+      console.error('Inventory period preview error:', err);
+      res.status(500).json({ error: 'Failed to compute the period' });
+    }
+  });
+
+  // Close — compute and PERSIST, header plus every line.
+  app.post("/api/restaurant/:id/inventory/periods/close", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const mod = _normaliseCostModule(req.body?.module, 'RESTAURANT');
+      const { from, to, key } = _periodWindow(req.body?.period, req.body?.from, req.body?.to);
+      if (!from || !to) return res.status(400).json({ error: 'period (YYYY-MM) or from/to (YYYY-MM-DD) is required' });
+
+      const computed = await _computeInventoryPeriod(req.params.id, mod, from, to);
+      const t = computed.totals;
+
+      // Re-closing a month is a CORRECTION, not a second period: the same row is
+      // rewritten and its lines replaced, so history stays readable.
+      const prior: any = await db.get(
+        "SELECT id FROM inventory_periods WHERE module = ? AND period_key = ?", [mod, key]).catch(() => null);
+      const pid = prior?.id || `INVP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      if (prior) {
+        await db.run(
+          `UPDATE inventory_periods SET period_from=?, period_to=?, status='CLOSED', count_id=?,
+                 opening_value=?, purchases_value=?, closing_value=?, actual_consumption_value=?,
+                 theoretical_consumption_value=?, wastage_value=?, variance_value=?,
+                 notes=?, closed_by=?, closed_at=CURRENT_TIMESTAMP
+           WHERE id=?`,
+          [from, to, req.body?.count_id || null, t.opening_value, t.purchases_value, t.closing_value,
+           t.actual_consumption_value, t.theoretical_consumption_value, t.wastage_value, t.variance_value,
+           req.body?.notes || null, req.user?.id || null, pid]);
+        await db.run("DELETE FROM inventory_period_lines WHERE period_id = ?", [pid]);
+      } else {
+        await db.run(
+          `INSERT INTO inventory_periods
+            (id, module, period_key, period_from, period_to, status, count_id,
+             opening_value, purchases_value, closing_value, actual_consumption_value,
+             theoretical_consumption_value, wastage_value, variance_value, notes, closed_by)
+           VALUES (?, ?, ?, ?, ?, 'CLOSED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [pid, mod, key, from, to, req.body?.count_id || null,
+           t.opening_value, t.purchases_value, t.closing_value, t.actual_consumption_value,
+           t.theoretical_consumption_value, t.wastage_value, t.variance_value,
+           req.body?.notes || null, req.user?.id || null]);
+      }
+
+      for (const l of computed.lines) {
+        await db.run(
+          `INSERT INTO inventory_period_lines
+            (id, period_id, ingredient_id, ingredient_name, unit, unit_price,
+             opening_qty, purchases_qty, other_in_qty, wastage_qty, closing_qty,
+             actual_consumption_qty, theoretical_consumption_qty, variance_qty, variance_value)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [`${pid}-${String(l.ingredient_id).slice(-8)}`, pid, l.ingredient_id, l.ingredient_name, l.unit, l.unit_price,
+           l.opening_qty, l.purchases_qty, l.other_in_qty, l.wastage_qty, l.closing_qty,
+           l.actual_consumption_qty, l.theoretical_consumption_qty, l.variance_qty, l.variance_value]);
+      }
+
+      await writeObjectAudit(db, req, {
+        objectType: 'INVENTORY_PERIOD', objectId: pid,
+        action: prior ? 'RECLOSED' : 'CLOSED',
+        summary: `${mod} stock closed for ${key} — consumption Rs.${t.actual_consumption_value}, variance Rs.${t.variance_value}`,
+      }).catch(() => {});
+
+      res.json({ success: true, id: pid, module: mod, period_key: key, reclosed: !!prior, totals: t, line_count: computed.line_count });
+    } catch (err: any) {
+      console.error('Inventory period close error:', err);
+      res.status(500).json({ error: 'Failed to close the period' });
+    }
+  });
+
+  // History
+  app.get("/api/restaurant/:id/inventory/periods", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const pmf = _invModuleFilter(req, 'module');
+      const rows = await db.query(
+        `SELECT * FROM inventory_periods
+          WHERE 1=1${pmf.sql}
+          ORDER BY period_key DESC, module ASC LIMIT 200`, pmf.params).catch(() => []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: 'Failed to fetch periods' }); }
+  });
+
+  // One closed period, with the line-by-line evidence AS STORED.
+  app.get("/api/restaurant/:id/inventory/periods/:pid", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const period: any = await db.get("SELECT * FROM inventory_periods WHERE id = ?", [req.params.pid]);
+      if (!period) return res.status(404).json({ error: 'Period not found' });
+      const lines = await db.query(
+        "SELECT * FROM inventory_period_lines WHERE period_id = ? ORDER BY ABS(variance_value) DESC, ingredient_name",
+        [req.params.pid]).catch(() => []);
+      res.json({ ...period, lines });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to fetch the period' }); }
   });
 
   // ── Approved supplier list per item (stage 3) ───────────────────────────
@@ -55618,8 +55838,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-spa-events-parity',
+    commit_marker: 'inventory-monthly-close',
     code_features: [
+      'inventory-monthly-close',         //FEATURE (inventory gap review, phase C part 1 - the owner's FIRST complaint). The system tracked stock PERPETUALLY - a recipe fires on every order and depletes ingredients in real time - but had NO periodic half whatsoever: searching the codebase for opening stock, closing stock, an inventory period or theoretical consumption returned nothing at all. So it could never answer the one question F&B control runs on: **did we use what the recipes say we used?** New `inventory_periods` + `inventory_period_lines`, one period per module per month (the kitchen and the spa are counted by different people on different days), and `_computeInventoryPeriod` derives every figure from ONE bucketed pass over `stock_movements` so the components cannot disagree with the totals they add up to: opening (everything before the window), purchases (GRN/RECEIVE), other-in (MANUAL/ADJUST/COUNT_ADJUSTMENT/REVERSAL), wastage, closing (everything up to the end), and theoretical = the CONSUMPTION rows the recipe explosion writes. **actual = opening + purchases + other-in - wastage - closing; variance = actual - theoretical**, and a positive variance is stock that left the building without a recipe to account for it - over-portioning, unlogged spoilage, or theft. Lines are STORED at close rather than recomputed on demand, because a close is a statement about a moment and recomputing it later would silently restate a signed-off month as stock moves underneath it; re-closing rewrites the same row (a correction, not a second period). BIND ORDER is commented at the query: eleven placeholders in one statement, and Postgres binds by position - reorder them and you get a plausible, wrong statement rather than an error. TC-INV-PERIOD-CLOSE asserts the IDENTITY line by line rather than an HTTP status, because a report whose parts do not add up to its own totals is worse than no report. **STILL TO COME (phase C part 2): the GL posting.** 1600/1610 remain seeded-but-unposted, so stock is still absent from the balance sheet and COGS is still everything BOUGHT rather than what was USED.',
       'inventory-spa-events-parity',     //FEATURE (inventory gap review, phase B). Spa and Events now run the SAME inventory screen, and it gained the two things the owner reported missing from both: PURCHASING and REPORTING. **Spa was a read-only list** - the source literally described itself as a 'read-only view of SPA_PRODUCT / SPA_RETAIL ingredients' - so it could show stock and nothing else: no adding an item, no supplier, no purchasing, no usage trail, while the engine beneath it supported all four. It is now routed to `ModuleInventoryView` AHEAD of the spa group, so one component serves Spa and Events and neither can drift from the other; the old `SpaInventory` in SpaViews.tsx is left in place but is no longer reachable. **New Purchasing tab**: purchase orders filtered to the module, with the auto-PO drafts raised from par levels shown for review - those already existed but were only visible under Procurement, so nobody working the spa or the banquet side ever saw them - plus Raise PO through the shared POCreateModal, which now loads items by the PO's own module. **New Reports tab**: stock value, below-reorder, 30-day wastage and month-to-date consumption, plus not-moved-in-30-days and expiring-within-14-days, every one of them scoped by the `?module=` that phase A added. Food cost % is deliberately ABSENT here: it would divide this module's consumption by restaurant sales, which is not a ratio of anything. TC-INV-MODULE-SURFACES asserts both modules answer on all five endpoints the screen calls AND that every PO listed under a module actually belongs to it - a filter quietly returning everything would still answer 200.',
       'checklist-actor-names-everywhere', //FIX (completes `housekeeping-log-real-names`). The cleaning log was only ONE of four surfaces answering 'who did this'. The personal worklist (`/checklists/my`) and the manager Checklist Board (`/checklists/board`) both select `completed_by` AND each task's `done_by` and returned them raw, so the same uuids the log was fixed for were still on screen two clicks away. Both now run a new `_hkNameJobs`, which collects every id on the page - job-level and task-level - and resolves them in ONE pass via `_resolveActorNames` rather than per row, because these screens routinely carry 300-500 jobs with several tasks each. The two TASK-tick paths also stored the wrong thing: one used `hkActor` (which degrades to a ROLE) and the other `email || id` (a raw id for the many staff who sign in with a login id and no email); both now store `hkActorId`. So the identity is kept at every write and the name is resolved at every read. Legacy values that are not ids - including role strings like 'OWNER' - are shown exactly as recorded, because a role cannot be resolved backwards into the person who held it. TC-CHK-ACTOR-NAME sweeps ALL FOUR surfaces for anything still uuid-shaped and, critically, FAILS IF IT CHECKED NOTHING - an empty property would otherwise report a clean pass forever.',
       'housekeeping-log-real-names',    //BUGFIX (reported: the cleaning log shows `user-7db771f6-...` instead of a person). THREE layers were wrong. **(1) The write side stored a DISPLAY STRING, not an identity.** `hkActor(req)` renders userName -> email -> Title-Cased ROLE -> 'Staff', so the log filled with 'OWNER' and, for custom roles, 'CUSTOM CHK OVR FULL 710 MTYAKJE6'. A role is not a person and cannot answer 'who cleaned 302 on the 4th', which is the only question this log exists to answer - and unlike an id, a role can NEVER be turned back into the person who held it. New `hkActorId(req)` stores `req.user.id`; all FIVE completion paths use it (they previously used three different spellings). **(2) Two paths wrote a raw id directly** - `/checklists/my/jobs/:jid/complete` and the hotel check-in both did `req.user?.email || req.user?.id`, and most staff sign in with a login id and no email address, so the id got stamped in. That my-checklist route is the one housekeepers actually use, which is why it produced the majority of the unreadable rows. **(3) The read-side rescue never fired** because `HK_UUID_RE` required a BARE uuid while this app mints ids as `user-<uuid>` - so every real staff id sailed past the 'unknown id -> Staff' fallback and was printed verbatim. The prefix is now optional. Reads resolve through the same `_resolveActorNames` the stock ledger uses (tenant `attendance_staff`, then central `users`, batched), so **existing id rows become real names with no data migration**. A resolved name beats even the owner special-case, because the owner's actual name is more useful than the word 'Owner'. Legacy rows holding a role string are shown as recorded rather than replaced with a guess - they cannot be resolved backwards - and an id nobody answers to reads 'Former staff' instead of a uuid.',

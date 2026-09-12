@@ -1895,6 +1895,67 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // module rather than hiding history behind a filter that did not exist yet.
   await db.exec("ALTER TABLE physical_counts ADD COLUMN IF NOT EXISTS module TEXT").catch(() => {});
 
+  // ── Monthly inventory close (inventory remediation, phase C) ─────────────
+  // The system tracked stock PERPETUALLY — a recipe fires on every order and
+  // depletes ingredients in real time — but had no PERIODIC half at all: no
+  // opening stock, no closing stock, no period, and so no way to produce the
+  // one report F&B control actually runs on:
+  //
+  //     opening + purchases - closing = what was ACTUALLY used
+  //     versus what the recipes say SHOULD have been used
+  //
+  // The difference is over-portioning, theft or waste. Every input for it
+  // existed; nothing ever computed it.
+  //
+  // One period per module per month: the kitchen closes its own stock on its
+  // own count, and the spa closes its own, because they are counted by
+  // different people on different days.
+  await db.exec(`CREATE TABLE IF NOT EXISTS inventory_periods (
+    id TEXT PRIMARY KEY,
+    module TEXT NOT NULL,
+    period_key TEXT NOT NULL,
+    period_from DATE NOT NULL,
+    period_to DATE NOT NULL,
+    status TEXT NOT NULL DEFAULT 'CLOSED',
+    count_id TEXT,
+    opening_value DOUBLE PRECISION DEFAULT 0,
+    purchases_value DOUBLE PRECISION DEFAULT 0,
+    closing_value DOUBLE PRECISION DEFAULT 0,
+    actual_consumption_value DOUBLE PRECISION DEFAULT 0,
+    theoretical_consumption_value DOUBLE PRECISION DEFAULT 0,
+    wastage_value DOUBLE PRECISION DEFAULT 0,
+    variance_value DOUBLE PRECISION DEFAULT 0,
+    gl_journal_ref TEXT,
+    notes TEXT,
+    closed_by TEXT,
+    closed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  // One close per module per month. Closing twice is a correction, not a second
+  // period, so the pair is the identity and a re-close updates in place.
+  await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inv_period_key ON inventory_periods (module, period_key)`).catch(() => {});
+
+  // The line-by-line evidence. Stored rather than recomputed on demand because a
+  // close is a STATEMENT ABOUT A MOMENT: recomputing it later would silently
+  // restate a signed-off month as stock moves on underneath it.
+  await db.exec(`CREATE TABLE IF NOT EXISTS inventory_period_lines (
+    id TEXT PRIMARY KEY,
+    period_id TEXT NOT NULL,
+    ingredient_id TEXT NOT NULL,
+    ingredient_name TEXT,
+    unit TEXT,
+    unit_price DOUBLE PRECISION DEFAULT 0,
+    opening_qty DOUBLE PRECISION DEFAULT 0,
+    purchases_qty DOUBLE PRECISION DEFAULT 0,
+    other_in_qty DOUBLE PRECISION DEFAULT 0,
+    wastage_qty DOUBLE PRECISION DEFAULT 0,
+    closing_qty DOUBLE PRECISION DEFAULT 0,
+    actual_consumption_qty DOUBLE PRECISION DEFAULT 0,
+    theoretical_consumption_qty DOUBLE PRECISION DEFAULT 0,
+    variance_qty DOUBLE PRECISION DEFAULT 0,
+    variance_value DOUBLE PRECISION DEFAULT 0
+  )`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_inv_period_lines ON inventory_period_lines (period_id)`).catch(() => {});
+
   // The events booking list sorts on these two and now pages over them.
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_event_bookings_date ON event_bookings (event_date DESC, created_at DESC)`).catch(() => {});
 
