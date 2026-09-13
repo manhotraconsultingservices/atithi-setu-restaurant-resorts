@@ -3272,6 +3272,19 @@ async function _markVouchersAdjusted(db: any, rvIds: string[], folioId: string, 
     [dateIso, folioId, f?.invoice_number || null, ...rvIds]).catch((e: any) => console.error('[RV] mark adjusted failed:', e?.message || e));
 }
 
+// A hotel check-out posts its settlement journal — which adjusts the advance
+// vouchers — BEFORE it mints the invoice serial, so _markVouchersAdjusted found
+// no number and the voucher lost its link to the invoice. The serial allocator
+// calls this once the number exists. Only fills a blank: a voucher that already
+// names its invoice is never rewritten.
+async function _linkVouchersToInvoice(db: any, folioId: string, invoiceNumber: string): Promise<void> {
+  if (!folioId || !invoiceNumber) return;
+  await db.run(
+    `UPDATE receipt_vouchers SET adjusted_invoice_number = ?
+      WHERE adjusted_folio_id = ? AND status = 'ADJUSTED' AND adjusted_invoice_number IS NULL`,
+    [invoiceNumber, folioId]).catch((e: any) => console.error('[RV] invoice link failed:', e?.message || e));
+}
+
 async function _cancelVouchersForPayment(db: any, paymentId: string, dateIso: string, reason: string): Promise<void> {
   await db.run(
     "UPDATE receipt_vouchers SET status = 'CANCELLED', cancelled_at = ?, cancel_reason = ? WHERE payment_id = ? AND status = 'ISSUED'",
@@ -5589,6 +5602,432 @@ async function _postSupplierPaymentGl(
     ).catch((e: any) => console.error('[GL] tds ledger insert failed:', e?.message || e));
   }
   return { ok: r.ok, reason: r.ok ? undefined : r.reason, journal_ref: ref, tds_booked: tdsAmt, tds_rule_would_withhold: ruleAmt, tds_section: rule?.section || null };
+}
+
+// ══ M-2 — Input tax credit gating ═══════════════════════════════════════════
+// Three controls on the credit a purchase bill may claim, all read by the one
+// journal builder below so a create, an edit and a backfill can never disagree:
+//   • ELIGIBILITY — Section 17(5) blocks some credit outright, and a supply taxed
+//     at a rate notified WITHOUT credit (a restaurant at 5%) cannot take it on
+//     its inputs. A credit that may not be claimed is part of the cost of the
+//     purchase, so it is posted to the expense, never to ITC Receivable.
+//   • GSTR-2B — credit is claimable only once the supplier has reported the bill
+//     (Section 16(2)(aa)). The statement is matched against the books; it posts
+//     nothing.
+//   • RULE 37 — credit on a bill not paid within 180 days of its date is
+//     reversed in proportion to the unpaid part, held in 1340, and re-claimed as
+//     the supplier is paid.
+
+const _ITC_ELIGIBILITY = ['ELIGIBLE', 'BLOCKED_17_5', 'INELIGIBLE_NO_ITC_RATE', 'INELIGIBLE_NOT_REGISTERED'];
+const _ITC_ELIGIBILITY_LABEL: Record<string, string> = {
+  ELIGIBLE: 'Input tax credit claimed',
+  BLOCKED_17_5: 'Blocked credit — Section 17(5)',
+  INELIGIBLE_NO_ITC_RATE: 'Not claimable — the supply is taxed at a rate without input tax credit',
+  INELIGIBLE_NOT_REGISTERED: 'Not claimable — the property is not registered under GST',
+};
+const _ITC_BLOCK_REASONS: Record<string, string> = {
+  MOTOR_VEHICLE: 'Section 17(5)(a) — motor vehicles and other conveyances',
+  FOOD_BEVERAGE_CATERING: 'Section 17(5)(b)(i) — food and beverages, outdoor catering',
+  BEAUTY_HEALTH_COSMETIC: 'Section 17(5)(b)(i) — beauty treatment, health services, cosmetic and plastic surgery',
+  VEHICLE_HIRE_INSURANCE: 'Section 17(5)(b)(i) — leasing or hiring of motor vehicles, life and health insurance',
+  CLUB_FITNESS_MEMBERSHIP: 'Section 17(5)(b)(ii) — membership of a club, health or fitness centre',
+  EMPLOYEE_TRAVEL: 'Section 17(5)(b)(iii) — travel benefits to employees on vacation',
+  WORKS_CONTRACT_IMMOVABLE: 'Section 17(5)(c) — works contract for construction of immovable property',
+  CONSTRUCTION_OWN_ACCOUNT: 'Section 17(5)(d) — construction of immovable property on own account',
+  CSR: 'Section 17(5)(fa) — goods or services used for corporate social responsibility',
+  PERSONAL_CONSUMPTION: 'Section 17(5)(g) — personal consumption',
+  LOST_STOLEN_GIFT_SAMPLE: 'Section 17(5)(h) — lost, stolen, destroyed, written off, gifts or free samples',
+  OTHER: 'Section 17(5) — other blocked credit',
+};
+
+const _r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+
+/** State code of a GSTIN: its first two digits. Null when it is not a GSTIN. */
+function _gstinStateCode(g: any): string | null {
+  const m = String(g || '').trim().toUpperCase().match(/^(\d{2})[A-Z0-9]{13}$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * The ITC treatment of a supplier invoice being created or edited.
+ * Explicit values in the body win. On an edit, an absent value keeps what the
+ * bill already has — a new default is never applied to a bill after the fact.
+ * On a create, the defaults are the ones the law decides without anyone's
+ * judgement: an unregistered property claims nothing, and a restaurant taxed at
+ * 5% claims nothing on its inputs. Inter-state is read from the two GSTINs when
+ * nobody says otherwise.
+ */
+async function _resolveItcTreatment(
+  db: any, restaurantId: string, body: any, supplierId: string, module: string, existing: any | null,
+): Promise<{ fail?: { status: number; error: string; code: string }; eligibility: string; blockReason: string | null; isInterstate: number; basis: string }> {
+  const out = { eligibility: 'ELIGIBLE', blockReason: null as string | null, isInterstate: 0, basis: 'ELIGIBLE_DEFAULT' };
+  const bodyElig = body?.itc_eligibility != null && String(body.itc_eligibility).trim() !== '' ? String(body.itc_eligibility).trim().toUpperCase() : null;
+  if (bodyElig && !_ITC_ELIGIBILITY.includes(bodyElig)) {
+    return { ...out, fail: { status: 400, error: `itc_eligibility must be one of ${_ITC_ELIGIBILITY.join(', ')}`, code: 'ITC_ELIGIBILITY_INVALID' } };
+  }
+  if (bodyElig) { out.eligibility = bodyElig; out.basis = 'CHOSEN'; }
+  else if (existing) { out.eligibility = String(existing.itc_eligibility || 'ELIGIBLE').toUpperCase(); out.basis = 'UNCHANGED'; }
+  else {
+    const reg = await _tenantGstRegistration(restaurantId);
+    if (!reg.gstin) { out.eligibility = 'INELIGIBLE_NOT_REGISTERED'; out.basis = 'NOT_REGISTERED'; }
+    else if (_normaliseCostModule(module) === 'RESTAURANT') {
+      const r: any = await centralDb.get("SELECT gst_percentage, is_gst_enabled FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+      if (r && Number(r.is_gst_enabled || 0) === 1 && Number(r.gst_percentage) === 5) {
+        out.eligibility = 'INELIGIBLE_NO_ITC_RATE'; out.basis = 'RESTAURANT_RATE_5_WITHOUT_ITC';
+      }
+    }
+  }
+  if (out.eligibility === 'BLOCKED_17_5') {
+    const reason = body?.itc_block_reason != null && String(body.itc_block_reason).trim() !== ''
+      ? String(body.itc_block_reason).trim().toUpperCase() : (existing?.itc_block_reason || null);
+    if (!reason || !_ITC_BLOCK_REASONS[reason]) {
+      return { ...out, fail: { status: 400, error: `A blocked credit needs its Section 17(5) reason: one of ${Object.keys(_ITC_BLOCK_REASONS).join(', ')}`, code: 'ITC_BLOCK_REASON_REQUIRED' } };
+    }
+    out.blockReason = reason;
+  }
+  const flag = body?.is_interstate;
+  if (flag === true || flag === 1 || flag === '1' || String(body?.tax_type || '').toUpperCase() === 'IGST') out.isInterstate = 1;
+  else if (flag === false || flag === 0 || flag === '0') out.isInterstate = 0;
+  else if (existing && existing.is_interstate != null) out.isInterstate = Number(existing.is_interstate) === 1 ? 1 : 0;
+  else {
+    const sup: any = supplierId ? await db.get("SELECT gst_number FROM suppliers WHERE id = ?", [supplierId]).catch(() => null) : null;
+    const reg = await _tenantGstRegistration(restaurantId);
+    const a = _gstinStateCode(sup?.gst_number), b = _gstinStateCode(reg.gstin);
+    out.isInterstate = a && b && a !== b ? 1 : 0;
+  }
+  return out;
+}
+
+/** The journal a supplier invoice posts. One builder for create, edit and re-post. */
+function _supplierInvoiceGlLines(inv: any): GlLine[] {
+  const ref = inv.invoice_number || inv.id;
+  const sub = Number(inv.subtotal || 0), gst = Number(inv.gst_amount || 0), total = Number(inv.total_amount || 0);
+  const exp = _glAccountForSupplierInvoice(inv.module || '', inv.notes || '');
+  const elig = String(inv.itc_eligibility || 'ELIGIBLE').toUpperCase();
+  const lines: GlLine[] = [];
+  if (elig === 'ELIGIBLE' || !(gst > 0)) {
+    lines.push({ account_code: exp.code, account_name: exp.name, dr_amount: sub, cr_amount: 0, narration: `Invoice ${ref}` });
+    if (Number(inv.is_interstate) === 1) {
+      if (gst > 0) lines.push({ account_code: '1320', account_name: 'ITC Receivable — IGST', dr_amount: gst, cr_amount: 0, narration: `ITC IGST ${inv.id}` });
+    } else {
+      const cgst = +(gst / 2).toFixed(2);
+      const sgst = +(gst - cgst).toFixed(2);
+      if (cgst > 0) lines.push({ account_code: '1300', account_name: 'ITC Receivable — CGST', dr_amount: cgst, cr_amount: 0, narration: `ITC CGST ${inv.id}` });
+      if (sgst > 0) lines.push({ account_code: '1310', account_name: 'ITC Receivable — SGST', dr_amount: sgst, cr_amount: 0, narration: `ITC SGST ${inv.id}` });
+    }
+  } else {
+    const why = elig === 'BLOCKED_17_5' ? (_ITC_BLOCK_REASONS[String(inv.itc_block_reason || 'OTHER')] || 'Section 17(5)') : (_ITC_ELIGIBILITY_LABEL[elig] || elig);
+    lines.push({ account_code: exp.code, account_name: exp.name, dr_amount: +(sub + gst).toFixed(2), cr_amount: 0, narration: `Invoice ${ref} — GST ${gst.toFixed(2)} not claimable (${why})` });
+  }
+  lines.push({ account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: 0, cr_amount: total, narration: `AP invoice ${inv.id}` });
+  return lines;
+}
+
+/** Journals of a supplier invoice that still stand: posted, and not reversed. */
+async function _liveSupplierInvoiceJournals(db: any, restaurantId: string, invoiceId: string): Promise<{ ref: string; entry_date: string; cost_centre: string | null; lines: any[] }[]> {
+  const rows: any[] = await db.query(
+    `SELECT journal_ref, entry_date, account_code, dr_amount, cr_amount, cost_centre FROM gl_entries
+      WHERE restaurant_id = ? AND source_type = 'SUPPLIER_INVOICE' AND source_id = ? AND is_reversed = 0`,
+    [restaurantId, invoiceId]).catch(() => []);
+  const revs: any[] = await db.query(
+    `SELECT DISTINCT journal_ref FROM gl_entries WHERE restaurant_id = ? AND source_id = ? AND journal_ref LIKE 'REV-%'`,
+    [restaurantId, invoiceId]).catch(() => []);
+  const reversed = new Set((revs || []).map((r: any) => String(r.journal_ref).slice(4)));
+  const byRef = new Map<string, { ref: string; entry_date: string; cost_centre: string | null; lines: any[] }>();
+  for (const r of rows || []) {
+    const ref = String(r.journal_ref);
+    if (reversed.has(ref)) continue;
+    if (!byRef.has(ref)) byRef.set(ref, { ref, entry_date: _glPostDate(r.entry_date), cost_centre: r.cost_centre || null, lines: [] });
+    byRef.get(ref)!.lines.push(r);
+  }
+  return [...byRef.values()];
+}
+
+/** Net amount per account, as a comparable string. */
+function _glNetSignature(lines: any[]): string {
+  const net: Record<string, number> = {};
+  for (const l of lines || []) {
+    const k = String(l.account_code);
+    net[k] = _r2((net[k] || 0) + Number(l.dr_amount || 0) - Number(l.cr_amount || 0));
+  }
+  return Object.keys(net).filter(k => Math.abs(net[k]) >= 0.005).sort().map(k => `${k}:${net[k].toFixed(2)}`).join('|');
+}
+
+/** Whether the invoice's credit sits in IGST. Bills recorded before the column
+ *  existed answer from their own journal. */
+async function _invoiceIsInterstate(db: any, restaurantId: string, inv: any): Promise<boolean> {
+  if (inv.is_interstate != null) return Number(inv.is_interstate) === 1;
+  const live = await _liveSupplierInvoiceJournals(db, restaurantId, inv.id);
+  return live.some(j => j.lines.some((l: any) => String(l.account_code) === '1320' && Number(l.dr_amount || 0) > 0));
+}
+
+/**
+ * Re-post a supplier invoice's journal after an edit. Nothing moves when the
+ * journal would be the same. Otherwise the new journal is posted FIRST, dated
+ * on the invoice date, and only once it lands is each old one reversed on its
+ * own date — so a failed re-post never leaves the bill without a journal. The
+ * caller has already refused an edit that touches a closed period.
+ */
+async function _repostSupplierInvoiceGl(db: any, restaurantId: string, inv: any, postedBy: string | null): Promise<{ changed: boolean; journal_ref: string | null; reason?: string }> {
+  const live = await _liveSupplierInvoiceJournals(db, restaurantId, inv.id);
+  const newLines = _supplierInvoiceGlLines(inv);
+  const newDate = _glPostDate(inv.invoice_date_iso || inv.invoice_date);
+  const newCc = _normaliseCostModule(inv.module);
+  if (live.length === 1 && live[0].entry_date === newDate && (live[0].cost_centre || null) === newCc
+      && _glNetSignature(live[0].lines) === _glNetSignature(newLines)) {
+    return { changed: false, journal_ref: live[0].ref };
+  }
+  const ref = `SI-${inv.id}#${Date.now()}`;
+  const posted = await _postGlEntries(db, restaurantId, ref, newDate, 'SUPPLIER_INVOICE', inv.id, newLines, postedBy, newCc);
+  if (!posted.ok) return { changed: false, journal_ref: live[0]?.ref || null, reason: posted.reason };
+  for (const j of live) {
+    await _reverseJournal(db, restaurantId, j.ref, {
+      date: j.entry_date, sourceType: 'SUPPLIER_INVOICE_REVERSAL', sourceId: inv.id,
+      reason: 'Invoice edited — re-posted', postedBy,
+    });
+  }
+  return { changed: true, journal_ref: ref };
+}
+
+async function _ensureItcReversalAccount(db: any): Promise<void> {
+  // DML, never DDL, inside a request path.
+  await db.run(`INSERT INTO chart_of_accounts (code, name, type, display_order) VALUES ('1340', 'ITC Reversed — Rule 37 (reclaimable on payment)', 'ASSET', 86) ON CONFLICT (code) DO NOTHING`).catch(() => {});
+}
+
+/** Split a credit amount across the ITC accounts the invoice claimed it in. */
+function _itcSplitLines(amount: number, interstate: boolean, side: 'dr' | 'cr', narration: string): GlLine[] {
+  const a = _r2(amount);
+  if (interstate) return [{ account_code: '1320', account_name: 'ITC Receivable — IGST', dr_amount: side === 'dr' ? a : 0, cr_amount: side === 'cr' ? a : 0, narration }];
+  const c = +(a / 2).toFixed(2), s = +(a - c).toFixed(2);
+  return [
+    { account_code: '1300', account_name: 'ITC Receivable — CGST', dr_amount: side === 'dr' ? c : 0, cr_amount: side === 'cr' ? c : 0, narration },
+    { account_code: '1310', account_name: 'ITC Receivable — SGST', dr_amount: side === 'dr' ? s : 0, cr_amount: side === 'cr' ? s : 0, narration },
+  ].filter(l => l.dr_amount > 0 || l.cr_amount > 0);
+}
+
+/** Credit Rule 37 is holding back on this invoice right now. */
+const _r37Net = (inv: any) => _r2(Number(inv?.r37_reversed || 0) - Number(inv?.r37_reclaimed || 0));
+
+/** Credit Rule 37 should hold back at a given outstanding: the claimed credit in
+ *  proportion to the part of the bill still unpaid. Zero for a bill that
+ *  claimed no credit. */
+function _r37Target(inv: any, outstanding: number): number {
+  const elig = String(inv?.itc_eligibility || 'ELIGIBLE').toUpperCase();
+  const gst = Number(inv?.gst_amount || 0), total = Number(inv?.total_amount || 0);
+  if (elig !== 'ELIGIBLE' || !(gst > 0) || !(total > 0)) return 0;
+  return _r2(gst * Math.max(0, Math.min(total, Number(outstanding || 0))) / total);
+}
+
+/**
+ * After a payment, give back the Rule 37 credit that part of the bill no longer
+ * owes. Posted as R37C-<paymentId>, so deleting the payment reverses exactly it.
+ */
+async function _postRule37Reclaim(db: any, restaurantId: string, invoiceId: string, paymentId: string, payDate: string, postedBy: string | null): Promise<number> {
+  const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [invoiceId]).catch(() => null);
+  if (!inv) return 0;
+  const net = _r37Net(inv);
+  if (!(net > 0.005)) return 0;
+  const reclaim = _r2(net - _r37Target(inv, Number(inv.outstanding_amount || 0)));
+  if (!(reclaim > 0.005)) return 0;
+  await _ensureItcReversalAccount(db);
+  const interstate = await _invoiceIsInterstate(db, restaurantId, inv);
+  const narr = `Rule 37 credit re-claimed on payment — ${inv.invoice_number || inv.id}`;
+  const lines: GlLine[] = [
+    ..._itcSplitLines(reclaim, interstate, 'dr', narr),
+    { account_code: '1340', account_name: 'ITC Reversed — Rule 37 (reclaimable on payment)', dr_amount: 0, cr_amount: reclaim, narration: narr },
+  ];
+  const r = await _postGlEntries(db, restaurantId, `R37C-${paymentId}`, _glPostDate(payDate), 'ITC_RULE37_RECLAIM', inv.id, lines, postedBy, _normaliseCostModule(inv.module));
+  if (!r.ok) { console.error(`[R37] reclaim for payment ${paymentId} not posted: ${r.reason}`); return 0; }
+  await db.run("UPDATE supplier_invoices SET r37_reclaimed = COALESCE(r37_reclaimed,0) + ? WHERE id = ?", [reclaim, inv.id]);
+  await db.run("UPDATE supplier_payments SET r37_reclaimed = ? WHERE id = ?", [reclaim, paymentId]);
+  return reclaim;
+}
+
+/** A Rule 37 reversal for one invoice, dated `dateIso`. */
+async function _postRule37Reversal(db: any, restaurantId: string, inv: any, amount: number, dateIso: string, postedBy: string | null): Promise<{ ok: boolean; journal_ref: string; reason?: string }> {
+  await _ensureItcReversalAccount(db);
+  const cnt: any = await db.get(
+    "SELECT COUNT(DISTINCT journal_ref) AS c FROM gl_entries WHERE restaurant_id = ? AND source_type = 'ITC_RULE37_REVERSAL' AND source_id = ?",
+    [restaurantId, inv.id]).catch(() => ({ c: 0 }));
+  const ref = `R37-${inv.id}-${Number(cnt?.c || 0) + 1}`;
+  const interstate = await _invoiceIsInterstate(db, restaurantId, inv);
+  const narr = `Rule 37 — credit reversed, ${inv.invoice_number || inv.id} unpaid 180 days after its date`;
+  const lines: GlLine[] = [
+    { account_code: '1340', account_name: 'ITC Reversed — Rule 37 (reclaimable on payment)', dr_amount: _r2(amount), cr_amount: 0, narration: narr },
+    ..._itcSplitLines(amount, interstate, 'cr', narr),
+  ];
+  const r = await _postGlEntries(db, restaurantId, ref, dateIso, 'ITC_RULE37_REVERSAL', inv.id, lines, postedBy, _normaliseCostModule(inv.module));
+  if (!r.ok) return { ok: false, journal_ref: ref, reason: r.reason };
+  await db.run("UPDATE supplier_invoices SET r37_reversed = COALESCE(r37_reversed,0) + ? WHERE id = ?", [_r2(amount), inv.id]);
+  return { ok: true, journal_ref: ref };
+}
+
+// ── GSTR-2B statement parsing and matching ──────────────────────────────────
+// Field names follow the portal's GSTR-2B JSON: docdata.b2b[].inv[] and
+// docdata.cdnr[].nt[], with the tax at document level (txval, igst, cgst, sgst,
+// cess), dates as DD-MM-YYYY and the return period as MMYYYY. The portal file
+// and the API envelope nest `docdata` at different depths, so it is searched for.
+
+function _find2bDocdata(raw: any, depth = 0): { meta: any; docdata: any } | null {
+  if (!raw || typeof raw !== 'object' || depth > 4) return null;
+  if (raw.docdata && typeof raw.docdata === 'object') return { meta: raw, docdata: raw.docdata };
+  return _find2bDocdata(raw.data, depth + 1);
+}
+
+function _isoFromDmy(v: any): string | null {
+  const t = String(v || '').trim();
+  let m = t.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+/** Invoice numbers are written differently by the supplier and the purchaser:
+ *  "INV/001" and "inv-1" are the same bill. Upper-case, drop punctuation, and
+ *  drop zeros that only pad a number. */
+function _normDocNo(v: any): string {
+  return String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/(^|[A-Z])0+(?=\d)/g, '$1');
+}
+
+function _parseGstr2b(raw: any): { fail?: string; period: string; gstin: string | null; generated_on: string | null; lines: any[] } {
+  const found = _find2bDocdata(raw);
+  if (!found) return { fail: 'This is not a GSTR-2B file — no docdata section was found.', period: '', gstin: null, generated_on: null, lines: [] };
+  const rp = String(found.meta.rtnprd || '').trim();
+  const pm = rp.match(/^(\d{2})(\d{4})$/);
+  if (!pm) return { fail: 'The file carries no return period (rtnprd, MMYYYY).', period: '', gstin: null, generated_on: null, lines: [] };
+  const period = `${pm[2]}-${pm[1]}`;
+  const docTax = (d: any) => {
+    const items = Array.isArray(d.items) ? d.items : (Array.isArray(d.itms) ? d.itms : null);
+    const has = ['txval', 'igst', 'cgst', 'sgst', 'cess'].some(k => d[k] != null);
+    if (has || !items) return { taxable: _r2(d.txval), igst: _r2(d.igst), cgst: _r2(d.cgst), sgst: _r2(d.sgst), cess: _r2(d.cess) };
+    const sum = (k: string) => _r2(items.reduce((a: number, it: any) => a + Number(it?.[k] || 0), 0));
+    return { taxable: sum('txval'), igst: sum('igst'), cgst: sum('cgst'), sgst: sum('sgst'), cess: sum('cess') };
+  };
+  const lines: any[] = [];
+  const push = (section: string, sup: any, d: any, number: any, noteType: any) => {
+    lines.push({
+      section, supplier_gstin: String(sup.ctin || '').trim().toUpperCase() || null, supplier_name: sup.trdnm || null,
+      supplier_filed_on: _isoFromDmy(sup.supfildt), supplier_period: sup.supprd || null,
+      doc_number: number != null ? String(number) : null, doc_number_norm: _normDocNo(number),
+      doc_date: _isoFromDmy(d.dt), doc_type: d.typ || d.suptyp || null, note_type: noteType || null,
+      place_of_supply: d.pos || null, reverse_charge: d.rev || null,
+      itc_available: d.itcavl != null ? String(d.itcavl).toUpperCase() : null, itc_reason: d.rsn || null,
+      doc_value: _r2(d.val), ...docTax(d),
+    });
+  };
+  const dd = found.docdata;
+  for (const sup of Array.isArray(dd.b2b) ? dd.b2b : []) for (const d of Array.isArray(sup.inv) ? sup.inv : []) push('B2B', sup, d, d.inum, null);
+  for (const sup of Array.isArray(dd.b2ba) ? dd.b2ba : []) for (const d of Array.isArray(sup.inv) ? sup.inv : []) push('B2BA', sup, d, d.inum, null);
+  for (const sup of Array.isArray(dd.cdnr) ? dd.cdnr : []) for (const d of Array.isArray(sup.nt) ? sup.nt : []) push('CDNR', sup, d, d.ntnum, d.typ);
+  for (const sup of Array.isArray(dd.cdnra) ? dd.cdnra : []) for (const d of Array.isArray(sup.nt) ? sup.nt : []) push('CDNRA', sup, d, d.ntnum, d.typ);
+  return { period, gstin: found.meta.gstin ? String(found.meta.gstin).toUpperCase() : null, generated_on: found.meta.gendt || null, lines };
+}
+
+/**
+ * Match one imported statement against the purchase bills in the books and
+ * stamp the result on both sides. Re-runnable: the stamps this import made last
+ * time are cleared first, so fixing a bill and matching again gives a clean answer.
+ */
+async function _reconcileGstr2b(db: any, importId: string): Promise<any> {
+  const imp: any = await db.get("SELECT * FROM gstr2b_imports WHERE id = ?", [importId]);
+  if (!imp) return null;
+  const lines: any[] = await db.query("SELECT * FROM gstr2b_lines WHERE import_id = ? ORDER BY section, supplier_gstin, doc_date", [importId]);
+  await db.run("UPDATE supplier_invoices SET itc_2b_status = NULL, itc_2b_period = NULL, itc_2b_import_id = NULL WHERE itc_2b_import_id = ?", [importId]);
+  const books: any[] = await db.query(
+    `SELECT si.id, si.invoice_number, TO_CHAR(si.invoice_date,'YYYY-MM-DD') AS inv_date, si.gst_amount, si.total_amount,
+            si.itc_eligibility, si.itc_2b_import_id, s.gst_number, s.name AS supplier_name
+       FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id
+      WHERE COALESCE(si.gst_amount, 0) > 0`, []);
+  const gstinOf = (b: any) => String(b.gst_number || '').trim().toUpperCase();
+  const used = new Set<string>();
+  for (const b of books) if (b.itc_2b_import_id && b.itc_2b_import_id !== importId) used.add(b.id);
+  const knownGstins = new Set(books.map(gstinOf).filter(Boolean));
+  const supGstins: any[] = await db.query("SELECT DISTINCT UPPER(TRIM(gst_number)) AS g FROM suppliers WHERE COALESCE(gst_number,'') <> ''", []).catch(() => []);
+  for (const r of supGstins || []) knownGstins.add(String(r.g));
+  const dayDiff = (a: string, b: string) => Math.abs((new Date(a + 'T00:00:00Z').getTime() - new Date(b + 'T00:00:00Z').getTime()) / 86400000);
+
+  const counts: Record<string, number> = {};
+  let itc2bAvailable = 0, itc2bMatched = 0, itcNotInBooks = 0, itcValueDiffers = 0, notesCredit = 0, notesDebit = 0, itcNotAvailable = 0;
+  for (const ln of lines) {
+    const tax = _r2(Number(ln.igst || 0) + Number(ln.cgst || 0) + Number(ln.sgst || 0));
+    let status = '', matched: any = null, note = '';
+    if (ln.section === 'CDNR' || ln.section === 'CDNRA') {
+      status = 'NOTE';
+      note = `${String(ln.note_type).toUpperCase() === 'C' ? 'Credit' : 'Debit'} note from the supplier — record the adjustment against the bill; notes are not matched automatically.`;
+      if (String(ln.itc_available || 'Y') !== 'N') { if (String(ln.note_type).toUpperCase() === 'C') notesCredit += tax; else notesDebit += tax; }
+    } else {
+      if (String(ln.itc_available || 'Y') !== 'N') itc2bAvailable += tax;
+      const exact = books.find(b => !used.has(b.id) && gstinOf(b) === ln.supplier_gstin && _normDocNo(b.invoice_number) === ln.doc_number_norm && ln.doc_number_norm);
+      if (exact) {
+        matched = exact;
+        const diff = _r2(Math.abs(Number(exact.gst_amount || 0) - tax));
+        if (diff <= 1) {
+          status = exact.inv_date === ln.doc_date ? 'MATCHED' : 'DATE_DIFFERS';
+          note = status === 'MATCHED' ? '' : `Dated ${exact.inv_date} in the books, ${ln.doc_date} in GSTR-2B.`;
+        } else {
+          status = 'VALUE_DIFFERS';
+          note = `Tax ${Number(exact.gst_amount || 0).toFixed(2)} in the books, ${tax.toFixed(2)} in GSTR-2B.`;
+          itcValueDiffers += _r2(Number(exact.gst_amount || 0) - tax);
+        }
+      } else {
+        const probable = books.find(b => !used.has(b.id) && gstinOf(b) === ln.supplier_gstin && ln.doc_date && b.inv_date
+          && Math.abs(Number(b.gst_amount || 0) - tax) <= 1 && dayDiff(b.inv_date, ln.doc_date) <= 3);
+        if (probable) {
+          matched = probable; status = 'PROBABLE';
+          note = `Same supplier, tax and date, but numbered ${probable.invoice_number || '(no number)'} in the books and ${ln.doc_number} in GSTR-2B — confirm and correct the number.`;
+        } else {
+          status = 'NOT_IN_BOOKS';
+          note = ln.supplier_gstin && knownGstins.has(ln.supplier_gstin)
+            ? `No purchase bill ${ln.doc_number} from this supplier in the books.`
+            : `No supplier on file carries GSTIN ${ln.supplier_gstin || '—'}.`;
+          if (String(ln.itc_available || 'Y') !== 'N') itcNotInBooks += tax;
+        }
+      }
+      if (String(ln.itc_available || '').toUpperCase() === 'N') {
+        itcNotAvailable += tax;
+        note = `GSTR-2B shows this credit as NOT available${ln.itc_reason ? ` (${ln.itc_reason})` : ''}.${note ? ' ' + note : ''}`;
+        status = 'ITC_NOT_AVAILABLE';
+      } else if (matched && (status === 'MATCHED' || status === 'DATE_DIFFERS')) {
+        itc2bMatched += tax;
+      }
+      if (matched && String(matched.itc_eligibility || 'ELIGIBLE').toUpperCase() !== 'ELIGIBLE') {
+        note = `${note ? note + ' ' : ''}The books do not claim this credit (${_ITC_ELIGIBILITY_LABEL[String(matched.itc_eligibility).toUpperCase()] || matched.itc_eligibility}).`;
+      }
+      if (matched) {
+        used.add(matched.id);
+        await db.run("UPDATE supplier_invoices SET itc_2b_status = ?, itc_2b_period = ?, itc_2b_import_id = ? WHERE id = ?",
+          [status, imp.return_period, importId, matched.id]);
+      }
+    }
+    counts[status] = (counts[status] || 0) + 1;
+    await db.run("UPDATE gstr2b_lines SET match_status = ?, matched_invoice_id = ?, match_note = ? WHERE id = ?",
+      [status, matched ? matched.id : null, note || null, ln.id]);
+  }
+  // Credit in the books the supplier has not reported. Section 16(2)(aa): not
+  // claimable until it appears in GSTR-2B. From the start of the return
+  // period's financial year to the end of the period, claimed, and matched by
+  // no statement.
+  const [py, pmo] = String(imp.return_period).split('-').map(Number);
+  const fyStart = `${pmo >= 4 ? py : py - 1}-04-01`;
+  const periodEnd = new Date(Date.UTC(py, pmo, 0)).toISOString().slice(0, 10);
+  const notIn2b: any[] = await db.query(
+    `SELECT si.id, si.invoice_number, TO_CHAR(si.invoice_date,'YYYY-MM-DD') AS invoice_date, si.gst_amount, si.module,
+            s.name AS supplier_name, s.gst_number AS supplier_gstin
+       FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id
+      WHERE COALESCE(si.gst_amount,0) > 0 AND COALESCE(si.itc_eligibility,'ELIGIBLE') = 'ELIGIBLE'
+        AND si.itc_2b_import_id IS NULL
+        AND TO_CHAR(si.invoice_date,'YYYY-MM-DD') BETWEEN ? AND ?
+      ORDER BY si.invoice_date`, [fyStart, periodEnd]).catch(() => []);
+  const summary = {
+    return_period: imp.return_period, lines: lines.length, counts,
+    itc_in_2b_available: _r2(itc2bAvailable), itc_matched: _r2(itc2bMatched),
+    itc_value_differs_books_minus_2b: _r2(itcValueDiffers), itc_in_2b_not_in_books: _r2(itcNotInBooks),
+    itc_marked_not_available: _r2(itcNotAvailable),
+    supplier_credit_notes_tax: _r2(notesCredit), supplier_debit_notes_tax: _r2(notesDebit),
+    books_not_in_2b: { from: fyStart, to: periodEnd, count: (notIn2b || []).length, itc: _r2((notIn2b || []).reduce((a: number, r: any) => a + Number(r.gst_amount || 0), 0)) },
+  };
+  await db.run("UPDATE gstr2b_imports SET summary_json = ?, reconciled_at = CURRENT_TIMESTAMP WHERE id = ?", [JSON.stringify(summary), importId]);
+  return { summary, books_not_in_2b: notIn2b || [] };
 }
 
 function _glCurrentQuarter(): string {
@@ -25227,40 +25666,35 @@ ${data.tenant.name}`;
         if (poRow?.module) invModule = _normaliseCostModule(poRow.module);
       }
       if (!invModule) invModule = 'RESTAURANT';
+      // M-2 — whether this bill's GST may be claimed, and whether it is IGST.
+      const itc = await _resolveItcTreatment(db, req.params.id, req.body, supplier_id, invModule, null);
+      if (itc.fail) return res.status(itc.fail.status).json({ error: itc.fail.error, code: itc.fail.code });
       await db.run(
         `INSERT INTO supplier_invoices
           (id, supplier_id, invoice_number, invoice_date, due_date, po_id, grn_id, module,
-           subtotal, gst_amount, total_amount, paid_amount, outstanding_amount, status, notes, created_by)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,'UNPAID',?,?)`,
+           subtotal, gst_amount, total_amount, paid_amount, outstanding_amount, status, notes, created_by,
+           itc_eligibility, itc_block_reason, is_interstate)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,'UNPAID',?,?,?,?,?)`,
         [id, supplier_id, invoice_number || null, invoice_date || new Date().toISOString().slice(0,10),
          due_date || null, po_id || null, grn_id || null, invModule,
-         sub, gst, total, outstanding, notes || null, (req as any).user?.email || (req as any).user?.id]
+         sub, gst, total, outstanding, notes || null, (req as any).user?.email || (req as any).user?.id,
+         itc.eligibility, itc.blockReason, itc.isInterstate]
       );
-      // GL: Dr Expense + ITC Receivable, Cr Accounts Payable
+      // GL: Dr Expense + ITC Receivable, Cr Accounts Payable — or, where the credit
+      // may not be claimed, Dr Expense including that GST. Built by the same
+      // _supplierInvoiceGlLines an edit re-posts with, from the stored module.
+      let glJournalRef: string | null = null;
       try {
-        const expAcct = _glAccountForSupplierInvoice(module || '', notes || '');
         const invDate = (invoice_date || new Date().toISOString().slice(0, 10)) as string;
-        // H2 — inter-state purchases claim ITC as IGST (1320), not CGST/SGST.
-        // Interstate when the caller flags it, or when a place_of_supply/supplier
-        // state differs from the tenant state (frontend-supplied). Default = intra.
-        const isInterstate = req.body?.is_interstate === true
-          || String(req.body?.tax_type || '').toUpperCase() === 'IGST';
-        const glLines: GlLine[] = [
-          { account_code: expAcct.code, account_name: expAcct.name, dr_amount: Number(sub), cr_amount: 0, narration: `Invoice ${invoice_number || id}` },
-        ];
-        if (isInterstate) {
-          if (Number(gst) > 0) glLines.push({ account_code: '1320', account_name: 'ITC Receivable — IGST', dr_amount: Number(gst), cr_amount: 0, narration: `ITC IGST ${id}` });
-        } else {
-          const cgst = +(Number(gst) / 2).toFixed(2);
-          const sgst = +(Number(gst) - cgst).toFixed(2);
-          if (cgst > 0) glLines.push({ account_code: '1300', account_name: 'ITC Receivable — CGST', dr_amount: cgst, cr_amount: 0, narration: `ITC CGST ${id}` });
-          if (sgst > 0) glLines.push({ account_code: '1310', account_name: 'ITC Receivable — SGST', dr_amount: sgst, cr_amount: 0, narration: `ITC SGST ${id}` });
-        }
-        glLines.push({ account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: 0, cr_amount: Number(total), narration: `AP invoice ${id}` });
-        await _postGlEntries(db, req.params.id, `SI-${id}`, invDate as string, 'SUPPLIER_INVOICE', id, glLines, (req as any).user?.email || (req as any).user?.id, _normaliseCostModule(module));
+        const glLines = _supplierInvoiceGlLines({
+          id, invoice_number, subtotal: sub, gst_amount: gst, total_amount: total, module: invModule, notes: notes || '',
+          itc_eligibility: itc.eligibility, itc_block_reason: itc.blockReason, is_interstate: itc.isInterstate,
+        });
+        const gp = await _postGlEntries(db, req.params.id, `SI-${id}`, invDate as string, 'SUPPLIER_INVOICE', id, glLines, (req as any).user?.email || (req as any).user?.id, _normaliseCostModule(invModule));
+        if (gp.ok) glJournalRef = `SI-${id}`;
       } catch (glErr) { console.error('[GL] supplier invoice error:', glErr); }
       const created: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [id]);
-      res.status(201).json(created);
+      res.status(201).json({ ...created, gl_journal_ref: glJournalRef, itc_basis: itc.basis });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to create invoice" });
     }
@@ -25279,6 +25713,51 @@ ${data.tenant.name}`;
       if (newTotal < inv.paid_amount - 0.01) return res.status(400).json({ error: `Cannot reduce total to ₹${newTotal} — already paid ₹${inv.paid_amount}` });
       const newOutstanding = Math.max(0, newTotal - inv.paid_amount);
       const newStatus = newOutstanding <= 0 ? 'PAID' : (newOutstanding < newTotal ? 'PARTIAL' : (status || inv.status));
+
+      // M-2 — the ITC treatment. A field the edit does not send keeps what the bill
+      // has; a bill recorded before the IGST column existed answers from its journal.
+      const existingItc = inv.is_interstate == null
+        ? { ...inv, is_interstate: (await _invoiceIsInterstate(db, req.params.id, inv)) ? 1 : 0 } : inv;
+      const nextModule = module != null && String(module) !== '' ? module : inv.module;
+      const itc = await _resolveItcTreatment(db, req.params.id, req.body, inv.supplier_id, nextModule, existingItc);
+      if (itc.fail) return res.status(itc.fail.status).json({ error: itc.fail.error, code: itc.fail.code });
+
+      // An edit used to change the bill and leave its journal as it was — the
+      // payable, the expense and the credit went on reading the old figures. Build
+      // the journal the edited bill posts and compare it with the one standing.
+      const curDate: any = await db.get("SELECT TO_CHAR(invoice_date,'YYYY-MM-DD') AS d FROM supplier_invoices WHERE id = ?", [inv.id]);
+      const nextInv = {
+        ...inv,
+        invoice_number: invoice_number ?? inv.invoice_number,
+        invoice_date_iso: invoice_date ? String(invoice_date).slice(0, 10) : curDate?.d,
+        subtotal: subtotal !== undefined ? Number(subtotal) : inv.subtotal,
+        gst_amount: gst_amount !== undefined ? Number(gst_amount) : inv.gst_amount,
+        total_amount: newTotal,
+        notes: notes ?? inv.notes,
+        module: nextModule,
+        itc_eligibility: itc.eligibility, itc_block_reason: itc.blockReason, is_interstate: itc.isInterstate,
+      };
+      const liveSi = await _liveSupplierInvoiceJournals(db, req.params.id, inv.id);
+      const nextLines = _supplierInvoiceGlLines(nextInv);
+      const nextDate = _glPostDate(nextInv.invoice_date_iso);
+      // A bill that never had a journal is not given one by an edit.
+      const glChanges = liveSi.length > 0 && !(liveSi.length === 1 && liveSi[0].entry_date === nextDate
+        && (liveSi[0].cost_centre || null) === _normaliseCostModule(nextInv.module)
+        && _glNetSignature(liveSi[0].lines) === _glNetSignature(nextLines));
+      if (glChanges) {
+        // The old journal is reversed on its own date and the new one posted on
+        // the invoice date — neither may land in a signed-off month.
+        for (const d of [nextDate, ...liveSi.map(j => j.entry_date)]) {
+          if (await _blockIfAcctClosed(res, db, d)) return;
+        }
+        if (_r37Net(inv) > 0.005) {
+          return res.status(409).json({
+            error: `Rule 37 is holding back ₹${_r37Net(inv).toFixed(2)} of this bill's input tax credit. Pay the supplier, which re-claims it, before changing what the bill posts.`,
+            code: 'RULE37_REVERSAL_OPEN',
+          });
+        }
+      }
+
       await db.run(
         `UPDATE supplier_invoices SET
           invoice_number = COALESCE(?, invoice_number),
@@ -25291,16 +25770,28 @@ ${data.tenant.name}`;
           status = ?,
           notes = COALESCE(?, notes),
           module = COALESCE(?, module),
+          itc_eligibility = ?,
+          itc_block_reason = ?,
+          is_interstate = ?,
           updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [invoice_number ?? null, invoice_date ?? null, due_date ?? null,
+        [invoice_number ?? null, invoice_date ? invoice_date : null, due_date ? due_date : null,
          subtotal !== undefined ? Number(subtotal) : null,
          gst_amount !== undefined ? Number(gst_amount) : null,
-         newTotal, newOutstanding, newStatus, notes ?? null, module ?? null,
+         newTotal, newOutstanding, newStatus, notes ?? null, module ? module : null,
+         itc.eligibility, itc.blockReason, itc.isInterstate,
          req.params.invoiceId]
       );
+      let gl: { changed: boolean; journal_ref: string | null; reason?: string } = { changed: false, journal_ref: liveSi[0]?.ref || null };
+      if (glChanges) {
+        try {
+          const fresh: any = await db.get("SELECT *, TO_CHAR(invoice_date,'YYYY-MM-DD') AS invoice_date_iso FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
+          gl = await _repostSupplierInvoiceGl(db, req.params.id, fresh, (req as any).user?.email || (req as any).user?.id || null);
+          if (!gl.changed && gl.reason) console.error(`[GL] supplier invoice ${inv.id} re-post refused: ${gl.reason}`);
+        } catch (glErr) { console.error('[GL] supplier invoice re-post error:', glErr); }
+      }
       const updated: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [req.params.invoiceId]);
-      res.json(updated);
+      res.json({ ...updated, gl_journal_ref: gl.journal_ref, gl_reposted: gl.changed });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to update invoice" });
     }
@@ -25316,12 +25807,26 @@ ${data.tenant.name}`;
       if (!inv) return res.status(404).json({ error: 'Invoice not found' });
       const payCount: any = await db.get("SELECT COUNT(*) AS cnt FROM supplier_payments WHERE invoice_id = ?", [inv.id]);
       if (payCount.cnt > 0) return res.status(409).json({ error: 'Cannot delete invoice with recorded payments' });
+      // The journals standing for this bill — the original, or the latest re-post
+      // after an edit — and any Rule 37 reversal, found before the row goes.
+      const liveSi = await _liveSupplierInvoiceJournals(db, req.params.id, inv.id);
+      const r37Refs: any[] = await db.query(
+        "SELECT DISTINCT journal_ref FROM gl_entries WHERE restaurant_id = ? AND source_type = 'ITC_RULE37_REVERSAL' AND source_id = ?",
+        [req.params.id, inv.id]).catch(() => []);
       await db.run("DELETE FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
       // Phase 3.2 — reverse the invoice's GL journal (expense + ITC + AP backed out).
-      await _reverseJournal(db, req.params.id, `SI-${req.params.invoiceId}`, {
-        sourceType: 'SUPPLIER_INVOICE_REVERSAL', sourceId: req.params.invoiceId,
-        reason: 'Invoice deleted', postedBy: req.user?.email || req.user?.id || null,
-      });
+      for (const ref of (liveSi.length ? liveSi.map(j => j.ref) : [`SI-${req.params.invoiceId}`])) {
+        await _reverseJournal(db, req.params.id, ref, {
+          sourceType: 'SUPPLIER_INVOICE_REVERSAL', sourceId: req.params.invoiceId,
+          reason: 'Invoice deleted', postedBy: req.user?.email || req.user?.id || null,
+        });
+      }
+      for (const r of (r37Refs || [])) {
+        await _reverseJournal(db, req.params.id, String(r.journal_ref), {
+          sourceType: 'ITC_RULE37_REVERSAL_UNDO', sourceId: req.params.invoiceId,
+          reason: 'Invoice deleted', postedBy: req.user?.email || req.user?.id || null,
+        });
+      }
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to delete invoice" });
@@ -25370,6 +25875,11 @@ ${data.tenant.name}`;
           inv, { postedBy: (req as any).user?.email || (req as any).user?.id || null, applyTds: true });
         if (!glRes.ok) console.error(`[GL] supplier payment ${pid} not posted: ${glRes.reason}`);
       } catch (glErr) { console.error('[GL] supplier payment error:', glErr); }
+      // Rule 37 — paying the supplier gives back the credit the reversal held.
+      try {
+        await _postRule37Reclaim(db, req.params.id, inv.id, pid, payment_date || new Date().toISOString().slice(0, 10),
+          (req as any).user?.email || (req as any).user?.id || null);
+      } catch (r37Err) { console.error('[R37] reclaim error:', r37Err); }
       const updatedInv: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [inv.id]);
       res.status(201).json({ payment_id: pid, invoice: updatedInv });
     } catch (err: any) {
@@ -25421,6 +25931,16 @@ ${data.tenant.name}`;
       // D-1: the GL TDS line is reversed above; drop the matching memorandum detail
       // row so the tds_payable_ledger stays reconciled to the 2300 GL balance.
       await db.run("DELETE FROM tds_payable_ledger WHERE payment_id = ?", [req.params.paymentId]).catch(() => {});
+      // Rule 37 — a deleted payment no longer re-claims the credit it gave back.
+      if (Number(pay.r37_reclaimed || 0) > 0.005) {
+        const rr = await _reverseJournal(db, req.params.id, `R37C-${req.params.paymentId}`, {
+          sourceType: 'ITC_RULE37_RECLAIM_REVERSAL', sourceId: pay.invoice_id || req.params.paymentId,
+          reason: 'Supplier payment deleted', postedBy: req.user?.email || req.user?.id || null,
+        });
+        if (rr.ok && pay.invoice_id) {
+          await db.run("UPDATE supplier_invoices SET r37_reclaimed = GREATEST(0, COALESCE(r37_reclaimed,0) - ?) WHERE id = ?", [Number(pay.r37_reclaimed), pay.invoice_id]);
+        }
+      }
       if (pay.invoice_id) {
         const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [pay.invoice_id]);
         if (inv) {
@@ -48912,12 +49432,23 @@ ${data.tenant.name}`;
       }
       const db = await getTenantDb(req.params.id);
       const where: string[] = []; const params: any[] = [];
-      if (folio_id) { where.push('folio_id = ?'); params.push(folio_id); }
-      if (event_booking_id) { where.push('event_booking_id = ?'); params.push(event_booking_id); }
-      if (booking_id) { where.push('booking_id = ?'); params.push(booking_id); }
-      const rows: any[] = await db.query(`SELECT * FROM receipt_vouchers WHERE ${where.join(' OR ')} ORDER BY receipt_date, rv_number`, params).catch(() => []);
+      if (folio_id) { where.push('rv.folio_id = ?'); params.push(folio_id); }
+      if (event_booking_id) { where.push('rv.event_booking_id = ?'); params.push(event_booking_id); }
+      if (booking_id) { where.push('rv.booking_id = ?'); params.push(booking_id); }
+      // A voucher that does not carry its invoice number reads it through the
+      // folio it was adjusted against — covering vouchers adjusted before the
+      // serial allocator began writing the number back.
+      const rows: any[] = await db.query(
+        `SELECT rv.*, af.invoice_number AS adjusted_folio_invoice_number
+           FROM receipt_vouchers rv LEFT JOIN folios af ON af.id = rv.adjusted_folio_id
+          WHERE ${where.join(' OR ')} ORDER BY rv.receipt_date, rv.rv_number`, params).catch(() => []);
       const visible: any[] = [];
-      for (const r of rows) if (await _canSeeVoucher(req, r.module)) visible.push(r);
+      for (const r of rows) {
+        if (!(await _canSeeVoucher(req, r.module))) continue;
+        if (r.status === 'ADJUSTED' && !r.adjusted_invoice_number) r.adjusted_invoice_number = r.adjusted_folio_invoice_number || null;
+        delete r.adjusted_folio_invoice_number;
+        visible.push(r);
+      }
       res.json(visible);
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to list receipt vouchers' }); }
   });
@@ -48928,6 +49459,11 @@ ${data.tenant.name}`;
       const rv: any = await db.get("SELECT * FROM receipt_vouchers WHERE id = ?", [req.params.rvId]);
       if (!rv) return res.status(404).json({ error: 'Receipt voucher not found' });
       if (!(await _canSeeVoucher(req, rv.module))) return res.status(403).json({ error: 'Forbidden' });
+      let adjustedInvoice: string | null = rv.adjusted_invoice_number || null;
+      if (!adjustedInvoice && rv.status === 'ADJUSTED' && rv.adjusted_folio_id) {
+        const af: any = await db.get("SELECT invoice_number FROM folios WHERE id = ?", [rv.adjusted_folio_id]).catch(() => null);
+        adjustedInvoice = af?.invoice_number || null;
+      }
       const rest: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [req.params.id]).catch(() => ({}));
       const seller = _invoiceSeller(rest || {});
       const pdf = await generateReceiptVoucherPdf({
@@ -48940,7 +49476,7 @@ ${data.tenant.name}`;
         rate_basis: rv.rate_basis, place_of_supply: rv.place_of_supply,
         payment_method: rv.payment_method, reference: rv.reference,
         booking_ref: rv.event_booking_id || rv.booking_id || rv.folio_id,
-        adjusted_invoice_number: rv.adjusted_invoice_number, adjusted_at: rv.adjusted_at,
+        adjusted_invoice_number: adjustedInvoice, adjusted_at: rv.adjusted_at,
         cancelled_at: rv.cancelled_at, cancel_reason: rv.cancel_reason,
       });
       writeObjectAudit(db, req, { objectType: 'RECEIPT_VOUCHER', objectId: rv.id, action: 'PRINTED', summary: `Receipt voucher ${rv.rv_number} printed` }).catch(() => {});
@@ -52250,7 +52786,11 @@ ${data.tenant.name}`;
     try {
       await tenantDb.run("UPDATE folios SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?", [num, folio.id]);
       const row: any = await tenantDb.get("SELECT invoice_number FROM folios WHERE id = ?", [folio.id]);
-      if (row?.invoice_number) return String(row.invoice_number);
+      if (row?.invoice_number) {
+        // Advance vouchers adjusted by this folio's settlement name the invoice now.
+        await _linkVouchersToInvoice(tenantDb, folio.id, String(row.invoice_number));
+        return String(row.invoice_number);
+      }
     } catch { /* fall through to the allocated value */ }
     return num;
   };
@@ -58780,8 +59320,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'advances-taxed-and-vouchered',
+    commit_marker: 'itc-gated-2b-17-5-rule-37',
     code_features: [
+      'itc-gated-2b-17-5-rule-37 — M-2 from the accounting review, plus two Stage 2 fixes the now-running tests found. (1) ELIGIBILITY / SECTION 17(5): every supplier invoice records whether its GST may be claimed. Blocked credit (with its 17(5) clause), a restaurant taxed at 5 per cent (rate without input tax credit, the default for a RESTAURANT bill when the tenant charges 5 per cent) and an unregistered property post the GST INTO the expense, never to ITC Receivable. Inter-state is read from the two GSTINs when not stated (it was never sent, so every IGST bill booked CGST/SGST). One journal builder, _supplierInvoiceGlLines, serves create and edit. (2) AN EDIT NOW RE-POSTS: PATCH used to change the bill and leave its journal reading the old figures. The edited journal is compared with the one standing; when it differs the new one is posted first and the old reversed on its own date; an edit touching a closed period, or a bill with Rule 37 credit held, is refused. A bill that never had a journal is not given one. Delete reverses whichever journal stands. (3) GSTR-2B: import the portal JSON (docdata.b2b/b2ba/cdnr/cdnra, tax at document level, DD-MM-YYYY) — matched by supplier GSTIN and normalised invoice number, then tax within one rupee and date: MATCHED, DATE_DIFFERS, VALUE_DIFFERS, PROBABLE, NOT_IN_BOOKS, ITC_NOT_AVAILABLE, NOTE; plus bills claimed in the books that no statement carries (Section 16(2)(aa)). Posts nothing; GSTIN of another taxpayer refused. (4) RULE 37: report of claimed credit on bills unpaid after day 180, proportionate to the unpaid part; reversal posts R37-<invoice>-<n> Dr 1340 ITC Reversed (reclaimable) / Cr 1300-1320, dated today; each payment re-claims (R37C-<payment>) down to what the remaining balance still requires; deleting the payment undoes it. Section 50 interest shown as an indicative ceiling, never posted. (5) GSTR-3B carries itc_rule37, itc_not_claimed and the period GSTR-2B summary; its totals are unchanged. (6) STAGE 2 FIX: an adjusted receipt voucher named no invoice, because hotel check-out adjusts vouchers before it mints the serial; the serial allocator now writes the number back, and the list and PDF read it through the folio for vouchers already adjusted. (7) Receipt voucher PDF: the statutory-reference subtitle and the explanatory footnote removed at the owner request; the Rule 50 eighteen-per-cent sentence remains where it explains the rate.',
       'advances-taxed-and-vouchered — four owner requests in one change, because they are one mechanism. (1) HOTEL ADVANCES REACH THE LEDGER. The journal lived inside ONE route (POST /hotel/folios/:folioId/payments) while check-in, record-advance, group booking creation and the group deposit wrote the same folio_payments row by calling recordFolioPayment directly - on the live tenant 41 hotel advances worth 87,334.98 had no journal (the 46 / 1,77,334.98 first reported wrongly included 5 event rows that are mirrors of event_payments and ARE posted). Settlement then debited Advances from Guests for money never credited. The posting now lives INSIDE recordFolioPayment, which now REQUIRES the tenant id so every one of its eight callers had to be revisited; the hotel and spa routes no longer post their own copies. Journal refs and source types are the ones the old route used, so nothing already posted is posted twice, and event folios are skipped because their advance row mirrors event_payments. Voiding an advance on an open folio now reverses its journal - it reversed nothing before. (2) GST ON ADVANCES. For a service, Section 13(2) makes tax due on the earlier of invoice and receipt, so an advance for a room or a hall is taxed in the month received. The tax goes to NEW accounts 2201/2211/2221 GST on Advances, not to invoice tax, so GSTR-1 Tables 4/7/12 (which read 2200/2210/2220) never mistake an advance for a sale. Rate: hotel = the slab rate already on the folio room charges, then the booking tariff, then 18 percent only where not determinable (Rule 50 proviso); events = the event GST rate; nil where the tenant has no GSTIN. An event receipt taken AFTER the invoice is paying that invoice and is posted exactly as before. (3) RECEIPT VOUCHERS. A Rule 50 voucher RV-<FY>-NNNNN is issued for every hotel and event advance, printable as a PDF carrying every Rule 50 particular, linked at receipt to the booking and folio and marked ADJUSTED with the tax invoice number at settlement, for traceability. The voucher is the SOURCE OF TRUTH for the tax on an advance. The three copy-pasted settlement blocks are now ONE function, _advanceApplicationLines, which reverses exactly the voucher tax out of 2201/2211 so it is paid once; reversing a folio settlement re-opens the vouchers it adjusted; deleting an event advance cancels its voucher; cancelling a hotel booking reverses the tax on the refunded part and moves the tax on a forfeited part to output GST, because forfeited consideration is a taxable supply. (4) GSTR-1 TABLES 11A/11B from the vouchers: 11A advances received in the period and not adjusted within it, 11B earlier advances adjusted or refunded in it. The return total is now invoices + 11A - 11B and still reconciles to GST Outstanding, which with GSTR-3B now counts both sets of accounts. BACKFILL gains folio_advances (posted GROSS with no tax and no voucher: settlements already took these out of 2100 at full value, and a voucher minted today for a receipt months ago would misdate a statutory document; voided folios skipped unless a cancel journal unwinds them) and spa_folios (all 13 spa bills predate spa GL capture on 2 Aug 2026). Smoke: TC-ADV-HOTEL-LEDGER, TC-ADV-HOTEL-GST, TC-ADV-HOTEL-RV-ADJUSTED, TC-RV-PDF, TC-ADV-EVENT-RV, TC-GSTR1-11A-RECONCILES, TC-RV-CANCEL-ON-DELETE, TC-BACKFILL-ADV-SPA-DRYRUN. tsc + vite build clean.',
       'backfill-by-section — POST /accounting/backfill-gl gains an optional sections=folios,orders,supplier_payments. Absent, every section runs exactly as before. It exists because the owner approved posting the 13 historical supplier payments, and the same call would otherwise also have posted 132 folio and order journals nobody had looked at: approval to post one kind of history is not approval to post the others. TC-BACKFILL-SECTIONS asserts a scoped run considers no folios or orders, against an unscoped run that does find some, so a scope that is silently ignored fails.',
       'supplier-payments-reach-the-ledger — two production defects found while preparing M-2, both older than today and both fixed before building on them. (1) NO SUPPLIER PAYMENT HAD EVER REACHED THE LEDGER. On the live tenant 14 payments worth 72,600 rupees had no journal; Accounts Payable carried 79 invoice credits (23,30,739) and NOT ONE DEBIT, so the balance sheet showed every supplier bill ever raised as still owed and cash and bank never went down for what was paid. There were no GL exceptions to show for it. The payment route selected `pan` from `suppliers`; the column is `pan_number`. Postgres refused the statement BEFORE _postGlEntries was reached and the surrounding catch only logged it, so each payment marked its invoice PAID while the books said otherwise. No smoke test had ever posted a supplier payment, which is how it survived. The journal is now ONE function, _postSupplierPaymentGl, shared by the route and the backfill so the two cannot drift. Lifting it corrected two more things: the TDS threshold financial year was the CALENDAR year (getYearIST), wrong from January to March, and is now the financial year of the payment itself; and a failed supplier lookup can no longer stop a payment posting - the payable and cash sides post, TDS is not withheld, and the failure is logged loudly. POST /accounting/backfill-gl now also posts historical supplier payments, reported in their own supplier_payments section so no existing counter changes meaning. History is backfilled WITHOUT TDS unless apply_tds=1: the payment rows record that a payable was cleared, not whether tax was actually held back at the time, and booking a TDS liability for a withholding that never happened would create a debt to the government out of nothing. A dry run lists, per payment, what the rule would withhold. (2) THE SPA INVOICES AND PAYMENTS SCREEN HAD NEVER LOADED. GET /accounts/spa-billing was registered after GET /accounts/:accountId, Express matches in registration order, and every call was answered by the customer-account route as an account called spa-billing: 404 Account not found. The screen tests r.ok, so it showed nothing, for everyone - including the GST button M-3b had just put on it. Moved above that route; the other literal /accounts routes were checked and are not shadowed. It also had no gate beyond sign-in while listing client names, phones and amounts, and now requires Spa access and the SPA_BILLING tab; nobody loses access by that because the route returned nothing. Also fixed a test-ordering fault from M-3b: its probe orders were placed between the GST Outstanding fetch and the GSTR-3B fetch, putting 40 rupees of output tax into one and not the other. At rest both read 93,630.20. Smoke: TC-SUP-PAY-GL (a supplier payment posts, AP debited and cash credited for the amount, with a non-empty journal asserted), TC-SPA-BILLING-REACHABLE, TC-BACKFILL-SUP-PAY-DRYRUN (a dry run lists payments and writes nothing). tsc clean.',
@@ -60858,6 +61399,29 @@ ${data.tenant.name}`;
         itcParams).catch(() => ({}));
       const cgst = Number(outRow?.cgst || 0), sgst = Number(outRow?.sgst || 0), igst = Number(outRow?.igst || 0), taxable = Number(outRow?.taxable || 0);
       const itc_c = Number(itcRow?.c || 0), itc_s = Number(itcRow?.s || 0), itc_i = Number(itcRow?.i || 0);
+      // M-2 — what the ITC figure already contains, stated for Table 4. Rule 37
+      // reversals and re-claims are netted inside 1300-1320 already; they are
+      // shown, not subtracted again. Blocked or ineligible credit was never
+      // claimed in the books, so it is not in the figure at all.
+      const r37Row: any = await db.get(
+        `SELECT SUM(CASE WHEN source_type IN ('ITC_RULE37_REVERSAL','ITC_RULE37_REVERSAL_UNDO') THEN cr_amount - dr_amount ELSE 0 END) AS reversed,
+                SUM(CASE WHEN source_type IN ('ITC_RULE37_RECLAIM','ITC_RULE37_RECLAIM_REVERSAL') THEN dr_amount - cr_amount ELSE 0 END) AS reclaimed
+           FROM gl_entries WHERE ${itcWhere}
+            AND source_type IN ('ITC_RULE37_REVERSAL','ITC_RULE37_REVERSAL_UNDO','ITC_RULE37_RECLAIM','ITC_RULE37_RECLAIM_REVERSAL')`,
+        itcParams).catch(() => ({}));
+      let blkWhere = "COALESCE(gst_amount,0) > 0 AND COALESCE(itc_eligibility,'ELIGIBLE') <> 'ELIGIBLE'";
+      const blkParams: any[] = [];
+      if (from) { blkWhere += " AND TO_CHAR(invoice_date,'YYYY-MM-DD') >= ?"; blkParams.push(from); }
+      if (to)   { blkWhere += " AND TO_CHAR(invoice_date,'YYYY-MM-DD') <= ?"; blkParams.push(to); }
+      const blkRows: any[] = await db.query(
+        `SELECT itc_eligibility, COUNT(*) AS n, SUM(gst_amount) AS gst FROM supplier_invoices WHERE ${blkWhere} GROUP BY itc_eligibility`,
+        blkParams).catch(() => []);
+      const periodKey = String(to || new Date().toISOString().slice(0, 10)).slice(0, 7);
+      const imp2b: any = await db.get(
+        "SELECT id, return_period, summary_json, created_at FROM gstr2b_imports WHERE return_period = ? ORDER BY created_at DESC LIMIT 1",
+        [periodKey]).catch(() => null);
+      let imp2bSummary: any = null;
+      try { imp2bSummary = imp2b?.summary_json ? JSON.parse(imp2b.summary_json) : null; } catch { imp2bSummary = null; }
       const output_tax = round(cgst + sgst + igst);
       const itc_total = round(itc_c + itc_s + itc_i);
       res.json({
@@ -60868,8 +61432,194 @@ ${data.tenant.name}`;
         // How much of output_tax is tax on advances (received less adjusted in
         // the period) — reported in GSTR-1 Tables 11A/11B.
         advance_tax_in_output: round(Number(outRow?.advance_tax || 0)),
+        itc_rule37: { reversed: round(Number(r37Row?.reversed || 0)), reclaimed: round(Number(r37Row?.reclaimed || 0)) },
+        itc_not_claimed: {
+          rows: (blkRows || []).map((r: any) => ({ eligibility: r.itc_eligibility, label: _ITC_ELIGIBILITY_LABEL[String(r.itc_eligibility)] || r.itc_eligibility, invoices: Number(r.n || 0), gst: round(Number(r.gst || 0)) })),
+          total: round((blkRows || []).reduce((a: number, r: any) => a + Number(r.gst || 0), 0)),
+        },
+        gstr2b: imp2b ? { import_id: imp2b.id, return_period: imp2b.return_period, uploaded_at: imp2b.created_at, summary: imp2bSummary } : null,
       });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── GSTR-2B — the portal statement, matched against the purchase bills ────
+  // Input tax credit is claimable only once the supplier has reported the bill
+  // (Section 16(2)(aa)). The owner downloads GSTR-2B as JSON from the portal and
+  // imports it here; each document is matched to a bill by the supplier's GSTIN
+  // and the invoice number, then by tax and date. Nothing is posted.
+  const _gstr2bBooksNotIn2b = async (db: any, period: string) => {
+    const [py, pmo] = String(period).split('-').map(Number);
+    const fyStart = `${pmo >= 4 ? py : py - 1}-04-01`;
+    const periodEnd = new Date(Date.UTC(py, pmo, 0)).toISOString().slice(0, 10);
+    return db.query(
+      `SELECT si.id, si.invoice_number, TO_CHAR(si.invoice_date,'YYYY-MM-DD') AS invoice_date, si.gst_amount, si.module,
+              s.name AS supplier_name, s.gst_number AS supplier_gstin
+         FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id
+        WHERE COALESCE(si.gst_amount,0) > 0 AND COALESCE(si.itc_eligibility,'ELIGIBLE') = 'ELIGIBLE'
+          AND si.itc_2b_import_id IS NULL
+          AND TO_CHAR(si.invoice_date,'YYYY-MM-DD') BETWEEN ? AND ?
+        ORDER BY si.invoice_date`, [fyStart, periodEnd]).catch(() => []);
+  };
+
+  app.post("/api/restaurant/:id/accounting/gst/gstr2b/import", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctCanWrite(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const parsed = _parseGstr2b(req.body?.statement);
+      if (parsed.fail) return res.status(400).json({ error: parsed.fail, code: 'GSTR2B_UNREADABLE' });
+      const reg = await _tenantGstRegistration(req.params.id);
+      if (parsed.gstin && reg.gstin && parsed.gstin !== String(reg.gstin).trim().toUpperCase()) {
+        return res.status(409).json({ error: `This GSTR-2B belongs to GSTIN ${parsed.gstin}, not to this property (${reg.gstin}).`, code: 'GSTR2B_GSTIN_MISMATCH' });
+      }
+      if (parsed.lines.length === 0) return res.status(400).json({ error: 'The statement has no supplier invoices or notes in it.', code: 'GSTR2B_EMPTY' });
+      const importId = `G2B-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO gstr2b_imports (id, return_period, recipient_gstin, generated_on, source_name, line_count, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [importId, parsed.period, parsed.gstin, parsed.generated_on, String(req.body?.source_name || '').slice(0, 200) || null,
+         parsed.lines.length, req.user?.email || req.user?.id || null]);
+      const COLS = ['id', 'import_id', 'section', 'supplier_gstin', 'supplier_name', 'supplier_filed_on', 'supplier_period',
+        'doc_number', 'doc_number_norm', 'doc_date', 'doc_type', 'note_type', 'place_of_supply', 'reverse_charge',
+        'itc_available', 'itc_reason', 'doc_value', 'taxable', 'igst', 'cgst', 'sgst', 'cess'];
+      let n = 0;
+      for (const l of parsed.lines) {
+        n++;
+        const row: any = { ...l, id: `${importId}-${n}`, import_id: importId };
+        await db.run(`INSERT INTO gstr2b_lines (${COLS.join(', ')}) VALUES (${COLS.map(() => '?').join(', ')})`, COLS.map(c => row[c] ?? null));
+      }
+      const rec = await _reconcileGstr2b(db, importId);
+      res.status(201).json({ import_id: importId, return_period: parsed.period, ...(rec || {}) });
+    } catch (err: any) { console.error('[GSTR-2B] import error:', err); res.status(500).json({ error: err?.message || 'Failed to import GSTR-2B' }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/gst/gstr2b", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query("SELECT id, return_period, recipient_gstin, generated_on, source_name, line_count, summary_json, uploaded_by, reconciled_at, created_at FROM gstr2b_imports ORDER BY return_period DESC, created_at DESC LIMIT 60", []);
+      res.json(rows.map((r: any) => { let summary = null; try { summary = r.summary_json ? JSON.parse(r.summary_json) : null; } catch { summary = null; } const { summary_json, ...rest } = r; return { ...rest, summary }; }));
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to list GSTR-2B imports' }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/gst/gstr2b/:importId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const imp: any = await db.get("SELECT * FROM gstr2b_imports WHERE id = ?", [req.params.importId]);
+      if (!imp) return res.status(404).json({ error: 'GSTR-2B import not found' });
+      const lines: any[] = await db.query(
+        `SELECT l.*, si.invoice_number AS book_invoice_number, TO_CHAR(si.invoice_date,'YYYY-MM-DD') AS book_invoice_date, si.gst_amount AS book_gst
+           FROM gstr2b_lines l LEFT JOIN supplier_invoices si ON si.id = l.matched_invoice_id
+          WHERE l.import_id = ? ORDER BY l.section, l.supplier_name, l.doc_date`, [imp.id]);
+      let summary = null; try { summary = imp.summary_json ? JSON.parse(imp.summary_json) : null; } catch { summary = null; }
+      const { summary_json, ...rest } = imp;
+      res.json({ ...rest, summary, lines, books_not_in_2b: await _gstr2bBooksNotIn2b(db, imp.return_period) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to read GSTR-2B import' }); }
+  });
+
+  app.post("/api/restaurant/:id/accounting/gst/gstr2b/:importId/reconcile", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctCanWrite(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rec = await _reconcileGstr2b(db, req.params.importId);
+      if (!rec) return res.status(404).json({ error: 'GSTR-2B import not found' });
+      res.json({ import_id: req.params.importId, ...rec });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to match GSTR-2B' }); }
+  });
+
+  app.delete("/api/restaurant/:id/accounting/gst/gstr2b/:importId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctCanWrite(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const imp: any = await db.get("SELECT id FROM gstr2b_imports WHERE id = ?", [req.params.importId]);
+      if (!imp) return res.status(404).json({ error: 'GSTR-2B import not found' });
+      await db.run("UPDATE supplier_invoices SET itc_2b_status = NULL, itc_2b_period = NULL, itc_2b_import_id = NULL WHERE itc_2b_import_id = ?", [imp.id]);
+      await db.run("DELETE FROM gstr2b_lines WHERE import_id = ?", [imp.id]);
+      await db.run("DELETE FROM gstr2b_imports WHERE id = ?", [imp.id]);
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to delete GSTR-2B import' }); }
+  });
+
+  // ── Rule 37 — credit on bills unpaid 180 days after their date ────────────
+  // Rule 37 (as substituted in 2022): where the recipient has not paid the
+  // supplier within 180 days of the invoice date, the credit availed is reversed
+  // in proportion to the unpaid part, and is re-availed when the supplier is
+  // paid. The report lists what is due; reversing is an explicit act.
+  // Interest under Section 50(3) applies only where the credit was utilised, so
+  // it is shown as an indicative ceiling (from the invoice date), never posted.
+  const _rule37Report = async (db: any, asOf: string) => {
+    const addDays = (iso: string, n: number) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+    const cutoff = addDays(asOf, -181);   // invoices dated on or before this are past day 180
+    const soon = addDays(asOf, -151);     // …and these reach it within 30 days
+    const rows: any[] = await db.query(
+      `SELECT si.*, TO_CHAR(si.invoice_date,'YYYY-MM-DD') AS invoice_date_iso, s.name AS supplier_name, s.gst_number AS supplier_gstin
+         FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id
+        WHERE COALESCE(si.gst_amount,0) > 0 AND COALESCE(si.itc_eligibility,'ELIGIBLE') = 'ELIGIBLE'
+          AND (COALESCE(si.outstanding_amount,0) > 0.005 OR COALESCE(si.r37_reversed,0) - COALESCE(si.r37_reclaimed,0) > 0.005)
+          AND TO_CHAR(si.invoice_date,'YYYY-MM-DD') <= ?
+        ORDER BY si.invoice_date`, [soon]).catch(() => []);
+    const due: any[] = [], held: any[] = [], dueSoon: any[] = [];
+    for (const inv of rows || []) {
+      const d = inv.invoice_date_iso;
+      const outstanding = Number(inv.outstanding_amount || 0);
+      const target = _r37Target(inv, outstanding);
+      const net = _r37Net(inv);
+      const days = Math.round((new Date(asOf + 'T00:00:00Z').getTime() - new Date(d + 'T00:00:00Z').getTime()) / 86400000);
+      const row = {
+        invoice_id: inv.id, invoice_number: inv.invoice_number, invoice_date: d, supplier_name: inv.supplier_name, supplier_gstin: inv.supplier_gstin,
+        module: inv.module, total_amount: _r2(inv.total_amount), paid_amount: _r2(inv.paid_amount), outstanding: _r2(outstanding),
+        itc_claimed: _r2(inv.gst_amount), day_181: addDays(d, 181), days_since_invoice: days,
+        reversal_target: target, already_held: net, to_reverse: _r2(Math.max(0, target - net)),
+        indicative_interest_ceiling: _r2(Math.max(0, target - net) * 0.18 * Math.max(0, days) / 365),
+      };
+      if (d <= cutoff) {
+        if (row.to_reverse > 0.005) due.push(row);
+        if (net > 0.005) held.push(row);
+      } else if (outstanding > 0.005) {
+        dueSoon.push(row);
+      }
+    }
+    return {
+      as_of: asOf, invoices_dated_on_or_before: cutoff, due, held, due_soon: dueSoon,
+      totals: {
+        to_reverse: _r2(due.reduce((a, r) => a + r.to_reverse, 0)),
+        held: _r2(held.reduce((a, r) => a + r.already_held, 0)),
+        due_soon_credit: _r2(dueSoon.reduce((a, r) => a + r.reversal_target, 0)),
+      },
+    };
+  };
+
+  app.get("/api/restaurant/:id/accounting/gst/rule37", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const q = String(req.query.as_of || '');
+      const asOf = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : new Date().toISOString().slice(0, 10);
+      res.json(await _rule37Report(db, asOf));
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to build the Rule 37 report' }); }
+  });
+
+  app.post("/api/restaurant/:id/accounting/gst/rule37/reverse", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctCanWrite(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const today = new Date().toISOString().slice(0, 10);
+      const q = String(req.body?.as_of || '');
+      const asOf = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : today;
+      // The reversal is dated today: it belongs to the return being prepared now,
+      // whatever date the report was run for.
+      if (await _blockIfAcctClosed(res, db, today)) return;
+      const only: string[] | null = Array.isArray(req.body?.invoice_ids) ? req.body.invoice_ids.map((x: any) => String(x)) : null;
+      const report = await _rule37Report(db, asOf);
+      const posted: any[] = [], failed: any[] = [];
+      for (const row of report.due) {
+        if (only && !only.includes(row.invoice_id)) continue;
+        const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [row.invoice_id]);
+        if (!inv) continue;
+        const r = await _postRule37Reversal(db, req.params.id, inv, row.to_reverse, today, req.user?.email || req.user?.id || null);
+        (r.ok ? posted : failed).push({ invoice_id: row.invoice_id, invoice_number: row.invoice_number, amount: row.to_reverse, journal_ref: r.journal_ref, reason: r.reason });
+      }
+      res.json({ as_of: asOf, posted_on: today, posted, failed, total_reversed: _r2(posted.reduce((a, p) => a + p.amount, 0)) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to reverse credit under Rule 37' }); }
   });
 
   // ── AR / AP Aging (GL-derived, FIFO) ───────────────────────────────────────

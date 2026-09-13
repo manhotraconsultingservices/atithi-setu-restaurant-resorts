@@ -2008,6 +2008,69 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_sup_pay_supplier ON supplier_payments (supplier_id, payment_date DESC)`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_sup_pay_invoice ON supplier_payments (invoice_id)`);
 
+  // M-2 — input tax credit gating. Each supplier invoice records whether its GST
+  // may be claimed (a blocked or ineligible credit is part of the cost, not an
+  // asset), whether it is inter-state (IGST), how it matched GSTR-2B, and how much
+  // of its credit Rule 37 reversed for non-payment within 180 days. NULL
+  // eligibility is a bill recorded before this existed: its credit WAS claimed.
+  await db.exec(`ALTER TABLE supplier_invoices ADD COLUMN IF NOT EXISTS itc_eligibility TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE supplier_invoices ADD COLUMN IF NOT EXISTS itc_block_reason TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE supplier_invoices ADD COLUMN IF NOT EXISTS is_interstate INT`).catch(() => {});
+  await db.exec(`ALTER TABLE supplier_invoices ADD COLUMN IF NOT EXISTS itc_2b_status TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE supplier_invoices ADD COLUMN IF NOT EXISTS itc_2b_period TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE supplier_invoices ADD COLUMN IF NOT EXISTS itc_2b_import_id TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE supplier_invoices ADD COLUMN IF NOT EXISTS r37_reversed DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await db.exec(`ALTER TABLE supplier_invoices ADD COLUMN IF NOT EXISTS r37_reclaimed DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await db.exec(`ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS r37_reclaimed DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+
+  // GSTR-2B statements as downloaded from the GST portal, one row per document,
+  // with the result of matching each against the purchase bills in the books.
+  // A statement is evidence, not a posting: nothing here moves the ledger.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS gstr2b_imports (
+      id                TEXT PRIMARY KEY,
+      return_period     TEXT NOT NULL,
+      recipient_gstin   TEXT,
+      generated_on      TEXT,
+      source_name       TEXT,
+      line_count        INT DEFAULT 0,
+      summary_json      TEXT,
+      uploaded_by       TEXT,
+      reconciled_at     TIMESTAMP,
+      created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_gstr2b_imports_period ON gstr2b_imports (return_period);
+    CREATE TABLE IF NOT EXISTS gstr2b_lines (
+      id                TEXT PRIMARY KEY,
+      import_id         TEXT NOT NULL,
+      section           TEXT NOT NULL,
+      supplier_gstin    TEXT,
+      supplier_name     TEXT,
+      supplier_filed_on TEXT,
+      supplier_period   TEXT,
+      doc_number        TEXT,
+      doc_number_norm   TEXT,
+      doc_date          TEXT,
+      doc_type          TEXT,
+      note_type         TEXT,
+      place_of_supply   TEXT,
+      reverse_charge    TEXT,
+      itc_available     TEXT,
+      itc_reason        TEXT,
+      doc_value         DOUBLE PRECISION DEFAULT 0,
+      taxable           DOUBLE PRECISION DEFAULT 0,
+      igst              DOUBLE PRECISION DEFAULT 0,
+      cgst              DOUBLE PRECISION DEFAULT 0,
+      sgst              DOUBLE PRECISION DEFAULT 0,
+      cess              DOUBLE PRECISION DEFAULT 0,
+      match_status      TEXT,
+      matched_invoice_id TEXT,
+      match_note        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_gstr2b_lines_import ON gstr2b_lines (import_id);
+    CREATE INDEX IF NOT EXISTS idx_gstr2b_lines_doc ON gstr2b_lines (supplier_gstin, doc_number_norm);
+  `).catch((e: any) => console.error('[M-2] gstr2b tables:', e?.message || e));
+
   // Extend suppliers with bank details and payment terms for NEFT/RTGS
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS bank_account_number TEXT").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS bank_name TEXT").catch(() => {});
@@ -3547,6 +3610,10 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['1310','ITC Receivable — SGST','ASSET',70],
     ['1320','ITC Receivable — IGST','ASSET',80],
     ['1330','ITC — Payment Gateway GST','ASSET',85],
+    // Rule 37: credit reversed because the supplier was not paid within 180 days.
+    // It comes back the day the supplier is paid, so until then it is held here
+    // rather than written off — and it is NOT part of ITC available (1300-1320).
+    ['1340','ITC Reversed — Rule 37 (reclaimable on payment)','ASSET',86],
     ['1500','Prepaid Expenses','ASSET',90],
     ['1600','Inventory — F&B Stock','ASSET',100],
     ['1610','Inventory — Housekeeping & Amenities','ASSET',110],

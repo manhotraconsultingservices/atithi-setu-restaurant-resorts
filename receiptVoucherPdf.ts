@@ -80,8 +80,6 @@ export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promi
       doc.moveDown(0.8);
       const titleY = doc.y;
       doc.fillColor(INK).font('Helvetica-Bold').fontSize(18).text('RECEIPT VOUCHER', left, titleY, { width: width * 0.6 });
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-        .text('Issued under Section 31(3)(d) of the CGST Act, 2017 read with Rule 50', left, doc.y, { width: width * 0.6 });
       const afterTitleY = doc.y;
 
       // Number / date / status, right-aligned beside the title.
@@ -158,13 +156,13 @@ export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promi
       }
 
       doc.moveDown(1.2);
-      doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(
-        'This is a receipt for an advance, not a tax invoice. Tax shown on this voucher is payable in the month the advance was received and is adjusted against the tax invoice issued for the supply, so it is paid once.' +
-        (d.gst_rate > 0 && d.rate_basis === 'NOT_DETERMINABLE_RULE_50'
-          ? ' The rate of tax could not be determined when the advance was received, so it has been charged at eighteen per cent under the proviso to Rule 50.'
-          : ''),
-        { width },
-      );
+      // Printed only where it explains a figure on this voucher: how the rate was set.
+      if (d.gst_rate > 0 && d.rate_basis === 'NOT_DETERMINABLE_RULE_50') {
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(
+          'The rate of tax could not be determined when the advance was received, so it has been charged at eighteen per cent under the proviso to Rule 50.',
+          { width },
+        );
+      }
 
       doc.moveDown(2.2);
       doc.fillColor(INK).font('Helvetica').fontSize(9)

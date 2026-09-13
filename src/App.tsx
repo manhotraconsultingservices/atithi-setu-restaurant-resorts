@@ -8135,7 +8135,7 @@ const costModuleOptions = () =>
 
 function AccountingView({ restaurantId, token, initialTab, cashierMode }: { restaurantId: string; token: string; initialTab?: string; cashierMode?: boolean }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
-    | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
+    | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B' | 'GSTR2B' | 'RULE37'
     | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'BANK_ACCOUNTS' | 'OWNER_EQUITY' | 'ACCRUAL' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
   // cashierMode (used by the top-level "Cash" nav item) opens straight on the
   // Cash Drawers panel and hides the rest of the ledger nav, so a cashier reaches
@@ -8367,6 +8367,14 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [cashFlowGl, setCashFlowGl] = useState<any>(null);
   const [gstr1, setGstr1] = useState<any>(null);
   const [gstr3b, setGstr3b] = useState<any>(null);
+  // M-2 — GSTR-2B statements matched against purchase bills, and Rule 37.
+  const [g2bImports, setG2bImports] = useState<any[]>([]);
+  const [g2bDetail, setG2bDetail] = useState<any>(null);
+  const [g2bBusy, setG2bBusy] = useState(false);
+  const [g2bFilter, setG2bFilter] = useState<string>('ALL');
+  const [r37, setR37] = useState<any>(null);
+  const [r37AsOf, setR37AsOf] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [r37Busy, setR37Busy] = useState(false);
   const [agingAr, setAgingAr] = useState<any>(null);
   const [agingAp, setAgingAp] = useState<any>(null);
   const [bankRec, setBankRec] = useState<any>(null);
@@ -8559,6 +8567,74 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   useEffect(() => { if (acctTab === 'CASHFLOW') loadCashFlowGl(); }, [acctTab, loadCashFlowGl]);
   useEffect(() => { if (acctTab === 'GSTR1') loadGstr1(); }, [acctTab, loadGstr1]);
   useEffect(() => { if (acctTab === 'GSTR3B') loadGstr3b(); }, [acctTab, loadGstr3b]);
+  const loadG2bImports = useCallback(() => {
+    acctApi('/accounting/gst/gstr2b').then(d => { if (Array.isArray(d)) setG2bImports(d); }).catch(() => {});
+  }, [acctApi]);
+  const openG2b = useCallback((id: string) => {
+    setG2bBusy(true); setG2bFilter('ALL');
+    acctApi(`/accounting/gst/gstr2b/${id}`).then(d => { if (d && !d.error) setG2bDetail(d); else if (d?.error) alert(d.error); })
+      .catch(() => alert('Could not open that statement.')).finally(() => setG2bBusy(false));
+  }, [acctApi]);
+  const loadR37 = useCallback(() => {
+    setR37Busy(true);
+    acctApi(`/accounting/gst/rule37?as_of=${r37AsOf}`).then(d => { if (d && !d.error) setR37(d); else if (d?.error) alert(d.error); })
+      .catch(() => alert('Could not build the Rule 37 report.')).finally(() => setR37Busy(false));
+  }, [acctApi, r37AsOf]);
+  useEffect(() => { if (acctTab === 'GSTR2B') loadG2bImports(); }, [acctTab, loadG2bImports]);
+  useEffect(() => { if (acctTab === 'RULE37') loadR37(); }, [acctTab, loadR37]);
+  // The portal file carries far more than the match needs. Keep the fields the
+  // server reads — it stays the one parser — so a busy month fits the upload.
+  const compactGstr2b = (raw: any) => {
+    let node = raw, meta: any = null;
+    for (let i = 0; i < 5 && node && typeof node === 'object'; i++) { if (node.docdata) { meta = node; break; } node = node.data; }
+    if (!meta) return raw;
+    const pick = (o: any, keys: string[]) => { const r: any = {}; for (const k of keys) if (o && o[k] != null) r[k] = o[k]; return r; };
+    const SUP = ['ctin', 'trdnm', 'supfildt', 'supprd'];
+    const DOC = ['inum', 'ntnum', 'typ', 'suptyp', 'dt', 'val', 'pos', 'rev', 'itcavl', 'rsn', 'txval', 'igst', 'cgst', 'sgst', 'cess', 'items', 'itms'];
+    const dd: any = {};
+    for (const [sec, arr] of [['b2b', 'inv'], ['b2ba', 'inv'], ['cdnr', 'nt'], ['cdnra', 'nt']]) {
+      const list = Array.isArray(meta.docdata[sec]) ? meta.docdata[sec] : [];
+      if (list.length) dd[sec] = list.map((sup: any) => ({ ...pick(sup, SUP), [arr]: (Array.isArray(sup[arr]) ? sup[arr] : []).map((x: any) => pick(x, DOC)) }));
+    }
+    return { ...pick(meta, ['rtnprd', 'gstin', 'gendt']), docdata: dd };
+  };
+  const importG2b = async (file: File) => {
+    setG2bBusy(true);
+    try {
+      let json: any;
+      try { json = JSON.parse(await file.text()); }
+      catch { alert('That file is not JSON. Download GSTR-2B as JSON from the GST portal — unzip it first if it arrived as a .zip.'); return; }
+      const body = JSON.stringify({ statement: compactGstr2b(json), source_name: file.name });
+      if (body.length > 1900000) { alert('This statement is larger than the 2 MB upload limit even after trimming. Import it one month at a time.'); return; }
+      const r = await acctApi('/accounting/gst/gstr2b/import', { method: 'POST', body });
+      if (r?.error) { alert(r.error); return; }
+      loadG2bImports();
+      openG2b(r.import_id);
+    } catch { alert('The statement could not be imported.'); }
+    finally { setG2bBusy(false); }
+  };
+  const rematchG2b = async (id: string) => {
+    setG2bBusy(true);
+    try { const r = await acctApi(`/accounting/gst/gstr2b/${id}/reconcile`, { method: 'POST' }); if (r?.error) alert(r.error); else { loadG2bImports(); openG2b(id); } }
+    catch { alert('Matching failed.'); } finally { setG2bBusy(false); }
+  };
+  const deleteG2b = async (id: string) => {
+    if (!window.confirm('Remove this imported statement? Its matches are cleared from the bills. Nothing in the ledger changes.')) return;
+    try { const r = await acctApi(`/accounting/gst/gstr2b/${id}`, { method: 'DELETE' }); if (r?.error) alert(r.error); else { setG2bDetail(null); loadG2bImports(); } }
+    catch { alert('Could not remove the statement.'); }
+  };
+  const reverseR37 = async () => {
+    const amt = Number(r37?.totals?.to_reverse || 0);
+    if (!(amt > 0)) return;
+    if (!window.confirm(`Reverse ${fmtAmt(amt)} of input tax credit under Rule 37, dated today? It comes back automatically as each supplier is paid.`)) return;
+    setR37Busy(true);
+    try {
+      const r = await acctApi('/accounting/gst/rule37/reverse', { method: 'POST', body: JSON.stringify({ as_of: r37AsOf }) });
+      if (r?.error) alert(r.error);
+      else if (Array.isArray(r?.failed) && r.failed.length) alert(`${r.failed.length} reversal(s) could not be posted: ${r.failed[0].reason || 'refused'}`);
+    } catch { alert('The reversal could not be posted.'); }
+    finally { setR37Busy(false); loadR37(); }
+  };
   useEffect(() => { if (acctTab === 'AGING_AR') loadAgingAr(); }, [acctTab, loadAgingAr]);
   useEffect(() => { if (acctTab === 'AGING_AP') loadAgingAp(); }, [acctTab, loadAgingAp]);
   useEffect(() => { if (acctTab === 'BANKREC') loadBankRec(); }, [acctTab, loadBankRec]);
@@ -8880,7 +8956,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const TAB_LABEL: Record<SubTab, string> = {
     TRIAL: 'Trial Balance', GL: 'General Ledger', DAYBOOK: 'Day Book', JOURNAL: 'Journal Entry',
     PNL: 'Profit & Loss', BALANCESHEET: 'Balance Sheet', CASHFLOW: 'Cash Flow Statement',
-    GST: 'GST Summary', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
+    GST: 'GST Summary', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B', GSTR2B: 'GSTR-2B Match', RULE37: 'Rule 37 — 180 Days',
     CASHBOOK: 'Cash Book', AGING_AR: 'Receivables Ageing', AGING_AP: 'Payables Ageing', BANKREC: 'Bank Reconciliation',
     BANK_ACCOUNTS: 'Bank Accounts', OWNER_EQUITY: "Owners' Equity",
     TDS: 'TDS Tracker', ACCRUAL: 'Year-End Accrual', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
@@ -8903,7 +8979,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     { key: 'STATEMENTS', label: 'Financial Statements', tabs: ['PNL', 'BALANCESHEET', 'CASHFLOW'] },
     { key: 'ARAP', label: 'Receivables & Payables', tabs: ['AGING_AR', 'AGING_AP', 'EXPENSES', 'LOANS'] },
     { key: 'BANKING', label: 'Banking & Cash', tabs: ['CASHBOOK', 'BANK_ACCOUNTS', 'BANKREC', 'CASHDRAWER', 'CASHCOUNT'] },
-    { key: 'TAX', label: 'GST & Tax', tabs: ['GST', 'GSTR1', 'GSTR3B', 'TDS'] },
+    { key: 'TAX', label: 'GST & Tax', tabs: ['GST', 'GSTR1', 'GSTR3B', 'GSTR2B', 'RULE37', 'TDS'] },
     { key: 'CLOSE', label: 'Capital & Close', tabs: ['OWNER_EQUITY', 'ACCRUAL', 'PERIODS'] },
   ];
   const activeGroup = ACCT_GROUPS.find(g => g.tabs.includes(acctTab)) || ACCT_GROUPS[0];
@@ -9596,14 +9672,212 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   <tbody>
                     <tr className="border-t border-[#f0e8d8]"><td className="px-3 py-2">3.1(a) Outward taxable supplies</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.outward_taxable_supplies.taxable_value)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.outward_taxable_supplies.igst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.outward_taxable_supplies.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.outward_taxable_supplies.sgst)}</td></tr>
                     <tr className="border-t border-[#f0e8d8]"><td className="px-3 py-2">4. ITC available</td><td className="px-3 py-2 text-right tabular-nums">—</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.itc_available.igst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.itc_available.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(gstr3b.itc_available.sgst)}</td></tr>
+                    {gstr3b.itc_rule37 && (Number(gstr3b.itc_rule37.reversed) !== 0 || Number(gstr3b.itc_rule37.reclaimed) !== 0) && (
+                      <tr className="border-t border-[#f0e8d8] text-xs text-[#6b5d52]"><td className="px-3 py-2">Rule 37 — reversed 4(B)(2) · re-claimed 4(D)(1) <span className="text-[#9c8e85]">(already within the ITC above)</span></td><td className="px-3 py-2 text-right tabular-nums" colSpan={4}>{fmtAmt(gstr3b.itc_rule37.reversed)} · {fmtAmt(gstr3b.itc_rule37.reclaimed)}</td></tr>
+                    )}
+                    {Number(gstr3b.itc_not_claimed?.total || 0) > 0 && (
+                      <tr className="border-t border-[#f0e8d8] text-xs text-[#6b5d52]"><td className="px-3 py-2">Credit not claimed in the books — blocked or ineligible <span className="text-[#9c8e85]">(4(B)(1) where Table 4(A) is taken from GSTR-2B)</span></td><td className="px-3 py-2 text-right tabular-nums" colSpan={4}>{fmtAmt(gstr3b.itc_not_claimed.total)}</td></tr>
+                    )}
                   </tbody>
                 </table>
               </div>
               <p className="text-[11px] text-[#9c8e85]">Working sheet — output tax, ITC and net payable reconcile to GST Outstanding for the same period.</p>
+              {gstr3b.gstr2b?.summary ? (
+                <p className="text-xs text-[#6b5d52]">GSTR-2B {gstr3b.gstr2b.return_period}: credit available {fmtAmt(gstr3b.gstr2b.summary.itc_in_2b_available)} · matched to bills {fmtAmt(gstr3b.gstr2b.summary.itc_matched)} · claimed in the books but not in GSTR-2B {fmtAmt(gstr3b.gstr2b.summary.books_not_in_2b?.itc)} — not claimable until the supplier reports it.</p>
+              ) : (
+                <p className="text-xs text-[#9c8e85]">No GSTR-2B imported for this period — the ITC above is what the books claim, not yet checked against what suppliers reported.</p>
+              )}
             </>
           ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a period and refresh.</p>}
         </div>
       )}
+
+      {acctTab === 'GSTR2B' && (() => {
+        const STATUS: Record<string, { label: string; cls: string }> = {
+          MATCHED: { label: 'Matched', cls: 'bg-emerald-50 text-emerald-700' },
+          DATE_DIFFERS: { label: 'Date differs', cls: 'bg-amber-50 text-amber-800' },
+          PROBABLE: { label: 'Number differs', cls: 'bg-amber-50 text-amber-800' },
+          VALUE_DIFFERS: { label: 'Tax differs', cls: 'bg-rose-50 text-rose-700' },
+          NOT_IN_BOOKS: { label: 'Not in books', cls: 'bg-rose-50 text-rose-700' },
+          ITC_NOT_AVAILABLE: { label: 'Credit not available', cls: 'bg-stone-100 text-stone-700' },
+          NOTE: { label: 'Supplier note', cls: 'bg-sky-50 text-sky-700' },
+        };
+        const d = g2bDetail;
+        const sm = d?.summary || null;
+        const lines: any[] = Array.isArray(d?.lines) ? d.lines : [];
+        const shown = g2bFilter === 'ALL' ? lines : lines.filter((l: any) => l.match_status === g2bFilter);
+        const notIn2b: any[] = Array.isArray(d?.books_not_in_2b) ? d.books_not_in_2b : [];
+        const TH = 'px-3 py-2 font-semibold text-[#1a1208]';
+        return (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-[#e8ded0] bg-white p-4 flex flex-wrap items-center gap-3">
+              <div className="flex-1 min-w-[240px]">
+                <p className="text-sm font-semibold text-[#1a1208]">Import a GSTR-2B statement</p>
+                <p className="text-xs text-[#6b5d52] mt-0.5">On the GST portal, open GSTR-2B for the month and download it as JSON. Each supplier invoice in it is matched to your purchase bills by the supplier's GSTIN and the invoice number, then by tax and date. The ledger does not change.</p>
+              </div>
+              <label className={cn(AC_BTN, 'cursor-pointer inline-block', g2bBusy && 'opacity-40 pointer-events-none')}>
+                {g2bBusy ? 'Working…' : 'Choose JSON file'}
+                <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) importG2b(f); }} />
+              </label>
+            </div>
+            {g2bImports.length > 0 ? (
+              <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                <table className="w-full text-sm border-collapse">
+                  <thead><tr className="bg-[#f5f0e8] text-left"><th className={TH}>Return period</th><th className={TH}>File</th><th className={cn(TH, 'text-right')}>Documents</th><th className={cn(TH, 'text-right')}>Matched</th><th className={cn(TH, 'text-right')}>Not in books</th><th className={cn(TH, 'text-right')}>Claimed, not in 2B</th><th className={TH}>Imported</th><th className={TH}></th></tr></thead>
+                  <tbody>
+                    {g2bImports.map((im: any) => (
+                      <tr key={im.id} className={cn('border-t border-[#f0e8d8]', d?.id === im.id && 'bg-[#fdf6ef]')}>
+                        <td className="px-3 py-2 font-semibold tabular-nums">{im.return_period}</td>
+                        <td className="px-3 py-2 text-xs text-[#6b5d52]">{im.source_name || '—'}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{im.line_count}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{im.summary?.counts?.MATCHED || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{im.summary?.counts?.NOT_IN_BOOKS || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{im.summary?.books_not_in_2b?.count ?? '—'}</td>
+                        <td className="px-3 py-2 text-xs text-[#6b5d52] whitespace-nowrap">{String(im.created_at || '').slice(0, 10)}</td>
+                        <td className="px-3 py-2 text-right"><button onClick={() => openG2b(im.id)} className="text-xs font-semibold text-[#a0522d] hover:underline">Open</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : !g2bBusy && <p className="text-sm text-[#6b5d52] italic">No GSTR-2B statement imported yet.</p>}
+            {d && sm && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <p className="text-base font-semibold text-[#1a1208]">GSTR-2B · {d.return_period}{d.recipient_gstin ? ` · ${d.recipient_gstin}` : ''}</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => rematchG2b(d.id)} disabled={g2bBusy} className={AC_BTN}>Match again</button>
+                    <button onClick={() => deleteG2b(d.id)} disabled={g2bBusy} className="px-3 py-1.5 text-sm rounded border border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-40">Remove import</button>
+                  </div>
+                </div>
+                <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Credit in GSTR-2B</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(sm.itc_in_2b_available)}</p><p className="text-[11px] text-[#9c8e85] mt-1">reported by suppliers as available</p></div>
+                  <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Matched to your bills</p><p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">{fmtAmt(sm.itc_matched)}</p><p className="text-[11px] text-[#9c8e85] mt-1">{sm.counts?.MATCHED || 0} matched · {sm.counts?.DATE_DIFFERS || 0} date differs</p></div>
+                  <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">In GSTR-2B, not in books</p><p className="text-2xl font-bold text-rose-700 mt-1 tabular-nums">{fmtAmt(sm.itc_in_2b_not_in_books)}</p><p className="text-[11px] text-[#9c8e85] mt-1">{sm.counts?.NOT_IN_BOOKS || 0} bill(s) to record</p></div>
+                  <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Claimed, not in GSTR-2B</p><p className="text-2xl font-bold text-amber-800 mt-1 tabular-nums">{fmtAmt(sm.books_not_in_2b?.itc)}</p><p className="text-[11px] text-[#9c8e85] mt-1">{sm.books_not_in_2b?.count || 0} bill(s) · not claimable until reported</p></div>
+                </div>
+                <div className="flex gap-1.5 flex-wrap">
+                  {['ALL', ...Object.keys(STATUS).filter(k => Number(sm.counts?.[k] || 0) > 0)].map(k => (
+                    <button key={k} onClick={() => setG2bFilter(k)}
+                      className={cn('px-2.5 py-1 rounded-full text-xs border', g2bFilter === k ? 'bg-[#a0522d] text-white border-[#a0522d]' : 'bg-white text-[#3d3128] border-[#e8ded0] hover:bg-[#faf6ef]')}>
+                      {k === 'ALL' ? `All · ${lines.length}` : `${STATUS[k].label} · ${sm.counts[k]}`}
+                    </button>
+                  ))}
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className={TH}>Result</th><th className={TH}>Supplier</th><th className={TH}>Document</th><th className={TH}>Date</th><th className={cn(TH, 'text-right')}>Taxable</th><th className={cn(TH, 'text-right')}>Tax</th><th className={TH}>In your books</th><th className={TH}>What to do</th></tr></thead>
+                    <tbody>
+                      {shown.map((l: any) => {
+                        const st = STATUS[l.match_status] || { label: l.match_status || '—', cls: 'bg-stone-100 text-stone-700' };
+                        const tax = Number(l.igst || 0) + Number(l.cgst || 0) + Number(l.sgst || 0);
+                        return (
+                          <tr key={l.id} className="border-t border-[#f0e8d8] align-top">
+                            <td className="px-3 py-2"><span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap', st.cls)}>{st.label}</span></td>
+                            <td className="px-3 py-2"><div className="font-medium">{l.supplier_name || '—'}</div><div className="text-[11px] font-mono text-[#9c8e85]">{l.supplier_gstin}</div></td>
+                            <td className="px-3 py-2"><div className="font-mono text-xs">{l.doc_number}</div><div className="text-[11px] text-[#9c8e85]">{l.section}{l.note_type ? ` · ${String(l.note_type).toUpperCase() === 'C' ? 'credit' : 'debit'} note` : ''}{l.reverse_charge === 'Y' ? ' · reverse charge' : ''}</div></td>
+                            <td className="px-3 py-2 text-xs whitespace-nowrap tabular-nums">{l.doc_date || '—'}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(l.taxable)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(tax)}</td>
+                            <td className="px-3 py-2 text-xs">{l.book_invoice_number || l.matched_invoice_id ? <><div className="font-mono">{l.book_invoice_number || '—'}</div><div className="text-[#9c8e85] tabular-nums">{l.book_invoice_date} · {fmtAmt(l.book_gst)}</div></> : <span className="text-[#9c8e85]">—</span>}</td>
+                            <td className="px-3 py-2 text-xs text-[#6b5d52] max-w-xs">{l.match_note || (l.match_status === 'MATCHED' ? 'Nothing — the credit is supported.' : '')}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {notIn2b.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-sm font-semibold text-[#1a1208]">Credit claimed in the books that no GSTR-2B carries <span className="font-normal text-xs text-[#6b5d52]">— {sm.books_not_in_2b?.from} to {sm.books_not_in_2b?.to}. Section 16(2)(aa): not claimable until the supplier reports the bill.</span></p>
+                    <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                      <table className="w-full text-sm border-collapse">
+                        <thead><tr className="bg-[#f5f0e8] text-left"><th className={TH}>Supplier</th><th className={TH}>GSTIN</th><th className={TH}>Invoice</th><th className={TH}>Date</th><th className={TH}>Module</th><th className={cn(TH, 'text-right')}>Credit claimed</th></tr></thead>
+                        <tbody>
+                          {notIn2b.map((b: any) => (
+                            <tr key={b.id} className="border-t border-[#f0e8d8]">
+                              <td className="px-3 py-2">{b.supplier_name || '—'}</td>
+                              <td className="px-3 py-2 font-mono text-[11px]">{b.supplier_gstin || <span className="text-rose-700 font-sans">no GSTIN on file</span>}</td>
+                              <td className="px-3 py-2 font-mono text-xs">{b.invoice_number || '—'}</td>
+                              <td className="px-3 py-2 text-xs tabular-nums whitespace-nowrap">{b.invoice_date}</td>
+                              <td className="px-3 py-2 text-xs">{b.module}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(b.gst_amount)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {acctTab === 'RULE37' && (() => {
+        const TH = 'px-3 py-2 font-semibold text-[#1a1208]';
+        const table = (rows: any[], mode: 'due' | 'held' | 'soon') => (
+          <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+            <table className="w-full text-sm border-collapse">
+              <thead><tr className="bg-[#f5f0e8] text-left">
+                <th className={TH}>Supplier</th><th className={TH}>Invoice</th><th className={TH}>Date</th><th className={TH}>Day 181</th>
+                <th className={cn(TH, 'text-right')}>Total</th><th className={cn(TH, 'text-right')}>Unpaid</th><th className={cn(TH, 'text-right')}>Credit claimed</th>
+                {mode !== 'soon' && <th className={cn(TH, 'text-right')}>Held now</th>}
+                {mode === 'due' && <><th className={cn(TH, 'text-right')}>To reverse</th><th className={cn(TH, 'text-right')}>Interest ceiling</th></>}
+                {mode === 'soon' && <th className={cn(TH, 'text-right')}>Would reverse</th>}
+              </tr></thead>
+              <tbody>
+                {rows.map((r: any) => (
+                  <tr key={`${mode}-${r.invoice_id}`} className="border-t border-[#f0e8d8]">
+                    <td className="px-3 py-2"><div>{r.supplier_name || '—'}</div><div className="text-[11px] font-mono text-[#9c8e85]">{r.supplier_gstin || ''}</div></td>
+                    <td className="px-3 py-2 font-mono text-xs">{r.invoice_number || '—'}</td>
+                    <td className="px-3 py-2 text-xs tabular-nums whitespace-nowrap">{r.invoice_date}</td>
+                    <td className="px-3 py-2 text-xs tabular-nums whitespace-nowrap">{r.day_181}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.total_amount)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.outstanding)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.itc_claimed)}</td>
+                    {mode !== 'soon' && <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.already_held)}</td>}
+                    {mode === 'due' && <><td className="px-3 py-2 text-right tabular-nums font-semibold text-rose-700">{fmtAmt(r.to_reverse)}</td><td className="px-3 py-2 text-right tabular-nums text-[#6b5d52]">{fmtAmt(r.indicative_interest_ceiling)}</td></>}
+                    {mode === 'soon' && <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(r.reversal_target)}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+        return (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="text-xs text-[#6b5d52]">As of</label>
+              <input type="date" value={r37AsOf} onChange={e => setR37AsOf(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+              <button onClick={loadR37} disabled={r37Busy} className={AC_BTN}>Refresh</button>
+            </div>
+            <p className="text-xs text-[#6b5d52] max-w-3xl">Rule 37: input tax credit on a bill not paid within 180 days of its date is reversed in proportion to the unpaid part, and comes back as the supplier is paid. Reversing posts the credit to ITC Reversed — Rule 37 (account 1340), dated today; each later payment re-claims its share automatically.</p>
+            {r37 ? (
+              <>
+                <div className="grid sm:grid-cols-3 gap-3">
+                  <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Credit to reverse now</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(r37.totals?.to_reverse)}</p><p className="text-[11px] text-[#6b5d52] mt-1">{(r37.due || []).length} bill(s) dated on or before {r37.invoices_dated_on_or_before}</p></div>
+                  <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Held — back when paid</p><p className="text-2xl font-bold text-rose-700 mt-1 tabular-nums">{fmtAmt(r37.totals?.held)}</p><p className="text-[11px] text-[#9c8e85] mt-1">{(r37.held || []).length} bill(s)</p></div>
+                  <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Reaching day 180 in 30 days</p><p className="text-2xl font-bold text-amber-800 mt-1 tabular-nums">{fmtAmt(r37.totals?.due_soon_credit)}</p><p className="text-[11px] text-[#9c8e85] mt-1">{(r37.due_soon || []).length} bill(s) — pay these to avoid a reversal</p></div>
+                </div>
+                {(r37.due || []).length > 0 ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <p className="text-sm font-semibold text-[#1a1208]">Past day 180, credit still claimed</p>
+                      <button onClick={reverseR37} disabled={r37Busy} className={AC_BTN}>Reverse {fmtAmt(r37.totals?.to_reverse)} now</button>
+                    </div>
+                    {table(r37.due, 'due')}
+                  </div>
+                ) : <p className="text-sm text-[#6b5d52] italic">No bill needs a Rule 37 reversal as of {r37.as_of}.</p>}
+                {(r37.held || []).length > 0 && (<div className="space-y-2"><p className="text-sm font-semibold text-[#1a1208]">Credit held under Rule 37</p>{table(r37.held, 'held')}</div>)}
+                {(r37.due_soon || []).length > 0 && (<div className="space-y-2"><p className="text-sm font-semibold text-[#1a1208]">Reaching day 180 within 30 days</p>{table(r37.due_soon, 'soon')}</div>)}
+                <p className="text-[11px] text-[#9c8e85] max-w-3xl">Interest ceiling: 18% a year on the credit to reverse, counted from the invoice date. Section 50(3) charges interest only where the credit was actually used, and from when it was availed — so what is payable is at most this, and nil if the credit was never used.</p>
+              </>
+            ) : !r37Busy && <p className="text-sm text-[#6b5d52] italic">No data. Pick a date and refresh.</p>}
+          </div>
+        );
+      })()}
 
       {(acctTab === 'AGING_AR' || acctTab === 'AGING_AP') && (() => {
         const isAr = acctTab === 'AGING_AR';
@@ -67781,6 +68055,9 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   const [invForm, setInvForm] = useState({
     supplier_id: '', invoice_number: '', invoice_date: new Date().toISOString().slice(0, 10),
     due_date: '', module: 'RESTAURANT', subtotal: '', gst_amount: '', total_amount: '', notes: '',
+    // Input tax credit. '' leaves the decision to the server: automatic on a new
+    // bill, unchanged on an edit.
+    itc_eligibility: '', itc_block_reason: '', is_interstate: '',
   });
   const [invSaving, setInvSaving] = useState(false);
 
@@ -67957,13 +68234,14 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
       module: po.module || 'RESTAURANT',
       subtotal: String(po.total_amount || ''), gst_amount: String(po.gst_amount || ''),
       total_amount: String(po.grand_total || ''), notes: `PO ref: ${po.id}`,
+      itc_eligibility: '', itc_block_reason: '', is_interstate: '',
     });
     setShowInvModal(true);
   };
 
   const openCreateInvoice = (prefill?: Partial<typeof invForm>) => {
     setEditInv(null);
-    setInvForm({ supplier_id: '', invoice_number: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', module: 'RESTAURANT', subtotal: '', gst_amount: '', total_amount: '', notes: '', ...prefill });
+    setInvForm({ supplier_id: '', invoice_number: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', module: 'RESTAURANT', subtotal: '', gst_amount: '', total_amount: '', notes: '', itc_eligibility: '', itc_block_reason: '', is_interstate: '', ...prefill });
     setShowInvModal(true);
   };
   const openEditInvoice = (inv: any) => {
@@ -67972,6 +68250,8 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
       supplier_id: inv.supplier_id, invoice_number: inv.invoice_number || '', invoice_date: String(inv.invoice_date || '').slice(0, 10),
       due_date: String(inv.due_date || '').slice(0, 10), module: inv.module || 'RESTAURANT',
       subtotal: String(inv.subtotal || ''), gst_amount: String(inv.gst_amount || ''), total_amount: String(inv.total_amount || ''), notes: inv.notes || '',
+      itc_eligibility: inv.itc_eligibility || '', itc_block_reason: inv.itc_block_reason || '',
+      is_interstate: inv.is_interstate == null ? '' : String(inv.is_interstate),
     });
     setShowInvModal(true);
   };
@@ -68491,6 +68771,26 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                 { key: 'paid_amount', label: 'Paid', sortable: true, align: 'right', getValue: (inv: any) => Number(inv.paid_amount), render: (inv: any) => <span className="text-emerald-700">{fmtAmt(inv.paid_amount)}</span> },
                 { key: 'outstanding_amount', label: 'Outstanding', sortable: true, align: 'right', getValue: (inv: any) => Number(inv.outstanding_amount), render: (inv: any) => <span className="font-bold text-rose-700">{fmtAmt(inv.outstanding_amount)}</span> },
                 { key: 'status', label: 'Status', sortable: true, render: (inv: any) => <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", statusColor[inv.status] || 'bg-stone-100 text-stone-600')}>{inv.status}</span> },
+                // Input tax credit: claimed or not, the GSTR-2B match, and any credit
+                // Rule 37 is holding back until the supplier is paid.
+                { key: 'itc_eligibility', label: 'ITC', sortable: true,
+                  exportValue: (inv: any) => Number(inv.gst_amount) > 0 ? `${inv.itc_eligibility || 'ELIGIBLE'}${inv.itc_2b_status ? ' / 2B ' + inv.itc_2b_status : ''}` : '',
+                  render: (inv: any) => {
+                    if (!(Number(inv.gst_amount) > 0)) return <span className="text-[10px] text-[#9c8e85]">—</span>;
+                    const e = String(inv.itc_eligibility || 'ELIGIBLE');
+                    const held = Number(inv.r37_reversed || 0) - Number(inv.r37_reclaimed || 0);
+                    const twoB: Record<string, string> = { MATCHED: 'in 2B', DATE_DIFFERS: '2B date differs', VALUE_DIFFERS: '2B tax differs', PROBABLE: '2B number differs', ITC_NOT_AVAILABLE: '2B: not available' };
+                    return (
+                      <div className="flex flex-wrap gap-1">
+                        <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap', e === 'ELIGIBLE' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800')}
+                          title={e === 'BLOCKED_17_5' ? `Blocked — ${inv.itc_block_reason || 'Section 17(5)'}` : undefined}>
+                          {e === 'ELIGIBLE' ? 'Claimed' : e === 'BLOCKED_17_5' ? 'Blocked 17(5)' : 'Not claimable'}
+                        </span>
+                        {inv.itc_2b_status && <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap', inv.itc_2b_status === 'MATCHED' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700')}>{twoB[inv.itc_2b_status] || inv.itc_2b_status}</span>}
+                        {held > 0.005 && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 whitespace-nowrap" title="Credit reversed under Rule 37 — re-claimed as the supplier is paid">Rule 37 {fmtAmt(held)}</span>}
+                      </div>
+                    );
+                  } },
                 { key: 'actions', label: 'Actions', searchable: false, exportValue: () => '', render: (inv: any) => (
                   <div className="flex items-center gap-1">
                     {inv.outstanding_amount > 0 && <button onClick={() => openPayModal(inv)} className="px-2 py-1 rounded-lg bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-700">Pay</button>}
@@ -69230,6 +69530,54 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm font-bold outline-none" />
                 </div>
               </div>
+              {Number(invForm.gst_amount) > 0 && (
+                <div className="rounded-2xl border border-[#cc5a16]/15 p-3 space-y-2">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Input tax credit</label>
+                      <select value={invForm.itc_eligibility} onChange={e => setInvForm(f => ({ ...f, itc_eligibility: e.target.value }))}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none">
+                        <option value="">{editInv ? 'Keep as recorded' : 'Automatic'}</option>
+                        <option value="ELIGIBLE">Claim the credit</option>
+                        <option value="BLOCKED_17_5">Blocked — Section 17(5)</option>
+                        <option value="INELIGIBLE_NO_ITC_RATE">Not claimable — rate without credit</option>
+                        <option value="INELIGIBLE_NOT_REGISTERED">Not claimable — not GST-registered</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Tax type</label>
+                      <select value={invForm.is_interstate} onChange={e => setInvForm(f => ({ ...f, is_interstate: e.target.value }))}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none">
+                        <option value="">{editInv ? 'Keep as recorded' : 'From the GSTINs'}</option>
+                        <option value="0">CGST + SGST (same state)</option>
+                        <option value="1">IGST (another state)</option>
+                      </select>
+                    </div>
+                  </div>
+                  {invForm.itc_eligibility === 'BLOCKED_17_5' && (
+                    <select value={invForm.itc_block_reason} onChange={e => setInvForm(f => ({ ...f, itc_block_reason: e.target.value }))}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none">
+                      <option value="">— Which clause of Section 17(5)? —</option>
+                      <option value="MOTOR_VEHICLE">17(5)(a) Motor vehicles and conveyances</option>
+                      <option value="FOOD_BEVERAGE_CATERING">17(5)(b)(i) Food and beverages, outdoor catering</option>
+                      <option value="BEAUTY_HEALTH_COSMETIC">17(5)(b)(i) Beauty treatment, health, cosmetic surgery</option>
+                      <option value="VEHICLE_HIRE_INSURANCE">17(5)(b)(i) Hiring motor vehicles, life and health insurance</option>
+                      <option value="CLUB_FITNESS_MEMBERSHIP">17(5)(b)(ii) Club, health or fitness membership</option>
+                      <option value="EMPLOYEE_TRAVEL">17(5)(b)(iii) Employee vacation travel</option>
+                      <option value="WORKS_CONTRACT_IMMOVABLE">17(5)(c) Works contract for immovable property</option>
+                      <option value="CONSTRUCTION_OWN_ACCOUNT">17(5)(d) Construction on own account</option>
+                      <option value="CSR">17(5)(fa) Corporate social responsibility</option>
+                      <option value="PERSONAL_CONSUMPTION">17(5)(g) Personal consumption</option>
+                      <option value="LOST_STOLEN_GIFT_SAMPLE">17(5)(h) Lost, stolen, written off, gifts, samples</option>
+                      <option value="OTHER">Other blocked credit</option>
+                    </select>
+                  )}
+                  <p className="text-[10px] text-[#9c8e85] leading-snug">
+                    Automatic claims the credit, except on a restaurant bill when the restaurant charges 5% GST (a rate without input tax credit) or when the property is not GST-registered.
+                    Credit that cannot be claimed is booked as part of the expense. Food, catering or beauty services used to supply the same service to guests are not blocked.
+                  </p>
+                </div>
+              )}
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
                 <input value={invForm.notes} onChange={e => setInvForm(f => ({ ...f, notes: e.target.value }))}
@@ -69239,7 +69587,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
             <div className="flex gap-2 mt-5">
               <button onClick={() => setShowInvModal(false)}
                 className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
-              <button onClick={saveInvoice} disabled={invSaving || !invForm.supplier_id || !invForm.total_amount}
+              <button onClick={saveInvoice} disabled={invSaving || !invForm.supplier_id || !invForm.total_amount || (invForm.itc_eligibility === 'BLOCKED_17_5' && !invForm.itc_block_reason)}
                 className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">
                 {invSaving ? 'Saving…' : (editInv ? 'Save Changes' : 'Create Invoice')}
               </button>
