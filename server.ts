@@ -5278,6 +5278,86 @@ function _tdsForSupplierPayment(opts: {
   return { section, rate, amount: r2(base * rate / 100), nature: s.nature, accountCode: s.code, accountName: s.name };
 }
 
+// ── A supplier payment's journal — ONE implementation ─────────────────────
+// FOUND DURING M-2: NO SUPPLIER PAYMENT HAD EVER REACHED THE LEDGER. On the live
+// tenant 14 payments worth ₹72,600 had no journal, Accounts Payable carried 79
+// invoice credits and not a single debit, and there were no GL exceptions to
+// show for it. The payment route selected `pan` from `suppliers`; the column is
+// `pan_number`. Postgres refused the statement BEFORE _postGlEntries was ever
+// reached, and the surrounding catch only logged it — so every payment updated
+// the invoice to PAID while the books kept the whole bill as owed and cash as
+// never having left.
+//
+// It is one function now because the backfill needs the same journal, and two
+// hand-kept copies of a journal are how they drift apart.
+//
+// Two further corrections made while lifting it:
+//   • The TDS threshold's financial-year start was `${getYearIST()}-04-01` — the
+//     CALENDAR year, so from January to March it summed the wrong year. It is
+//     now the financial year of the PAYMENT, which is also what a backfill of an
+//     old payment needs.
+//   • The supplier lookup cannot stop the payment posting any more. If it fails,
+//     the payable and cash sides still post, TDS is not withheld, and the failure
+//     is logged loudly — money must never move without a ledger entry.
+async function _postSupplierPaymentGl(
+  db: any, restaurantId: string,
+  p: { id: string; amount: number; payment_method?: string | null; payment_date?: any },
+  inv: any,
+  opts: { postedBy: string | null; applyTds: boolean },
+): Promise<{ ok: boolean; already?: boolean; reason?: string; journal_ref: string; tds_booked: number; tds_rule_would_withhold: number; tds_section: string | null }> {
+  const ref = `SP-${p.id}`;
+  const exists = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ? LIMIT 1", [ref]).catch(() => null);
+  if (exists) return { ok: true, already: true, journal_ref: ref, tds_booked: 0, tds_rule_would_withhold: 0, tds_section: null };
+  const payAmt = +Number(p.amount || 0).toFixed(2);
+  const payDate = _glPostDate(p.payment_date || new Date());
+  const cashAcct = _glAccountForPaymentMethod(p.payment_method || 'BANK');
+  let sup: any = null;
+  try {
+    sup = await db.get("SELECT name, tds_section, tds_category, pan_number AS pan FROM suppliers WHERE id = ?", [inv.supplier_id]);
+  } catch (e: any) {
+    console.error(`[GL] supplier lookup failed for payment ${p.id} — posting WITHOUT TDS:`, e?.message || e);
+  }
+  // TDS is on the ex-GST value; the threshold uses this payment's base or the
+  // FY-to-date ex-GST value billed to the supplier.
+  const invTotal = Number(inv.total_amount || 0);
+  const taxFrac = invTotal > 0 ? Math.max(0, invTotal - Number(inv.gst_amount || 0)) / invTotal : 1;
+  const taxableBase = +(payAmt * taxFrac).toFixed(2);
+  const py = Number(payDate.slice(0, 4)), pm = Number(payDate.slice(5, 7));
+  const fyStart = `${pm >= 4 ? py : py - 1}-04-01`;
+  const aggRow: any = await db.get(
+    "SELECT COALESCE(SUM(total_amount - COALESCE(gst_amount,0)),0) AS agg FROM supplier_invoices WHERE supplier_id = ? AND COALESCE(invoice_date::text, created_at::text) >= ?",
+    [inv.supplier_id, fyStart]).catch(() => ({ agg: taxableBase }));
+  const rule = sup ? _tdsForSupplierPayment({
+    section: sup.tds_section, category: sup.tds_category, hasPan: !!(sup.pan && String(sup.pan).trim()),
+    taxableBase, fyAggregateBase: Number(aggRow?.agg || taxableBase),
+  }) : null;
+  const ruleAmt = rule ? Math.min(Number(rule.amount || 0), payAmt) : 0;
+  const tdsAmt = opts.applyTds ? ruleAmt : 0;
+  const cashOut = +(payAmt - tdsAmt).toFixed(2);
+  const lines: GlLine[] = [
+    { account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: payAmt, cr_amount: 0, narration: `Payment to ${sup?.name || 'supplier'} ${inv.invoice_number || inv.id}` },
+    { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: cashOut, narration: `Payment to ${sup?.name || 'supplier'}${tdsAmt > 0 ? ' (net of TDS)' : ''}` },
+  ];
+  if (rule && tdsAmt > 0) {
+    lines.push({ account_code: rule.accountCode || '2300', account_name: rule.accountName || 'TDS Payable', dr_amount: 0, cr_amount: tdsAmt, narration: `TDS ${rule.section} withheld — ${sup?.name || inv.supplier_id}` });
+  }
+  const r = await _postGlEntries(db, restaurantId, ref, payDate, 'SUPPLIER_PAYMENT', p.id, lines, opts.postedBy, _normaliseCostModule(inv?.module));
+  // Section-wise TDS detail (reconciles to the 2300 balance; feeds 26Q) — only
+  // for TDS actually booked, and only once the journal that books it posted.
+  if (r.ok && rule && tdsAmt > 0) {
+    const tdsId = `TDS-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    await db.run(
+      `INSERT INTO tds_payable_ledger
+         (id, restaurant_id, supplier_id, supplier_name, supplier_pan, payment_id, payment_date,
+          gross_amount, tds_section, tds_rate, tds_amount, nature_of_payment, quarter)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [tdsId, restaurantId, inv.supplier_id, sup?.name || 'Supplier', sup?.pan || null,
+       p.id, payDate, taxableBase, rule.section, rule.rate, tdsAmt, rule.nature, _glCurrentQuarter()]
+    ).catch((e: any) => console.error('[GL] tds ledger insert failed:', e?.message || e));
+  }
+  return { ok: r.ok, reason: r.ok ? undefined : r.reason, journal_ref: ref, tds_booked: tdsAmt, tds_rule_would_withhold: ruleAmt, tds_section: rule?.section || null };
+}
+
 function _glCurrentQuarter(): string {
   const now = new Date();
   const m = now.getMonth() + 1;
@@ -25042,51 +25122,14 @@ ${data.tenant.name}`;
         "UPDATE supplier_invoices SET paid_amount = ?, outstanding_amount = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         [newPaid, newOutstanding, newStatus, inv.id]
       );
-      // GL — D-1: vendor TDS is now WITHHELD IN THE LEDGER, not just recorded in a
-      // memorandum table. We clear the FULL payable (Dr AP), pay the supplier NET of
-      // TDS (Cr Cash/Bank), and book the withheld tax as a liability (Cr 2300 TDS
-      // Payable). So the balance sheet shows the TDS liability and the supplier reads
-      // as paid net of tax; the tds_payable_ledger row is the section-wise detail
-      // that reconciles to the 2300 GL balance.
+      // GL — D-1: vendor TDS is withheld IN THE LEDGER (Dr AP gross, Cr Cash net,
+      // Cr TDS Payable). The journal lives in _postSupplierPaymentGl, which the
+      // GL backfill shares — see there for why this block never posted at all.
       try {
-        const payDate = (payment_date || new Date().toISOString().slice(0, 10)) as string;
-        const cashAcct = _glAccountForPaymentMethod(payment_method || 'BANK');
-        const sup: any = await db.get("SELECT tds_section, tds_category, pan FROM suppliers WHERE id = ?", [inv.supplier_id]);
-        // TDS is on the ex-GST taxable value; the threshold uses this payment's base
-        // OR the FY-to-date aggregate of ex-GST invoice value billed to the supplier.
-        const invTotal = Number(inv.total_amount || 0);
-        const taxFrac = invTotal > 0 ? Math.max(0, invTotal - Number(inv.gst_amount || 0)) / invTotal : 1;
-        const taxableBase = +(payAmt * taxFrac).toFixed(2);
-        const fyStart = `${getYearIST()}-04-01`;
-        const aggRow: any = await db.get(
-          "SELECT COALESCE(SUM(total_amount - COALESCE(gst_amount,0)),0) AS agg FROM supplier_invoices WHERE supplier_id = ? AND COALESCE(invoice_date, created_at::text) >= ?",
-          [inv.supplier_id, fyStart]).catch(() => ({ agg: taxableBase }));
-        const tds = _tdsForSupplierPayment({
-          section: sup?.tds_section, category: sup?.tds_category, hasPan: !!(sup?.pan && String(sup.pan).trim()),
-          taxableBase, fyAggregateBase: Number(aggRow?.agg || taxableBase),
-        });
-        const tdsAmt = tds ? Math.min(Number(tds.amount || 0), payAmt) : 0;
-        const cashOut = +(payAmt - tdsAmt).toFixed(2);
-        const glLines: GlLine[] = [
-          { account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: payAmt, cr_amount: 0, narration: `Payment to supplier ${inv.supplier_id}` },
-          { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: cashOut, narration: `Payment to supplier ${inv.supplier_id}${tdsAmt > 0 ? ' (net of TDS)' : ''}` },
-        ];
-        if (tds && tdsAmt > 0) {
-          glLines.push({ account_code: tds.accountCode || '2300', account_name: tds.accountName || 'TDS Payable', dr_amount: 0, cr_amount: tdsAmt, narration: `TDS ${tds.section} withheld — supplier ${inv.supplier_id}` });
-        }
-        await _postGlEntries(db, req.params.id, `SP-${pid}`, payDate, 'SUPPLIER_PAYMENT', pid, glLines, (req as any).user?.email || (req as any).user?.id, _normaliseCostModule(inv?.module));
-        // Section-wise TDS detail (reconciles to the 2300 GL balance; feeds 26Q).
-        if (tds && tdsAmt > 0) {
-          const tdsId = `TDS-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-          await db.run(
-            `INSERT INTO tds_payable_ledger
-               (id, restaurant_id, supplier_id, supplier_name, supplier_pan, payment_id, payment_date,
-                gross_amount, tds_section, tds_rate, tds_amount, nature_of_payment, quarter)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [tdsId, req.params.id, inv.supplier_id, inv.supplier_name || 'Supplier', sup?.pan || null,
-             pid, payDate, taxableBase, tds.section, tds.rate, tdsAmt, tds.nature, _glCurrentQuarter()]
-          );
-        }
+        const glRes = await _postSupplierPaymentGl(db, req.params.id,
+          { id: pid, amount: payAmt, payment_method: payment_method || 'CASH', payment_date: payment_date || new Date().toISOString().slice(0, 10) },
+          inv, { postedBy: (req as any).user?.email || (req as any).user?.id || null, applyTds: true });
+        if (!glRes.ok) console.error(`[GL] supplier payment ${pid} not posted: ${glRes.reason}`);
       } catch (glErr) { console.error('[GL] supplier payment error:', glErr); }
       const updatedInv: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [inv.id]);
       res.status(201).json({ payment_id: pid, invoice: updatedInv });
@@ -40202,6 +40245,75 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── SPA BILLING (Accounts module) ────────────────────────────────────────
+  // FOUND DURING M-3: THIS ROUTE HAD NEVER ANSWERED. It was registered AFTER
+  // GET /accounts/:accountId (the customer-account routes), and Express matches
+  // in registration order, so every call was read as a customer account called
+  // "spa-billing" and came back 404 "Account not found". The Spa "Invoices &
+  // Payments" screen tests `if (r.ok)`, so it simply showed nothing, for everyone.
+  // Moved above that route. It also carried no gate beyond sign-in while listing
+  // client names, phones and amounts; it now requires Spa access and the
+  // SPA_BILLING tab. Nobody loses anything by that — the route returned nothing.
+  app.get("/api/restaurant/:id/accounts/spa-billing", authenticate, spaStaff, requireTabAction('SPA_BILLING', 'READ'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as any;
+      const f = from || new Date().toISOString().slice(0, 7) + '-01';
+      const t = to   || new Date().toISOString().slice(0, 10);
+
+      const [summary, folios] = await Promise.all([
+        db.get(`
+          SELECT COUNT(*) AS appointment_count,
+                 COALESCE(SUM(subtotal), 0) AS total_net,
+                 COALESCE(SUM(gst_amount), 0) AS gst_collected,
+                 COALESCE(SUM(grand_total), 0) AS total_settled
+          FROM folios
+          WHERE folio_kind='SPA' AND status='closed'
+            AND DATE(settled_at) BETWEEN ? AND ?
+        `, [f, t]).catch(() => ({ appointment_count: 0, total_net: 0, gst_collected: 0, total_settled: 0 })),
+        db.query(`
+          SELECT f.id, f.settled_at, f.subtotal, f.gst_amount, f.grand_total,
+                 f.payment_method, f.invoice_number, f.customer_gstin, f.customer_address,
+                 sa.client_name, sa.client_phone, sa.service_name
+          FROM folios f
+          LEFT JOIN spa_appointments sa ON sa.id = f.appointment_id
+          WHERE f.folio_kind='SPA' AND f.status='closed'
+            AND DATE(f.settled_at) BETWEEN ? AND ?
+          ORDER BY f.settled_at DESC
+          LIMIT 200
+        `, [f, t]).catch(() => []),
+      ]);
+
+      const round = (n: number) => Math.round(Number(n) * 100) / 100;
+      const s = summary as any;
+      res.json({
+        period: { from: f, to: t },
+        summary: {
+          appointment_count: Number(s?.appointment_count || 0),
+          total_net:    round(Number(s?.total_net || 0)),
+          gst_collected: round(Number(s?.gst_collected || 0)),
+          total_settled: round(Number(s?.total_settled || 0)),
+        },
+        folios: (folios as any[]).map(r => ({
+          id:             r.id,
+          settled_at:     r.settled_at,
+          client_name:    r.client_name  || '—',
+          client_phone:   r.client_phone || '',
+          service_name:   r.service_name || '—',
+          subtotal:       round(Number(r.subtotal  || 0)),
+          gst_amount:     round(Number(r.gst_amount || 0)),
+          grand_total:    round(Number(r.grand_total || 0)),
+          payment_method: r.payment_method || '',
+          // The download already named the file by invoice_number, which this
+          // response never returned — every spa invoice saved as its folio id.
+          invoice_number:   r.invoice_number || null,
+          customer_gstin:   r.customer_gstin || null,
+          customer_address: r.customer_address || null,
+        })),
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
   app.get("/api/restaurant/:id/accounts/:accountId", authenticate, requireTabAction('CUSTOMER_ACCOUNTS', 'READ'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
@@ -41032,67 +41144,6 @@ ${data.tenant.name}`;
           b60_90:   round(totals.b60_90),   b90_plus: round(totals.b90_plus),
           total:    round(totals.total),
         },
-      });
-    } catch (err: any) { res.status(500).json({ error: err?.message }); }
-  });
-
-  // ─── SPA BILLING (Accounts module) ────────────────────────────────────────
-  app.get("/api/restaurant/:id/accounts/spa-billing", authenticate, async (req: AuthRequest, res: Response) => {
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { from, to } = req.query as any;
-      const f = from || new Date().toISOString().slice(0, 7) + '-01';
-      const t = to   || new Date().toISOString().slice(0, 10);
-
-      const [summary, folios] = await Promise.all([
-        db.get(`
-          SELECT COUNT(*) AS appointment_count,
-                 COALESCE(SUM(subtotal), 0) AS total_net,
-                 COALESCE(SUM(gst_amount), 0) AS gst_collected,
-                 COALESCE(SUM(grand_total), 0) AS total_settled
-          FROM folios
-          WHERE folio_kind='SPA' AND status='closed'
-            AND DATE(settled_at) BETWEEN ? AND ?
-        `, [f, t]).catch(() => ({ appointment_count: 0, total_net: 0, gst_collected: 0, total_settled: 0 })),
-        db.query(`
-          SELECT f.id, f.settled_at, f.subtotal, f.gst_amount, f.grand_total,
-                 f.payment_method, f.invoice_number, f.customer_gstin, f.customer_address,
-                 sa.client_name, sa.client_phone, sa.service_name
-          FROM folios f
-          LEFT JOIN spa_appointments sa ON sa.id = f.appointment_id
-          WHERE f.folio_kind='SPA' AND f.status='closed'
-            AND DATE(f.settled_at) BETWEEN ? AND ?
-          ORDER BY f.settled_at DESC
-          LIMIT 200
-        `, [f, t]).catch(() => []),
-      ]);
-
-      const round = (n: number) => Math.round(Number(n) * 100) / 100;
-      const s = summary as any;
-      res.json({
-        period: { from: f, to: t },
-        summary: {
-          appointment_count: Number(s?.appointment_count || 0),
-          total_net:    round(Number(s?.total_net || 0)),
-          gst_collected: round(Number(s?.gst_collected || 0)),
-          total_settled: round(Number(s?.total_settled || 0)),
-        },
-        folios: (folios as any[]).map(r => ({
-          id:             r.id,
-          settled_at:     r.settled_at,
-          client_name:    r.client_name  || '—',
-          client_phone:   r.client_phone || '',
-          service_name:   r.service_name || '—',
-          subtotal:       round(Number(r.subtotal  || 0)),
-          gst_amount:     round(Number(r.gst_amount || 0)),
-          grand_total:    round(Number(r.grand_total || 0)),
-          payment_method: r.payment_method || '',
-          // The download already named the file by invoice_number, which this
-          // response never returned — every spa invoice saved as its folio id.
-          invoice_number:   r.invoice_number || null,
-          customer_gstin:   r.customer_gstin || null,
-          customer_address: r.customer_address || null,
-        })),
       });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
@@ -58393,8 +58444,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'buyer-gstin-on-every-bill',
+    commit_marker: 'supplier-payments-reach-the-ledger',
     code_features: [
+      'supplier-payments-reach-the-ledger — two production defects found while preparing M-2, both older than today and both fixed before building on them. (1) NO SUPPLIER PAYMENT HAD EVER REACHED THE LEDGER. On the live tenant 14 payments worth 72,600 rupees had no journal; Accounts Payable carried 79 invoice credits (23,30,739) and NOT ONE DEBIT, so the balance sheet showed every supplier bill ever raised as still owed and cash and bank never went down for what was paid. There were no GL exceptions to show for it. The payment route selected `pan` from `suppliers`; the column is `pan_number`. Postgres refused the statement BEFORE _postGlEntries was reached and the surrounding catch only logged it, so each payment marked its invoice PAID while the books said otherwise. No smoke test had ever posted a supplier payment, which is how it survived. The journal is now ONE function, _postSupplierPaymentGl, shared by the route and the backfill so the two cannot drift. Lifting it corrected two more things: the TDS threshold financial year was the CALENDAR year (getYearIST), wrong from January to March, and is now the financial year of the payment itself; and a failed supplier lookup can no longer stop a payment posting - the payable and cash sides post, TDS is not withheld, and the failure is logged loudly. POST /accounting/backfill-gl now also posts historical supplier payments, reported in their own supplier_payments section so no existing counter changes meaning. History is backfilled WITHOUT TDS unless apply_tds=1: the payment rows record that a payable was cleared, not whether tax was actually held back at the time, and booking a TDS liability for a withholding that never happened would create a debt to the government out of nothing. A dry run lists, per payment, what the rule would withhold. (2) THE SPA INVOICES AND PAYMENTS SCREEN HAD NEVER LOADED. GET /accounts/spa-billing was registered after GET /accounts/:accountId, Express matches in registration order, and every call was answered by the customer-account route as an account called spa-billing: 404 Account not found. The screen tests r.ok, so it showed nothing, for everyone - including the GST button M-3b had just put on it. Moved above that route; the other literal /accounts routes were checked and are not shadowed. It also had no gate beyond sign-in while listing client names, phones and amounts, and now requires Spa access and the SPA_BILLING tab; nobody loses access by that because the route returned nothing. Also fixed a test-ordering fault from M-3b: its probe orders were placed between the GST Outstanding fetch and the GSTR-3B fetch, putting 40 rupees of output tax into one and not the other. At rest both read 93,630.20. Smoke: TC-SUP-PAY-GL (a supplier payment posts, AP debited and cash credited for the amount, with a non-empty journal asserted), TC-SPA-BILLING-REACHABLE, TC-BACKFILL-SUP-PAY-DRYRUN (a dry run lists payments and writes nothing). tsc clean.',
       'buyer-gstin-on-every-bill — M-3 second half, which closes M-3. Table 4 of GSTR-1 (invoice-level B2B) could only ever contain hotel and event supplies, because those were the only two bills with anywhere to keep a buyer GSTIN. A company paying for a working lunch or a spa package could not get a claimable tax invoice at all, and its supply was reported as B2C. NOW EVERY KIND OF BILL CAN CARRY ONE. A restaurant bill is two different things and the details go on whichever is the INVOICE: a dine-in table is ONE invoice across several order rounds with the number on the SESSION, a takeaway/delivery/manual bill is one ORDER with its own number. So table_sessions and orders both gained customer_gstin + customer_address, and GSTR-1 reads the session first and the order second. A spa folio has no booking to carry a GSTIN the way hotel and event folios do, so folios gained the same two columns - added in ALL THREE places the folios table is created (createHotelTables, createSpaTables, the events schema), because each owns the table for its own kind of tenant and a migration in one would have left the other two without the column. ONE RULE SET: _readBuyerGstDetails lifts the event route own semantics, so every bill refuses a malformed GSTIN (GSTIN_INVALID) and refuses a GSTIN WITHOUT AN ADDRESS (ADDRESS_REQUIRED) - Rule 46 needs both, and a half-filled B2B invoice is worse than a B2C one because it looks claimable and is not. A round on a live table session is refused with SESSION_INVOICE naming the session, rather than saved somewhere the session invoice silently overrides. All three routes are audited GST_DETAILS_UPDATED with before and after, because they change what a tax document says about its recipient, and all three are separate from invoice edits: the fields carry no money, so a company can ask for a GST bill after paying and staff add the details and reprint. GSTR-1 NOW AGGREGATES B2B BY INVOICE, not by journal: revenue posts one ORDER journal per round, so a four-round table bill used to be at risk of four Table 4 lines. Each row also carries its source (HOTEL/EVENTS/SPA/RESTAURANT). The folio lookup retries WITHOUT f.customer_gstin if that column is missing, instead of relying on a .catch that returned [] - that catch would have silently dropped every hotel and event B2B invoice from the return, the exact failure this code exists to prevent. PRINTS ON ALL FOUR BILL RENDERERS: the thermal ESC/POS invoice, the owner-designed template, the legacy thermal HTML, and the spa PDF (which had gstin: null hard-coded). On a tax invoice the buyer block prints whenever a GSTIN is present even if the owner template hides the customer line, because Rule 46 requires it. FIXED IN PASSING: the spa billing list never returned invoice_number, so every spa invoice downloaded named by its folio id; and Table 12 raised no code, set one before filing in red over a 2,000 rupee discount contra - only positive turnover can need a code. Smoke: TC-INV-BUYER-GST-RULES (malformed refused, missing address refused, complete saved), TC-GSTR1-B2B-RESTAURANT (two orders settled seconds apart, one with a GSTIN: exactly one Table 4 row for it, source RESTAURANT, valued at that one order and not both), TC-GSTR1-B2B-SPA (a real spa bill given a GSTIN appears under its own invoice number, then restored). Test GSTINs are shape-valid and unique per run, and are cleared afterwards so no invented GSTIN stays on the books. tsc + vite build clean.',
       'gstr1-hsn-from-the-ledger — M-3 from the accounting review, first half. The complaint was that two of four revenue streams produced portal-shaped HSN detail and two summarised, so a filer assembled part of Table 12 by hand. THE CAUSE WAS WORSE THAN THE SYMPTOM. Table 12 was read from gst_output_register, a PARALLEL record written at three hotel settlement paths only - on the live tenant it held 146 of 493 settled hotel folios, ZERO spa folios, ZERO event folios and nothing whatever from the restaurant - and the code itself was keyed on folio_entries.account_head, a column that is NULL on about two rows in three, so 120 of its 317 rows carried no HSN at all. It also lives in createHotelTables, which runs only for property_type HOTEL or BOTH, so a restaurant-only tenant has no register to read. Extending that register to three more modules would have been building more of the wrong thing. Every other part of this return - the totals, the invoice-level B2B of Table 4, the B2CS of Table 7 - is derived from the GENERAL LEDGER, which is complete by construction and already ties to the trial balance. So Table 12 is now derived there too. The revenue account plus its cost centre is all the classification needs, because the accounts ALREADY separate rooms, food, service charge, ancillary, spa and events; _gstSupplyKind reads them, and a 4010 credit on a FOLIO journal is correctly called IN-ROOM DINING rather than a restaurant cover, since _folioRevenueGlLines is the only thing that produces one. cost_centre says so on journals posted since cost-centre tagging and source_type answers for every historical row. The split of tax within a journal is EXACT, not an apportionment: this product applies ONE GST rate per bill, so a revenue account share of the tax is its share of the taxable value. NEW gst_hsn_map, seeded per TENANT beside the chart of accounts rather than in the hotel schema, holding one SAC per kind of supply: 996311 accommodation, 996331 restaurant, 996332 in-room dining, 996334 banquet, 999722 spa, 999799 ancillary. EVERY SEEDED CODE IS MARKED is_default UNTIL SOMEBODY CONFIRMS IT, and the return lists the kinds still sitting on one, because classification is the taxpayer judgement and their CA to sign off - this product should suggest a code and then say plainly that it is a suggestion, not file a guess silently. Turnover with NO code is reported separately and in red, because that stops a return being filed while an unconfirmed code only means nobody has checked it. Two judgements are STATED rather than hidden: the ledger books all event revenue to one account so hall hire and catering cannot be separated (right for a package, wrong for bare hall hire, and the description says so), and 999721 is the alternative for a salon-led spa. gst_hsn_map is in BOOKS_OF_ACCOUNT_TABLES so a reclassification lands in the statutory trail with its before and after - the row alone only ever holds the latest confirmer. Smoke: TC-ACC-GSTR1-HSN-ALL-STREAMS asserts coverage of more than one stream, a named supply on every line, and that Table 12 ADDS UP TO THE RETURN HEADLINE - a Table 12 that disagrees with Tables 4 and 7 is a return that gets rejected. NOT DONE and stated rather than implied: restaurant and spa bills carry no customer GSTIN field, so those supplies still appear in B2CS; invoice-level B2B for them needs that field first and is the second half of M-3. tsc + vite build clean.',
       'year-end-accrual — H-3 from the accounting review, and the last of its High findings. Revenue reaches this ledger when a BILL SETTLES: a restaurant order posts ORDER-<id> when it is paid, a folio posts FOLIO-<id> when it is settled. For 364 days a year that is immaterial and arguably prudent; on the last day of the financial year it is a cut-off error - food served in one year with its revenue in the next, and a guest who slept four nights in March and checks out on 3 April carrying all four nights into the new year. THE FIX IS NOT A CHANGE TO DAILY REVENUE RECOGNITION, which would touch every operational path in the product. It is ONE journal dated at the cut-off for what was delivered and not yet billed, and an equal REVERSING journal dated the next day. The reversal is the entire safety mechanism: when the bill finally settles it posts IN FULL, and the reversal has already taken the accrued portion back out, so nothing is counted twice and no later posting has to know the accrual ever happened. WHAT COUNTS AS DELIVERED, and why this measure and not a reconstruction: a folio is charged AS the service is rendered - verified against live data that a room charge is posted PER NIGHT, a five-night stay carrying five ROOM_CHARGE rows dated one per night - so the folio is the product own DATED record of what was delivered, and summing its entries to the cut-off is the most faithful measure available. Restaurant orders not on a folio are the second source; an order CHARGED TO A ROOM is excluded because it will be recognised through that folio, and counting both would bill the same plate of food twice. NET OF GST on purpose: an accrual is a revenue-recognition entry, not a tax event - the tax point is the invoice, which has not been raised, so accruing output GST would create a liability no return reports. THE VALUATION IS SHARED, NOT MIRRORED: _orderNetRevenue was lifted out of _postOrderGl so the accrual values an unbilled order on EXACTLY the basis the journal will use when it is finally paid - an accrual computed on a different basis than the revenue it anticipates leaves a residue at every reversal. Per-LINE cost centres, so one journal spans four modules and each revenue credit lands in its own bucket; the 1150 debit that faces them carries none, because it is genuinely property-wide. New account 1150 Accrued Revenue (Unbilled), which should read ZERO on every date outside the accrual-to-reversal window. BOTH DATES ARE CHECKED AGAINST THE PERIOD LOCK BEFORE ANYTHING IS WRITTEN: an accrual that posts and then cannot be reversed, because the next day sits in a period somebody closed, overstates revenue permanently and an append-only ledger has no undo. Posting is refused for a future date; the schedule is readable for any date, because an owner in January wants to see where the cut-off will land. Everything left out is REPORTED with a reason - two CANCELLED events were carrying 1.95 lakh each on open folios, package purchases and membership fees are consideration received in ADVANCE of service and are deferred rather than accrued, a tip is a liability to the staff, and an in-house booking with NO FOLIO is named because there is no dated record to accrue from and inventing one would be worse than saying so. TWO STALE STATEMENTS CORRECTED IN PASSING, both of which described the period close as advisory: the comment above the routes and, worse, the sentence on the Period Close screen itself reading Soft lock: posting is never blocked. That stopped being true when Q-2 shipped. A screen that tells a user a control is advisory while it refuses their posting is worse than one that says nothing. Smoke: -SCHEDULE (the parts add up to the headline), -NO-DOUBLE-COUNT (two orders placed seconds apart, one left unbilled and one settled: the first IS accrued and the second is NOT), -NET-OF-GST, -EXPLAINS-EXCLUSIONS, -FUTURE-REFUSED, -POSTS-AND-REVERSES (asserts the reversal exists AND its date), -IDEMPOTENT, -TB-STILL-TIES. The suite posts with a cut-off of YESTERDAY so both halves land in the past and no report ending today is moved by a paisa. tsc + vite build clean.',
@@ -59698,7 +59750,49 @@ ${data.tenant.name}`;
         await _postOrderGl(db, req.params.id, o, req.user?.email || 'BACKFILL');
         (await has(ref) ? posted : stillMissing).push(ref);
       }
+      // 3) Supplier PAYMENTS → SP-<id>. Kept in their OWN section of the response
+      // rather than folded into the counters above, so nothing that already reads
+      // those counters changes meaning.
+      //
+      // TDS is NOT applied to history unless asked (?apply_tds=1). The payment row
+      // records that the payable was cleared; whether tax was actually held back
+      // from the supplier at the time is a fact these rows do not contain, and
+      // booking a TDS liability for a withholding that never happened would put
+      // money owed to the government into the books out of nothing. So a dry run
+      // reports, per payment, what the rule WOULD withhold, and the owner decides.
+      const applyTds = String(req.query.apply_tds || req.body?.apply_tds || '') === '1';
+      const payRows: any[] = await db.query(
+        `SELECT id, invoice_id, amount, payment_method, payment_date FROM supplier_payments
+          WHERE TO_CHAR(payment_date,'YYYY-MM-DD') BETWEEN ? AND ? ORDER BY payment_date`, [from, to]
+      ).catch(() => []);
+      const spDetail: any[] = []; let spAlready = 0; let spPosted = 0; const spMissing: string[] = [];
+      for (const pr of payRows) {
+        const ref = `SP-${pr.id}`;
+        if (await has(ref)) { spAlready++; continue; }
+        const inv: any = pr.invoice_id ? await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [pr.invoice_id]).catch(() => null) : null;
+        if (!inv) { spMissing.push(ref); spDetail.push({ journal_ref: ref, amount: Number(pr.amount || 0), status: 'NO_INVOICE', note: 'Payment is not linked to a supplier invoice — post it by manual journal.' }); continue; }
+        if (dryRun) {
+          // A dry run must not write: compute the rule without posting anything.
+          const sup: any = await db.get("SELECT tds_section, tds_category, pan_number AS pan FROM suppliers WHERE id = ?", [inv.supplier_id]).catch(() => null);
+          const invTotal = Number(inv.total_amount || 0);
+          const base = +(Number(pr.amount || 0) * (invTotal > 0 ? Math.max(0, invTotal - Number(inv.gst_amount || 0)) / invTotal : 1)).toFixed(2);
+          const rule = sup ? _tdsForSupplierPayment({ section: sup.tds_section, category: sup.tds_category, hasPan: !!(sup.pan && String(sup.pan).trim()), taxableBase: base }) : null;
+          spDetail.push({ journal_ref: ref, amount: Number(pr.amount || 0), payment_date: _glPostDate(pr.payment_date), status: 'WOULD_POST', tds_rule_would_withhold: rule ? Math.min(Number(rule.amount || 0), Number(pr.amount || 0)) : 0, tds_section: rule?.section || null, tds_will_be_booked: applyTds && !!rule });
+          continue;
+        }
+        const r = await _postSupplierPaymentGl(db, req.params.id, pr, inv, { postedBy: req.user?.email || 'BACKFILL', applyTds });
+        if (r.ok) spPosted++; else spMissing.push(ref);
+        spDetail.push({ journal_ref: ref, amount: Number(pr.amount || 0), status: r.ok ? 'POSTED' : 'REFUSED', reason: r.reason, tds_booked: r.tds_booked, tds_rule_would_withhold: r.tds_rule_would_withhold });
+      }
       res.json({
+        supplier_payments: {
+          already_posted: spAlready,
+          candidates: spDetail.length,
+          posted_count: dryRun ? 0 : spPosted,
+          still_missing_count: spMissing.length,
+          tds_applied: applyTds,
+          detail: spDetail.slice(0, 200),
+        },
         ok: true, dry_run: dryRun, from, to,
         already_posted: alreadyPosted,
         candidates,
