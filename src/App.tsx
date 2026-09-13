@@ -14068,7 +14068,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   const fetchInventoryGRNs = async () => {
     try {
-      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/grn`, {
+      // Scoped like the ingredients list above. Unscoped, the chef's
+      // goods-receipt history listed hotel linen and spa deliveries too.
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/grn?module=RESTAURANT&include_shared=1`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (r.ok) setInventoryGRNs(await r.json());
@@ -14076,7 +14078,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   const fetchInventoryWastage = async () => {
     try {
-      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/wastage`, {
+      // The route has accepted ?module= all along; this caller never sent one,
+      // so the kitchen's wastage log showed every department's spoilage.
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/wastage?module=RESTAURANT&include_shared=1`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (r.ok) setInventoryWastage(await r.json());
@@ -14084,7 +14088,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   const fetchInventoryCounts = async () => {
     try {
-      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/counts`, {
+      // Counts take a plain module, no include_shared: the route deliberately
+      // also returns stock-takes whose module is NULL, which are the ones taken
+      // before counts were scoped and genuinely spanned the whole property.
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/counts?module=RESTAURANT`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (r.ok) setInventoryCounts(await r.json());

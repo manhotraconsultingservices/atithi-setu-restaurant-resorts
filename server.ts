@@ -20770,6 +20770,14 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/inventory/grn", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
+      // A receipt has no module column of its own — it is a delivery, and what
+      // makes it one department's business is WHAT ARRIVED IN IT. So match on
+      // the items received, and fall back to the module of the purchase order
+      // it was raised against: that second arm is what keeps a PO-linked
+      // receipt visible when its lines were never recorded, which on a property
+      // that receipts nothing is most of them.
+      const gmfItems = _invModuleFilter(req, 'ix.module');
+      const gmfPo = _invModuleFilter(req, 'px.module');
       const rows = await db.query(
         `SELECT g.*, s.name AS supplier_name,
                 COALESCE(SUM(gi.qty_received), 0) AS total_qty,
@@ -20777,8 +20785,18 @@ ${data.tenant.name}`;
            FROM goods_receipts g
            LEFT JOIN suppliers s ON s.id = g.supplier_id
            LEFT JOIN goods_receipt_items gi ON gi.grn_id = g.id
+          ${gmfItems.module ? `WHERE (
+                EXISTS (SELECT 1 FROM goods_receipt_items gx
+                          JOIN ingredients ix ON ix.id = gx.ingredient_id
+                         WHERE gx.grn_id = g.id${gmfItems.sql})
+             OR EXISTS (SELECT 1 FROM purchase_orders px
+                         WHERE px.id = g.po_id${gmfPo.sql})
+          )` : ''}
           GROUP BY g.id, s.name
-          ORDER BY g.received_at DESC`
+          ORDER BY g.received_at DESC`,
+        // BIND ORDER: the items EXISTS precedes the purchase-order EXISTS in the
+        // statement text, so its params bind first.
+        [...gmfItems.params, ...gmfPo.params]
       );
       res.json(rows);
     } catch (err) {
@@ -57780,8 +57798,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'forecast-honours-the-module',
+    commit_marker: 'kitchen-lists-scoped',
     code_features: [
+      'kitchen-lists-scoped — the last of the unscoped kitchen reads, after the dashboard and forecast. The chef goods-receipt history, wastage log and stock-take list were all fetched with no module, so they showed every department: hotel linen deliveries, spa spoilage, and other modules stock-takes. Wastage and counts had ACCEPTED ?module= on the server all along and the caller simply never sent one; the GRN list had no module filter at all, so one was added. A GOODS RECEIPT HAS NO MODULE OF ITS OWN - it is a delivery, and what makes it a department business is WHAT ARRIVED IN IT. So it matches on the items received (EXISTS over goods_receipt_items -> ingredients) OR on the module of the purchase order it was raised against. The second arm is what keeps a PO-linked receipt visible when its lines were never recorded, which on a property that receipts nothing is all of them. TWO THINGS I GOT WRONG AND CORRECTED WHILE DOING IT: (1) my first anchors matched 2-3 sites each, because the same URL is used by POST calls in GRNCreateModal / WastageLogModal / StartCountModal - only the three GETs in OwnerDashboard needed scoping. (2) I then added `module: RESTAURANT` to the counts POST believing kitchen stock-takes were saved NULL-tagged; the route already does _normaliseCostModule(req.body?.module, RESTAURANT), so it was a no-op whose comment would have misled the next reader. Reverted. Counts deliberately take a plain module with no include_shared, because that route also returns NULL-module stock-takes - the ones taken before counts were scoped, which genuinely spanned the whole property.',
       'forecast-honours-the-module — the other half of kitchen-dashboard-scoped, and it needed BOTH. Scoping the client fetch fixed the tiles (stock Rs6.9L -> Rs99k, below-reorder 23 -> 2, food cost 1.8% -> 14.8%) but the Consumption Forecast table underneath went on listing Ashwagandha Churna, because the dashboard route applied its module filter to every KPI query and NOT to the forecast query, whose WHERE was a bare `i.is_active = 1`. So a module-scoped request still received the whole property suggested-order list. Found by looking at the screen again after the first fix rather than assuming it had worked - the tiles changing is not evidence the list did. LANDMINE: the horizon placeholder lives in a LEFT JOIN that precedes the WHERE, so it binds BEFORE the module params; reversing them binds a module name as a horizon and returns an empty forecast rather than an error.',
       'kitchen-dashboard-scoped — FOUND BY DRIVING THE UI after re-filing 20 Ayurvedic items from RESTAURANT to SPA. The Kitchen Inventory screen kept showing Rs6.9L of stock, 23 items below reorder, and a consumption forecast proposing purchase orders for Ashwagandha Churna - spa medicine - while its own Ingredients tab correctly read 38. Cause: fetchInventoryDashboard called /inventory/dashboard with NO module, so every tile on the chef screen (stock value, below reorder, expiring, wastage, food cost %, pending PO value) plus the whole suggested-order forecast was the WHOLE PROPERTY - hotel linen and the spa dispensary included. This is the SAME defect as the one fixed when the hotel silo was folded in (that fix scoped /inventory/ingredients to module=RESTAURANT&include_shared=1 and MISSED the dashboard read three lines below it). ModuleInventoryView had it right all along for Hotel/Spa/Events. Pre-existing, not caused by the re-filing - the re-filing just made it impossible to miss, because the kitchen started forecasting POs for items it does not stock. NOTE for anyone extending this screen: the kitchen wastage, counts and GRN reads are still unscoped; they are transaction lists rather than KPI tiles so they mislead less, but they are the same class.',
       'valuation-join-whitespace — HOTFIX for one-valuation-basis, which I shipped broken. The reusable join fragment began with the bare token LEFT JOIN and every call site interpolated it directly after the preceding join last token, so `ON sm.ingredient_id = i.id` + `LEFT JOIN` lexed as the single identifier `i.idLEFT` and Postgres answered "column i.idleft does not exist". SQL is whitespace-INSENSITIVE, not whitespace-OPTIONAL, and I reasoned from the first. It took out the inventory dashboard, dead stock, the COGS report and the variance report - four 500s - for the few minutes between deploys. The fragment now starts on its own line, and that leading newline is load-bearing. CAUGHT BY PROBING EVERY TOUCHED ENDPOINT STRAIGHT AFTER THE DEPLOY rather than waiting for the suite: tsc cannot see inside a SQL string, so twelve query edits are twelve run-time-only risks and the only honest verification is to call them.',
