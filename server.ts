@@ -5698,6 +5698,19 @@ function _optionalStaffUser(req: any, tenantId: string): any | null {
   } catch { return null; }
 }
 
+// How a person is NAMED in any log this product writes. ONE definition, because
+// two would eventually disagree - and the disagreement always surfaces the same
+// way: a raw `user-<uuid>` printed where a name belongs. That has now been the
+// reported bug three separate times (the cleaning log, an event revision, and
+// the first cut of the statutory trail), every time because a caller reached for
+// `.name` when the token carries `userName`.
+function _actorDisplayName(u: any): string {
+  const named = (u?.userName && String(u.userName).trim()) || (u?.email && String(u.email).trim());
+  if (named) return named;
+  const role = String(u?.role || '').replace(/_/g, ' ').trim();
+  return role ? role.replace(/\w/g, (c: string) => c.toUpperCase()) : 'Staff';
+}
+
 const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
   // T1-S8 — accept the JWT from EITHER the Authorization header (legacy
   // SPA, mobile clients, integrations) OR the HttpOnly cookie issued at
@@ -5720,7 +5733,7 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
     const _auditStore = booksAuditContext.getStore();
     if (_auditStore) {
       _auditStore.id = decoded.id || decoded.email || null;
-      _auditStore.name = decoded.name || decoded.full_name || decoded.email || null;
+      _auditStore.name = _actorDisplayName(decoded);
       _auditStore.role = String(decoded.role || 'STAFF');
     }
 
@@ -26386,13 +26399,7 @@ ${data.tenant.name}`;
   const HK_OVERRIDE_DENIED = 'Only a manager, or housekeeping staff with Full access, can skip a cleaning checklist.';
   // Human-readable actor for cleaning-log entries — never a raw user UUID.
   // Prefers the JWT display name, then email, then a Title-Cased role.
-  const hkActor = (req: AuthRequest): string => {
-    const u: any = req.user || {};
-    const name = (u.userName && String(u.userName).trim()) || (u.email && String(u.email).trim());
-    if (name) return name;
-    const role = String(u.role || '').replace(/_/g, ' ').trim();
-    return role ? role.replace(/\b\w/g, (c: string) => c.toUpperCase()) : 'Staff';
-  };
+  const hkActor = (req: AuthRequest): string => _actorDisplayName(req.user || {});
   // Matches the identifiers this app actually issues, which is the whole point:
   // the previous version required a BARE uuid, but tenant user ids are minted as
   // `user-<uuid>`. So every real staff id sailed straight past the "unknown id →
@@ -57829,8 +57836,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'books-audit-trail',
+    commit_marker: 'audit-actor-has-a-name',
     code_features: [
+      'audit-actor-has-a-name — the statutory trail went live naming its actor `user-c192c760-06c5-...`, a raw uuid where a person belongs. THE SAME DEFECT FOR THE THIRD TIME this session (the housekeeping cleaning log, then event revised_by, now the audit trail) with the same cause every time: the caller reached for decoded.name when the token carries userName. Fixed by making the wrong field unreachable - _actorDisplayName(u) is now the SINGLE definition of how a person is named in any log this product writes (userName, then email, then a Title-Cased role, then Staff), at module scope above `authenticate`, used by the audit context, with hkActor reduced to a one-line delegation. Two copies of a naming rule is two answers to who did this, and the disagreement always surfaces as a uuid in a report a human is meant to read.',
       'books-audit-trail — Q-1 from the accounting review, and the qualification that blocked certifying this product for a COMPANY client. Rule 3(1) of the Companies (Accounts) Rules has required since 1 Apr 2023 that accounting software record an audit trail of each and every transaction, create an edit log of every change to the books, and NOT allow it to be disabled. The old trail was writeObjectAudit called endpoint by endpoint: 118 of 564 write routes, about a fifth. WHY IT MOVED BELOW THE ROUTES. Completeness achieved endpoint-by-endpoint lapses the next time somebody adds an endpoint. PostgresDb.run is the ONE place every tenant write passes through, so the log is now written because the row was written - there is no flag to turn it off and removing it means editing db.ts. New tenant table books_audit_log (table, operation, row key, actor, request id, before/after images, statement shape, timestamp). THE BEFORE-IMAGE IS DELIBERATELY CONSERVATIVE: it comes from re-running the statement OWN WHERE clause as a SELECT, and is attempted ONLY when the statement contains exactly one WHERE - with a subquery there is no way to tell which WHERE bounds the rows being changed, and a plausible wrong before-image is evidence that misleads, which is worse than a missing one. Placeholders in a SET clause bind BEFORE those in the WHERE, so the SELECT takes only the tail of the params; getting that backwards would read a different row than the one being changed. A survey of the codebase first confirmed 54 of 57 books-table UPDATEs have a single WHERE. ACTOR VIA AsyncLocalStorage: a context is opened for EVERY request before the body parser (so public endpoints that never reach `authenticate` are covered too) and `authenticate` then names the user by MUTATING that store in place, which keeps one request id across every row a request writes. Cron and boot writes find no store and record as SYSTEM. SCOPE: the books of account and the subsidiary records that feed them. `orders` is deliberately EXCLUDED - it churns on every kitchen status change and its financial effect reaches the books through gl_entries, which IS covered, so the money is audited without the noise. object_audit_log is kept: business intent and row-level change answer different questions. THE TRAIL NEVER FAILS THE WRITE - a guest bill must not be refused because an audit insert failed - but the failure is logged loudly rather than swallowed. Read back at GET /accounting/audit-trail (owner-only, filterable, with a coverage summary); there is deliberately NO endpoint that edits or deletes an entry. Smoke: TC-AUDIT-TRAIL-RECORDS drives a route containing NO audit call of its own and requires the entry anyway - if that holds, it holds for endpoints nobody has written yet; -NAMES-WHO, -BEFORE-AFTER (what it was and what it became), -COVERS-BOOKS, -CANNOT-BE-CLEARED (asserts the ABSENCE of any delete/clear endpoint).',
       'supplier-insert-placeholders — HOTFIX. Adding the four Section 43B(h) fields to the supplier INSERT widened the column list and the parameter array but NOT the VALUES placeholder list: 31 columns, 31 params, 27 question marks. Postgres answered "INSERT has more target columns than expressions" and CREATING A SUPPLIER 500d for the few minutes between deploys. tsc cannot count placeholders inside a SQL string, and the smoke suite caught it only as a SKIP - TC-MSME-43B reported "fixture invoices not created" rather than a failure, because its fixture could not build. A SKIP on a test you just wrote is a result, not an absence: it means the test proved nothing, and here it was hiding a live regression in an unrelated feature. Diagnosed by reproducing the fixture calls directly against production.',
       'msme-43b-ageing — H-1 from the accounting review, and the highest-value item on it for an Indian MSME practice. Section 43B(h) (Finance Act 2023, AY 2024-25 onward) disallows a deduction for sums payable to a MICRO or SMALL enterprise beyond the section 15 MSMED time limit until they are actually paid. It costs the CLIENT money, at assessment, on an amount the books report as an entirely ordinary payable - and nothing in the product answered it. THE DISTINCTION THAT MAKES THE REPORT WORTH HAVING: the test is NOT "unpaid at the year end", it is "unpaid BEYOND THE LIMIT at the year end". An invoice dated 20 March on 45-day terms falls due 4 May - unpaid on 31 March and NOT disallowed. A screen that lists every open MSME payable overstates the disallowance and sends the owner paying bills that were never due; that is the naive version and the smoke tests are built to fail it. New supplier fields udyam_number / msme_class / msme_agreement_days / msme_is_trader, because msme_registered alone cannot answer the question: the section reaches micro and small only, so the CLASS is required, and MEDIUM IS OUTSIDE IT - the commonest error in this calculation. Limit = the days agreed in writing capped at 45, else 15. GET /accounting/msme-43b returns per-invoice status (DISALLOWED / WITHIN_LIMIT / PAID_LATE / PAID_WITHIN_LIMIT), the section 15 due date, days beyond, a by-supplier roll-up, and an EXCLUDED list naming who was left out and why - an exclusion a report cannot explain is one an auditor will not accept. Traders are a flag rather than a hard-coded rule, since their exclusion is a judgement for the client CA. Paid invoices are retained so a habit of late payment is visible, not just the closing balance. Smoke: -DISALLOWED, -WITHIN-LIMIT (a 5-day-old unpaid micro bill must NOT be disallowed), -MEDIUM-EXCLUDED, -AGREEMENT (45-day terms honoured), -CAP (a 90-day agreement capped at 45), -TRADER, -TOTALS (headline equals the sum of its lines), -AS-OF (the same invoice is not disallowed at a date before its limit expired).',
