@@ -5229,6 +5229,43 @@ function _glPostDate(ts?: unknown): string {
   return d.toISOString().slice(0, 10);
 }
 
+// ── A closed accounting period REFUSES a posting dated inside it ───────────
+// The close used to be advisory: it recorded the sign-off and reported entries
+// that arrived afterwards, but it did not refuse them. A signed-off month that
+// can still move is not signed off — and the product already contained the
+// stronger control, applied to STOCK (`_inventoryPeriodBlock`) but not to the
+// ledger. This is that same pattern, ported to the books.
+//
+// WHAT THIS DOES NOT BREAK, by construction: a posting dated TODAY can never
+// land in a closed period, because periods are closed over past months. So every
+// settlement, payment and order taken in the normal course is untouched. What is
+// refused is a posting DATED INTO a month that has been signed off — which is
+// either a back-dated manual journal or a back-dated operational entry, and both
+// are precisely what the lock exists to stop.
+async function _acctPeriodBlock(db: any, dateIso: string): Promise<any | null> {
+  if (!dateIso || !/^\d{4}-\d{2}-\d{2}/.test(String(dateIso))) return null;
+  return await db.get(
+    `SELECT period_key, from_date, to_date, closed_at, closed_by
+       FROM accounting_periods
+      WHERE status = 'CLOSED' AND ?::date BETWEEN from_date AND to_date
+      LIMIT 1`,
+    [String(dateIso).slice(0, 10)]
+  ).catch(() => null);
+}
+
+// One place to refuse, so every back-dating path gives the same sentence and the
+// same way out — the pattern `_blockIfClosed` established for stock.
+async function _blockIfAcctClosed(res: Response, db: any, dateIso: string): Promise<boolean> {
+  const p = await _acctPeriodBlock(db, dateIso);
+  if (!p) return false;
+  res.status(409).json({
+    error: `The books are closed for ${p.period_key} (signed off ${String(p.closed_at || '').slice(0, 10)}). Reopen that period before recording anything dated inside it.`,
+    code: 'ACCOUNTING_PERIOD_CLOSED',
+    period_key: p.period_key, from_date: p.from_date, to_date: p.to_date,
+  });
+  return true;
+}
+
 async function _postGlEntries(
   db: any,
   restaurantId: string,
@@ -5242,6 +5279,21 @@ async function _postGlEntries(
   // both, it is derived from the source type, and absent that it stays NULL.
   costCentre?: string | null,
 ): Promise<GlPostResult> {
+  // The backstop. Routes below refuse up front with a 409 so the user gets a
+  // sentence they can act on; this catches anything that did not, and records a
+  // GL exception so a refused posting is VISIBLE rather than quietly missing.
+  // Money must never move without a ledger entry and no one noticing.
+  const _closed = await _acctPeriodBlock(db, entryDate);
+  if (_closed) {
+    const _dr = (lines || []).reduce((a, l) => a + Number(l.dr_amount || 0), 0);
+    const _cr = (lines || []).reduce((a, l) => a + Number(l.cr_amount || 0), 0);
+    await _recordGlException(
+      db, restaurantId, journalRef, entryDate, sourceType, sourceId, _dr, _cr, lines,
+      `REFUSED — ${_closed.period_key} is closed (signed off ${String(_closed.closed_at || '').slice(0, 10)}). Reopen that period to post into it.`,
+      postedBy,
+    ).catch(() => {});
+    return { ok: false, posted: 0, dropped: true, reason: 'ACCOUNTING_PERIOD_CLOSED' };
+  }
   const meaningful = (lines || []).filter(l => (l.dr_amount || 0) !== 0 || (l.cr_amount || 0) !== 0);
   if (meaningful.length === 0) return { ok: true, posted: 0, dropped: false };
   const totalDr = meaningful.reduce((s, l) => s + (l.dr_amount || 0), 0);
@@ -24474,6 +24526,9 @@ ${data.tenant.name}`;
       const { supplier_id, invoice_number, invoice_date, due_date, po_id, grn_id, module,
               subtotal, gst_amount, total_amount, notes } = req.body;
       if (!supplier_id || !total_amount) return res.status(400).json({ error: 'supplier_id and total_amount are required' });
+      // A purchase bill dated into a signed-off month would move that month's
+      // expense and its payable after the fact.
+      if (await _blockIfAcctClosed(res, db, String(invoice_date || ''))) return;
       const id = `SI-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
       const sub = Number(subtotal || total_amount);
       const gst = Number(gst_amount || 0);
@@ -24601,6 +24656,7 @@ ${data.tenant.name}`;
       const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
       if (!inv) return res.status(404).json({ error: 'Invoice not found' });
       const { amount, payment_method, payment_date, reference_number, notes } = req.body;
+      if (await _blockIfAcctClosed(res, db, String(payment_date || ''))) return;
       if (!amount || Number(amount) <= 0) return res.status(400).json({ error: 'amount must be > 0' });
       const payAmt = Number(amount);
       if (payAmt > inv.outstanding_amount + 0.01) return res.status(400).json({ error: `Payment ₹${payAmt} exceeds outstanding ₹${inv.outstanding_amount}` });
@@ -36362,6 +36418,7 @@ ${data.tenant.name}`;
       const amount = Math.abs(Number(req.body?.amount || 0));
       if (!(amount > 0)) return res.status(400).json({ error: 'amount must be greater than 0' });
       const entry_date = String(req.body?.entry_date || new Date().toISOString().slice(0, 10));
+      if (await _blockIfAcctClosed(res, tenantDb, entry_date)) return;
       // Coerces an unrecognised module rather than rejecting it, which is the
       // long-standing behaviour — but the list now covers all four business
       // modules, so an Events or Spa expense is no longer silently refiled as
@@ -57836,8 +57893,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'audit-actor-has-a-name',
+    commit_marker: 'accounting-period-lock',
     code_features: [
+      'accounting-period-lock — Q-2 from the accounting review, and the last qualification. Closing an accounting period used to record the sign-off and REPORT entries that arrived afterwards without refusing them, while the INVENTORY close in the same product hard-blocks a back-dated write with a 409. The stronger control existed, applied to stock and not to the ledger. Now ported. WHAT IT DELIBERATELY DOES NOT BREAK: a posting dated TODAY can never land in a closed period, because periods are closed over PAST months - so every settlement, payment and order taken in the normal course is untouched by construction. What is refused is a posting DATED INTO a signed-off month. TC-ACCT-PERIOD-LOCK-TODAY-OK asserts exactly that, because a lock that stopped the property taking money would be torn out within a day. TWO LAYERS, on purpose. Five routes that accept a user-supplied date refuse UP FRONT with 409 ACCOUNTING_PERIOD_CLOSED naming the period and the way out (manual journal, supplier invoice, supplier payment, petty cash, expense payment) - a person gets a sentence they can act on. And _postGlEntries itself refuses as a BACKSTOP, recording a gl_exception, so anything that slips past a route guard is visible rather than silently unposted: money must never move without a ledger entry and nobody noticing. REOPEN NOW DEMANDS A REASON (>= 3 chars, 400 REOPEN_REASON_REQUIRED otherwise), appends who/when/why to the period note, and lands in the statutory trail for free because accounting_periods is one of the books tables audited by books-audit-trail. KNOWN CONSEQUENCE, accepted deliberately: the inventory close/reopen posts its reversal dated at the INVENTORY period end (date: period_to), so re-closing stock for a month whose ACCOUNTS are signed off is now refused until the accounting period is reopened. That is the correct discipline - you cannot silently re-post a signed-off month - and the 409 names the way out. Smoke: -REFUSES, -ALL-DOORS (a back-dated purchase bill is refused by the same lock; the control is on the DATE, not on one screen), -TODAY-OK, -REOPEN. The test reopens its probe period in `finally` whatever happens, since leaving the books locked would fail every later money test on a guard working exactly as designed.',
       'audit-actor-has-a-name — the statutory trail went live naming its actor `user-c192c760-06c5-...`, a raw uuid where a person belongs. THE SAME DEFECT FOR THE THIRD TIME this session (the housekeeping cleaning log, then event revised_by, now the audit trail) with the same cause every time: the caller reached for decoded.name when the token carries userName. Fixed by making the wrong field unreachable - _actorDisplayName(u) is now the SINGLE definition of how a person is named in any log this product writes (userName, then email, then a Title-Cased role, then Staff), at module scope above `authenticate`, used by the audit context, with hkActor reduced to a one-line delegation. Two copies of a naming rule is two answers to who did this, and the disagreement always surfaces as a uuid in a report a human is meant to read.',
       'books-audit-trail — Q-1 from the accounting review, and the qualification that blocked certifying this product for a COMPANY client. Rule 3(1) of the Companies (Accounts) Rules has required since 1 Apr 2023 that accounting software record an audit trail of each and every transaction, create an edit log of every change to the books, and NOT allow it to be disabled. The old trail was writeObjectAudit called endpoint by endpoint: 118 of 564 write routes, about a fifth. WHY IT MOVED BELOW THE ROUTES. Completeness achieved endpoint-by-endpoint lapses the next time somebody adds an endpoint. PostgresDb.run is the ONE place every tenant write passes through, so the log is now written because the row was written - there is no flag to turn it off and removing it means editing db.ts. New tenant table books_audit_log (table, operation, row key, actor, request id, before/after images, statement shape, timestamp). THE BEFORE-IMAGE IS DELIBERATELY CONSERVATIVE: it comes from re-running the statement OWN WHERE clause as a SELECT, and is attempted ONLY when the statement contains exactly one WHERE - with a subquery there is no way to tell which WHERE bounds the rows being changed, and a plausible wrong before-image is evidence that misleads, which is worse than a missing one. Placeholders in a SET clause bind BEFORE those in the WHERE, so the SELECT takes only the tail of the params; getting that backwards would read a different row than the one being changed. A survey of the codebase first confirmed 54 of 57 books-table UPDATEs have a single WHERE. ACTOR VIA AsyncLocalStorage: a context is opened for EVERY request before the body parser (so public endpoints that never reach `authenticate` are covered too) and `authenticate` then names the user by MUTATING that store in place, which keeps one request id across every row a request writes. Cron and boot writes find no store and record as SYSTEM. SCOPE: the books of account and the subsidiary records that feed them. `orders` is deliberately EXCLUDED - it churns on every kitchen status change and its financial effect reaches the books through gl_entries, which IS covered, so the money is audited without the noise. object_audit_log is kept: business intent and row-level change answer different questions. THE TRAIL NEVER FAILS THE WRITE - a guest bill must not be refused because an audit insert failed - but the failure is logged loudly rather than swallowed. Read back at GET /accounting/audit-trail (owner-only, filterable, with a coverage summary); there is deliberately NO endpoint that edits or deletes an entry. Smoke: TC-AUDIT-TRAIL-RECORDS drives a route containing NO audit call of its own and requires the entry anyway - if that holds, it holds for endpoints nobody has written yet; -NAMES-WHO, -BEFORE-AFTER (what it was and what it became), -COVERS-BOOKS, -CANNOT-BE-CLEARED (asserts the ABSENCE of any delete/clear endpoint).',
       'supplier-insert-placeholders — HOTFIX. Adding the four Section 43B(h) fields to the supplier INSERT widened the column list and the parameter array but NOT the VALUES placeholder list: 31 columns, 31 params, 27 question marks. Postgres answered "INSERT has more target columns than expressions" and CREATING A SUPPLIER 500d for the few minutes between deploys. tsc cannot count placeholders inside a SQL string, and the smoke suite caught it only as a SKIP - TC-MSME-43B reported "fixture invoices not created" rather than a failure, because its fixture could not build. A SKIP on a test you just wrote is a result, not an absence: it means the test proved nothing, and here it was hiding a live regression in an unrelated feature. Diagnosed by reproducing the fixture calls directly against production.',
@@ -58971,6 +59029,7 @@ ${data.tenant.name}`;
         cashAcct = { code: wanted, name: String(known.label || known.bank_name || 'Bank') };
       }
       const date = String(b.entry_date || new Date().toISOString().slice(0, 10));
+      if (await _blockIfAcctClosed(res, db, date)) return;
       const by = (req.user as any)?.id || (req.user as any)?.email || null;
       const id = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const party = b.party || null;
@@ -59032,6 +59091,10 @@ ${data.tenant.name}`;
     if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
+      // A manual journal is the one thing that exists to be dated wherever the
+      // person typing wants, which makes it the first thing a period lock has to
+      // refuse.
+      if (await _blockIfAcctClosed(res, db, String(req.body?.entry_date || ''))) return;
       const { entry_date, narration, lines } = req.body;
       if (!Array.isArray(lines) || lines.length < 2) return res.status(400).json({ error: 'At least 2 lines required' });
       // The canonical name for a code, from the chart of accounts. The reports
@@ -59909,7 +59972,24 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const { period_key } = req.body || {};
       if (!period_key) return res.status(400).json({ error: 'period_key is required' });
-      await db.run("UPDATE accounting_periods SET status='OPEN', closed_by=NULL, closed_at=NULL WHERE period_key = ?", [String(period_key)]);
+      // A lock needs a key, and the key needs a reason. Reopening a signed-off
+      // month is the single most sensitive thing on this screen: it is how a
+      // figure somebody already relied on becomes editable again. The reason is
+      // stored on the period, and the reopen itself lands in the statutory audit
+      // trail because accounting_periods is one of the books tables.
+      const reopenReason = String((req.body || {}).reason || '').trim();
+      if (reopenReason.length < 3) {
+        return res.status(400).json({
+          error: 'A reason is required to reopen a closed period — it is recorded against the period and in the audit trail.',
+          code: 'REOPEN_REASON_REQUIRED',
+        });
+      }
+      const _prior: any = await db.get("SELECT note, closed_by, closed_at FROM accounting_periods WHERE period_key = ?", [String(period_key)]).catch(() => null);
+      const _trail = `[reopened ${new Date().toISOString().slice(0, 10)} by ${_actorDisplayName(req.user || {})}: ${reopenReason}]`;
+      await db.run(
+        "UPDATE accounting_periods SET status='OPEN', closed_by=NULL, closed_at=NULL, note = ? WHERE period_key = ?",
+        [((_prior?.note ? _prior.note + ' ' : '') + _trail).slice(0, 2000), String(period_key)]
+      );
       const row = await db.get("SELECT * FROM accounting_periods WHERE period_key = ?", [String(period_key)]);
       res.json(row || { period_key, status: 'OPEN' });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
