@@ -25068,6 +25068,131 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Stock turns + days on hand ────────────────────────────────────────────
+  // How many times the stock on the shelf was sold through in the period, and
+  // how many days of cover is being held. The two are the same fact stated
+  // twice — days = period / turns — so they are computed once and both
+  // reported, rather than derived independently and allowed to disagree.
+  //
+  // THE ONE THING THAT MAKES OR BREAKS THIS NUMBER: turns is a RATIO, so the
+  // numerator (what was consumed) and the denominator (what was held) must be
+  // valued on the SAME basis. Value the stock at batch cost and the consumption
+  // at list price and the ratio is not wrong by a little, it is meaningless.
+  // So this does not compute anything itself — it calls _computeInventoryPeriod,
+  // the same engine behind the month-end close, which values every component
+  // through _INV_UNIT_COST_SQL. Turns therefore reconciles to the close by
+  // construction, and there is no second valuation to drift.
+  //
+  // Module scoping follows the close too: strictly one module, no include_shared
+  // overlay. A period belongs to exactly one set of books.
+  app.get("/api/restaurant/:id/inventory/turns", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const mod = _normaliseCostModule(req.query.module, 'RESTAURANT');
+      // A quarter by default. A month is too short for anything slow-moving —
+      // one delivery lands and turns doubles — and a year hides the season.
+      const days = Math.min(730, Math.max(7, Number(req.query.days) || 90));
+      const todayIso = _istNowParts().date;
+      const to = String(req.query.to || todayIso).slice(0, 10);
+      const from = String(req.query.from || '').slice(0, 10)
+        || new Date(new Date(to + 'T00:00:00Z').getTime() - (days - 1) * 86400000).toISOString().slice(0, 10);
+      // Recompute the span from the ACTUAL dates: a caller who passes from+to
+      // must not have its rates annualised against the default 90.
+      const spanDays = Math.max(1, Math.round(
+        (new Date(to + 'T00:00:00Z').getTime() - new Date(from + 'T00:00:00Z').getTime()) / 86400000
+      ) + 1);
+
+      const period = await _computeInventoryPeriod(req.params.id, mod, from, to);
+      const t = period?.totals || {};
+      const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+      const opening = Number(t.opening_value || 0);
+      const closing = Number(t.closing_value || 0);
+      const cogs = Number(t.actual_consumption_value || 0);
+      const recipeCogs = Number(t.theoretical_consumption_value || 0);
+      const avgInventory = r2((opening + closing) / 2);
+
+      // DIVISION GUARDS. Every one of these returns null rather than a number,
+      // because Infinity and NaN render as "∞" and "NaN" on a dashboard and a
+      // 0 reads as a fact when it is actually an absence.
+      const safeTurns = (num: number, den: number): number | null =>
+        den > 0 && num > 0 ? Math.round((num / den) * 1000) / 1000 : null;
+      const turnsPeriod = safeTurns(cogs, avgInventory);
+      const turnsAnnual = turnsPeriod == null ? null : Math.round(turnsPeriod * (365 / spanDays) * 100) / 100;
+      // Days on hand: at the rate it was consumed, how long would the average
+      // holding last. Equivalent to span / turns, computed from the same pair.
+      const daysOnHand = turnsPeriod == null ? null : Math.round((spanDays / turnsPeriod) * 10) / 10;
+
+      const perDay = cogs > 0 ? cogs / spanDays : 0;
+      const lines = Array.isArray(period?.lines) ? period.lines : [];
+      const items = lines.map((l: any) => {
+        const used = Number(l.actual_consumption_qty || 0);
+        const onHand = Number(l.closing_qty || 0);
+        const avgDaily = used > 0 ? used / spanDays : 0;
+        const cover = avgDaily > 0 ? Math.round((onHand / avgDaily) * 10) / 10 : null;
+        const itemAvg = (Number(l.opening_value || 0) + Number(l.closing_value || 0)) / 2;
+        const itemTurns = safeTurns(Number(l.actual_consumption_value || 0), itemAvg);
+        // Bands describe the COVER, which is what a buyer acts on. Deliberately
+        // NOT called "dead stock" — that screen means "no movement of any kind
+        // in N days", a different question from "held but not being consumed".
+        const band = onHand <= 0 ? 'NO_STOCK'
+          : cover == null ? 'NO_USAGE'
+          : cover > 90 ? 'OVERSTOCKED'
+          : cover < 14 ? 'TIGHT'
+          : 'HEALTHY';
+        return {
+          ingredient_id: l.ingredient_id, ingredient_name: l.ingredient_name, unit: l.unit,
+          unit_cost: l.unit_price,
+          on_hand_qty: onHand, on_hand_value: l.closing_value,
+          consumed_qty: used, consumed_value: l.actual_consumption_value,
+          avg_daily_qty: Math.round(avgDaily * 1000) / 1000,
+          days_of_cover: cover,
+          turns_annualised: itemTurns == null ? null : Math.round(itemTurns * (365 / spanDays) * 100) / 100,
+          band,
+        };
+      });
+
+      // WHY A ZERO MUST EXPLAIN ITSELF. Consumption on this product was
+      // structurally absent until the waiter-order fix (13 Sep 2026): orders
+      // carried no menu item id, so no recipe ever fired. A turns screen that
+      // answered "0.0" for those months would be reporting the outage as a
+      // business result — the reader would conclude the kitchen sells nothing.
+      // So an empty numerator is reported as UNMEASURABLE, with the reason.
+      const withUsage = items.filter((i: any) => Number(i.consumed_qty) > 0).length;
+      const dq = cogs > 0
+        ? { ok: true, reason: null, items_with_consumption: withUsage, items_total: items.length }
+        : {
+            ok: false,
+            reason: avgInventory <= 0
+              ? 'No stock was held in this period, so there is nothing to turn over.'
+              : 'No consumption was recorded in this period, so turnover cannot be measured — this is an absence of data, not a turnover of zero. Usual causes: dishes sold have no recipe attached, or the period predates 13 Sep 2026, when orders were being placed without a menu item id and no recipe could fire.',
+            items_with_consumption: withUsage,
+            items_total: items.length,
+          };
+
+      res.json({
+        module: mod,
+        period: { from, to, days: spanDays },
+        basis: 'Weighted-average batch cost — the same basis as the stock value and the month-end close, so these figures reconcile to it.',
+        totals: {
+          opening_value: r2(opening),
+          closing_value: r2(closing),
+          average_inventory_value: avgInventory,
+          cogs_value: r2(cogs),
+          recipe_consumption_value: r2(recipeCogs),
+          wastage_value: r2(Number(t.wastage_value || 0)),
+          turns_period: turnsPeriod,
+          turns_annualised: turnsAnnual,
+          days_on_hand: daysOnHand,
+        },
+        data_quality: dq,
+        item_count: items.length,
+        items: items.sort((a: any, b: any) => Number(b.on_hand_value || 0) - Number(a.on_hand_value || 0)),
+      });
+    } catch (err: any) {
+      console.error('/inventory/turns error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to compute stock turns' });
+    }
+  });
+
   app.get("/api/restaurant/:id/inventory/dead-stock", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
@@ -57247,8 +57372,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'waiter-order-carries-the-dish-id',
+    commit_marker: 'stock-turns-and-days-on-hand',
     code_features: [
+      'stock-turns-and-days-on-hand — the portfolio turnover KPI the supply-chain review found missing (grep confirmed inventory_turns / stock_turn / days_on_hand had zero hits; the only turnover in the codebase was the GST e-invoicing threshold). New GET /inventory/turns?module=&days=|from=&to= plus a panel in InventoryAnalyticsView, which is already mounted from the kitchen AND from ModuleInventoryView, so all four modules get it at once. THE DESIGN DECISION THAT MAKES THE NUMBER MEAN ANYTHING: turns is a RATIO, so the numerator (consumed) and the denominator (held) must be valued on the SAME basis - value stock at batch cost and consumption at list price and the ratio is not slightly wrong, it is meaningless. So this endpoint computes NOTHING itself: it calls _computeInventoryPeriod, the engine behind the month-end close, which values every component through _INV_UNIT_COST_SQL. Turns reconciles to the close by construction and there is no second valuation to drift. Module scoping follows the close too - strictly one module, no include_shared overlay, because a period belongs to one set of books. A ZERO MUST EXPLAIN ITSELF. Consumption on this product was structurally absent until waiter-order-carries-the-dish-id (13 Sep 2026), so any historical window has an empty numerator. A screen answering 0.0 turns for those months would be reporting an outage as a business result - the reader would conclude the kitchen sells nothing. Every division is guarded to return NULL rather than 0, Infinity or NaN, and a data_quality block names the cause (no recipes attached, or a period predating the id fix). The UI renders a dash and an amber Not measurable note, never a zero. Per item: on-hand qty/value, average daily usage, DAYS OF COVER and annualised turns, banded TIGHT (<14d) / HEALTHY / OVERSTOCKED (>90d) / NOT MOVING / NO STOCK. Bands describe COVER and are deliberately NOT called dead stock - that screen means no movement of any kind in N days, a different question from held but not consumed. Default window is 90 days: a month is too short for anything slow-moving (one delivery lands and turns doubles) and a year hides the season. from+to recomputes the span from the actual dates so a custom window is never annualised against the default 90. Smoke: TC-INV-TURNS-MATHS (turns and days-on-hand RECOMPUTED from the same response and matched, because a derived figure that is merely plausible is the easiest kind of wrong to ship), -HONEST (no consumption => null + a reason, never 0.0), -SCOPED (no item under two modules, and non-vacuous - one side must carry rows), -EMPTY-WINDOW (nulls, not Infinity). OBSERVED IN PASSING, not fixed: /inventory/dead-stock still values stock at default_unit_price while everything else now uses batch cost.',
       'waiter-order-carries-the-dish-id — THE reason consumption, food cost %, variance and stock turns all read ZERO on every module. WaiterOrderPanel held its cart as {name, price, quantity} and posted exactly that: the menu item id was never stored in the cart, so it could not be sent. deductIngredientsForOrder looks a dish up by `it.id || it.menu_item_id` and SILENTLY SKIPS a line with neither - no error, no log - so a waiter-punched Dal Makhni consumed no dal. Nothing complained because a STAFF user is deliberately allowed to key an off-menu custom item (_optionalStaffUser resolves the HttpOnly cookie, so the waiter panel is authenticated even though its fetch sends no Authorization header), and an id-less line is exactly what a custom item looks like. The guest ordering screen was always correct - it sends `id: i.menuItemId` - so the two order paths disagreed, and only the staff one was wrong. The cart now carries `id` and `size` and posts the SAME shape the guest screen posts. `size` matters on its own: recipes have FULL/HALF/BOTH variants and the server defaults to FULL when a line does not say, so half portions were deducting a full portion of ingredients. WHY IT SURVIVED SO LONG: TC-INV-AUDIT-WHO has exercised this exact consumption path for months and always PASSED - because the test sends the id. The server was right and tested; only the browser payload was wrong, which no API test can see. MEASURED before the fix on RESTO-1003: 614 order lines named a real menu dish, 246 carried an id and 368 did not, and 79 of those id-less lines were dishes that DO have a recipe (Dal Makhni 18, Chicken Tikka 15, Paneer Tikka 11, Veg Biryani 9, Jeera Rice 8) - every one of them consumed nothing. Also corrected in the record: recipes are NOT unpopulated, as an earlier review claimed; there are 298 recipe lines across 84 dishes, all carrying real quantities. Coverage is 17% of 508 menu items, which is a separate and much smaller problem than the one fixed here. NOTE: waiter orders will now MOVE STOCK. That is the point, but expect ingredient balances to start falling where they previously did not, and the deduction has no negative floor (unchanged behaviour - the guest path has always been able to drive stock negative). Smoke: TC-ORD-RECIPE-FIRES (an order WITH the id draws exactly 2kg x 3) paired with TC-ORD-RECIPE-NEEDS-THE-ID (the same order WITHOUT it draws nothing) - the negative half is the one that matters, since a positive-only test would pass just as happily if the engine consumed on every line regardless.',
       'checklist-cron-back-to-0500 — the checklist cron is back on 0 5 * * * after a live end-to-end run of the real nightly path on a temporary 3-minute schedule. WHAT THE RUN PROVED, against production data: (1) THE GENERATOR. Raising the day for 2026-08-23 produced 3 jobs, not 9 — three active DAILY templates against the ONE hall that had a booking that day, out of four active halls. Before the fix it was every active hall every day regardless of whether anything happened there, which is how this tenant reached 433 open jobs. (2) THE SWEEP. A matched PAIR of daily jobs was raised on the same past day for the same hall, identical in every respect except blocks_release, and the cron made the distinction it exists to make: the non-blocking one went to EXPIRED, the release-blocking one was left OPEN for a human. EXPIRED and not DONE, because recording work as completed when it never happened is the worse lie. WHAT THE PROBE ALSO SHOWED and is worth knowing: only ONE daily template is active on this tenant (Event Hall - Daily, non-blocking), and NO room daily template is active at all — so the rooms half of the generator fix changes nothing here today and matters only if one is switched on (it would cut the raise from 34 rooms to the 15 occupied). Jobs from EVENT_COMPLETE and MANUAL triggers carry a NULL due_date and so are never swept; that is deliberate (no due date means it was never scheduled work) but it does mean a stale non-blocking job of that kind still needs a human.',
       'search-the-whole-table-TEMP-CRON. (A) SERVER-SIDE BOOKING SEARCH. The Event Bookings list loads 200 rows of 2,828 and its search box filtered only those, so a booking not already on the page could not be found at all and nothing on screen said the box was looking at a slice. DataTable takes an optional onSearch: given it, the box debounces (350ms) to the SERVER and the local filter skips the term - re-applying it would be wrong as well as redundant, because the server matches fields the table may not be showing (venue name, email). Without onSearch every other table is untouched. The server search itself was only customer_name + phone, which is not how anyone looks a booking up: widened to booking ID (the column staff read off an invoice), email and venue name. EventViews holds the term in a REF as well as state because load() is called with no arguments from a dozen places (after create / cancel / confirm, on back from a detail view) and every one must stay inside the search the user is looking at. FOUND WHILE THERE: the list refresh button was onClick={load}, which hands React the MouseEvent as `offset` - so `offset === 0` was false and refreshing APPENDED page 1 to itself instead of replacing it, duplicating every row. Now onClick={() => load(0)}. Smoke: TC-EVT-BOOKINGS-SEARCH asserts BOTH halves of each match (the booking that should match is returned AND the one that should not is absent - a search returning everything would pass a find-only test), plus -TOTAL (the count describes the match, not the table). (B) THE EXPIRY SWEEP WAS UNREACHABLE. _expireStaleChecklistJobs had exactly ONE call site, the 05:00 cron, so it had never run against real data and an owner staring at a board of dead rows had to wait for the morning. POST /checklists/run-scheduled now runs the sweep BEFORE the raise - the same sequence the cron runs, so the route is a real rehearsal of it - and reports `expired`. New optional expire_grace_days (default 7, clamped at >= 0 so nobody can ask for a negative window that would expire work not yet due). Smoke: TC-CHK-EXPIRY-SWEEP raises a PAIR of daily jobs on the same past day for the same hall, identical except blocks_release, and asserts one is EXPIRED (not DONE) while the other is left OPEN - a sweep that cleared everything, or nothing, fails one half. Plus -OFF-WORKLIST. (C) TEMPORARY: the checklist cron is on */3 * * * * instead of 0 5 * * * so the real nightly path can be watched end to end. THIS MUST BE REVERTED IN THE NEXT DEPLOY.',

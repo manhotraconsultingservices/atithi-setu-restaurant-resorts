@@ -48063,6 +48063,8 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
   const [expiringData, setExpiringData] = useState<any>(null);
   const [deadStockData, setDeadStockData] = useState<any>(null);
   const [batches, setBatches] = useState<any[]>([]);
+  const [turnsData, setTurnsData] = useState<any>(null);
+  const [turnsDays, setTurnsDays] = useState(90);
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState<string[]>([]);
   const api = async (path: string) => {
@@ -48085,22 +48087,27 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
       api(`/inventory/expiring?days=7${amp}`),
       api(`/inventory/dead-stock?days=30${amp}`),
       api(`/inventory/batches${qs}`),
+      // Turns is scoped to ONE module with no shared overlay, matching the
+      // month-end close it reconciles to — so it takes `module` alone, not the
+      // include_shared query the other four share.
+      api(`/inventory/turns?days=${turnsDays}${module ? `&module=${encodeURIComponent(module)}` : ''}`),
     ])
-      .then(([abc, exp, dead, bat]: any[]) => {
+      .then(([abc, exp, dead, bat, trn]: any[]) => {
         const failed: string[] = [];
         if (abc.status === 'fulfilled') setAbcData(abc.value); else failed.push('ABC analysis');
         if (exp.status === 'fulfilled') setExpiringData(exp.value); else failed.push('expiry alerts');
         if (dead.status === 'fulfilled') setDeadStockData(dead.value); else failed.push('dead stock');
         if (bat.status === 'fulfilled') setBatches(Array.isArray(bat.value) ? bat.value : []); else failed.push('batches');
+        if (trn.status === 'fulfilled') setTurnsData(trn.value); else failed.push('stock turns');
         setErrored(failed);
       })
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [restaurantId, module, includeShared]);
+  }, [restaurantId, module, includeShared, turnsDays]);
 
   if (loading) return <div className="text-center py-16"><RefreshCw size={28} className="mx-auto animate-spin text-[#9c8e85]" /></div>;
 
-  const nothingLoaded = !abcData && !expiringData && !deadStockData && batches.length === 0;
+  const nothingLoaded = !abcData && !expiringData && !deadStockData && batches.length === 0 && !turnsData;
 
   return (
     <div className="space-y-5">
@@ -48116,6 +48123,98 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
           <p className="text-xs text-[#9c8e85] mt-1">Analytics build up from your inventory, purchase orders, goods receipts, wastage, and stock counts.</p>
         </div>
       )}
+      {turnsData && (() => {
+        const t = turnsData.totals || {};
+        const dq = turnsData.data_quality || {};
+        // A dash, never a zero. Turns cannot be computed without consumption,
+        // and printing 0.0 would tell the reader the kitchen sells nothing when
+        // the truth is that nothing was measured.
+        const num = (v: any, suffix = '') => v == null ? '—' : `${v}${suffix}`;
+        const BAND: Record<string, { label: string; cls: string }> = {
+          TIGHT: { label: 'Tight', cls: 'bg-rose-100 text-rose-700' },
+          HEALTHY: { label: 'Healthy', cls: 'bg-emerald-100 text-emerald-700' },
+          OVERSTOCKED: { label: 'Overstocked', cls: 'bg-amber-100 text-amber-800' },
+          NO_USAGE: { label: 'Not moving', cls: 'bg-[#f0e8d8] text-[#6b5d52]' },
+          NO_STOCK: { label: 'No stock', cls: 'bg-[#f0e8d8] text-[#9c8e85]' },
+        };
+        const items = (turnsData.items || []).filter((i: any) => Number(i.on_hand_value || 0) > 0 || Number(i.consumed_qty || 0) > 0);
+        return (
+          <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+            <div className="flex items-start justify-between gap-3 flex-wrap mb-1">
+              <h3 className="text-sm font-bold text-[#1a1208]">Stock turns &amp; days on hand</h3>
+              <select value={turnsDays} onChange={e => setTurnsDays(Number(e.target.value))}
+                className="text-xs border border-[#e8dccf] rounded-xl px-2 py-1 bg-white">
+                <option value={30}>Last 30 days</option>
+                <option value={90}>Last 90 days</option>
+                <option value={180}>Last 180 days</option>
+                <option value={365}>Last 365 days</option>
+              </select>
+            </div>
+            <p className="text-xs text-[#9c8e85] mb-3">
+              How many times the shelf sold through, and how long the stock being held would last.
+              {turnsData.period ? ` ${turnsData.period.from} to ${turnsData.period.to}.` : ''} {turnsData.basis}
+            </p>
+
+            {!dq.ok && (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 text-xs text-amber-900 mb-3 flex gap-2">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                <span><strong>Not measurable for this period.</strong> {dq.reason}</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+              {[
+                { k: 'Turns (annualised)', v: num(t.turns_annualised, '×'), sub: `${num(t.turns_period, '×')} over the period` },
+                { k: 'Days on hand', v: num(t.days_on_hand), sub: 'at the rate consumed' },
+                { k: 'Average stock held', v: `Rs.${Number(t.average_inventory_value || 0).toLocaleString('en-IN')}`, sub: `opening + closing / 2` },
+                { k: 'Consumed (COGS)', v: `Rs.${Number(t.cogs_value || 0).toLocaleString('en-IN')}`, sub: `recipes say Rs.${Number(t.recipe_consumption_value || 0).toLocaleString('en-IN')}` },
+              ].map(c => (
+                <div key={c.k} className="rounded-2xl bg-[#faf7f2] border border-[#f0e8d8] px-3 py-2">
+                  <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">{c.k}</p>
+                  <p className="text-lg font-bold text-[#1a1208] tabular-nums leading-tight">{c.v}</p>
+                  <p className="text-[10px] text-[#9c8e85]">{c.sub}</p>
+                </div>
+              ))}
+            </div>
+
+            {items.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-[10px] uppercase tracking-widest text-[#9c8e85]">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left font-bold">Item</th>
+                      <th className="px-2 py-1.5 text-right font-bold">On hand</th>
+                      <th className="px-2 py-1.5 text-right font-bold">Value</th>
+                      <th className="px-2 py-1.5 text-right font-bold">Used / day</th>
+                      <th className="px-2 py-1.5 text-right font-bold">Days cover</th>
+                      <th className="px-2 py-1.5 text-right font-bold">Turns</th>
+                      <th className="px-2 py-1.5 text-left font-bold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.slice(0, 50).map((i: any) => {
+                      const b = BAND[i.band] || BAND.NO_STOCK;
+                      return (
+                        <tr key={i.ingredient_id} className="border-t border-[#f0e8d8]">
+                          <td className="px-2 py-1.5 text-[#1a1208]">{i.ingredient_name}</td>
+                          <td className="px-2 py-1.5 text-right font-mono">{Number(i.on_hand_qty || 0)} {i.unit}</td>
+                          <td className="px-2 py-1.5 text-right font-mono">Rs.{Number(i.on_hand_value || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">{i.avg_daily_qty ? `${i.avg_daily_qty} ${i.unit}` : '—'}</td>
+                          <td className="px-2 py-1.5 text-right font-mono">{i.days_of_cover == null ? '—' : i.days_of_cover}</td>
+                          <td className="px-2 py-1.5 text-right font-mono">{i.turns_annualised == null ? '—' : `${i.turns_annualised}x`}</td>
+                          <td className="px-2 py-1.5"><span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${b.cls}`}>{b.label}</span></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {items.length > 50 && <p className="text-[11px] text-[#9c8e85] mt-2">Showing the 50 largest by value, of {items.length}.</p>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {batches.length > 0 && (
         <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
           <h3 className="text-sm font-bold text-[#1a1208] mb-1">Open batches</h3>
