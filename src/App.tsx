@@ -8364,6 +8364,30 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   // ── Phase 2: GL-derived statements, GST returns, aging, controls ──────────
   const [pnl, setPnl] = useState<any>(null);
   const [balanceSheet, setBalanceSheet] = useState<any>(null);
+  // What these statements do NOT contain, stated where they are read. Written
+  // once and rendered on BOTH, so the two can never disclose different things
+  // about the same books. The server sends the wording; this only presents it,
+  // which means an export or an integration carries the same caveat.
+  const StatementScopeNote = ({ scope }: { scope: any }) => {
+    if (!scope || scope.complete) return null;
+    return (
+      <details className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-[11px] text-amber-900">
+        <summary className="cursor-pointer font-bold list-none flex items-center gap-1.5">
+          <AlertTriangle size={13} className="shrink-0" />
+          {scope.heading}
+        </summary>
+        <div className="mt-2 space-y-1.5 pl-[18px]">
+          <p><b>Not included:</b></p>
+          <ul className="list-disc pl-4 space-y-0.5">
+            {(scope.excluded || []).map((x: string, i: number) => <li key={i}>{x}</li>)}
+          </ul>
+          <p className="pt-1">{scope.effect_on_profit}</p>
+          <p>{scope.effect_on_balance_sheet}</p>
+          <p className="pt-1 font-semibold">{scope.certificate_note}</p>
+        </div>
+      </details>
+    );
+  };
   const [cashFlowGl, setCashFlowGl] = useState<any>(null);
   const [gstr1, setGstr1] = useState<any>(null);
   const [gstr3b, setGstr3b] = useState<any>(null);
@@ -9344,6 +9368,11 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <button onClick={loadPnl} className={AC_BTN}>Refresh</button>
             {pnl && <button onClick={() => downloadCsv(`pnl_${tbFrom}_${tbTo}.csv`, ['Section', 'Code', 'Account', 'Amount'], [...pnl.revenue.map((r: any) => ['Revenue', r.account_code, r.account_name, r.amount]), ...pnl.expenses.map((r: any) => ['Expense', r.account_code, r.account_name, r.amount])])} className="text-sm px-3 py-1.5 border border-[#d4c4a8] rounded hover:bg-[#f5f0e8]">Download CSV</button>}
           </div>
+          {/* The profit figure above is BEFORE depreciation and tax, which this
+              product does not record. Saying so next to the number matters more
+              than saying it on the balance sheet, because this is the figure an
+              owner quotes. */}
+          {pnl && <StatementScopeNote scope={pnl.scope} />}
           {pnl ? (
             <>
               <div className="grid sm:grid-cols-3 gap-3">
@@ -9373,8 +9402,12 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <label className="text-xs text-[#6b5d52]">As of</label>
             <input type="date" value={asOfDate} onChange={e => setAsOfDate(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
             <button onClick={loadBalanceSheet} className={AC_BTN}>Refresh</button>
-            {balanceSheet && <span className={`text-xs font-bold px-2 py-1 rounded-full ${balanceSheet.balanced ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>{balanceSheet.balanced ? '✓ Balanced' : `Off by ${fmtAmt(balanceSheet.diff)}`}</span>}
+            {/* "Balanced" means the accounts that EXIST reconcile. On its own,
+                beside a statement missing whole classes of asset, it reads as a
+                clean bill of health — so it is qualified where it is shown. */}
+            {balanceSheet && <span className={`text-xs font-bold px-2 py-1 rounded-full ${balanceSheet.balanced ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`} title={balanceSheet.balanced ? 'The accounts held in this system reconcile. See the scope note for what is not included.' : undefined}>{balanceSheet.balanced ? '✓ Balanced within scope' : `Off by ${fmtAmt(balanceSheet.diff)}`}</span>}
           </div>
+          {balanceSheet && <StatementScopeNote scope={balanceSheet.scope} />}
           {balanceSheet ? (
             <div className="grid md:grid-cols-2 gap-4">
               <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">

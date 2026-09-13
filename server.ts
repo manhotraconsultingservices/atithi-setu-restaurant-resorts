@@ -57907,8 +57907,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'period-lock-actually-locks',
+    commit_marker: 'statements-declare-their-scope',
     code_features: [
+      'statements-declare-their-scope — H-2 from the accounting review. Fixed assets, depreciation and tax were scoped out of this product by the owner, to be handled by the client CA. That decision stands; what was missing is SAYING SO, because a balance sheet that balances gets read as a complete financial position. CHECKING THE CHART OF ACCOUNTS SHARPENED MY OWN FINDING: I had written this up as a balance-sheet issue, but there is no DEPRECIATION EXPENSE ACCOUNT either - the expense list runs from Cost of F&B Consumed to Petty Cash with no depreciation anywhere - so the P&L overstates profit by the charge that should have been made. A note on the balance sheet alone would have missed the number people actually quote. Also absent and now disclosed: intangibles, security deposits and investments, provisions for gratuity and leave encashment, and income tax (current, deferred, advance and provision). _STATEMENT_SCOPE is declared ONCE and attached to BOTH /accounting/balance-sheet and /accounting/profit-loss, so the two cannot disclose different things about the same books - TC-STMT-SCOPE-ONE-WORDING asserts the wording is identical. The P&L also gains net_profit_basis = Before depreciation, amortisation and tax, on the PAYLOAD so an export or integration carries the caveat rather than only the screen. UI: one StatementScopeNote component rendered on both, and the balance sheet badge now reads "Balanced within scope" - on its own, beside a statement missing whole classes of asset, a bare tick reads as a clean bill of health. Smoke: -ON-BOTH, -ONE-WORDING, -NAMES-DEPRECIATION.',
       'period-lock-actually-locks — HOTFIX. accounting-period-lock shipped and blocked NOTHING: a journal dated inside the closed month still posted 201. accounting_periods.from_date and .to_date are TEXT, not DATE, so `?::date BETWEEN from_date AND to_date` compared a date against text, Postgres refused the statement, and the guard `.catch(() => null)` swallowed it and reported no closed period. THE LOCK WAS LIVE, LOOKED PRESENT AND DID NOTHING - which is worse than no lock, because an owner would have trusted it. Exactly the defect class already recorded for housekeeping_jobs.due_date being TEXT, and I walked into it again on a different table. Two fixes: compare ISO dates as PLAIN STRINGS (they order correctly, no cast needed), and make the failure LOUD - a control that fails open must not do so in silence, so the catch now logs that postings are not being checked. CAUGHT BY DRIVING THE REAL ENDPOINTS AFTER DEPLOY rather than trusting tsc and a green build: the smoke tests for this feature had not run yet, and the manual probe is what found it.',
       'accounting-period-lock — Q-2 from the accounting review, and the last qualification. Closing an accounting period used to record the sign-off and REPORT entries that arrived afterwards without refusing them, while the INVENTORY close in the same product hard-blocks a back-dated write with a 409. The stronger control existed, applied to stock and not to the ledger. Now ported. WHAT IT DELIBERATELY DOES NOT BREAK: a posting dated TODAY can never land in a closed period, because periods are closed over PAST months - so every settlement, payment and order taken in the normal course is untouched by construction. What is refused is a posting DATED INTO a signed-off month. TC-ACCT-PERIOD-LOCK-TODAY-OK asserts exactly that, because a lock that stopped the property taking money would be torn out within a day. TWO LAYERS, on purpose. Five routes that accept a user-supplied date refuse UP FRONT with 409 ACCOUNTING_PERIOD_CLOSED naming the period and the way out (manual journal, supplier invoice, supplier payment, petty cash, expense payment) - a person gets a sentence they can act on. And _postGlEntries itself refuses as a BACKSTOP, recording a gl_exception, so anything that slips past a route guard is visible rather than silently unposted: money must never move without a ledger entry and nobody noticing. REOPEN NOW DEMANDS A REASON (>= 3 chars, 400 REOPEN_REASON_REQUIRED otherwise), appends who/when/why to the period note, and lands in the statutory trail for free because accounting_periods is one of the books tables audited by books-audit-trail. KNOWN CONSEQUENCE, accepted deliberately: the inventory close/reopen posts its reversal dated at the INVENTORY period end (date: period_to), so re-closing stock for a month whose ACCOUNTS are signed off is now refused until the accounting period is reopened. That is the correct discipline - you cannot silently re-post a signed-off month - and the 409 names the way out. Smoke: -REFUSES, -ALL-DOORS (a back-dated purchase bill is refused by the same lock; the control is on the DATE, not on one screen), -TODAY-OK, -REOPEN. The test reopens its probe period in `finally` whatever happens, since leaving the books locked would fail every later money test on a guard working exactly as designed.',
       'audit-actor-has-a-name — the statutory trail went live naming its actor `user-c192c760-06c5-...`, a raw uuid where a person belongs. THE SAME DEFECT FOR THE THIRD TIME this session (the housekeeping cleaning log, then event revised_by, now the audit trail) with the same cause every time: the caller reached for decoded.name when the token carries userName. Fixed by making the wrong field unreachable - _actorDisplayName(u) is now the SINGLE definition of how a person is named in any log this product writes (userName, then email, then a Title-Cased role, then Staff), at module scope above `authenticate`, used by the audit context, with hkActor reduced to a one-line delegation. Two copies of a naming rule is two answers to who did this, and the disagreement always surfaces as a uuid in a report a human is meant to read.',
@@ -59260,6 +59261,38 @@ ${data.tenant.name}`;
   // ══════════════════════════════════════════════════════════════════════════
 
   // ── Profit & Loss (GL-derived) ─────────────────────────────────────────────
+  // ── What these statements deliberately do NOT contain ─────────────────────
+  // Fixed assets, depreciation and tax were scoped out of this product by the
+  // owner, to be handled by the client's CA. That is a defensible commercial
+  // decision and this does not reverse it. What it does is STATE the
+  // consequence, because leaving it implicit is how a screen that balances gets
+  // mistaken for a complete financial position.
+  //
+  // Two consequences, and the second is the one people miss. The balance sheet
+  // omits whole classes of asset, so it balances on what is essentially working
+  // capital plus borrowings and capital. And because there is no depreciation
+  // ACCOUNT AT ALL — checked: the chart of accounts has no 'Depreciation'
+  // expense — the profit figure is OVERSTATED by the charge that should have
+  // been made. A note on the balance sheet alone would have missed that.
+  //
+  // Written once and attached to BOTH statements, so the two cannot end up
+  // disclosing different things about the same books.
+  const _STATEMENT_SCOPE = {
+    complete: false,
+    heading: 'Prepared from the books held in this system — not a complete financial statement',
+    excluded: [
+      'Fixed assets — land, buildings, plant, kitchen equipment, furniture, vehicles and computers are not recorded here',
+      'Depreciation and amortisation — there is no depreciation account, so no charge is made against profit',
+      'Intangible assets',
+      'Security deposits and investments',
+      'Provisions for gratuity and leave encashment',
+      'Income tax — no current or deferred tax, advance tax or tax provision',
+    ],
+    effect_on_profit: 'Net profit is stated BEFORE depreciation and tax, and is therefore higher than the final figure your accountant will report.',
+    effect_on_balance_sheet: 'Assets and liabilities cover working capital, borrowings and capital introduced. The statement balances within that scope; it is not a Schedule III balance sheet.',
+    certificate_note: 'A certificate or return drawn on these books carries this scope limitation. Present them alongside your accountant\'s fixed-asset and tax schedules.',
+  };
+
   app.get("/api/restaurant/:id/accounting/profit-loss", authenticate, async (req: AuthRequest, res: Response) => {
     if (!(await _acctOwnerOnly(req, res))) return;
     try {
@@ -59301,7 +59334,15 @@ ${data.tenant.name}`;
         }
       }
       total_revenue = round(total_revenue); total_expense = round(total_expense);
-      res.json({ period: { from: from || null, to: to || null }, revenue, expenses, total_revenue, total_expense, net_profit: round(total_revenue - total_expense) });
+      res.json({
+        period: { from: from || null, to: to || null }, revenue, expenses,
+        total_revenue, total_expense, net_profit: round(total_revenue - total_expense),
+        // `net_profit` here is profit BEFORE depreciation and tax. Naming the
+        // basis on the payload means an export or an integration carries the
+        // caveat too, not just the screen.
+        net_profit_basis: 'Before depreciation, amortisation and tax',
+        scope: _STATEMENT_SCOPE,
+      });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
@@ -59355,7 +59396,14 @@ ${data.tenant.name}`;
       total_assets = round(total_assets); total_liabilities = round(total_liabilities);
       const total_equity = round(equity_posted + earnings);
       const diff = round(total_assets - (total_liabilities + total_equity));
-      res.json({ as_of: asOf, assets, liabilities, equity, retained_earnings: earnings, total_assets, total_liabilities, total_equity, diff, balanced: Math.abs(diff) < 0.02 });
+      res.json({
+        as_of: asOf, assets, liabilities, equity, retained_earnings: earnings,
+        total_assets, total_liabilities, total_equity, diff,
+        // `balanced` means the accounts that EXIST reconcile — it is not a claim
+        // that every asset and liability of the business is represented here.
+        balanced: Math.abs(diff) < 0.02,
+        scope: _STATEMENT_SCOPE,
+      });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
