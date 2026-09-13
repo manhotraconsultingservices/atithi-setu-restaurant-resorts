@@ -25068,6 +25068,172 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Stockout frequency ────────────────────────────────────────────────────
+  // How often each item actually ran out, how long it stayed out, and what
+  // share of the period it was available. Turns tells you how hard the stock is
+  // working; this tells you how often it let you down, and the two are read
+  // together — a high turnover that is really a series of stockouts is not
+  // efficiency, it is under-buying.
+  //
+  // BALANCES ARE RECONSTRUCTED FROM THE LEDGER, NOT READ FROM stock_movements
+  // .balance_after. That column is a denormalised convenience written by each
+  // caller; summing qty_delta is the same source of truth the month-end close
+  // uses, so a stockout history cannot disagree with the closing balance it is
+  // derived from. If the two ever diverge, this reports the ledger.
+  //
+  // THREE RULES WORTH STATING, because each one is a way to be quietly wrong:
+  //   • An item already out when the window opens contributes DAYS but not an
+  //     EVENT — the running-out happened before this period and counting it
+  //     here would double-count it against last period's report.
+  //   • Tracking starts at the LATER of the window and the item's created_at.
+  //     Otherwise every newly added item looks like it was out of stock for
+  //     weeks before it existed, and the portfolio availability sinks every
+  //     time someone adds an item.
+  //   • days_below_reorder is measured against TODAY'S reorder point, because
+  //     the historical value is not stored. It is a useful risk signal, not an
+  //     audit of what the threshold was at the time, and is labelled as such.
+  app.get("/api/restaurant/:id/inventory/stockouts", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const days = Math.min(730, Math.max(7, Number(req.query.days) || 90));
+      const todayIso = _istNowParts().date;
+      const to = String(req.query.to || todayIso).slice(0, 10);
+      const from = String(req.query.from || '').slice(0, 10)
+        || new Date(new Date(to + 'T00:00:00Z').getTime() - (days - 1) * 86400000).toISOString().slice(0, 10);
+      const fromTs = new Date(from + 'T00:00:00Z').getTime();
+      // Exclusive end of the last day, so a window of one day is a full day.
+      const toTs = new Date(to + 'T00:00:00Z').getTime() + 86400000;
+      const spanDays = Math.max(1, Math.round((toTs - fromTs) / 86400000));
+      const dmf = _invModuleFilter(req, 'i.module');
+
+      // Opening balance per item: everything that happened before the window.
+      const openingRows: any[] = await db.query(
+        `SELECT i.id, i.name, i.unit, i.created_at,
+                COALESCE(i.current_stock_qty, 0) AS current_qty,
+                COALESCE(i.reorder_point, 0) AS reorder_point,
+                COALESCE((SELECT SUM(sm.qty_delta) FROM stock_movements sm
+                           WHERE sm.ingredient_id = i.id AND sm.recorded_at < ?::date), 0) AS opening_qty
+           FROM ingredients i
+          WHERE i.is_active = 1${dmf.sql}
+          ORDER BY i.name`,
+        // Bind order: the window start inside the correlated sum comes FIRST,
+        // then whatever the module filter appended to the WHERE.
+        [from, ...dmf.params]
+      ).catch(() => [] as any[]);
+
+      // Movements inside the window, oldest first, so the walk below replays
+      // the period in the order it actually happened.
+      const moveRows: any[] = await db.query(
+        `SELECT sm.ingredient_id, sm.recorded_at, sm.qty_delta
+           FROM stock_movements sm
+           JOIN ingredients i ON i.id = sm.ingredient_id
+          WHERE i.is_active = 1
+            AND sm.recorded_at >= ?::date
+            AND sm.recorded_at < ?::date + INTERVAL '1 day'${dmf.sql}
+          ORDER BY sm.ingredient_id, sm.recorded_at`,
+        [from, to, ...dmf.params]
+      ).catch(() => [] as any[]);
+
+      const byItem = new Map<string, any[]>();
+      for (const m of moveRows) {
+        const k = String(m.ingredient_id);
+        if (!byItem.has(k)) byItem.set(k, []);
+        byItem.get(k)!.push(m);
+      }
+
+      const DAY = 86400000;
+      let totalDaysOut = 0, totalDaysTracked = 0, totalEvents = 0, everOut = 0, nowOut = 0;
+      const items = openingRows.map((r: any) => {
+        const created = r.created_at ? new Date(r.created_at).getTime() : fromTs;
+        // An item cannot have been out of stock before it existed.
+        const startTs = Math.max(fromTs, isNaN(created) ? fromTs : created);
+        const trackedMs = Math.max(0, toTs - startTs);
+        const reorder = Number(r.reorder_point || 0);
+
+        let running = Number(r.opening_qty || 0);
+        let out = running <= 0;
+        let low = reorder > 0 && running <= reorder;
+        let outSince = out ? startTs : null;
+        let lowSince = low ? startTs : null;
+        let events = 0, msOut = 0, msLow = 0;
+        let lastStockout: number | null = out ? startTs : null;
+
+        for (const m of (byItem.get(String(r.id)) || [])) {
+          const at = Math.max(startTs, new Date(m.recorded_at).getTime());
+          if (isNaN(at) || at > toTs) continue;
+          const prev = running;
+          running += Number(m.qty_delta || 0);
+
+          if (prev > 0 && running <= 0) {            // ran out just now
+            events++; outSince = at; lastStockout = at;
+          } else if (prev <= 0 && running > 0 && outSince != null) {   // restocked
+            msOut += at - outSince; outSince = null;
+          }
+          if (reorder > 0) {
+            const wasLow = prev <= reorder, isLow = running <= reorder;
+            if (!wasLow && isLow) lowSince = at;
+            else if (wasLow && !isLow && lowSince != null) { msLow += at - lowSince; lowSince = null; }
+          }
+        }
+        if (outSince != null) msOut += toTs - outSince;      // still out at the end
+        if (lowSince != null) msLow += toTs - lowSince;
+
+        const daysOut = Math.round((msOut / DAY) * 10) / 10;
+        const daysTracked = Math.round((trackedMs / DAY) * 10) / 10;
+        // Guard: an item created today has a tracked span of hours, and a few
+        // minutes out of stock inside it is a huge FRACTION — a item added this
+        // morning and briefly at zero would publish "12% availability" and sit
+        // at the top of the worst-offenders list on its first day. Below a full
+        // day of history there is no rate to report, so report none.
+        const availability = trackedMs >= DAY
+          ? Math.round((1 - Math.min(1, msOut / trackedMs)) * 1000) / 10
+          : null;
+
+        // The portfolio rate counts only items with a full day of history, for
+        // the same reason — otherwise adding items moves the headline number.
+        if (trackedMs >= DAY) { totalDaysOut += msOut / DAY; totalDaysTracked += trackedMs / DAY; }
+        totalEvents += events;
+        if (events > 0 || msOut > 0) everOut++;
+        const isOutNow = Number(r.current_qty || 0) <= 0;
+        if (isOutNow) nowOut++;
+
+        return {
+          ingredient_id: r.id, ingredient_name: r.name, unit: r.unit,
+          current_qty: Number(r.current_qty || 0), reorder_point: reorder,
+          stockout_events: events,
+          days_out: daysOut,
+          days_tracked: daysTracked,
+          availability_pct: availability,
+          days_below_reorder: Math.round((msLow / DAY) * 10) / 10,
+          currently_out: isOutNow,
+          last_stockout_at: lastStockout ? new Date(lastStockout).toISOString().slice(0, 10) : null,
+        };
+      });
+
+      res.json({
+        module: dmf.module,
+        period: { from, to, days: spanDays },
+        method: 'Balances are reconstructed by summing the movement ledger — the same source the month-end close uses — not read from the denormalised balance_after column. An item already out when the window opens contributes days but not a new event. days_below_reorder is measured against today\'s reorder point, since the historical threshold is not stored.',
+        totals: {
+          items_tracked: items.length,
+          items_that_ran_out: everOut,
+          stockout_events: totalEvents,
+          item_days_out: Math.round(totalDaysOut * 10) / 10,
+          currently_out: nowOut,
+          availability_pct: totalDaysTracked > 0
+            ? Math.round((1 - Math.min(1, totalDaysOut / totalDaysTracked)) * 1000) / 10
+            : null,
+        },
+        // Worst first: most days out, then most events.
+        items: items.sort((a: any, b: any) =>
+          (b.days_out - a.days_out) || (b.stockout_events - a.stockout_events)),
+      });
+    } catch (err: any) {
+      console.error('/inventory/stockouts error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to compute stockouts' });
+    }
+  });
+
   // ── Stock turns + days on hand ────────────────────────────────────────────
   // How many times the stock on the shelf was sold through in the period, and
   // how many days of cover is being held. The two are the same fact stated
@@ -57382,8 +57548,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'turns-no-negative-cover',
+    commit_marker: 'stockout-frequency',
     code_features: [
+      'stockout-frequency — the last measurement gap from the supply-chain review after stock turns. New GET /inventory/stockouts?module=&days=|from=&to= plus a panel beside turns in InventoryAnalyticsView, so all four modules get it at once. Per item: stockout EVENTS (each fall to zero), DAYS OUT, availability %, days below reorder, whether it is out right now, and when it last ran out; portfolio totals across the same window. Read beside turnover on purpose - a high turn that is really a run of stockouts is not efficiency, it is under-buying. BALANCES ARE RECONSTRUCTED BY SUMMING THE LEDGER (qty_delta), NOT read from stock_movements.balance_after: that column is a denormalised convenience each caller writes, while the sum is the same source of truth the month-end close uses, so a stockout history cannot disagree with the closing balance it comes from. THREE RULES, each of them a way to be quietly wrong if skipped: (1) an item ALREADY out when the window opens contributes DAYS but not an EVENT - the running-out happened in the previous period and counting it again double-counts it across two reports; (2) tracking starts at the LATER of the window and the item created_at, or every newly added item looks like it was out of stock for weeks before it existed and portfolio availability drops each time someone adds an item; (3) days_below_reorder is measured against TODAY reorder point because the historical threshold is not stored - a risk signal, not an audit, and labelled as such on screen. FOUND WHILE WRITING THE TEST, not after: a brand-new item has only HOURS of history, so a few seconds at zero inside that is a huge fraction - an item added this morning would have published 12% availability and sat at the top of the worst-offenders list on day one. Availability is now withheld (null) below a full day of history, and part-day items are excluded from the portfolio rate so that adding an item cannot move the headline. Smoke: TC-INV-STOCKOUT-EVENTS drives a real timeline (10 -> 0 -> 5 -> 0 -> 8 = exactly 2 events) against a control item that dips to 3 without ever reaching zero and must record NONE - without the control the test would pass against an implementation that counted every downward movement; -NEEDS-A-DAY; -BOUNDED sweeps all four modules for a percentage outside 0..100 or a negative count.',
       'turns-no-negative-cover — FOUND BY LOOKING AT THE SCREEN, not by a test. The new turns panel rendered a retail candle sitting at -2 pcs as "-90 days cover" next to real figures. Days of cover divides stock by usage, and a negative balance divided by a usage rate is not a slightly wrong number, it is a nonsense one printed beside correct ones - and one of those costs the whole dashboard its credibility. Cover is now null unless stock is actually held, and NEGATIVE is its own band (rose, "Negative - check count") rather than being lumped in with "no stock": a balance below zero means more was consumed than was ever received, which is a counting error to go and fix, not a shelf to restock. Smoke: TC-INV-TURNS-NEGATIVE-STOCK sweeps all four modules and asserts no item anywhere reports a negative cover.',
       'stock-turns-and-days-on-hand — the portfolio turnover KPI the supply-chain review found missing (grep confirmed inventory_turns / stock_turn / days_on_hand had zero hits; the only turnover in the codebase was the GST e-invoicing threshold). New GET /inventory/turns?module=&days=|from=&to= plus a panel in InventoryAnalyticsView, which is already mounted from the kitchen AND from ModuleInventoryView, so all four modules get it at once. THE DESIGN DECISION THAT MAKES THE NUMBER MEAN ANYTHING: turns is a RATIO, so the numerator (consumed) and the denominator (held) must be valued on the SAME basis - value stock at batch cost and consumption at list price and the ratio is not slightly wrong, it is meaningless. So this endpoint computes NOTHING itself: it calls _computeInventoryPeriod, the engine behind the month-end close, which values every component through _INV_UNIT_COST_SQL. Turns reconciles to the close by construction and there is no second valuation to drift. Module scoping follows the close too - strictly one module, no include_shared overlay, because a period belongs to one set of books. A ZERO MUST EXPLAIN ITSELF. Consumption on this product was structurally absent until waiter-order-carries-the-dish-id (13 Sep 2026), so any historical window has an empty numerator. A screen answering 0.0 turns for those months would be reporting an outage as a business result - the reader would conclude the kitchen sells nothing. Every division is guarded to return NULL rather than 0, Infinity or NaN, and a data_quality block names the cause (no recipes attached, or a period predating the id fix). The UI renders a dash and an amber Not measurable note, never a zero. Per item: on-hand qty/value, average daily usage, DAYS OF COVER and annualised turns, banded TIGHT (<14d) / HEALTHY / OVERSTOCKED (>90d) / NOT MOVING / NO STOCK. Bands describe COVER and are deliberately NOT called dead stock - that screen means no movement of any kind in N days, a different question from held but not consumed. Default window is 90 days: a month is too short for anything slow-moving (one delivery lands and turns doubles) and a year hides the season. from+to recomputes the span from the actual dates so a custom window is never annualised against the default 90. Smoke: TC-INV-TURNS-MATHS (turns and days-on-hand RECOMPUTED from the same response and matched, because a derived figure that is merely plausible is the easiest kind of wrong to ship), -HONEST (no consumption => null + a reason, never 0.0), -SCOPED (no item under two modules, and non-vacuous - one side must carry rows), -EMPTY-WINDOW (nulls, not Infinity). OBSERVED IN PASSING, not fixed: /inventory/dead-stock still values stock at default_unit_price while everything else now uses batch cost.',
       'waiter-order-carries-the-dish-id — THE reason consumption, food cost %, variance and stock turns all read ZERO on every module. WaiterOrderPanel held its cart as {name, price, quantity} and posted exactly that: the menu item id was never stored in the cart, so it could not be sent. deductIngredientsForOrder looks a dish up by `it.id || it.menu_item_id` and SILENTLY SKIPS a line with neither - no error, no log - so a waiter-punched Dal Makhni consumed no dal. Nothing complained because a STAFF user is deliberately allowed to key an off-menu custom item (_optionalStaffUser resolves the HttpOnly cookie, so the waiter panel is authenticated even though its fetch sends no Authorization header), and an id-less line is exactly what a custom item looks like. The guest ordering screen was always correct - it sends `id: i.menuItemId` - so the two order paths disagreed, and only the staff one was wrong. The cart now carries `id` and `size` and posts the SAME shape the guest screen posts. `size` matters on its own: recipes have FULL/HALF/BOTH variants and the server defaults to FULL when a line does not say, so half portions were deducting a full portion of ingredients. WHY IT SURVIVED SO LONG: TC-INV-AUDIT-WHO has exercised this exact consumption path for months and always PASSED - because the test sends the id. The server was right and tested; only the browser payload was wrong, which no API test can see. MEASURED before the fix on RESTO-1003: 614 order lines named a real menu dish, 246 carried an id and 368 did not, and 79 of those id-less lines were dishes that DO have a recipe (Dal Makhni 18, Chicken Tikka 15, Paneer Tikka 11, Veg Biryani 9, Jeera Rice 8) - every one of them consumed nothing. Also corrected in the record: recipes are NOT unpopulated, as an earlier review claimed; there are 298 recipe lines across 84 dishes, all carrying real quantities. Coverage is 17% of 508 menu items, which is a separate and much smaller problem than the one fixed here. NOTE: waiter orders will now MOVE STOCK. That is the point, but expect ingredient balances to start falling where they previously did not, and the deduction has no negative floor (unchanged behaviour - the guest path has always been able to drive stock negative). Smoke: TC-ORD-RECIPE-FIRES (an order WITH the id draws exactly 2kg x 3) paired with TC-ORD-RECIPE-NEEDS-THE-ID (the same order WITHOUT it draws nothing) - the negative half is the one that matters, since a positive-only test would pass just as happily if the engine consumed on every line regardless.',

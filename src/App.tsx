@@ -48064,6 +48064,7 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
   const [deadStockData, setDeadStockData] = useState<any>(null);
   const [batches, setBatches] = useState<any[]>([]);
   const [turnsData, setTurnsData] = useState<any>(null);
+  const [stockoutData, setStockoutData] = useState<any>(null);
   const [turnsDays, setTurnsDays] = useState(90);
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState<string[]>([]);
@@ -48091,14 +48092,19 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
       // month-end close it reconciles to — so it takes `module` alone, not the
       // include_shared query the other four share.
       api(`/inventory/turns?days=${turnsDays}${module ? `&module=${encodeURIComponent(module)}` : ''}`),
+      // Stockouts shares the turns window — they are read together, and two
+      // availability figures over different periods on one screen would invite
+      // exactly the wrong comparison.
+      api(`/inventory/stockouts?days=${turnsDays}${amp}`),
     ])
-      .then(([abc, exp, dead, bat, trn]: any[]) => {
+      .then(([abc, exp, dead, bat, trn, sto]: any[]) => {
         const failed: string[] = [];
         if (abc.status === 'fulfilled') setAbcData(abc.value); else failed.push('ABC analysis');
         if (exp.status === 'fulfilled') setExpiringData(exp.value); else failed.push('expiry alerts');
         if (dead.status === 'fulfilled') setDeadStockData(dead.value); else failed.push('dead stock');
         if (bat.status === 'fulfilled') setBatches(Array.isArray(bat.value) ? bat.value : []); else failed.push('batches');
         if (trn.status === 'fulfilled') setTurnsData(trn.value); else failed.push('stock turns');
+        if (sto.status === 'fulfilled') setStockoutData(sto.value); else failed.push('stockouts');
         setErrored(failed);
       })
       .finally(() => setLoading(false));
@@ -48107,7 +48113,7 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
 
   if (loading) return <div className="text-center py-16"><RefreshCw size={28} className="mx-auto animate-spin text-[#9c8e85]" /></div>;
 
-  const nothingLoaded = !abcData && !expiringData && !deadStockData && batches.length === 0 && !turnsData;
+  const nothingLoaded = !abcData && !expiringData && !deadStockData && batches.length === 0 && !turnsData && !stockoutData;
 
   return (
     <div className="space-y-5">
@@ -48210,6 +48216,81 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
                   </tbody>
                 </table>
                 {items.length > 50 && <p className="text-[11px] text-[#9c8e85] mt-2">Showing the 50 largest by value, of {items.length}.</p>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {stockoutData && (() => {
+        const t = stockoutData.totals || {};
+        // Only items with something to say. A list of 58 rows all reading
+        // "never ran out" buries the three that did.
+        const items = (stockoutData.items || []).filter((i: any) =>
+          Number(i.stockout_events || 0) > 0 || Number(i.days_out || 0) > 0 || i.currently_out);
+        const pct = (v: any) => v == null ? '—' : `${v}%`;
+        return (
+          <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+            <h3 className="text-sm font-bold text-[#1a1208] mb-1">Stockouts &amp; availability</h3>
+            <p className="text-xs text-[#9c8e85] mb-3">
+              How often items actually ran out and how long they stayed out. Read beside turnover:
+              a high turn that is really a run of stockouts is not efficiency, it is under-buying.
+              {stockoutData.period ? ` ${stockoutData.period.from} to ${stockoutData.period.to}.` : ''}
+            </p>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+              {[
+                { k: 'Availability', v: pct(t.availability_pct), sub: 'of item-days in stock' },
+                { k: 'Stockout events', v: String(t.stockout_events ?? 0), sub: `across ${t.items_that_ran_out ?? 0} of ${t.items_tracked ?? 0} items` },
+                { k: 'Item-days out', v: String(t.item_days_out ?? 0), sub: 'total time unavailable' },
+                { k: 'Out right now', v: String(t.currently_out ?? 0), sub: 'items at or below zero' },
+              ].map(c => (
+                <div key={c.k} className="rounded-2xl bg-[#faf7f2] border border-[#f0e8d8] px-3 py-2">
+                  <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">{c.k}</p>
+                  <p className="text-lg font-bold text-[#1a1208] tabular-nums leading-tight">{c.v}</p>
+                  <p className="text-[10px] text-[#9c8e85]">{c.sub}</p>
+                </div>
+              ))}
+            </div>
+
+            {items.length === 0 ? (
+              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-2xl px-3 py-2">
+                Nothing ran out in this period.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-[10px] uppercase tracking-widest text-[#9c8e85]">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left font-bold">Item</th>
+                      <th className="px-2 py-1.5 text-right font-bold">Times out</th>
+                      <th className="px-2 py-1.5 text-right font-bold">Days out</th>
+                      <th className="px-2 py-1.5 text-right font-bold">Available</th>
+                      <th className="px-2 py-1.5 text-right font-bold">Days below reorder</th>
+                      <th className="px-2 py-1.5 text-left font-bold">Last out</th>
+                      <th className="px-2 py-1.5 text-left font-bold">Now</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.slice(0, 50).map((i: any) => (
+                      <tr key={i.ingredient_id} className="border-t border-[#f0e8d8]">
+                        <td className="px-2 py-1.5 text-[#1a1208]">{i.ingredient_name}</td>
+                        <td className="px-2 py-1.5 text-right font-mono">{i.stockout_events}</td>
+                        <td className="px-2 py-1.5 text-right font-mono">{i.days_out}</td>
+                        <td className="px-2 py-1.5 text-right font-mono">{pct(i.availability_pct)}</td>
+                        <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">{i.reorder_point > 0 ? i.days_below_reorder : '—'}</td>
+                        <td className="px-2 py-1.5 text-[#6b5d52]">{i.last_stockout_at || '—'}</td>
+                        <td className="px-2 py-1.5">
+                          {i.currently_out
+                            ? <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">Out</span>
+                            : <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700">In stock</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {items.length > 50 && <p className="text-[11px] text-[#9c8e85] mt-2">Showing the 50 worst, of {items.length}.</p>}
+                <p className="text-[10px] text-[#9c8e85] mt-2">Days below reorder is measured against today's reorder point — the historical threshold isn't stored.</p>
               </div>
             )}
           </div>
