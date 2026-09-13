@@ -24812,14 +24812,24 @@ ${data.tenant.name}`;
     total_ordered?: any; total_received?: any;
     price_variance_pct?: any;
     total_quality_items?: any; good_items?: any;
+    receipt_count?: any;
   }) => {
     const deliveries = Number(raw.total_deliveries || 0);
     const ordered = Number(raw.total_ordered || 0);
     const qualityItems = Number(raw.total_quality_items || 0);
+    const receipts = Number(raw.receipt_count || 0);
 
     const on_time_pct = deliveries > 0
       ? Math.round(100 * Number(raw.on_time_count || 0) / deliveries * 10) / 10 : null;
-    const fill_rate_pct = ordered > 0
+    // Fill rate needs a RECEIPT to mean anything. qty_received is only written
+    // when a goods receipt is posted, so a supplier with orders but no GRN at
+    // all reads as 0% — and that is not "delivers nothing", it is "nobody has
+    // recorded a delivery". On this tenant that put the largest supplier by PO
+    // count (359 orders, Rs.1.67L) at the bottom of the league on a score of 0
+    // while smoke-test fixtures topped it. An absence must not render as a bad
+    // result; without a receipt the measure is simply unavailable, which moves
+    // the supplier to `unrated` where it belongs.
+    const fill_rate_pct = ordered > 0 && receipts > 0
       ? Math.min(100, Math.round(Number(raw.total_received || 0) / ordered * 1000) / 10) : null;
     const price_variance_pct = raw.price_variance_pct == null ? null : Number(raw.price_variance_pct);
     // Stability is distance from the agreed price in EITHER direction: a
@@ -24845,6 +24855,7 @@ ${data.tenant.name}`;
       weight_covered: Math.round(weightSum * 100),
       total_deliveries: deliveries, total_ordered: ordered,
       total_received: Number(raw.total_received || 0), total_quality_items: qualityItems,
+      receipt_count: receipts,
     };
   };
 
@@ -24923,17 +24934,24 @@ ${data.tenant.name}`;
          WHERE raised_at >= ?::timestamp
          GROUP BY supplier_id`, [sinceIso]).catch(() => [] as any[]);
 
+      // Whether ANY goods receipt exists per supplier — the gate on fill rate.
+      const receipts: any[] = await db.query(`
+        SELECT supplier_id, COUNT(*) AS receipt_count
+          FROM goods_receipts
+         WHERE received_at >= ?::timestamp
+         GROUP BY supplier_id`, [sinceIso]).catch(() => [] as any[]);
+
       const idx = (rows: any[]) => {
         const m = new Map<string, any>();
         for (const r of rows) m.set(String(r.supplier_id), r);
         return m;
       };
-      const ot = idx(onTime), fr = idx(fill), pv = idx(price), ql = idx(quality), sp = idx(spend);
+      const ot = idx(onTime), fr = idx(fill), pv = idx(price), ql = idx(quality), sp = idx(spend), rc = idx(receipts);
 
       const scored = suppliers.map((s: any) => {
         const k = String(s.id);
         const sc = _supplierScore({
-          ...(ot.get(k) || {}), ...(fr.get(k) || {}), ...(pv.get(k) || {}), ...(ql.get(k) || {}),
+          ...(ot.get(k) || {}), ...(fr.get(k) || {}), ...(pv.get(k) || {}), ...(ql.get(k) || {}), ...(rc.get(k) || {}),
         });
         const money = sp.get(k) || {};
         return {
@@ -25138,11 +25156,19 @@ ${data.tenant.name}`;
 
       // Scored through the SHARED formula, so this card and the league table
       // can never publish different numbers for the same supplier.
+      // The receipt count gates fill rate, so the card must read it too — the
+      // shared formula only keeps the two in step if both feed it the same
+      // inputs.
+      const [rcRow] = await db.query(
+        "SELECT COUNT(*) AS receipt_count FROM goods_receipts WHERE supplier_id = ? AND received_at >= NOW() - INTERVAL '90 days'",
+        [sid]
+      ).catch(() => [{ receipt_count: 0 }] as any[]);
       const sc = _supplierScore({
         total_deliveries: otRow.total_deliveries, on_time_count: otRow.on_time_count,
         total_ordered: frRow.total_ordered, total_received: frRow.total_received,
         price_variance_pct: pvRow.price_variance_pct,
         total_quality_items: qlRow.total_items, good_items: qlRow.good_items,
+        receipt_count: rcRow?.receipt_count,
       });
       // Response shape unchanged — the UI reads these exact keys.
       res.json({ period_days: 90, ...sc });
@@ -57724,8 +57750,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'supplier-league-table',
+    commit_marker: 'league-fill-needs-a-receipt',
     code_features: [
+      'league-fill-needs-a-receipt — caught by reading the first live league rather than by a test. Aggarwal Wholesale, the tenant biggest supplier at 359 POs and Rs.1.67L of spend, sat at rank 4 on a score of ZERO while three smoke-test fixtures topped the table. The cause is not the supplier: purchase_order_items.qty_received is only written when a GOODS RECEIPT is posted, and this tenant has never posted one - zero GRNs in the entire database - so total_received/total_ordered was 0/1871 for every real supplier. That is nobody recorded a delivery, not delivers nothing, and it is the same defect class as the stockout headline that read 19 of 58 ran out with zero events: AN ABSENCE MUST NOT RENDER AS A BAD RESULT. Fill rate is now measurable only when at least one goods receipt exists for that supplier in the window; without one the dimension is null and the supplier moves to `unrated`, which is exactly the bucket that exists to say we have no history on them. Both the league AND the per-supplier card feed the receipt count into the shared _supplierScore - a shared formula only keeps two screens in step if both give it the same inputs. Smoke: TC-SUP-LEAGUE-FILL-NEEDS-A-RECEIPT sweeps every supplier, rated and unrated, for a fill rate with no receipt behind it. WORTH KNOWING SEPARATELY: this tenant records no goods receipts at all, so on-time, fill rate, price variance and quality are ALL unmeasurable for every real supplier - the league is working, but it can only rank what the receiving process records.',
       'supplier-league-table — the last gap from the supply-chain review. A per-supplier scorecard already existed and was surfaced (I nearly mis-reported it as missing because my grep filtered out the string 360), but the suppliers LIST carried no performance fields at all, so suppliers could be inspected one at a time and never compared. New GET /procurement/suppliers/league?days= plus a third view beside Card and Table in ProcurementView. ONE FORMULA, NOT TWO. The weights (on-time 35, fill 25, price stability 25, quality 15) are extracted into _supplierScore and the EXISTING scorecard route now calls it too, so the league and the card a user clicks through to cannot publish different numbers for the same supplier - the one thing a league cannot survive is disagreeing with the profile it links to. The league gathers its inputs set-based (five grouped queries for the whole book, not four per supplier); only the gathering differs, and that difference is visible rather than silent. WEIGHTS ARE RE-NORMALISED OVER THE MEASURES THAT HAVE DATA, which is exactly the fact a RANKING has to surface: a supplier judged only on quality is scored on 15% of the intended weighting stretched to 100%, so its 98 is not comparable to a supplier measured on all four at 92. Every row therefore reports dimensions_measured and weight_covered, shown on screen as "2 of 4 - 60%" and amber-flagged below 100. Ties break on weight_covered then spend, so a fully-measured supplier outranks a partly-measured one on the same score. Suppliers with NO history come back SEPARATELY as `unrated` rather than ranked last on a null - an unrated supplier is not a bad one, and the bottom of a league invites exactly that reading. Spend and PO count are carried alongside because a 100% score on a single delivery is not a supplier relationship. LANDMINE: the route MUST be declared before /procurement/suppliers/:supplierId - Express matches in order, so otherwise the league is served by the single-supplier lookup as a supplier named "league" and 404s as though it were never deployed. TC-SUP-LEAGUE-ROUTE locks that in. Smoke: -AGREES (the top-ranked supplier scores identically in the league and on its own card, across all four components - the test that justifies the shared formula), -RANKED (descending, sequential ranks, rated and unrated partition the book), -COVERAGE.',
       'stockout-ran-out-means-crossed — caught by reading the LIVE numbers rather than the tests, which were all green. The panel reported RESTAURANT as "19 of 58 items ran out" over a period with ZERO stockout events, which cannot both be true. Cause: items_that_ran_out counted any item with time at zero, so it swept up 18 items whose ledger merely OPENED at zero and were topped up minutes later by their first delivery. Those never ran out - they were not yet stocked - and that is exactly the distinction the event counter already draws (an item already out when the window opens contributes days but not an event). The counter now counts crossings, so the three headline figures mean three different things: stockout_events = crossings into zero during the window, items_that_ran_out = how many distinct items had one, item_days_out = total unavailability INCLUDING items that began the window out, currently_out = the snapshot now. Smoke: TC-INV-STOCKOUT-TOTALS-<module> asserts across three modules that items_that_ran_out equals the number of items actually carrying an event and never exceeds the event total - an internal-consistency check, which is the kind that catches a headline drifting from the detail it is supposed to summarise.',
       'stockout-frequency — the last measurement gap from the supply-chain review after stock turns. New GET /inventory/stockouts?module=&days=|from=&to= plus a panel beside turns in InventoryAnalyticsView, so all four modules get it at once. Per item: stockout EVENTS (each fall to zero), DAYS OUT, availability %, days below reorder, whether it is out right now, and when it last ran out; portfolio totals across the same window. Read beside turnover on purpose - a high turn that is really a run of stockouts is not efficiency, it is under-buying. BALANCES ARE RECONSTRUCTED BY SUMMING THE LEDGER (qty_delta), NOT read from stock_movements.balance_after: that column is a denormalised convenience each caller writes, while the sum is the same source of truth the month-end close uses, so a stockout history cannot disagree with the closing balance it comes from. THREE RULES, each of them a way to be quietly wrong if skipped: (1) an item ALREADY out when the window opens contributes DAYS but not an EVENT - the running-out happened in the previous period and counting it again double-counts it across two reports; (2) tracking starts at the LATER of the window and the item created_at, or every newly added item looks like it was out of stock for weeks before it existed and portfolio availability drops each time someone adds an item; (3) days_below_reorder is measured against TODAY reorder point because the historical threshold is not stored - a risk signal, not an audit, and labelled as such on screen. FOUND WHILE WRITING THE TEST, not after: a brand-new item has only HOURS of history, so a few seconds at zero inside that is a huge fraction - an item added this morning would have published 12% availability and sat at the top of the worst-offenders list on day one. Availability is now withheld (null) below a full day of history, and part-day items are excluded from the portfolio rate so that adding an item cannot move the headline. Smoke: TC-INV-STOCKOUT-EVENTS drives a real timeline (10 -> 0 -> 5 -> 0 -> 8 = exactly 2 events) against a control item that dips to 3 without ever reaching zero and must record NONE - without the control the test would pass against an implementation that counted every downward movement; -NEEDS-A-DAY; -BOUNDED sweeps all four modules for a percentage outside 0..100 or a negative count.',
