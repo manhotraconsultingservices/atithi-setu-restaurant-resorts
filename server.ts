@@ -5244,13 +5244,27 @@ function _glPostDate(ts?: unknown): string {
 // are precisely what the lock exists to stop.
 async function _acctPeriodBlock(db: any, dateIso: string): Promise<any | null> {
   if (!dateIso || !/^\d{4}-\d{2}-\d{2}/.test(String(dateIso))) return null;
-  return await db.get(
-    `SELECT period_key, from_date, to_date, closed_at, closed_by
-       FROM accounting_periods
-      WHERE status = 'CLOSED' AND ?::date BETWEEN from_date AND to_date
-      LIMIT 1`,
-    [String(dateIso).slice(0, 10)]
-  ).catch(() => null);
+  const d = String(dateIso).slice(0, 10);
+  try {
+    // from_date and to_date are TEXT, not DATE. `?::date BETWEEN from_date AND
+    // to_date` therefore compares a date with text, which Postgres refuses — and
+    // the first cut of this guard swallowed that error and returned null, so the
+    // lock was live, looked present, and blocked nothing. ISO dates order
+    // correctly as plain strings, so compare them as what they are.
+    return await db.get(
+      `SELECT period_key, from_date, to_date, closed_at, closed_by
+         FROM accounting_periods
+        WHERE status = 'CLOSED' AND ? >= from_date AND ? <= to_date
+        LIMIT 1`,
+      [d, d]
+    );
+  } catch (err: any) {
+    // A control that fails OPEN must at least fail LOUDLY. Refusing every
+    // posting because this lookup broke would stop the business, so it opens —
+    // but silence here is how a lock becomes decorative without anyone knowing.
+    console.error('[period-lock] closed-period lookup FAILED — postings are NOT being checked:', err?.message || err);
+    return null;
+  }
 }
 
 // One place to refuse, so every back-dating path gives the same sentence and the
@@ -57893,8 +57907,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'accounting-period-lock',
+    commit_marker: 'period-lock-actually-locks',
     code_features: [
+      'period-lock-actually-locks — HOTFIX. accounting-period-lock shipped and blocked NOTHING: a journal dated inside the closed month still posted 201. accounting_periods.from_date and .to_date are TEXT, not DATE, so `?::date BETWEEN from_date AND to_date` compared a date against text, Postgres refused the statement, and the guard `.catch(() => null)` swallowed it and reported no closed period. THE LOCK WAS LIVE, LOOKED PRESENT AND DID NOTHING - which is worse than no lock, because an owner would have trusted it. Exactly the defect class already recorded for housekeeping_jobs.due_date being TEXT, and I walked into it again on a different table. Two fixes: compare ISO dates as PLAIN STRINGS (they order correctly, no cast needed), and make the failure LOUD - a control that fails open must not do so in silence, so the catch now logs that postings are not being checked. CAUGHT BY DRIVING THE REAL ENDPOINTS AFTER DEPLOY rather than trusting tsc and a green build: the smoke tests for this feature had not run yet, and the manual probe is what found it.',
       'accounting-period-lock — Q-2 from the accounting review, and the last qualification. Closing an accounting period used to record the sign-off and REPORT entries that arrived afterwards without refusing them, while the INVENTORY close in the same product hard-blocks a back-dated write with a 409. The stronger control existed, applied to stock and not to the ledger. Now ported. WHAT IT DELIBERATELY DOES NOT BREAK: a posting dated TODAY can never land in a closed period, because periods are closed over PAST months - so every settlement, payment and order taken in the normal course is untouched by construction. What is refused is a posting DATED INTO a signed-off month. TC-ACCT-PERIOD-LOCK-TODAY-OK asserts exactly that, because a lock that stopped the property taking money would be torn out within a day. TWO LAYERS, on purpose. Five routes that accept a user-supplied date refuse UP FRONT with 409 ACCOUNTING_PERIOD_CLOSED naming the period and the way out (manual journal, supplier invoice, supplier payment, petty cash, expense payment) - a person gets a sentence they can act on. And _postGlEntries itself refuses as a BACKSTOP, recording a gl_exception, so anything that slips past a route guard is visible rather than silently unposted: money must never move without a ledger entry and nobody noticing. REOPEN NOW DEMANDS A REASON (>= 3 chars, 400 REOPEN_REASON_REQUIRED otherwise), appends who/when/why to the period note, and lands in the statutory trail for free because accounting_periods is one of the books tables audited by books-audit-trail. KNOWN CONSEQUENCE, accepted deliberately: the inventory close/reopen posts its reversal dated at the INVENTORY period end (date: period_to), so re-closing stock for a month whose ACCOUNTS are signed off is now refused until the accounting period is reopened. That is the correct discipline - you cannot silently re-post a signed-off month - and the 409 names the way out. Smoke: -REFUSES, -ALL-DOORS (a back-dated purchase bill is refused by the same lock; the control is on the DATE, not on one screen), -TODAY-OK, -REOPEN. The test reopens its probe period in `finally` whatever happens, since leaving the books locked would fail every later money test on a guard working exactly as designed.',
       'audit-actor-has-a-name — the statutory trail went live naming its actor `user-c192c760-06c5-...`, a raw uuid where a person belongs. THE SAME DEFECT FOR THE THIRD TIME this session (the housekeeping cleaning log, then event revised_by, now the audit trail) with the same cause every time: the caller reached for decoded.name when the token carries userName. Fixed by making the wrong field unreachable - _actorDisplayName(u) is now the SINGLE definition of how a person is named in any log this product writes (userName, then email, then a Title-Cased role, then Staff), at module scope above `authenticate`, used by the audit context, with hkActor reduced to a one-line delegation. Two copies of a naming rule is two answers to who did this, and the disagreement always surfaces as a uuid in a report a human is meant to read.',
       'books-audit-trail — Q-1 from the accounting review, and the qualification that blocked certifying this product for a COMPANY client. Rule 3(1) of the Companies (Accounts) Rules has required since 1 Apr 2023 that accounting software record an audit trail of each and every transaction, create an edit log of every change to the books, and NOT allow it to be disabled. The old trail was writeObjectAudit called endpoint by endpoint: 118 of 564 write routes, about a fifth. WHY IT MOVED BELOW THE ROUTES. Completeness achieved endpoint-by-endpoint lapses the next time somebody adds an endpoint. PostgresDb.run is the ONE place every tenant write passes through, so the log is now written because the row was written - there is no flag to turn it off and removing it means editing db.ts. New tenant table books_audit_log (table, operation, row key, actor, request id, before/after images, statement shape, timestamp). THE BEFORE-IMAGE IS DELIBERATELY CONSERVATIVE: it comes from re-running the statement OWN WHERE clause as a SELECT, and is attempted ONLY when the statement contains exactly one WHERE - with a subquery there is no way to tell which WHERE bounds the rows being changed, and a plausible wrong before-image is evidence that misleads, which is worse than a missing one. Placeholders in a SET clause bind BEFORE those in the WHERE, so the SELECT takes only the tail of the params; getting that backwards would read a different row than the one being changed. A survey of the codebase first confirmed 54 of 57 books-table UPDATEs have a single WHERE. ACTOR VIA AsyncLocalStorage: a context is opened for EVERY request before the body parser (so public endpoints that never reach `authenticate` are covered too) and `authenticate` then names the user by MUTATING that store in place, which keeps one request id across every row a request writes. Cron and boot writes find no store and record as SYSTEM. SCOPE: the books of account and the subsidiary records that feed them. `orders` is deliberately EXCLUDED - it churns on every kitchen status change and its financial effect reaches the books through gl_entries, which IS covered, so the money is audited without the noise. object_audit_log is kept: business intent and row-level change answer different questions. THE TRAIL NEVER FAILS THE WRITE - a guest bill must not be refused because an audit insert failed - but the failure is logged loudly rather than swallowed. Read back at GET /accounting/audit-trail (owner-only, filterable, with a coverage summary); there is deliberately NO endpoint that edits or deletes an entry. Smoke: TC-AUDIT-TRAIL-RECORDS drives a route containing NO audit call of its own and requires the entry anyway - if that holds, it holds for endpoints nobody has written yet; -NAMES-WHO, -BEFORE-AFTER (what it was and what it became), -COVERS-BOOKS, -CANNOT-BE-CLEARED (asserts the ABSENCE of any delete/clear endpoint).',
