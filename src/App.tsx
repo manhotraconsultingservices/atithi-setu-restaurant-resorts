@@ -8885,7 +8885,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{cashierMode ? (acctTab === 'CASHCOUNT' ? 'Cash Count' : 'Cash Drawer & Shift Handover') : 'Accounting & Reports'}</h2>
+        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{cashierMode ? (acctTab === 'CASHCOUNT' ? 'Cash Count' : 'Cash Drawer & Shift Handover') : 'Ledger & Books'}</h2>
         <p className="text-sm text-[#6b5d52] mt-1">{cashierMode ? (acctTab === 'CASHCOUNT' ? 'Count the till and post the over/short variance to the ledger' : 'Open your till · count & close · hand over to the next shift') : 'Double-entry GL · Trial balance · TDS tracker · Manual journals'}</p>
       </div>
 
@@ -16368,7 +16368,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // now group every destination into SIX left-sidebar modules by
         // operator job-to-be-done. The activeTab state machine and all
         // ~30 view components are untouched — only the nav chrome changed.
-        type NavTab = { id: string; label: string; mode?: 'RESTAURANT' | 'HOTEL'; requires?: 'hotel' | 'restaurant' | 'spa' | 'events' };
+        // `section` groups tabs INSIDE a module under a small heading. It is a
+        // label, not a third nav level: there is no extra click, no extra state
+        // and no id of its own, so nothing about RBAC or routing can key off it.
+        // Added for Finance, where eleven children needed dividing without
+        // burying any of them one level deeper.
+        type NavTab = { id: string; label: string; section?: string; mode?: 'RESTAURANT' | 'HOTEL'; requires?: 'hotel' | 'restaurant' | 'spa' | 'events' };
         type NavModule = {
           id: string;
           label: string;
@@ -16493,50 +16498,61 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
-            // Accounts = money in / money out ledger for the business owner.
-            // Procurement (AP), expenses, and OTA receivables belong here —
-            // not buried inside operational modules.
-            id: 'ACCOUNTS', label: 'Accounts', icon: <IndianRupee size={16} />,
+            // ── Finance: one home for the books (nav regrouping, Sep 2026) ──
+            // This was THREE top-level groups — Accounts, Cash, and Suppliers &
+            // Customers — so an accountant opening the product had to already
+            // know that the till was in one group, the supplier ledger in a
+            // second and the trial balance in a third. It is one job, so it is
+            // one group.
+            //
+            // Renamed from "Accounts" deliberately: in Indian usage "accounts"
+            // reads as CUSTOMER accounts at least as often as it reads as books.
+            //
+            // Eleven children are sectioned rather than nested a level deeper —
+            // `section` prints a heading above the first tab carrying it, so
+            // Statutory is findable without another click.
+            //
+            // EVERY TAB ID IS UNCHANGED, and that is load-bearing. Ids are RBAC
+            // keys: FINANCE_TABS in src/navVisibility.ts, the server's tab ->
+            // module map, and every tenant's saved Staff Access grants all key
+            // off the exact string. This moves and renames menu entries; it
+            // grants nothing and revokes nothing.
+            id: 'FINANCE', label: 'Finance', icon: <IndianRupee size={16} />,
             visible: true,
             tabs: [
-              // Ordered the way the work actually happens: record the money
-              // (1-3), watch what is owed and owing (4-5), read the quick
-              // numbers (6-7), then the full books (8). Every id is unchanged —
-              // they are RBAC keys, so this is labels and order only.
-              // NOT "Receivables (AR)": this route reads only
-              // `ota_commission_entries`. Customer AR lives in the ledger (1100)
-              // and is read under Receivables Ageing; there is no operational
-              // screen for it yet. Do not let this label claim otherwise.
-              { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
-              // PROCUREMENT moved to the Relationships group below. Its id is
-              // unchanged — ids are RBAC keys — so every existing grant, the
-              // TAB_MODULE mapping and the route all keep working; only where
-              // it SITS in the menu and what it is CALLED have changed.
-              { id: 'EXPENSE_JOURNAL', label: 'Expenses' },
-              // Always present; isVisible() gates them to owner / MANAGER / a role the
-              // owner EXPLICITLY granted the tab in Staff Access — so finance is
-              // controllable per-role, not owner-hardcoded. Others never see them.
-              { id: 'ACCOUNTS_VENDOR_AGING', label: 'Payables Ageing' },
-              { id: 'ACCOUNTS_MSME_43B', label: 'MSME 43B(h)' },
-              { id: 'ACCOUNTS_GST',          label: 'GST Summary' },
-              // "Snapshot" because these are the OPERATIONAL views, computed
-              // from the source tables (/reports/pnl, /reports/cash-flow) — not
-              // the statutory statements, which are GL-derived and live under
-              // Accounting & Reports -> Financial Statements. They are allowed
-              // to differ; the names now say which is which instead of showing
-              // two profit figures called the same thing.
-              { id: 'ACCOUNTS_PNL',          label: 'P&L Snapshot' },
-              { id: 'ACCOUNTS_CASHFLOW',     label: 'Cash Flow Snapshot' },
-              { id: 'ACCOUNTING',            label: 'Accounting & Reports' },
-            ],
-          },
-          {
-            // Cash = one-click cashier till + shift handover, surfaced out of the
-            // owner-only Ledger & Books so cash-handling staff reach it directly.
-            id: 'CASH', label: 'Cash', icon: <IndianRupee size={16} />,
-            visible: true,
-            tabs: [
-              { id: 'CASH_DRAWER', label: 'Cash Drawer' },
+              // Books — where the accountant actually lives. Ledger & Books
+              // carries the day book, trial balance, financial statements, bank
+              // reconciliation and the period close. The two "Snapshot" screens
+              // are the OPERATIONAL views computed from the source tables
+              // (/reports/pnl, /reports/cash-flow), NOT the GL-derived statutory
+              // statements inside Ledger & Books. They are allowed to differ;
+              // the names say which is which instead of showing two profit
+              // figures under the same word.
+              { id: 'ACCOUNTING',            label: 'Ledger & Books',          section: 'Books' },
+              { id: 'ACCOUNTS_PNL',          label: 'P&L Snapshot',            section: 'Books' },
+              { id: 'ACCOUNTS_CASHFLOW',     label: 'Cash Flow Snapshot',      section: 'Books' },
+              // Cash & Banking — the cashier's till. It was a top-level group of
+              // its own for discoverability, and it loses nothing by sitting
+              // here: both shapes are one click to open the group and one to
+              // open the screen. A role that can ONLY reach the drawer still
+              // sees a one-item group, just correctly named.
+              { id: 'CASH_DRAWER',           label: 'Cash Drawer',             section: 'Cash & Banking' },
+              // NOT "Receivables (AR)": the route behind this tab reads ONE
+              // table, `ota_commission_entries`. Customer AR is posted (folio
+              // settlement hits 1100) and readable inside Ledger & Books under
+              // Receivables Ageing, but there is no operational screen for it —
+              // so this label must not claim there is.
+              { id: 'RECEIVABLES',           label: 'OTA & Agent Receivables', section: 'Receivables', requires: 'hotel' },
+              { id: 'CUSTOMER_ACCOUNTS',     label: 'Customers & Credit',      section: 'Receivables' },
+              // Payables — the bill, who it is owed to, and how late it is.
+              { id: 'EXPENSE_JOURNAL',       label: 'Expenses',                section: 'Payables' },
+              { id: 'PROCUREMENT',           label: 'Suppliers & Purchasing',  section: 'Payables' },
+              { id: 'ACCOUNTS_VENDOR_AGING', label: 'Payables Ageing',         section: 'Payables' },
+              // Statutory — the compliance calendar finally has an address. GST
+              // was filed among the management reports and MSME 43B(h) had
+              // nowhere to sit at all; e-invoice status and TDS land here next.
+              { id: 'ACCOUNTS_GST',          label: 'GST Summary',             section: 'Statutory' },
+              { id: 'ACCOUNTS_MSME_43B',     label: 'MSME 43B(h)',             section: 'Statutory' },
             ],
           },
           {
@@ -16555,19 +16571,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // It is an inventory permission, and it is named like one.
               { id: 'INVENTORY_EVENTS', label: 'Events Inventory',  requires: 'events' },
               { id: 'SPA_INVENTORY',   label: 'Spa Inventory',     requires: 'spa' },
-            ],
-          },
-          {
-            // The two sides of every trading relationship in one place. Before
-            // this, "who we buy from" was a sub-tab of Accounts called
-            // Purchases & Payables, and "who we sell to on terms" had no screen
-            // at all — its ledger was reachable only through Channel Manager,
-            // and only for room nights.
-            id: 'RELATIONSHIPS', label: 'Suppliers & Customers', icon: <Users size={16} />,
-            visible: true,
-            tabs: [
-              { id: 'PROCUREMENT',       label: 'Suppliers & Purchasing' },
-              { id: 'CUSTOMER_ACCOUNTS', label: 'Customers & Credit' },
             ],
           },
           {
@@ -16714,22 +16717,38 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </button>
               {!collapsed && expanded && (
                 <div className="mt-0.5 mb-1 ml-3 pl-2.5 border-l border-[#cc5a16]/10 space-y-0.5">
-                  {m.tabs.map(t => (
-                    <button
-                      key={t.id + (t.mode || '')}
-                      type="button"
-                      onClick={() => goTo(t)}
-                      className={cn(
-                        "w-full text-left px-3 py-2 rounded-xl text-[13px] font-semibold transition-colors flex items-center justify-between gap-2",
-                        isActivePage(t)
-                          ? "bg-[#cc5a16] text-white shadow-sm"
-                          : "text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#3d3128]"
+                  {m.tabs.map((t, ti) => {
+                    // `m.tabs` here is ALREADY filtered by pageVisible, so the
+                    // heading is decided against what this role can actually
+                    // see. That is the whole point: a role granted only GST
+                    // Summary gets the "Statutory" heading and nothing else,
+                    // and no role ever gets a heading standing over an empty
+                    // section.
+                    const prevSection = ti > 0 ? (m.tabs[ti - 1].section || '') : '';
+                    const showSection = !!t.section && t.section !== prevSection;
+                    return (
+                    <React.Fragment key={t.id + (t.mode || '')}>
+                      {showSection && (
+                        <div className="px-3 pt-2.5 pb-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[#b3a396]">
+                          {tr(t.section as string)}
+                        </div>
                       )}
-                    >
-                      {tr(t.label)}
-                      {isActivePage(t) && <Check size={13} />}
-                    </button>
-                  ))}
+                      <button
+                        type="button"
+                        onClick={() => goTo(t)}
+                        className={cn(
+                          "w-full text-left px-3 py-2 rounded-xl text-[13px] font-semibold transition-colors flex items-center justify-between gap-2",
+                          isActivePage(t)
+                            ? "bg-[#cc5a16] text-white shadow-sm"
+                            : "text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#3d3128]"
+                        )}
+                      >
+                        {tr(t.label)}
+                        {isActivePage(t) && <Check size={13} />}
+                      </button>
+                    </React.Fragment>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -28479,24 +28498,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'PUBLIC_BOOKING_PAGE',  label: 'Public Booking Page',  description: 'Customer-facing direct-booking page: hero, photo galleries, amenities, slug URL, cancellation policy. 0% commission channel.', hotelOnly: true },
               { id: 'HOTEL_INVENTORY',      label: 'Hotel Inventory',       description: 'Housekeeping consumables, amenities, linen — stock levels, movements, low-stock alerts.', hotelOnly: true },
               // Finance tabs (visible for both HOTEL and RESTAURANT tenants)
-              { id: 'EXPENSE_JOURNAL',      label: 'Expense Journal',       description: 'Daily operating expenses, petty cash entries, vendor payments, expense reports and approval.' },
-              { id: 'PROCUREMENT',          label: 'Procurement & AP',      description: 'Purchase orders, supplier invoices, goods-received notes, accounts payable aging.' },
-              { id: 'RECEIVABLES',          label: 'Receivables (AR)',      description: 'Customer / OTA receivables — agents, invoices, payments, aging, collection.' },
+              { id: 'EXPENSE_JOURNAL',      label: 'Expenses',              description: 'Daily operating expenses, petty cash entries, vendor payments, expense reports and approval.' },
+              { id: 'PROCUREMENT',          label: 'Suppliers & Purchasing', description: 'Supplier master, purchase orders, supplier invoices, goods-received notes and the supplier league table.' },
+              { id: 'RECEIVABLES',          label: 'OTA & Agent Receivables', description: 'Commission and payouts owed by OTAs and travel agents. NOT customer AR — that is posted to the ledger (1100) and read as Receivables Ageing inside Ledger & Books.' },
               // Grantable now; the screen itself lands with the Relationships
               // nav group. The permission ships with the API rather than after
               // it, so staff access is decided by the owner from day one
               // instead of the routes being owner-only by accident.
-              { id: 'CUSTOMER_ACCOUNTS',    label: 'Customers & Credit Accounts', description: 'Companies the property sells to on credit — corporates, travel agents, tour operators. Contacts, credit limit and terms, interaction log, statements and ageing. Used by Hotel and Events alike.' },
+              { id: 'CUSTOMER_ACCOUNTS',    label: 'Customers & Credit',    description: 'Companies the property sells to on credit — corporates, travel agents, tour operators. Contacts, credit limit and terms, interaction log, statements and ageing. Used by Hotel and Events alike.' },
               // ── Completeness pass (2026-08-28): every remaining nav tab is now
               // grantable so the owner can control ALL menus/commands from here. ──
               { id: 'CHECKLIST_BOARD',      label: 'Checklist Board',       description: 'Manager/owner cockpit over every checklist instance across the property — status, overdue, room/venue release gating.' },
               { id: 'STATUS_BOARD',         label: 'Status Board',          description: 'Live rooms + event-halls status grid (vacant / occupied / cleaning / booked). Hotel/Events operational view.' },
               { id: 'CASH_DRAWER',          label: 'Cash Drawer',           description: 'Cashier till — opening float, cash in/out, shift handover, and cash-count reconciliation.' },
               { id: 'ACCOUNTING',           label: 'Ledger & Books',        description: 'Double-entry ledger, day book, trial balance, P&L, balance sheet and period close (owner finance).' },
-              { id: 'ACCOUNTS_PNL',         label: 'P&L Report',            description: 'Profit & Loss statement derived from the general ledger for any period.' },
-              { id: 'ACCOUNTS_CASHFLOW',    label: 'Cash Flow',             description: 'Cash-flow statement (operating / investing / financing) derived from the GL.' },
-              { id: 'ACCOUNTS_GST',         label: 'GST Ledger',            description: 'GST output/input register, GSTR-1 / 3B working sheets, and tax liability.' },
-              { id: 'ACCOUNTS_VENDOR_AGING', label: 'Vendor Aging',         description: 'Accounts-payable aging by supplier — outstanding balances bucketed by age.' },
+              { id: 'ACCOUNTS_PNL',         label: 'P&L Snapshot',          description: 'Managerial P&L computed from the source tables (revenue, COGS, opex, EBITDA). The GL-derived statutory statement lives inside Ledger & Books.' },
+              { id: 'ACCOUNTS_CASHFLOW',    label: 'Cash Flow Snapshot',    description: 'Operational cash in / cash out computed from the source tables. The GL-derived cash-flow statement lives inside Ledger & Books.' },
+              { id: 'ACCOUNTS_GST',         label: 'GST Summary',           description: 'GST output/input register, GSTR-1 / 3B working sheets, and tax liability.' },
+              { id: 'ACCOUNTS_VENDOR_AGING', label: 'Payables Ageing',      description: 'Accounts-payable ageing by supplier — outstanding balances bucketed by age.' },
+              { id: 'ACCOUNTS_MSME_43B',    label: 'MSME 43B(h)',           description: 'Sec 43B(h) ageing — supplier bills past the 45/15-day MSMED limit, and the amount disallowed if still unpaid on 31 March. Micro and small suppliers only.' },
               // Events & Convention tabs (only shown when the Events module is enabled).
               { id: 'EVENTS_DASHBOARD',  label: 'Events Dashboard',   description: 'Events ops cockpit: pipeline, win rate, revenue, receivables, venue utilization.', eventsOnly: true },
               { id: 'EVENTS_CALENDAR',   label: 'Events Calendar',    description: 'Venue × date booking calendar.', eventsOnly: true },
@@ -28552,7 +28572,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               SPA_CALENDAR: 'SPA', SPA_APPOINTMENTS: 'SPA', SPA_CATALOG: 'SPA', SPA_RESOURCES: 'SPA', SPA_CLIENTS: 'SPA', SPA_PACKAGES: 'SPA', SPA_REPORTS: 'SPA', SPA_BILLING: 'SPA', SPA_SETTINGS: 'SPA',
               EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_ADDONS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
               EXPENSE_JOURNAL: 'ACCOUNTS', PROCUREMENT: 'ACCOUNTS', RECEIVABLES: 'ACCOUNTS', CUSTOMER_ACCOUNTS: 'ACCOUNTS',
-              ACCOUNTING: 'ACCOUNTS', ACCOUNTS_PNL: 'ACCOUNTS', ACCOUNTS_CASHFLOW: 'ACCOUNTS', ACCOUNTS_GST: 'ACCOUNTS', ACCOUNTS_VENDOR_AGING: 'ACCOUNTS', CASH_DRAWER: 'ACCOUNTS',
+              ACCOUNTING: 'ACCOUNTS', ACCOUNTS_PNL: 'ACCOUNTS', ACCOUNTS_CASHFLOW: 'ACCOUNTS', ACCOUNTS_GST: 'ACCOUNTS', ACCOUNTS_VENDOR_AGING: 'ACCOUNTS', ACCOUNTS_MSME_43B: 'ACCOUNTS', CASH_DRAWER: 'ACCOUNTS',
               CHECKLIST_BOARD: 'OVERVIEW', STATUS_BOARD: 'FRONTDESK',
               LOYALTY: 'SALES', FEEDBACK: 'SALES', CHANNEL_MANAGER: 'SALES', PUBLIC_BOOKING_PAGE: 'SALES',
               INVENTORY: 'INVENTORY', HOTEL_INVENTORY: 'INVENTORY', SPA_INVENTORY: 'INVENTORY',
@@ -28572,7 +28592,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { key: 'RESTAURANT', label: 'Restaurant' },
               { key: 'SPA',        label: 'Spa & Wellness' },
               { key: 'EVENTS',     label: 'Events' },
-              { key: 'ACCOUNTS',   label: 'Finance & Accounts' },
+              { key: 'ACCOUNTS',   label: 'Finance' },
               { key: 'SALES',      label: 'Sales & Marketing' },
               { key: 'INVENTORY',  label: 'Inventory' },
               { key: 'REPORTS',    label: 'Reports' },

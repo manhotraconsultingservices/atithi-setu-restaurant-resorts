@@ -308,6 +308,11 @@ export const pa: Record<string, string> = {
   'Accounting & Reports': 'ਲੇਖਾ ਤੇ ਰਿਪੋਰਟਾਂ',
   'Accounts': 'ਖਾਤੇ', 'Payables & Procurement': 'ਦੇਣਦਾਰੀਆਂ ਤੇ ਖਰੀਦ', 'Expense Journal': 'ਖਰਚ ਜਰਨਲ', 'OTA & Agent Receivables': 'OTA ਤੇ ਏਜੰਟ ਪ੍ਰਾਪਤੀਆਂ', 'Vendor Aging': 'ਵਿਕਰੇਤਾ ਏਜਿੰਗ', 'P&L Report': 'ਲਾਭ-ਹਾਨੀ ਰਿਪੋਰਟ', 'Cash Flow': 'ਨਕਦੀ ਪ੍ਰਵਾਹ', 'GST Ledger': 'GST ਲੇਜਰ', 'Ledger & Books': 'ਲੇਜਰ ਤੇ ਬਹੀ',
   'Cash': 'ਨਕਦੀ', 'Cash Drawer': 'ਕੈਸ਼ ਦਰਾਜ਼',
+  // Finance group + its section headings (nav regrouping, Sep 2026).
+  'Finance': 'ਵਿੱਤ',
+  'Books': 'ਬਹੀ-ਖਾਤੇ', 'Cash & Banking': 'ਨਕਦੀ ਤੇ ਬੈਂਕਿੰਗ', 'Receivables': 'ਪ੍ਰਾਪਤੀਆਂ',
+  'Payables': 'ਦੇਣਦਾਰੀਆਂ', 'Statutory': 'ਕਾਨੂੰਨੀ',
+  'MSME 43B(h)': 'MSME 43B(h)',
   'Inventory': 'ਵਸਤੂ-ਸੂਚੀ', 'Hotel Inventory': 'ਹੋਟਲ ਵਸਤੂ-ਸੂਚੀ', 'Kitchen Inventory': 'ਰਸੋਈ ਵਸਤੂ-ਸੂਚੀ', 'Spa Inventory': 'ਸਪਾ ਵਸਤੂ-ਸੂਚੀ',
   'Sales & Distribution': 'ਵਿਕਰੀ ਤੇ ਵੰਡ', 'Channel Manager': 'ਚੈਨਲ ਮੈਨੇਜਰ', 'Direct Booking Page': 'ਸਿੱਧੀ ਬੁਕਿੰਗ ਪੰਨਾ', 'Loyalty': 'ਵਫ਼ਾਦਾਰੀ', 'Guest Feedback': 'ਮਹਿਮਾਨ ਫੀਡਬੈਕ',
   'Reports': 'ਰਿਪੋਰਟਾਂ', 'All Reports': 'ਸਾਰੀਆਂ ਰਿਪੋਰਟਾਂ',

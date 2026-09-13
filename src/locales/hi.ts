@@ -347,6 +347,11 @@ export const hi: Record<string, string> = {
   'Accounting & Reports': 'लेखांकन और रिपोर्ट',
   'Accounts': 'खाते', 'Payables & Procurement': 'देय और खरीद', 'Expense Journal': 'व्यय जर्नल', 'OTA & Agent Receivables': 'OTA और एजेंट प्राप्य', 'Vendor Aging': 'वेंडर एजिंग', 'P&L Report': 'लाभ-हानि रिपोर्ट', 'Cash Flow': 'कैश फ्लो', 'GST Ledger': 'GST लेजर', 'Ledger & Books': 'लेजर और बही',
   'Cash': 'नकद', 'Cash Drawer': 'कैश ड्रॉअर',
+  // Finance group + its section headings (nav regrouping, Sep 2026).
+  'Finance': 'वित्त',
+  'Books': 'बही-खाते', 'Cash & Banking': 'नकद और बैंकिंग', 'Receivables': 'प्राप्य',
+  'Payables': 'देय', 'Statutory': 'सांविधिक',
+  'MSME 43B(h)': 'MSME 43B(h)',
   'Inventory': 'इन्वेंटरी', 'Hotel Inventory': 'होटल इन्वेंटरी', 'Kitchen Inventory': 'किचन इन्वेंटरी', 'Spa Inventory': 'स्पा इन्वेंटरी',
   'Sales & Distribution': 'बिक्री और वितरण', 'Channel Manager': 'चैनल मैनेजर', 'Direct Booking Page': 'डायरेक्ट बुकिंग पेज', 'Loyalty': 'लॉयल्टी', 'Guest Feedback': 'अतिथि फीडबैक',
   'Reports': 'रिपोर्ट्स', 'All Reports': 'सभी रिपोर्ट',
