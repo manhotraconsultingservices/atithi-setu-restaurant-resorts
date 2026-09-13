@@ -54,7 +54,7 @@ export const OWNER_ONLY_TABS = ['ROOM_SETUP', 'KITCHEN_PRINTERS', 'PRINT_TEMPLAT
 /** Finance module tabs — hard-gated to owner / MANAGER / explicit grant. */
 export const FINANCE_TABS = [
   'PROCUREMENT', 'EXPENSE_JOURNAL', 'RECEIVABLES', 'ACCOUNTS_PNL',
-  'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'ACCOUNTING',
+  'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'ACCOUNTS_MSME_43B', 'ACCOUNTING',
   // Who owes us money, on what terms, and their credit limit. Same
   // sensitivity as the rest of this list, so it gets the same hard gate:
   // owner / MANAGER / an explicit grant, and never a fail-open null list.

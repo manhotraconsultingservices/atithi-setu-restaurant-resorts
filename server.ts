@@ -25081,7 +25081,8 @@ ${data.tenant.name}`;
         name, contact_name, phone, email, address, gst_number,
         lead_time_days, payment_terms, credit_days, supplier_type,
         bank_account_number, bank_name, ifsc_code, notes,
-        pan_number, msme_registered, vendor_category, credit_limit, tds_category, tds_section,
+        pan_number, msme_registered, udyam_number, msme_class, msme_agreement_days, msme_is_trader,
+        vendor_category, credit_limit, tds_category, tds_section,
         contract_start_date, contract_end_date, preferred_status,
         pan_doc_url, msme_doc_url, gst_doc_url,
       } = req.body;
@@ -25092,7 +25093,8 @@ ${data.tenant.name}`;
         `INSERT INTO suppliers (id, name, contact_name, phone, email, address, gst_number,
            lead_time_days, payment_terms, credit_days, supplier_type,
            bank_account_number, bank_name, ifsc_code, notes,
-           pan_number, msme_registered, vendor_category, credit_limit, tds_category, tds_section,
+           pan_number, msme_registered, udyam_number, msme_class, msme_agreement_days, msme_is_trader,
+           vendor_category, credit_limit, tds_category, tds_section,
            contract_start_date, contract_end_date, preferred_status,
            pan_doc_url, msme_doc_url, gst_doc_url, is_active)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
@@ -25100,7 +25102,10 @@ ${data.tenant.name}`;
          gst_number || null, lead_time_days || 0, payment_terms || null,
          credit_days || 0, supplier_type || 'GENERAL',
          bank_account_number || null, bank_name || null, ifsc_code || null, notes || null,
-         pan_number || null, msme_registered ? 1 : 0, vendor_category || null,
+         pan_number || null, msme_registered ? 1 : 0,
+         udyam_number || null, msme_class || null,
+         msme_agreement_days != null ? Number(msme_agreement_days) : null, msme_is_trader ? 1 : 0,
+         vendor_category || null,
          credit_limit || null, tds_category || 'NIL', tds_section || null,
          contract_start_date || null, contract_end_date || null, preferred_status || 'PREFERRED',
          pan_doc_url || null, msme_doc_url || null, gst_doc_url || null]
@@ -25119,7 +25124,8 @@ ${data.tenant.name}`;
         'name', 'contact_name', 'phone', 'email', 'address', 'gst_number',
         'lead_time_days', 'payment_terms', 'credit_days', 'supplier_type',
         'bank_account_number', 'bank_name', 'ifsc_code', 'notes', 'is_active',
-        'pan_number', 'msme_registered', 'vendor_category', 'credit_limit', 'tds_category', 'tds_section',
+        'pan_number', 'msme_registered', 'udyam_number', 'msme_class', 'msme_agreement_days', 'msme_is_trader',
+        'vendor_category', 'credit_limit', 'tds_category', 'tds_section',
         'contract_start_date', 'contract_end_date', 'preferred_status',
         'pan_doc_url', 'msme_doc_url', 'gst_doc_url',
       ];
@@ -57802,8 +57808,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'grn-scope-by-what-arrived',
+    commit_marker: 'msme-43b-ageing',
     code_features: [
+      'msme-43b-ageing — H-1 from the accounting review, and the highest-value item on it for an Indian MSME practice. Section 43B(h) (Finance Act 2023, AY 2024-25 onward) disallows a deduction for sums payable to a MICRO or SMALL enterprise beyond the section 15 MSMED time limit until they are actually paid. It costs the CLIENT money, at assessment, on an amount the books report as an entirely ordinary payable - and nothing in the product answered it. THE DISTINCTION THAT MAKES THE REPORT WORTH HAVING: the test is NOT "unpaid at the year end", it is "unpaid BEYOND THE LIMIT at the year end". An invoice dated 20 March on 45-day terms falls due 4 May - unpaid on 31 March and NOT disallowed. A screen that lists every open MSME payable overstates the disallowance and sends the owner paying bills that were never due; that is the naive version and the smoke tests are built to fail it. New supplier fields udyam_number / msme_class / msme_agreement_days / msme_is_trader, because msme_registered alone cannot answer the question: the section reaches micro and small only, so the CLASS is required, and MEDIUM IS OUTSIDE IT - the commonest error in this calculation. Limit = the days agreed in writing capped at 45, else 15. GET /accounting/msme-43b returns per-invoice status (DISALLOWED / WITHIN_LIMIT / PAID_LATE / PAID_WITHIN_LIMIT), the section 15 due date, days beyond, a by-supplier roll-up, and an EXCLUDED list naming who was left out and why - an exclusion a report cannot explain is one an auditor will not accept. Traders are a flag rather than a hard-coded rule, since their exclusion is a judgement for the client CA. Paid invoices are retained so a habit of late payment is visible, not just the closing balance. Smoke: -DISALLOWED, -WITHIN-LIMIT (a 5-day-old unpaid micro bill must NOT be disallowed), -MEDIUM-EXCLUDED, -AGREEMENT (45-day terms honoured), -CAP (a 90-day agreement capped at 45), -TRADER, -TOTALS (headline equals the sum of its lines), -AS-OF (the same invoice is not disallowed at a date before its limit expired).',
       'grn-scope-by-what-arrived — follow-up to kitchen-lists-scoped, caught by checking that the new filter PARTITIONS rather than assuming a 200 meant it worked. The GRN module filter matched on the items received OR on the linked purchase order module, unconditionally - and purchase_orders.module is COALESCEd to RESTAURANT, so every legacy untagged PO made its receipt look like a kitchen receipt and the kitchen list still returned all 19 receipts, the spa one included. The PO arm now applies ONLY when the receipt has no lines at all: judge by what arrived when that is known, fall back to the order only when it is not. Wastage and counts partitioned correctly first time (wastage 10 RESTAURANT + 35 EVENTS = 45; counts 45 HOTEL + 6 NULL-module, and a NULL-module stock-take deliberately shows under every module because it predates scoping). ALSO CORRECTS A CLAIM I MADE EARLIER: I reported this tenant had ZERO goods receipts, having probed a path that does not exist (/inventory/goods-receipts) and read the empty result as fact. The real route is /inventory/grn and there are 19 receipts, 17 with lines. The supplier-league conclusion survives but for a DIFFERENT reason: all 19 are against E2E TEST suppliers, so no REAL supplier has receipt history.',
       'kitchen-lists-scoped — the last of the unscoped kitchen reads, after the dashboard and forecast. The chef goods-receipt history, wastage log and stock-take list were all fetched with no module, so they showed every department: hotel linen deliveries, spa spoilage, and other modules stock-takes. Wastage and counts had ACCEPTED ?module= on the server all along and the caller simply never sent one; the GRN list had no module filter at all, so one was added. A GOODS RECEIPT HAS NO MODULE OF ITS OWN - it is a delivery, and what makes it a department business is WHAT ARRIVED IN IT. So it matches on the items received (EXISTS over goods_receipt_items -> ingredients) OR on the module of the purchase order it was raised against. The second arm is what keeps a PO-linked receipt visible when its lines were never recorded, which on a property that receipts nothing is all of them. TWO THINGS I GOT WRONG AND CORRECTED WHILE DOING IT: (1) my first anchors matched 2-3 sites each, because the same URL is used by POST calls in GRNCreateModal / WastageLogModal / StartCountModal - only the three GETs in OwnerDashboard needed scoping. (2) I then added `module: RESTAURANT` to the counts POST believing kitchen stock-takes were saved NULL-tagged; the route already does _normaliseCostModule(req.body?.module, RESTAURANT), so it was a no-op whose comment would have misled the next reader. Reverted. Counts deliberately take a plain module with no include_shared, because that route also returns NULL-module stock-takes - the ones taken before counts were scoped, which genuinely spanned the whole property.',
       'forecast-honours-the-module — the other half of kitchen-dashboard-scoped, and it needed BOTH. Scoping the client fetch fixed the tiles (stock Rs6.9L -> Rs99k, below-reorder 23 -> 2, food cost 1.8% -> 14.8%) but the Consumption Forecast table underneath went on listing Ashwagandha Churna, because the dashboard route applied its module filter to every KPI query and NOT to the forecast query, whose WHERE was a bare `i.is_active = 1`. So a module-scoped request still received the whole property suggested-order list. Found by looking at the screen again after the first fix rather than assuming it had worked - the tiles changing is not evidence the list did. LANDMINE: the horizon placeholder lives in a LEFT JOIN that precedes the WHERE, so it binds BEFORE the module params; reversing them binds a module name as a horizon and returns an empty forecast rather than an error.',
@@ -58203,7 +58210,7 @@ ${data.tenant.name}`;
   // Finance & Accounts module tabs (the grantable Staff-Access pages the Ledger
   // & Books / GST / P&L / Cash-Flow / Aging / Expense endpoints serve). Excludes
   // CASH_DRAWER (cashier-tier, gated by _acctStaff) and PROCUREMENT (its own gate).
-  const FINANCE_MODULE_TABS = ['ACCOUNTING', 'ACCOUNTS_PNL', 'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'EXPENSE_JOURNAL', 'RECEIVABLES'];
+  const FINANCE_MODULE_TABS = ['ACCOUNTING', 'ACCOUNTS_PNL', 'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'ACCOUNTS_MSME_43B', 'EXPENSE_JOURNAL', 'RECEIVABLES'];
   // Permission-aware finance gate. Was owner-only, which 403'd every CUSTOM role
   // the owner granted a Finance & Accounts tab (the reported "Manager has Full
   // access to Ledger & Books / GST but nothing loads"). Now: OWNER/SUPER_ADMIN/CTO
@@ -59542,6 +59549,180 @@ ${data.tenant.name}`;
   // Age the OPEN balance of the control accounts by consuming oldest increasing-
   // side lots with the total decreasing-side (FIFO), then bucket the survivors by
   // age. Bucket total reconciles to the control account's trial-balance net.
+  // ── Section 43B(h) — MSME payment ageing and disallowance ─────────────────
+  // Sums payable to a MICRO or SMALL enterprise beyond the s.15 MSMED time limit
+  // are deductible only in the year they are actually paid. Inserted by the
+  // Finance Act 2023 and effective from AY 2024-25, it is the one tax rule in
+  // this product that costs the CLIENT money on an amount the books report as an
+  // entirely ordinary payable.
+  //
+  // THE DISTINCTION THAT MAKES THIS REPORT WORTH HAVING: the test is NOT "unpaid
+  // at the year end". It is "unpaid BEYOND THE s.15 LIMIT at the year end". An
+  // invoice dated 20 March on 45-day terms falls due on 4 May — it is unpaid on
+  // 31 March and it is NOT disallowed. A report that lists every open MSME
+  // payable overstates the disallowance and sends the owner paying bills that
+  // did not need paying, which is the naive version of this screen.
+  //
+  // s.15 MSMED: pay by the date agreed IN WRITING, which may not exceed 45 days
+  // from acceptance; with no written agreement, 15 days.
+  const MSME_HARD_CEILING_DAYS = 45;
+  const MSME_NO_AGREEMENT_DAYS = 15;
+  const _msme43bLimitDays = (agreementDays: any): { days: number; basis: string } => {
+    const n = Number(agreementDays || 0);
+    if (!Number.isFinite(n) || n <= 0) {
+      return { days: MSME_NO_AGREEMENT_DAYS, basis: 'No written agreement — 15 days' };
+    }
+    if (n > MSME_HARD_CEILING_DAYS) {
+      // An agreement CANNOT buy more than 45 days; a longer term is void to that
+      // extent, so the ceiling applies rather than the agreed figure.
+      return { days: MSME_HARD_CEILING_DAYS, basis: `Agreed ${n} days, capped at the 45-day statutory ceiling` };
+    }
+    return { days: n, basis: `Written agreement — ${n} days` };
+  };
+  // Whether 43B(h) reaches this supplier at all, and if not, WHY — an exclusion a
+  // report cannot explain is an exclusion an auditor will not accept.
+  const _msme43bCovered = (sup: any): { covered: boolean; reason: string } => {
+    const cls = String(sup?.msme_class || '').toUpperCase();
+    if (Number(sup?.msme_is_trader || 0) === 1) {
+      return { covered: false, reason: 'Trader — Udyam registration was extended to traders for priority-sector lending only' };
+    }
+    if (cls === 'MICRO' || cls === 'SMALL') return { covered: true, reason: '' };
+    if (cls === 'MEDIUM') return { covered: false, reason: 'Medium enterprise — outside section 43B(h), which reaches micro and small only' };
+    if (Number(sup?.msme_registered || 0) === 1) {
+      return { covered: false, reason: 'Flagged MSME but no class recorded — set micro or small to bring it into the computation' };
+    }
+    return { covered: false, reason: 'Not a registered micro or small enterprise' };
+  };
+
+  app.get("/api/restaurant/:id/accounting/msme-43b", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      // Defaults to today, but the figure that matters is the one as at 31 March:
+      // the disallowance is tested at the year end, not continuously.
+      const asOf = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.as_of || ''))
+        ? String(req.query.as_of) : _istNowParts().date;
+      const asOfTs = new Date(asOf + 'T00:00:00Z').getTime();
+
+      const suppliers: any[] = await db.query(
+        `SELECT id, name, udyam_number, msme_class, msme_registered, msme_agreement_days,
+                msme_is_trader, pan_number
+           FROM suppliers`
+      ).catch(() => [] as any[]);
+      const supById = new Map(suppliers.map((x: any) => [String(x.id), x]));
+
+      // Every invoice up to the as-of date. Paid ones are kept deliberately: a
+      // bill settled AFTER its limit is still disallowed in the year it was
+      // incurred, and the owner needs to see the habit, not just the balance.
+      const invoices: any[] = await db.query(
+        `SELECT si.id, si.supplier_id, si.invoice_number, si.invoice_date, si.total_amount,
+                si.paid_amount, si.outstanding_amount, si.status, si.module,
+                (SELECT MAX(sp.payment_date) FROM supplier_payments sp
+                  WHERE sp.invoice_id = si.id) AS last_payment_date
+           FROM supplier_invoices si
+          WHERE si.invoice_date <= ?::date
+          ORDER BY si.invoice_date`,
+        [asOf]
+      ).catch(() => [] as any[]);
+
+      const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+      const DAY = 86400000;
+      const lines: any[] = [];
+      const excluded = new Map<string, { supplier: string; reason: string; invoices: number; amount: number }>();
+      let disallowable = 0, atRisk = 0, withinLimit = 0, paidLate = 0, paidOnTime = 0;
+
+      for (const inv of invoices) {
+        const sup = supById.get(String(inv.supplier_id));
+        const cover = _msme43bCovered(sup);
+        const outstanding = r2(inv.outstanding_amount);
+        if (!cover.covered) {
+          const k = String(inv.supplier_id);
+          const e = excluded.get(k) || { supplier: sup?.name || 'Unknown supplier', reason: cover.reason, invoices: 0, amount: 0 };
+          e.invoices++; e.amount = r2(e.amount + outstanding);
+          excluded.set(k, e);
+          continue;
+        }
+
+        const lim = _msme43bLimitDays(sup?.msme_agreement_days);
+        // Acceptance date is proxied by the invoice date. Where a buyer objects
+        // in writing within 15 days the clock restarts from resolution, which
+        // this product does not record — noted on the response rather than
+        // silently assumed away.
+        const invIso = _pgYmd(inv.invoice_date) || String(inv.invoice_date).slice(0, 10);
+        const dueTs = new Date(invIso + 'T00:00:00Z').getTime() + lim.days * DAY;
+        const dueIso = new Date(dueTs).toISOString().slice(0, 10);
+        const payIso = inv.last_payment_date ? (_pgYmd(inv.last_payment_date) || String(inv.last_payment_date).slice(0, 10)) : null;
+        const settled = outstanding <= 0.01;
+
+        let status: string, disallow = 0;
+        if (settled) {
+          const payTs = payIso ? new Date(payIso + 'T00:00:00Z').getTime() : null;
+          if (payTs != null && payTs > dueTs) { status = 'PAID_LATE'; paidLate = r2(paidLate + r2(inv.total_amount)); }
+          else { status = 'PAID_WITHIN_LIMIT'; paidOnTime = r2(paidOnTime + r2(inv.total_amount)); }
+        } else if (dueTs <= asOfTs) {
+          // Unpaid and the statutory clock has run out — this is the number.
+          status = 'DISALLOWED';
+          disallow = outstanding;
+          disallowable = r2(disallowable + outstanding);
+        } else {
+          status = 'WITHIN_LIMIT';
+          withinLimit = r2(withinLimit + outstanding);
+          // Falls due within 30 days of the as-of date: pay these before the
+          // year end and they never become a disallowance.
+          if (dueTs - asOfTs <= 30 * DAY) atRisk = r2(atRisk + outstanding);
+        }
+
+        lines.push({
+          invoice_id: inv.id, invoice_number: inv.invoice_number, module: inv.module,
+          supplier_id: inv.supplier_id, supplier_name: sup?.name || null,
+          msme_class: sup?.msme_class || null, udyam_number: sup?.udyam_number || null,
+          invoice_date: invIso, total_amount: r2(inv.total_amount), outstanding_amount: outstanding,
+          limit_days: lim.days, limit_basis: lim.basis, due_date: dueIso,
+          days_beyond_limit: dueTs <= asOfTs ? Math.round((asOfTs - dueTs) / DAY) : 0,
+          last_payment_date: payIso, status, disallowable_amount: r2(disallow),
+        });
+      }
+
+      const bySupplier = new Map<string, any>();
+      for (const l of lines) {
+        const k = String(l.supplier_id);
+        const b = bySupplier.get(k) || {
+          supplier_id: l.supplier_id, supplier_name: l.supplier_name, msme_class: l.msme_class,
+          udyam_number: l.udyam_number, invoices: 0, outstanding: 0, disallowable: 0, oldest_days_beyond: 0,
+        };
+        b.invoices++;
+        b.outstanding = r2(b.outstanding + l.outstanding_amount);
+        b.disallowable = r2(b.disallowable + l.disallowable_amount);
+        b.oldest_days_beyond = Math.max(b.oldest_days_beyond, l.days_beyond_limit);
+        bySupplier.set(k, b);
+      }
+
+      res.json({
+        as_of: asOf,
+        basis: {
+          section: 'Section 43B(h), Income-tax Act 1961 (Finance Act 2023, w.e.f. AY 2024-25)',
+          time_limit: 'Section 15, MSMED Act 2006 — the date agreed in writing, not exceeding 45 days from acceptance; 15 days where there is no written agreement',
+          covers: 'Micro and small enterprises only. Medium enterprises are outside the section.',
+          test: 'A sum is disallowed when it is unpaid AND the section 15 limit has expired as at the reporting date. An invoice still inside its limit is not disallowed, however recently it was raised.',
+          acceptance_date_note: 'The invoice date is used as the date of acceptance. Where the buyer has raised a written objection within 15 days the clock runs from its resolution, which this system does not record.',
+        },
+        totals: {
+          disallowable, at_risk_within_30_days: atRisk, within_limit: withinLimit,
+          paid_late_in_period: paidLate, paid_within_limit: paidOnTime,
+          covered_suppliers: bySupplier.size, covered_invoices: lines.length,
+        },
+        by_supplier: [...bySupplier.values()].sort((a, b) => b.disallowable - a.disallowable || b.outstanding - a.outstanding),
+        lines: lines.sort((a, b) => b.disallowable_amount - a.disallowable_amount || b.days_beyond_limit - a.days_beyond_limit),
+        // Shown, not hidden: an auditor's first question about an MSME schedule
+        // is who was left out of it.
+        excluded_suppliers: [...excluded.values()].sort((a, b) => b.amount - a.amount),
+      });
+    } catch (err: any) {
+      console.error('/accounting/msme-43b error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to compute the MSME 43B(h) schedule' });
+    }
+  });
+
   app.get("/api/restaurant/:id/accounting/aging", authenticate, async (req: AuthRequest, res: Response) => {
     if (!(await _acctOwnerOnly(req, res))) return;
     try {

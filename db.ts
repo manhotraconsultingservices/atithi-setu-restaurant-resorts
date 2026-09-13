@@ -2156,6 +2156,21 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS preferred_status TEXT DEFAULT 'PREFERRED'").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS pan_doc_url TEXT").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS msme_doc_url TEXT").catch(() => {});
+  // ── Section 43B(h), Income-tax Act — what the disallowance test needs ──────
+  // `msme_registered` alone cannot answer it. The section bites only on a MICRO
+  // or SMALL enterprise, so the CLASS has to be known: a medium enterprise is
+  // outside 43B(h) entirely and treating it as inside is the commonest error in
+  // this calculation. The agreed credit period matters too, because s.15 MSMED
+  // allows the written-agreement date up to a ceiling of 45 days and falls back
+  // to 15 days when there is no written agreement.
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS udyam_number TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS msme_class TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS msme_agreement_days INT").catch(() => {});
+  // Traders hold Udyam registration but were admitted for priority-sector
+  // lending only, so the prevailing professional view puts them outside 43B(h).
+  // It is a judgement the user's CA should make, not one to hard-code — so it
+  // is a flag on the supplier, and the report says who was excluded and why.
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS msme_is_trader INT DEFAULT 0").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS gst_doc_url TEXT").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP").catch(() => {});
 

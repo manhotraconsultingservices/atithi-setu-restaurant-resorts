@@ -10648,6 +10648,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ACCOUNTS_CASHFLOW'                         // Cash flow — cash in vs out
     | 'ACCOUNTS_GST'                              // GST tax ledger — output vs ITC
     | 'ACCOUNTS_VENDOR_AGING'                     // Vendor aging — what we owe suppliers
+    | 'ACCOUNTS_MSME_43B'                         // Sec 43B(h) — MSME payment ageing & disallowance
     | 'SPA_BILLING'                               // Spa settlement ledger in Accounts context
     | 'ACCOUNTING'                                // Double-entry GL · trial balance · TDS tracker
     | 'CASH_DRAWER'                               // Cashier till + shift handover (top-level shortcut into the Cash Drawers panel)
@@ -12357,6 +12358,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (r.ok) setGstLedgerData(await r.json());
     } catch { /* silent */ }
   };
+  // Defaults to the CURRENT financial year end, because that is the date the
+  // disallowance is actually tested on — not today.
+  const [msmeAsOf, setMsmeAsOf] = useState(() => {
+    const n = new Date(Date.now() + 5.5 * 3600e3);
+    const fyEndYear = n.getMonth() + 1 >= 4 ? n.getFullYear() + 1 : n.getFullYear();
+    return `${fyEndYear}-03-31`;
+  });
+  const [msmeData, setMsmeData] = useState<any>(null);
+  const fetchMsme43b = async () => {
+    setMsmeData(null);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/accounting/msme-43b?as_of=${msmeAsOf}`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) setMsmeData(await r.json());
+    } catch { /* silent */ }
+  };
+
   const fetchVendorAging = async () => {
     try {
       const r = await fetch(`/api/restaurant/${restaurantId}/reports/vendor-aging`, { headers: { Authorization: `Bearer ${token}` } });
@@ -15723,6 +15741,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'ACCOUNTS_CASHFLOW')      { fetchCashFlow(); }
     if (activeTab === 'ACCOUNTS_GST')           { fetchGstLedger(); }
     if (activeTab === 'ACCOUNTS_VENDOR_AGING')  { fetchVendorAging(); }
+    if (activeTab === 'ACCOUNTS_MSME_43B')      { fetchMsme43b(); }
     if (activeTab === 'SPA_BILLING')            { fetchSpaBilling(); }
     if (activeTab === 'FOLIOS') { fetchHotelFolios(); fetchPendingFolioOrders(); }
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
@@ -16464,6 +16483,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // owner EXPLICITLY granted the tab in Staff Access — so finance is
               // controllable per-role, not owner-hardcoded. Others never see them.
               { id: 'ACCOUNTS_VENDOR_AGING', label: 'Payables Ageing' },
+              { id: 'ACCOUNTS_MSME_43B', label: 'MSME 43B(h)' },
               { id: 'ACCOUNTS_GST',          label: 'GST Summary' },
               // "Snapshot" because these are the OPERATIONAL views, computed
               // from the source tables (/reports/pnl, /reports/cash-flow) — not
@@ -20335,6 +20355,153 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </table>
                   </div>
                 </div>
+              </div>
+            );
+          })()}
+        </div>
+      ) : activeTab === 'ACCOUNTS_MSME_43B' ? (
+        <div className="space-y-5">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">MSME payments — Section 43B(h)</h2>
+              <p className="text-sm text-[#6b5d52] mt-1 max-w-2xl">
+                What you owe micro and small suppliers beyond the time limit in section 15 of the MSMED
+                Act. Anything still unpaid past that limit on your year-end date is disallowed as a
+                deduction until you actually pay it.
+              </p>
+            </div>
+            <div className="flex items-end gap-2">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wide text-[#9c8e85] mb-1">As at</label>
+                <input type="date" value={msmeAsOf} onChange={e => setMsmeAsOf(e.target.value)}
+                  className="px-2 py-1.5 rounded-xl border border-[#e8dccf] text-sm bg-white" />
+              </div>
+              <button onClick={fetchMsme43b}
+                className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612]">Run</button>
+            </div>
+          </div>
+
+          {!msmeData ? <p className="text-sm text-[#9c8e85] italic">Loading…</p> : (() => {
+            const t = msmeData.totals || {};
+            const inr = (v: any) => 'Rs' + Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+            const STATUS: Record<string, { label: string; cls: string }> = {
+              DISALLOWED:        { label: 'Disallowed',     cls: 'bg-rose-100 text-rose-700' },
+              WITHIN_LIMIT:      { label: 'Within limit',   cls: 'bg-emerald-100 text-emerald-700' },
+              PAID_LATE:         { label: 'Paid late',      cls: 'bg-amber-100 text-amber-800' },
+              PAID_WITHIN_LIMIT: { label: 'Paid on time',   cls: 'bg-[#f0e8d8] text-[#6b5d52]' },
+            };
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    { k: 'Disallowable', v: inr(t.disallowable), sub: `unpaid past the limit on ${msmeData.as_of}`, big: true },
+                    { k: 'Pay before year end', v: inr(t.at_risk_within_30_days), sub: 'falls due within 30 days — pay and it never arises' },
+                    { k: 'Within limit', v: inr(t.within_limit), sub: 'not yet due, not disallowed' },
+                    { k: 'Paid late in period', v: inr(t.paid_late_in_period), sub: 'settled, but after the limit' },
+                  ].map(c => (
+                    <div key={c.k} className={cn('rounded-2xl border px-4 py-3',
+                      c.big ? 'bg-rose-50 border-rose-200' : 'bg-white border-[#cc5a16]/10')}>
+                      <p className="text-[10px] uppercase tracking-widest font-bold text-[#9c8e85]">{c.k}</p>
+                      <p className={cn('text-xl font-bold tabular-nums leading-tight', c.big ? 'text-rose-700' : 'text-[#1a1208]')}>{c.v}</p>
+                      <p className="text-[10px] text-[#9c8e85] mt-0.5">{c.sub}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="bg-[#faf7f2] border border-[#e8dccf] rounded-2xl px-4 py-3 text-xs text-[#6b5d52]">
+                  <b className="text-[#1a1208]">How this is worked out.</b> {msmeData.basis?.time_limit}.{' '}
+                  {msmeData.basis?.covers} {msmeData.basis?.test}
+                  <br /><span className="text-[#9c8e85]">{msmeData.basis?.acceptance_date_note}</span>
+                </div>
+
+                {(msmeData.by_supplier || []).length === 0 ? (
+                  <p className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-2xl px-4 py-3">
+                    No micro or small supplier invoices fall inside this computation. If that looks wrong, set each
+                    supplier's MSME class on the supplier record — the section only reaches micro and small.
+                  </p>
+                ) : (
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 overflow-x-auto">
+                    <h3 className="text-sm font-bold text-[#1a1208] mb-2">By supplier</h3>
+                    <table className="w-full text-sm">
+                      <thead className="text-[10px] uppercase tracking-widest text-[#9c8e85]">
+                        <tr><th className="px-2 py-1.5 text-left font-bold">Supplier</th>
+                          <th className="px-2 py-1.5 text-left font-bold">Class</th>
+                          <th className="px-2 py-1.5 text-left font-bold">Udyam</th>
+                          <th className="px-2 py-1.5 text-right font-bold">Bills</th>
+                          <th className="px-2 py-1.5 text-right font-bold">Outstanding</th>
+                          <th className="px-2 py-1.5 text-right font-bold">Disallowable</th>
+                          <th className="px-2 py-1.5 text-right font-bold">Worst overrun</th></tr>
+                      </thead>
+                      <tbody>
+                        {msmeData.by_supplier.map((b: any) => (
+                          <tr key={b.supplier_id} className="border-t border-[#f0e8d8]">
+                            <td className="px-2 py-1.5 text-[#1a1208] font-medium">{b.supplier_name}</td>
+                            <td className="px-2 py-1.5 text-[#6b5d52]">{b.msme_class || '—'}</td>
+                            <td className="px-2 py-1.5 text-[#9c8e85] text-xs">{b.udyam_number || '—'}</td>
+                            <td className="px-2 py-1.5 text-right font-mono">{b.invoices}</td>
+                            <td className="px-2 py-1.5 text-right font-mono">{inr(b.outstanding)}</td>
+                            <td className={cn('px-2 py-1.5 text-right font-mono font-bold',
+                              Number(b.disallowable) > 0 ? 'text-rose-700' : 'text-[#9c8e85]')}>{inr(b.disallowable)}</td>
+                            <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">{b.oldest_days_beyond ? `${b.oldest_days_beyond}d` : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {(msmeData.lines || []).length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 overflow-x-auto">
+                    <h3 className="text-sm font-bold text-[#1a1208] mb-2">Invoice detail</h3>
+                    <table className="w-full text-sm">
+                      <thead className="text-[10px] uppercase tracking-widest text-[#9c8e85]">
+                        <tr><th className="px-2 py-1.5 text-left font-bold">Invoice</th>
+                          <th className="px-2 py-1.5 text-left font-bold">Supplier</th>
+                          <th className="px-2 py-1.5 text-left font-bold">Dated</th>
+                          <th className="px-2 py-1.5 text-left font-bold">Limit</th>
+                          <th className="px-2 py-1.5 text-left font-bold">Due</th>
+                          <th className="px-2 py-1.5 text-right font-bold">Outstanding</th>
+                          <th className="px-2 py-1.5 text-right font-bold">Disallowable</th>
+                          <th className="px-2 py-1.5 text-left font-bold">Status</th></tr>
+                      </thead>
+                      <tbody>
+                        {msmeData.lines.slice(0, 100).map((l: any) => {
+                          const st = STATUS[l.status] || { label: l.status, cls: 'bg-[#f0e8d8] text-[#6b5d52]' };
+                          return (
+                            <tr key={l.invoice_id} className="border-t border-[#f0e8d8]">
+                              <td className="px-2 py-1.5 text-[#1a1208]">{l.invoice_number || l.invoice_id}</td>
+                              <td className="px-2 py-1.5 text-[#6b5d52]">{l.supplier_name}</td>
+                              <td className="px-2 py-1.5 font-mono text-xs">{l.invoice_date}</td>
+                              <td className="px-2 py-1.5 text-xs text-[#6b5d52]" title={l.limit_basis}>{l.limit_days}d</td>
+                              <td className="px-2 py-1.5 font-mono text-xs">{l.due_date}{l.days_beyond_limit > 0 && <span className="text-rose-600"> +{l.days_beyond_limit}d</span>}</td>
+                              <td className="px-2 py-1.5 text-right font-mono">{inr(l.outstanding_amount)}</td>
+                              <td className={cn('px-2 py-1.5 text-right font-mono', Number(l.disallowable_amount) > 0 ? 'text-rose-700 font-bold' : 'text-[#c9bdb2]')}>{Number(l.disallowable_amount) > 0 ? inr(l.disallowable_amount) : '—'}</td>
+                              <td className="px-2 py-1.5"><span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold', st.cls)}>{st.label}</span></td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Who was left out, and why. An auditor's first question about an
+                    MSME schedule is what is NOT on it. */}
+                {(msmeData.excluded_suppliers || []).length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <h3 className="text-sm font-bold text-[#1a1208] mb-1">Not included ({msmeData.excluded_suppliers.length})</h3>
+                    <p className="text-xs text-[#9c8e85] mb-2">Shown so the schedule can be relied on — these suppliers are outside the section, or not yet classified.</p>
+                    <div className="space-y-1.5">
+                      {msmeData.excluded_suppliers.slice(0, 40).map((e: any, i: number) => (
+                        <div key={i} className="flex flex-wrap items-baseline gap-2 text-xs border-b border-[#f7f2ea] pb-1.5">
+                          <span className="font-medium text-[#1a1208]">{e.supplier}</span>
+                          <span className="font-mono text-[#6b5d52]">{inr(e.amount)}</span>
+                          <span className="text-[#9c8e85]">· {e.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })()}
