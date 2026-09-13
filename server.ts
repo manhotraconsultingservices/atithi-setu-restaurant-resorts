@@ -23414,9 +23414,18 @@ ${data.tenant.name}`;
            LEFT JOIN consumption_forecasts f
              ON f.ingredient_id = i.id AND f.horizon = ?
            LEFT JOIN suppliers s ON s.id = i.default_supplier_id
-          WHERE i.is_active = 1
+          WHERE i.is_active = 1${dmfI.sql}
           ORDER BY i.category, i.name`,
-        [validHorizon]
+        // BIND ORDER: the horizon placeholder sits in the LEFT JOIN, which
+        // precedes the WHERE in the statement text, so it binds FIRST and the
+        // module params follow. Swapping them binds a module name as a horizon
+        // and silently returns an empty forecast.
+        //
+        // The module filter was applied to every KPI on this route but NOT
+        // here, so a request scoped to one module still got the whole
+        // property's suggested orders — the kitchen screen proposed purchase
+        // orders for spa medicines while its own tiles read correctly.
+        [validHorizon, ...dmfI.params]
       );
 
       // Use daily forecast for days-of-cover (always — even when toggle is W/M)
@@ -57771,8 +57780,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'kitchen-dashboard-scoped',
+    commit_marker: 'forecast-honours-the-module',
     code_features: [
+      'forecast-honours-the-module — the other half of kitchen-dashboard-scoped, and it needed BOTH. Scoping the client fetch fixed the tiles (stock Rs6.9L -> Rs99k, below-reorder 23 -> 2, food cost 1.8% -> 14.8%) but the Consumption Forecast table underneath went on listing Ashwagandha Churna, because the dashboard route applied its module filter to every KPI query and NOT to the forecast query, whose WHERE was a bare `i.is_active = 1`. So a module-scoped request still received the whole property suggested-order list. Found by looking at the screen again after the first fix rather than assuming it had worked - the tiles changing is not evidence the list did. LANDMINE: the horizon placeholder lives in a LEFT JOIN that precedes the WHERE, so it binds BEFORE the module params; reversing them binds a module name as a horizon and returns an empty forecast rather than an error.',
       'kitchen-dashboard-scoped — FOUND BY DRIVING THE UI after re-filing 20 Ayurvedic items from RESTAURANT to SPA. The Kitchen Inventory screen kept showing Rs6.9L of stock, 23 items below reorder, and a consumption forecast proposing purchase orders for Ashwagandha Churna - spa medicine - while its own Ingredients tab correctly read 38. Cause: fetchInventoryDashboard called /inventory/dashboard with NO module, so every tile on the chef screen (stock value, below reorder, expiring, wastage, food cost %, pending PO value) plus the whole suggested-order forecast was the WHOLE PROPERTY - hotel linen and the spa dispensary included. This is the SAME defect as the one fixed when the hotel silo was folded in (that fix scoped /inventory/ingredients to module=RESTAURANT&include_shared=1 and MISSED the dashboard read three lines below it). ModuleInventoryView had it right all along for Hotel/Spa/Events. Pre-existing, not caused by the re-filing - the re-filing just made it impossible to miss, because the kitchen started forecasting POs for items it does not stock. NOTE for anyone extending this screen: the kitchen wastage, counts and GRN reads are still unscoped; they are transaction lists rather than KPI tiles so they mislead less, but they are the same class.',
       'valuation-join-whitespace — HOTFIX for one-valuation-basis, which I shipped broken. The reusable join fragment began with the bare token LEFT JOIN and every call site interpolated it directly after the preceding join last token, so `ON sm.ingredient_id = i.id` + `LEFT JOIN` lexed as the single identifier `i.idLEFT` and Postgres answered "column i.idleft does not exist". SQL is whitespace-INSENSITIVE, not whitespace-OPTIONAL, and I reasoned from the first. It took out the inventory dashboard, dead stock, the COGS report and the variance report - four 500s - for the few minutes between deploys. The fragment now starts on its own line, and that leading newline is load-bearing. CAUGHT BY PROBING EVERY TOUCHED ENDPOINT STRAIGHT AFTER THE DEPLOY rather than waiting for the suite: tsc cannot see inside a SQL string, so twelve query edits are twelve run-time-only risks and the only honest verification is to call them.',
       'one-valuation-basis — I reported dead-stock as THE LAST survivor of the split valuation basis. That was wrong: it was ONE OF TWELVE. Only the dashboard stock value and _computeInventoryPeriod had been moved onto weighted-average batch cost; every site that valued a MOVEMENT still priced it at i.default_unit_price, the static list price. So food cost % was a COGS at list price divided by revenue while the stock it is drawn from was valued at cost - a ratio of two different bases - and the month-end close and the dashboard could report different money for the same consumption. Fixed across all twelve: per-channel food cost, dashboard wastage-30d, dashboard consumed value, consumption trend, top consumers, wastage breakdown by reason, physical-count variance (select + GROUP BY + ORDER BY), cogs-report COGS, cogs-report wastage, and dead stock (select + FROM/GROUP BY). ONE DEFINITION, TWO SHAPES: _INV_UNIT_COST_EXPR(alias) is now the single cascade, exposed as _INV_UNIT_COST_SQL (correlated on `i`, for queries already grouped by ingredient, where it runs once per group) and _INV_UNIT_COST_JOIN (the same cascade as a derived table joined as `uc`, for queries that aggregate over MOVEMENTS - there the correlated form would re-run per movement row, so this computes it once per item instead). A second copy of the cascade would be a second answer to what is this worth. Two sites use the cost as a BARE column in a grouped query, so uc.unit_cost joins the GROUP BY there. Smoke: TC-INV-ONE-VALUATION-AGREES (dead stock and stock turns must publish the SAME unit cost for the same item - two endpoints, one basis; skips rather than passes when no item appears in both) and -ALIVE (twelve SQL edits can only fail at run time, so every report that values stock is executed and checked for a 500).',
