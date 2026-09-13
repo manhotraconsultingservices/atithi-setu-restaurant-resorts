@@ -5280,6 +5280,256 @@ async function _blockIfAcctClosed(res: Response, db: any, dateIso: string): Prom
   return true;
 }
 
+// ── Year-end accrual — revenue earned before the cut-off, billed after it ──
+// H-3 from the accounting review, and the last of its High findings.
+//
+// Revenue reaches this ledger when a BILL SETTLES: a restaurant order posts
+// ORDER-<id> when it is paid, a folio posts FOLIO-<id> when it is settled. For
+// 364 days a year that is immaterial and arguably prudent. On the last day of
+// the financial year it is a cut-off error — food served in one year and its
+// revenue in the next; a guest who slept four nights in March and checks out on
+// 3 April carries all four nights into the new year.
+//
+// The fix is deliberately NOT a change to daily revenue recognition, which would
+// touch every operational path in the product. It is ONE journal dated at the
+// year end for what was delivered and not yet billed, and an equal REVERSING
+// journal dated the next day. The reversal is what makes it safe: when the bill
+// finally settles it posts in full, and the reversal has already taken the
+// accrued portion back out, so nothing is counted twice and no later posting has
+// to know the accrual ever happened.
+//
+// WHAT COUNTS AS DELIVERED, and why this measure and not another:
+//   • FOLIO ENTRIES. A folio is charged AS the service is rendered — a room
+//     charge is posted PER NIGHT (checked against live data: a five-night stay
+//     carries five ROOM_CHARGE rows, one dated per night), and spa treatments,
+//     venue hire, rentals and charged-to-room F&B land on it as they happen. The
+//     folio is therefore the product's own DATED record of what has been
+//     delivered, which makes summing its entries to the cut-off the most
+//     faithful measure available rather than a reconstruction.
+//   • RESTAURANT ORDERS NOT ON A FOLIO. An open table has no folio; the order
+//     rows are the record. An order CHARGED TO A ROOM is excluded here because
+//     it will be recognised through that folio — counting both would bill the
+//     same plate of food twice.
+//
+// Amounts are NET OF GST, on purpose. An accrual is a revenue-recognition entry,
+// not a tax event: the tax point is the invoice, which has not been raised, so
+// accruing output GST would create a liability no return reports. The GST
+// follows the bill, next year, which is where it belongs.
+//
+// Everything left out is REPORTED with the reason, never silently dropped. An
+// exclusion a schedule cannot explain is one an auditor will not accept.
+
+/** Charges that are consideration received in ADVANCE of service, or not the
+ *  property's revenue at all. Accruing these would recognise revenue for
+ *  something not yet delivered — the opposite of the error being fixed. */
+const _ACCRUAL_NOT_EARNED: Record<string, string> = {
+  PACKAGE_PURCHASE:   'Package sold but not yet redeemed — consideration received in advance of service, so it is deferred revenue, not an accrual',
+  MEMBERSHIP_FEE:     'Membership fee — earned over the membership term, not on the day it is charged',
+  PACKAGE_REDEMPTION: 'Redemption of a pre-paid package — the consideration was taken at purchase, so there is nothing further to accrue',
+  TIP:                'Tip collected for staff — a liability to the team, not revenue of the property',
+};
+
+/** 31 March of the financial year containing `dateIso` (India: 1 Apr - 31 Mar). */
+function _fyEndFor(dateIso: string): string {
+  const y = Number(String(dateIso).slice(0, 4));
+  const m = Number(String(dateIso).slice(5, 7));
+  return `${m >= 4 ? y + 1 : y}-03-31`;
+}
+function _fyLabelFor(dateIso: string): string {
+  const end = Number(_fyEndFor(dateIso).slice(0, 4));
+  return `${end - 1}-${String(end % 100).padStart(2, '0')}`;
+}
+
+type AccrualLine = {
+  source: 'FOLIO' | 'ORDER';
+  source_id: string; ref: string; date: string;
+  module: string; kind: string; description: string;
+  amount: number; account_code: string; account_name: string;
+};
+
+async function _computeYearEndAccrual(db: any, restaurantId: string, asOf: string) {
+  const lines: AccrualLine[] = [];
+  const excluded: { source: string; source_id: string; amount: number; reason: string }[] = [];
+  let afterCutOff = 0;
+
+  // Every journal that already recognises something. One read, then set lookups:
+  // the alternative is a SELECT per folio and per order, which on a real year end
+  // is thousands of round trips to answer a question one query answers.
+  const refRows: any[] = await db.query(
+    `SELECT DISTINCT journal_ref FROM gl_entries
+      WHERE restaurant_id = ? AND (journal_ref LIKE 'FOLIO-%' OR journal_ref LIKE 'ORDER-%')`,
+    [restaurantId]).catch(() => []);
+  const posted = new Set((refRows || []).map((r: any) => String(r.journal_ref)));
+
+  // ── 1. Folio-borne: hotel, spa and events ────────────────────────────────
+  const entryRows: any[] = await db.query(
+    `SELECT e.id, e.folio_id, e.entry_type, e.description, e.amount, e.created_at,
+            e.reversal_of_entry_id,
+            f.folio_kind, f.status AS folio_status, f.booking_id
+       FROM folio_entries e
+       JOIN folios f ON f.id = e.folio_id
+      WHERE LOWER(COALESCE(f.status, '')) NOT IN ('settled', 'closed', 'voided', 'cancelled')`,
+    []).catch(() => []);
+
+  // A reversal entry and the entry it reverses both drop out: together they are
+  // a charge that was taken back, and accruing either half would be wrong.
+  const reversedIds = new Set(
+    (entryRows || []).map((e: any) => e.reversal_of_entry_id).filter(Boolean).map(String));
+
+  // A cancelled event or booking is not delivered revenue however much sits on
+  // its folio — and on live data two CANCELLED events were carrying ₹1.95 lakh
+  // each on open folios, which is exactly the kind of line that would have made
+  // this schedule indefensible.
+  const cancelledFolios = new Map<string, string>();
+  const evRows: any[] = await db.query(
+    `SELECT folio_id, id, status FROM event_bookings WHERE folio_id IS NOT NULL`, []).catch(() => []);
+  for (const ev of (evRows || [])) {
+    const st = String(ev.status || '').toUpperCase();
+    if (st === 'CANCELLED') cancelledFolios.set(String(ev.folio_id), `Event ${ev.id} is cancelled — nothing was delivered`);
+  }
+  const rbRows: any[] = await db.query(
+    `SELECT id, status FROM room_bookings WHERE UPPER(COALESCE(status,'')) = 'CANCELLED'`, []).catch(() => []);
+  const cancelledBookings = new Set((rbRows || []).map((r: any) => String(r.id)));
+
+  for (const e of (entryRows || [])) {
+    const amt = +Number(e.amount || 0).toFixed(2);
+    const fid = String(e.folio_id || '');
+    if (amt <= 0) continue;                                   // a zero line is nothing to accrue
+    if (e.reversal_of_entry_id) continue;                     // this row IS a reversal
+    if (reversedIds.has(String(e.id))) continue;              // this row WAS reversed
+    if (posted.has(`FOLIO-${fid}`)) continue;                 // already in the ledger
+
+    const kind = String(e.folio_kind || 'HOTEL').toUpperCase();
+    const cancelReason = cancelledFolios.get(fid)
+      || (e.booking_id && cancelledBookings.has(String(e.booking_id)) ? `Booking ${e.booking_id} is cancelled — nothing was delivered` : null);
+    if (cancelReason) { excluded.push({ source: 'FOLIO', source_id: fid, amount: amt, reason: cancelReason }); continue; }
+
+    const et = String(e.entry_type || '').toUpperCase();
+    if (_ACCRUAL_NOT_EARNED[et]) {
+      excluded.push({ source: 'FOLIO', source_id: fid, amount: amt, reason: _ACCRUAL_NOT_EARNED[et] });
+      continue;
+    }
+
+    const d = _glPostDate(e.created_at);
+    if (d > asOf) { afterCutOff += amt; continue; }            // delivered after the cut-off
+
+    // Mirror the account the SETTLEMENT journal will use, so the accrual and the
+    // revenue it anticipates land on the same line of the P&L. A hotel folio
+    // splits charged-to-room F&B out of room revenue (_folioRevenueGlLines);
+    // spa and event folios settle wholly to their own revenue account.
+    let code = '4000', name = 'Room Revenue', mod = 'HOTEL';
+    if (kind === 'SPA')        { code = '4040'; name = 'Spa Revenue'; mod = 'SPA'; }
+    else if (kind === 'EVENT') { code = '4050'; name = 'Banquet & Events Revenue'; mod = 'EVENTS'; }
+    else if (et === 'F_AND_B') { code = '4010'; name = 'F&B Revenue'; }
+
+    lines.push({
+      source: 'FOLIO', source_id: fid, ref: String(e.id), date: d, module: mod, kind: et,
+      description: String(e.description || et || 'Folio charge'), amount: amt,
+      account_code: code, account_name: name,
+    });
+  }
+
+  // In-house with NOTHING charged. Reported rather than accrued: there is no
+  // dated record of what was delivered, so any figure would be invented. It is
+  // still the operator's problem, so it is named.
+  const noFolio: any[] = await db.query(
+    `SELECT rb.id, rb.guest_name, rb.check_in_date, rb.room_rate
+       FROM room_bookings rb
+      WHERE UPPER(COALESCE(rb.status,'')) = 'CHECKED_IN'
+        AND NOT EXISTS (SELECT 1 FROM folios f WHERE f.booking_id = rb.id)`, []).catch(() => []);
+  for (const b of (noFolio || [])) {
+    const ci = _glPostDate(b.check_in_date);
+    if (ci > asOf) continue;
+    excluded.push({
+      source: 'BOOKING', source_id: String(b.id), amount: 0,
+      reason: `${b.guest_name || 'Guest'} checked in ${ci} and is still in-house, but the booking has NO folio — nothing has been charged, so there is no dated record to accrue from. Open a folio to bring this stay into the accounts.`,
+    });
+  }
+
+  // ── 2. Restaurant orders that are not on a folio ─────────────────────────
+  const orderRows: any[] = await db.query(
+    `SELECT id, status, payment_status, payment_method, folio_id, folio_post_status,
+            posted_to_folio_at, items, total_amount, gst_amount, discount_amount,
+            service_charge_percent, gst_percent, apply_gst, created_at, table_number
+       FROM orders
+      WHERE UPPER(COALESCE(status, '')) NOT IN ('CANCELLED', 'VOID', 'VOIDED')`,
+    []).catch(() => []);
+  const byStatus: Record<string, { n: number; amount: number }> = {};
+
+  for (const o of (orderRows || [])) {
+    const oid = String(o.id);
+    if (posted.has(`ORDER-${oid}`)) continue;                 // already in the ledger
+
+    // The same folio-bound test _postOrderGl uses, so the two can never disagree
+    // about which orders belong to a folio.
+    const pm = String(o.payment_method || '').toUpperCase();
+    const folioBound = String(o.folio_post_status || '').toUpperCase() === 'POSTED'
+      || (o.folio_id && o.posted_to_folio_at) || pm === 'CHARGE_TO_ROOM';
+
+    const d = _glPostDate(o.created_at);
+    if (d > asOf) continue;
+
+    if (folioBound) {
+      excluded.push({ source: 'ORDER', source_id: oid, amount: +Number(o.total_amount || 0).toFixed(2),
+        reason: 'Charged to a room — this will be recognised through the folio, and accruing it here as well would count the same food twice' });
+      continue;
+    }
+    if (String(o.payment_status || '').toUpperCase() === 'PAID') {
+      excluded.push({ source: 'ORDER', source_id: oid, amount: +Number(o.total_amount || 0).toFixed(2),
+        reason: 'Already PAID but carries no ORDER journal — that is a posting gap, not an accrual. Run Backfill GL; accruing it would hide the gap rather than fix it' });
+      continue;
+    }
+
+    const v = await _orderNetRevenue(restaurantId, o);
+    if (v.netRev + v.svcAmt <= 0) continue;
+    const st = String(o.status || 'UNKNOWN').toUpperCase();
+    byStatus[st] = byStatus[st] || { n: 0, amount: 0 };
+    byStatus[st].n += 1;
+    byStatus[st].amount = +(byStatus[st].amount + v.netRev + v.svcAmt).toFixed(2);
+
+    lines.push({ source: 'ORDER', source_id: oid, ref: oid, date: d, module: 'RESTAURANT', kind: st,
+      description: `Unbilled cover${o.table_number ? ' · table ' + o.table_number : ''} · order ${oid}`,
+      amount: v.netRev, account_code: '4010', account_name: 'F&B Revenue' });
+    if (v.svcAmt > 0) {
+      lines.push({ source: 'ORDER', source_id: oid, ref: oid + '-SVC', date: d, module: 'RESTAURANT', kind: st,
+        description: `Service charge · order ${oid}`, amount: v.svcAmt,
+        account_code: '4020', account_name: 'Service Charge Revenue' });
+    }
+  }
+
+  // ── 3. roll up ───────────────────────────────────────────────────────────
+  const byAccount = new Map<string, { account_code: string; account_name: string; cost_centre: string; amount: number; lines: number }>();
+  const byModule = new Map<string, { module: string; amount: number; lines: number }>();
+  for (const l of lines) {
+    const k = `${l.account_code}|${l.module}`;
+    const a = byAccount.get(k) || { account_code: l.account_code, account_name: l.account_name, cost_centre: l.module, amount: 0, lines: 0 };
+    a.amount = +(a.amount + l.amount).toFixed(2); a.lines += 1; byAccount.set(k, a);
+    const m = byModule.get(l.module) || { module: l.module, amount: 0, lines: 0 };
+    m.amount = +(m.amount + l.amount).toFixed(2); m.lines += 1; byModule.set(l.module, m);
+  }
+  const total = +lines.reduce((s, l) => s + l.amount, 0).toFixed(2);
+
+  return {
+    as_of: asOf,
+    fy: _fyLabelFor(asOf),
+    total_accrual: total,
+    by_account: [...byAccount.values()].sort((a, b) => b.amount - a.amount),
+    by_module: [...byModule.values()].sort((a, b) => b.amount - a.amount),
+    restaurant_by_status: Object.entries(byStatus).map(([status, v]) => ({ status, ...v })).sort((a, b) => b.amount - a.amount),
+    lines: lines.sort((a, b) => b.amount - a.amount).slice(0, 500),
+    line_count: lines.length,
+    excluded: excluded.sort((a, b) => b.amount - a.amount).slice(0, 300),
+    excluded_count: excluded.length,
+    excluded_total: +excluded.reduce((s, e) => s + e.amount, 0).toFixed(2),
+    charges_after_cut_off: +afterCutOff.toFixed(2),
+    basis: [
+      'Delivered on or before the cut-off and not yet in the ledger: folio charges on an unsettled folio (a room charge is posted per night, so the folio is a dated record of what was delivered), plus restaurant orders that are not charged to a room.',
+      'Stated NET OF GST. An accrual is a revenue-recognition entry, not a tax event — the tax point is the invoice, which has not been raised.',
+      'Posting writes ONE journal dated at the cut-off and an equal REVERSING journal dated the next day, so when the bill finally settles it posts in full and nothing is counted twice.',
+    ],
+  };
+}
+
 async function _postGlEntries(
   db: any,
   restaurantId: string,
@@ -5441,6 +5691,57 @@ async function _markRoomChargedOrdersPaid(tenantDb: DbInterface, folioId: string
 // Post GL for a STANDALONE (non-folio) restaurant order that has been paid. Room
 // F&B charged to a hotel folio is captured by folio settlement and skipped here.
 // Idempotent on ORDER-<id> — safe from both the payment endpoint and session close.
+// Value ONE restaurant order the way the printed bill values it.
+//
+// UAT F-R1 (Sep 2026) — derive from the order's ITEMS through the same totals
+// engine that prints the bill (computeInvoiceTotals), never from the stored
+// total_amount. Ordinary rounds store total_amount PRE-tax (the QR / POS clients
+// send the subtotal with gst_amount alongside, and the session bill engine sums
+// them that way) while manual / edited invoices store it GST-INCLUSIVE — and the
+// GL poster assumed inclusive for every row, so each ordinary round booked cash
+// and revenue short by its own GST (a ₹878.90 bill posted Dr Cash ₹808.90 / Cr
+// revenue ₹729). Items are convention-free; the engine applies the row's
+// discount + service charge and the tenant's single-sourced GST exactly as the
+// printed invoice does, so GL == bill.
+//
+// Lifted out of _postOrderGl so the YEAR-END ACCRUAL can value an order that has
+// not been billed yet on EXACTLY the basis the journal will use when it finally
+// is. An accrual computed on a different basis than the revenue it anticipates
+// leaves a residue behind at every reversal, and residues in a ledger are found
+// by the auditor, not by the person who left them.
+async function _orderNetRevenue(
+  restaurantId: string, order: any,
+): Promise<{ gross: number; netRev: number; svcAmt: number; gst: number }> {
+  let items: any[] = [];
+  try { items = typeof order.items === 'string' ? JSON.parse(order.items) : (Array.isArray(order.items) ? order.items : []); } catch { items = []; }
+  const itemsSub = +(items.reduce((s: number, it: any) =>
+    s + Math.max(0, Number(it?.price ?? it?.unit_price ?? it?.unitPrice ?? 0)) * Math.max(0, Number(it?.quantity ?? it?.qty ?? 1)), 0)).toFixed(2);
+  const scp = Number(order.service_charge_percent || 0);
+  let gross = 0, netRev = 0, svcAmt = 0, gst = 0;
+  const engine = (globalThis as any).__computeInvoiceTotals;
+  if (itemsSub > 0 && typeof engine === 'function') {
+    const t = await engine({
+      tenantId: restaurantId, subtotal: itemsSub,
+      discountAmount: Number(order.discount_amount || 0), serviceChargePct: scp,
+      legacyGstFallback: { gst_percent: Number(order.gst_percent || 0), apply_gst: Number(order.apply_gst ?? 1) === 1 },
+    });
+    gross  = +Number(t?.grandTotal || 0).toFixed(2);
+    netRev = +Number(t?.subtotalAfterDiscount || 0).toFixed(2);
+    svcAmt = +Number(t?.serviceCharge || 0).toFixed(2);
+    gst    = +Number(t?.totalTax || 0).toFixed(2);
+  } else {
+    // Legacy row without items (or engine not registered): every such writer
+    // stored a GST-inclusive total, so keep the historical reading for them.
+    const total = +Number(order.total_amount || 0).toFixed(2);
+    gst = +Number(order.gst_amount || 0).toFixed(2);
+    const taxable = +(total - gst).toFixed(2);
+    netRev = +(taxable / (1 + scp / 100)).toFixed(2);
+    svcAmt = +(taxable - netRev).toFixed(2);
+    gross = total;
+  }
+  return { gross, netRev, svcAmt, gst };
+}
+
 async function _postOrderGl(db: any, restaurantId: string, order: any, postedBy: string | null): Promise<void> {
   try {
     if (!order || !order.id) return;
@@ -5455,43 +5756,9 @@ async function _postOrderGl(db: any, restaurantId: string, order: any, postedBy:
     const already = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
     if (already) return;
 
-    // UAT F-R1 (Sep 2026) — derive the journal from the order's ITEMS through the
-    // same totals engine that prints the bill (computeInvoiceTotals), never from
-    // the stored total_amount. Ordinary rounds store total_amount PRE-tax (the QR /
-    // POS clients send the subtotal with gst_amount alongside, and the session bill
-    // engine sums them that way) while manual / edited invoices store it
-    // GST-INCLUSIVE — and this helper assumed inclusive for every row, so each
-    // ordinary round booked cash and revenue short by its own GST (a ₹878.90 bill
-    // posted Dr Cash ₹808.90 / Cr revenue ₹729). Items are convention-free; the
-    // engine applies the row's discount + service charge and the tenant's
-    // single-sourced GST exactly as the printed invoice does, so GL == bill.
-    let items: any[] = [];
-    try { items = typeof order.items === 'string' ? JSON.parse(order.items) : (Array.isArray(order.items) ? order.items : []); } catch { items = []; }
-    const itemsSub = +(items.reduce((s: number, it: any) =>
-      s + Math.max(0, Number(it?.price ?? it?.unit_price ?? it?.unitPrice ?? 0)) * Math.max(0, Number(it?.quantity ?? it?.qty ?? 1)), 0)).toFixed(2);
-    const scp = Number(order.service_charge_percent || 0);
-    let gross = 0, netRev = 0, svcAmt = 0, gst = 0;
-    const engine = (globalThis as any).__computeInvoiceTotals;
-    if (itemsSub > 0 && typeof engine === 'function') {
-      const t = await engine({
-        tenantId: restaurantId, subtotal: itemsSub,
-        discountAmount: Number(order.discount_amount || 0), serviceChargePct: scp,
-        legacyGstFallback: { gst_percent: Number(order.gst_percent || 0), apply_gst: Number(order.apply_gst ?? 1) === 1 },
-      });
-      gross  = +Number(t?.grandTotal || 0).toFixed(2);
-      netRev = +Number(t?.subtotalAfterDiscount || 0).toFixed(2);
-      svcAmt = +Number(t?.serviceCharge || 0).toFixed(2);
-      gst    = +Number(t?.totalTax || 0).toFixed(2);
-    } else {
-      // Legacy row without items (or engine not registered): every such writer
-      // stored a GST-inclusive total, so keep the historical reading for them.
-      const total = +Number(order.total_amount || 0).toFixed(2);
-      gst = +Number(order.gst_amount || 0).toFixed(2);
-      const taxable = +(total - gst).toFixed(2);
-      netRev = +(taxable / (1 + scp / 100)).toFixed(2);
-      svcAmt = +(taxable - netRev).toFixed(2);
-      gross = total;
-    }
+    const _ord = await _orderNetRevenue(restaurantId, order);
+    const gross = _ord.gross, svcAmt = _ord.svcAmt, gst = _ord.gst;
+    let netRev = _ord.netRev;
     if (gross <= 0) return;
     // Rounding guard: the credit side must equal the tender debit to the paisa —
     // absorb any 1-paisa residue into revenue so the journal always balances.
@@ -57915,8 +58182,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'finance-is-one-group',
+    commit_marker: 'year-end-accrual',
     code_features: [
+      'year-end-accrual — H-3 from the accounting review, and the last of its High findings. Revenue reaches this ledger when a BILL SETTLES: a restaurant order posts ORDER-<id> when it is paid, a folio posts FOLIO-<id> when it is settled. For 364 days a year that is immaterial and arguably prudent; on the last day of the financial year it is a cut-off error - food served in one year with its revenue in the next, and a guest who slept four nights in March and checks out on 3 April carrying all four nights into the new year. THE FIX IS NOT A CHANGE TO DAILY REVENUE RECOGNITION, which would touch every operational path in the product. It is ONE journal dated at the cut-off for what was delivered and not yet billed, and an equal REVERSING journal dated the next day. The reversal is the entire safety mechanism: when the bill finally settles it posts IN FULL, and the reversal has already taken the accrued portion back out, so nothing is counted twice and no later posting has to know the accrual ever happened. WHAT COUNTS AS DELIVERED, and why this measure and not a reconstruction: a folio is charged AS the service is rendered - verified against live data that a room charge is posted PER NIGHT, a five-night stay carrying five ROOM_CHARGE rows dated one per night - so the folio is the product own DATED record of what was delivered, and summing its entries to the cut-off is the most faithful measure available. Restaurant orders not on a folio are the second source; an order CHARGED TO A ROOM is excluded because it will be recognised through that folio, and counting both would bill the same plate of food twice. NET OF GST on purpose: an accrual is a revenue-recognition entry, not a tax event - the tax point is the invoice, which has not been raised, so accruing output GST would create a liability no return reports. THE VALUATION IS SHARED, NOT MIRRORED: _orderNetRevenue was lifted out of _postOrderGl so the accrual values an unbilled order on EXACTLY the basis the journal will use when it is finally paid - an accrual computed on a different basis than the revenue it anticipates leaves a residue at every reversal. Per-LINE cost centres, so one journal spans four modules and each revenue credit lands in its own bucket; the 1150 debit that faces them carries none, because it is genuinely property-wide. New account 1150 Accrued Revenue (Unbilled), which should read ZERO on every date outside the accrual-to-reversal window. BOTH DATES ARE CHECKED AGAINST THE PERIOD LOCK BEFORE ANYTHING IS WRITTEN: an accrual that posts and then cannot be reversed, because the next day sits in a period somebody closed, overstates revenue permanently and an append-only ledger has no undo. Posting is refused for a future date; the schedule is readable for any date, because an owner in January wants to see where the cut-off will land. Everything left out is REPORTED with a reason - two CANCELLED events were carrying 1.95 lakh each on open folios, package purchases and membership fees are consideration received in ADVANCE of service and are deferred rather than accrued, a tip is a liability to the staff, and an in-house booking with NO FOLIO is named because there is no dated record to accrue from and inventing one would be worse than saying so. TWO STALE STATEMENTS CORRECTED IN PASSING, both of which described the period close as advisory: the comment above the routes and, worse, the sentence on the Period Close screen itself reading Soft lock: posting is never blocked. That stopped being true when Q-2 shipped. A screen that tells a user a control is advisory while it refuses their posting is worse than one that says nothing. Smoke: -SCHEDULE (the parts add up to the headline), -NO-DOUBLE-COUNT (two orders placed seconds apart, one left unbilled and one settled: the first IS accrued and the second is NOT), -NET-OF-GST, -EXPLAINS-EXCLUSIONS, -FUTURE-REFUSED, -POSTS-AND-REVERSES (asserts the reversal exists AND its date), -IDEMPOTENT, -TB-STILL-TIES. The suite posts with a cut-off of YESTERDAY so both halves land in the past and no report ending today is moved by a paisa. tsc + vite build clean.',
       'finance-is-one-group — the nav regrouping from section 7 of the accounting review. The finance side of the product was spread across THREE top-level groups: Accounts, Cash, and Suppliers & Customers. An accountant opening this had to already know that the till was in one group, the supplier ledger in a second and the trial balance in a third, and there was no single answer to where do I do my accounts. Fourteen top-level groups are now twelve (eleven for a both-mode tenant, where Overview folds away): Accounts absorbs Cash and Suppliers & Customers and is renamed FINANCE, because in Indian usage accounts reads as CUSTOMER accounts at least as often as it reads as books. Its eleven children are SECTIONED rather than nested a level deeper — a new optional NavTab.section prints a small heading above the first tab carrying it: Books, Cash & Banking, Receivables, Payables, Statutory. Sections are computed from the RBAC-FILTERED list, so a heading never stands over an empty section and a role granted only GST Summary sees Statutory and nothing else. STATUTORY IS THE POINT OF THE EXERCISE: compliance had no home at all — GST Summary was filed among the management reports and MSME 43B(h) had nowhere to sit — and M-1 (e-invoice) and M-2 (ITC gating) now have somewhere to land. NO TAB ID CHANGED; ids are RBAC keys read by FINANCE_TABS in src/navVisibility.ts, the server tab->module mapper and every tenants saved Staff Access grants, so this moves and renames menu entries and grants or revokes nothing. THE DEFECT THE REGROUPING SURFACED: ACCOUNTS_MSME_43B was never added to the Staff Access matrix or to TAB_MODULE, so it fell into the Other module and — worse — an owner had NO WAY TO GRANT IT. It is in FINANCE_TABS, whose non-manager branch requires an explicit grant that could not be given, so the tab was owner/MANAGER-only by accident rather than by decision. Added, with TC-RBAC-MSME-GRANT proving 403 before the grant and 200 after on the same token. Eight Staff Access finance rows had also drifted to different words than the menu uses, which matters because the owner grants by name and then looks for that name in the menu; two of them made claims the screen does not support — Receivables (AR) promised a customer-AR screen that does not exist (the route reads ONE table, ota_commission_entries), and the P&L and Cash Flow rows said derived from the general ledger when both read /reports/* from the source tables. Both corrected. The nav audit universe had drifted the same way: ACCOUNTS_MSME_43B and CUSTOMER_ACCOUNTS were in FINANCE_TABS but absent from nav_visibility_audit.ts, so neither had ever been leak-checked — ALL_FINANCE is now DERIVED from FINANCE_TABS with a structural check that fails loudly on the next drift. 9/9 scenarios pass with the widened universe. Nav labels ARE the i18n keys, so Finance and all five section headings went into hi.ts and pa.ts in the same commit; MSME 43B(h) is mapped to itself on purpose because a CA searches for that citation. NOT DONE and deliberately not silently folded in: the six report destinations are still six (one Reports home with a module filter is its own piece of work, not a label move) and the three checklist surfaces are still three. tsc + vite build clean.',
       'scope-note-on-the-visible-pnl — follow-up to statements-declare-their-scope, caught by opening the nav rather than trusting the endpoint I had just edited. There are TWO P&L surfaces: /accounting/profit-loss inside Accounting & Reports, and /reports/pnl behind the top-level nav item "P&L Snapshot". I had disclosed on the buried one and not on the one in the navigation, which is the one an owner actually opens. /reports/pnl now carries the same _STATEMENT_SCOPE plus ebitda_basis. That endpoint reports EBITDA, which is honest by construction - it is before depreciation by definition - but the label cannot tell a reader that this system records NO depreciation at all, so there is no figure below that line; the screen heading now says it ends at EBITDA. StatementScopeNote was defined inside AccountingView and the P&L Report screen lives in OwnerDashboard, so it was lifted to module scope: one component, one wording, every statement screen.',
       'statements-declare-their-scope — H-2 from the accounting review. Fixed assets, depreciation and tax were scoped out of this product by the owner, to be handled by the client CA. That decision stands; what was missing is SAYING SO, because a balance sheet that balances gets read as a complete financial position. CHECKING THE CHART OF ACCOUNTS SHARPENED MY OWN FINDING: I had written this up as a balance-sheet issue, but there is no DEPRECIATION EXPENSE ACCOUNT either - the expense list runs from Cost of F&B Consumed to Petty Cash with no depreciation anywhere - so the P&L overstates profit by the charge that should have been made. A note on the balance sheet alone would have missed the number people actually quote. Also absent and now disclosed: intangibles, security deposits and investments, provisions for gratuity and leave encashment, and income tax (current, deferred, advance and provision). _STATEMENT_SCOPE is declared ONCE and attached to BOTH /accounting/balance-sheet and /accounting/profit-loss, so the two cannot disclose different things about the same books - TC-STMT-SCOPE-ONE-WORDING asserts the wording is identical. The P&L also gains net_profit_basis = Before depreciation, amortisation and tax, on the PAYLOAD so an export or integration carries the caveat rather than only the screen. UI: one StatementScopeNote component rendered on both, and the balance sheet badge now reads "Balanced within scope" - on its own, beside a statement missing whole classes of asset, a bare tick reads as a clean bill of health. Smoke: -ON-BOTH, -ONE-WORDING, -NAMES-DEPRECIATION.',
@@ -59989,9 +60257,14 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
-  // ── Period close (SOFT lock — advisory only) ───────────────────────────────
-  // Closing a period NEVER blocks or alters posting; _postGlEntries is untouched.
-  // The exceptions endpoint surfaces any entry dated inside a closed period.
+  // ── Period close (HARD lock) ───────────────────────────────────────────────
+  // This said "SOFT lock — advisory only … closing a period NEVER blocks or
+  // alters posting", which stopped being true when Q-2 shipped: five routes now
+  // refuse a posting dated into a closed period with 409, and _postGlEntries
+  // refuses as a backstop, recording a gl_exception. A comment that states the
+  // opposite of what the code does is worse than no comment, because the next
+  // reader believes it. The exceptions endpoint still surfaces any entry dated
+  // inside a closed period — it is now a safety net rather than the control.
   app.get("/api/restaurant/:id/accounting/periods", authenticate, async (req: AuthRequest, res: Response) => {
     if (!(await _acctOwnerOnly(req, res))) return;
     try {
@@ -60066,6 +60339,150 @@ ${data.tenant.name}`;
       const row = await db.get("SELECT * FROM accounting_periods WHERE period_key = ?", [String(period_key)]);
       res.json(row || { period_key, status: 'OPEN' });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ── Year-end accrual (H-3) ────────────────────────────────────────────────
+  // The schedule is a READ and is deliberately available for ANY date, including
+  // a future one: an owner in January wants to see what the cut-off will look
+  // like. Posting is a different matter and refuses a future date, because you
+  // cannot date a journal into a day that has not happened.
+  app.get("/api/restaurant/:id/accounting/year-end-accrual", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const asOf = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.as_of || ''))
+        ? String(req.query.as_of) : _fyEndFor(_istNowParts().date);
+      const schedule = await _computeYearEndAccrual(db, req.params.id, asOf);
+      const ref = `ACCRUAL-${asOf}`;
+      const postedRows: any[] = await db.query(
+        `SELECT account_code, account_name, dr_amount, cr_amount, entry_date, cost_centre
+           FROM gl_entries WHERE restaurant_id = ? AND journal_ref = ? ORDER BY dr_amount DESC`,
+        [req.params.id, ref]).catch(() => []);
+      const revRow: any = await db.get(
+        "SELECT entry_date FROM gl_entries WHERE restaurant_id = ? AND journal_ref = ? LIMIT 1",
+        [req.params.id, `REV-${ref}`]).catch(() => null);
+      // A period lock is reported rather than enforced on a READ — knowing the
+      // books are shut is precisely what the owner needs to see BEFORE trying.
+      const closedAt = await _acctPeriodBlock(db, asOf);
+      res.json({
+        ...schedule,
+        journal_ref: ref,
+        period_closed: closedAt ? { period_key: closedAt.period_key, closed_at: closedAt.closed_at } : null,
+        posted: (postedRows || []).length > 0 ? {
+          journal_ref: ref, entry_date: postedRows[0]?.entry_date || asOf, lines: postedRows,
+          reversal_ref: `REV-${ref}`, reversal_posted: !!revRow, reversal_date: revRow?.entry_date || null,
+        } : null,
+      });
+    } catch (err: any) {
+      console.error('/accounting/year-end-accrual error:', err);
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  app.post("/api/restaurant/:id/accounting/year-end-accrual", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctCanWrite(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const asOf = String((req.body || {}).as_of || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+        return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required. The journal is DATED at the cut-off, so this is never defaulted for you.', code: 'ACCRUAL_DATE_REQUIRED' });
+      }
+      const today = _istNowParts().date;
+      if (asOf > today) {
+        return res.status(400).json({ error: `You cannot date a journal into the future. ${asOf} has not happened yet — run the schedule to preview it, and post on or after the cut-off.`, code: 'ACCRUAL_FUTURE_DATE' });
+      }
+      const _d = new Date(asOf + 'T00:00:00Z'); _d.setUTCDate(_d.getUTCDate() + 1);
+      const nextDay = _d.toISOString().slice(0, 10);
+
+      // BOTH dates are checked BEFORE anything is written. An accrual that posts
+      // and then cannot be reversed — because the next day sits in a period
+      // somebody already closed — overstates revenue permanently and there is no
+      // undo in an append-only ledger. Refuse the pair, or write neither.
+      if (await _blockIfAcctClosed(res, db, asOf)) return;
+      if (await _blockIfAcctClosed(res, db, nextDay)) return;
+
+      const ref = `ACCRUAL-${asOf}`;
+      const existing: any = await db.get(
+        "SELECT entry_date FROM gl_entries WHERE restaurant_id = ? AND journal_ref = ? LIMIT 1",
+        [req.params.id, ref]).catch(() => null);
+      if (existing) {
+        const revRow: any = await db.get(
+          "SELECT entry_date FROM gl_entries WHERE restaurant_id = ? AND journal_ref = ? LIMIT 1",
+          [req.params.id, `REV-${ref}`]).catch(() => null);
+        return res.json({
+          posted: false, already_posted: true, journal_ref: ref, entry_date: asOf,
+          reversal_ref: `REV-${ref}`, reversal_posted: !!revRow,
+          message: `The accrual for ${asOf} is already in the ledger as ${ref}. A ledger is append-only: to change it, reverse ${ref} and post a manual journal — do not post it twice.`,
+        });
+      }
+
+      const schedule = await _computeYearEndAccrual(db, req.params.id, asOf);
+      if (!(schedule.total_accrual > 0)) {
+        return res.json({
+          posted: false, reason: 'NOTHING_TO_ACCRUE', journal_ref: ref,
+          message: `Nothing was delivered and unbilled at ${asOf}, so there is no accrual to post. That is a result, not a failure.`,
+          ...schedule,
+        });
+      }
+
+      // The account is seeded with the chart for every tenant; this is the belt
+      // for a tenant whose chart predates it. Plain DML, never DDL — creating a
+      // table or column inside a request handler is how this codebase earned its
+      // lock-storm scar.
+      await db.run(
+        `INSERT INTO chart_of_accounts (code, name, type, display_order)
+         VALUES ('1150', 'Accrued Revenue (Unbilled)', 'ASSET', 45) ON CONFLICT (code) DO NOTHING`, []
+      ).catch(() => {});
+
+      const actor = _actorDisplayName(req.user || {});
+      const lines: GlLine[] = [
+        { account_code: '1150', account_name: 'Accrued Revenue (Unbilled)',
+          dr_amount: schedule.total_accrual, cr_amount: 0,
+          narration: `Revenue earned to ${asOf}, not yet billed` },
+        // Per-LINE cost centre: one journal spans four modules, and the debit
+        // that faces them is genuinely property-wide, so it carries none rather
+        // than being filed under whichever module happens to be largest.
+        ...schedule.by_account.map(a => ({
+          account_code: a.account_code, account_name: a.account_name,
+          dr_amount: 0, cr_amount: a.amount,
+          narration: `Accrued ${a.account_name} to ${asOf}`,
+          cost_centre: a.cost_centre,
+        })),
+      ];
+      const postRes = await _postGlEntries(db, req.params.id, ref, asOf, 'YEAR_END_ACCRUAL', asOf, lines, actor, null);
+      if (!postRes.ok) {
+        return res.status(409).json({ error: `The accrual journal was refused: ${postRes.reason}. Nothing was posted.`, code: 'ACCRUAL_NOT_POSTED', reason: postRes.reason });
+      }
+
+      const rev = await _reverseJournal(db, req.params.id, ref, {
+        reversalRef: `REV-${ref}`, date: nextDay,
+        sourceType: 'YEAR_END_ACCRUAL_REVERSAL', sourceId: asOf,
+        reason: `Year-end accrual at ${asOf} reverses on ${nextDay}`,
+        postedBy: actor,
+      });
+      if (!rev.ok) {
+        // Loud, and specific about the consequence. The pre-check above makes
+        // this nearly unreachable, but an accrual standing without its reversal
+        // is the one outcome of this feature that quietly misstates the books.
+        console.error(`[ACCRUAL] ${ref} posted but REV-${ref} failed: ${rev.reason}`);
+        return res.status(500).json({
+          error: `The accrual posted as ${ref}, but its reversal FAILED (${rev.reason}). Reverse ${ref} before closing the year — left as it stands, it overstates revenue permanently.`,
+          code: 'ACCRUAL_REVERSAL_FAILED', journal_ref: ref, reversal_ref: rev.reversalRef,
+        });
+      }
+
+      res.status(201).json({
+        posted: true, journal_ref: ref, entry_date: asOf,
+        reversal_ref: rev.reversalRef, reversal_date: nextDay,
+        total_accrual: schedule.total_accrual, by_account: schedule.by_account,
+        by_module: schedule.by_module, line_count: schedule.line_count,
+        excluded_count: schedule.excluded_count,
+        message: `Accrued ₹${schedule.total_accrual.toLocaleString('en-IN')} at ${asOf} as ${ref}, reversing ${nextDay} as ${rev.reversalRef}.`,
+      });
+    } catch (err: any) {
+      console.error('POST /accounting/year-end-accrual error:', err);
+      res.status(500).json({ error: err?.message });
+    }
   });
 
   // ── Physical cash count + optional variance journal ────────────────────────

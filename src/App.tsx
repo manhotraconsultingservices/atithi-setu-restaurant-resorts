@@ -8136,7 +8136,7 @@ const costModuleOptions = () =>
 function AccountingView({ restaurantId, token, initialTab, cashierMode }: { restaurantId: string; token: string; initialTab?: string; cashierMode?: boolean }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
     | 'PNL' | 'BALANCESHEET' | 'CASHFLOW' | 'GSTR1' | 'GSTR3B'
-    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'BANK_ACCOUNTS' | 'OWNER_EQUITY' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
+    | 'AGING_AR' | 'AGING_AP' | 'BANKREC' | 'BANK_ACCOUNTS' | 'OWNER_EQUITY' | 'ACCRUAL' | 'PERIODS' | 'CASHCOUNT' | 'CASHDRAWER' | 'DAYBOOK' | 'EXPENSES' | 'LOANS';
   // cashierMode (used by the top-level "Cash" nav item) opens straight on the
   // Cash Drawers panel and hides the rest of the ledger nav, so a cashier reaches
   // their till + shift handover in one click without the owner-only accounting tabs.
@@ -8440,6 +8440,19 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const loadPeriods = useCallback(() => { setLoading(true); Promise.all([acctApi('/accounting/periods'), acctApi('/accounting/periods/exceptions')]).then(([p, e]) => { if (Array.isArray(p)) setPeriods(p); if (Array.isArray(e)) setPeriodsExc(e); }).finally(() => setLoading(false)); }, [acctApi]);
   const loadCashCount = useCallback(() => { setLoading(true); acctApi(`/accounting/cash-count?date=${asOfDate}`).then(d => { if (d && !d.error) setCashCount(d); }).finally(() => setLoading(false)); }, [acctApi, asOfDate]);
 
+  // ── Year-end accrual (H-3) ────────────────────────────────────────────────
+  // The cut-off defaults to 31 March of the financial year we are in, because
+  // that is the only date this journal is normally dated — but it stays editable,
+  // since a company with a different year end, or an accountant checking last
+  // year, needs the same schedule on another date.
+  const _fyEnd = (() => { const d = new Date(); const y = d.getFullYear(); return `${d.getMonth() + 1 >= 4 ? y + 1 : y}-03-31`; })();
+  const [accrualDate, setAccrualDate] = useState(_fyEnd);
+  const [accrual, setAccrual] = useState<any>(null);
+  const [accrualMsg, setAccrualMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [accrualPosting, setAccrualPosting] = useState(false);
+  const [accrualShowAll, setAccrualShowAll] = useState(false);
+  const loadAccrual = useCallback(() => { setLoading(true); acctApi(`/accounting/year-end-accrual?as_of=${accrualDate}`).then(d => { if (d && !d.error) setAccrual(d); }).finally(() => setLoading(false)); }, [acctApi, accrualDate]);
+
   // ── EOD Cash Drawers (per-cashier till) ──────────────────────────────────
   const DENOMS = [2000, 500, 200, 100, 50, 20, 10, 5, 2, 1];
   const [dcDate, setDcDate] = useState(todayStr);
@@ -8550,12 +8563,25 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   useEffect(() => { if (acctTab === 'AGING_AP') loadAgingAp(); }, [acctTab, loadAgingAp]);
   useEffect(() => { if (acctTab === 'BANKREC') loadBankRec(); }, [acctTab, loadBankRec]);
   useEffect(() => { if (acctTab === 'PERIODS') loadPeriods(); }, [acctTab, loadPeriods]);
+  useEffect(() => { if (acctTab === 'ACCRUAL') loadAccrual(); }, [acctTab, loadAccrual]);
   useEffect(() => { if (acctTab === 'CASHCOUNT') loadCashCount(); }, [acctTab, loadCashCount]);
   useEffect(() => { if (acctTab === 'CASHDRAWER') loadDayClose(); }, [acctTab, loadDayClose]);
   useEffect(() => { if (acctTab === 'DAYBOOK') loadDayBook(); }, [acctTab, loadDayBook]);
   useEffect(() => { if (acctTab === 'CASHBOOK') loadOpenTablesAr(); }, [acctTab, loadOpenTablesAr]);
   useEffect(() => { if (acctTab === 'EXPENSES') { loadExpenses(); loadLoans(); } }, [acctTab, loadExpenses, loadLoans]);
   useEffect(() => { if (acctTab === 'LOANS') loadLoans(); }, [acctTab, loadLoans]);
+
+  const postAccrual = async () => {
+    setAccrualMsg(null); setAccrualPosting(true);
+    try {
+      const res = await acctApi('/accounting/year-end-accrual', { method: 'POST', body: JSON.stringify({ as_of: accrualDate }) });
+      if (res?.error) { setAccrualMsg({ type: 'err', text: res.error }); return; }
+      // `posted: false` is not a failure — it is "already in the ledger" or
+      // "nothing was unbilled", and both are answers the user asked for.
+      setAccrualMsg({ type: res.posted === false && !res.already_posted && res.reason !== 'NOTHING_TO_ACCRUE' ? 'err' : 'ok', text: res.message || 'Posted' });
+      loadAccrual();
+    } finally { setAccrualPosting(false); }
+  };
 
   const closePeriod = async () => {
     if (!pcKey || !pcFrom || !pcTo) return;
@@ -8857,7 +8883,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     GST: 'GST Summary', GSTR1: 'GSTR-1', GSTR3B: 'GSTR-3B',
     CASHBOOK: 'Cash Book', AGING_AR: 'Receivables Ageing', AGING_AP: 'Payables Ageing', BANKREC: 'Bank Reconciliation',
     BANK_ACCOUNTS: 'Bank Accounts', OWNER_EQUITY: "Owners' Equity",
-    TDS: 'TDS Tracker', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
+    TDS: 'TDS Tracker', ACCRUAL: 'Year-End Accrual', PERIODS: 'Period Close', CASHCOUNT: 'Cash Count', CASHDRAWER: 'Cash Drawers',
     EXPENSES: 'Expenses', LOANS: 'Loans / EMI',
   };
   // Regrouped onto concepts an accountant already has a name for. What moved
@@ -8878,7 +8904,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     { key: 'ARAP', label: 'Receivables & Payables', tabs: ['AGING_AR', 'AGING_AP', 'EXPENSES', 'LOANS'] },
     { key: 'BANKING', label: 'Banking & Cash', tabs: ['CASHBOOK', 'BANK_ACCOUNTS', 'BANKREC', 'CASHDRAWER', 'CASHCOUNT'] },
     { key: 'TAX', label: 'GST & Tax', tabs: ['GST', 'GSTR1', 'GSTR3B', 'TDS'] },
-    { key: 'CLOSE', label: 'Capital & Close', tabs: ['OWNER_EQUITY', 'PERIODS'] },
+    { key: 'CLOSE', label: 'Capital & Close', tabs: ['OWNER_EQUITY', 'ACCRUAL', 'PERIODS'] },
   ];
   const activeGroup = ACCT_GROUPS.find(g => g.tabs.includes(acctTab)) || ACCT_GROUPS[0];
 
@@ -9939,10 +9965,141 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
         </div>
       )}
 
+      {acctTab === 'ACCRUAL' && (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-[#e8ded0] bg-white p-4 space-y-3">
+            <p className="text-sm font-semibold text-[#1a1208]">Revenue earned before the cut-off, billed after it</p>
+            <p className="text-[12px] text-[#6b5d52] leading-relaxed">
+              Revenue reaches the ledger when a bill settles. For most of the year that does not matter.
+              On the last day of the financial year it does: food served in March and paid for in April,
+              or a guest who slept four nights in March and checks out on the 3rd of April, would carry
+              the whole amount into the new year. This posts one journal dated at the cut-off for what
+              was delivered and not yet billed, and an equal <b>reversing</b> journal the next day — so
+              when the bill finally settles it posts in full and nothing is counted twice.
+            </p>
+            <div className="flex items-end gap-2 flex-wrap">
+              <div><label className="text-xs text-[#6b5d52] block">Cut-off date</label><input type="date" value={accrualDate} onChange={e => setAccrualDate(e.target.value)} className={AC_INPUT} /></div>
+              <button onClick={loadAccrual} className="px-3 py-1.5 border border-[#d4c4a8] text-[#6b5d52] text-sm rounded hover:bg-[#f5f0e8]">Run schedule</button>
+              {canWriteTab('ACCOUNTING') && accrual && !accrual.posted && Number(accrual.total_accrual) > 0 && (
+                <button onClick={postAccrual} disabled={accrualPosting} className={AC_BTN}>{accrualPosting ? 'Posting…' : 'Post accrual + reversal'}</button>
+              )}
+              {accrualMsg && <span className={`text-sm ${accrualMsg.type === 'ok' ? 'text-emerald-700' : 'text-rose-700'}`}>{accrualMsg.text}</span>}
+            </div>
+          </div>
+
+          {accrual && (
+            <>
+              <div className="grid sm:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide">To accrue at {accrual.as_of}</p>
+                  <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(accrual.total_accrual)}</p>
+                  <p className="text-[11px] text-[#9c8e85] mt-1">{accrual.line_count} charge{accrual.line_count === 1 ? '' : 's'} · FY {accrual.fy} · net of GST</p>
+                </div>
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Status</p>
+                  {accrual.posted ? (
+                    <>
+                      <p className="text-sm font-bold text-emerald-700 mt-1">Posted</p>
+                      <p className="text-[11px] text-[#6b5d52] mt-1 font-mono">{accrual.posted.journal_ref}</p>
+                      <p className="text-[11px] mt-0.5">{accrual.posted.reversal_posted
+                        ? <span className="text-emerald-700">reverses {accrual.posted.reversal_date}</span>
+                        : <span className="text-rose-700 font-bold">REVERSAL MISSING — this overstates revenue until it is reversed</span>}</p>
+                    </>
+                  ) : Number(accrual.total_accrual) > 0 ? (
+                    <p className="text-sm font-bold text-amber-700 mt-1">Not posted yet</p>
+                  ) : (
+                    <p className="text-sm font-bold text-emerald-700 mt-1">Nothing to accrue</p>
+                  )}
+                  {accrual.period_closed && <p className="text-[11px] text-rose-700 mt-1">{accrual.period_closed.period_key} is closed — reopen it to post into that date.</p>}
+                </div>
+                <div className="rounded-lg border border-[#e8ded0] bg-white p-4">
+                  <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Left out</p>
+                  <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(accrual.excluded_total)}</p>
+                  <p className="text-[11px] text-[#9c8e85] mt-1">{accrual.excluded_count} item{accrual.excluded_count === 1 ? '' : 's'}, each with a reason below</p>
+                </div>
+              </div>
+
+              {accrual.by_account?.length > 0 && (
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">The journal</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Module</th><th className="px-3 py-2 font-semibold text-[#1a1208] text-right">Dr</th><th className="px-3 py-2 font-semibold text-[#1a1208] text-right">Cr</th></tr></thead>
+                    <tbody>
+                      <tr className="border-t border-[#f0e8d8]">
+                        <td className="px-3 py-2"><span className="font-mono text-xs">1150</span> Accrued Revenue (Unbilled)</td>
+                        <td className="px-3 py-2 text-[#9c8e85] text-xs">property-wide</td>
+                        <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmtAmt(accrual.total_accrual)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">—</td>
+                      </tr>
+                      {accrual.by_account.map((a: any) => (
+                        <tr key={a.account_code + a.cost_centre} className="border-t border-[#f0e8d8]">
+                          <td className="px-3 py-2 pl-8"><span className="font-mono text-xs">{a.account_code}</span> {a.account_name}</td>
+                          <td className="px-3 py-2 text-[#6b5d52] text-xs">{a.cost_centre}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">—</td>
+                          <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmtAmt(a.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {accrual.lines?.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm font-semibold text-[#1a1208]">What is in the number</p>
+                    {accrual.lines.length > 12 && <button onClick={() => setAccrualShowAll(v => !v)} className="text-xs text-[#a0522d] font-semibold hover:underline">{accrualShowAll ? 'Show less' : `Show all ${accrual.lines.length}`}</button>}
+                  </div>
+                  <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                    <table className="w-full text-sm border-collapse">
+                      <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Date</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Module</th><th className="px-3 py-2 font-semibold text-[#1a1208]">What</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Account</th><th className="px-3 py-2 font-semibold text-[#1a1208] text-right">Amount</th></tr></thead>
+                      <tbody>{(accrualShowAll ? accrual.lines : accrual.lines.slice(0, 12)).map((l: any) => (
+                        <tr key={l.ref} className="border-t border-[#f0e8d8]">
+                          <td className="px-3 py-2 whitespace-nowrap text-[#6b5d52]">{l.date}</td>
+                          <td className="px-3 py-2 text-xs">{l.module}</td>
+                          <td className="px-3 py-2 text-[#6b5d52]">{l.description}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{l.account_code}</td>
+                          <td className="px-3 py-2 text-right tabular-nums font-semibold">{fmtAmt(l.amount)}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {accrual.excluded?.length > 0 && (
+                <div>
+                  <p className="text-sm font-semibold text-[#1a1208] mb-2">Left out, and why</p>
+                  <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                    <table className="w-full text-sm border-collapse">
+                      <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">What</th><th className="px-3 py-2 font-semibold text-[#1a1208] text-right">Amount</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Reason</th></tr></thead>
+                      <tbody>{accrual.excluded.map((x: any, i: number) => (
+                        <tr key={x.source + x.source_id + i} className="border-t border-[#f0e8d8]">
+                          <td className="px-3 py-2"><span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#f0e8d8] text-[#6b5d52]">{x.source}</span> <span className="font-mono text-xs text-[#9c8e85]">{x.source_id}</span></td>
+                          <td className="px-3 py-2 text-right tabular-nums">{x.amount > 0 ? fmtAmt(x.amount) : '—'}</td>
+                          <td className="px-3 py-2 text-[#6b5d52] text-[12px]">{x.reason}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-lg border border-[#e8ded0] bg-[#faf7f2] p-3">
+                <p className="text-[11px] font-bold text-[#6b5d52] uppercase tracking-wide mb-1.5">Basis</p>
+                <ul className="list-disc pl-4 space-y-1 text-[12px] text-[#6b5d52]">
+                  {(accrual.basis || []).map((b: string, i: number) => <li key={i}>{b}</li>)}
+                  {Number(accrual.charges_after_cut_off) > 0 && <li>{fmtAmt(accrual.charges_after_cut_off)} of charges on these folios are dated AFTER the cut-off and are not accrued — they belong to the next year.</li>}
+                </ul>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {acctTab === 'PERIODS' && (
         <div className="space-y-4">
           <div className="rounded-lg border border-[#e8ded0] bg-white p-4 space-y-3">
-            <p className="text-sm font-semibold text-[#1a1208]">Close a period (soft lock)</p>
+            <p className="text-sm font-semibold text-[#1a1208]">Close a period</p>
             <div className="flex items-end gap-2 flex-wrap">
               <div><label className="text-xs text-[#6b5d52] block">Period key</label><input value={pcKey} onChange={e => setPcKey(e.target.value)} placeholder="2026-07" className={AC_INPUT + ' w-28'} /></div>
               <div><label className="text-xs text-[#6b5d52] block">From</label><input type="date" value={pcFrom} onChange={e => setPcFrom(e.target.value)} className={AC_INPUT} /></div>
@@ -9950,7 +10107,11 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
               <div className="flex-1 min-w-[10rem]"><label className="text-xs text-[#6b5d52] block">Note</label><input value={pcNote} onChange={e => setPcNote(e.target.value)} placeholder="optional" className={AC_INPUT + ' w-full'} /></div>
               <button onClick={closePeriod} className={AC_BTN}>Close period</button>
             </div>
-            <p className="text-[11px] text-[#9c8e85]">Soft lock: closing a period is advisory. Posting is never blocked — any entry dated inside a closed period is flagged in Exceptions below.</p>
+            {/* This said "soft lock … posting is never blocked", which stopped
+                being true when the binding close shipped. A screen that tells a
+                user a control is advisory when it refuses their posting is worse
+                than one that says nothing. */}
+            <p className="text-[11px] text-[#9c8e85]">Closing a period is <b>binding</b>: anything dated inside it is refused, on every screen, until the period is reopened — and a reopen asks for a reason and is recorded. Today's trading is never affected, because periods are closed over months that have finished. Anything that still reaches a closed period is listed in Exceptions below.</p>
           </div>
           {periods.length > 0 && (
             <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">

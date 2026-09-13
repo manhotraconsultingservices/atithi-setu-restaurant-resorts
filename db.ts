@@ -3451,6 +3451,12 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['1020','Bank — OTA Receivable','ASSET',20],
     ['1100','Accounts Receivable — Guests','ASSET',30],
     ['1110','Accounts Receivable — OTA Channels','ASSET',40],
+    // Revenue earned before the cut-off and billed after it — the debit side of
+    // the year-end accrual (H-3). It exists only between the cut-off and the
+    // reversal the next day, and should read ZERO on every other date; a balance
+    // standing here outside that window means an accrual was posted and its
+    // reversal was not.
+    ['1150','Accrued Revenue (Unbilled)','ASSET',45],
     ['1200','Advance to Suppliers','ASSET',50],
     ['1210','Advances to Staff','ASSET',55],
     ['1300','ITC Receivable — CGST','ASSET',60],
