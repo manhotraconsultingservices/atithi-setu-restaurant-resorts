@@ -14092,7 +14092,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   const fetchInventoryDashboard = async () => {
     try {
-      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/dashboard?horizon=${forecastHorizon}`, {
+      // Scoped to the kitchen, exactly like the ingredients list above it.
+      // This read was missed when that one was fixed, so the chef's tiles and
+      // consumption forecast were the WHOLE PROPERTY: stock value, below-reorder
+      // count, wastage, food cost and the suggested-PO list all included hotel
+      // linen and the spa dispensary. It showed up the moment 20 Ayurvedic items
+      // were re-filed to SPA and the kitchen screen carried on proposing
+      // purchase orders for Ashwagandha Churna.
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/dashboard?module=RESTAURANT&include_shared=1&horizon=${forecastHorizon}`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (r.ok) setInventoryDashboard(await r.json());
