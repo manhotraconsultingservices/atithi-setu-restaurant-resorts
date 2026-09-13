@@ -984,6 +984,14 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
         <div key={p.id} className="flex items-center gap-2 text-xs py-1 border-b border-[#f0e9df]">
           <span className="flex-1 min-w-0 truncate">{dOnly(p.paid_at)} · {p.method}{p.reference ? ` · ${p.reference}` : ''}</span>
           <span className="w-20 text-right tabular-nums font-semibold text-emerald-700">{money(p.amount)}</span>
+          {/* Rule 50 receipt voucher — issued automatically for an advance taken
+              before the event is invoiced, printable to hand to the customer. */}
+          {p.receipt_voucher_id && (
+            <button className={`${BTN_GHOST} py-0.5`} title="Print the receipt voucher for this advance"
+              onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/receipt-vouchers/${p.receipt_voucher_id}/pdf`, token)}>
+              <FileText size={12} />Voucher
+            </button>
+          )}
           {editable && <button onClick={() => delPay(p.id)}><X size={12} className="text-rose-500" /></button>}
         </div>
       ))}

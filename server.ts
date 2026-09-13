@@ -16,6 +16,7 @@ import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, sendTelegramDetailed, b
 import { getChannelAdapter, ChannelCredentials, AdapterAvailabilityPayload, AdapterResult } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
+import { generateReceiptVoucherPdf } from "./receiptVoucherPdf.ts";
 import { generatePOPdf, buildPOEmailBody, type POPdfData } from "./poService.ts";
 import {
   createSpaTables, seedSpaDefaults,
@@ -1835,6 +1836,10 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_folio_entries_folio   ON folio_entries(folio_id);
   `);
 
+  // Links an advance receipt to its Rule 50 receipt voucher. Its own statement
+  // after the big exec block, so it can never run ahead of the table's CREATE.
+  await tenantDb.exec("ALTER TABLE folio_payments ADD COLUMN IF NOT EXISTS receipt_voucher_id TEXT").catch(() => {});
+
   // UAT F-3 (Sep 2026) — historical GST output-register rows were written at
   // check-out BEFORE the folio's serial was stamped, so they carry invoice_number
   // NULL and a GSTR-1 line could not be tied to its invoice. New rows carry the
@@ -3057,6 +3062,222 @@ async function getFolioOutstanding(tenantDb: DbInterface, folioId: string): Prom
   };
 }
 
+// ═══ ADVANCES: into the ledger, taxed on receipt, vouchered, adjusted once ═══
+//
+// FOUND: HOTEL ADVANCES NEVER REACHED THE LEDGER. The journal was built inside
+// ONE route (POST /hotel/folios/:folioId/payments), and four other paths —
+// check-in, "record advance", group booking creation and the group deposit —
+// wrote the same folio_payments row by calling recordFolioPayment directly.
+// Not one hotel advance had ever come through the route that posts. The
+// settlement then DEBITED Advances from Guests for money that had never been
+// credited, and the cash received was never debited anywhere. The posting now
+// lives inside recordFolioPayment, so a receipt cannot be written without it.
+//
+// GST ON ADVANCES. For a SERVICE, Section 13(2) makes tax due on the earlier of
+// the invoice and the receipt of payment, so an advance for a room or a hall is
+// taxed in the month it is received (the 2017 relief covers goods only). The
+// tax goes to 2201/2211/2221 — separate from invoice tax, so GSTR-1's invoice
+// tables never read an advance as a sale — and is reversed out when the invoice
+// is issued, so it is paid once. A Rule 50 receipt voucher is issued for every
+// hotel and event advance, and is the record of what tax was charged.
+
+const _ADV_GST = {
+  cgst: { code: '2201', name: 'GST on Advances — CGST' },
+  sgst: { code: '2211', name: 'GST on Advances — SGST' },
+  igst: { code: '2221', name: 'GST on Advances — IGST' },
+};
+
+/** An advance is tax-INCLUSIVE: the guest hands over one amount. Place of supply
+ *  for accommodation and for an event at the venue is the property itself, so
+ *  the tax is always CGST + SGST. */
+function _advanceTaxSplit(amount: number, rate: number) {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const amt = r2(Number(amount || 0));
+  if (!(rate > 0) || !(amt > 0)) return { taxable: amt, cgst: 0, sgst: 0, igst: 0, tax: 0 };
+  const taxable = r2(amt * 100 / (100 + rate));
+  const tax = r2(amt - taxable);
+  const cgst = r2(tax / 2);
+  const sgst = r2(tax - cgst);
+  return { taxable, cgst, sgst, igst: 0, tax };
+}
+
+async function _ensureAdvanceGstAccounts(db: any): Promise<void> {
+  // DML, never DDL, inside a request path.
+  for (const [code, name, order] of [['2201', 'GST on Advances — CGST', 225], ['2211', 'GST on Advances — SGST', 235], ['2221', 'GST on Advances — IGST', 245]] as any[]) {
+    await db.run(`INSERT INTO chart_of_accounts (code, name, type, display_order) VALUES (?, ?, 'LIABILITY', ?) ON CONFLICT (code) DO NOTHING`, [code, name, order]).catch(() => {});
+  }
+}
+
+/** An unregistered supplier cannot charge GST, and a voucher must not print a tax it cannot collect. */
+async function _tenantGstRegistration(restaurantId: string): Promise<{ gstin: string | null; state: string | null }> {
+  const r: any = await centralDb.get("SELECT gst_number, state FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+  const g = String(r?.gst_number || '').trim();
+  return { gstin: g && g !== '0' ? g : null, state: r?.state || null };
+}
+
+/** The rate for a HOTEL advance. Read from what the property actually charges:
+ *  the room-charge lines already on the folio carry the tariff-slab rate. Then
+ *  the booking's tariff; then, only where no rate can be determined, eighteen
+ *  per cent under the proviso to Rule 50. */
+async function _hotelAdvanceGstRate(db: any, restaurantId: string, folio: any): Promise<{ rate: number; basis: string }> {
+  const reg = await _tenantGstRegistration(restaurantId);
+  if (!reg.gstin) return { rate: 0, basis: 'NOT_REGISTERED' };
+  const onFolio: any = await db.get(
+    `SELECT MAX(gst_rate) AS r FROM folio_entries
+      WHERE folio_id = ? AND entry_type IN ('ROOM_CHARGE','HOTEL_ROOM') AND COALESCE(gst_rate,0) > 0`,
+    [folio.id]).catch(() => null);
+  if (Number(onFolio?.r || 0) > 0) return { rate: Number(onFolio.r), basis: 'ROOM_TARIFF_SLAB' };
+  const cfg = await loadHotelTaxConfig(restaurantId);
+  if (folio.group_id) {
+    const g: any = await db.get(
+      `SELECT MAX(fe.gst_rate) AS r FROM folio_entries fe JOIN folios f ON f.id = fe.folio_id
+         JOIN room_bookings rb ON rb.id = f.booking_id
+        WHERE rb.group_id = ? AND fe.entry_type IN ('ROOM_CHARGE','HOTEL_ROOM') AND COALESCE(fe.gst_rate,0) > 0`,
+      [folio.group_id]).catch(() => null);
+    if (Number(g?.r || 0) > 0) return { rate: Number(g.r), basis: 'ROOM_TARIFF_SLAB' };
+    const gr: any = await db.get("SELECT MAX(room_rate) AS rr FROM room_bookings WHERE group_id = ?", [folio.group_id]).catch(() => null);
+    if (Number(gr?.rr || 0) > 0) return { rate: gstRateForTariff(Number(gr.rr), cfg), basis: 'ROOM_TARIFF_SLAB' };
+  }
+  if (folio.booking_id) {
+    const b: any = await db.get("SELECT room_rate, total_amount, check_in_date, check_out_date FROM room_bookings WHERE id = ?", [folio.booking_id]).catch(() => null);
+    if (Number(b?.room_rate || 0) > 0) return { rate: gstRateForTariff(Number(b.room_rate), cfg), basis: 'ROOM_TARIFF_SLAB' };
+    const ci = b?.check_in_date ? _glPostDate(b.check_in_date) : null;
+    const co = b?.check_out_date ? _glPostDate(b.check_out_date) : null;
+    const nights = ci && co ? Math.max(1, Math.round((Date.parse(co) - Date.parse(ci)) / 86400000)) : 1;
+    if (Number(b?.total_amount || 0) > 0) return { rate: gstRateForTariff(Number(b.total_amount) / nights, cfg), basis: 'ROOM_TARIFF_SLAB' };
+  }
+  return { rate: 18, basis: 'NOT_DETERMINABLE_RULE_50' };
+}
+
+async function _issueReceiptVoucher(db: any, v: {
+  module: 'HOTEL' | 'EVENTS'; receiptDate: string; amount: number; rate: number; basis: string;
+  split: { taxable: number; cgst: number; sgst: number; igst: number };
+  customerName: string | null; customerGstin: string | null; customerAddress: string | null;
+  description: string; method: string | null; reference: string | null;
+  bookingId: string | null; eventBookingId: string | null; folioId: string | null;
+  paymentId: string; paymentSource: string; journalRef: string; placeOfSupply: string | null; issuedBy: string | null;
+}): Promise<any> {
+  const y = Number(v.receiptDate.slice(0, 4)), m = Number(v.receiptDate.slice(5, 7));
+  const fy = m >= 4 ? y : y - 1;
+  const seq = await getNextTenantSequence(db, `receipt-voucher-${fy}`);
+  const rvNumber = `RV-${fy}-${String(seq).padStart(5, '0')}`;
+  const id = `RVCH-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  await db.run(
+    `INSERT INTO receipt_vouchers
+       (id, rv_number, module, status, receipt_date, amount, taxable_value, gst_rate, cgst, sgst, igst,
+        rate_basis, place_of_supply, customer_name, customer_gstin, customer_address, description,
+        payment_method, reference, booking_id, event_booking_id, folio_id, payment_id, payment_source,
+        journal_ref, issued_by)
+     VALUES (?, ?, ?, 'ISSUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    // 25 placeholders, bound in column order — status is the literal 'ISSUED'.
+    [id, rvNumber, v.module, v.receiptDate, v.amount, v.split.taxable, v.rate,
+     v.split.cgst, v.split.sgst, v.split.igst, v.basis, v.placeOfSupply,
+     v.customerName, v.customerGstin, v.customerAddress, v.description,
+     v.method, v.reference, v.bookingId, v.eventBookingId, v.folioId, v.paymentId, v.paymentSource,
+     v.journalRef, v.issuedBy]);
+  return db.get("SELECT * FROM receipt_vouchers WHERE id = ?", [id]);
+}
+
+/** Post one ADVANCE or INTERIM folio receipt, taxing and vouchering a hotel one.
+ *  Journal refs and source types are the ones the old route used, so every
+ *  advance already in the ledger is recognised and never posted twice. */
+async function _postFolioAdvanceGl(db: any, restaurantId: string, payment: any, folio: any, postedBy: string | null) {
+  const type = String(payment?.payment_type || '').toUpperCase();
+  if (type !== 'ADVANCE' && type !== 'INTERIM') return null;
+  const kind = String(folio?.folio_kind || 'HOTEL').toUpperCase();
+  // An EVENT folio's advance row is a mirror of event_payments, which post their
+  // own journal (EVENT-PAY-<id>). Posting it here too would count it twice.
+  if (kind === 'EVENT') return null;
+  const ref = type === 'ADVANCE' ? `ADV-${payment.id}` : `INTPAY-${payment.id}`;
+  const exists = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ? LIMIT 1", [ref]).catch(() => null);
+  if (exists) return { journal_ref: ref, already: true, receipt_voucher: null };
+  const amount = +Number(payment.amount || 0).toFixed(2);
+  if (!(amount > 0)) return null;
+  const date = new Date().toISOString().slice(0, 10);
+  const cashAcct = _glAccountForPaymentMethod(payment.payment_method);
+  const sourceType = kind === 'SPA' ? (type === 'INTERIM' ? 'SPA_INTERIM' : 'FOLIO_ADVANCE') : (type === 'ADVANCE' ? 'FOLIO_ADVANCE' : 'FOLIO_PAYMENT');
+  let rate = 0, basis = 'NOT_A_HOTEL_ADVANCE';
+  if (kind === 'HOTEL') { const g = await _hotelAdvanceGstRate(db, restaurantId, folio); rate = g.rate; basis = g.basis; }
+  const split = _advanceTaxSplit(amount, rate);
+  if (split.tax > 0) await _ensureAdvanceGstAccounts(db);
+  const narr = `${type === 'ADVANCE' ? 'Advance' : 'Interim payment'}: folio ${folio.id}`;
+  const lines: GlLine[] = [
+    { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: narr },
+    { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: split.taxable, narration: narr },
+  ];
+  if (split.cgst > 0) lines.push({ account_code: _ADV_GST.cgst.code, account_name: _ADV_GST.cgst.name, dr_amount: 0, cr_amount: split.cgst, narration: `CGST on advance: folio ${folio.id}` });
+  if (split.sgst > 0) lines.push({ account_code: _ADV_GST.sgst.code, account_name: _ADV_GST.sgst.name, dr_amount: 0, cr_amount: split.sgst, narration: `SGST on advance: folio ${folio.id}` });
+  const r = await _postGlEntries(db, restaurantId, ref, date, sourceType, payment.id, lines, postedBy, _folioCostModule(folio));
+  let rv: any = null;
+  if (kind === 'HOTEL') {
+    const reg = await _tenantGstRegistration(restaurantId);
+    const bk: any = folio.booking_id
+      ? await db.get("SELECT id, guest_name, guest_gstin FROM room_bookings WHERE id = ?", [folio.booking_id]).catch(() => null) : null;
+    const grp: any = !bk && folio.group_id
+      ? await db.get("SELECT id, name FROM room_booking_groups WHERE id = ?", [folio.group_id]).catch(() => null) : null;
+    rv = await _issueReceiptVoucher(db, {
+      module: 'HOTEL', receiptDate: date, amount, rate, basis, split,
+      customerName: bk?.guest_name || grp?.name || null,
+      customerGstin: folio.customer_gstin || bk?.guest_gstin || null,
+      customerAddress: folio.customer_address || null,
+      description: bk ? `Advance against room booking ${bk.id}` : grp ? `Advance against group booking ${grp.name || grp.id}` : `Advance against folio ${folio.id}`,
+      method: payment.payment_method || null, reference: payment.reference_number || null,
+      bookingId: bk?.id || folio.group_id || null, eventBookingId: null, folioId: folio.id,
+      paymentId: payment.id, paymentSource: 'folio_payments', journalRef: ref,
+      placeOfSupply: reg.state, issuedBy: postedBy,
+    });
+    await db.run("UPDATE folio_payments SET receipt_voucher_id = ? WHERE id = ?", [rv.id, payment.id]).catch(() => {});
+  }
+  return { journal_ref: ref, posted: r.ok, reason: r.ok ? undefined : r.reason, receipt_voucher: rv };
+}
+
+/** Apply advances against the bill at settlement — ONE implementation for the
+ *  three settlement paths that each carried their own copy. The tax already
+ *  paid on those advances (from their vouchers) is reversed out of 2201/2211,
+ *  so the invoice's own GST is the tax paid for the supply and nothing is paid
+ *  twice. `capAt` null = no cap. */
+async function _advanceApplicationLines(
+  db: any, folio: any, advances: any[], capAt: number | null, ar: { code: string; name: string },
+): Promise<{ lines: GlLine[]; rvIds: string[] }> {
+  const advTotal = +(advances || []).reduce((s: number, p: any) => s + Number(p.amount || 0), 0).toFixed(2);
+  if (!(advTotal > 0)) return { lines: [], rvIds: [] };
+  const applied = +Math.min(advTotal, capAt === null ? advTotal : Number(capAt)).toFixed(2);
+  if (!(applied > 0)) return { lines: [], rvIds: [] };
+  const kind = String(folio?.folio_kind || 'HOTEL').toUpperCase();
+  const rvs: any[] = kind === 'EVENT'
+    ? await db.query("SELECT id, cgst, sgst, igst FROM receipt_vouchers WHERE event_booking_id = ? AND status = 'ISSUED'", [folio.event_booking_id]).catch(() => [])
+    : await db.query("SELECT id, cgst, sgst, igst FROM receipt_vouchers WHERE folio_id = ? AND status = 'ISSUED'", [folio.id]).catch(() => []);
+  const ratio = applied / advTotal;
+  const c = +((rvs || []).reduce((s: number, r: any) => s + Number(r.cgst || 0), 0) * ratio).toFixed(2);
+  const sg = +((rvs || []).reduce((s: number, r: any) => s + Number(r.sgst || 0), 0) * ratio).toFixed(2);
+  const ig = +((rvs || []).reduce((s: number, r: any) => s + Number(r.igst || 0), 0) * ratio).toFixed(2);
+  const lines: GlLine[] = [
+    { account_code: '2100', account_name: 'Advances from Guests', dr_amount: +(applied - c - sg - ig).toFixed(2), cr_amount: 0, narration: `Advance applied ${folio.id}` },
+  ];
+  if (c > 0) lines.push({ account_code: _ADV_GST.cgst.code, account_name: _ADV_GST.cgst.name, dr_amount: c, cr_amount: 0, narration: `CGST on advance adjusted ${folio.id}` });
+  if (sg > 0) lines.push({ account_code: _ADV_GST.sgst.code, account_name: _ADV_GST.sgst.name, dr_amount: sg, cr_amount: 0, narration: `SGST on advance adjusted ${folio.id}` });
+  if (ig > 0) lines.push({ account_code: _ADV_GST.igst.code, account_name: _ADV_GST.igst.name, dr_amount: ig, cr_amount: 0, narration: `IGST on advance adjusted ${folio.id}` });
+  lines.push({ account_code: ar.code, account_name: ar.name, dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folio.id}` });
+  return { lines, rvIds: (rvs || []).map((r: any) => String(r.id)) };
+}
+
+async function _markVouchersAdjusted(db: any, rvIds: string[], folioId: string, dateIso: string): Promise<void> {
+  if (!rvIds.length) return;
+  const f: any = await db.get("SELECT invoice_number FROM folios WHERE id = ?", [folioId]).catch(() => null);
+  const ph = rvIds.map(() => '?').join(',');
+  await db.run(
+    `UPDATE receipt_vouchers SET status = 'ADJUSTED', adjusted_at = ?, adjusted_folio_id = ?, adjusted_invoice_number = ?
+      WHERE id IN (${ph}) AND status = 'ISSUED'`,
+    // adjusted_at / folio / invoice first, then the id list.
+    [dateIso, folioId, f?.invoice_number || null, ...rvIds]).catch((e: any) => console.error('[RV] mark adjusted failed:', e?.message || e));
+}
+
+async function _cancelVouchersForPayment(db: any, paymentId: string, dateIso: string, reason: string): Promise<void> {
+  await db.run(
+    "UPDATE receipt_vouchers SET status = 'CANCELLED', cancelled_at = ?, cancel_reason = ? WHERE payment_id = ? AND status = 'ISSUED'",
+    [dateIso, String(reason || '').slice(0, 300), paymentId]).catch((e: any) => console.error('[RV] cancel failed:', e?.message || e));
+}
+
 /**
  * Insert a payment row + return the inserted record. payment_type
  * defaults to INTERIM; pass 'ADVANCE' from check-in path and
@@ -3074,6 +3295,9 @@ async function recordFolioPayment(
     reference?: string | null;
     recordedBy?: string | null;
     notes?: string | null;
+    // Required, so every call site had to be revisited: the journal for an
+    // advance is posted HERE now, and it needs the tenant.
+    restaurantId: string;
   }
 ): Promise<any> {
   const id = `FP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -3084,6 +3308,17 @@ async function recordFolioPayment(
     [id, args.folioId, Math.abs(args.amount), args.method, args.type,
      args.reference || null, args.recordedBy || null, args.notes || null]
   );
+  // ADVANCE and INTERIM receipts are cash in hand NOW and post NOW. FINAL and
+  // REFUND are settled by the settlement journal, which reads these rows.
+  if (args.type === 'ADVANCE' || args.type === 'INTERIM') {
+    try {
+      const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [args.folioId]);
+      const row: any = await tenantDb.get("SELECT * FROM folio_payments WHERE id = ?", [id]);
+      if (folio && row) await _postFolioAdvanceGl(tenantDb, args.restaurantId, row, folio, args.recordedBy || null);
+    } catch (e: any) {
+      console.error(`[GL] advance receipt ${id} was recorded but NOT posted:`, e?.message || e);
+    }
+  }
   return tenantDb.get("SELECT * FROM folio_payments WHERE id = ?", [id]);
 }
 
@@ -4836,11 +5071,8 @@ async function settleFolioForBooking(
           if (cgst > 0) glLines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST folio ${folio.id}` });
           if (sgst > 0) glLines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST folio ${folio.id}` });
         }
-        if (advTotal > 0) {
-          const applied = Math.min(advTotal, grandTotal);
-          glLines.push({ account_code: '2100', account_name: 'Advances from Guests', dr_amount: applied, cr_amount: 0, narration: `Advance applied ${folio.id}` });
-          glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folio.id}` });
-        }
+        const _advApp = await _advanceApplicationLines(tenantDb, settled, advances, grandTotal, { code: '1100', name: 'Accounts Receivable — Guests' });
+        glLines.push(..._advApp.lines);
         const mdrFolio = await _mdrConfig(restaurantId);
         for (const p of nonAdv) {
           const amt = Number(p.amount);
@@ -4851,7 +5083,8 @@ async function settleFolioForBooking(
           glLines.push(..._tenderGlLines(mdrFolio, p.payment_method, amt, `${p.payment_method} ${folio.id}`));
           glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
         }
-        await _postGlEntries(tenantDb, restaurantId, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null, _folioCostModule(folio));
+        const _gp1 = await _postGlEntries(tenantDb, restaurantId, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null, _folioCostModule(folio));
+        if (_gp1.ok) await _markVouchersAdjusted(tenantDb, _advApp.rvIds, folio.id, entryDate);
       }
     } catch (glErr) {
       console.error('[GL] folio settlement error:', glErr);
@@ -5810,6 +6043,14 @@ async function _reverseJournal(
       db, restaurantId, reversalRef, date,
       opts.sourceType || 'REVERSAL', opts.sourceId || originalRef, lines, opts.postedBy || null
     );
+    // Reversing a folio's settlement also reverses the advance tax it adjusted,
+    // which puts that tax back in 2201/2211 — so the vouchers it adjusted are
+    // held again, not left marked as used by an invoice that no longer stands.
+    if (result.ok && originalRef.startsWith('FOLIO-')) {
+      await db.run(
+        `UPDATE receipt_vouchers SET status = 'ISSUED', adjusted_at = NULL, adjusted_folio_id = NULL, adjusted_invoice_number = NULL
+          WHERE adjusted_folio_id = ? AND status = 'ADJUSTED'`, [originalRef.slice(6)]).catch(() => {});
+    }
     return { ok: result.ok, reversed: result.ok ? lines.length : 0, reason: result.ok ? undefined : result.reason, reversalRef };
   } catch (e: any) {
     console.error(`[GL] _reverseJournal(${originalRef}) failed:`, e);
@@ -5991,11 +6232,8 @@ async function _postFolioGl(
       if (cgst > 0) lines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST ${folioId}` });
       if (sgst > 0) lines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST ${folioId}` });
     }
-    if (advTotal > 0) {
-      const applied = +Math.min(advTotal, grandTotal > 0 ? grandTotal : advTotal).toFixed(2);
-      lines.push({ account_code: '2100', account_name: 'Advances from Guests', dr_amount: applied, cr_amount: 0, narration: `Advance applied ${folioId}` });
-      lines.push({ account_code: arCode, account_name: arName, dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folioId}` });
-    }
+    const _advApp3 = await _advanceApplicationLines(db, folio, advances, grandTotal > 0 ? grandTotal : null, { code: arCode, name: arName });
+    lines.push(..._advApp3.lines);
     const mdrF = await _mdrConfig(restaurantId);
     for (const p of nonAdv) {
       const amt = +Number(p.amount || 0).toFixed(2);
@@ -6009,7 +6247,8 @@ async function _postFolioGl(
     // EVENT_SETTLEMENT (4050) and spa settlement (4040). Without this the two
     // modules with the least accounting coverage were also the only ones whose
     // revenue journals carried no cost centre.
-    await _postGlEntries(db, restaurantId, journalRef, entryDate, opts.sourceType, folioId, lines, opts.postedBy || null, _folioCostModule(folio));
+    const _gp3 = await _postGlEntries(db, restaurantId, journalRef, entryDate, opts.sourceType, folioId, lines, opts.postedBy || null, _folioCostModule(folio));
+    if (_gp3.ok) await _markVouchersAdjusted(db, _advApp3.rvIds, folioId, entryDate);
   } catch (e) {
     console.error(`[GL] _postFolioGl(${folioId}) failed:`, e);
   }
@@ -30791,14 +31030,42 @@ ${data.tenant.name}`;
       } catch (e) { console.warn('[events] accounts bridge (post) failed:', e); }
       // Phase 3.1 — post the receipt to the GL as an advance from the customer
       // (Dr Cash/Bank / Cr 2100 Advances). Revenue is recognized at checkout.
+      // A receipt taken BEFORE the event is invoiced is an advance: GST falls due
+      // on it now (Section 13(2)) and it gets a Rule 50 receipt voucher. A receipt
+      // taken AFTER the invoice is raised is paying an invoice whose tax is
+      // already charged, so it is posted exactly as before, untaxed and unvouchered.
+      let receiptVoucher: any = null;
       try {
-        const evGuard = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [`EVENT-PAY-${pid}`]);
+        const evRef = `EVENT-PAY-${pid}`;
+        const evGuard = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [evRef]);
         if (!evGuard) {
+          const payDate = String(b.paid_at || new Date().toISOString().slice(0, 10)).slice(0, 10);
           const cashAcct = _glAccountForPaymentMethod(b.method);
-          await _postGlEntries(db, req.params.id, `EVENT-PAY-${pid}`, (b.paid_at || new Date().toISOString().slice(0, 10)), 'EVENT_ADVANCE', pid, [
+          const isAdvance = !bk.folio_id;
+          const reg = isAdvance ? await _tenantGstRegistration(req.params.id) : { gstin: null, state: null };
+          const rate = isAdvance && reg.gstin ? await resolveEventGstRate(db) : 0;
+          const split = _advanceTaxSplit(amount, rate);
+          if (split.tax > 0) await _ensureAdvanceGstAccounts(db);
+          const evLines: GlLine[] = [
             { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Event advance ${bk.customer_name || ''}`.trim() },
-            { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Event advance ${req.params.bid}` },
-          ], req.user?.email || null);
+            { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: split.taxable, narration: `Event advance ${req.params.bid}` },
+          ];
+          if (split.cgst > 0) evLines.push({ account_code: '2201', account_name: 'GST on Advances — CGST', dr_amount: 0, cr_amount: split.cgst, narration: `CGST on event advance ${req.params.bid}` });
+          if (split.sgst > 0) evLines.push({ account_code: '2211', account_name: 'GST on Advances — SGST', dr_amount: 0, cr_amount: split.sgst, narration: `SGST on event advance ${req.params.bid}` });
+          await _postGlEntries(db, req.params.id, evRef, payDate, 'EVENT_ADVANCE', pid, evLines, req.user?.email || null);
+          if (isAdvance) {
+            receiptVoucher = await _issueReceiptVoucher(db, {
+              module: 'EVENTS', receiptDate: payDate, amount, rate,
+              basis: rate > 0 ? 'EVENT_GST_RATE' : (reg.gstin ? 'EVENT_GST_DISABLED' : 'NOT_REGISTERED'), split,
+              customerName: bk.customer_name || null, customerGstin: bk.customer_gstin || null, customerAddress: bk.customer_address || null,
+              description: `Advance against event booking ${bk.id}${bk.event_date ? ` for ${_glPostDate(bk.event_date)}` : ''}${bk.event_type ? ` (${String(bk.event_type).replace(/_/g, ' ').toLowerCase()})` : ''}`,
+              method: b.method || null, reference: b.reference || null,
+              bookingId: bk.id, eventBookingId: bk.id, folioId: null,
+              paymentId: pid, paymentSource: 'event_payments', journalRef: evRef,
+              placeOfSupply: reg.state, issuedBy: req.user?.email || req.user?.id || null,
+            });
+            await db.run("UPDATE event_payments SET receipt_voucher_id = ? WHERE id = ?", [receiptVoucher.id, pid]).catch(() => {});
+          }
         }
       } catch (glErr) { console.error('[GL] event-payment capture failed:', glErr); }
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'PAYMENT_RECORDED', summary: `Payment ${amount} via ${b.method || 'CASH'} (total paid ${paid})` });
@@ -30807,7 +31074,10 @@ ${data.tenant.name}`;
         grand_total: Number(bk.total_amount || 0), paid,
         balance: round2(Math.max(0, Number(bk.total_amount || 0) - paid)),
       });
-      res.status(201).json({ success: true, payment_id: pid, paid, balance: round2(Number(bk.total_amount || 0) - paid) });
+      res.status(201).json({
+        success: true, payment_id: pid, paid, balance: round2(Number(bk.total_amount || 0) - paid),
+        receipt_voucher: receiptVoucher ? { id: receiptVoucher.id, rv_number: receiptVoucher.rv_number, gst: round2(Number(receiptVoucher.cgst || 0) + Number(receiptVoucher.sgst || 0) + Number(receiptVoucher.igst || 0)) } : null,
+      });
     } catch (err: any) { res.status(500).json({ error: "Failed to record payment" }); }
   });
 
@@ -30836,6 +31106,9 @@ ${data.tenant.name}`;
         sourceType: 'EVENT_ADVANCE_REVERSAL', sourceId: req.params.pid,
         reason: 'Event payment deleted', postedBy: req.user?.email || req.user?.id || null,
       });
+      // The reversal takes the advance tax back out with the rest of the journal;
+      // the voucher that recorded it is cancelled on the same date.
+      await _cancelVouchersForPayment(db, req.params.pid, new Date().toISOString().slice(0, 10), 'Event payment deleted');
       const paid = await recomputeEventPaid(db, pay.booking_id);
       // Re-project the schedule from the remaining receipts so reversing a payment
       // correctly un-marks the instalments it had covered.
@@ -33103,22 +33376,12 @@ ${data.tenant.name}`;
       // GL sub-block stays balanced. A receipt that fully clears the bill stays FINAL.
       const settlesNow = reqType !== 'REFUND' && amount >= out0.outstanding - 0.01;
       const recordType: 'INTERIM' | 'FINAL' | 'REFUND' = reqType === 'REFUND' ? 'REFUND' : (settlesNow ? 'FINAL' : 'INTERIM');
-      const payment = await recordFolioPayment(db, {
+      const payment = await recordFolioPayment(db, { restaurantId: req.params.id,
         folioId: req.params.fid, amount, method,
         type: recordType, reference: b.reference || null,
         recordedBy: req.user?.email || req.user?.id || null, notes: b.notes || null,
       });
-      if (recordType === 'INTERIM') {
-        try {
-          const cashAcct = _glAccountForPaymentMethod(method);
-          const today = new Date().toISOString().slice(0, 10);
-          await _postGlEntries(db, req.params.id, `INTPAY-${(payment as any).id}`, today,
-            'SPA_INTERIM', (payment as any).id, [
-              { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Spa interim: folio ${req.params.fid}` },
-              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Spa interim: folio ${req.params.fid}` },
-            ], req.user?.email || req.user?.id || null, 'SPA');
-        } catch (glErr) { console.error('[GL] spa interim payment error:', glErr); }
-      }
+      // An INTERIM receipt is posted by recordFolioPayment (same ref, same source).
       const out = await getFolioOutstanding(db, req.params.fid);
       if (out && out.is_fully_paid) {
         await db.run("UPDATE folios SET status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
@@ -33355,7 +33618,7 @@ ${data.tenant.name}`;
     const seq = await getNextTenantSequence(db, `spa-invoice-${year}`);
     const invNum = `SPA-${year}-${String(seq).padStart(5, '0')}`;
     const out = await getFolioOutstanding(db, folioId);
-    await recordFolioPayment(db, { folioId, amount: out?.outstanding || amt + gstAmt, method: paymentMethod || 'CASH', type: 'FINAL', recordedBy });
+    await recordFolioPayment(db, { restaurantId, folioId, amount: out?.outstanding || amt + gstAmt, method: paymentMethod || 'CASH', type: 'FINAL', recordedBy });
     await db.run("UPDATE folios SET invoice_number = ?, status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
       [invNum, paymentMethod || 'CASH', folioId]);
     // Phase 3.1 — capture spa quick-sale (package / membership / retail) to the GL.
@@ -38071,7 +38334,7 @@ ${data.tenant.name}`;
               [mfId, groupId]
             );
             await tenantDb.run("UPDATE room_booking_groups SET master_folio_id = ? WHERE id = ?", [mfId, groupId]);
-            await recordFolioPayment(tenantDb, {
+            await recordFolioPayment(tenantDb, { restaurantId: req.params.id,
               folioId: mfId,
               amount: advanceAmount,
               method: (advanceMethod || 'CASH').toUpperCase(),
@@ -38149,7 +38412,7 @@ ${data.tenant.name}`;
         folioRow = { id: newFolio.id };
       }
       const folioId: string = folioRow.id;
-      await recordFolioPayment(tenantDb, {
+      await recordFolioPayment(tenantDb, { restaurantId: req.params.id,
         folioId,
         amount,
         method,
@@ -44898,7 +45161,7 @@ ${data.tenant.name}`;
       // in the ledger (not just stored on the group row).
       try {
         const masterFolioId = await ensureGroupMasterFolio(req.params.id, groupId);
-        await recordFolioPayment(db, {
+        await recordFolioPayment(db, { restaurantId: req.params.id,
           folioId: masterFolioId,
           amount: amt,
           method: (payment_method || 'CASH').toUpperCase(),
@@ -45984,7 +46247,7 @@ ${data.tenant.name}`;
           return res.status(400).json({ error: `advance_method must be one of ${Array.from(VALID_METHODS).join(', ')}` });
         }
         try {
-          await recordFolioPayment(tenantDb, {
+          await recordFolioPayment(tenantDb, { restaurantId: req.params.id,
             folioId: folio.id,
             amount: advanceAmount,
             method: advanceMethod,
@@ -46425,7 +46688,7 @@ ${data.tenant.name}`;
             return res.status(400).json({ error: `additional_payment_method must be one of ${Array.from(VALID).join(', ')}` });
           }
           try {
-            await recordFolioPayment(tenantDb, {
+            await recordFolioPayment(tenantDb, { restaurantId: req.params.id,
               folioId: openFolio.id,
               amount: additionalAmt,
               method: additionalMethod,
@@ -46961,12 +47224,40 @@ ${data.tenant.name}`;
             const refundApplied = +Math.min(Number(refund.refund_amount || 0), advTotal).toFixed(2);
             const forfeit = +(advTotal - refundApplied).toFixed(2);
             const cashAcct = _glAccountForPaymentMethod(advMethod);
+            // Advances now carry GST in 2201/2211 and only their NET sits in 2100.
+            // On cancellation the tax on the REFUNDED part is reversed (no supply
+            // was made), while the FORFEITED part is consideration for the
+            // cancellation — a taxable supply — so its tax moves to output GST
+            // and stays paid.
+            const _cRvs: any[] = await tenantDb.query(
+              "SELECT id, cgst, sgst, igst FROM receipt_vouchers WHERE folio_id = ? AND status = 'ISSUED'", [cf.id]).catch(() => []);
+            const _rc = +(_cRvs || []).reduce((s: number, r: any) => s + Number(r.cgst || 0), 0).toFixed(2);
+            const _rs = +(_cRvs || []).reduce((s: number, r: any) => s + Number(r.sgst || 0), 0).toFixed(2);
+            const _ri = +(_cRvs || []).reduce((s: number, r: any) => s + Number(r.igst || 0), 0).toFixed(2);
+            const _rTax = +(_rc + _rs + _ri).toFixed(2);
             const lines: GlLine[] = [
-              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: advTotal, cr_amount: 0, narration: `Cancel booking ${req.params.bookingId}` },
+              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: +(advTotal - _rTax).toFixed(2), cr_amount: 0, narration: `Cancel booking ${req.params.bookingId}` },
             ];
+            if (_rc > 0) lines.push({ account_code: '2201', account_name: 'GST on Advances — CGST', dr_amount: _rc, cr_amount: 0, narration: `Advance CGST unwound ${req.params.bookingId}` });
+            if (_rs > 0) lines.push({ account_code: '2211', account_name: 'GST on Advances — SGST', dr_amount: _rs, cr_amount: 0, narration: `Advance SGST unwound ${req.params.bookingId}` });
+            if (_ri > 0) lines.push({ account_code: '2221', account_name: 'GST on Advances — IGST', dr_amount: _ri, cr_amount: 0, narration: `Advance IGST unwound ${req.params.bookingId}` });
             if (refundApplied > 0) lines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: refundApplied, narration: `Refund on cancel ${req.params.bookingId}` });
-            if (forfeit > 0) lines.push({ account_code: '4900', account_name: 'Other Income', dr_amount: 0, cr_amount: forfeit, narration: `Forfeited advance ${req.params.bookingId}` });
-            await _postGlEntries(tenantDb, req.params.id, journalRef, new Date().toISOString().slice(0, 10), 'BOOKING_CANCEL', req.params.bookingId, lines, req.user?.id || req.user?.email || null);
+            if (forfeit > 0) {
+              const _share = advTotal > 0 ? forfeit / advTotal : 0;
+              const _fc = +(_rc * _share).toFixed(2), _fs = +(_rs * _share).toFixed(2), _fi = +(_ri * _share).toFixed(2);
+              lines.push({ account_code: '4900', account_name: 'Other Income', dr_amount: 0, cr_amount: +(forfeit - _fc - _fs - _fi).toFixed(2), narration: `Forfeited advance ${req.params.bookingId}` });
+              if (_fc > 0) lines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: _fc, narration: `CGST on forfeited advance ${req.params.bookingId}` });
+              if (_fs > 0) lines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: _fs, narration: `SGST on forfeited advance ${req.params.bookingId}` });
+              if (_fi > 0) lines.push({ account_code: '2220', account_name: 'GST Payable — IGST', dr_amount: 0, cr_amount: _fi, narration: `IGST on forfeited advance ${req.params.bookingId}` });
+            }
+            const _cancelDate = new Date().toISOString().slice(0, 10);
+            const _cgp = await _postGlEntries(tenantDb, req.params.id, journalRef, _cancelDate, 'BOOKING_CANCEL', req.params.bookingId, lines, req.user?.id || req.user?.email || null);
+            if (_cgp.ok && (_cRvs || []).length) {
+              const _ph = _cRvs.map(() => '?').join(',');
+              await tenantDb.run(
+                `UPDATE receipt_vouchers SET status = 'CANCELLED', cancelled_at = ?, cancel_reason = ? WHERE id IN (${_ph}) AND status = 'ISSUED'`,
+                [_cancelDate, forfeit > 0 ? `Booking cancelled — ${refundApplied > 0 ? 'part refunded, part forfeited' : 'advance forfeited'}` : 'Booking cancelled — advance refunded', ..._cRvs.map((r: any) => r.id)]).catch(() => {});
+            }
           }
         }
       } catch (glErr) { console.error('[GL] booking-cancel capture failed:', glErr); }
@@ -48607,6 +48898,58 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Receipt vouchers (Rule 50) ─────────────────────────────────────────────
+  // A hotel voucher needs Guest Bills access; an event voucher needs Event
+  // Bookings access. Owners pass both.
+  const _canSeeVoucher = (req: AuthRequest, module: string) =>
+    String(module || '').toUpperCase() === 'EVENTS' ? _roleHasTab(req, 'EVENTS_BOOKINGS') : _roleHasTab(req, 'FOLIOS');
+
+  app.get("/api/restaurant/:id/receipt-vouchers", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { folio_id, event_booking_id, booking_id } = req.query as Record<string, string>;
+      if (!folio_id && !event_booking_id && !booking_id) {
+        return res.status(400).json({ error: 'Pass folio_id, event_booking_id or booking_id.', code: 'FILTER_REQUIRED' });
+      }
+      const db = await getTenantDb(req.params.id);
+      const where: string[] = []; const params: any[] = [];
+      if (folio_id) { where.push('folio_id = ?'); params.push(folio_id); }
+      if (event_booking_id) { where.push('event_booking_id = ?'); params.push(event_booking_id); }
+      if (booking_id) { where.push('booking_id = ?'); params.push(booking_id); }
+      const rows: any[] = await db.query(`SELECT * FROM receipt_vouchers WHERE ${where.join(' OR ')} ORDER BY receipt_date, rv_number`, params).catch(() => []);
+      const visible: any[] = [];
+      for (const r of rows) if (await _canSeeVoucher(req, r.module)) visible.push(r);
+      res.json(visible);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to list receipt vouchers' }); }
+  });
+
+  app.get("/api/restaurant/:id/receipt-vouchers/:rvId/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rv: any = await db.get("SELECT * FROM receipt_vouchers WHERE id = ?", [req.params.rvId]);
+      if (!rv) return res.status(404).json({ error: 'Receipt voucher not found' });
+      if (!(await _canSeeVoucher(req, rv.module))) return res.status(403).json({ error: 'Forbidden' });
+      const rest: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [req.params.id]).catch(() => ({}));
+      const seller = _invoiceSeller(rest || {});
+      const pdf = await generateReceiptVoucherPdf({
+        rv_number: rv.rv_number, receipt_date: rv.receipt_date, status: rv.status, module: rv.module,
+        seller: { name: seller.name, address: seller.address, city: seller.city, state: seller.state, pincode: seller.pincode, gstin: seller.gstin, phone: seller.phone, email: seller.email },
+        customer: { name: rv.customer_name, address: rv.customer_address, gstin: rv.customer_gstin },
+        description: rv.description || 'Advance received',
+        amount: Number(rv.amount || 0), taxable_value: Number(rv.taxable_value || 0), gst_rate: Number(rv.gst_rate || 0),
+        cgst: Number(rv.cgst || 0), sgst: Number(rv.sgst || 0), igst: Number(rv.igst || 0),
+        rate_basis: rv.rate_basis, place_of_supply: rv.place_of_supply,
+        payment_method: rv.payment_method, reference: rv.reference,
+        booking_ref: rv.event_booking_id || rv.booking_id || rv.folio_id,
+        adjusted_invoice_number: rv.adjusted_invoice_number, adjusted_at: rv.adjusted_at,
+        cancelled_at: rv.cancelled_at, cancel_reason: rv.cancel_reason,
+      });
+      writeObjectAudit(db, req, { objectType: 'RECEIPT_VOUCHER', objectId: rv.id, action: 'PRINTED', summary: `Receipt voucher ${rv.rv_number} printed` }).catch(() => {});
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${rv.rv_number}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) { console.error('receipt voucher pdf error:', err); res.status(500).json({ error: 'Failed to generate receipt voucher' }); }
+  });
+
   app.post("/api/restaurant/:id/hotel/folios/:folioId/payments", authenticate, hotelStaff, requireTabAction('FOLIOS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -48633,7 +48976,7 @@ ${data.tenant.name}`;
       if (!VALID_TYPES.has(type)) {
         return res.status(400).json({ error: `payment_type must be one of ${Array.from(VALID_TYPES).join(', ')}` });
       }
-      const payment = await recordFolioPayment(tenantDb, {
+      const payment = await recordFolioPayment(tenantDb, { restaurantId: req.params.id,
         folioId: req.params.folioId,
         amount,
         method,
@@ -48642,35 +48985,10 @@ ${data.tenant.name}`;
         recordedBy: req.user?.id || req.user?.email || null,
         notes: req.body?.notes || null,
       });
-      // GL: Dr Cash/Bank, Cr Advances from Guests (advance receipt liability)
-      if (type === 'ADVANCE') {
-        try {
-          const cashAcct = _glAccountForPaymentMethod(method);
-          const today = new Date().toISOString().slice(0, 10);
-          await _postGlEntries(tenantDb, req.params.id, `ADV-${(payment as any).id}`, today,
-            'FOLIO_ADVANCE', (payment as any).id, [
-              { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Advance: folio ${req.params.folioId}` },
-              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Advance: folio ${req.params.folioId}` },
-            ], req.user?.id || req.user?.email || null, _folioCostModule(folio));
-        } catch (glErr) { console.error('[GL] advance payment error:', glErr); }
-      }
-      // GL timing fix: an INTERIM (mid-stay) receipt is cash in the drawer NOW,
-      // not at checkout. Post it immediately as Dr Cash/Bank, Cr 2100 Advances
-      // from Guests — an advance in substance — so it appears in the Cash Book on
-      // the day it was received. Settlement applies ADVANCE+INTERIM against AR
-      // (see settleFolioForBooking / _postFolioGl), so cash is never
-      // double-counted and each GL sub-block stays internally balanced.
-      else if (type === 'INTERIM') {
-        try {
-          const cashAcct = _glAccountForPaymentMethod(method);
-          const today = new Date().toISOString().slice(0, 10);
-          await _postGlEntries(tenantDb, req.params.id, `INTPAY-${(payment as any).id}`, today,
-            'FOLIO_PAYMENT', (payment as any).id, [
-              { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Interim payment: folio ${req.params.folioId}` },
-              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Interim payment: folio ${req.params.folioId}` },
-            ], req.user?.id || req.user?.email || null, _folioCostModule(folio));
-        } catch (glErr) { console.error('[GL] interim payment error:', glErr); }
-      }
+      // The ADVANCE / INTERIM journal (and a hotel advance's GST and receipt
+      // voucher) is posted by recordFolioPayment itself — this route used to
+      // post its own, which is why the four other paths that record advances
+      // never reached the ledger.
       // Return the updated outstanding so the UI can update without
       // a second round-trip.
       const outstanding = await getFolioOutstanding(tenantDb, req.params.folioId);
@@ -48700,9 +49018,29 @@ ${data.tenant.name}`;
         `UPDATE folio_payments SET is_voided = 1, voided_at = ?, voided_by = ?, voided_reason = ? WHERE id = ?`,
         [now, req.user?.id || req.user?.email || null, reason, req.params.paymentId]
       );
+      // An advance or interim receipt was posted — and a hotel one taxed and
+      // vouchered — when it was received. Voiding it without reversing that left
+      // the cash and the tax standing for money that was handed back. Reversed
+      // only while the bill is open: once it has settled, the settlement journal
+      // has already applied this advance, and that needs a credit note instead.
+      let glReversed = false;
+      const _pt = String(payment.payment_type || '').toUpperCase();
+      if (_pt === 'ADVANCE' || _pt === 'INTERIM') {
+        const _fol: any = await tenantDb.get("SELECT status FROM folios WHERE id = ?", [payment.folio_id]).catch(() => null);
+        if (_fol && !['settled', 'closed'].includes(String(_fol.status || '').toLowerCase())) {
+          const _d = new Date().toISOString().slice(0, 10);
+          const _ref = _pt === 'ADVANCE' ? `ADV-${payment.id}` : `INTPAY-${payment.id}`;
+          const _rev = await _reverseJournal(tenantDb, req.params.id, _ref, {
+            reversalRef: `REV-${_ref}`, date: _d, sourceType: 'FOLIO_ADVANCE_REVERSAL', sourceId: payment.id,
+            reason: `Payment voided: ${reason}`, postedBy: req.user?.id || req.user?.email || null,
+          });
+          glReversed = !!(_rev.ok && _rev.reversed > 0);
+          await _cancelVouchersForPayment(tenantDb, payment.id, _d, `Payment voided: ${reason}`);
+        }
+      }
       const outstanding = await getFolioOutstanding(tenantDb, payment.folio_id);
       await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: payment.folio_id, action: 'PAYMENT_VOIDED', summary: `Payment ₹${Number(payment.amount || 0).toLocaleString('en-IN')} (${payment.payment_method || ''}) voided: ${reason}`, before: { payment_id: payment.id, amount: payment.amount } }).catch(() => {});
-      res.json({ ok: true, outstanding });
+      res.json({ ok: true, outstanding, gl_reversed: glReversed });
     } catch (err: any) {
       console.error('folio payment void error:', err);
       res.status(500).json({ error: err?.message || 'Failed to void payment' });
@@ -49903,11 +50241,8 @@ ${data.tenant.name}`;
             if (cgst > 0) glLines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST folio ${folio.id}` });
             if (sgst > 0) glLines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST folio ${folio.id}` });
           }
-          if (advTotal > 0) {
-            const applied = Math.min(advTotal, grandTotal);
-            glLines.push({ account_code: '2100', account_name: 'Advances from Guests', dr_amount: applied, cr_amount: 0, narration: `Advance applied ${folio.id}` });
-            glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folio.id}` });
-          }
+          const _advApp2 = await _advanceApplicationLines(tenantDb, refreshed, advances, grandTotal, { code: '1100', name: 'Accounts Receivable — Guests' });
+          glLines.push(..._advApp2.lines);
           for (const p of nonAdv) {
             const amt = Number(p.amount);
             if (amt <= 0) continue;
@@ -49916,7 +50251,8 @@ ${data.tenant.name}`;
             glLines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method} ${folio.id}` });
             glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
           }
-          await _postGlEntries(tenantDb, req.params.id, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null, _folioCostModule(folio));
+          const _gp2 = await _postGlEntries(tenantDb, req.params.id, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null, _folioCostModule(folio));
+          if (_gp2.ok) await _markVouchersAdjusted(tenantDb, _advApp2.rvIds, folio.id, entryDate);
         }
       } catch (glErr) {
         console.error('[GL] standalone settle error:', glErr);
@@ -58444,8 +58780,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'backfill-by-section',
+    commit_marker: 'advances-taxed-and-vouchered',
     code_features: [
+      'advances-taxed-and-vouchered — four owner requests in one change, because they are one mechanism. (1) HOTEL ADVANCES REACH THE LEDGER. The journal lived inside ONE route (POST /hotel/folios/:folioId/payments) while check-in, record-advance, group booking creation and the group deposit wrote the same folio_payments row by calling recordFolioPayment directly - on the live tenant 41 hotel advances worth 87,334.98 had no journal (the 46 / 1,77,334.98 first reported wrongly included 5 event rows that are mirrors of event_payments and ARE posted). Settlement then debited Advances from Guests for money never credited. The posting now lives INSIDE recordFolioPayment, which now REQUIRES the tenant id so every one of its eight callers had to be revisited; the hotel and spa routes no longer post their own copies. Journal refs and source types are the ones the old route used, so nothing already posted is posted twice, and event folios are skipped because their advance row mirrors event_payments. Voiding an advance on an open folio now reverses its journal - it reversed nothing before. (2) GST ON ADVANCES. For a service, Section 13(2) makes tax due on the earlier of invoice and receipt, so an advance for a room or a hall is taxed in the month received. The tax goes to NEW accounts 2201/2211/2221 GST on Advances, not to invoice tax, so GSTR-1 Tables 4/7/12 (which read 2200/2210/2220) never mistake an advance for a sale. Rate: hotel = the slab rate already on the folio room charges, then the booking tariff, then 18 percent only where not determinable (Rule 50 proviso); events = the event GST rate; nil where the tenant has no GSTIN. An event receipt taken AFTER the invoice is paying that invoice and is posted exactly as before. (3) RECEIPT VOUCHERS. A Rule 50 voucher RV-<FY>-NNNNN is issued for every hotel and event advance, printable as a PDF carrying every Rule 50 particular, linked at receipt to the booking and folio and marked ADJUSTED with the tax invoice number at settlement, for traceability. The voucher is the SOURCE OF TRUTH for the tax on an advance. The three copy-pasted settlement blocks are now ONE function, _advanceApplicationLines, which reverses exactly the voucher tax out of 2201/2211 so it is paid once; reversing a folio settlement re-opens the vouchers it adjusted; deleting an event advance cancels its voucher; cancelling a hotel booking reverses the tax on the refunded part and moves the tax on a forfeited part to output GST, because forfeited consideration is a taxable supply. (4) GSTR-1 TABLES 11A/11B from the vouchers: 11A advances received in the period and not adjusted within it, 11B earlier advances adjusted or refunded in it. The return total is now invoices + 11A - 11B and still reconciles to GST Outstanding, which with GSTR-3B now counts both sets of accounts. BACKFILL gains folio_advances (posted GROSS with no tax and no voucher: settlements already took these out of 2100 at full value, and a voucher minted today for a receipt months ago would misdate a statutory document; voided folios skipped unless a cancel journal unwinds them) and spa_folios (all 13 spa bills predate spa GL capture on 2 Aug 2026). Smoke: TC-ADV-HOTEL-LEDGER, TC-ADV-HOTEL-GST, TC-ADV-HOTEL-RV-ADJUSTED, TC-RV-PDF, TC-ADV-EVENT-RV, TC-GSTR1-11A-RECONCILES, TC-RV-CANCEL-ON-DELETE, TC-BACKFILL-ADV-SPA-DRYRUN. tsc + vite build clean.',
       'backfill-by-section — POST /accounting/backfill-gl gains an optional sections=folios,orders,supplier_payments. Absent, every section runs exactly as before. It exists because the owner approved posting the 13 historical supplier payments, and the same call would otherwise also have posted 132 folio and order journals nobody had looked at: approval to post one kind of history is not approval to post the others. TC-BACKFILL-SECTIONS asserts a scoped run considers no folios or orders, against an unscoped run that does find some, so a scope that is silently ignored fails.',
       'supplier-payments-reach-the-ledger — two production defects found while preparing M-2, both older than today and both fixed before building on them. (1) NO SUPPLIER PAYMENT HAD EVER REACHED THE LEDGER. On the live tenant 14 payments worth 72,600 rupees had no journal; Accounts Payable carried 79 invoice credits (23,30,739) and NOT ONE DEBIT, so the balance sheet showed every supplier bill ever raised as still owed and cash and bank never went down for what was paid. There were no GL exceptions to show for it. The payment route selected `pan` from `suppliers`; the column is `pan_number`. Postgres refused the statement BEFORE _postGlEntries was reached and the surrounding catch only logged it, so each payment marked its invoice PAID while the books said otherwise. No smoke test had ever posted a supplier payment, which is how it survived. The journal is now ONE function, _postSupplierPaymentGl, shared by the route and the backfill so the two cannot drift. Lifting it corrected two more things: the TDS threshold financial year was the CALENDAR year (getYearIST), wrong from January to March, and is now the financial year of the payment itself; and a failed supplier lookup can no longer stop a payment posting - the payable and cash sides post, TDS is not withheld, and the failure is logged loudly. POST /accounting/backfill-gl now also posts historical supplier payments, reported in their own supplier_payments section so no existing counter changes meaning. History is backfilled WITHOUT TDS unless apply_tds=1: the payment rows record that a payable was cleared, not whether tax was actually held back at the time, and booking a TDS liability for a withholding that never happened would create a debt to the government out of nothing. A dry run lists, per payment, what the rule would withhold. (2) THE SPA INVOICES AND PAYMENTS SCREEN HAD NEVER LOADED. GET /accounts/spa-billing was registered after GET /accounts/:accountId, Express matches in registration order, and every call was answered by the customer-account route as an account called spa-billing: 404 Account not found. The screen tests r.ok, so it showed nothing, for everyone - including the GST button M-3b had just put on it. Moved above that route; the other literal /accounts routes were checked and are not shadowed. It also had no gate beyond sign-in while listing client names, phones and amounts, and now requires Spa access and the SPA_BILLING tab; nobody loses access by that because the route returned nothing. Also fixed a test-ordering fault from M-3b: its probe orders were placed between the GST Outstanding fetch and the GSTR-3B fetch, putting 40 rupees of output tax into one and not the other. At rest both read 93,630.20. Smoke: TC-SUP-PAY-GL (a supplier payment posts, AP debited and cash credited for the amount, with a non-empty journal asserted), TC-SPA-BILLING-REACHABLE, TC-BACKFILL-SUP-PAY-DRYRUN (a dry run lists payments and writes nothing). tsc clean.',
       'buyer-gstin-on-every-bill — M-3 second half, which closes M-3. Table 4 of GSTR-1 (invoice-level B2B) could only ever contain hotel and event supplies, because those were the only two bills with anywhere to keep a buyer GSTIN. A company paying for a working lunch or a spa package could not get a claimable tax invoice at all, and its supply was reported as B2C. NOW EVERY KIND OF BILL CAN CARRY ONE. A restaurant bill is two different things and the details go on whichever is the INVOICE: a dine-in table is ONE invoice across several order rounds with the number on the SESSION, a takeaway/delivery/manual bill is one ORDER with its own number. So table_sessions and orders both gained customer_gstin + customer_address, and GSTR-1 reads the session first and the order second. A spa folio has no booking to carry a GSTIN the way hotel and event folios do, so folios gained the same two columns - added in ALL THREE places the folios table is created (createHotelTables, createSpaTables, the events schema), because each owns the table for its own kind of tenant and a migration in one would have left the other two without the column. ONE RULE SET: _readBuyerGstDetails lifts the event route own semantics, so every bill refuses a malformed GSTIN (GSTIN_INVALID) and refuses a GSTIN WITHOUT AN ADDRESS (ADDRESS_REQUIRED) - Rule 46 needs both, and a half-filled B2B invoice is worse than a B2C one because it looks claimable and is not. A round on a live table session is refused with SESSION_INVOICE naming the session, rather than saved somewhere the session invoice silently overrides. All three routes are audited GST_DETAILS_UPDATED with before and after, because they change what a tax document says about its recipient, and all three are separate from invoice edits: the fields carry no money, so a company can ask for a GST bill after paying and staff add the details and reprint. GSTR-1 NOW AGGREGATES B2B BY INVOICE, not by journal: revenue posts one ORDER journal per round, so a four-round table bill used to be at risk of four Table 4 lines. Each row also carries its source (HOTEL/EVENTS/SPA/RESTAURANT). The folio lookup retries WITHOUT f.customer_gstin if that column is missing, instead of relying on a .catch that returned [] - that catch would have silently dropped every hotel and event B2B invoice from the return, the exact failure this code exists to prevent. PRINTS ON ALL FOUR BILL RENDERERS: the thermal ESC/POS invoice, the owner-designed template, the legacy thermal HTML, and the spa PDF (which had gstin: null hard-coded). On a tax invoice the buyer block prints whenever a GSTIN is present even if the owner template hides the customer line, because Rule 46 requires it. FIXED IN PASSING: the spa billing list never returned invoice_number, so every spa invoice downloaded named by its folio id; and Table 12 raised no code, set one before filing in red over a 2,000 rupee discount contra - only positive turnover can need a code. Smoke: TC-INV-BUYER-GST-RULES (malformed refused, missing address refused, complete saved), TC-GSTR1-B2B-RESTAURANT (two orders settled seconds apart, one with a GSTIN: exactly one Table 4 row for it, source RESTAURANT, valued at that one order and not both), TC-GSTR1-B2B-SPA (a real spa bill given a GSTIN appears under its own invoice number, then restored). Test GSTINs are shape-valid and unique per run, and are cleared afterwards so no invented GSTIN stays on the books. tsc + vite build clean.',
@@ -59348,7 +59685,9 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as Record<string, string>;
-      const OUTPUT_CODES = ['2200', '2210', '2220']; // GST Payable — CGST / SGST / IGST (liability)
+      // Invoice GST (2200/2210/2220) and GST on ADVANCES (2201/2211/2221): both are
+      // tax the business owes, so both are outstanding.
+      const OUTPUT_CODES = ['2200', '2210', '2220', '2201', '2211', '2221'];
       const ITC_CODES    = ['1300', '1310', '1320']; // ITC Receivable — CGST / SGST / IGST (asset)
       const allCodes = [...OUTPUT_CODES, ...ITC_CODES];
       const ph = allCodes.map(() => '?').join(',');
@@ -59759,6 +60098,70 @@ ${data.tenant.name}`;
         await _postOrderGl(db, req.params.id, o, req.user?.email || 'BACKFILL');
         (await has(ref) ? posted : stillMissing).push(ref);
       }
+      // 4) HOTEL ADVANCE / INTERIM receipts that never reached the ledger. Posted
+      // GROSS, with no GST and no voucher: the settlement journals already posted
+      // for these folios took the advance out of 2100 at its full amount, so a
+      // tax split now would drive 2100 negative, and a voucher minted today for a
+      // receipt months ago would misdate a statutory document. Event folios are
+      // excluded — their advance rows mirror event_payments, already posted as
+      // EVENT-PAY. A voided folio's advance is posted only where a cancellation
+      // journal already unwinds it; otherwise it is reported for review.
+      const faRows: any[] = !want('folio_advances') ? [] : await db.query(
+        `SELECT p.id, p.folio_id, p.amount, p.payment_type, p.payment_method, p.recorded_at,
+                f.status AS folio_status, f.booking_id, f.folio_kind
+           FROM folio_payments p JOIN folios f ON f.id = p.folio_id
+          WHERE p.is_voided = 0 AND p.payment_type IN ('ADVANCE','INTERIM')
+            AND UPPER(COALESCE(f.folio_kind,'HOTEL')) = 'HOTEL'
+            AND TO_CHAR(p.recorded_at,'YYYY-MM-DD') BETWEEN ? AND ?
+          ORDER BY p.recorded_at`, [from, to]).catch(() => []);
+      const faDetail: any[] = []; let faAlready = 0; let faPosted = 0;
+      for (const p of faRows) {
+        const ref = String(p.payment_type).toUpperCase() === 'ADVANCE' ? `ADV-${p.id}` : `INTPAY-${p.id}`;
+        if (await has(ref)) { faAlready++; continue; }
+        const fst = String(p.folio_status || '').toLowerCase();
+        const base = { journal_ref: ref, amount: Number(p.amount || 0), received: _glPostDate(p.recorded_at), folio_status: fst };
+        if (fst === 'voided' && !(p.booking_id && await has(`CANCEL-${p.booking_id}`))) {
+          faDetail.push({ ...base, status: 'SKIPPED', note: 'Folio voided and no cancellation journal unwinds this advance — posting the receipt alone would leave a liability standing for money that was refunded or forfeited. Review by hand.' });
+          continue;
+        }
+        const note = fst === 'open' ? 'Received without GST on the advance — tax on it was not paid in the month it was received. Ask your accountant whether to regularise it.' : undefined;
+        if (dryRun) { faDetail.push({ ...base, status: 'WOULD_POST', note }); continue; }
+        const cashAcct = _glAccountForPaymentMethod(p.payment_method);
+        const src = String(p.payment_type).toUpperCase() === 'ADVANCE' ? 'FOLIO_ADVANCE' : 'FOLIO_PAYMENT';
+        const r = await _postGlEntries(db, req.params.id, ref, _glPostDate(p.recorded_at), src, p.id, [
+          { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: Number(p.amount || 0), cr_amount: 0, narration: `Advance (backfill): folio ${p.folio_id}` },
+          { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: Number(p.amount || 0), narration: `Advance (backfill): folio ${p.folio_id}` },
+        ], req.user?.email || 'BACKFILL', 'HOTEL');
+        if (r.ok) faPosted++;
+        faDetail.push({ ...base, status: r.ok ? 'POSTED' : 'REFUSED', reason: r.ok ? undefined : r.reason, note });
+      }
+      // 5) SPA bills that never reached the ledger — all thirteen on the live
+      // tenant predate spa GL capture (2 Aug 2026). Posted through _postFolioGl
+      // with the account the live path uses: retail → 4030, everything else →
+      // 4040. Packages and memberships are booked to revenue at sale, exactly as
+      // the live path books them; that recognition policy is reported, not changed.
+      const spaBfRows: any[] = !want('spa_folios') ? [] : await db.query(
+        `SELECT f.id, f.invoice_number,
+                (SELECT string_agg(DISTINCT e.entry_type, ',') FROM folio_entries e WHERE e.folio_id = f.id) AS types
+           FROM folios f
+          WHERE f.folio_kind = 'SPA' AND LOWER(COALESCE(f.status,'')) IN ('closed','settled')
+            AND TO_CHAR(COALESCE(f.settled_at, f.created_at),'YYYY-MM-DD') BETWEEN ? AND ?`, [from, to]).catch(() => []);
+      const spaDetail: any[] = []; let spaAlready = 0; let spaPosted = 0;
+      for (const f of spaBfRows) {
+        const ref = `FOLIO-${f.id}`;
+        if (await has(ref)) { spaAlready++; continue; }
+        const types = String(f.types || '').split(',').filter(Boolean);
+        const retailOnly = types.length > 0 && types.every(t => t === 'SPA_PRODUCT');
+        const revenueCode = retailOnly ? '4030' : '4040';
+        const revenueName = retailOnly ? 'Ancillary Revenue' : 'Spa Revenue';
+        const policy = types.some(t => t === 'PACKAGE_PURCHASE' || t === 'MEMBERSHIP_FEE') ? 'Package or membership booked to revenue at sale, as the live path does — arguably deferred revenue; for your accountant.' : undefined;
+        if (dryRun) { spaDetail.push({ journal_ref: ref, invoice_number: f.invoice_number, revenue_code: revenueCode, types, status: 'WOULD_POST', note: policy }); continue; }
+        await _postFolioGl(db, req.params.id, f.id, { revenueCode, revenueName, sourceType: 'SPA_BACKFILL', postedBy: req.user?.email || 'BACKFILL' });
+        const ok = await has(ref);
+        if (ok) spaPosted++;
+        spaDetail.push({ journal_ref: ref, invoice_number: f.invoice_number, revenue_code: revenueCode, types, status: ok ? 'POSTED' : 'STILL_MISSING', note: policy });
+      }
+
       // 3) Supplier PAYMENTS → SP-<id>. Kept in their OWN section of the response
       // rather than folded into the counters above, so nothing that already reads
       // those counters changes meaning.
@@ -59794,6 +60197,15 @@ ${data.tenant.name}`;
         spDetail.push({ journal_ref: ref, amount: Number(pr.amount || 0), status: r.ok ? 'POSTED' : 'REFUSED', reason: r.reason, tds_booked: r.tds_booked, tds_rule_would_withhold: r.tds_rule_would_withhold });
       }
       res.json({
+        folio_advances: {
+          already_posted: faAlready, candidates: faDetail.filter(d => d.status !== 'SKIPPED').length,
+          posted_count: dryRun ? 0 : faPosted, skipped: faDetail.filter(d => d.status === 'SKIPPED').length,
+          detail: faDetail.slice(0, 200),
+        },
+        spa_folios: {
+          already_posted: spaAlready, candidates: spaDetail.length,
+          posted_count: dryRun ? 0 : spaPosted, detail: spaDetail.slice(0, 200),
+        },
         supplier_payments: {
           already_posted: spAlready,
           candidates: spDetail.length,
@@ -60340,11 +60752,47 @@ ${data.tenant.name}`;
         } catch { return []; }
       })();
 
+      // ── Tables 11A / 11B — tax on advances ─────────────────────────────────
+      // Built from the receipt vouchers, which record the tax charged on each
+      // advance. 11A(1): advances RECEIVED in the period and not adjusted (or
+      // refunded) within it. 11B(1): advances received EARLIER and adjusted (or
+      // refunded) in this period. An advance received and adjusted in the same
+      // period appears in neither — its tax went into 2201/2211 and came out again
+      // inside the window, exactly as the portal expects.
+      const advRows: any[] = await db.query("SELECT * FROM receipt_vouchers", []).catch(() => []);
+      const _inWin = (d: any) => !!d && (!from || String(d) >= from) && (!to || String(d) <= to);
+      const _closedOn = (rv: any) => rv.adjusted_at || rv.cancelled_at || null;
+      const _bucket = (list: any[]) => {
+        const mp: Record<string, any> = {};
+        for (const rv of list) {
+          const rate = Number(rv.gst_rate || 0);
+          const k = `${rate}|${rv.place_of_supply || ''}`;
+          const cur = mp[k] || { rate, place_of_supply: rv.place_of_supply || pos, gross_advance: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, vouchers: 0 };
+          cur.gross_advance += Number(rv.amount || 0); cur.taxable += Number(rv.taxable_value || 0);
+          cur.cgst += Number(rv.cgst || 0); cur.sgst += Number(rv.sgst || 0); cur.igst += Number(rv.igst || 0); cur.vouchers += 1;
+          mp[k] = cur;
+        }
+        return Object.values(mp).map((x: any) => ({ ...x, gross_advance: round(x.gross_advance), taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), tax: round(x.cgst + x.sgst + x.igst) })).sort((a: any, b: any) => a.rate - b.rate);
+      };
+      const t11a = _bucket((advRows || []).filter((rv: any) => _inWin(rv.receipt_date) && !(_closedOn(rv) && _inWin(_closedOn(rv))) && !(_closedOn(rv) && to && String(_closedOn(rv)) <= to && (!from || String(_closedOn(rv)) >= from))));
+      const t11b = _bucket((advRows || []).filter((rv: any) => !!from && !!rv.receipt_date && String(rv.receipt_date) < from && _inWin(_closedOn(rv))));
+      const adv11aTax = round(t11a.reduce((a: number, r: any) => a + r.tax, 0));
+      const adv11bTax = round(t11b.reduce((a: number, r: any) => a + r.tax, 0));
+
       // Back-compat: rate-wise b2b/b2c aggregates the existing UI already reads.
       const b2bAgg: Record<number, any> = {};
       for (const r of b2bInvoices) { const c = b2bAgg[r.rate] || { rate: r.rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, invoices: 0 }; c.taxable += r.taxable; c.cgst += r.cgst; c.sgst += r.sgst; c.igst += r.igst; c.invoices += 1; b2bAgg[r.rate] = c; }
       const b2b = Object.values(b2bAgg).map((x: any) => ({ rate: x.rate, taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), invoices: x.invoices })).sort((a, b) => a.rate - b.rate);
-      const totals = { taxable: round(tTaxable), cgst: round(tCgst), sgst: round(tSgst), igst: round(tIgst), output_gst: round(tCgst + tSgst + tIgst) };
+      // output_gst is the return's liability: tax on invoices (Tables 4-10) plus
+      // tax on advances received (11A) less advance tax adjusted (11B). It
+      // reconciles to GST Outstanding, which counts both sets of accounts.
+      const invoiceGst = round(tCgst + tSgst + tIgst);
+      const totals = {
+        taxable: round(tTaxable), cgst: round(tCgst), sgst: round(tSgst), igst: round(tIgst),
+        invoice_gst: invoiceGst,
+        advance_tax_11a: adv11aTax, advance_tax_11b: adv11bTax,
+        output_gst: round(invoiceGst + adv11aTax - adv11bTax),
+      };
       res.json({
         period: { from: from || null, to: to || null },
         place_of_supply: pos,
@@ -60359,6 +60807,8 @@ ${data.tenant.name}`;
         hsn_unconfirmed_kinds: hsnUnconfirmed,
         hsn_uncoded_kinds: hsnUncoded,
         docs,                         // Table 13
+        advances_11a: t11a,           // Table 11A(1) — advances received, not yet adjusted
+        advances_11b: t11b,           // Table 11B(1) — earlier advances adjusted / refunded now
         totals,
         note: 'Reconciles to the GL output-tax total. Table 12 (HSN/SAC) is derived from the general ledger and covers all four revenue streams — rooms, restaurant, spa and events. The codes are this product\'s suggestions until your accountant confirms them; any still on a default is listed in hsn_unconfirmed_kinds. B2B invoice detail (Table 4) covers every revenue stream that carries a buyer GSTIN — hotel and event bookings, and restaurant and spa bills once GST details are added to them — one row per invoice, so a multi-round table bill is a single line.',
       });
@@ -60372,7 +60822,8 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const { from, to } = req.query as Record<string, string>;
-      const GST = ['2200', '2210', '2220'], ITC = ['1300', '1310', '1320'];
+      // Output tax in 3.1(a) includes tax on advances received in the period.
+      const GST = ['2200', '2210', '2220', '2201', '2211', '2221'], ITC = ['1300', '1310', '1320'];
       const gstPh = GST.map(() => '?').join(',');
       const mainParams: any[] = [req.params.id];
       let mainDate = '';
@@ -60382,9 +60833,10 @@ ${data.tenant.name}`;
       if (to)   { mainDate += ' AND g.entry_date <= ?'; mainParams.push(to);   subDate += ' AND entry_date <= ?'; subParams.push(to); }
       const outRow: any = await db.get(
         `SELECT SUM(CASE WHEN c.type='REVENUE' OR g.account_code LIKE '4%' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS taxable,
-                SUM(CASE WHEN g.account_code='2200' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS cgst,
-                SUM(CASE WHEN g.account_code='2210' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS sgst,
-                SUM(CASE WHEN g.account_code='2220' THEN g.cr_amount - g.dr_amount ELSE 0 END) AS igst
+                SUM(CASE WHEN g.account_code IN ('2200','2201') THEN g.cr_amount - g.dr_amount ELSE 0 END) AS cgst,
+                SUM(CASE WHEN g.account_code IN ('2210','2211') THEN g.cr_amount - g.dr_amount ELSE 0 END) AS sgst,
+                SUM(CASE WHEN g.account_code IN ('2220','2221') THEN g.cr_amount - g.dr_amount ELSE 0 END) AS igst,
+                SUM(CASE WHEN g.account_code IN ('2201','2211','2221') THEN g.cr_amount - g.dr_amount ELSE 0 END) AS advance_tax
            FROM gl_entries g LEFT JOIN chart_of_accounts c ON c.code = g.account_code
           WHERE g.restaurant_id = ? AND g.is_reversed = 0 ${mainDate}
             AND g.journal_ref IN (
@@ -60413,6 +60865,9 @@ ${data.tenant.name}`;
         outward_taxable_supplies: { taxable_value: round(taxable), igst: round(igst), cgst: round(cgst), sgst: round(sgst) },
         itc_available: { igst: round(itc_i), cgst: round(itc_c), sgst: round(itc_s), total: itc_total },
         output_tax, net_tax_payable: round(output_tax - itc_total),
+        // How much of output_tax is tax on advances (received less adjusted in
+        // the period) — reported in GSTR-1 Tables 11A/11B.
+        advance_tax_in_output: round(Number(outRow?.advance_tax || 0)),
       });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });

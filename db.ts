@@ -63,6 +63,9 @@ export const BOOKS_OF_ACCOUNT_TABLES = new Set<string>([
   // table gives the before-and-after for free, which is what somebody asking
   // "who reclassified spa, and when" actually needs.
   'gst_hsn_map',
+  // A statutory document (Rule 50). Every change to one — adjusted, cancelled,
+  // re-opened — is part of the audit trail.
+  'receipt_vouchers',
 ]);
 
 // The acting user, carried on the async context so the data layer can name an
@@ -3158,6 +3161,51 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Receipt vouchers — Rule 50, CGST Rules. One per advance received against
+    -- a hotel or event booking. It is the SOURCE OF TRUTH for the tax charged on
+    -- that advance: the settlement reverses exactly what the voucher records, and
+    -- GSTR-1 Tables 11A/11B are built from these rows. Linked to the booking at
+    -- receipt and to the tax invoice when adjusted, for traceability. Dates are
+    -- ISO text so they compare as strings (see accounting_periods for why).
+    CREATE TABLE IF NOT EXISTS receipt_vouchers (
+      id                      TEXT PRIMARY KEY,
+      rv_number               TEXT NOT NULL,
+      module                  TEXT NOT NULL,
+      status                  TEXT NOT NULL DEFAULT 'ISSUED',
+      receipt_date            TEXT NOT NULL,
+      amount                  DOUBLE PRECISION NOT NULL DEFAULT 0,
+      taxable_value           DOUBLE PRECISION NOT NULL DEFAULT 0,
+      gst_rate                DOUBLE PRECISION NOT NULL DEFAULT 0,
+      cgst                    DOUBLE PRECISION NOT NULL DEFAULT 0,
+      sgst                    DOUBLE PRECISION NOT NULL DEFAULT 0,
+      igst                    DOUBLE PRECISION NOT NULL DEFAULT 0,
+      rate_basis              TEXT,
+      place_of_supply         TEXT,
+      customer_name           TEXT,
+      customer_gstin          TEXT,
+      customer_address        TEXT,
+      description             TEXT,
+      payment_method          TEXT,
+      reference               TEXT,
+      booking_id              TEXT,
+      event_booking_id        TEXT,
+      folio_id                TEXT,
+      payment_id              TEXT,
+      payment_source          TEXT,
+      journal_ref             TEXT,
+      adjusted_at             TEXT,
+      adjusted_folio_id       TEXT,
+      adjusted_invoice_number TEXT,
+      cancelled_at            TEXT,
+      cancel_reason           TEXT,
+      issued_by               TEXT,
+      created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_receipt_vouchers_number ON receipt_vouchers (rv_number);
+    CREATE INDEX IF NOT EXISTS idx_rv_folio   ON receipt_vouchers (folio_id);
+    CREATE INDEX IF NOT EXISTS idx_rv_event   ON receipt_vouchers (event_booking_id);
+    CREATE INDEX IF NOT EXISTS idx_rv_payment ON receipt_vouchers (payment_id);
+
     -- Statutory edit log — Rule 3(1), Companies (Accounts) Rules 2014.
     -- Written by the data layer for every change to the books of account, so it
     -- cannot be forgotten by a new endpoint and cannot be switched off.
@@ -3514,6 +3562,16 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['2200','GST Payable — CGST','LIABILITY',220],
     ['2210','GST Payable — SGST','LIABILITY',230],
     ['2220','GST Payable — IGST','LIABILITY',240],
+    // Tax on ADVANCES, held apart from invoice tax. Section 13(2) makes GST due
+    // when an advance for a service is received, not when the bill is raised.
+    // Kept in its own accounts so the invoice-level GSTR-1 tables (4, 7, 12),
+    // which read 2200/2210/2220, never mistake an advance for a sale; the advance
+    // tax is reported in Tables 11A/11B and is reversed out of these accounts
+    // when the invoice is issued, so it is paid once. GST Outstanding and GSTR-3B
+    // count both sets.
+    ['2201','GST on Advances — CGST','LIABILITY',225],
+    ['2211','GST on Advances — SGST','LIABILITY',235],
+    ['2221','GST on Advances — IGST','LIABILITY',245],
     ['2300','TDS Payable — Sec 194C','LIABILITY',250],
     ['2310','TDS Payable — Sec 194J','LIABILITY',260],
     ['2320','TDS Payable — Sec 194H','LIABILITY',270],

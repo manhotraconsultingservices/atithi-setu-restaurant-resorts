@@ -304,6 +304,8 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // booking's GSTIN for the one invoice that needs it.
   await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS customer_gstin TEXT`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS customer_address TEXT`).catch(() => {});
+  // Links an advance receipt to its Rule 50 receipt voucher.
+  await tenantDb.exec(`ALTER TABLE folio_payments ADD COLUMN IF NOT EXISTS receipt_voucher_id TEXT`).catch(() => {});
 
   // ── Convention halls / venues ──────────────────────────────────────────────
   await tenantDb.exec(`
@@ -649,6 +651,9 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_event_payments ON event_payments(booking_id);
   `);
+  // After the CREATE, never before it: on a first init the ALTER would otherwise
+  // run against a table that does not exist yet.
+  await tenantDb.exec(`ALTER TABLE event_payments ADD COLUMN IF NOT EXISTS receipt_voucher_id TEXT`).catch(() => {});
   // Lost-reason capture on cancel (makes win-rate actionable). The structured
   // reason category reuses the existing `cancellation_reason` column; this adds
   // an optional free-text note alongside it.

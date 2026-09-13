@@ -9543,6 +9543,20 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                 </div>
               )}
 
+              {/* Tables 11A / 11B — tax on advances, from the receipt vouchers */}
+              {((Array.isArray(gstr1.advances_11a) && gstr1.advances_11a.length > 0) || (Array.isArray(gstr1.advances_11b) && gstr1.advances_11b.length > 0)) && (
+                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                  <table className="w-full text-sm border-collapse">
+                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={7}>Advances (Tables 11A / 11B)</th></tr>
+                      <tr className="bg-[#faf6ef] text-left text-xs"><th className="px-3 py-1.5">Table</th><th className="px-3 py-1.5 text-right">Rate %</th><th className="px-3 py-1.5 text-right">Advance</th><th className="px-3 py-1.5 text-right">CGST</th><th className="px-3 py-1.5 text-right">SGST</th><th className="px-3 py-1.5 text-right">IGST</th><th className="px-3 py-1.5 text-right">Vouchers</th></tr></thead>
+                    <tbody>
+                      {(gstr1.advances_11a || []).map((a: any, i: number) => (<tr key={'a' + i} className="border-t border-[#f0e8d8]"><td className="px-3 py-2 text-xs">11A · received, not yet invoiced</td><td className="px-3 py-2 text-right">{a.rate}%</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(a.gross_advance)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(a.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(a.sgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(a.igst)}</td><td className="px-3 py-2 text-right">{a.vouchers}</td></tr>))}
+                      {(gstr1.advances_11b || []).map((a: any, i: number) => (<tr key={'b' + i} className="border-t border-[#f0e8d8]"><td className="px-3 py-2 text-xs">11B · earlier advance adjusted or refunded</td><td className="px-3 py-2 text-right">{a.rate}%</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(-a.gross_advance)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(-a.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(-a.sgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(-a.igst)}</td><td className="px-3 py-2 text-right">{a.vouchers}</td></tr>))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               {/* Table 13 — document series */}
               {Array.isArray(gstr1.docs) && gstr1.docs.length > 0 && (
                 <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
@@ -37973,7 +37987,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Payments received ({viewFolio.payments.length})</p>
                   <table className="w-full text-xs">
                     <thead className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">
-                      <tr><th className="text-left py-1">When (IST)</th><th className="text-left py-1">Type</th><th className="text-left py-1">Method</th><th className="text-right py-1">Amount</th></tr>
+                      <tr><th className="text-left py-1">When (IST)</th><th className="text-left py-1">Type</th><th className="text-left py-1">Method</th><th className="text-right py-1">Amount</th><th className="py-1"></th></tr>
                     </thead>
                     <tbody>
                       {viewFolio.payments.map((p: any) => (
@@ -37988,6 +38002,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <td className="py-1.5 text-[#6b5d52]">{(p.payment_method || '—').replace(/_/g, ' ')}{p.reference_number ? ` · ${p.reference_number}` : ''}</td>
                           <td className={cn('py-1.5 text-right font-mono font-semibold', p.payment_type === 'REFUND' ? 'text-rose-700' : 'text-emerald-700')}>
                             {p.payment_type === 'REFUND' ? '+' : '−'}₹{Number(p.amount || 0).toLocaleString('en-IN')}
+                          </td>
+                          {/* Rule 50 receipt voucher — issued automatically for every
+                              advance, printable to hand to the guest. */}
+                          <td className="py-1.5 pl-2 text-right whitespace-nowrap">
+                            {p.receipt_voucher_id && (
+                              <button
+                                onClick={() => openReceiptVoucherPdf(restaurantId, token, p.receipt_voucher_id).catch((e: any) => window.alert(e.message))}
+                                title="Print the receipt voucher for this advance"
+                                className="text-[10px] font-bold text-[#cc5a16] hover:underline"
+                              >Receipt voucher</button>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -50182,6 +50207,20 @@ interface ThermalReceiptData {
   total: number;
   paymentMethod?: string;
   footerNote?: string;
+}
+
+// Opens a receipt voucher PDF (Rule 50) in a new tab so it can be printed and
+// handed to the guest. Authenticated fetch, then a blob URL — the PDF route is
+// not reachable by a bare link.
+async function openReceiptVoucherPdf(restaurantId: string, token: string, rvId: string): Promise<void> {
+  const r = await fetch(`/api/restaurant/${restaurantId}/receipt-vouchers/${rvId}/pdf`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(j?.error || 'Could not open the receipt voucher');
+  }
+  const url = URL.createObjectURL(await r.blob());
+  window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 function buildThermalHTML(d: ThermalReceiptData): string {
