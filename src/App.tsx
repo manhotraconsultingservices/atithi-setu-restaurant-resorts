@@ -9502,14 +9502,44 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                 </div>
               )}
 
-              {/* Table 12 — HSN/SAC summary */}
+              {/* Table 12 — HSN/SAC summary, now derived from the ledger and
+                  covering all four revenue streams. The SUPPLY column is what
+                  makes the codes checkable: an accountant can see that spa
+                  turnover went to 999722 without decoding the number first. */}
               {Array.isArray(gstr1.hsn) && gstr1.hsn.length > 0 && (
-                <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
-                  <table className="w-full text-sm border-collapse">
-                    <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={6}>HSN / SAC summary (Table 12)</th></tr>
-                      <tr className="bg-[#faf6ef] text-left text-xs"><th className="px-3 py-1.5">HSN / SAC</th><th className="px-3 py-1.5 text-right">Rate %</th><th className="px-3 py-1.5 text-right">Taxable</th><th className="px-3 py-1.5 text-right">CGST</th><th className="px-3 py-1.5 text-right">SGST</th><th className="px-3 py-1.5 text-right">IGST</th></tr></thead>
-                    <tbody>{gstr1.hsn.map((h: any, i: number) => (<tr key={i} className="border-t border-[#f0e8d8]"><td className="px-3 py-2 font-mono text-xs">{h.hsn_sac}</td><td className="px-3 py-2 text-right">{h.rate}%</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.taxable)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.cgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.sgst)}</td><td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.igst)}</td></tr>))}</tbody>
-                  </table>
+                <div className="space-y-2">
+                  <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+                    <table className="w-full text-sm border-collapse">
+                      <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]" colSpan={7}>HSN / SAC summary (Table 12) — rooms, restaurant, spa and events</th></tr>
+                        <tr className="bg-[#faf6ef] text-left text-xs"><th className="px-3 py-1.5">Supply</th><th className="px-3 py-1.5">HSN / SAC</th><th className="px-3 py-1.5 text-right">Rate %</th><th className="px-3 py-1.5 text-right">Taxable</th><th className="px-3 py-1.5 text-right">CGST</th><th className="px-3 py-1.5 text-right">SGST</th><th className="px-3 py-1.5 text-right">IGST</th></tr></thead>
+                      <tbody>{gstr1.hsn.map((h: any, i: number) => (
+                        <tr key={i} className="border-t border-[#f0e8d8]">
+                          <td className="px-3 py-2">
+                            <span className="text-xs font-semibold">{String(h.supply_kind || '').replace(/_/g, ' ')}</span>
+                            {h.description && <span className="block text-[10.5px] text-[#9c8e85] leading-snug max-w-[28rem]">{h.description}</span>}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">
+                            {h.hsn_sac || <span className="text-rose-700 font-sans font-bold">no code</span>}
+                            {h.hsn_sac && h.is_default_code && <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 align-middle">UNCONFIRMED</span>}
+                          </td>
+                          <td className="px-3 py-2 text-right">{h.rate}%</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.taxable)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.cgst)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.sgst)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(h.igst)}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                  {/* Two different problems, said separately: turnover with NO
+                      code stops a return being filed; a code nobody has checked
+                      only means nobody has checked it. */}
+                  {Array.isArray(gstr1.hsn_uncoded_kinds) && gstr1.hsn_uncoded_kinds.length > 0 && (
+                    <p className="text-[11.5px] text-rose-700 font-semibold">No HSN/SAC code for {gstr1.hsn_uncoded_kinds.join(', ').replace(/_/g, ' ').toLowerCase()} — set one before filing.</p>
+                  )}
+                  {Array.isArray(gstr1.hsn_unconfirmed_kinds) && gstr1.hsn_unconfirmed_kinds.length > 0 && (
+                    <p className="text-[11.5px] text-amber-800">Codes for {gstr1.hsn_unconfirmed_kinds.join(', ').replace(/_/g, ' ').toLowerCase()} are still the ones this system suggested. Classification is your judgement and your accountant's to confirm — have them checked before you rely on them.</p>
+                  )}
                 </div>
               )}
 
@@ -9524,7 +9554,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                 </div>
               )}
 
-              <p className="text-[11px] text-[#9c8e85]">Working sheet reconciled to the GL. B2B invoice detail + HSN (Table 12) + document series (Table 13) cover hotel &amp; event supplies; restaurant/spa invoice-level detail follows once the output register is extended. Rate labels snap to the nearest slab; rupee totals are exact.</p>
+              <p className="text-[11px] text-[#9c8e85]">Working sheet reconciled to the GL. Table 12 (HSN/SAC) is derived from the ledger and covers all four revenue streams — rooms, restaurant, spa and events. B2B invoice detail covers supplies that carry a customer GSTIN, which today means hotel and event bills; restaurant and spa have no GSTIN field yet, so those supplies appear under B2C. Rate labels snap to the nearest slab; rupee totals are exact.</p>
             </>
           ) : !loading && <p className="text-sm text-[#6b5d52] italic">No data. Pick a period and refresh.</p>}
         </div>

@@ -5073,6 +5073,46 @@ function _tenderGlLines(mdr: { cardPct: number; upiPct: number; gstPct: number }
   return lines;
 }
 
+// Which KIND of supply a revenue line represents, for HSN/SAC purposes.
+//
+// M-3 from the accounting review: two of four revenue streams produced
+// portal-shaped HSN detail and two summarised, so a filer assembled part of
+// Table 12 by hand. The cause was that the HSN came from `gst_output_register`,
+// a parallel record written at three hotel settlement paths only — on the live
+// tenant it held 146 of 493 settled hotel folios, NO spa folios, NO event
+// folios and nothing from the restaurant at all, and its code was keyed on
+// `folio_entries.account_head`, which is NULL on about two rows in three.
+//
+// The rest of the return is derived from the GENERAL LEDGER, which is complete
+// by construction and already ties to the trial balance. So Table 12 is derived
+// there too, and the revenue account plus its cost centre is all the
+// classification needs: the accounts already separate rooms, food, service
+// charge, ancillary, spa and events.
+function _gstSupplyKind(accountCode: string, costCentre: string | null, sourceType: string | null): string {
+  const cc = String(costCentre || '').toUpperCase();
+  const st = String(sourceType || '').toUpperCase();
+  switch (String(accountCode || '')) {
+    case '4000': return 'ACCOMMODATION';
+    case '4010':
+      // A 4010 credit on a FOLIO journal is food CHARGED TO A ROOM — that is
+      // the only way _folioRevenueGlLines produces one — so it is in-room
+      // dining rather than a restaurant cover, and the two have different SACs.
+      // `cost_centre` says so on journals posted since cost-centre tagging;
+      // `source_type` answers for the ones posted before it, which is every
+      // historical row.
+      if (cc === 'HOTEL' || st === 'FOLIO_SETTLEMENT') return 'IN_ROOM_DINING';
+      if (cc === 'EVENTS') return 'BANQUET';
+      return 'RESTAURANT';
+    case '4020': return 'SERVICE_CHARGE';
+    case '4030': return 'ANCILLARY';
+    case '4040': return 'SPA';
+    case '4050': return 'BANQUET';
+    // 4900 Other Income and anything else a tenant has added: named OTHER and
+    // reported as needing a code, rather than quietly filed under a guess.
+    default: return 'OTHER';
+  }
+}
+
 function _glAccountForEntryType(entryType: string): { code: string; name: string } {
   const t = String(entryType || '').toUpperCase();
   if (t === 'F_AND_B_REVENUE')        return { code: '4010', name: 'F&B Revenue' };
@@ -58182,8 +58222,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'year-end-accrual',
+    commit_marker: 'gstr1-hsn-from-the-ledger',
     code_features: [
+      'gstr1-hsn-from-the-ledger — M-3 from the accounting review, first half. The complaint was that two of four revenue streams produced portal-shaped HSN detail and two summarised, so a filer assembled part of Table 12 by hand. THE CAUSE WAS WORSE THAN THE SYMPTOM. Table 12 was read from gst_output_register, a PARALLEL record written at three hotel settlement paths only - on the live tenant it held 146 of 493 settled hotel folios, ZERO spa folios, ZERO event folios and nothing whatever from the restaurant - and the code itself was keyed on folio_entries.account_head, a column that is NULL on about two rows in three, so 120 of its 317 rows carried no HSN at all. It also lives in createHotelTables, which runs only for property_type HOTEL or BOTH, so a restaurant-only tenant has no register to read. Extending that register to three more modules would have been building more of the wrong thing. Every other part of this return - the totals, the invoice-level B2B of Table 4, the B2CS of Table 7 - is derived from the GENERAL LEDGER, which is complete by construction and already ties to the trial balance. So Table 12 is now derived there too. The revenue account plus its cost centre is all the classification needs, because the accounts ALREADY separate rooms, food, service charge, ancillary, spa and events; _gstSupplyKind reads them, and a 4010 credit on a FOLIO journal is correctly called IN-ROOM DINING rather than a restaurant cover, since _folioRevenueGlLines is the only thing that produces one. cost_centre says so on journals posted since cost-centre tagging and source_type answers for every historical row. The split of tax within a journal is EXACT, not an apportionment: this product applies ONE GST rate per bill, so a revenue account share of the tax is its share of the taxable value. NEW gst_hsn_map, seeded per TENANT beside the chart of accounts rather than in the hotel schema, holding one SAC per kind of supply: 996311 accommodation, 996331 restaurant, 996332 in-room dining, 996334 banquet, 999722 spa, 999799 ancillary. EVERY SEEDED CODE IS MARKED is_default UNTIL SOMEBODY CONFIRMS IT, and the return lists the kinds still sitting on one, because classification is the taxpayer judgement and their CA to sign off - this product should suggest a code and then say plainly that it is a suggestion, not file a guess silently. Turnover with NO code is reported separately and in red, because that stops a return being filed while an unconfirmed code only means nobody has checked it. Two judgements are STATED rather than hidden: the ledger books all event revenue to one account so hall hire and catering cannot be separated (right for a package, wrong for bare hall hire, and the description says so), and 999721 is the alternative for a salon-led spa. gst_hsn_map is in BOOKS_OF_ACCOUNT_TABLES so a reclassification lands in the statutory trail with its before and after - the row alone only ever holds the latest confirmer. Smoke: TC-ACC-GSTR1-HSN-ALL-STREAMS asserts coverage of more than one stream, a named supply on every line, and that Table 12 ADDS UP TO THE RETURN HEADLINE - a Table 12 that disagrees with Tables 4 and 7 is a return that gets rejected. NOT DONE and stated rather than implied: restaurant and spa bills carry no customer GSTIN field, so those supplies still appear in B2CS; invoice-level B2B for them needs that field first and is the second half of M-3. tsc + vite build clean.',
       'year-end-accrual — H-3 from the accounting review, and the last of its High findings. Revenue reaches this ledger when a BILL SETTLES: a restaurant order posts ORDER-<id> when it is paid, a folio posts FOLIO-<id> when it is settled. For 364 days a year that is immaterial and arguably prudent; on the last day of the financial year it is a cut-off error - food served in one year with its revenue in the next, and a guest who slept four nights in March and checks out on 3 April carrying all four nights into the new year. THE FIX IS NOT A CHANGE TO DAILY REVENUE RECOGNITION, which would touch every operational path in the product. It is ONE journal dated at the cut-off for what was delivered and not yet billed, and an equal REVERSING journal dated the next day. The reversal is the entire safety mechanism: when the bill finally settles it posts IN FULL, and the reversal has already taken the accrued portion back out, so nothing is counted twice and no later posting has to know the accrual ever happened. WHAT COUNTS AS DELIVERED, and why this measure and not a reconstruction: a folio is charged AS the service is rendered - verified against live data that a room charge is posted PER NIGHT, a five-night stay carrying five ROOM_CHARGE rows dated one per night - so the folio is the product own DATED record of what was delivered, and summing its entries to the cut-off is the most faithful measure available. Restaurant orders not on a folio are the second source; an order CHARGED TO A ROOM is excluded because it will be recognised through that folio, and counting both would bill the same plate of food twice. NET OF GST on purpose: an accrual is a revenue-recognition entry, not a tax event - the tax point is the invoice, which has not been raised, so accruing output GST would create a liability no return reports. THE VALUATION IS SHARED, NOT MIRRORED: _orderNetRevenue was lifted out of _postOrderGl so the accrual values an unbilled order on EXACTLY the basis the journal will use when it is finally paid - an accrual computed on a different basis than the revenue it anticipates leaves a residue at every reversal. Per-LINE cost centres, so one journal spans four modules and each revenue credit lands in its own bucket; the 1150 debit that faces them carries none, because it is genuinely property-wide. New account 1150 Accrued Revenue (Unbilled), which should read ZERO on every date outside the accrual-to-reversal window. BOTH DATES ARE CHECKED AGAINST THE PERIOD LOCK BEFORE ANYTHING IS WRITTEN: an accrual that posts and then cannot be reversed, because the next day sits in a period somebody closed, overstates revenue permanently and an append-only ledger has no undo. Posting is refused for a future date; the schedule is readable for any date, because an owner in January wants to see where the cut-off will land. Everything left out is REPORTED with a reason - two CANCELLED events were carrying 1.95 lakh each on open folios, package purchases and membership fees are consideration received in ADVANCE of service and are deferred rather than accrued, a tip is a liability to the staff, and an in-house booking with NO FOLIO is named because there is no dated record to accrue from and inventing one would be worse than saying so. TWO STALE STATEMENTS CORRECTED IN PASSING, both of which described the period close as advisory: the comment above the routes and, worse, the sentence on the Period Close screen itself reading Soft lock: posting is never blocked. That stopped being true when Q-2 shipped. A screen that tells a user a control is advisory while it refuses their posting is worse than one that says nothing. Smoke: -SCHEDULE (the parts add up to the headline), -NO-DOUBLE-COUNT (two orders placed seconds apart, one left unbilled and one settled: the first IS accrued and the second is NOT), -NET-OF-GST, -EXPLAINS-EXCLUSIONS, -FUTURE-REFUSED, -POSTS-AND-REVERSES (asserts the reversal exists AND its date), -IDEMPOTENT, -TB-STILL-TIES. The suite posts with a cut-off of YESTERDAY so both halves land in the past and no report ending today is moved by a paisa. tsc + vite build clean.',
       'finance-is-one-group — the nav regrouping from section 7 of the accounting review. The finance side of the product was spread across THREE top-level groups: Accounts, Cash, and Suppliers & Customers. An accountant opening this had to already know that the till was in one group, the supplier ledger in a second and the trial balance in a third, and there was no single answer to where do I do my accounts. Fourteen top-level groups are now twelve (eleven for a both-mode tenant, where Overview folds away): Accounts absorbs Cash and Suppliers & Customers and is renamed FINANCE, because in Indian usage accounts reads as CUSTOMER accounts at least as often as it reads as books. Its eleven children are SECTIONED rather than nested a level deeper — a new optional NavTab.section prints a small heading above the first tab carrying it: Books, Cash & Banking, Receivables, Payables, Statutory. Sections are computed from the RBAC-FILTERED list, so a heading never stands over an empty section and a role granted only GST Summary sees Statutory and nothing else. STATUTORY IS THE POINT OF THE EXERCISE: compliance had no home at all — GST Summary was filed among the management reports and MSME 43B(h) had nowhere to sit — and M-1 (e-invoice) and M-2 (ITC gating) now have somewhere to land. NO TAB ID CHANGED; ids are RBAC keys read by FINANCE_TABS in src/navVisibility.ts, the server tab->module mapper and every tenants saved Staff Access grants, so this moves and renames menu entries and grants or revokes nothing. THE DEFECT THE REGROUPING SURFACED: ACCOUNTS_MSME_43B was never added to the Staff Access matrix or to TAB_MODULE, so it fell into the Other module and — worse — an owner had NO WAY TO GRANT IT. It is in FINANCE_TABS, whose non-manager branch requires an explicit grant that could not be given, so the tab was owner/MANAGER-only by accident rather than by decision. Added, with TC-RBAC-MSME-GRANT proving 403 before the grant and 200 after on the same token. Eight Staff Access finance rows had also drifted to different words than the menu uses, which matters because the owner grants by name and then looks for that name in the menu; two of them made claims the screen does not support — Receivables (AR) promised a customer-AR screen that does not exist (the route reads ONE table, ota_commission_entries), and the P&L and Cash Flow rows said derived from the general ledger when both read /reports/* from the source tables. Both corrected. The nav audit universe had drifted the same way: ACCOUNTS_MSME_43B and CUSTOMER_ACCOUNTS were in FINANCE_TABS but absent from nav_visibility_audit.ts, so neither had ever been leak-checked — ALL_FINANCE is now DERIVED from FINANCE_TABS with a structural check that fails loudly on the next drift. 9/9 scenarios pass with the widened universe. Nav labels ARE the i18n keys, so Finance and all five section headings went into hi.ts and pa.ts in the same commit; MSME 43B(h) is mapped to itself on purpose because a CA searches for that citation. NOT DONE and deliberately not silently folded in: the six report destinations are still six (one Reports home with a module filter is its own piece of work, not a label move) and the three checklist surfaces are still three. tsc + vite build clean.',
       'scope-note-on-the-visible-pnl — follow-up to statements-declare-their-scope, caught by opening the nav rather than trusting the endpoint I had just edited. There are TWO P&L surfaces: /accounting/profit-loss inside Accounting & Reports, and /reports/pnl behind the top-level nav item "P&L Snapshot". I had disclosed on the buried one and not on the one in the navigation, which is the one an owner actually opens. /reports/pnl now carries the same _STATEMENT_SCOPE plus ebitda_basis. That endpoint reports EBITDA, which is honest by construction - it is before depreciation by definition - but the label cannot tell a reader that this system records NO depreciation at all, so there is no figure below that line; the screen heading now says it ends at EBITDA. StatementScopeNote was defined inside AccountingView and the P&L Report screen lives in OwnerDashboard, so it was lifted to module scope: one component, one wording, every statement screen.',
@@ -59875,21 +59916,86 @@ ${data.tenant.name}`;
       b2bInvoices.sort((a, b) => String(a.gstin).localeCompare(String(b.gstin)) || String(a.invoice_no).localeCompare(String(b.invoice_no)));
       const b2cs = Object.values(b2csMap).map((x: any) => ({ rate: x.rate, place_of_supply: x.place_of_supply, taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), invoices: x.invoices })).sort((a, b) => a.rate - b.rate);
 
-      // Table 12 — HSN/SAC summary (from the GST output register's invoice-line HSN).
+      // ── Table 12 — HSN/SAC summary, derived from the LEDGER ────────────────
+      // Was read from gst_output_register, which covers one module partially and
+      // three not at all (see _gstSupplyKind). The totals, B2B and B2CS above are
+      // all GL-derived, so this now comes from the same place and covers the same
+      // supplies — which is the whole of M-3.
+      //
+      // The split within a journal is EXACT, not an apportionment: this product
+      // applies ONE GST rate per bill, so a revenue account's share of the tax is
+      // its share of the taxable value. (Where a journal somehow carried two
+      // rates, the effective rate is what the GL says it collected, and the rate
+      // label snaps to the nearest slab exactly as it does everywhere else here.)
+      let hsnUnconfirmed: string[] = [];
+      let hsnUncoded: string[] = [];
       const hsn: any[] = await (async () => {
         try {
-          const p: any[] = [req.params.id];
-          let w = '';
-          if (from) { w += ' AND invoice_date >= ?'; p.push(from); }
-          if (to)   { w += ' AND invoice_date <= ?'; p.push(to); }
-          const hr: any[] = await db.query(
-            `SELECT hsn_sac,
-                    ROUND((COALESCE(cgst_rate,0)+COALESCE(sgst_rate,0)+COALESCE(igst_rate,0))::numeric, 2) AS rate,
-                    SUM(taxable_value) AS taxable, SUM(cgst_amount) AS cgst, SUM(sgst_amount) AS sgst, SUM(igst_amount) AS igst
-               FROM gst_output_register
-              WHERE restaurant_id = ?${w}
-              GROUP BY hsn_sac, rate ORDER BY hsn_sac, rate`, p).catch(() => []);
-          return hr.map((h: any) => ({ hsn_sac: h.hsn_sac || '—', rate: Number(h.rate || 0), taxable: round(h.taxable), cgst: round(h.cgst), sgst: round(h.sgst), igst: round(h.igst) }));
+          const revLines: any[] = await db.query(
+            `SELECT g.journal_ref, g.account_code,
+                    MAX(g.cost_centre) AS cost_centre, MAX(g.source_type) AS source_type,
+                    SUM(g.cr_amount - g.dr_amount) AS taxable
+               FROM gl_entries g
+              WHERE g.restaurant_id = ? AND g.is_reversed = 0 ${mainDate}
+                AND g.account_code LIKE '4%'
+                AND g.journal_ref IN (
+                  SELECT DISTINCT journal_ref FROM gl_entries
+                   WHERE restaurant_id = ? AND is_reversed = 0 ${subDate} AND account_code IN (${gstPh}))
+              GROUP BY g.journal_ref, g.account_code`,
+            [...mainParams, ...subParams, ...GST]).catch(() => []);
+
+          // The per-journal tax already computed for Tables 4 and 7 — reused so
+          // Table 12 cannot disagree with them about what a journal collected.
+          const jTax: Record<string, { taxable: number; cgst: number; sgst: number; igst: number }> = {};
+          for (const r of rows) {
+            jTax[String(r.journal_ref)] = {
+              taxable: Number(r.taxable || 0), cgst: Number(r.cgst || 0),
+              sgst: Number(r.sgst || 0), igst: Number(r.igst || 0),
+            };
+          }
+
+          const codeRows: any[] = await db.query(
+            "SELECT supply_kind, hsn_sac, description, is_default FROM gst_hsn_map", []).catch(() => []);
+          const codeOf: Record<string, any> = {};
+          for (const c of codeRows) codeOf[String(c.supply_kind)] = c;
+
+          const bucket: Record<string, any> = {};
+          for (const l of revLines) {
+            const j = jTax[String(l.journal_ref)];
+            if (!j || Math.abs(j.taxable) < 0.005) continue;
+            const lineTaxable = Number(l.taxable || 0);
+            if (Math.abs(lineTaxable) < 0.005) continue;
+            const share = lineTaxable / j.taxable;
+            const cgst = j.cgst * share, sgst = j.sgst * share, igst = j.igst * share;
+            const kind = _gstSupplyKind(l.account_code, l.cost_centre, l.source_type);
+            const meta = codeOf[kind] || null;
+            const rate = snap(round((cgst + sgst + igst) / lineTaxable * 100));
+            const key = `${kind}|${rate}`;
+            const cur = bucket[key] || {
+              supply_kind: kind,
+              hsn_sac: meta?.hsn_sac || null,
+              description: meta?.description || null,
+              is_default_code: Number(meta?.is_default ?? 1) === 1,
+              rate, taxable: 0, cgst: 0, sgst: 0, igst: 0,
+            };
+            cur.taxable += lineTaxable; cur.cgst += cgst; cur.sgst += sgst; cur.igst += igst;
+            bucket[key] = cur;
+          }
+
+          const out = Object.values(bucket)
+            .map((x: any) => ({
+              ...x, taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst),
+              igst: round(x.igst), total_gst: round(x.cgst + x.sgst + x.igst),
+            }))
+            .filter((x: any) => Math.abs(x.taxable) >= 0.005 || Math.abs(x.total_gst) >= 0.005)
+            .sort((a: any, b: any) => b.taxable - a.taxable);
+          // Two different problems, reported separately: a code that is still
+          // whatever this product suggested, and turnover with no code at all.
+          // The second one stops a return being filed; the first only means
+          // nobody has checked it yet.
+          hsnUnconfirmed = [...new Set(out.filter((x: any) => x.hsn_sac && x.is_default_code).map((x: any) => x.supply_kind))];
+          hsnUncoded = [...new Set(out.filter((x: any) => !x.hsn_sac).map((x: any) => x.supply_kind))];
+          return out;
         } catch { return []; }
       })();
 
@@ -59920,10 +60026,16 @@ ${data.tenant.name}`;
         b2b_invoices: b2bInvoices,   // Table 4 — invoice-level (hotel + events)
         b2b,                          // rate-wise aggregate (back-compat)
         b2cs, b2c: b2cs,              // Table 7 — rate-wise B2C (b2c = back-compat alias)
-        hsn,                          // Table 12
+        hsn,                          // Table 12 — now GL-derived, all four streams
+        hsn_source: 'GENERAL_LEDGER',
+        // A code nobody has checked, and turnover with no code at all, are
+        // different problems and are reported as two lists rather than one
+        // warning that means neither.
+        hsn_unconfirmed_kinds: hsnUnconfirmed,
+        hsn_uncoded_kinds: hsnUncoded,
         docs,                         // Table 13
         totals,
-        note: 'Reconciles to the GL output-tax total. B2B is classified for GSTIN-bearing hotel + event supplies; HSN summary is from the GST output register (hotel-populated). Restaurant/spa invoice-level B2B + HSN follow once the output register is extended to those modules.',
+        note: 'Reconciles to the GL output-tax total. Table 12 (HSN/SAC) is derived from the general ledger and covers all four revenue streams — rooms, restaurant, spa and events. The codes are this product\'s suggestions until your accountant confirms them; any still on a default is listed in hsn_unconfirmed_kinds. B2B invoice detail is classified for GSTIN-bearing hotel and event supplies; restaurant and spa carry no customer GSTIN field yet, so their supplies appear in B2CS.',
       });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });

@@ -58,6 +58,11 @@ export const BOOKS_OF_ACCOUNT_TABLES = new Set<string>([
   'folios', 'folio_payments',
   'cash_drawers', 'cash_handovers', 'cash_counts',
   'tds_payable_ledger', 'gst_output_register',
+  // Not a book of account in itself, but changing an HSN/SAC code changes what
+  // is FILED — and the row only ever holds the latest confirmer. Auditing the
+  // table gives the before-and-after for free, which is what somebody asking
+  // "who reclassified spa, and when" actually needs.
+  'gst_hsn_map',
 ]);
 
 // The acting user, carried on the async context so the data layer can name an
@@ -3122,6 +3127,28 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     );
     CREATE INDEX IF NOT EXISTS idx_coa_type ON chart_of_accounts (type);
 
+    -- HSN / SAC classification per kind of supply the property makes.
+    --
+    -- Table 12 of GSTR-1 needs a code against every line of turnover. This used
+    -- to be a four-entry map hard-coded in the settlement path, keyed on
+    -- folio_entries.account_head — a column that is NULL on roughly two rows in
+    -- three — so the code came out blank for venue hire, spa, rentals and
+    -- services, and was never produced at all for restaurant supplies.
+    --
+    -- The codes seeded below are DEFAULTS, marked is_default = 1 until somebody
+    -- confirms them. Classification is the taxpayer's own judgement and their
+    -- CA's to sign off: this product should suggest a sensible code and then say
+    -- plainly that it is a suggestion, not file a guess silently.
+    CREATE TABLE IF NOT EXISTS gst_hsn_map (
+      supply_kind   TEXT PRIMARY KEY,
+      hsn_sac       TEXT,
+      description   TEXT NOT NULL,
+      is_default    INTEGER NOT NULL DEFAULT 1,
+      confirmed_by  TEXT,
+      confirmed_at  TIMESTAMP,
+      updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
     -- Statutory edit log — Rule 3(1), Companies (Accounts) Rules 2014.
     -- Written by the data layer for every change to the books of account, so it
     -- cannot be forgotten by a new endpoint and cannot be switched off.
@@ -3531,6 +3558,41 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       `INSERT INTO chart_of_accounts (code, name, type, display_order) VALUES (?, ?, ?, ?)
        ON CONFLICT (code) DO NOTHING`,
       [code, name, type, display_order]
+    ).catch(() => {});
+  }
+
+  // ── HSN / SAC defaults for the supplies a hospitality business makes ──────
+  // Chapter 99 service accounting codes. Seeded as SUGGESTIONS (is_default = 1)
+  // and never overwritten once a tenant confirms or edits one — the ON CONFLICT
+  // is DO NOTHING, so a re-init cannot quietly revert somebody's classification
+  // back to ours.
+  //
+  // The codes themselves are the common hospitality ones, but classification is
+  // the taxpayer's judgement: two of these have a defensible alternative and the
+  // description says so rather than pretending the choice is settled. Nothing
+  // here is presented as advice, and the GSTR-1 flags every line still sitting
+  // on a default.
+  const _hsnSeed: [string, string, string][] = [
+    ['ACCOMMODATION',   '996311', 'Room or unit accommodation services provided by hotels, inns and guest houses'],
+    ['RESTAURANT',      '996331', 'Services provided by restaurants, cafes and similar eating facilities, including takeaway'],
+    ['IN_ROOM_DINING',  '996332', 'Food served by a hotel to its own guests — room service and in-house takeaway. Some properties classify this with the restaurant supply instead'],
+    // The ledger books ALL event revenue to one account (4050), so hall hire,
+    // catering, rentals and add-ons arrive here as a single supply and the
+    // return cannot split them. That is right for a hall sold WITH catering as
+    // one package. A property that sells bare hall hire separately is making a
+    // different supply — usually 997212, rental of non-residential property —
+    // and should say so here rather than let this line carry both.
+    ['BANQUET',         '996334', 'Catering in banquet and exhibition halls, marriage halls and other functions — covers the whole event package, hall included'],
+    ['SPA',             '999722', 'Physical well-being services including health club, spa and fitness centre. A salon-led treatment list may belong under 999721 instead'],
+    ['SERVICE_CHARGE',  '996331', 'Service charge follows the principal supply it was added to — set this to match wherever you levy it'],
+    ['ANCILLARY',       '999799', 'Other services not elsewhere classified'],
+    ['OTHER',           null as any, 'Unclassified — anything the ledger could not place. A line here needs a code before the return is filed'],
+  ];
+  for (const [kind, sac, description] of _hsnSeed) {
+    await db.run(
+      `INSERT INTO gst_hsn_map (supply_kind, hsn_sac, description, is_default)
+       VALUES (?, ?, ?, 1) ON CONFLICT (supply_kind) DO NOTHING`,
+      [kind, sac, description]
     ).catch(() => {});
   }
 
