@@ -49897,13 +49897,18 @@ ${data.tenant.name}`;
       // Payment ledger so the folio view shows Total / Advance-paid /
       // Outstanding (advance DEDUCTED), not just the grand total.
       const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
+      // A credit note reverses the whole invoice, so nothing on it is owed —
+      // whatever its receipts add up to once an advance has been refunded.
+      const _cn: any = folio.doc_type === 'CREDIT_NOTE' ? null : await tenantDb.get(
+        "SELECT id, invoice_number FROM folios WHERE parent_folio_id = ? AND doc_type = 'CREDIT_NOTE' LIMIT 1", [folio.id]).catch(() => null);
       res.json({
         ...folio,
         entries,
         amount_paid:     _out ? _out.total_paid : 0,
         amount_refunded: _out ? _out.total_refunded : 0,
-        outstanding:     _out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
+        outstanding:     _cn ? 0 : (_out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0))),
         payments:        _out ? _out.payments : [],
+        credit_note:     _cn ? { id: _cn.id, invoice_number: _cn.invoice_number || null } : null,
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch folio" });
@@ -59609,8 +59614,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'refunds-serials-event-receipts',
+    commit_marker: 'credit-noted-folio-owes-nothing',
     code_features: [
+      'credit-noted-folio-owes-nothing — seen on screen after the refund work: a hotel folio whose invoice had been credit-noted showed its refunded advance as outstanding, because the viewer total ignores credit notes and a refunded advance no longer counts as paid. GET /hotel/folios/:id now reports outstanding 0 and names the credit note when one exists; the viewer says so and no longer offers a second credit note. The payment action buttons wrap instead of clipping, and the Method and Amount headers no longer run together.',
       'refunds-serials-event-receipts — three fixes from the post-M-2 review. (1) REFUND OF AN ADVANCE, RULE 51: POST /receipt-vouchers/:id/refund refunds an advance that is still held (voucher ISSUED — one adjusted against a live invoice is refused until that invoice is credit-noted or cancelled). Journal RFV-<voucher>: Dr 2100 and the advance GST exactly as the receipt credited them, Cr cash or bank. A refund voucher RFV-<FY>-NNNNN is issued with the Rule 51 particulars and prints as a PDF. The voucher becomes REFUNDED, closing it in GSTR-1 11A/11B like a cancellation. The receipt stops counting: a hotel folio payment is voided (settlement already ignores voided rows) and an event booking gets a negative receipt row, and neither half can be deleted. Refund is full, dated today or earlier and not before the receipt, and refused in a closed period. (2) EVENT INVOICE NUMBERS were count of event invoices plus one, so two invoices raised together shared a number. Now EVT-<FY>-NNNNN from an atomic tenant sequence seeded above the highest number issued under the prefix, skipping any number already on a folio. The visible format is unchanged for this financial year. (3) EVENT RECEIPTS AFTER THE INVOICE credited Advances from Guests, leaving the invoice owed and the money also held as an advance. A receipt while an invoice stands now clears the receivable that invoice debited (read from its journal, source EVENT_RECEIPT). A re-issued invoice applies only what the ledger holds as an advance, so a receipt that paid the earlier invoice, or a refunded advance, is not taken out of 2100 twice. Historical postings are unchanged.',
       'accrual-schedule-all-lines — GET /accounting/year-end-accrual gains ?lines=all. The schedule returns its 500 largest lines by default (unchanged) and now says so with lines_truncated; with lines=all it returns every line the accrual journal is built from, so the full schedule can be checked. Found because the H-3 regression check looked for a 75-rupee test order in the capped list: once the tenant passed 500 accrual lines the order fell off the end, and the check that a settled order is NOT accrued had become vacuous. The check now reads the full list.',
       'probe-bills-reverse-on-their-date — DELETE /procurement/supplier-invoices/:id gains ?reverse_on=invoice_date: each standing journal (and any Rule 37 reversal) is reversed on the date it was posted, so a bill entered in error leaves the month that carried it rather than staying there while the month of the deletion takes an equal negative. Every affected date is checked against closed periods first (409). Without the flag reversals are dated today, exactly as before, and the response now lists the reversals it posted. Used to remove the test probe bills two regression checks had been leaving in the live payables (they deactivated the supplier and left the bill): 97 MSME 43B(h) and audit-trail probes plus 4 verification probes, Rs 31.06 lakh, dated back to July. The checks now delete their own bills, and the supplier-payment check its payment and bill.',

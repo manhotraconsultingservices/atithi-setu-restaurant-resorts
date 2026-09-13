@@ -38255,13 +38255,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                   );
                 })()}
+                {viewFolio.credit_note && (
+                  <p className="text-[11px] text-[#6b5d52]">Credit note {viewFolio.credit_note.invoice_number || viewFolio.credit_note.id} reverses this invoice — nothing is outstanding on it.</p>
+                )}
               </div>
               {Array.isArray(viewFolio.payments) && viewFolio.payments.length > 0 && (
                 <div className="bg-[#faf7f2] rounded-2xl p-4">
                   <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Payments received ({viewFolio.payments.length})</p>
                   <table className="w-full text-xs">
                     <thead className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">
-                      <tr><th className="text-left py-1">When (IST)</th><th className="text-left py-1">Type</th><th className="text-left py-1">Method</th><th className="text-right py-1">Amount</th><th className="py-1"></th></tr>
+                      <tr><th className="text-left py-1">When (IST)</th><th className="text-left py-1">Type</th><th className="text-left py-1">Method</th><th className="text-right py-1 pl-2">Amount</th><th className="py-1"></th></tr>
                     </thead>
                     <tbody>
                       {viewFolio.payments.map((p: any) => (
@@ -38274,13 +38277,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             </span>
                           </td>
                           <td className="py-1.5 text-[#6b5d52]">{(p.payment_method || '—').replace(/_/g, ' ')}{p.reference_number ? ` · ${p.reference_number}` : ''}</td>
-                          <td className={cn('py-1.5 text-right font-mono font-semibold', p.payment_type === 'REFUND' ? 'text-rose-700' : 'text-emerald-700', Number(p.is_voided) === 1 && 'line-through opacity-60')}>
+                          <td className={cn('py-1.5 pl-2 text-right font-mono font-semibold whitespace-nowrap', p.payment_type === 'REFUND' ? 'text-rose-700' : 'text-emerald-700', Number(p.is_voided) === 1 && 'line-through opacity-60')}>
                             {p.payment_type === 'REFUND' ? '+' : '−'}₹{Number(p.amount || 0).toLocaleString('en-IN')}
                           </td>
                           {/* Rule 50 receipt voucher — issued automatically for every
                               advance, printable to hand to the guest. */}
-                          <td className="py-1.5 pl-2 text-right whitespace-nowrap">
-                            <div className="flex items-center justify-end gap-2">
+                          <td className="py-1.5 pl-2 text-right">
+                            <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-0.5">
                               {/* A voided receipt says so; a refunded advance names its refund voucher. */}
                               {p.refund_voucher_id ? (
                                 <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-rose-50 text-rose-700">Refunded</span>
@@ -38344,7 +38347,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </table>
                 </div>
               )}
-              {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'settled' && (
+              {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'settled' && !viewFolio.credit_note && (
                 <button
                   onClick={async () => {
                     const cnr = await promptPayment({ title: 'Generate credit note', fields: [{ name: 'reason', label: 'Reason', type: 'text', placeholder: 'Refund / cancellation', defaultValue: 'Refund' }], confirmLabel: 'Generate' });
