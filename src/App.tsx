@@ -56907,7 +56907,22 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [restaurant, setRestaurant] = useState<any>(null);
   const [session, setSession] = useState<any | null>(null);
-  const [cart, setCart] = useState<{ name: string; price: number; quantity: number }[]>([]);
+  // The cart carries the MENU ITEM ID and the size, not just a label.
+  //
+  // Without the id the kitchen's recipe never fires. deductIngredientsForOrder
+  // looks the dish up by `it.id || it.menu_item_id`; a line that has neither is
+  // silently skipped, so a waiter-punched Dal Makhni consumed no dal — and with
+  // consumption never written, food cost %, variance and stock turns all read
+  // zero no matter how many recipes were entered. The server accepts these
+  // lines because a staff user is ALLOWED to key a custom item off-menu
+  // (_optionalStaffUser resolves the HttpOnly cookie), so nothing ever
+  // complained. `id` stays optional precisely so that genuine off-menu items
+  // still work exactly as before.
+  //
+  // `size` matters too: the recipe table has FULL / HALF / BOTH variants and
+  // the server defaults to FULL when the line does not say, so a half portion
+  // was deducting a full portion's ingredients.
+  const [cart, setCart] = useState<{ id?: string; size?: 'FULL' | 'HALF'; name: string; price: number; quantity: number }[]>([]);
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [panelTab, setPanelTab] = useState<'MENU' | 'BILL'>('MENU');
@@ -56973,9 +56988,11 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
     const price = size === 'HALF' ? (item.price_half ?? item.price) : item.price_full;
     const label = `${item.name}${size === 'HALF' ? ' (Half)' : ''}`;
     setCart(prev => {
+      // Still keyed on the label — FULL and HALF produce different labels, so
+      // the two remain separate lines and inc/dec/remove are unaffected.
       const ex = prev.find(c => c.name === label);
       if (ex) return prev.map(c => c.name === label ? { ...c, quantity: c.quantity + 1 } : c);
-      return [...prev, { name: label, price, quantity: 1 }];
+      return [...prev, { id: item.id, size, name: label, price, quantity: 1 }];
     });
   };
 
@@ -57027,7 +57044,12 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
         body: JSON.stringify({
           tableNumber: tableName, tableId,
           customerName: name, customerPhone: phone,
-          items: cart.map(c => ({ name: c.name, price: c.price, quantity: c.quantity })),
+          // Same shape the guest ordering screen already sends (`id` + `size`),
+          // so both order paths produce identical item payloads rather than a
+          // third variant for anything downstream to special-case. `id` is
+          // omitted by JSON.stringify when undefined, so a genuine off-menu
+          // custom line is sent exactly as it was before.
+          items: cart.map(c => ({ id: c.id, size: c.size, name: c.name, price: c.price, quantity: c.quantity })),
           totalAmount: sub + gst, gstAmount: gst,
           paymentMethod: 'TABLE', session_token: session.session_token,
           token_number: orderToken.trim() || undefined,
