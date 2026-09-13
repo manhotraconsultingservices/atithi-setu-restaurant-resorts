@@ -25811,23 +25811,42 @@ ${data.tenant.name}`;
       // after an edit — and any Rule 37 reversal, found before the row goes.
       const liveSi = await _liveSupplierInvoiceJournals(db, req.params.id, inv.id);
       const r37Refs: any[] = await db.query(
-        "SELECT DISTINCT journal_ref FROM gl_entries WHERE restaurant_id = ? AND source_type = 'ITC_RULE37_REVERSAL' AND source_id = ?",
+        "SELECT journal_ref, MIN(entry_date) AS entry_date FROM gl_entries WHERE restaurant_id = ? AND source_type = 'ITC_RULE37_REVERSAL' AND source_id = ? GROUP BY journal_ref",
         [req.params.id, inv.id]).catch(() => []);
+      // ?reverse_on=invoice_date — for a bill entered in error, such as a test
+      // probe: each journal is reversed on the date it was posted, so the month
+      // that carried the bill loses it, instead of keeping it while the month of
+      // the deletion takes an equal negative. Refused when any of those months is
+      // signed off. Without it, reversals are dated today, as before.
+      const onOwnDate = String(req.query.reverse_on || '') === 'invoice_date';
+      if (onOwnDate) {
+        const dates = [...liveSi.map(j => j.entry_date), ...(r37Refs || []).map((r: any) => _glPostDate(r.entry_date))];
+        for (const d of dates) if (await _blockIfAcctClosed(res, db, d)) return;
+      }
       await db.run("DELETE FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
       // Phase 3.2 — reverse the invoice's GL journal (expense + ITC + AP backed out).
-      for (const ref of (liveSi.length ? liveSi.map(j => j.ref) : [`SI-${req.params.invoiceId}`])) {
-        await _reverseJournal(db, req.params.id, ref, {
-          sourceType: 'SUPPLIER_INVOICE_REVERSAL', sourceId: req.params.invoiceId,
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const reversals: { ref: string; date: string; ok: boolean; reversed: number }[] = [];
+      const toReverse: { ref: string; date: string | null }[] = liveSi.length
+        ? liveSi.map(j => ({ ref: j.ref, date: j.entry_date }))
+        : [{ ref: `SI-${req.params.invoiceId}`, date: null }];
+      for (const j of toReverse) {
+        const d = onOwnDate && j.date ? j.date : undefined;
+        const rr = await _reverseJournal(db, req.params.id, j.ref, {
+          date: d, sourceType: 'SUPPLIER_INVOICE_REVERSAL', sourceId: req.params.invoiceId,
           reason: 'Invoice deleted', postedBy: req.user?.email || req.user?.id || null,
         });
+        reversals.push({ ref: rr.reversalRef, date: d || todayIso, ok: rr.ok, reversed: rr.reversed });
       }
       for (const r of (r37Refs || [])) {
-        await _reverseJournal(db, req.params.id, String(r.journal_ref), {
-          sourceType: 'ITC_RULE37_REVERSAL_UNDO', sourceId: req.params.invoiceId,
+        const d = onOwnDate ? _glPostDate(r.entry_date) : undefined;
+        const rr = await _reverseJournal(db, req.params.id, String(r.journal_ref), {
+          date: d, sourceType: 'ITC_RULE37_REVERSAL_UNDO', sourceId: req.params.invoiceId,
           reason: 'Invoice deleted', postedBy: req.user?.email || req.user?.id || null,
         });
+        reversals.push({ ref: rr.reversalRef, date: d || todayIso, ok: rr.ok, reversed: rr.reversed });
       }
-      res.json({ ok: true });
+      res.json({ ok: true, reversals });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to delete invoice" });
     }
@@ -59320,8 +59339,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'itc-gated-2b-17-5-rule-37',
+    commit_marker: 'probe-bills-reverse-on-their-date',
     code_features: [
+      'probe-bills-reverse-on-their-date — DELETE /procurement/supplier-invoices/:id gains ?reverse_on=invoice_date: each standing journal (and any Rule 37 reversal) is reversed on the date it was posted, so a bill entered in error leaves the month that carried it rather than staying there while the month of the deletion takes an equal negative. Every affected date is checked against closed periods first (409). Without the flag reversals are dated today, exactly as before, and the response now lists the reversals it posted. Used to remove the test probe bills two regression checks had been leaving in the live payables (they deactivated the supplier and left the bill): 97 MSME 43B(h) and audit-trail probes plus 4 verification probes, Rs 31.06 lakh, dated back to July. The checks now delete their own bills, and the supplier-payment check its payment and bill.',
       'itc-gated-2b-17-5-rule-37 — M-2 from the accounting review, plus two Stage 2 fixes the now-running tests found. (1) ELIGIBILITY / SECTION 17(5): every supplier invoice records whether its GST may be claimed. Blocked credit (with its 17(5) clause), a restaurant taxed at 5 per cent (rate without input tax credit, the default for a RESTAURANT bill when the tenant charges 5 per cent) and an unregistered property post the GST INTO the expense, never to ITC Receivable. Inter-state is read from the two GSTINs when not stated (it was never sent, so every IGST bill booked CGST/SGST). One journal builder, _supplierInvoiceGlLines, serves create and edit. (2) AN EDIT NOW RE-POSTS: PATCH used to change the bill and leave its journal reading the old figures. The edited journal is compared with the one standing; when it differs the new one is posted first and the old reversed on its own date; an edit touching a closed period, or a bill with Rule 37 credit held, is refused. A bill that never had a journal is not given one. Delete reverses whichever journal stands. (3) GSTR-2B: import the portal JSON (docdata.b2b/b2ba/cdnr/cdnra, tax at document level, DD-MM-YYYY) — matched by supplier GSTIN and normalised invoice number, then tax within one rupee and date: MATCHED, DATE_DIFFERS, VALUE_DIFFERS, PROBABLE, NOT_IN_BOOKS, ITC_NOT_AVAILABLE, NOTE; plus bills claimed in the books that no statement carries (Section 16(2)(aa)). Posts nothing; GSTIN of another taxpayer refused. (4) RULE 37: report of claimed credit on bills unpaid after day 180, proportionate to the unpaid part; reversal posts R37-<invoice>-<n> Dr 1340 ITC Reversed (reclaimable) / Cr 1300-1320, dated today; each payment re-claims (R37C-<payment>) down to what the remaining balance still requires; deleting the payment undoes it. Section 50 interest shown as an indicative ceiling, never posted. (5) GSTR-3B carries itc_rule37, itc_not_claimed and the period GSTR-2B summary; its totals are unchanged. (6) STAGE 2 FIX: an adjusted receipt voucher named no invoice, because hotel check-out adjusts vouchers before it mints the serial; the serial allocator now writes the number back, and the list and PDF read it through the folio for vouchers already adjusted. (7) Receipt voucher PDF: the statutory-reference subtitle and the explanatory footnote removed at the owner request; the Rule 50 eighteen-per-cent sentence remains where it explains the rate.',
       'advances-taxed-and-vouchered — four owner requests in one change, because they are one mechanism. (1) HOTEL ADVANCES REACH THE LEDGER. The journal lived inside ONE route (POST /hotel/folios/:folioId/payments) while check-in, record-advance, group booking creation and the group deposit wrote the same folio_payments row by calling recordFolioPayment directly - on the live tenant 41 hotel advances worth 87,334.98 had no journal (the 46 / 1,77,334.98 first reported wrongly included 5 event rows that are mirrors of event_payments and ARE posted). Settlement then debited Advances from Guests for money never credited. The posting now lives INSIDE recordFolioPayment, which now REQUIRES the tenant id so every one of its eight callers had to be revisited; the hotel and spa routes no longer post their own copies. Journal refs and source types are the ones the old route used, so nothing already posted is posted twice, and event folios are skipped because their advance row mirrors event_payments. Voiding an advance on an open folio now reverses its journal - it reversed nothing before. (2) GST ON ADVANCES. For a service, Section 13(2) makes tax due on the earlier of invoice and receipt, so an advance for a room or a hall is taxed in the month received. The tax goes to NEW accounts 2201/2211/2221 GST on Advances, not to invoice tax, so GSTR-1 Tables 4/7/12 (which read 2200/2210/2220) never mistake an advance for a sale. Rate: hotel = the slab rate already on the folio room charges, then the booking tariff, then 18 percent only where not determinable (Rule 50 proviso); events = the event GST rate; nil where the tenant has no GSTIN. An event receipt taken AFTER the invoice is paying that invoice and is posted exactly as before. (3) RECEIPT VOUCHERS. A Rule 50 voucher RV-<FY>-NNNNN is issued for every hotel and event advance, printable as a PDF carrying every Rule 50 particular, linked at receipt to the booking and folio and marked ADJUSTED with the tax invoice number at settlement, for traceability. The voucher is the SOURCE OF TRUTH for the tax on an advance. The three copy-pasted settlement blocks are now ONE function, _advanceApplicationLines, which reverses exactly the voucher tax out of 2201/2211 so it is paid once; reversing a folio settlement re-opens the vouchers it adjusted; deleting an event advance cancels its voucher; cancelling a hotel booking reverses the tax on the refunded part and moves the tax on a forfeited part to output GST, because forfeited consideration is a taxable supply. (4) GSTR-1 TABLES 11A/11B from the vouchers: 11A advances received in the period and not adjusted within it, 11B earlier advances adjusted or refunded in it. The return total is now invoices + 11A - 11B and still reconciles to GST Outstanding, which with GSTR-3B now counts both sets of accounts. BACKFILL gains folio_advances (posted GROSS with no tax and no voucher: settlements already took these out of 2100 at full value, and a voucher minted today for a receipt months ago would misdate a statutory document; voided folios skipped unless a cancel journal unwinds them) and spa_folios (all 13 spa bills predate spa GL capture on 2 Aug 2026). Smoke: TC-ADV-HOTEL-LEDGER, TC-ADV-HOTEL-GST, TC-ADV-HOTEL-RV-ADJUSTED, TC-RV-PDF, TC-ADV-EVENT-RV, TC-GSTR1-11A-RECONCILES, TC-RV-CANCEL-ON-DELETE, TC-BACKFILL-ADV-SPA-DRYRUN. tsc + vite build clean.',
       'backfill-by-section — POST /accounting/backfill-gl gains an optional sections=folios,orders,supplier_payments. Absent, every section runs exactly as before. It exists because the owner approved posting the 13 historical supplier payments, and the same call would otherwise also have posted 132 folio and order journals nobody had looked at: approval to post one kind of history is not approval to post the others. TC-BACKFILL-SECTIONS asserts a scoped run considers no folios or orders, against an unscoped run that does find some, so a scope that is silently ignored fails.',
