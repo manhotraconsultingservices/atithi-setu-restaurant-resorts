@@ -48136,6 +48136,7 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
           OVERSTOCKED: { label: 'Overstocked', cls: 'bg-amber-100 text-amber-800' },
           NO_USAGE: { label: 'Not moving', cls: 'bg-[#f0e8d8] text-[#6b5d52]' },
           NO_STOCK: { label: 'No stock', cls: 'bg-[#f0e8d8] text-[#9c8e85]' },
+          NEGATIVE: { label: 'Negative — check count', cls: 'bg-rose-100 text-rose-700' },
         };
         const items = (turnsData.items || []).filter((i: any) => Number(i.on_hand_value || 0) > 0 || Number(i.consumed_qty || 0) > 0);
         return (
