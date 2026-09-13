@@ -20772,10 +20772,13 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       // A receipt has no module column of its own — it is a delivery, and what
       // makes it one department's business is WHAT ARRIVED IN IT. So match on
-      // the items received, and fall back to the module of the purchase order
-      // it was raised against: that second arm is what keeps a PO-linked
-      // receipt visible when its lines were never recorded, which on a property
-      // that receipts nothing is most of them.
+      // the items received, and fall back to the module of the purchase order it
+      // was raised against — but ONLY when the receipt has no lines at all.
+      // Applied unconditionally, that second arm SWALLOWED the filter:
+      // purchase_orders.module is COALESCEd to RESTAURANT, so every legacy
+      // untagged PO made its receipt look like a kitchen receipt and the kitchen
+      // list still came back with all 19, the spa's included. Judge by what
+      // arrived when that is known; fall back to the order only when it is not.
       const gmfItems = _invModuleFilter(req, 'ix.module');
       const gmfPo = _invModuleFilter(req, 'px.module');
       const rows = await db.query(
@@ -20789,8 +20792,9 @@ ${data.tenant.name}`;
                 EXISTS (SELECT 1 FROM goods_receipt_items gx
                           JOIN ingredients ix ON ix.id = gx.ingredient_id
                          WHERE gx.grn_id = g.id${gmfItems.sql})
-             OR EXISTS (SELECT 1 FROM purchase_orders px
-                         WHERE px.id = g.po_id${gmfPo.sql})
+             OR (NOT EXISTS (SELECT 1 FROM goods_receipt_items gy WHERE gy.grn_id = g.id)
+                 AND EXISTS (SELECT 1 FROM purchase_orders px
+                              WHERE px.id = g.po_id${gmfPo.sql}))
           )` : ''}
           GROUP BY g.id, s.name
           ORDER BY g.received_at DESC`,
@@ -57798,8 +57802,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'kitchen-lists-scoped',
+    commit_marker: 'grn-scope-by-what-arrived',
     code_features: [
+      'grn-scope-by-what-arrived — follow-up to kitchen-lists-scoped, caught by checking that the new filter PARTITIONS rather than assuming a 200 meant it worked. The GRN module filter matched on the items received OR on the linked purchase order module, unconditionally - and purchase_orders.module is COALESCEd to RESTAURANT, so every legacy untagged PO made its receipt look like a kitchen receipt and the kitchen list still returned all 19 receipts, the spa one included. The PO arm now applies ONLY when the receipt has no lines at all: judge by what arrived when that is known, fall back to the order only when it is not. Wastage and counts partitioned correctly first time (wastage 10 RESTAURANT + 35 EVENTS = 45; counts 45 HOTEL + 6 NULL-module, and a NULL-module stock-take deliberately shows under every module because it predates scoping). ALSO CORRECTS A CLAIM I MADE EARLIER: I reported this tenant had ZERO goods receipts, having probed a path that does not exist (/inventory/goods-receipts) and read the empty result as fact. The real route is /inventory/grn and there are 19 receipts, 17 with lines. The supplier-league conclusion survives but for a DIFFERENT reason: all 19 are against E2E TEST suppliers, so no REAL supplier has receipt history.',
       'kitchen-lists-scoped — the last of the unscoped kitchen reads, after the dashboard and forecast. The chef goods-receipt history, wastage log and stock-take list were all fetched with no module, so they showed every department: hotel linen deliveries, spa spoilage, and other modules stock-takes. Wastage and counts had ACCEPTED ?module= on the server all along and the caller simply never sent one; the GRN list had no module filter at all, so one was added. A GOODS RECEIPT HAS NO MODULE OF ITS OWN - it is a delivery, and what makes it a department business is WHAT ARRIVED IN IT. So it matches on the items received (EXISTS over goods_receipt_items -> ingredients) OR on the module of the purchase order it was raised against. The second arm is what keeps a PO-linked receipt visible when its lines were never recorded, which on a property that receipts nothing is all of them. TWO THINGS I GOT WRONG AND CORRECTED WHILE DOING IT: (1) my first anchors matched 2-3 sites each, because the same URL is used by POST calls in GRNCreateModal / WastageLogModal / StartCountModal - only the three GETs in OwnerDashboard needed scoping. (2) I then added `module: RESTAURANT` to the counts POST believing kitchen stock-takes were saved NULL-tagged; the route already does _normaliseCostModule(req.body?.module, RESTAURANT), so it was a no-op whose comment would have misled the next reader. Reverted. Counts deliberately take a plain module with no include_shared, because that route also returns NULL-module stock-takes - the ones taken before counts were scoped, which genuinely spanned the whole property.',
       'forecast-honours-the-module — the other half of kitchen-dashboard-scoped, and it needed BOTH. Scoping the client fetch fixed the tiles (stock Rs6.9L -> Rs99k, below-reorder 23 -> 2, food cost 1.8% -> 14.8%) but the Consumption Forecast table underneath went on listing Ashwagandha Churna, because the dashboard route applied its module filter to every KPI query and NOT to the forecast query, whose WHERE was a bare `i.is_active = 1`. So a module-scoped request still received the whole property suggested-order list. Found by looking at the screen again after the first fix rather than assuming it had worked - the tiles changing is not evidence the list did. LANDMINE: the horizon placeholder lives in a LEFT JOIN that precedes the WHERE, so it binds BEFORE the module params; reversing them binds a module name as a horizon and returns an empty forecast rather than an error.',
       'kitchen-dashboard-scoped — FOUND BY DRIVING THE UI after re-filing 20 Ayurvedic items from RESTAURANT to SPA. The Kitchen Inventory screen kept showing Rs6.9L of stock, 23 items below reorder, and a consumption forecast proposing purchase orders for Ashwagandha Churna - spa medicine - while its own Ingredients tab correctly read 38. Cause: fetchInventoryDashboard called /inventory/dashboard with NO module, so every tile on the chef screen (stock value, below reorder, expiring, wastage, food cost %, pending PO value) plus the whole suggested-order forecast was the WHOLE PROPERTY - hotel linen and the spa dispensary included. This is the SAME defect as the one fixed when the hotel silo was folded in (that fix scoped /inventory/ingredients to module=RESTAURANT&include_shared=1 and MISSED the dashboard read three lines below it). ModuleInventoryView had it right all along for Hotel/Spa/Events. Pre-existing, not caused by the re-filing - the re-filing just made it impossible to miss, because the kitchen started forecasting POs for items it does not stock. NOTE for anyone extending this screen: the kitchen wastage, counts and GRN reads are still unscoped; they are transaction lists rather than KPI tiles so they mislead less, but they are the same class.',
