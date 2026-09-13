@@ -24792,6 +24792,197 @@ ${data.tenant.name}`;
   });
 
   // GET /api/restaurant/:id/procurement/suppliers/:supplierId — single supplier with AP summary
+  // ── Supplier scoring — ONE formula, used by the scorecard AND the league ──
+  // The weights (on-time 35, fill rate 25, price stability 25, quality 15) are
+  // written here once. A second copy in the league table would be a promise that
+  // two screens will eventually disagree about the same supplier, and the one
+  // thing a league table cannot survive is disagreeing with the profile it
+  // links to.
+  //
+  // WEIGHTS ARE RE-NORMALISED OVER THE DIMENSIONS THAT HAVE DATA, and that is
+  // the fact a ranking has to surface. A supplier with only quality data is
+  // scored purely on quality — 15% of the intended weight, stretched to 100% —
+  // so its 98 is NOT comparable to a supplier measured on all four at 92.
+  // `weight_covered` says how much of the intended weighting was actually
+  // measurable, so the table can show what a score is built on instead of
+  // implying every row was judged the same way.
+  const _SUPPLIER_WEIGHTS = { on_time: 0.35, fill_rate: 0.25, price_stability: 0.25, quality: 0.15 };
+  const _supplierScore = (raw: {
+    total_deliveries?: any; on_time_count?: any;
+    total_ordered?: any; total_received?: any;
+    price_variance_pct?: any;
+    total_quality_items?: any; good_items?: any;
+  }) => {
+    const deliveries = Number(raw.total_deliveries || 0);
+    const ordered = Number(raw.total_ordered || 0);
+    const qualityItems = Number(raw.total_quality_items || 0);
+
+    const on_time_pct = deliveries > 0
+      ? Math.round(100 * Number(raw.on_time_count || 0) / deliveries * 10) / 10 : null;
+    const fill_rate_pct = ordered > 0
+      ? Math.min(100, Math.round(Number(raw.total_received || 0) / ordered * 1000) / 10) : null;
+    const price_variance_pct = raw.price_variance_pct == null ? null : Number(raw.price_variance_pct);
+    // Stability is distance from the agreed price in EITHER direction: a
+    // supplier who under-charges is still not invoicing what was ordered.
+    const price_stability_pct = price_variance_pct !== null
+      ? Math.max(0, Math.round((100 - Math.abs(price_variance_pct)) * 10) / 10) : null;
+    const quality_pct = qualityItems > 0
+      ? Math.round(Number(raw.good_items || 0) / qualityItems * 1000) / 10 : null;
+
+    const parts: number[] = [];
+    let weightSum = 0;
+    if (on_time_pct !== null) { parts.push(on_time_pct * _SUPPLIER_WEIGHTS.on_time); weightSum += _SUPPLIER_WEIGHTS.on_time; }
+    if (fill_rate_pct !== null) { parts.push(fill_rate_pct * _SUPPLIER_WEIGHTS.fill_rate); weightSum += _SUPPLIER_WEIGHTS.fill_rate; }
+    if (price_stability_pct !== null) { parts.push(price_stability_pct * _SUPPLIER_WEIGHTS.price_stability); weightSum += _SUPPLIER_WEIGHTS.price_stability; }
+    if (quality_pct !== null) { parts.push(quality_pct * _SUPPLIER_WEIGHTS.quality); weightSum += _SUPPLIER_WEIGHTS.quality; }
+    const health_score = weightSum > 0
+      ? Math.round(parts.reduce((a, b) => a + b, 0) / weightSum * 10) / 10 : null;
+
+    return {
+      on_time_pct, fill_rate_pct, price_variance_pct, price_stability_pct, quality_pct,
+      health_score,
+      dimensions_measured: parts.length,
+      weight_covered: Math.round(weightSum * 100),
+      total_deliveries: deliveries, total_ordered: ordered,
+      total_received: Number(raw.total_received || 0), total_quality_items: qualityItems,
+    };
+  };
+
+  // ── Supplier league table ─────────────────────────────────────────────────
+  // Every supplier scored side by side on the same four measures, so they can
+  // be compared rather than inspected one at a time. The per-supplier scorecard
+  // answers "how is this supplier doing"; this answers "who should we be buying
+  // from", which is the question that actually changes a purchase order.
+  //
+  // Set-based on purpose: four grouped queries for the whole book, not four per
+  // supplier. The FORMULA is shared with the scorecard (above); only the shape
+  // of the data-gathering differs, which is visible here rather than silent.
+  //
+  // Suppliers with NO measurable history are returned SEPARATELY as `unrated`
+  // instead of being ranked last with a null score — an unrated supplier is not
+  // a bad one, and putting it at the bottom of a league invites exactly that
+  // reading.
+  app.get("/api/restaurant/:id/procurement/suppliers/league", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const days = Math.min(730, Math.max(7, Number(req.query.days) || 90));
+      // The cut-off is computed here and bound as a timestamp rather than built
+      // as `(? || ' days')::interval` in SQL: Postgres cannot infer the type of
+      // a bare parameter inside that concatenation, and the failure mode is the
+      // whole statement being rejected at run time. Same reasoning as the
+      // checklist expiry sweep.
+      const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
+
+      const suppliers: any[] = await db.query(
+        "SELECT id, name, COALESCE(is_active, 1) AS is_active, lead_time_days, payment_terms FROM suppliers ORDER BY name"
+      ).catch(() => [] as any[]);
+
+      const onTime: any[] = await db.query(`
+        SELECT gr.supplier_id,
+               COUNT(*) AS total_deliveries,
+               COUNT(CASE WHEN gr.received_at::date <= po.expected_delivery_date THEN 1 END) AS on_time_count
+          FROM goods_receipts gr
+          JOIN purchase_orders po ON po.id = gr.po_id
+         WHERE po.expected_delivery_date IS NOT NULL AND gr.received_at >= ?::timestamp
+         GROUP BY gr.supplier_id`, [sinceIso]).catch(() => [] as any[]);
+
+      const fill: any[] = await db.query(`
+        SELECT po.supplier_id,
+               COALESCE(SUM(poi.qty_ordered), 0) AS total_ordered,
+               COALESCE(SUM(poi.qty_received), 0) AS total_received
+          FROM purchase_orders po
+          JOIN purchase_order_items poi ON poi.po_id = po.id
+         WHERE po.raised_at >= ?::timestamp
+         GROUP BY po.supplier_id`, [sinceIso]).catch(() => [] as any[]);
+
+      const price: any[] = await db.query(`
+        SELECT gr.supplier_id,
+               ROUND(AVG((gri.unit_price - poi.unit_price) / NULLIF(poi.unit_price, 0) * 100)::numeric, 1) AS price_variance_pct
+          FROM goods_receipt_items gri
+          JOIN goods_receipts gr ON gr.id = gri.grn_id
+          JOIN purchase_order_items poi ON poi.po_id = gr.po_id AND poi.ingredient_id = gri.ingredient_id
+         WHERE gr.received_at >= ?::timestamp AND gr.po_id IS NOT NULL
+         GROUP BY gr.supplier_id`, [sinceIso]).catch(() => [] as any[]);
+
+      const quality: any[] = await db.query(`
+        SELECT gr.supplier_id,
+               COUNT(*) AS total_quality_items,
+               COUNT(CASE WHEN gri.condition = 'GOOD' THEN 1 END) AS good_items
+          FROM goods_receipt_items gri
+          JOIN goods_receipts gr ON gr.id = gri.grn_id
+         WHERE gr.received_at >= ?::timestamp
+         GROUP BY gr.supplier_id`, [sinceIso]).catch(() => [] as any[]);
+
+      // What was actually bought, so a league can be read by weight of business
+      // as well as by score — a 100% score on one delivery is not a supplier
+      // relationship, and ranking it above a supplier who filled forty is how a
+      // league table gives bad advice.
+      const spend: any[] = await db.query(`
+        SELECT supplier_id, COUNT(*) AS po_count, COALESCE(SUM(grand_total), 0) AS spend_value
+          FROM purchase_orders
+         WHERE raised_at >= ?::timestamp
+         GROUP BY supplier_id`, [sinceIso]).catch(() => [] as any[]);
+
+      const idx = (rows: any[]) => {
+        const m = new Map<string, any>();
+        for (const r of rows) m.set(String(r.supplier_id), r);
+        return m;
+      };
+      const ot = idx(onTime), fr = idx(fill), pv = idx(price), ql = idx(quality), sp = idx(spend);
+
+      const scored = suppliers.map((s: any) => {
+        const k = String(s.id);
+        const sc = _supplierScore({
+          ...(ot.get(k) || {}), ...(fr.get(k) || {}), ...(pv.get(k) || {}), ...(ql.get(k) || {}),
+        });
+        const money = sp.get(k) || {};
+        return {
+          supplier_id: s.id, supplier_name: s.name,
+          is_active: Number(s.is_active) === 1,
+          lead_time_days: s.lead_time_days ?? null,
+          payment_terms: s.payment_terms ?? null,
+          po_count: Number(money.po_count || 0),
+          spend_value: Math.round(Number(money.spend_value || 0) * 100) / 100,
+          ...sc,
+        };
+      });
+
+      const rated = scored.filter((x: any) => x.health_score !== null)
+        .sort((a: any, b: any) =>
+          (b.health_score - a.health_score)
+          // Tie-break on how much of the weighting was measurable, so a
+          // fully-measured supplier outranks a partially-measured one on the
+          // same score, then on weight of business.
+          || (b.weight_covered - a.weight_covered)
+          || (b.spend_value - a.spend_value));
+      rated.forEach((x: any, i: number) => { x.rank = i + 1; });
+      const unrated = scored.filter((x: any) => x.health_score === null)
+        .sort((a: any, b: any) => b.spend_value - a.spend_value);
+
+      const avg = rated.length
+        ? Math.round(rated.reduce((a: number, x: any) => a + x.health_score, 0) / rated.length * 10) / 10
+        : null;
+
+      res.json({
+        period_days: days,
+        weights: _SUPPLIER_WEIGHTS,
+        method: 'Each supplier is scored on the same four measures as its own scorecard, using one shared formula. Weights are re-normalised over whichever measures have data, so weight_covered says how much of the intended weighting a score is actually built on — a supplier judged on one measure is not comparable to one judged on four.',
+        totals: {
+          suppliers: scored.length,
+          rated: rated.length,
+          unrated: unrated.length,
+          average_health_score: avg,
+          spend_value: Math.round(scored.reduce((a: number, x: any) => a + Number(x.spend_value || 0), 0) * 100) / 100,
+        },
+        rated,
+        unrated,
+      });
+    } catch (err: any) {
+      console.error('/procurement/suppliers/league error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to build the supplier league' });
+    }
+  });
+
   app.get("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
@@ -24945,38 +25136,16 @@ ${data.tenant.name}`;
         WHERE gr.supplier_id = ? AND gr.received_at >= NOW() - INTERVAL '90 days'
       `, [sid]);
 
-      const on_time_pct = otRow.total_deliveries > 0
-        ? Math.round(100 * otRow.on_time_count / otRow.total_deliveries * 10) / 10 : null;
-      const fill_rate_pct = frRow.total_ordered > 0
-        ? Math.min(100, Math.round(frRow.total_received / frRow.total_ordered * 1000) / 10) : null;
-      const price_variance_pct = pvRow.price_variance_pct ?? null;
-      const price_stability_pct = price_variance_pct !== null
-        ? Math.max(0, Math.round((100 - Math.abs(price_variance_pct)) * 10) / 10) : null;
-      const quality_pct = qlRow.total_items > 0
-        ? Math.round(qlRow.good_items / qlRow.total_items * 1000) / 10 : null;
-
-      const parts: number[] = [];
-      let weightSum = 0;
-      if (on_time_pct !== null)       { parts.push(on_time_pct * 0.35);      weightSum += 0.35; }
-      if (fill_rate_pct !== null)      { parts.push(fill_rate_pct * 0.25);    weightSum += 0.25; }
-      if (price_stability_pct !== null){ parts.push(price_stability_pct * 0.25); weightSum += 0.25; }
-      if (quality_pct !== null)        { parts.push(quality_pct * 0.15);      weightSum += 0.15; }
-      const health_score = weightSum > 0
-        ? Math.round(parts.reduce((a, b) => a + b, 0) / weightSum * 10) / 10 : null;
-
-      res.json({
-        period_days: 90,
-        on_time_pct,
-        total_deliveries: otRow.total_deliveries,
-        fill_rate_pct,
-        total_ordered: frRow.total_ordered,
-        total_received: frRow.total_received,
-        price_variance_pct,
-        price_stability_pct,
-        quality_pct,
-        total_quality_items: qlRow.total_items,
-        health_score,
+      // Scored through the SHARED formula, so this card and the league table
+      // can never publish different numbers for the same supplier.
+      const sc = _supplierScore({
+        total_deliveries: otRow.total_deliveries, on_time_count: otRow.on_time_count,
+        total_ordered: frRow.total_ordered, total_received: frRow.total_received,
+        price_variance_pct: pvRow.price_variance_pct,
+        total_quality_items: qlRow.total_items, good_items: qlRow.good_items,
       });
+      // Response shape unchanged — the UI reads these exact keys.
+      res.json({ period_days: 90, ...sc });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to compute scorecard" });
     }
@@ -57555,8 +57724,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'stockout-ran-out-means-crossed',
+    commit_marker: 'supplier-league-table',
     code_features: [
+      'supplier-league-table — the last gap from the supply-chain review. A per-supplier scorecard already existed and was surfaced (I nearly mis-reported it as missing because my grep filtered out the string 360), but the suppliers LIST carried no performance fields at all, so suppliers could be inspected one at a time and never compared. New GET /procurement/suppliers/league?days= plus a third view beside Card and Table in ProcurementView. ONE FORMULA, NOT TWO. The weights (on-time 35, fill 25, price stability 25, quality 15) are extracted into _supplierScore and the EXISTING scorecard route now calls it too, so the league and the card a user clicks through to cannot publish different numbers for the same supplier - the one thing a league cannot survive is disagreeing with the profile it links to. The league gathers its inputs set-based (five grouped queries for the whole book, not four per supplier); only the gathering differs, and that difference is visible rather than silent. WEIGHTS ARE RE-NORMALISED OVER THE MEASURES THAT HAVE DATA, which is exactly the fact a RANKING has to surface: a supplier judged only on quality is scored on 15% of the intended weighting stretched to 100%, so its 98 is not comparable to a supplier measured on all four at 92. Every row therefore reports dimensions_measured and weight_covered, shown on screen as "2 of 4 - 60%" and amber-flagged below 100. Ties break on weight_covered then spend, so a fully-measured supplier outranks a partly-measured one on the same score. Suppliers with NO history come back SEPARATELY as `unrated` rather than ranked last on a null - an unrated supplier is not a bad one, and the bottom of a league invites exactly that reading. Spend and PO count are carried alongside because a 100% score on a single delivery is not a supplier relationship. LANDMINE: the route MUST be declared before /procurement/suppliers/:supplierId - Express matches in order, so otherwise the league is served by the single-supplier lookup as a supplier named "league" and 404s as though it were never deployed. TC-SUP-LEAGUE-ROUTE locks that in. Smoke: -AGREES (the top-ranked supplier scores identically in the league and on its own card, across all four components - the test that justifies the shared formula), -RANKED (descending, sequential ranks, rated and unrated partition the book), -COVERAGE.',
       'stockout-ran-out-means-crossed — caught by reading the LIVE numbers rather than the tests, which were all green. The panel reported RESTAURANT as "19 of 58 items ran out" over a period with ZERO stockout events, which cannot both be true. Cause: items_that_ran_out counted any item with time at zero, so it swept up 18 items whose ledger merely OPENED at zero and were topped up minutes later by their first delivery. Those never ran out - they were not yet stocked - and that is exactly the distinction the event counter already draws (an item already out when the window opens contributes days but not an event). The counter now counts crossings, so the three headline figures mean three different things: stockout_events = crossings into zero during the window, items_that_ran_out = how many distinct items had one, item_days_out = total unavailability INCLUDING items that began the window out, currently_out = the snapshot now. Smoke: TC-INV-STOCKOUT-TOTALS-<module> asserts across three modules that items_that_ran_out equals the number of items actually carrying an event and never exceeds the event total - an internal-consistency check, which is the kind that catches a headline drifting from the detail it is supposed to summarise.',
       'stockout-frequency — the last measurement gap from the supply-chain review after stock turns. New GET /inventory/stockouts?module=&days=|from=&to= plus a panel beside turns in InventoryAnalyticsView, so all four modules get it at once. Per item: stockout EVENTS (each fall to zero), DAYS OUT, availability %, days below reorder, whether it is out right now, and when it last ran out; portfolio totals across the same window. Read beside turnover on purpose - a high turn that is really a run of stockouts is not efficiency, it is under-buying. BALANCES ARE RECONSTRUCTED BY SUMMING THE LEDGER (qty_delta), NOT read from stock_movements.balance_after: that column is a denormalised convenience each caller writes, while the sum is the same source of truth the month-end close uses, so a stockout history cannot disagree with the closing balance it comes from. THREE RULES, each of them a way to be quietly wrong if skipped: (1) an item ALREADY out when the window opens contributes DAYS but not an EVENT - the running-out happened in the previous period and counting it again double-counts it across two reports; (2) tracking starts at the LATER of the window and the item created_at, or every newly added item looks like it was out of stock for weeks before it existed and portfolio availability drops each time someone adds an item; (3) days_below_reorder is measured against TODAY reorder point because the historical threshold is not stored - a risk signal, not an audit, and labelled as such on screen. FOUND WHILE WRITING THE TEST, not after: a brand-new item has only HOURS of history, so a few seconds at zero inside that is a huge fraction - an item added this morning would have published 12% availability and sat at the top of the worst-offenders list on day one. Availability is now withheld (null) below a full day of history, and part-day items are excluded from the portfolio rate so that adding an item cannot move the headline. Smoke: TC-INV-STOCKOUT-EVENTS drives a real timeline (10 -> 0 -> 5 -> 0 -> 8 = exactly 2 events) against a control item that dips to 3 without ever reaching zero and must record NONE - without the control the test would pass against an implementation that counted every downward movement; -NEEDS-A-DAY; -BOUNDED sweeps all four modules for a percentage outside 0..100 or a negative count.',
       'turns-no-negative-cover — FOUND BY LOOKING AT THE SCREEN, not by a test. The new turns panel rendered a retail candle sitting at -2 pcs as "-90 days cover" next to real figures. Days of cover divides stock by usage, and a negative balance divided by a usage rate is not a slightly wrong number, it is a nonsense one printed beside correct ones - and one of those costs the whole dashboard its credibility. Cover is now null unless stock is actually held, and NEGATIVE is its own band (rose, "Negative - check count") rather than being lumped in with "no stock": a balance below zero means more was consumed than was ever received, which is a counting error to go and fix, not a shelf to restock. Smoke: TC-INV-TURNS-NEGATIVE-STOCK sweeps all four modules and asserts no item anywhere reports a negative cover.',

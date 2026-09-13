@@ -67223,7 +67223,12 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   const [supForm, setSupForm] = useState({ ...EMPTY_SUP });
   const [supSaving, setSupSaving] = useState(false);
   const [supSearch, setSupSearch] = useState('');
-  const [supView, setSupView] = useState<'CARD' | 'TABLE'>('CARD');
+  // LEAGUE sits beside CARD and TABLE rather than being a separate panel: it
+  // is the same suppliers, ordered by how they have actually performed.
+  const [supView, setSupView] = useState<'CARD' | 'TABLE' | 'LEAGUE'>('CARD');
+  const [leagueData, setLeagueData] = useState<any>(null);
+  const [leagueDays, setLeagueDays] = useState(90);
+  const [leagueLoading, setLeagueLoading] = useState(false);
 
   // ── PO sub-tab ────────────────────────────────────────────────────────────
   const [purchaseOrders, setPurchaseOrders] = useState<any[]>([]);
@@ -67339,6 +67344,19 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
 
   useEffect(() => { loadSuppliers(); loadSupplierList(); }, []);
   useEffect(() => { if (subTab === 'SUPPLIERS') loadSupplierList(); }, [subTab]);
+  // Only fetched when the league is actually being looked at — it is five
+  // grouped queries, and nobody on the card view is waiting for them.
+  useEffect(() => {
+    if (subTab !== 'SUPPLIERS' || supView !== 'LEAGUE') return;
+    let cancelled = false;
+    setLeagueLoading(true);
+    api(`/procurement/suppliers/league?days=${leagueDays}`)
+      .then((d: any) => { if (!cancelled) setLeagueData(d); })
+      .catch(() => { if (!cancelled) setLeagueData(null); })
+      .finally(() => { if (!cancelled) setLeagueLoading(false); });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subTab, supView, leagueDays]);
   useEffect(() => { if (subTab === 'INVOICES') loadInvoices(); }, [subTab, invFilter]);
   useEffect(() => { if (subTab === 'PAYMENTS') loadPayments(); }, [subTab]);
   useEffect(() => { if (subTab === 'REPORTS') { loadPayables(); loadSpending(); loadPoStats(); } }, [subTab]);
@@ -67562,6 +67580,10 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                 className={cn("p-2 transition-colors", supView === 'TABLE' ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10')}>
                 <List size={15} />
               </button>
+              <button onClick={() => setSupView('LEAGUE')} title="League table — suppliers ranked on performance"
+                className={cn("p-2 transition-colors", supView === 'LEAGUE' ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10')}>
+                <TrendingUp size={15} />
+              </button>
             </div>
             <button onClick={openNewSupplier}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">
@@ -67569,7 +67591,120 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
             </button>
           </div>
 
-          {supView === 'TABLE' ? (
+          {supView === 'LEAGUE' ? (
+            leagueLoading ? (
+              <div className="text-center py-16"><RefreshCw size={26} className="mx-auto animate-spin text-[#9c8e85]" /></div>
+            ) : !leagueData ? (
+              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-8 text-center text-sm text-[#6b5d52]">
+                Couldn't load the league table.
+              </div>
+            ) : (() => {
+              const t = leagueData.totals || {};
+              const w = leagueData.weights || {};
+              const cell = (v: any, suffix = '%') => v == null ? <span className="text-[#c9bdb2]">—</span> : `${v}${suffix}`;
+              const scoreCls = (v: number) => v >= 80 ? 'bg-emerald-100 text-emerald-800'
+                : v >= 60 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-700';
+              return (
+                <div className="space-y-4">
+                  <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+                    <div className="flex items-start justify-between gap-3 flex-wrap mb-1">
+                      <h3 className="text-sm font-bold text-[#1a1208]">Supplier league</h3>
+                      <select value={leagueDays} onChange={e => setLeagueDays(Number(e.target.value))}
+                        className="text-xs border border-[#e8dccf] rounded-xl px-2 py-1 bg-white">
+                        <option value={30}>Last 30 days</option>
+                        <option value={90}>Last 90 days</option>
+                        <option value={180}>Last 180 days</option>
+                        <option value={365}>Last 365 days</option>
+                      </select>
+                    </div>
+                    <p className="text-xs text-[#9c8e85] mb-3">
+                      Ranked on delivery ({Math.round((w.on_time || 0) * 100)}%), fill rate ({Math.round((w.fill_rate || 0) * 100)}%),
+                      price stability ({Math.round((w.price_stability || 0) * 100)}%) and quality ({Math.round((w.quality || 0) * 100)}%) —
+                      the same score each supplier's own card shows.
+                    </p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {[
+                        { k: 'Rated', v: `${t.rated ?? 0} of ${t.suppliers ?? 0}`, sub: `${t.unrated ?? 0} with no history yet` },
+                        { k: 'Average score', v: t.average_health_score == null ? '—' : `${t.average_health_score}`, sub: 'across rated suppliers' },
+                        { k: 'Spend in period', v: `Rs.${Number(t.spend_value || 0).toLocaleString('en-IN')}`, sub: 'ordered value' },
+                        { k: 'Window', v: `${leagueData.period_days}d`, sub: 'rolling' },
+                      ].map(c => (
+                        <div key={c.k} className="rounded-2xl bg-[#faf7f2] border border-[#f0e8d8] px-3 py-2">
+                          <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">{c.k}</p>
+                          <p className="text-lg font-bold text-[#1a1208] tabular-nums leading-tight">{c.v}</p>
+                          <p className="text-[10px] text-[#9c8e85]">{c.sub}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4 overflow-x-auto">
+                    {(leagueData.rated || []).length === 0 ? (
+                      <p className="text-sm text-[#6b5d52] text-center py-6">
+                        No supplier has enough delivery history yet to be scored. Receive goods against a purchase order and they'll appear here.
+                      </p>
+                    ) : (
+                      <table className="w-full text-sm">
+                        <thead className="text-[10px] uppercase tracking-widest text-[#9c8e85]">
+                          <tr>
+                            <th className="px-2 py-1.5 text-left font-bold">#</th>
+                            <th className="px-2 py-1.5 text-left font-bold">Supplier</th>
+                            <th className="px-2 py-1.5 text-right font-bold">Score</th>
+                            <th className="px-2 py-1.5 text-right font-bold">On time</th>
+                            <th className="px-2 py-1.5 text-right font-bold">Fill rate</th>
+                            <th className="px-2 py-1.5 text-right font-bold">Price</th>
+                            <th className="px-2 py-1.5 text-right font-bold">Quality</th>
+                            <th className="px-2 py-1.5 text-right font-bold">POs</th>
+                            <th className="px-2 py-1.5 text-right font-bold">Spend</th>
+                            <th className="px-2 py-1.5 text-left font-bold">Judged on</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(leagueData.rated || []).map((r: any) => (
+                            <tr key={r.supplier_id} className="border-t border-[#f0e8d8]">
+                              <td className="px-2 py-1.5 font-bold text-[#9c8e85] tabular-nums">{r.rank}</td>
+                              <td className="px-2 py-1.5 text-[#1a1208] font-medium">{r.supplier_name}</td>
+                              <td className="px-2 py-1.5 text-right">
+                                <span className={cn('px-2 py-0.5 rounded-full text-[11px] font-bold tabular-nums', scoreCls(r.health_score))}>{r.health_score}</span>
+                              </td>
+                              <td className="px-2 py-1.5 text-right font-mono">{cell(r.on_time_pct)}</td>
+                              <td className="px-2 py-1.5 text-right font-mono">{cell(r.fill_rate_pct)}</td>
+                              <td className="px-2 py-1.5 text-right font-mono">{cell(r.price_stability_pct)}</td>
+                              <td className="px-2 py-1.5 text-right font-mono">{cell(r.quality_pct)}</td>
+                              <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">{r.po_count}</td>
+                              <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">Rs.{Number(r.spend_value || 0).toLocaleString('en-IN')}</td>
+                              {/* A score built on one measure is not the same claim as one
+                                  built on four — say so rather than let the ranking imply
+                                  every row was judged the same way. */}
+                              <td className="px-2 py-1.5">
+                                <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full',
+                                  r.weight_covered >= 100 ? 'bg-[#f0e8d8] text-[#6b5d52]' : 'bg-amber-50 text-amber-800 border border-amber-200')}>
+                                  {r.dimensions_measured} of 4 · {r.weight_covered}%
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                    {(leagueData.unrated || []).length > 0 && (
+                      <div className="mt-4 pt-3 border-t border-[#f0e8d8]">
+                        <p className="text-[11px] font-bold text-[#6b5d52] mb-1">Not yet rated ({leagueData.unrated.length})</p>
+                        <p className="text-[10px] text-[#9c8e85] mb-2">No delivery history in this window — not a poor score, no score.</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {leagueData.unrated.slice(0, 30).map((r: any) => (
+                            <span key={r.supplier_id} className="text-[11px] px-2 py-0.5 rounded-full bg-[#faf7f2] border border-[#f0e8d8] text-[#6b5d52]">
+                              {r.supplier_name}{r.po_count > 0 ? ` · ${r.po_count} PO` : ''}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()
+          ) : supView === 'TABLE' ? (
             <DataTable
               data={filteredSuppliers}
               rowKey={(s: any) => s.id}
