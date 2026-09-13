@@ -1384,6 +1384,15 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_id TEXT").catch(() => {});
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_post_status TEXT").catch(() => {});
+  // Buyer GST details for a B2B restaurant supply (Rule 46: a tax invoice to a
+  // registered recipient carries the recipient's name, address and GSTIN). On the
+  // ORDER for a standalone bill and on the SESSION for a dine-in bill, because
+  // those are the two things that carry an invoice number. Nullable: a walk-in
+  // diner's bill is B2C and prints exactly as before.
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_gstin TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address TEXT").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS customer_gstin TEXT").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS customer_address TEXT").catch(() => {});
   // KDS (Kitchen Display) — promote the chef-assignment fields that used to be
   // created lazily inside endpoints (fragile) into the real migration, and add the
   // waiter link + per-transition timestamps for the unified live queue + prep metrics.

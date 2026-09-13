@@ -13972,6 +13972,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       tableName:            inv.tableNumber || inv.table_number,
       customerName:         inv.customerName || inv.customer_name || undefined,
       customerPhone:        tpl.showCustomerPhone ? (inv.customerPhone || inv.customer_phone || undefined) : undefined,
+      customerGstin:        inv.customer_gstin || undefined,
+      customerAddress:      inv.customer_address || undefined,
       date:                 dateStr,
       time:                 timeStr,
       rounds,
@@ -14007,6 +14009,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         phone: r.phone || r.contact_number || r.mobile || '',
         customer: inv.customerName || inv.customer_name || '',
         mobile: inv.customerPhone || inv.customer_phone || '',
+        customerGstin: inv.customer_gstin || '',
+        customerAddress: inv.customer_address || '',
         date: dateStr + (timeStr ? ' ' + timeStr : ''),
         cashier: inv.served_by || inv.cashier || '',
         orderType: (inv.tableNumber || inv.table_number) ? ('Table: ' + (inv.tableNumber || inv.table_number)) : '',
@@ -14062,6 +14066,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       date: inv.created_at || inv.createdAt || new Date().toISOString(),
       table: inv.table_number || inv.tableNumber || null,
       customer: inv.customer_name || inv.customerName || null,
+      customer_gstin: inv.customer_gstin || null,
+      customer_address: inv.customer_address || null,
       items, subtotal, discount: disc, service_charge: svcAmt, service_charge_pct: svcPct || null,
       taxes, total: Number(inv.total_amount || 0), payment_method: inv.payment_method || null,
     };
@@ -14081,6 +14087,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch {
       browserFallback();
     }
+  };
+
+  // ── Buyer GST details on a restaurant bill (M-3) ──────────────────────────
+  // A dine-in table bill is ONE invoice across several order rounds and carries
+  // its number on the session; a takeaway / delivery / manual bill is one order.
+  // The details go on whichever is the invoice. They carry no money, so they can
+  // be added after the bill is paid and the invoice simply reprinted.
+  const editBuyerGst = async (inv: any, kind: 'SESSION' | 'ORDER' | 'SPA', onDone: () => void) => {
+    const r = await promptPayment({
+      title: inv.customer_gstin ? 'Edit buyer GST details' : 'Add buyer GST details',
+      body: 'For a customer claiming input tax credit. The invoice then prints their GSTIN and address and is reported as a B2B supply. Clear the GSTIN to turn it back into an ordinary bill.',
+      fields: [
+        { name: 'gstin', label: 'Customer GSTIN', type: 'text', placeholder: '27AAPFU0939F1ZV', defaultValue: inv.customer_gstin || '' },
+        { name: 'address', label: 'Registered address', type: 'textarea', placeholder: 'Address as on the GST registration', defaultValue: inv.customer_address || '' },
+      ],
+      confirmLabel: 'Save GST details',
+    });
+    if (!r) return;
+    const url = kind === 'SPA'
+      ? `/api/restaurant/${restaurantId}/spa/folios/${inv.id}/gst-details`
+      : kind === 'SESSION'
+        ? `/api/restaurant/${restaurantId}/invoices/session/${inv.session_token || inv.id}/gst-details`
+        : `/api/restaurant/${restaurantId}/invoices/order/${inv.id}/gst-details`;
+    try {
+      const res = await fetch(url, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ customer_gstin: String(r.gstin || '').trim().toUpperCase(), customer_address: String(r.address || '').trim() }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d?.error || 'Could not save GST details');
+      toast.success(d.customer_gstin ? `GSTIN ${d.customer_gstin} saved — reprint the invoice to include it` : 'GST details cleared');
+      onDone();
+    } catch (err: any) { toast.error(err.message); }
   };
 
   // ── Invoice Edit helpers ──────────────────────────────────────────────────
@@ -21098,6 +21137,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <button onClick={async () => { try { const r = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${f.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await r.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${f.invoice_number || f.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { toast.error(err.message); } }} className="inline-flex items-center gap-1 text-xs font-bold text-[#cc5a16] hover:underline whitespace-nowrap cursor-pointer">
                                 <FileText size={12} /> Invoice
                               </button>
+                              {canWriteTab('SPA_BILLING') && (
+                                <button onClick={() => editBuyerGst(f, 'SPA', () => fetchSpaBilling())}
+                                  title={f.customer_gstin ? `B2B invoice to GSTIN ${f.customer_gstin}` : 'Add the client\u2019s GSTIN for a B2B tax invoice'}
+                                  className={cn("ml-2 inline-flex items-center gap-1 text-xs font-bold hover:underline whitespace-nowrap cursor-pointer", f.customer_gstin ? "text-emerald-700" : "text-[#6b5d52]")}>
+                                  {f.customer_gstin ? <Check size={12} /> : null} GST
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -22379,6 +22425,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               >
                                 <Printer size={11} /> Print
                               </button>}
+                              {/* Buyer GST — turns the bill into a B2B tax invoice. */}
+                              {canWriteTab('INVOICES')
+                                && String(inv.status || '').toUpperCase() !== 'CANCELLED'
+                                && String(inv.invoice_status || '').toUpperCase() !== 'CANCELLED' && (
+                                <button
+                                  onClick={() => editBuyerGst(inv, isSession ? 'SESSION' : 'ORDER', fetchInvoices)}
+                                  className={cn("px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap flex items-center gap-1",
+                                    inv.customer_gstin ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#1a1208]")}
+                                  title={inv.customer_gstin ? `B2B invoice to GSTIN ${inv.customer_gstin}` : 'Add the customer\u2019s GSTIN for a B2B tax invoice'}
+                                >
+                                  {inv.customer_gstin ? <Check size={11} /> : null} GST
+                                </button>
+                              )}
                               {/* History — audit log (who changed this invoice), available
                                   straight from the list without opening Edit; works for
                                   paid + unpaid invoices. Opens the same ObjectDetail overlay. */}
@@ -50097,6 +50156,8 @@ interface ThermalReceiptData {
   tableName?: string;
   customerName?: string;
   customerPhone?: string;
+  customerGstin?: string;   // buyer GSTIN — present only on a B2B tax invoice
+  customerAddress?: string; // buyer address, required alongside the GSTIN (Rule 46)
   date: string;             // pre-formatted date string
   time?: string;
   rounds: Array<{
@@ -50235,6 +50296,8 @@ function buildThermalHTML(d: ThermalReceiptData): string {
   ${d.tableName  ? `<div><b>Table :</b> ${d.tableName}</div>` : ''}
   ${d.customerName  ? `<div><b>Name  :</b> ${d.customerName}</div>` : ''}
   ${d.customerPhone ? `<div><b>Phone :</b> ${d.customerPhone}</div>` : ''}
+  ${d.customerGstin && d.customerAddress ? `<div class="dim">${d.customerAddress}</div>` : ''}
+  ${d.customerGstin ? `<div><b>GSTIN :</b> ${d.customerGstin}</div>` : ''}
   <div><b>Date  :</b> ${d.date}${d.time ? ' ' + d.time : ''}</div>
   <div><b>Bill# :</b> ${d.billId}</div>
 

@@ -267,6 +267,12 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
   await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS gst_exempt_reason TEXT`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS folio_kind TEXT DEFAULT 'HOTEL'`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS appointment_id TEXT`).catch(() => {});
+  // Buyer GST details on the folio itself. Hotel and event folios already resolve
+  // a GSTIN from their booking; a SPA folio has no booking to carry one, so this
+  // is where a spa client's GSTIN lives — and it also lets any folio override its
+  // booking's GSTIN for the one invoice that needs it.
+  await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS customer_gstin TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS customer_address TEXT`).catch(() => {});
   // Spa folios carry their own invoice number (SPA-<year>-NNNNN). Hotel folios
   // derive the number from the folio id at render time and leave this NULL.
   await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS invoice_number TEXT`).catch(() => {});

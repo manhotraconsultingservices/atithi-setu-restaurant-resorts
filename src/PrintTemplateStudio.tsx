@@ -122,9 +122,17 @@ export function renderInvoice(c: Cfg, d: any): string {
   // label, never an owner toggle.
   if (d.taxInvoice) H += '<div class="pts-c pts-b" style="letter-spacing:1px;margin-top:2px">TAX INVOICE</div>';
   if (c.logo || c.name || c.gstin || c.address || c.phone || d.taxInvoice) H += '<hr class="pts-hr">';
-  if (c.customer && (d.customer || d.mobile)) {
+  // A buyer GSTIN makes the bill a B2B tax invoice, and Rule 46 then requires the
+  // recipient's name, address and GSTIN on it — so the block prints whenever a
+  // GSTIN is present, even when the owner's layout hides the customer line.
+  if ((c.customer && (d.customer || d.mobile)) || d.customerGstin) {
     let nm = 'Name: ' + esc(d.customer || ''); if (c.mobile && d.mobile) nm += '  (M: ' + esc(d.mobile) + ')';
-    H += '<div>' + nm + '</div><hr class="pts-hr">';
+    H += '<div>' + nm + '</div>';
+    if (d.customerGstin) {
+      if (d.customerAddress) H += '<div class="pts-muted">' + esc(d.customerAddress) + '</div>';
+      H += '<div class="pts-b">Buyer GSTIN: ' + esc(d.customerGstin) + '</div>';
+    }
+    H += '<hr class="pts-hr">';
   }
   let meta = '';
   if (c.date || c.orderType) meta += rrow(c.date ? 'Date: ' + d.date : '', c.orderType ? d.orderType : '', true);

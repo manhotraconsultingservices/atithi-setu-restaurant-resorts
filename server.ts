@@ -556,10 +556,19 @@ function renderInvoiceEscpos(cfg: any, d: any, W: number): string {
   // GST compliance: a registered supplier's bill is a TAX INVOICE (auto label).
   if (d.taxInvoice) o += PTPL.center + PTPL.boldOn + `TAX INVOICE\n` + PTPL.boldOff;
   o += PTPL.left + line;
-  if (cfg.customer) {
+  // A buyer GSTIN makes this a B2B tax invoice, and Rule 46 then requires the
+  // recipient's name, address and GSTIN on it — so that block prints whenever a
+  // GSTIN is present, even if the owner's template hides the customer line for
+  // ordinary walk-in bills.
+  if (cfg.customer || d.customerGstin) {
     let nm = `Name: ${d.customer || ''}`;
     if (cfg.mobile && d.mobile) nm += `  (M: ${d.mobile})`;
-    o += nm + '\n' + line;
+    o += nm + '\n';
+    if (d.customerGstin) {
+      if (d.customerAddress) o += `${d.customerAddress}\n`;
+      o += PTPL.boldOn + `Buyer GSTIN: ${d.customerGstin}\n` + PTPL.boldOff;
+    }
+    o += line;
   }
   if (cfg.date || cfg.orderType) o += _ptplLr(cfg.date ? `Date: ${_ptplDate(d.date)}` : '', cfg.orderType && d.orderType ? String(d.orderType) : '', W);
   if (cfg.cashier || cfg.billNo) o += _ptplLr(cfg.cashier && d.cashier ? `Cashier: ${d.cashier}` : '', cfg.billNo && d.billNo ? `Bill No.: ${d.billNo}` : '', W);
@@ -619,7 +628,7 @@ async function _ensureOrderCols(db: any): Promise<void> {
     "customer_pincode TEXT", "customer_landmark TEXT", "gst_percent FLOAT DEFAULT 0",
     "apply_gst INTEGER DEFAULT 1", "invoice_status TEXT DEFAULT 'DRAFT'",
     "currency_snapshot TEXT", "tax_label_snapshot TEXT", "room_id TEXT",
-    "booking_id TEXT", "token_number TEXT",
+    "booking_id TEXT", "token_number TEXT", "customer_gstin TEXT", "customer_address TEXT",
   ]) await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS ${c}`).catch(() => {});
   await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT").catch(() => {});
 }
@@ -1716,6 +1725,11 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- folios keep folio_kind='HOTEL' + appointment_id NULL → identical behaviour.
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS folio_kind TEXT DEFAULT 'HOTEL';
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS appointment_id TEXT;
+    -- Buyer GST details on the folio (M-3). Also added by createSpaTables and the
+    -- events schema, because each of the three creates this table for its own
+    -- kind of tenant.
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS customer_gstin TEXT;
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS customer_address TEXT;
     -- Invoice Revision System (Jul 2026) — once a folio is settled/voided,
     -- staff must create a new revision rather than editing in place.
     -- revision_number: 1 for original, 2+ for each subsequent amendment.
@@ -5071,6 +5085,35 @@ function _tenderGlLines(mdr: { cardPct: number; upiPct: number; gstPct: number }
   ];
   if (gstOnFee > 0.009) lines.push({ account_code: '1330', account_name: 'ITC — Payment Gateway GST', dr_amount: gstOnFee, cr_amount: 0, narration: `GST on ${m} charges` });
   return lines;
+}
+
+// ── Buyer GST details: ONE reading of the rules, for every kind of bill ─────
+// Lifted from the event route's own semantics (PUT /events/bookings/:bid/
+// gst-details) so a restaurant bill, a spa bill and an event invoice accept and
+// refuse exactly the same input. An absent key leaves a field as it is; an empty
+// string clears it (the customer decided not to claim); a GSTIN must be the
+// 15-character shape; and a GSTIN WITHOUT an address is refused, because Rule 46
+// needs both for the recipient to claim input credit — a half-filled B2B invoice
+// is worse than a B2C one, since it looks claimable and is not.
+const _GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+function _readBuyerGstDetails(
+  body: any, existing: { customer_gstin?: string | null; customer_address?: string | null },
+// A flat shape rather than a { ok: true } | { ok: false } union: this tsconfig
+// is not strict, so a literal-boolean discriminant does not narrow and the
+// caller could not read the error fields. `fail` present = refuse.
+): { fail?: { status: number; error: string; code: string }; gstin: string | undefined; address: string | undefined } {
+  const b = body || {};
+  const gstin = b.customer_gstin === undefined ? undefined : String(b.customer_gstin ?? '').trim().toUpperCase();
+  const address = b.customer_address === undefined ? undefined : String(b.customer_address ?? '').trim().slice(0, 500);
+  if (gstin && !_GSTIN_RE.test(gstin)) {
+    return { fail: { status: 400, code: 'GSTIN_INVALID', error: 'That does not look like a valid GSTIN. It is 15 characters, e.g. 27AAPFU0939F1ZV.' }, gstin, address };
+  }
+  const finalGstin = gstin === undefined ? (existing.customer_gstin || '') : gstin;
+  const finalAddress = address === undefined ? (existing.customer_address || '') : address;
+  if (finalGstin && !finalAddress) {
+    return { gstin, address, fail: { status: 400, code: 'ADDRESS_REQUIRED', error: 'A GSTIN needs the customer\u2019s address too — a GST invoice must carry both for the customer to claim input credit.' } };
+  }
+  return { gstin, address };
 }
 
 // Which KIND of supply a revenue line represents, for HSN/SAC purposes.
@@ -33171,7 +33214,11 @@ ${data.tenant.name}`;
         policies: _invoicePolicies(hotel, 'hotel'),
         guest: {
           name: folio.client_name || 'Guest', phone: folio.client_phone, email: folio.client_email,
-          nationality: null, state: hotel.state, gstin: null,
+          // Was hard-coded `gstin: null`: a spa bill could never be a B2B tax
+          // invoice, however the client asked. The renderer prints address and
+          // GSTIN only when present, so a walk-in client's invoice is unchanged.
+          address: folio.customer_address || undefined,
+          nationality: null, state: hotel.state, gstin: folio.customer_gstin || undefined,
         },
         stay: {
           roomName: folio.service_name || 'Spa Service', bookingId: folio.appointment_id,
@@ -33207,6 +33254,39 @@ ${data.tenant.name}`;
       res.setHeader('Content-Disposition', `attachment; filename="${invNum}-${safeName}.pdf"`);
       res.send(pdf);
     } catch (err: any) { console.error("Spa invoice PDF error:", err); res.status(500).json({ error: "Failed to generate invoice PDF" }); }
+  });
+
+  // Buyer GST details on a spa bill (M-3). A spa folio has no booking to carry a
+  // GSTIN the way a hotel or event folio does, so it lives on the folio. Same
+  // rules as every other bill; see _readBuyerGstDetails.
+  app.put("/api/restaurant/:id/spa/folios/:fid/gst-details", authenticate, spaStaff, requireTabAction('SPA_BILLING', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const f: any = await db.get(
+        "SELECT id, status, invoice_number, customer_gstin, customer_address FROM folios WHERE id = ? AND folio_kind = 'SPA'",
+        [req.params.fid]);
+      if (!f) return res.status(404).json({ error: 'Spa bill not found' });
+      if (['voided', 'cancelled'].includes(String(f.status || '').toLowerCase())) {
+        return res.status(409).json({ error: 'This bill is voided — there is no invoice to put GST details on.', code: 'BILL_CANCELLED' });
+      }
+      const v = _readBuyerGstDetails(req.body, f);
+      if (v.fail) return res.status(v.fail.status).json({ error: v.fail.error, code: v.fail.code });
+      if (v.gstin !== undefined) await db.run("UPDATE folios SET customer_gstin = ? WHERE id = ?", [v.gstin || null, f.id]);
+      if (v.address !== undefined) await db.run("UPDATE folios SET customer_address = ? WHERE id = ?", [v.address || null, f.id]);
+      const row: any = await db.get("SELECT id, invoice_number, customer_gstin, customer_address FROM folios WHERE id = ?", [f.id]);
+      await writeObjectAudit(db, req, {
+        objectType: 'FOLIO', objectId: String(f.id), action: 'GST_DETAILS_UPDATED',
+        summary: row.customer_gstin ? `Buyer GST details set on ${row.invoice_number || f.id} — GSTIN ${row.customer_gstin}` : `Buyer GST details cleared on ${row.invoice_number || f.id}`,
+        before: { customer_gstin: f.customer_gstin, customer_address: f.customer_address },
+        after: { customer_gstin: row.customer_gstin, customer_address: row.customer_address },
+      }).catch(() => {});
+      res.json({ success: true, ...row, prints_on_invoice: !!row.customer_gstin });
+    } catch (err: any) {
+      console.error('spa gst-details error:', err);
+      res.status(500).json({ error: 'Failed to save GST details' });
+    }
   });
 
   // Small helper: open a standalone SPA folio, post one taxable line, take a
@@ -40976,7 +41056,7 @@ ${data.tenant.name}`;
         `, [f, t]).catch(() => ({ appointment_count: 0, total_net: 0, gst_collected: 0, total_settled: 0 })),
         db.query(`
           SELECT f.id, f.settled_at, f.subtotal, f.gst_amount, f.grand_total,
-                 f.payment_method,
+                 f.payment_method, f.invoice_number, f.customer_gstin, f.customer_address,
                  sa.client_name, sa.client_phone, sa.service_name
           FROM folios f
           LEFT JOIN spa_appointments sa ON sa.id = f.appointment_id
@@ -41007,6 +41087,11 @@ ${data.tenant.name}`;
           gst_amount:     round(Number(r.gst_amount || 0)),
           grand_total:    round(Number(r.grand_total || 0)),
           payment_method: r.payment_method || '',
+          // The download already named the file by invoice_number, which this
+          // response never returned — every spa invoice saved as its folio id.
+          invoice_number:   r.invoice_number || null,
+          customer_gstin:   r.customer_gstin || null,
+          customer_address: r.customer_address || null,
         })),
       });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
@@ -51896,6 +51981,8 @@ ${data.tenant.name}`;
           invoice_status:         sess.invoice_status,
           customer_name:          sess.customer_name || '',
           customer_phone:         sess.customer_phone || '',
+          customer_gstin:         sess.customer_gstin || null,
+          customer_address:       sess.customer_address || null,
           table_number:           sess.table_name || sess.table_id,
           created_at:             sess.opened_at,
           // Prefer the stored bill_amount (set on Request Bill) or final_amount
@@ -52029,6 +52116,86 @@ ${data.tenant.name}`;
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update session invoice status" });
+    }
+  });
+
+  // ── Buyer GST details on a restaurant bill (M-3) ────────────────────────────
+  // Two routes because a restaurant bill is two kinds of thing. A dine-in table
+  // is ONE invoice spread across several order rounds, and the invoice number
+  // lives on the SESSION; a takeaway, delivery or manual bill is one ORDER with
+  // its own number. The details go on whichever of those is the invoice.
+  //
+  // Deliberately separate from invoice edits: these fields carry no money, so a
+  // company can ask for a GST bill after it has paid, and staff fill them in and
+  // reprint. The amounts stay exactly as they were.
+  app.put("/api/restaurant/:id/invoices/session/:token/gst-details", authenticate, restaurantStaff, requireTabAction('INVOICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const sess: any = await db.get(
+        "SELECT id, session_token, status, deleted_at, invoice_number, customer_name, customer_gstin, customer_address FROM table_sessions WHERE session_token = ?",
+        [req.params.token]);
+      if (!sess) return res.status(404).json({ error: 'Bill not found' });
+      if (sess.deleted_at || String(sess.status || '').toLowerCase() === 'cancelled') {
+        return res.status(409).json({ error: 'This bill is cancelled — there is no invoice to put GST details on.', code: 'BILL_CANCELLED' });
+      }
+      const v = _readBuyerGstDetails(req.body, sess);
+      if (v.fail) return res.status(v.fail.status).json({ error: v.fail.error, code: v.fail.code });
+      if (v.gstin !== undefined) await db.run("UPDATE table_sessions SET customer_gstin = ? WHERE id = ?", [v.gstin || null, sess.id]);
+      if (v.address !== undefined) await db.run("UPDATE table_sessions SET customer_address = ? WHERE id = ?", [v.address || null, sess.id]);
+      const row: any = await db.get("SELECT id, session_token, invoice_number, customer_name, customer_gstin, customer_address FROM table_sessions WHERE id = ?", [sess.id]);
+      // Audited on the same INVOICE trail the print and settle events use: this
+      // changes what a tax document says about its recipient.
+      await writeObjectAudit(db, req, {
+        objectType: 'INVOICE', objectId: String(sess.id), action: 'GST_DETAILS_UPDATED',
+        summary: row.customer_gstin ? `Buyer GST details set on ${row.invoice_number || 'the bill'} — GSTIN ${row.customer_gstin}` : `Buyer GST details cleared on ${row.invoice_number || 'the bill'}`,
+        before: { customer_gstin: sess.customer_gstin, customer_address: sess.customer_address },
+        after: { customer_gstin: row.customer_gstin, customer_address: row.customer_address },
+      }).catch(() => {});
+      res.json({ success: true, ...row, prints_on_invoice: !!row.customer_gstin });
+    } catch (err: any) {
+      console.error('session gst-details error:', err);
+      res.status(500).json({ error: 'Failed to save GST details' });
+    }
+  });
+
+  app.put("/api/restaurant/:id/invoices/order/:orderId/gst-details", authenticate, restaurantStaff, requireTabAction('INVOICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const ord: any = await db.get(
+        "SELECT id, status, session_id, invoice_number, customer_name, customer_gstin, customer_address FROM orders WHERE id = ?",
+        [req.params.orderId]);
+      if (!ord) return res.status(404).json({ error: 'Order not found' });
+      if (String(ord.status || '').toUpperCase() === 'CANCELLED') {
+        return res.status(409).json({ error: 'This order is cancelled — there is no invoice to put GST details on.', code: 'BILL_CANCELLED' });
+      }
+      // A round on a live table session is NOT its own invoice. Setting details
+      // here would be accepted and then ignored, because the session's invoice
+      // wins — so it is refused, naming where they belong, rather than silently
+      // saved somewhere nothing reads.
+      if (ord.session_id) {
+        const sess: any = await db.get("SELECT session_token, status FROM table_sessions WHERE id = ?", [ord.session_id]).catch(() => null);
+        if (sess && ['open', 'bill_requested', 'closed'].includes(String(sess.status || '').toLowerCase())) {
+          return res.status(409).json({
+            error: 'This order is one round of a table bill. Put the GST details on the table\u2019s bill, which is the invoice.',
+            code: 'SESSION_INVOICE', session_token: sess.session_token,
+          });
+        }
+      }
+      const v = _readBuyerGstDetails(req.body, ord);
+      if (v.fail) return res.status(v.fail.status).json({ error: v.fail.error, code: v.fail.code });
+      if (v.gstin !== undefined) await db.run("UPDATE orders SET customer_gstin = ? WHERE id = ?", [v.gstin || null, ord.id]);
+      if (v.address !== undefined) await db.run("UPDATE orders SET customer_address = ? WHERE id = ?", [v.address || null, ord.id]);
+      const row: any = await db.get("SELECT id, invoice_number, customer_name, customer_gstin, customer_address FROM orders WHERE id = ?", [ord.id]);
+      await writeObjectAudit(db, req, {
+        objectType: 'INVOICE', objectId: String(ord.id), action: 'GST_DETAILS_UPDATED',
+        summary: row.customer_gstin ? `Buyer GST details set on ${row.invoice_number || ord.id} — GSTIN ${row.customer_gstin}` : `Buyer GST details cleared on ${row.invoice_number || ord.id}`,
+        before: { customer_gstin: ord.customer_gstin, customer_address: ord.customer_address },
+        after: { customer_gstin: row.customer_gstin, customer_address: row.customer_address },
+      }).catch(() => {});
+      res.json({ success: true, ...row, prints_on_invoice: !!row.customer_gstin });
+    } catch (err: any) {
+      console.error('order gst-details error:', err);
+      res.status(500).json({ error: 'Failed to save GST details' });
     }
   });
 
@@ -54459,6 +54626,8 @@ ${data.tenant.name}`;
         date:       b.date || new Date().toISOString(),
         table:      b.table || b.table_number || null,
         customer:   b.customer || b.customer_name || null,
+        customer_gstin:   b.customer_gstin || null,
+        customer_address: b.customer_address || null,
         served_by:  b.served_by || null,
         items: Array.isArray(b.items) ? b.items.map((it: any) => ({
           name: it.name, qty: Number(it.qty ?? it.quantity ?? 1),
@@ -54489,6 +54658,8 @@ ${data.tenant.name}`;
         billNo: billBase.invoice_no,
         token: b.token || b.token_number || null,
         customer: billBase.customer,
+        customerGstin: billBase.customer_gstin,
+        customerAddress: billBase.customer_address,
         mobile: b.mobile || b.customer_phone || null,
         items: billBase.items,
         subtotal: billBase.subtotal,
@@ -58222,8 +58393,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gstr1-hsn-from-the-ledger',
+    commit_marker: 'buyer-gstin-on-every-bill',
     code_features: [
+      'buyer-gstin-on-every-bill — M-3 second half, which closes M-3. Table 4 of GSTR-1 (invoice-level B2B) could only ever contain hotel and event supplies, because those were the only two bills with anywhere to keep a buyer GSTIN. A company paying for a working lunch or a spa package could not get a claimable tax invoice at all, and its supply was reported as B2C. NOW EVERY KIND OF BILL CAN CARRY ONE. A restaurant bill is two different things and the details go on whichever is the INVOICE: a dine-in table is ONE invoice across several order rounds with the number on the SESSION, a takeaway/delivery/manual bill is one ORDER with its own number. So table_sessions and orders both gained customer_gstin + customer_address, and GSTR-1 reads the session first and the order second. A spa folio has no booking to carry a GSTIN the way hotel and event folios do, so folios gained the same two columns - added in ALL THREE places the folios table is created (createHotelTables, createSpaTables, the events schema), because each owns the table for its own kind of tenant and a migration in one would have left the other two without the column. ONE RULE SET: _readBuyerGstDetails lifts the event route own semantics, so every bill refuses a malformed GSTIN (GSTIN_INVALID) and refuses a GSTIN WITHOUT AN ADDRESS (ADDRESS_REQUIRED) - Rule 46 needs both, and a half-filled B2B invoice is worse than a B2C one because it looks claimable and is not. A round on a live table session is refused with SESSION_INVOICE naming the session, rather than saved somewhere the session invoice silently overrides. All three routes are audited GST_DETAILS_UPDATED with before and after, because they change what a tax document says about its recipient, and all three are separate from invoice edits: the fields carry no money, so a company can ask for a GST bill after paying and staff add the details and reprint. GSTR-1 NOW AGGREGATES B2B BY INVOICE, not by journal: revenue posts one ORDER journal per round, so a four-round table bill used to be at risk of four Table 4 lines. Each row also carries its source (HOTEL/EVENTS/SPA/RESTAURANT). The folio lookup retries WITHOUT f.customer_gstin if that column is missing, instead of relying on a .catch that returned [] - that catch would have silently dropped every hotel and event B2B invoice from the return, the exact failure this code exists to prevent. PRINTS ON ALL FOUR BILL RENDERERS: the thermal ESC/POS invoice, the owner-designed template, the legacy thermal HTML, and the spa PDF (which had gstin: null hard-coded). On a tax invoice the buyer block prints whenever a GSTIN is present even if the owner template hides the customer line, because Rule 46 requires it. FIXED IN PASSING: the spa billing list never returned invoice_number, so every spa invoice downloaded named by its folio id; and Table 12 raised no code, set one before filing in red over a 2,000 rupee discount contra - only positive turnover can need a code. Smoke: TC-INV-BUYER-GST-RULES (malformed refused, missing address refused, complete saved), TC-GSTR1-B2B-RESTAURANT (two orders settled seconds apart, one with a GSTIN: exactly one Table 4 row for it, source RESTAURANT, valued at that one order and not both), TC-GSTR1-B2B-SPA (a real spa bill given a GSTIN appears under its own invoice number, then restored). Test GSTINs are shape-valid and unique per run, and are cleared afterwards so no invented GSTIN stays on the books. tsc + vite build clean.',
       'gstr1-hsn-from-the-ledger — M-3 from the accounting review, first half. The complaint was that two of four revenue streams produced portal-shaped HSN detail and two summarised, so a filer assembled part of Table 12 by hand. THE CAUSE WAS WORSE THAN THE SYMPTOM. Table 12 was read from gst_output_register, a PARALLEL record written at three hotel settlement paths only - on the live tenant it held 146 of 493 settled hotel folios, ZERO spa folios, ZERO event folios and nothing whatever from the restaurant - and the code itself was keyed on folio_entries.account_head, a column that is NULL on about two rows in three, so 120 of its 317 rows carried no HSN at all. It also lives in createHotelTables, which runs only for property_type HOTEL or BOTH, so a restaurant-only tenant has no register to read. Extending that register to three more modules would have been building more of the wrong thing. Every other part of this return - the totals, the invoice-level B2B of Table 4, the B2CS of Table 7 - is derived from the GENERAL LEDGER, which is complete by construction and already ties to the trial balance. So Table 12 is now derived there too. The revenue account plus its cost centre is all the classification needs, because the accounts ALREADY separate rooms, food, service charge, ancillary, spa and events; _gstSupplyKind reads them, and a 4010 credit on a FOLIO journal is correctly called IN-ROOM DINING rather than a restaurant cover, since _folioRevenueGlLines is the only thing that produces one. cost_centre says so on journals posted since cost-centre tagging and source_type answers for every historical row. The split of tax within a journal is EXACT, not an apportionment: this product applies ONE GST rate per bill, so a revenue account share of the tax is its share of the taxable value. NEW gst_hsn_map, seeded per TENANT beside the chart of accounts rather than in the hotel schema, holding one SAC per kind of supply: 996311 accommodation, 996331 restaurant, 996332 in-room dining, 996334 banquet, 999722 spa, 999799 ancillary. EVERY SEEDED CODE IS MARKED is_default UNTIL SOMEBODY CONFIRMS IT, and the return lists the kinds still sitting on one, because classification is the taxpayer judgement and their CA to sign off - this product should suggest a code and then say plainly that it is a suggestion, not file a guess silently. Turnover with NO code is reported separately and in red, because that stops a return being filed while an unconfirmed code only means nobody has checked it. Two judgements are STATED rather than hidden: the ledger books all event revenue to one account so hall hire and catering cannot be separated (right for a package, wrong for bare hall hire, and the description says so), and 999721 is the alternative for a salon-led spa. gst_hsn_map is in BOOKS_OF_ACCOUNT_TABLES so a reclassification lands in the statutory trail with its before and after - the row alone only ever holds the latest confirmer. Smoke: TC-ACC-GSTR1-HSN-ALL-STREAMS asserts coverage of more than one stream, a named supply on every line, and that Table 12 ADDS UP TO THE RETURN HEADLINE - a Table 12 that disagrees with Tables 4 and 7 is a return that gets rejected. NOT DONE and stated rather than implied: restaurant and spa bills carry no customer GSTIN field, so those supplies still appear in B2CS; invoice-level B2B for them needs that field first and is the second half of M-3. tsc + vite build clean.',
       'year-end-accrual — H-3 from the accounting review, and the last of its High findings. Revenue reaches this ledger when a BILL SETTLES: a restaurant order posts ORDER-<id> when it is paid, a folio posts FOLIO-<id> when it is settled. For 364 days a year that is immaterial and arguably prudent; on the last day of the financial year it is a cut-off error - food served in one year with its revenue in the next, and a guest who slept four nights in March and checks out on 3 April carrying all four nights into the new year. THE FIX IS NOT A CHANGE TO DAILY REVENUE RECOGNITION, which would touch every operational path in the product. It is ONE journal dated at the cut-off for what was delivered and not yet billed, and an equal REVERSING journal dated the next day. The reversal is the entire safety mechanism: when the bill finally settles it posts IN FULL, and the reversal has already taken the accrued portion back out, so nothing is counted twice and no later posting has to know the accrual ever happened. WHAT COUNTS AS DELIVERED, and why this measure and not a reconstruction: a folio is charged AS the service is rendered - verified against live data that a room charge is posted PER NIGHT, a five-night stay carrying five ROOM_CHARGE rows dated one per night - so the folio is the product own DATED record of what was delivered, and summing its entries to the cut-off is the most faithful measure available. Restaurant orders not on a folio are the second source; an order CHARGED TO A ROOM is excluded because it will be recognised through that folio, and counting both would bill the same plate of food twice. NET OF GST on purpose: an accrual is a revenue-recognition entry, not a tax event - the tax point is the invoice, which has not been raised, so accruing output GST would create a liability no return reports. THE VALUATION IS SHARED, NOT MIRRORED: _orderNetRevenue was lifted out of _postOrderGl so the accrual values an unbilled order on EXACTLY the basis the journal will use when it is finally paid - an accrual computed on a different basis than the revenue it anticipates leaves a residue at every reversal. Per-LINE cost centres, so one journal spans four modules and each revenue credit lands in its own bucket; the 1150 debit that faces them carries none, because it is genuinely property-wide. New account 1150 Accrued Revenue (Unbilled), which should read ZERO on every date outside the accrual-to-reversal window. BOTH DATES ARE CHECKED AGAINST THE PERIOD LOCK BEFORE ANYTHING IS WRITTEN: an accrual that posts and then cannot be reversed, because the next day sits in a period somebody closed, overstates revenue permanently and an append-only ledger has no undo. Posting is refused for a future date; the schedule is readable for any date, because an owner in January wants to see where the cut-off will land. Everything left out is REPORTED with a reason - two CANCELLED events were carrying 1.95 lakh each on open folios, package purchases and membership fees are consideration received in ADVANCE of service and are deferred rather than accrued, a tip is a liability to the staff, and an in-house booking with NO FOLIO is named because there is no dated record to accrue from and inventing one would be worse than saying so. TWO STALE STATEMENTS CORRECTED IN PASSING, both of which described the period close as advisory: the comment above the routes and, worse, the sentence on the Period Close screen itself reading Soft lock: posting is never blocked. That stopped being true when Q-2 shipped. A screen that tells a user a control is advisory while it refuses their posting is worse than one that says nothing. Smoke: -SCHEDULE (the parts add up to the headline), -NO-DOUBLE-COUNT (two orders placed seconds apart, one left unbilled and one settled: the first IS accrued and the second is NOT), -NET-OF-GST, -EXPLAINS-EXCLUSIONS, -FUTURE-REFUSED, -POSTS-AND-REVERSES (asserts the reversal exists AND its date), -IDEMPOTENT, -TB-STILL-TIES. The suite posts with a cut-off of YESTERDAY so both halves land in the past and no report ending today is moved by a paisa. tsc + vite build clean.',
       'finance-is-one-group — the nav regrouping from section 7 of the accounting review. The finance side of the product was spread across THREE top-level groups: Accounts, Cash, and Suppliers & Customers. An accountant opening this had to already know that the till was in one group, the supplier ledger in a second and the trial balance in a third, and there was no single answer to where do I do my accounts. Fourteen top-level groups are now twelve (eleven for a both-mode tenant, where Overview folds away): Accounts absorbs Cash and Suppliers & Customers and is renamed FINANCE, because in Indian usage accounts reads as CUSTOMER accounts at least as often as it reads as books. Its eleven children are SECTIONED rather than nested a level deeper — a new optional NavTab.section prints a small heading above the first tab carrying it: Books, Cash & Banking, Receivables, Payables, Statutory. Sections are computed from the RBAC-FILTERED list, so a heading never stands over an empty section and a role granted only GST Summary sees Statutory and nothing else. STATUTORY IS THE POINT OF THE EXERCISE: compliance had no home at all — GST Summary was filed among the management reports and MSME 43B(h) had nowhere to sit — and M-1 (e-invoice) and M-2 (ITC gating) now have somewhere to land. NO TAB ID CHANGED; ids are RBAC keys read by FINANCE_TABS in src/navVisibility.ts, the server tab->module mapper and every tenants saved Staff Access grants, so this moves and renames menu entries and grants or revokes nothing. THE DEFECT THE REGROUPING SURFACED: ACCOUNTS_MSME_43B was never added to the Staff Access matrix or to TAB_MODULE, so it fell into the Other module and — worse — an owner had NO WAY TO GRANT IT. It is in FINANCE_TABS, whose non-manager branch requires an explicit grant that could not be given, so the tab was owner/MANAGER-only by accident rather than by decision. Added, with TC-RBAC-MSME-GRANT proving 403 before the grant and 200 after on the same token. Eight Staff Access finance rows had also drifted to different words than the menu uses, which matters because the owner grants by name and then looks for that name in the menu; two of them made claims the screen does not support — Receivables (AR) promised a customer-AR screen that does not exist (the route reads ONE table, ota_commission_entries), and the P&L and Cash Flow rows said derived from the general ledger when both read /reports/* from the source tables. Both corrected. The nav audit universe had drifted the same way: ACCOUNTS_MSME_43B and CUSTOMER_ACCOUNTS were in FINANCE_TABS but absent from nav_visibility_audit.ts, so neither had ever been leak-checked — ALL_FINANCE is now DERIVED from FINANCE_TABS with a structural check that fails loudly on the next drift. 9/9 scenarios pass with the widened universe. Nav labels ARE the i18n keys, so Finance and all five section headings went into hi.ts and pa.ts in the same commit; MSME 43B(h) is mapped to itself on purpose because a CA searches for that citation. NOT DONE and deliberately not silently folded in: the six report destinations are still six (one Reports home with a module filter is its own piece of work, not a label move) and the three checklist surfaces are still three. tsc + vite build clean.',
@@ -59872,14 +60044,42 @@ ${data.tenant.name}`;
       const folioMeta: Record<string, any> = {};
       if (folioIds.length) {
         const fph = folioIds.map(() => '?').join(',');
-        const frows: any[] = await db.query(
-          `SELECT f.id AS folio_id, f.invoice_number, f.settled_at, f.created_at, f.doc_type,
-                  COALESCE(rb.guest_gstin, eb.customer_gstin) AS gstin
+        // f.customer_gstin comes FIRST: it is set on the one bill that needs it,
+        // and it is the only place a SPA folio can carry a GSTIN at all. The
+        // query retries without it rather than failing, because a `.catch(() =>
+        // [])` on a missing column would silently drop EVERY hotel and event
+        // B2B invoice from the return — the exact failure mode this code exists
+        // to prevent, and one nobody would notice until a customer did.
+        const folioSql = (withFolioGstin: boolean) =>
+          `SELECT f.id AS folio_id, f.invoice_number, f.settled_at, f.created_at, f.doc_type, f.folio_kind,
+                  COALESCE(${withFolioGstin ? 'f.customer_gstin, ' : ''}rb.guest_gstin, eb.customer_gstin) AS gstin
              FROM folios f
              LEFT JOIN room_bookings rb ON rb.id = f.booking_id
              LEFT JOIN event_bookings eb ON eb.id = f.event_booking_id
-            WHERE f.id IN (${fph})`, folioIds).catch(() => []);
+            WHERE f.id IN (${fph})`;
+        let frows: any[] = await db.query(folioSql(true), folioIds).catch(() => null as any);
+        if (!Array.isArray(frows)) frows = await db.query(folioSql(false), folioIds).catch(() => []);
         for (const fr of frows) folioMeta[String(fr.folio_id)] = fr;
+      }
+      // ── Restaurant invoices (M-3) ─────────────────────────────────────────
+      // Revenue posts ONE journal per order (ORDER-<id>), but a dine-in bill is
+      // several orders under ONE session invoice. So the buyer and the invoice
+      // number are read from the SESSION first and the order second, and B2B
+      // rows are aggregated by invoice below — a four-round table bill is one
+      // Table 4 line, not four.
+      const orderIds = rows.filter(r => r.source_id && String(r.journal_ref || '').startsWith('ORDER-')).map(r => String(r.source_id));
+      const orderMeta: Record<string, any> = {};
+      if (orderIds.length) {
+        const oph = orderIds.map(() => '?').join(',');
+        const orows: any[] = await db.query(
+          `SELECT o.id AS order_id, o.session_id,
+                  COALESCE(ts.customer_gstin, o.customer_gstin) AS gstin,
+                  COALESCE(ts.invoice_number, o.invoice_number) AS invoice_number,
+                  COALESCE(ts.closed_at, o.created_at) AS invoice_date
+             FROM orders o
+             LEFT JOIN table_sessions ts ON ts.id = o.session_id
+            WHERE o.id IN (${oph})`, orderIds).catch(() => []);
+        for (const orow of orows) orderMeta[String(orow.order_id)] = orow;
       }
       // Place of supply = the property's own state (intra-state supplies).
       const propRow: any = await centralDb.get("SELECT state FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
@@ -59888,6 +60088,7 @@ ${data.tenant.name}`;
       const SLABS = [0, 5, 12, 18, 28];
       const snap = (rate: number) => SLABS.reduce((best, s) => Math.abs(s - rate) < Math.abs(best - rate) ? s : best, SLABS[0]);
       const b2bInvoices: any[] = [];               // Table 4 — invoice-level B2B
+      const b2bByInvoice: Record<string, any> = {}; // aggregated per invoice, then flattened
       const b2csMap: Record<number, any> = {};     // Table 7 — rate-wise B2C
       let tTaxable = 0, tCgst = 0, tSgst = 0, tIgst = 0;
       for (const r of rows) {
@@ -59896,22 +60097,39 @@ ${data.tenant.name}`;
         if (Math.abs(tax) < 0.005 && Math.abs(taxable) < 0.005) continue;
         tTaxable += taxable; tCgst += cgst; tSgst += sgst; tIgst += igst;
         const rate = taxable > 0 ? snap(round(tax / taxable * 100)) : 0;
-        const meta = folioMeta[String(r.source_id)];
+        const isOrder = String(r.journal_ref || '').startsWith('ORDER-');
+        const meta = isOrder ? orderMeta[String(r.source_id)] : folioMeta[String(r.source_id)];
         const gstin = meta?.gstin || null;
         if (gstin) {
-          b2bInvoices.push({
-            gstin,
-            invoice_no: meta.invoice_number || String(r.journal_ref || '').replace(/^FOLIO-/, ''),
-            invoice_date: String(meta.settled_at || meta.created_at || r.entry_date || '').slice(0, 10),
-            place_of_supply: pos, rate,
-            taxable: round(taxable), cgst: round(cgst), sgst: round(sgst), igst: round(igst),
-            invoice_value: round(taxable + tax),
-          });
+          const invoiceNo = meta.invoice_number
+            || (isOrder && meta.session_id ? `SESSION-${meta.session_id}` : String(r.journal_ref || '').replace(/^(FOLIO|ORDER)-/, ''));
+          const key = `${gstin}|${invoiceNo}`;
+          const source = isOrder ? 'RESTAURANT'
+            : String(meta.folio_kind || 'HOTEL').toUpperCase() === 'EVENT' ? 'EVENTS'
+            : String(meta.folio_kind || 'HOTEL').toUpperCase();
+          const cur = b2bByInvoice[key] || {
+            gstin, invoice_no: invoiceNo, source,
+            invoice_date: String((isOrder ? meta.invoice_date : (meta.settled_at || meta.created_at)) || r.entry_date || '').slice(0, 10),
+            place_of_supply: pos, taxable: 0, cgst: 0, sgst: 0, igst: 0,
+          };
+          cur.taxable += taxable; cur.cgst += cgst; cur.sgst += sgst; cur.igst += igst;
+          b2bByInvoice[key] = cur;
         } else {
           const cur = b2csMap[rate] || { rate, place_of_supply: pos, taxable: 0, cgst: 0, sgst: 0, igst: 0, invoices: 0 };
           cur.taxable += taxable; cur.cgst += cgst; cur.sgst += sgst; cur.igst += igst; cur.invoices += 1;
           b2csMap[rate] = cur;
         }
+      }
+      // One row per INVOICE, with its rate taken from the invoice's own totals.
+      for (const x of Object.values(b2bByInvoice) as any[]) {
+        const t = x.cgst + x.sgst + x.igst;
+        b2bInvoices.push({
+          gstin: x.gstin, invoice_no: x.invoice_no, invoice_date: x.invoice_date, source: x.source,
+          place_of_supply: x.place_of_supply,
+          rate: x.taxable > 0 ? snap(round(t / x.taxable * 100)) : 0,
+          taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst),
+          invoice_value: round(x.taxable + t),
+        });
       }
       b2bInvoices.sort((a, b) => String(a.gstin).localeCompare(String(b.gstin)) || String(a.invoice_no).localeCompare(String(b.invoice_no)));
       const b2cs = Object.values(b2csMap).map((x: any) => ({ rate: x.rate, place_of_supply: x.place_of_supply, taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), invoices: x.invoices })).sort((a, b) => a.rate - b.rate);
@@ -59993,8 +60211,12 @@ ${data.tenant.name}`;
           // whatever this product suggested, and turnover with no code at all.
           // The second one stops a return being filed; the first only means
           // nobody has checked it yet.
-          hsnUnconfirmed = [...new Set(out.filter((x: any) => x.hsn_sac && x.is_default_code).map((x: any) => x.supply_kind))];
-          hsnUncoded = [...new Set(out.filter((x: any) => !x.hsn_sac).map((x: any) => x.supply_kind))];
+          // Only POSITIVE turnover can need a code. A negative line is a discount
+          // or a reversal reducing a supply already classified elsewhere — the
+          // first cut raised "no code, set one before filing" in red over a
+          // ₹2,000 discount contra, which is a false alarm on a compliance screen.
+          hsnUnconfirmed = [...new Set(out.filter((x: any) => x.taxable > 0 && x.hsn_sac && x.is_default_code).map((x: any) => x.supply_kind))];
+          hsnUncoded = [...new Set(out.filter((x: any) => x.taxable > 0 && !x.hsn_sac).map((x: any) => x.supply_kind))];
           return out;
         } catch { return []; }
       })();
@@ -60035,7 +60257,7 @@ ${data.tenant.name}`;
         hsn_uncoded_kinds: hsnUncoded,
         docs,                         // Table 13
         totals,
-        note: 'Reconciles to the GL output-tax total. Table 12 (HSN/SAC) is derived from the general ledger and covers all four revenue streams — rooms, restaurant, spa and events. The codes are this product\'s suggestions until your accountant confirms them; any still on a default is listed in hsn_unconfirmed_kinds. B2B invoice detail is classified for GSTIN-bearing hotel and event supplies; restaurant and spa carry no customer GSTIN field yet, so their supplies appear in B2CS.',
+        note: 'Reconciles to the GL output-tax total. Table 12 (HSN/SAC) is derived from the general ledger and covers all four revenue streams — rooms, restaurant, spa and events. The codes are this product\'s suggestions until your accountant confirms them; any still on a default is listed in hsn_unconfirmed_kinds. B2B invoice detail (Table 4) covers every revenue stream that carries a buyer GSTIN — hotel and event bookings, and restaurant and spa bills once GST details are added to them — one row per invoice, so a multi-round table bill is a single line.',
       });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
