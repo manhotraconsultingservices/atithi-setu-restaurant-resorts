@@ -8364,30 +8364,6 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   // ── Phase 2: GL-derived statements, GST returns, aging, controls ──────────
   const [pnl, setPnl] = useState<any>(null);
   const [balanceSheet, setBalanceSheet] = useState<any>(null);
-  // What these statements do NOT contain, stated where they are read. Written
-  // once and rendered on BOTH, so the two can never disclose different things
-  // about the same books. The server sends the wording; this only presents it,
-  // which means an export or an integration carries the same caveat.
-  const StatementScopeNote = ({ scope }: { scope: any }) => {
-    if (!scope || scope.complete) return null;
-    return (
-      <details className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-[11px] text-amber-900">
-        <summary className="cursor-pointer font-bold list-none flex items-center gap-1.5">
-          <AlertTriangle size={13} className="shrink-0" />
-          {scope.heading}
-        </summary>
-        <div className="mt-2 space-y-1.5 pl-[18px]">
-          <p><b>Not included:</b></p>
-          <ul className="list-disc pl-4 space-y-0.5">
-            {(scope.excluded || []).map((x: string, i: number) => <li key={i}>{x}</li>)}
-          </ul>
-          <p className="pt-1">{scope.effect_on_profit}</p>
-          <p>{scope.effect_on_balance_sheet}</p>
-          <p className="pt-1 font-semibold">{scope.certificate_note}</p>
-        </div>
-      </details>
-    );
-  };
   const [cashFlowGl, setCashFlowGl] = useState<any>(null);
   const [gstr1, setGstr1] = useState<any>(null);
   const [gstr3b, setGstr3b] = useState<any>(null);
@@ -10648,6 +10624,31 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     </div>
   );
 }
+
+// What these statements do NOT contain, stated where they are read. Written
+// once and rendered on BOTH, so the two can never disclose different things
+// about the same books. The server sends the wording; this only presents it,
+// which means an export or an integration carries the same caveat.
+const StatementScopeNote = ({ scope }: { scope: any }) => {
+  if (!scope || scope.complete) return null;
+  return (
+    <details className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-[11px] text-amber-900">
+      <summary className="cursor-pointer font-bold list-none flex items-center gap-1.5">
+        <AlertTriangle size={13} className="shrink-0" />
+        {scope.heading}
+      </summary>
+      <div className="mt-2 space-y-1.5 pl-[18px]">
+        <p><b>Not included:</b></p>
+        <ul className="list-disc pl-4 space-y-0.5">
+          {(scope.excluded || []).map((x: string, i: number) => <li key={i}>{x}</li>)}
+        </ul>
+        <p className="pt-1">{scope.effect_on_profit}</p>
+        <p>{scope.effect_on_balance_sheet}</p>
+        <p className="pt-1 font-semibold">{scope.certificate_note}</p>
+      </div>
+    </details>
+  );
+};
 
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
   const [activeTab, setActiveTab] = useState<
@@ -20603,10 +20604,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : activeTab === 'ACCOUNTS_PNL' ? (
         <div className="space-y-5">
+          {/* This is the P&L in the main navigation, so it is the one most
+              likely to be read as the whole story. The note goes here too. */}
+          {accountsPnlData?.scope && <StatementScopeNote scope={accountsPnlData.scope} />}
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
               <h2 className="text-3xl font-bold font-serif text-[#1a1208]">P&amp;L Report</h2>
-              <p className="text-sm text-[#6b5d52] mt-1">Revenue vs. costs for the selected period. Accrual basis &mdash; recognised when earned/incurred.</p>
+              <p className="text-sm text-[#6b5d52] mt-1">Revenue vs. costs for the selected period. Accrual basis &mdash; recognised when earned/incurred. Ends at EBITDA.</p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <input type="date" value={accountsPnlRange.from} onChange={e => setAccountsPnlRange(p=>({...p,from:e.target.value}))} className="text-xs border border-[#e8dccf] rounded-lg px-2 py-1.5" />
