@@ -18619,10 +18619,10 @@ ${data.tenant.name}`;
       //    for CONSUMPTION movements tied to orders in this window)
       const foodCostRows: any[] = await db.query(
         `SELECT o.external_platform AS channel,
-                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS food_cost
+                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)), 0) AS food_cost
            FROM stock_movements sm
            JOIN orders o ON o.id = sm.reference_id AND sm.reference_type = 'order'
-           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE o.external_platform IS NOT NULL
             AND o.status != 'CANCELLED'
             AND o.created_at >= ?::date
@@ -19345,15 +19345,30 @@ ${data.tenant.name}`;
   //
   // Written ONCE because the dashboard and the monthly close must agree; two
   // copies of a valuation rule is how a report and the ledger drift apart.
-  const _INV_UNIT_COST_SQL = `COALESCE(
+  // What a unit of stock is WORTH: weighted-average cost of the open batches,
+  // falling back to the last cost actually paid, then to the list price.
+  //
+  // Written once and used in two shapes, because a second copy of this cascade
+  // is a second answer to "what is this worth".
+  //   • _INV_UNIT_COST_SQL  — correlated on `i`, for queries already grouped by
+  //     the ingredient, where it runs once per group.
+  //   • _INV_UNIT_COST_JOIN — the same cascade as a derived table joined as
+  //     `uc`, for queries that aggregate over MOVEMENTS. There the correlated
+  //     form would re-run per movement row; this computes it once per item.
+  const _INV_UNIT_COST_EXPR = (a: string) => `COALESCE(
     (SELECT SUM(b.remaining_qty * b.unit_cost) / NULLIF(SUM(b.remaining_qty), 0)
        FROM stock_batches b
-      WHERE b.ingredient_id = i.id AND b.remaining_qty > 0 AND b.unit_cost IS NOT NULL),
+      WHERE b.ingredient_id = ${a}.id AND b.remaining_qty > 0 AND b.unit_cost IS NOT NULL),
     (SELECT m.unit_cost FROM stock_movements m
-      WHERE m.ingredient_id = i.id AND COALESCE(m.unit_cost, 0) > 0
+      WHERE m.ingredient_id = ${a}.id AND COALESCE(m.unit_cost, 0) > 0
       ORDER BY m.recorded_at DESC LIMIT 1),
-    i.default_unit_price,
+    ${a}.default_unit_price,
     0)`;
+  const _INV_UNIT_COST_SQL = _INV_UNIT_COST_EXPR('i');
+  const _INV_UNIT_COST_JOIN = `LEFT JOIN (
+      SELECT i2.id AS ingredient_id, ${_INV_UNIT_COST_EXPR('i2')} AS unit_cost
+        FROM ingredients i2
+    ) uc ON uc.ingredient_id = i.id`;
 
   const _INVENTORY_GL_ACCOUNTS: Record<string, { asset: string; assetName: string; expense: string; expenseName: string }> = {
     RESTAURANT: { asset: '1600', assetName: 'Inventory — F&B Stock', expense: '5000', expenseName: 'Cost of F&B Consumed' },
@@ -23302,16 +23317,16 @@ ${data.tenant.name}`;
       // (which stores qty in the user-entered unit — would cause 1000× over-
       // count when user logs grams of a kg-stocked ingredient).
       const wastageRow: any = await db.get(
-        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS v
+        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)), 0) AS v
            FROM stock_movements sm
-           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type = 'WASTAGE'
             AND sm.recorded_at >= NOW() - INTERVAL '30 days'${dmfI.sql}`, dmfI.params
       );
       const consumedValueRow: any = await db.get(
-        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS v
+        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)), 0) AS v
            FROM stock_movements sm
-           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type = 'CONSUMPTION'
             AND sm.recorded_at >= DATE_TRUNC('month', CURRENT_DATE)${dmfI.sql}`, dmfI.params
       );
@@ -23435,9 +23450,9 @@ ${data.tenant.name}`;
       const trendRows: any[] = await db.query(
         `SELECT DATE_TRUNC('day', sm.recorded_at)::date AS d,
                 SUM(ABS(sm.qty_delta)) AS qty,
-                SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)) AS cost
+                SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)) AS cost
            FROM stock_movements sm
-           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type IN ('CONSUMPTION', 'WASTAGE')
             AND sm.recorded_at >= NOW() - INTERVAL '30 days'
           GROUP BY DATE_TRUNC('day', sm.recorded_at)
@@ -23448,9 +23463,9 @@ ${data.tenant.name}`;
       const topConsumers: any[] = await db.query(
         `SELECT i.id, i.name, i.unit, i.category,
                 SUM(ABS(sm.qty_delta)) AS total_qty,
-                SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)) AS total_cost
+                SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)) AS total_cost
            FROM stock_movements sm
-           JOIN ingredients i ON i.id = sm.ingredient_id
+           JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type = 'CONSUMPTION'
             AND sm.recorded_at >= NOW() - INTERVAL '30 days'
           GROUP BY i.id, i.name, i.unit, i.category
@@ -23464,11 +23479,11 @@ ${data.tenant.name}`;
       const wastageBreakdown: any[] = await db.query(
         `SELECT w.reason,
                 COUNT(*) AS count,
-                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS total_value
+                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)), 0) AS total_value
            FROM wastage_logs w
            LEFT JOIN stock_movements sm
              ON sm.reference_type = 'wastage' AND sm.reference_id = w.id
-           LEFT JOIN ingredients i ON i.id = w.ingredient_id
+           LEFT JOIN ingredients i ON i.id = w.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE w.logged_at >= NOW() - INTERVAL '30 days'
           GROUP BY w.reason
           ORDER BY total_value DESC`
@@ -23645,16 +23660,16 @@ ${data.tenant.name}`;
                 COALESCE(SUM(pci.variance), 0) AS total_variance,
                 COUNT(*) AS counts,
                 MAX(pc.count_date) AS last_count_date,
-                COALESCE(i.default_unit_price, 0) AS unit_price,
-                COALESCE(SUM(pci.variance) * COALESCE(i.default_unit_price, 0), 0) AS variance_value
+                COALESCE(uc.unit_cost, 0) AS unit_price,
+                COALESCE(SUM(pci.variance) * COALESCE(uc.unit_cost, 0), 0) AS variance_value
            FROM physical_count_items pci
            JOIN physical_counts pc ON pc.id = pci.count_id
-           LEFT JOIN ingredients i ON i.id = pci.ingredient_id
+           LEFT JOIN ingredients i ON i.id = pci.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE pc.status = 'COMPLETED'
             AND pc.count_date BETWEEN ?::date AND ?::date
             AND pci.actual_qty IS NOT NULL${vmf.sql}
-          GROUP BY pci.ingredient_id, i.name, i.category, i.unit, i.default_unit_price
-          ORDER BY ABS(SUM(pci.variance) * COALESCE(i.default_unit_price, 0)) DESC`,
+          GROUP BY pci.ingredient_id, i.name, i.category, i.unit, uc.unit_cost
+          ORDER BY ABS(SUM(pci.variance) * COALESCE(uc.unit_cost, 0)) DESC`,
         // module param goes LAST: its placeholder sits after the two dates in
         // the statement text, and Postgres binds by position, not by name.
         [fromDate, toDate, ...vmf.params]
@@ -23703,9 +23718,9 @@ ${data.tenant.name}`;
       const ingredientRows: any[] = await db.query(
         `SELECT i.id, i.name, i.category, i.unit,
                 COALESCE(SUM(ABS(sm.qty_delta)), 0) AS qty,
-                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS cogs
+                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)), 0) AS cogs
            FROM stock_movements sm
-           JOIN ingredients i ON i.id = sm.ingredient_id
+           JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type = 'CONSUMPTION'
             AND sm.recorded_at >= ?::date
             AND sm.recorded_at < ?::date + INTERVAL '1 day'
@@ -23714,9 +23729,9 @@ ${data.tenant.name}`;
         [fromDate, toDate]
       );
       const wastageRows: any[] = await db.query(
-        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS v
+        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)), 0) AS v
            FROM stock_movements sm
-           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type = 'WASTAGE'
             AND sm.recorded_at >= ?::date
             AND sm.recorded_at < ?::date + INTERVAL '1 day'`,
@@ -25579,16 +25594,16 @@ ${data.tenant.name}`;
       const items: any[] = await db.query(
         `SELECT i.id, i.name, i.category, i.unit,
                 i.current_stock_qty AS stock_qty,
-                COALESCE(i.default_unit_price, 0) AS unit_price,
-                i.current_stock_qty * COALESCE(i.default_unit_price, 0) AS stock_value,
+                COALESCE(uc.unit_cost, 0) AS unit_price,
+                i.current_stock_qty * COALESCE(uc.unit_cost, 0) AS stock_value,
                 MAX(sm.recorded_at) AS last_movement,
                 CASE WHEN MAX(sm.recorded_at) IS NULL THEN NULL
                      ELSE EXTRACT(DAY FROM (NOW() - MAX(sm.recorded_at)))::integer
                 END AS days_idle
          FROM ingredients i
-         LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id
+         LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id${_INV_UNIT_COST_JOIN}
          WHERE i.is_active = 1 AND i.current_stock_qty > 0${dmf.sql}
-         GROUP BY i.id
+         GROUP BY i.id, uc.unit_cost
          HAVING MAX(sm.recorded_at) IS NULL OR EXTRACT(DAY FROM (NOW() - MAX(sm.recorded_at)))::integer >= ?
          ORDER BY stock_value DESC`,
         // The module placeholder lands in the WHERE, which precedes the HAVING
@@ -57750,8 +57765,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'league-fill-needs-a-receipt',
+    commit_marker: 'one-valuation-basis',
     code_features: [
+      'one-valuation-basis — I reported dead-stock as THE LAST survivor of the split valuation basis. That was wrong: it was ONE OF TWELVE. Only the dashboard stock value and _computeInventoryPeriod had been moved onto weighted-average batch cost; every site that valued a MOVEMENT still priced it at i.default_unit_price, the static list price. So food cost % was a COGS at list price divided by revenue while the stock it is drawn from was valued at cost - a ratio of two different bases - and the month-end close and the dashboard could report different money for the same consumption. Fixed across all twelve: per-channel food cost, dashboard wastage-30d, dashboard consumed value, consumption trend, top consumers, wastage breakdown by reason, physical-count variance (select + GROUP BY + ORDER BY), cogs-report COGS, cogs-report wastage, and dead stock (select + FROM/GROUP BY). ONE DEFINITION, TWO SHAPES: _INV_UNIT_COST_EXPR(alias) is now the single cascade, exposed as _INV_UNIT_COST_SQL (correlated on `i`, for queries already grouped by ingredient, where it runs once per group) and _INV_UNIT_COST_JOIN (the same cascade as a derived table joined as `uc`, for queries that aggregate over MOVEMENTS - there the correlated form would re-run per movement row, so this computes it once per item instead). A second copy of the cascade would be a second answer to what is this worth. Two sites use the cost as a BARE column in a grouped query, so uc.unit_cost joins the GROUP BY there. Smoke: TC-INV-ONE-VALUATION-AGREES (dead stock and stock turns must publish the SAME unit cost for the same item - two endpoints, one basis; skips rather than passes when no item appears in both) and -ALIVE (twelve SQL edits can only fail at run time, so every report that values stock is executed and checked for a 500).',
       'league-fill-needs-a-receipt — caught by reading the first live league rather than by a test. Aggarwal Wholesale, the tenant biggest supplier at 359 POs and Rs.1.67L of spend, sat at rank 4 on a score of ZERO while three smoke-test fixtures topped the table. The cause is not the supplier: purchase_order_items.qty_received is only written when a GOODS RECEIPT is posted, and this tenant has never posted one - zero GRNs in the entire database - so total_received/total_ordered was 0/1871 for every real supplier. That is nobody recorded a delivery, not delivers nothing, and it is the same defect class as the stockout headline that read 19 of 58 ran out with zero events: AN ABSENCE MUST NOT RENDER AS A BAD RESULT. Fill rate is now measurable only when at least one goods receipt exists for that supplier in the window; without one the dimension is null and the supplier moves to `unrated`, which is exactly the bucket that exists to say we have no history on them. Both the league AND the per-supplier card feed the receipt count into the shared _supplierScore - a shared formula only keeps two screens in step if both give it the same inputs. Smoke: TC-SUP-LEAGUE-FILL-NEEDS-A-RECEIPT sweeps every supplier, rated and unrated, for a fill rate with no receipt behind it. WORTH KNOWING SEPARATELY: this tenant records no goods receipts at all, so on-time, fill rate, price variance and quality are ALL unmeasurable for every real supplier - the league is working, but it can only rank what the receiving process records.',
       'supplier-league-table — the last gap from the supply-chain review. A per-supplier scorecard already existed and was surfaced (I nearly mis-reported it as missing because my grep filtered out the string 360), but the suppliers LIST carried no performance fields at all, so suppliers could be inspected one at a time and never compared. New GET /procurement/suppliers/league?days= plus a third view beside Card and Table in ProcurementView. ONE FORMULA, NOT TWO. The weights (on-time 35, fill 25, price stability 25, quality 15) are extracted into _supplierScore and the EXISTING scorecard route now calls it too, so the league and the card a user clicks through to cannot publish different numbers for the same supplier - the one thing a league cannot survive is disagreeing with the profile it links to. The league gathers its inputs set-based (five grouped queries for the whole book, not four per supplier); only the gathering differs, and that difference is visible rather than silent. WEIGHTS ARE RE-NORMALISED OVER THE MEASURES THAT HAVE DATA, which is exactly the fact a RANKING has to surface: a supplier judged only on quality is scored on 15% of the intended weighting stretched to 100%, so its 98 is not comparable to a supplier measured on all four at 92. Every row therefore reports dimensions_measured and weight_covered, shown on screen as "2 of 4 - 60%" and amber-flagged below 100. Ties break on weight_covered then spend, so a fully-measured supplier outranks a partly-measured one on the same score. Suppliers with NO history come back SEPARATELY as `unrated` rather than ranked last on a null - an unrated supplier is not a bad one, and the bottom of a league invites exactly that reading. Spend and PO count are carried alongside because a 100% score on a single delivery is not a supplier relationship. LANDMINE: the route MUST be declared before /procurement/suppliers/:supplierId - Express matches in order, so otherwise the league is served by the single-supplier lookup as a supplier named "league" and 404s as though it were never deployed. TC-SUP-LEAGUE-ROUTE locks that in. Smoke: -AGREES (the top-ranked supplier scores identically in the league and on its own card, across all four components - the test that justifies the shared formula), -RANKED (descending, sequential ranks, rated and unrated partition the book), -COVERAGE.',
       'stockout-ran-out-means-crossed — caught by reading the LIVE numbers rather than the tests, which were all green. The panel reported RESTAURANT as "19 of 58 items ran out" over a period with ZERO stockout events, which cannot both be true. Cause: items_that_ran_out counted any item with time at zero, so it swept up 18 items whose ledger merely OPENED at zero and were topped up minutes later by their first delivery. Those never ran out - they were not yet stocked - and that is exactly the distinction the event counter already draws (an item already out when the window opens contributes days but not an event). The counter now counts crossings, so the three headline figures mean three different things: stockout_events = crossings into zero during the window, items_that_ran_out = how many distinct items had one, item_days_out = total unavailability INCLUDING items that began the window out, currently_out = the snapshot now. Smoke: TC-INV-STOCKOUT-TOTALS-<module> asserts across three modules that items_that_ran_out equals the number of items actually carrying an event and never exceeds the event total - an internal-consistency check, which is the kind that catches a headline drifting from the detail it is supposed to summarise.',
