@@ -30,6 +30,107 @@ export interface DbInterface {
   exec: (sql: string) => Promise<void>;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STATUTORY AUDIT TRAIL — Rule 3(1), Companies (Accounts) Rules 2014
+// ═══════════════════════════════════════════════════════════════════════════
+// In force since 1 April 2023: accounting software must record an audit trail
+// of each and every transaction, create an edit log of every change made to the
+// books of account, and MUST NOT allow that trail to be disabled.
+//
+// WHY THIS LIVES HERE AND NOT IN THE ROUTES. The previous trail was written by
+// each endpoint calling writeObjectAudit, which reached 118 of 564 write routes
+// — about a fifth. Completeness achieved endpoint-by-endpoint is completeness
+// that lapses the next time somebody adds an endpoint. Below the routes there is
+// exactly ONE place every tenant write passes through, PostgresDb.run, so the
+// log is written because the row was written. There is no flag to turn it off;
+// removing it means editing this file.
+//
+// WHAT IS COVERED. The books of account and the subsidiary records that feed
+// them. `orders` is deliberately NOT here: it churns on every kitchen status
+// change, and its financial effect reaches the books through gl_entries, which
+// IS covered — so the money is audited without the noise. Business-level intent
+// ("who cancelled this booking, and why") stays in object_audit_log; the two
+// answer different questions and both are kept.
+export const BOOKS_OF_ACCOUNT_TABLES = new Set<string>([
+  'gl_entries', 'chart_of_accounts', 'accounting_periods',
+  'supplier_invoices', 'supplier_payments',
+  'petty_cash', 'expense_payments', 'loans',
+  'folios', 'folio_payments',
+  'cash_drawers', 'cash_handovers', 'cash_counts',
+  'tds_payable_ledger', 'gst_output_register',
+]);
+
+// The acting user, carried on the async context so the data layer can name an
+// actor without every caller having to thread one through. Set once per request
+// in `authenticate`; absent for cron and boot work, which records as SYSTEM.
+import { AsyncLocalStorage } from 'node:async_hooks';
+export type BooksActor = { id?: string | null; name?: string | null; role?: string | null; request_id?: string | null };
+export const booksAuditContext = new AsyncLocalStorage<BooksActor>();
+export const runWithBooksActor = <T>(actor: BooksActor, fn: () => T): T => booksAuditContext.run(actor, fn);
+
+type AuditPlan = {
+  table: string; op: 'INSERT' | 'UPDATE' | 'DELETE';
+  beforeSql: string | null; beforeParams: any[] | null;
+  insertColumns: string[] | null;
+};
+
+const _countPlaceholders = (sql: string): number => (sql.match(/\?/g) || []).length;
+
+// Conservative by design: anything it is not certain about, it declines to
+// describe rather than describing wrongly. A missing before-image is a gap in
+// one row's detail; a WRONG before-image is evidence that misleads.
+export function planBooksAudit(sql: string, params: any[]): AuditPlan | null {
+  const m = /^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+("?)([a-zA-Z_][a-zA-Z0-9_]*)\2/i.exec(sql);
+  if (!m) return null;
+  const table = m[3].toLowerCase();
+  if (!BOOKS_OF_ACCOUNT_TABLES.has(table)) return null;
+  const verb = m[1].toUpperCase().replace(/\s+/g, ' ');
+  const op: AuditPlan['op'] = verb.startsWith('INSERT') ? 'INSERT' : verb === 'UPDATE' ? 'UPDATE' : 'DELETE';
+
+  if (op === 'INSERT') {
+    // Zip the declared column list with the parameters, so the after-image is
+    // named values rather than an opaque array. Skipped when the statement does
+    // not list its columns.
+    const cm = /INSERT\s+INTO\s+"?[a-zA-Z_][a-zA-Z0-9_]*"?\s*\(([^)]*)\)/i.exec(sql);
+    const cols = cm ? cm[1].split(',').map(c => c.trim().replace(/^"|"$/g, '')) : null;
+    return { table, op, beforeSql: null, beforeParams: null, insertColumns: cols };
+  }
+
+  // UPDATE / DELETE: the before-image comes from re-running this statement's own
+  // WHERE clause as a SELECT. Only attempted when the statement contains exactly
+  // ONE `WHERE`, because with a subquery there is no way to tell which one bounds
+  // the rows being changed, and guessing produces a plausible, wrong answer.
+  const wheres = sql.match(/\bWHERE\b/gi);
+  if (!wheres || wheres.length !== 1) return { table, op, beforeSql: null, beforeParams: null, insertColumns: null };
+  const wIdx = sql.search(/\bWHERE\b/i);
+  const head = sql.slice(0, wIdx);
+  const whereClause = sql.slice(wIdx);
+  // Placeholders in the SET clause bind BEFORE those in the WHERE, so the
+  // SELECT takes only the tail of the array. Getting this backwards would read
+  // a different row than the one being changed.
+  const headCount = _countPlaceholders(head);
+  const whereParams = params.slice(headCount);
+  if (_countPlaceholders(whereClause) !== whereParams.length) {
+    return { table, op, beforeSql: null, beforeParams: null, insertColumns: null };
+  }
+  return {
+    table, op,
+    beforeSql: `SELECT * FROM "${table}" ${whereClause}`,
+    beforeParams: whereParams,
+    insertColumns: null,
+  };
+}
+
+const _auditJson = (v: any): string | null => {
+  if (v == null) return null;
+  try {
+    const s = JSON.stringify(v);
+    // A single row image should never be enormous; cap it so one pathological
+    // payload cannot bloat the log.
+    return s.length > 20000 ? s.slice(0, 20000) + '…[truncated]' : s;
+  } catch { return null; }
+};
+
 class PostgresDb implements DbInterface {
   private pool: Pool;
   private schema: string;
@@ -78,9 +179,60 @@ class PostgresDb implements DbInterface {
   }
 
   async run(sql: string, params: any[] = []): Promise<{ changes: number }> {
+    // Only tenant schemas keep books; `public` is the platform registry.
+    const plan = this.schema === 'public' ? null : planBooksAudit(sql, params);
+    if (!plan) {
+      return this.withClient(async (client) => {
+        const res = await client.query(this.toPositional(sql), params);
+        return { changes: res.rowCount ?? 0 };
+      });
+    }
     return this.withClient(async (client) => {
+      let before: any = null;
+      if (plan.beforeSql) {
+        try {
+          const r = await client.query(this.toPositional(plan.beforeSql), plan.beforeParams || []);
+          before = r.rows;
+        } catch { before = null; }
+      }
       const res = await client.query(this.toPositional(sql), params);
-      return { changes: res.rowCount ?? 0 };
+      const changes = res.rowCount ?? 0;
+
+      // THE WRITE ITSELF IS NEVER FAILED BY THE TRAIL. A guest's bill must not
+      // be refused because an audit insert could not be made — but the failure
+      // is loud rather than swallowed, so a trail that stops working is noticed.
+      try {
+        let after: any = null;
+        if (plan.op === 'UPDATE' && plan.beforeSql && changes > 0) {
+          const r2 = await client.query(this.toPositional(plan.beforeSql), plan.beforeParams || []);
+          after = r2.rows;
+        } else if (plan.op === 'INSERT' && plan.insertColumns) {
+          const row: Record<string, any> = {};
+          plan.insertColumns.forEach((c, i) => { if (i < params.length) row[c] = params[i]; });
+          after = [row];
+        }
+        const actor = booksAuditContext.getStore() || {};
+        const key = (() => {
+          const src = (after && after[0]) || (before && before[0]);
+          return src && (src.id ?? src.ID) != null ? String(src.id ?? src.ID) : null;
+        })();
+        await client.query(
+          `INSERT INTO books_audit_log
+             (table_name, operation, row_key, rows_affected, actor_id, actor_name, actor_role,
+              request_id, before_json, after_json, statement)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [plan.table, plan.op, key, changes,
+           actor.id || null, actor.name || null, actor.role || 'SYSTEM',
+           actor.request_id || null,
+           _auditJson(before), _auditJson(after),
+           // The statement SHAPE only — parameters live in the before/after
+           // images, so a value is never recorded twice in different forms.
+           sql.replace(/\s+/g, ' ').trim().slice(0, 2000)]
+        );
+      } catch (auditErr: any) {
+        console.error(`[books-audit] FAILED to log ${plan.op} on ${plan.table} in ${this.schema}:`, auditErr?.message || auditErr);
+      }
+      return { changes };
     });
   }
 
@@ -2969,6 +3121,28 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_coa_type ON chart_of_accounts (type);
+
+    -- Statutory edit log — Rule 3(1), Companies (Accounts) Rules 2014.
+    -- Written by the data layer for every change to the books of account, so it
+    -- cannot be forgotten by a new endpoint and cannot be switched off.
+    CREATE TABLE IF NOT EXISTS books_audit_log (
+      id            BIGSERIAL PRIMARY KEY,
+      table_name    TEXT NOT NULL,
+      operation     TEXT NOT NULL,
+      row_key       TEXT,
+      rows_affected INTEGER NOT NULL DEFAULT 0,
+      actor_id      TEXT,
+      actor_name    TEXT,
+      actor_role    TEXT,
+      request_id    TEXT,
+      before_json   TEXT,
+      after_json    TEXT,
+      statement     TEXT,
+      changed_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_books_audit_when  ON books_audit_log (changed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_books_audit_table ON books_audit_log (table_name, changed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_books_audit_row   ON books_audit_log (table_name, row_key);
 
     CREATE TABLE IF NOT EXISTS gl_entries (
       id                   TEXT PRIMARY KEY,

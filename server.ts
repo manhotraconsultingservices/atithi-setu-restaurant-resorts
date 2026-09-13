@@ -11,7 +11,7 @@ import cookieParser from "cookie-parser";
 import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash, timingSafeEqual } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
-import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, createAccountTables, DbInterface } from "./db.ts";
+import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, createAccountTables, DbInterface, booksAuditContext, runWithBooksActor, BOOKS_OF_ACCOUNT_TABLES } from "./db.ts";
 import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, sendTelegramDetailed, buildNotificationContent, sendWhatsAppDetailed, sendSMSDetailed, sendEmailAs, verifyTenantSmtp, type TenantSmtpConfig } from "./notificationService.ts";
 import { getChannelAdapter, ChannelCredentials, AdapterAvailabilityPayload, AdapterResult } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
@@ -5713,6 +5713,17 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as any;
     req.user = decoded;
 
+    // Name the actor on the audit context opened above. Mutating the store in
+    // place rather than opening a nested one keeps the request id stable, so
+    // every row written by this request shares it and the whole change set can
+    // be reconstructed later.
+    const _auditStore = booksAuditContext.getStore();
+    if (_auditStore) {
+      _auditStore.id = decoded.id || decoded.email || null;
+      _auditStore.name = decoded.name || decoded.full_name || decoded.email || null;
+      _auditStore.role = String(decoded.role || 'STAFF');
+    }
+
     // ──────────────────────────────────────────────────────────────────
     // T1-S2: TENANT ISOLATION (BCG audit, Tier 1)
     // ──────────────────────────────────────────────────────────────────
@@ -7724,6 +7735,16 @@ async function startServer() {
   // Body size — 2 MB is plenty for any JSON payload the ERP sends. File
   // uploads use multer with its own limit (10 MB photos). Without a cap an
   // attacker could DOS the parser with multi-GB JSON bombs.
+  // ── Statutory audit trail: open a context for EVERY request ──────────────
+  // Placed before the body parser so it wraps the whole request, including the
+  // public endpoints that never reach `authenticate`. The store is a mutable
+  // object: this sets the request id and an anonymous actor, and `authenticate`
+  // fills in who it turned out to be. Writes made outside any request (cron,
+  // boot) simply find no store and record as SYSTEM.
+  app.use((req: any, _res: Response, next: NextFunction) => {
+    runWithBooksActor({ id: null, name: null, role: 'ANONYMOUS', request_id: randomUUID() }, () => next());
+  });
+
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
@@ -57808,8 +57829,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'supplier-insert-placeholders',
+    commit_marker: 'books-audit-trail',
     code_features: [
+      'books-audit-trail — Q-1 from the accounting review, and the qualification that blocked certifying this product for a COMPANY client. Rule 3(1) of the Companies (Accounts) Rules has required since 1 Apr 2023 that accounting software record an audit trail of each and every transaction, create an edit log of every change to the books, and NOT allow it to be disabled. The old trail was writeObjectAudit called endpoint by endpoint: 118 of 564 write routes, about a fifth. WHY IT MOVED BELOW THE ROUTES. Completeness achieved endpoint-by-endpoint lapses the next time somebody adds an endpoint. PostgresDb.run is the ONE place every tenant write passes through, so the log is now written because the row was written - there is no flag to turn it off and removing it means editing db.ts. New tenant table books_audit_log (table, operation, row key, actor, request id, before/after images, statement shape, timestamp). THE BEFORE-IMAGE IS DELIBERATELY CONSERVATIVE: it comes from re-running the statement OWN WHERE clause as a SELECT, and is attempted ONLY when the statement contains exactly one WHERE - with a subquery there is no way to tell which WHERE bounds the rows being changed, and a plausible wrong before-image is evidence that misleads, which is worse than a missing one. Placeholders in a SET clause bind BEFORE those in the WHERE, so the SELECT takes only the tail of the params; getting that backwards would read a different row than the one being changed. A survey of the codebase first confirmed 54 of 57 books-table UPDATEs have a single WHERE. ACTOR VIA AsyncLocalStorage: a context is opened for EVERY request before the body parser (so public endpoints that never reach `authenticate` are covered too) and `authenticate` then names the user by MUTATING that store in place, which keeps one request id across every row a request writes. Cron and boot writes find no store and record as SYSTEM. SCOPE: the books of account and the subsidiary records that feed them. `orders` is deliberately EXCLUDED - it churns on every kitchen status change and its financial effect reaches the books through gl_entries, which IS covered, so the money is audited without the noise. object_audit_log is kept: business intent and row-level change answer different questions. THE TRAIL NEVER FAILS THE WRITE - a guest bill must not be refused because an audit insert failed - but the failure is logged loudly rather than swallowed. Read back at GET /accounting/audit-trail (owner-only, filterable, with a coverage summary); there is deliberately NO endpoint that edits or deletes an entry. Smoke: TC-AUDIT-TRAIL-RECORDS drives a route containing NO audit call of its own and requires the entry anyway - if that holds, it holds for endpoints nobody has written yet; -NAMES-WHO, -BEFORE-AFTER (what it was and what it became), -COVERS-BOOKS, -CANNOT-BE-CLEARED (asserts the ABSENCE of any delete/clear endpoint).',
       'supplier-insert-placeholders — HOTFIX. Adding the four Section 43B(h) fields to the supplier INSERT widened the column list and the parameter array but NOT the VALUES placeholder list: 31 columns, 31 params, 27 question marks. Postgres answered "INSERT has more target columns than expressions" and CREATING A SUPPLIER 500d for the few minutes between deploys. tsc cannot count placeholders inside a SQL string, and the smoke suite caught it only as a SKIP - TC-MSME-43B reported "fixture invoices not created" rather than a failure, because its fixture could not build. A SKIP on a test you just wrote is a result, not an absence: it means the test proved nothing, and here it was hiding a live regression in an unrelated feature. Diagnosed by reproducing the fixture calls directly against production.',
       'msme-43b-ageing — H-1 from the accounting review, and the highest-value item on it for an Indian MSME practice. Section 43B(h) (Finance Act 2023, AY 2024-25 onward) disallows a deduction for sums payable to a MICRO or SMALL enterprise beyond the section 15 MSMED time limit until they are actually paid. It costs the CLIENT money, at assessment, on an amount the books report as an entirely ordinary payable - and nothing in the product answered it. THE DISTINCTION THAT MAKES THE REPORT WORTH HAVING: the test is NOT "unpaid at the year end", it is "unpaid BEYOND THE LIMIT at the year end". An invoice dated 20 March on 45-day terms falls due 4 May - unpaid on 31 March and NOT disallowed. A screen that lists every open MSME payable overstates the disallowance and sends the owner paying bills that were never due; that is the naive version and the smoke tests are built to fail it. New supplier fields udyam_number / msme_class / msme_agreement_days / msme_is_trader, because msme_registered alone cannot answer the question: the section reaches micro and small only, so the CLASS is required, and MEDIUM IS OUTSIDE IT - the commonest error in this calculation. Limit = the days agreed in writing capped at 45, else 15. GET /accounting/msme-43b returns per-invoice status (DISALLOWED / WITHIN_LIMIT / PAID_LATE / PAID_WITHIN_LIMIT), the section 15 due date, days beyond, a by-supplier roll-up, and an EXCLUDED list naming who was left out and why - an exclusion a report cannot explain is one an auditor will not accept. Traders are a flag rather than a hard-coded rule, since their exclusion is a judgement for the client CA. Paid invoices are retained so a habit of late payment is visible, not just the closing balance. Smoke: -DISALLOWED, -WITHIN-LIMIT (a 5-day-old unpaid micro bill must NOT be disallowed), -MEDIUM-EXCLUDED, -AGREEMENT (45-day terms honoured), -CAP (a 90-day agreement capped at 45), -TRADER, -TOTALS (headline equals the sum of its lines), -AS-OF (the same invoice is not disallowed at a date before its limit expired).',
       'grn-scope-by-what-arrived — follow-up to kitchen-lists-scoped, caught by checking that the new filter PARTITIONS rather than assuming a 200 meant it worked. The GRN module filter matched on the items received OR on the linked purchase order module, unconditionally - and purchase_orders.module is COALESCEd to RESTAURANT, so every legacy untagged PO made its receipt look like a kitchen receipt and the kitchen list still returned all 19 receipts, the spa one included. The PO arm now applies ONLY when the receipt has no lines at all: judge by what arrived when that is known, fall back to the order only when it is not. Wastage and counts partitioned correctly first time (wastage 10 RESTAURANT + 35 EVENTS = 45; counts 45 HOTEL + 6 NULL-module, and a NULL-module stock-take deliberately shows under every module because it predates scoping). ALSO CORRECTS A CLAIM I MADE EARLIER: I reported this tenant had ZERO goods receipts, having probed a path that does not exist (/inventory/goods-receipts) and read the empty result as fact. The real route is /inventory/grn and there are 19 receipts, 17 with lines. The supplier-league conclusion survives but for a DIFFERENT reason: all 19 are against E2E TEST suppliers, so no REAL supplier has receipt history.',
@@ -59721,6 +59743,63 @@ ${data.tenant.name}`;
     } catch (err: any) {
       console.error('/accounting/msme-43b error:', err);
       res.status(500).json({ error: err?.message || 'Failed to compute the MSME 43B(h) schedule' });
+    }
+  });
+
+  // ── The statutory edit log, read back ─────────────────────────────────────
+  // Rule 3(1) requires the trail to exist and to be preserved; an auditor has to
+  // be able to READ it, filtered to the record they are testing. Read-only and
+  // owner-gated: there is deliberately no endpoint that edits or deletes a row
+  // here, because a trail that can be edited is not a trail.
+  app.get("/api/restaurant/:id/accounting/audit-trail", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const clauses: string[] = [];
+      const params: any[] = [];
+      const tbl = String(req.query.table || '').trim().toLowerCase();
+      // Only a books table may be asked for, so this cannot become a generic
+      // reader for tables the trail does not cover.
+      if (tbl && BOOKS_OF_ACCOUNT_TABLES.has(tbl)) { clauses.push('table_name = ?'); params.push(tbl); }
+      const rowKey = String(req.query.row_key || '').trim();
+      if (rowKey) { clauses.push('row_key = ?'); params.push(rowKey); }
+      const op = String(req.query.operation || '').trim().toUpperCase();
+      if (['INSERT', 'UPDATE', 'DELETE'].includes(op)) { clauses.push('operation = ?'); params.push(op); }
+      const from = String(req.query.from || '').trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(from)) { clauses.push('changed_at >= ?::date'); params.push(from); }
+      const to = String(req.query.to || '').trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(to)) { clauses.push("changed_at < ?::date + INTERVAL '1 day'"); params.push(to); }
+      const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 200));
+
+      const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+      const rows = await db.query(
+        `SELECT id, table_name, operation, row_key, rows_affected, actor_id, actor_name,
+                actor_role, request_id, before_json, after_json, statement, changed_at
+           FROM books_audit_log ${where}
+          ORDER BY changed_at DESC, id DESC LIMIT ${limit}`, params
+      ).catch(() => [] as any[]);
+      const totalRow: any = await db.get(
+        `SELECT COUNT(*)::int AS n FROM books_audit_log ${where}`, params
+      ).catch(() => ({ n: 0 }));
+      const coverage: any[] = await db.query(
+        `SELECT table_name, COUNT(*)::int AS entries, MAX(changed_at) AS last_change
+           FROM books_audit_log GROUP BY table_name ORDER BY entries DESC`
+      ).catch(() => [] as any[]);
+
+      res.json({
+        rule: 'Rule 3(1), Companies (Accounts) Rules 2014 — audit trail of every change to the books of account, recorded by the data layer and not disablable.',
+        tables_covered: [...BOOKS_OF_ACCOUNT_TABLES].sort(),
+        total: Number(totalRow?.n || 0),
+        coverage,
+        rows: rows.map((r: any) => ({
+          ...r,
+          before: r.before_json ? (() => { try { return JSON.parse(r.before_json); } catch { return null; } })() : null,
+          after: r.after_json ? (() => { try { return JSON.parse(r.after_json); } catch { return null; } })() : null,
+        })),
+      });
+    } catch (err: any) {
+      console.error('/accounting/audit-trail error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to read the audit trail' });
     }
   });
 
