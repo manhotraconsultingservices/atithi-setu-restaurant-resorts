@@ -275,6 +275,7 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
   await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS customer_address TEXT`).catch(() => {});
   // Links an advance receipt to its Rule 50 receipt voucher.
   await tenantDb.exec(`ALTER TABLE folio_payments ADD COLUMN IF NOT EXISTS receipt_voucher_id TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE folio_payments ADD COLUMN IF NOT EXISTS refund_voucher_id TEXT`).catch(() => {});
   // Spa folios carry their own invoice number (SPA-<year>-NNNNN). Hotel folios
   // derive the number from the folio id at render time and leave this NULL.
   await tenantDb.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS invoice_number TEXT`).catch(() => {});

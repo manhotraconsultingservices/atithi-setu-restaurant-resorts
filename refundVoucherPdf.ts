@@ -1,33 +1,30 @@
 /**
- * Atithi Setu — Receipt Voucher PDF (Rule 50, CGST Rules 2017)
+ * Atithi Setu — Refund Voucher PDF (Rule 51, CGST Rules 2017)
  *
- * A registered supplier who receives an ADVANCE for a supply of services must
- * issue a receipt voucher (Section 31(3)(d) of the CGST Act), and tax on that
- * advance falls due on receipt (Section 13(2)) — it is not deferred to the
- * invoice. Rule 50 prescribes what the voucher carries; every one of those
- * particulars is printed below, and nothing is printed that is not true of the
- * record behind it.
+ * An advance was received and a receipt voucher issued, but no supply was made
+ * and no tax invoice raised for it, and the money went back to the customer.
+ * The refund is evidenced by a refund voucher. Rule 51 prescribes what it
+ * carries: the supplier, a serial number and date, the recipient, the number
+ * and date of the receipt voucher, the service, the amount refunded, the rate
+ * and the tax paid on it, whether tax is payable on reverse charge, and a
+ * signature. Every one of those is printed below from the record behind it.
  *
- * Traceability: the voucher names the booking it was taken against and, once
- * the bill is raised, the tax invoice it was adjusted against — so a guest, an
- * auditor or the tax officer can follow the money from receipt to invoice.
- *
- * Amounts are printed as "Rs." rather than the rupee glyph: PDFKit's built-in
- * Helvetica has no glyph for it.
+ * Amounts are printed as "Rs." — PDFKit's built-in Helvetica has no rupee glyph.
  */
 
 import PDFDocument from 'pdfkit';
 
-export interface ReceiptVoucherPdfData {
-  rv_number: string;
-  receipt_date: string;
-  status: string;                  // ISSUED | ADJUSTED | CANCELLED | REFUNDED
+export interface RefundVoucherPdfData {
+  rfv_number: string;
+  refund_date: string;
   module: string;                  // HOTEL | EVENTS
   seller: {
     name: string; address?: string; city?: string; state?: string; pincode?: string;
     gstin?: string; phone?: string; email?: string;
   };
   customer: { name: string | null; address: string | null; gstin: string | null };
+  rv_number: string;
+  rv_date: string;
   description: string;
   amount: number;
   taxable_value: number;
@@ -35,23 +32,17 @@ export interface ReceiptVoucherPdfData {
   cgst: number;
   sgst: number;
   igst: number;
-  rate_basis: string | null;
   place_of_supply: string | null;
   payment_method: string | null;
   reference: string | null;
+  reason: string | null;
   booking_ref: string | null;
-  adjusted_invoice_number: string | null;
-  adjusted_at: string | null;
-  cancelled_at: string | null;
-  cancel_reason: string | null;
-  refund_voucher_number?: string | null;
-  refunded_at?: string | null;
 }
 
 const money = (n: number) =>
   'Rs. ' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promise<Buffer> {
+export async function generateRefundVoucherPdf(d: RefundVoucherPdfData): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: 'A4', margin: 44 });
@@ -81,27 +72,19 @@ export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promi
       // ── Title ─────────────────────────────────────────────────────────────
       doc.moveDown(0.8);
       const titleY = doc.y;
-      doc.fillColor(INK).font('Helvetica-Bold').fontSize(18).text('RECEIPT VOUCHER', left, titleY, { width: width * 0.6 });
+      doc.fillColor(INK).font('Helvetica-Bold').fontSize(18).text('REFUND VOUCHER', left, titleY, { width: width * 0.6 });
       const afterTitleY = doc.y;
-
-      // Number / date / status, right-aligned beside the title.
       doc.font('Helvetica-Bold').fontSize(10).fillColor(INK)
-        .text(d.rv_number, left + width * 0.6, titleY, { width: width * 0.4, align: 'right' });
+        .text(d.rfv_number, left + width * 0.6, titleY, { width: width * 0.4, align: 'right' });
       doc.font('Helvetica').fontSize(9).fillColor(MUTED)
-        .text(`Date: ${d.receipt_date}`, left + width * 0.6, doc.y, { width: width * 0.4, align: 'right' });
-      const statusLabel = d.status === 'ADJUSTED' ? 'Adjusted against invoice'
-        : d.status === 'CANCELLED' ? 'CANCELLED'
-        : d.status === 'REFUNDED' ? 'Refunded' : 'Advance held';
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(d.status === 'CANCELLED' ? '#b42318' : INK)
-        .text(statusLabel, left + width * 0.6, doc.y, { width: width * 0.4, align: 'right' });
-
+        .text(`Date: ${d.refund_date}`, left + width * 0.6, doc.y, { width: width * 0.4, align: 'right' });
       doc.y = Math.max(doc.y, afterTitleY);
       doc.moveDown(1.2);
       doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor(RULE).lineWidth(1).stroke();
       doc.moveDown(0.6);
 
       // ── Recipient ─────────────────────────────────────────────────────────
-      doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text('RECEIVED FROM', left, doc.y, { width });
+      doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text('REFUNDED TO', left, doc.y, { width });
       doc.fillColor(INK).font('Helvetica-Bold').fontSize(11).text(d.customer.name || 'Guest', { width });
       doc.font('Helvetica').fontSize(9).fillColor(INK);
       if (d.customer.address) doc.text(d.customer.address, { width });
@@ -109,7 +92,7 @@ export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promi
 
       doc.moveDown(0.8);
 
-      // ── The advance ───────────────────────────────────────────────────────
+      // ── The refund ────────────────────────────────────────────────────────
       const row = (label: string, value: string, bold = false) => {
         const y = doc.y;
         doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).fillColor(INK)
@@ -126,20 +109,21 @@ export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promi
       doc.fillColor(INK).font('Helvetica').fontSize(10).text(d.description, { width });
       doc.moveDown(0.5);
 
-      row('Amount of advance received', money(d.amount), true);
+      row('Receipt voucher', `${d.rv_number} dated ${d.rv_date}`);
+      row('Amount refunded', money(d.amount), true);
       if (d.gst_rate > 0) {
-        row('Value of advance (excluding tax)', money(d.taxable_value));
+        row('Value refunded (excluding tax)', money(d.taxable_value));
         row('Rate of tax', `${Number(d.gst_rate).toFixed(2)}%`);
-        if (d.igst > 0) row('Integrated tax (IGST)', money(d.igst));
-        if (d.cgst > 0) row(`Central tax (CGST @ ${(Number(d.gst_rate) / 2).toFixed(2)}%)`, money(d.cgst));
-        if (d.sgst > 0) row(`State tax (SGST @ ${(Number(d.gst_rate) / 2).toFixed(2)}%)`, money(d.sgst));
-        row('Total tax on this advance', money(d.cgst + d.sgst + d.igst), true);
+        if (d.igst > 0) row('Integrated tax (IGST) paid on the advance', money(d.igst));
+        if (d.cgst > 0) row(`Central tax (CGST @ ${(Number(d.gst_rate) / 2).toFixed(2)}%) paid on the advance`, money(d.cgst));
+        if (d.sgst > 0) row(`State tax (SGST @ ${(Number(d.gst_rate) / 2).toFixed(2)}%) paid on the advance`, money(d.sgst));
+        row('Total tax paid on the advance', money(d.cgst + d.sgst + d.igst), true);
       } else {
-        row('Tax on this advance', 'Nil');
+        row('Tax paid on the advance', 'Nil');
       }
       row('Place of supply', d.place_of_supply || '—');
       row('Tax payable on reverse charge', 'No');
-      if (d.payment_method) row('Received by', `${String(d.payment_method).replace(/_/g, ' ')}${d.reference ? ` · ${d.reference}` : ''}`);
+      if (d.payment_method) row('Refunded by', `${String(d.payment_method).replace(/_/g, ' ')}${d.reference ? ` · ${d.reference}` : ''}`);
 
       doc.moveDown(0.4);
       doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor(RULE).stroke();
@@ -148,26 +132,8 @@ export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promi
       // ── Traceability ──────────────────────────────────────────────────────
       doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text('TRACEABILITY', left, doc.y, { width });
       doc.fillColor(INK).font('Helvetica').fontSize(9);
-      doc.text(`Taken against ${d.module === 'EVENTS' ? 'event booking' : 'booking'}: ${d.booking_ref || '—'}`, { width });
-      if (d.status === 'ADJUSTED') {
-        doc.text(`Adjusted against tax invoice ${d.adjusted_invoice_number || '—'} on ${d.adjusted_at || '—'}.`, { width });
-      } else if (d.status === 'REFUNDED') {
-        doc.text(`Refunded under refund voucher ${d.refund_voucher_number || '—'} on ${d.refunded_at || '—'}.`, { width });
-      } else if (d.status === 'CANCELLED') {
-        doc.fillColor('#b42318').text(`Cancelled on ${d.cancelled_at || '—'}${d.cancel_reason ? ` — ${d.cancel_reason}` : ''}.`, { width });
-        doc.fillColor(INK);
-      } else {
-        doc.text('Not yet adjusted — it will be set against the tax invoice when the bill is raised.', { width });
-      }
-
-      doc.moveDown(1.2);
-      // Printed only where it explains a figure on this voucher: how the rate was set.
-      if (d.gst_rate > 0 && d.rate_basis === 'NOT_DETERMINABLE_RULE_50') {
-        doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(
-          'The rate of tax could not be determined when the advance was received, so it has been charged at eighteen per cent under the proviso to Rule 50.',
-          { width },
-        );
-      }
+      doc.text(`Advance received against ${d.module === 'EVENTS' ? 'event booking' : 'booking'} ${d.booking_ref || '—'} under receipt voucher ${d.rv_number}.`, { width });
+      if (d.reason) doc.text(`Reason for refund: ${d.reason}`, { width });
 
       doc.moveDown(2.2);
       doc.fillColor(INK).font('Helvetica').fontSize(9)

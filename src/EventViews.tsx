@@ -939,6 +939,18 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
     catch (e: any) { alert(e.message); }
   };
   const delPay = async (pid: string) => { try { await api(`/events/payments/${pid}`, { method: 'DELETE' }); await load(); onChanged(); } catch (e: any) { alert(e.message); } };
+  // Refund an advance that is still held, under a Rule 51 refund voucher. The
+  // server refuses while the advance is adjusted against a live invoice.
+  const refundPay = async (p: any) => {
+    const reason = window.prompt(`Refund this advance of ${money(p.amount)}?\n\nA refund voucher is issued and the tax paid on the advance is reversed.\n\nReason for the refund:`);
+    if (reason == null) return;
+    const method = window.prompt('Refunded by — CASH, UPI, CARD, BANK or CHEQUE:', String(p.method || 'CASH').toUpperCase());
+    if (method == null) return;
+    try {
+      await api(`/receipt-vouchers/${p.receipt_voucher_id}/refund`, { method: 'POST', body: JSON.stringify({ reason, method: method.trim().toUpperCase() }) });
+      await load(); onChanged();
+    } catch (e: any) { alert(e.message); }
+  };
   const METHODS = ['UPI', 'CASH', 'CARD', 'BANK', 'CHEQUE'];
 
   return (
@@ -980,10 +992,12 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
       })}
 
       {(pay.payments || []).length > 0 && <div className="text-[11px] font-bold uppercase tracking-wide text-[#9d8b7e] mt-3 mb-1">{t('events.pay.receipts')}</div>}
-      {(pay.payments || []).map((p: any) => (
+      {(pay.payments || []).map((p: any) => {
+        const isRefund = Number(p.amount) < 0;
+        return (
         <div key={p.id} className="flex items-center gap-2 text-xs py-1 border-b border-[#f0e9df]">
-          <span className="flex-1 min-w-0 truncate">{dOnly(p.paid_at)} · {p.method}{p.reference ? ` · ${p.reference}` : ''}</span>
-          <span className="w-20 text-right tabular-nums font-semibold text-emerald-700">{money(p.amount)}</span>
+          <span className="flex-1 min-w-0 truncate">{dOnly(p.paid_at)} · {p.method}{p.reference ? ` · ${p.reference}` : ''}{isRefund && p.note ? ` · ${p.note}` : ''}</span>
+          <span className={`w-20 text-right tabular-nums font-semibold ${isRefund ? 'text-rose-700' : 'text-emerald-700'}`}>{money(p.amount)}</span>
           {/* Rule 50 receipt voucher — issued automatically for an advance taken
               before the event is invoiced, printable to hand to the customer. */}
           {p.receipt_voucher_id && (
@@ -992,9 +1006,20 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
               <FileText size={12} />Voucher
             </button>
           )}
-          {editable && <button onClick={() => delPay(p.id)}><X size={12} className="text-rose-500" /></button>}
+          {/* Rule 51 refund voucher — on the refund row and on the receipt it refunded. */}
+          {p.refund_voucher_id && (
+            <button className={`${BTN_GHOST} py-0.5 text-rose-700`} title="Print the refund voucher"
+              onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/refund-vouchers/${p.refund_voucher_id}/pdf`, token)}>
+              <FileText size={12} />{isRefund ? 'Refund voucher' : 'Refunded'}
+            </button>
+          )}
+          {canRecord && p.receipt_voucher_id && !p.refund_voucher_id && !isRefund && (
+            <button className={`${BTN_GHOST} py-0.5`} title="Refund this advance and issue a refund voucher" onClick={() => refundPay(p)}>Refund</button>
+          )}
+          {editable && !p.refund_voucher_id && <button onClick={() => delPay(p.id)}><X size={12} className="text-rose-500" /></button>}
         </div>
-      ))}
+        );
+      })}
 
       {form.open && (
         <div className="mt-3 p-3 rounded-xl bg-[#faf7f2] border border-[#e8dccf]">

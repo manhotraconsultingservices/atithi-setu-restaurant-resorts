@@ -38274,19 +38274,69 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             </span>
                           </td>
                           <td className="py-1.5 text-[#6b5d52]">{(p.payment_method || '—').replace(/_/g, ' ')}{p.reference_number ? ` · ${p.reference_number}` : ''}</td>
-                          <td className={cn('py-1.5 text-right font-mono font-semibold', p.payment_type === 'REFUND' ? 'text-rose-700' : 'text-emerald-700')}>
+                          <td className={cn('py-1.5 text-right font-mono font-semibold', p.payment_type === 'REFUND' ? 'text-rose-700' : 'text-emerald-700', Number(p.is_voided) === 1 && 'line-through opacity-60')}>
                             {p.payment_type === 'REFUND' ? '+' : '−'}₹{Number(p.amount || 0).toLocaleString('en-IN')}
                           </td>
                           {/* Rule 50 receipt voucher — issued automatically for every
                               advance, printable to hand to the guest. */}
                           <td className="py-1.5 pl-2 text-right whitespace-nowrap">
-                            {p.receipt_voucher_id && (
-                              <button
-                                onClick={() => openReceiptVoucherPdf(restaurantId, token, p.receipt_voucher_id).catch((e: any) => window.alert(e.message))}
-                                title="Print the receipt voucher for this advance"
-                                className="text-[10px] font-bold text-[#cc5a16] hover:underline"
-                              >Receipt voucher</button>
-                            )}
+                            <div className="flex items-center justify-end gap-2">
+                              {/* A voided receipt says so; a refunded advance names its refund voucher. */}
+                              {p.refund_voucher_id ? (
+                                <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-rose-50 text-rose-700">Refunded</span>
+                              ) : Number(p.is_voided) === 1 ? (
+                                <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-stone-100 text-stone-600" title={p.voided_reason || undefined}>Voided</span>
+                              ) : null}
+                              {p.receipt_voucher_id && (
+                                <button
+                                  onClick={() => openReceiptVoucherPdf(restaurantId, token, p.receipt_voucher_id).catch((e: any) => window.alert(e.message))}
+                                  title="Print the receipt voucher for this advance"
+                                  className="text-[10px] font-bold text-[#cc5a16] hover:underline"
+                                >Receipt voucher</button>
+                              )}
+                              {p.refund_voucher_id && (
+                                <button
+                                  onClick={() => openRefundVoucherPdf(restaurantId, token, p.refund_voucher_id).catch((e: any) => window.alert(e.message))}
+                                  title="Print the refund voucher for this advance"
+                                  className="text-[10px] font-bold text-rose-700 hover:underline"
+                                >Refund voucher</button>
+                              )}
+                              {/* Rule 51 — return an advance that is still held. The server
+                                  refuses while it is adjusted against a live invoice. */}
+                              {p.receipt_voucher_id && !p.refund_voucher_id && Number(p.is_voided) !== 1 && (
+                                <button
+                                  onClick={async () => {
+                                    const METHODS = ['CASH', 'UPI', 'CARD', 'BANK_TRANSFER', 'CHEQUE', 'OTHER'];
+                                    const current = String(p.payment_method || 'CASH').toUpperCase();
+                                    const rr = await promptPayment({
+                                      title: `Refund advance ₹${Number(p.amount || 0).toLocaleString('en-IN')}`,
+                                      fields: [
+                                        { name: 'method', label: 'Refunded by', type: 'select', defaultValue: METHODS.includes(current) ? current : 'CASH',
+                                          options: METHODS.map(m => ({ value: m, label: m.replace(/_/g, ' ') })) },
+                                        { name: 'reference', label: 'Reference (optional)', type: 'text', placeholder: 'UTR / cheque number' },
+                                        { name: 'reason', label: 'Reason for refund', type: 'text', placeholder: 'Stay cancelled after invoice' },
+                                      ],
+                                      confirmLabel: 'Refund and issue voucher',
+                                    });
+                                    if (!rr) return;
+                                    try {
+                                      const res = await fetch(`/api/restaurant/${restaurantId}/receipt-vouchers/${p.receipt_voucher_id}/refund`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        body: JSON.stringify({ method: rr.method, reference: rr.reference || null, reason: rr.reason }),
+                                      });
+                                      const body = await res.json();
+                                      if (!res.ok) throw new Error(body.error || 'Refund failed');
+                                      toast.success(`Refund voucher ${body.refund_voucher?.rfv_number || ''} issued`);
+                                      const fr = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}`, { headers: { Authorization: `Bearer ${token}` } });
+                                      if (fr.ok) setViewFolio(await fr.json());
+                                    } catch (err: any) { toast.error(err.message); }
+                                  }}
+                                  title="Refund this advance to the guest and issue a refund voucher"
+                                  className="text-[10px] font-bold text-rose-700 hover:underline"
+                                >Refund</button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -50491,6 +50541,18 @@ async function openReceiptVoucherPdf(restaurantId: string, token: string, rvId: 
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
     throw new Error(j?.error || 'Could not open the receipt voucher');
+  }
+  const url = URL.createObjectURL(await r.blob());
+  window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+// Opens a refund voucher PDF (Rule 51) in a new tab, the same way.
+async function openRefundVoucherPdf(restaurantId: string, token: string, rfvId: string): Promise<void> {
+  const r = await fetch(`/api/restaurant/${restaurantId}/refund-vouchers/${rfvId}/pdf`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(j?.error || 'Could not open the refund voucher');
   }
   const url = URL.createObjectURL(await r.blob());
   window.open(url, '_blank');

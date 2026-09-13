@@ -66,6 +66,8 @@ export const BOOKS_OF_ACCOUNT_TABLES = new Set<string>([
   // A statutory document (Rule 50). Every change to one — adjusted, cancelled,
   // re-opened — is part of the audit trail.
   'receipt_vouchers',
+  // Rule 51 — a refund of an advance is a statutory document too.
+  'refund_vouchers',
 ]);
 
 // The acting user, carried on the async context so the data layer can name an
@@ -3268,6 +3270,44 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     CREATE INDEX IF NOT EXISTS idx_rv_folio   ON receipt_vouchers (folio_id);
     CREATE INDEX IF NOT EXISTS idx_rv_event   ON receipt_vouchers (event_booking_id);
     CREATE INDEX IF NOT EXISTS idx_rv_payment ON receipt_vouchers (payment_id);
+
+    -- Refund vouchers — Rule 51, CGST Rules. One per advance returned to the
+    -- customer after a receipt voucher was issued and no supply was invoiced.
+    -- It carries the receipt voucher it refunds, and the tax paid on the advance.
+    CREATE TABLE IF NOT EXISTS refund_vouchers (
+      id                 TEXT PRIMARY KEY,
+      rfv_number         TEXT NOT NULL,
+      module             TEXT NOT NULL,
+      refund_date        TEXT NOT NULL,
+      receipt_voucher_id TEXT NOT NULL,
+      rv_number          TEXT,
+      rv_date            TEXT,
+      amount             DOUBLE PRECISION NOT NULL DEFAULT 0,
+      taxable_value      DOUBLE PRECISION NOT NULL DEFAULT 0,
+      gst_rate           DOUBLE PRECISION NOT NULL DEFAULT 0,
+      cgst               DOUBLE PRECISION NOT NULL DEFAULT 0,
+      sgst               DOUBLE PRECISION NOT NULL DEFAULT 0,
+      igst               DOUBLE PRECISION NOT NULL DEFAULT 0,
+      place_of_supply    TEXT,
+      customer_name      TEXT,
+      customer_gstin     TEXT,
+      customer_address   TEXT,
+      description        TEXT,
+      reason             TEXT,
+      payment_method     TEXT,
+      reference          TEXT,
+      booking_id         TEXT,
+      event_booking_id   TEXT,
+      folio_id           TEXT,
+      payment_id         TEXT,
+      journal_ref        TEXT,
+      issued_by          TEXT,
+      created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_refund_vouchers_number ON refund_vouchers (rfv_number);
+    CREATE INDEX IF NOT EXISTS idx_rfv_receipt_voucher ON refund_vouchers (receipt_voucher_id);
+    ALTER TABLE receipt_vouchers ADD COLUMN IF NOT EXISTS refunded_at TEXT;
+    ALTER TABLE receipt_vouchers ADD COLUMN IF NOT EXISTS refund_voucher_id TEXT;
 
     -- Statutory edit log — Rule 3(1), Companies (Accounts) Rules 2014.
     -- Written by the data layer for every change to the books of account, so it
