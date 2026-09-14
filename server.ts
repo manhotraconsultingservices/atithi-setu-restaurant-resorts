@@ -27203,6 +27203,15 @@ ${data.tenant.name}`;
       // Exclusive end of the last day, so a window of one day is a full day.
       const toTs = new Date(to + 'T00:00:00Z').getTime() + 86400000;
       const spanDays = Math.max(1, Math.round((toTs - fromTs) / 86400000));
+      // Time is counted up to NOW, not to the end of the last day. `to` defaults
+      // to today, so toTs lies in the future: a report run at 09:00 IST charged
+      // an item that was still out for the 20.5 hours to come, and an item made
+      // a minute ago already had most of a day of history. Just after midnight
+      // IST (toTs is 05:30 IST tomorrow) that was more than a day, so the
+      // one-day guard below published a rate from seconds of data. Only the
+      // spans stop here; which movements fall in the window, the opening
+      // balance and period.days still follow from/to, as in the month-end close.
+      const endTs = Math.min(toTs, Date.now());
       const dmf = _invModuleFilter(req, 'i.module');
 
       // Opening balance per item: everything that happened before the window.
@@ -27246,7 +27255,7 @@ ${data.tenant.name}`;
         const created = r.created_at ? new Date(r.created_at).getTime() : fromTs;
         // An item cannot have been out of stock before it existed.
         const startTs = Math.max(fromTs, isNaN(created) ? fromTs : created);
-        const trackedMs = Math.max(0, toTs - startTs);
+        const trackedMs = Math.max(0, endTs - startTs);
         const reorder = Number(r.reorder_point || 0);
 
         let running = Number(r.opening_qty || 0);
@@ -27274,8 +27283,12 @@ ${data.tenant.name}`;
             else if (wasLow && !isLow && lowSince != null) { msLow += at - lowSince; lowSince = null; }
           }
         }
-        if (outSince != null) msOut += toTs - outSince;      // still out at the end
-        if (lowSince != null) msLow += toTs - lowSince;
+        // Still out (or low) at the end: up to endTs, not toTs. The floor at zero
+        // is for a window that has not begun (from after today) or an item
+        // created after a past window ended — there startTs is later than
+        // endTs, and the span read as negative days out.
+        if (outSince != null) msOut += Math.max(0, endTs - outSince);
+        if (lowSince != null) msLow += Math.max(0, endTs - lowSince);
 
         const daysOut = Math.round((msOut / DAY) * 10) / 10;
         const daysTracked = Math.round((trackedMs / DAY) * 10) / 10;
@@ -27319,7 +27332,7 @@ ${data.tenant.name}`;
       res.json({
         module: dmf.module,
         period: { from, to, days: spanDays },
-        method: 'Balances are reconstructed by summing the movement ledger — the same source the month-end close uses — not read from the denormalised balance_after column. An item already out when the window opens contributes days but not a new event. days_below_reorder is measured against today\'s reorder point, since the historical threshold is not stored.',
+        method: 'Balances are reconstructed by summing the movement ledger — the same source the month-end close uses — not read from the denormalised balance_after column. An item already out when the window opens contributes days but not a new event. days_below_reorder is measured against today\'s reorder point, since the historical threshold is not stored. Time is counted up to the moment of the report, so today contributes only the hours that have passed.',
         totals: {
           items_tracked: items.length,
           items_that_ran_out: everOut,
@@ -62865,8 +62878,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hrms-r0b-staff-data-attendance',
+    commit_marker: 'stockout-measured-to-now',
     code_features: [
+      'stockout-measured-to-now — GET /inventory/stockouts counted time up to the END of the last day of the report (toTs), and `to` defaults to today, so every span reached into hours that had not happened yet. An item still out was charged for the rest of today, and an item created minutes ago already had hours of history; between midnight and 05:30 IST that was more than a day, because toTs is 05:30 IST tomorrow, so the one-day guard published availability from seconds of data. TC-INV-STOCKOUT-NEEDS-A-DAY passed and then failed on the same build (b58b8f8) for exactly this reason: the failing run ended 00:42 IST and read tracked 1.2d, availability 100. Tracked, still-out and still-low spans now end at endTs = min(toTs, now). Unchanged: which movements fall in the window, the opening balance, events, currently_out and period.days. The portfolio rate still divides out time by tracked time over the same items, both now measured to endTs. The still-out and still-low spans are floored at zero, since a window that starts after today, or an item created after a past window ended, has startTs later than endTs and read as negative days out. Day boundaries stay at UTC midnight (05:30 IST) exactly as in the month-end close, whose SQL uses the same ::date cut; moving only this report to IST days would make its opening balance disagree with the close, so that is left for a deliberate decision. Smoke: TC-INV-STOCKOUT-MEASURED-TO-NOW takes the fixture out a third time and asserts, for items made seconds ago, days_tracked and days_out of at most 0.1 with 3 events and out now; the old code reads at least 0.2 day at every hour, so the test catches it whenever the suite runs.',
       'hrms-r0b-staff-data-attendance — PATCH /api/owner/staff/:id allow-list (name, role, login_id, phone, email, is_active; others ignored, 400 when none); POST /api/owner/staff/bulk (created_count, created[{row,id,name}], errors[{row,error}]); HR PAN/Aadhaar/bank_account masked in /hr/employees list/detail/PUT response/CSV, run payslips and /me/profile, ?reveal=1 needs HR_PAYROLL Edit and writes EMPLOYEE SENSITIVE_REVEALED, masked values skipped on PUT, password hash no longer returned; bank advice CSV needs HR_PAYROLL Edit; timesheet recompute counts only approved attendance; self-log on an APPROVED day 409 ATTENDANCE_APPROVED; expense claim HR approval posts EXP-<id> from its lines (Dr category accounts, Cr 2400); POST /hr/expenses/:claimId/cancel reverses it; hotel SERVICE_CHARGE credited to 4020 at settlement and in the year-end accrual; GET /timesheet returns status; staff-picker returns default_hours.',
       'hrms-r0a-payroll-engine — HR payroll compute reads approved attendance for unpaid days (ABSENT/LEAVE_WO_PAY 1, HALF_DAY 0.5); income tax per FY and regime from central_tax_years/central_tax_slabs with standard deduction, 87A rebate and marginal relief (FY 2025-26 seeded; a missing year returns 409 TAX_YEAR_MISSING); zero paid days pays zero; payslip paid/lop days NUMERIC; one structure per employee per run; stale payslips removed; failed compute resets PROCESSING; DELETE /payroll/runs/:runId for drafts; EPF ECR mapping via payslipToEcrRow (no s.basic); approve writes no petty-cash salary row; /reports/pnl payroll = approved payslips gross + employer PF/ESI; Form 16 standard deduction from the tax year; PT slabs by run period, seed only when empty.',
       'spa-wellness-charge-tips-shift — Owner decisions 14 Sep 2026. (1) POST /hotel/folios/:folioId/entries with entry_type WELLNESS (or SPA) on a spa-enabled property posts SPA_SERVICE, entry_subtype MANUAL, account_head SPA_REVENUE, cost_centre SPA, optional service_id (400 SERVICE_UNKNOWN): the GST rate entered is kept at check-out, credited to 4040, SAC 999722. Existing lines unchanged. The Add Manual Charge window offers the wellness option under the property module name (else Wellness session) with the wellness menu. (3) GET /spa/reports/tips and /spa/reports/tips.csv (SPA_REPORTS): each tip share with treatment, guest and bill; COLLECTED when the spa invoice is closed or the room bill settled, PENDING while open, REVERSED on a voided, cancelled or credit-noted bill; per-therapist collected, pending, reversed. (4) spaShiftProblem: staff booking (POST /spa/appointments) and moving (PUT /spa/appointments/:aid) outside a rostered therapist shift, on a day off or in a break returns 409 OUTSIDE_SHIFT (confirmable) unless confirm_outside_shift; then spa_appointments.shift_note is kept and audited OUTSIDE_SHIFT_CONFIRMED, shown as To be confirmed, and cleared on confirm or check-in or a move back inside the roster. Therapists with no roster are not checked; online booking is unchanged.',
