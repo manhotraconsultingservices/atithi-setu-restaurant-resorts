@@ -4541,7 +4541,7 @@ const getDaysInMonth = (monthStr: string) => {
   return days;
 };
 
-function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, token: string, restaurantId: string }) {
+function AttendanceManagement({ role, token, restaurantId, manage }: { role: UserRole, token: string, restaurantId: string, manage?: boolean }) {
   const toast = useToast();
   const attCanEdit = canWriteTab('ATTENDANCE');
   const [logs, setLogs] = useState<any[]>([]);
@@ -4558,7 +4558,9 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
   const [user, setUser] = useState<any>(null);
 
   // Mark Attendance grid (OWNER/MANAGER)
-  const isManager = role === 'OWNER' || role === 'MANAGER';
+  // `manage` comes from the owner dashboard (owner-level role or Attendance at
+  // Edit); the chef and waiter homes leave it unset (HRMS-R0B).
+  const isManager = manage ?? (role === 'OWNER' || role === 'MANAGER');
   const [attTab, setAttTab] = useState<'logs' | 'grid'>('logs');
   const getWeekStart = () => {
     const d = new Date(); d.setDate(d.getDate() - d.getDay() + 1); return d.toISOString().slice(0, 10);
@@ -32971,7 +32973,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
         )  /* end of isHotelView ? <HotelCommandCenter /> : <restaurant Monitor> */
       ) : (
-        <AttendanceManagement role="OWNER" token={token} restaurantId={restaurantId} />
+        // Anyone given the Attendance tab used to get the owner's view. Owner-level
+        // roles still do; other roles get the grid only with Attendance at Edit and
+        // otherwise see their own attendance (HRMS-R0B).
+        <AttendanceManagement
+          role={(['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(currentRole) ? 'OWNER' : currentRole) as UserRole}
+          manage={['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(currentRole) || canWriteTab('ATTENDANCE')}
+          token={token} restaurantId={restaurantId} />
       )}
       </TabErrorBoundary>
 
@@ -70361,6 +70369,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
 // ─── Expense Claims ────────────────────────────────────────────────
 function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const canEdit = canWriteTab('HR_PAYROLL');
+  const showConfirm = useConfirm(); // cancel an approved claim
   const [claims, setClaims] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('SUBMITTED');
   const [rejectingId, setRejectingId] = useState<string | null>(null);
@@ -70394,10 +70403,27 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
       refresh();
     } catch { setActError('Network error — action failed'); }
   }
+  async function cancelClaim(id: string) {
+    if (!canDeleteTab('HR_PAYROLL')) { setActError('You need Full access to HR & Payroll to cancel a claim.'); return; }
+    if (!await showConfirm({ title: 'Cancel this approved claim? Its expense entry in the accounts is reversed.', danger: true })) return;
+    setActError('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hr/expenses/${id}/cancel`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ reason: 'Cancelled by HR' }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        setActError(e.error || 'Cancel failed');
+        return;
+      }
+      refresh();
+    } catch { setActError('Network error — cancel failed'); }
+  }
   return (
     <div className="space-y-3">
       <div className="flex gap-2 flex-wrap">
-        {['ALL', 'SUBMITTED', 'MANAGER_APPROVED', 'HR_APPROVED', 'REJECTED', 'REIMBURSED'].map(s => (
+        {['ALL', 'SUBMITTED', 'MANAGER_APPROVED', 'HR_APPROVED', 'REJECTED', 'REIMBURSED', 'CANCELLED'].map(s => (
           <button key={s} onClick={() => setStatusFilter(s)} className={cn('px-3 py-1.5 rounded-xl text-xs',
             statusFilter === s ? 'bg-[#cc5a16] text-white' : 'border border-[#e8dccf] text-[#6b5d52]')}>{s}</button>
         ))}
@@ -70424,6 +70450,7 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
                         c.status === 'HR_APPROVED' && 'bg-purple-100 text-purple-700',
                         c.status === 'REIMBURSED' && 'bg-green-100 text-green-700',
                         c.status === 'REJECTED' && 'bg-red-100 text-red-700',
+                        c.status === 'CANCELLED' && 'bg-gray-100 text-gray-600',
                       )}>{c.status}</span>
                     </td>
                     <td className="p-3 space-x-1">
@@ -70436,6 +70463,8 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
                         <button onClick={() => { setRejectingId(c.id); setRejectReason(''); }} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
                       </>}
                       {c.status === 'HR_APPROVED' && <span className="text-[10px] text-[#9c8e85]">Awaiting payroll</span>}
+                      {c.status === 'HR_APPROVED' && canDeleteTab('HR_PAYROLL') && <button onClick={() => cancelClaim(c.id)} className="ml-1 px-2 py-1 rounded border border-[#e8dccf] text-[10px]">Cancel</button>}
+                      {c.status === 'CANCELLED' && <span className="text-[10px] text-gray-500">Cancelled</span>}
                       {c.status === 'REIMBURSED' && <span className="text-[10px] text-green-600">✓ Reimbursed</span>}
                       {c.status === 'REJECTED' && <span className="text-[10px] text-red-500">Rejected</span>}
                     </td>
@@ -70823,6 +70852,7 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
   const [structures, setStructures] = useState<any[]>([]);
   const [payslips, setPayslips] = useState<any[]>([]);
   const [saving, setSaving] = useState(false);
+  const [revealed, setRevealed] = useState(false); // PAN, Aadhaar and bank account arrive masked
 
   useEffect(() => {
     (async () => {
@@ -70871,6 +70901,18 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
   };
 
   const setF = (k: string, v: any) => setEmp({ ...emp, [k]: v });
+  const revealNumbers = async () => {
+    try {
+      const res = await window.fetch(
+        `/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees/${encodeURIComponent(staffId)}?reveal=1`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.revealed) { toast.error(j.error || 'You need HR & Payroll at Edit to see full numbers.'); return; }
+      setEmp({ ...emp, pan: j.employee?.pan ?? null, aadhaar: j.employee?.aadhaar ?? null, bank_account: j.employee?.bank_account ?? null });
+      setRevealed(true);
+    } catch (err: any) { toast.error(err?.message || 'Could not load the full numbers'); }
+  };
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
@@ -70943,7 +70985,15 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
 
           {/* ── Statutory IDs ────────────────────────────────────── */}
           <section>
-            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Statutory identifiers</p>
+            <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Statutory identifiers</p>
+              {!revealed && canWriteTab('HR_PAYROLL') && (
+                <button type="button" onClick={revealNumbers} className="text-[11px] font-bold text-[#cc5a16] hover:underline">Show full numbers to edit</button>
+              )}
+            </div>
+            {!revealed && (
+              <p className="text-[11px] text-[#9c8e85] mb-2">PAN, Aadhaar and bank account show only their last four characters. A masked number is kept as it is when you save.</p>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="PAN"     value={emp.pan || ''}         onChange={(v) => setF('pan', String(v).toUpperCase())} placeholder="ABCDE1234F" />
               <Field label="Aadhaar" value={emp.aadhaar || ''}     onChange={(v) => setF('aadhaar', v)} placeholder="1234 5678 9012" />

@@ -5766,11 +5766,23 @@ async function _folioRevenueGlLines(tenantDb: any, folioId: string, subtotal: nu
     spaSub = Math.max(0, Math.round(Number(s?.spa || 0) * 100) / 100);
   } catch { spaSub = 0; }
   spaSub = Math.min(Math.max(0, subtotal - fnbSub), spaSub);
-  const roomSub = Math.round((subtotal - fnbSub - spaSub) * 100) / 100;
+  // Service charge on the room bill is Service Charge Revenue (4020), as on a
+  // restaurant bill. It used to fall into Room Revenue (HRMS-R0B, new settlements).
+  let svcSub = 0;
+  try {
+    const v: any = await tenantDb.get(
+      "SELECT COALESCE(SUM(amount),0) AS svc FROM folio_entries WHERE folio_id = ? AND entry_type = 'SERVICE_CHARGE'",
+      [folioId]
+    );
+    svcSub = Math.max(0, Math.round(Number(v?.svc || 0) * 100) / 100);
+  } catch { svcSub = 0; }
+  svcSub = Math.min(Math.max(0, subtotal - fnbSub - spaSub), svcSub);
+  const roomSub = Math.round((subtotal - fnbSub - spaSub - svcSub) * 100) / 100;
   const lines: GlLine[] = [];
   if (roomSub > 0) lines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: roomSub, narration: `Room revenue folio ${folioId}` });
   if (fnbSub  > 0) lines.push({ account_code: '4010', account_name: 'F&B Revenue', dr_amount: 0, cr_amount: fnbSub,  narration: `F&B revenue (charged to room) folio ${folioId}` });
   if (spaSub  > 0) lines.push({ account_code: '4040', account_name: 'Spa Revenue', dr_amount: 0, cr_amount: spaSub,  narration: `Spa revenue (charged to room) folio ${folioId}` });
+  if (svcSub  > 0) lines.push({ account_code: '4020', account_name: 'Service Charge Revenue', dr_amount: 0, cr_amount: svcSub,  narration: `Service charge folio ${folioId}` });
   // Safety: never drop revenue to a rounding gap — if both rounded to 0 but the
   // subtotal is positive, keep a single Room line so the journal still balances.
   if (lines.length === 0 && subtotal > 0) lines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: Math.round(subtotal * 100) / 100, narration: `Room revenue folio ${folioId}` });
@@ -6595,6 +6607,7 @@ async function _computeYearEndAccrual(db: any, restaurantId: string, asOf: strin
     else if (kind === 'EVENT') { code = '4050'; name = 'Banquet & Events Revenue'; mod = 'EVENTS'; }
     else if (et === 'F_AND_B') { code = '4010'; name = 'F&B Revenue'; }
     else if (et === 'SPA_SERVICE' || et === 'SPA_TIP') { code = '4040'; name = 'Spa Revenue'; mod = 'SPA'; }
+    else if (et === 'SERVICE_CHARGE') { code = '4020'; name = 'Service Charge Revenue'; }
 
     lines.push({
       source: 'FOLIO', source_id: fid, ref: String(e.id), date: d, module: mod, kind: et,
@@ -17361,7 +17374,7 @@ async function startServer() {
       if (!start || !end) return res.status(400).json({ error: "start and end required" });
       const db = await getTenantDb(req.params.id);
       let q = `SELECT t.staff_id, t.shift_date, t.planned_hours, t.actual_hours,
-                      t.variance_hours, t.is_no_show, t.is_overtime, t.notes,
+                      t.variance_hours, t.is_no_show, t.is_overtime, t.notes, t.status,
                       s.name AS staff_name, s.role AS staff_role
                  FROM timesheet_day t
                  LEFT JOIN attendance_staff s ON s.id = t.staff_id
@@ -17491,10 +17504,13 @@ async function startServer() {
           AND status != 'CANCELLED'`,
       [startDate, endDate]
     );
+    // Only approved attendance counts for hours and pay (a legacy row with no
+    // status counts as approved). Pending and rejected self-logs were paid (HRMS-R0B).
     const attendance: any[] = await db.query(
       `SELECT user_id AS staff_id, date AS shift_date, hours, check_in, check_out, status
          FROM attendance
-        WHERE date >= ? AND date <= ?`,
+        WHERE date >= ? AND date <= ?
+          AND (status IS NULL OR status = 'APPROVED')`,
       [startDate, endDate]
     );
     // Build maps keyed by (staff_id, date)
@@ -17916,6 +17932,40 @@ async function startServer() {
   // explicit access can view HR fields (which contain PII).
   // Document upload reuses existing multer + /uploads pipeline.
 
+  // ── Sensitive HR numbers (HRMS-R0B) ────────────────────────────────────
+  // PAN, Aadhaar and bank account are masked in HR responses: bullets plus the
+  // last four characters. Full values need HR & Payroll at Edit (the same rule
+  // as saving an employee), are asked for on purpose with ?reveal=1, and each
+  // reveal or full export is written to the object history. The password hash
+  // is never sent (the detail route returned the whole row).
+  const HR_MASKED_FIELDS = ['pan', 'aadhaar', 'bank_account'];
+  function _hrMaskValue(v: any): any {
+    if (v == null || v === '') return v;
+    const s = String(v);
+    return '•'.repeat(Math.max(4, s.length - 4)) + s.slice(-4);
+  }
+  function _hrMaskRow(row: any): any {
+    if (!row) return row;
+    const out: any = { ...row };
+    for (const k of HR_MASKED_FIELDS) if (out[k]) out[k] = _hrMaskValue(out[k]);
+    delete out.password;
+    return out;
+  }
+  // HR & Payroll at Edit, mirroring requireTabAction('HR_PAYROLL', 'UPDATE').
+  async function _hrCanEdit(req: AuthRequest): Promise<boolean> {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (role === 'OWNER' || role === 'SUPER_ADMIN' || role === 'CTO') return true;
+    try {
+      const perms: any = await getTabPermissionsForRole(req.params.id, role);
+      if (perms === null) return true;
+      if (!('HR_PAYROLL' in perms)) {
+        const opRoles = _moduleOperationalRolesForTab('HR_PAYROLL');
+        return !!(opRoles && opRoles.includes(role));
+      }
+      return Number(perms.HR_PAYROLL || 0) >= 2;
+    } catch { return false; }
+  }
+
   // List all employees with HR field projection.
   app.get("/api/restaurant/:id/hr/employees", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
@@ -17954,7 +18004,7 @@ async function startServer() {
         acc[k] = (acc[k] || 0) + 1;
         return acc;
       }, {});
-      res.json({ employees: rows, count: rows.length, summary });
+      res.json({ employees: rows.map(_hrMaskRow), count: rows.length, summary });
     } catch (err: any) {
       console.error('hr/employees list error:', err);
       res.status(500).json({ error: err?.message || 'Failed to load employees' });
@@ -17980,7 +18030,20 @@ async function startServer() {
            FROM payslips WHERE staff_id = ? ORDER BY pay_period_end DESC LIMIT 12`,
         [req.params.staffId]
       ).catch(() => []);
-      res.json({ employee: staff, salary_structures: structures, recent_payslips: recentPayslips });
+      const reveal = String(req.query.reveal || '') === '1' && await _hrCanEdit(req);
+      if (reveal) {
+        await writeObjectAudit(db, req, {
+          objectType: 'EMPLOYEE', objectId: String(req.params.staffId), action: 'SENSITIVE_REVEALED',
+          summary: `Full PAN, Aadhaar and bank account shown for ${staff.name || req.params.staffId}`,
+        });
+      }
+      const { password: _pw, ...employee } = staff;
+      res.json({
+        employee: reveal ? employee : _hrMaskRow(employee),
+        revealed: reveal,
+        salary_structures: structures,
+        recent_payslips: recentPayslips,
+      });
     } catch (err: any) {
       console.error('hr/employees detail error:', err);
       res.status(500).json({ error: err?.message || 'Failed to load employee' });
@@ -18007,6 +18070,8 @@ async function startServer() {
       const params: any[] = [];
       for (const [k, v] of Object.entries(b)) {
         if (ALLOWED[k]) {
+          // A masked number sent back unchanged is kept as stored (HRMS-R0B).
+          if (HR_MASKED_FIELDS.includes(k) && typeof v === 'string' && v.includes('•')) continue;
           // Light validation — PAN format (5 letters + 4 digits + 1 letter),
           // Aadhaar 12 digits, IFSC 4 letters + 0 + 6 chars. Reject only
           // when input is non-empty AND malformed — empty string clears.
@@ -18030,7 +18095,7 @@ async function startServer() {
       params.push(req.params.staffId);
       await db.run(`UPDATE attendance_staff SET ${sets.join(', ')} WHERE id = ?`, params);
       const updated = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [req.params.staffId]);
-      res.json(updated);
+      res.json(_hrMaskRow(updated));
     } catch (err: any) {
       console.error('hr/employees update error:', err);
       res.status(500).json({ error: err?.message || 'Failed to update employee' });
@@ -18062,8 +18127,17 @@ async function startServer() {
         const s = (v == null ? '' : String(v)).replace(/"/g, '""');
         return /[",\n\r]/.test(s) ? `"${s}"` : s;
       };
+      // Full numbers only for HR & Payroll at Edit, and the export is noted (HRMS-R0B).
+      const fullNumbers = await _hrCanEdit(req);
+      if (fullNumbers) {
+        await writeObjectAudit(db, req, {
+          objectType: 'EMPLOYEE', objectId: 'ALL', action: 'SENSITIVE_EXPORTED',
+          summary: `Employee CSV exported with full PAN, Aadhaar and bank account (${rows.length} employees)`,
+        });
+      }
+      const outRows = fullNumbers ? rows : rows.map(_hrMaskRow);
       const lines = [header.join(',')];
-      for (const r of rows) {
+      for (const r of outRows) {
         lines.push([
           r.id, r.name, r.role, r.designation, r.department, r.hr_status,
           r.joining_date, r.ctc, r.hourly_rate, r.payroll_id,
@@ -18392,7 +18466,7 @@ async function startServer() {
           ORDER BY s.name`,
         [req.params.runId]
       );
-      res.json({ run, payslips });
+      res.json({ run, payslips: payslips.map(_hrMaskRow) });
     } catch (err: any) {
       console.error('payroll/payslips list error:', err);
       res.status(500).json({ error: err?.message || 'List failed' });
@@ -18864,6 +18938,10 @@ You can also view all your payslips in the employee portal.
   // Bank-advice CSV export (NPCI / banking system import format)
   app.get("/api/restaurant/:id/payroll/runs/:runId/export.csv", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
+      // The bank advice carries full account numbers (HRMS-R0B).
+      if (!(await _hrCanEdit(req))) {
+        return res.status(403).json({ error: 'The bank advice file carries full account numbers, so it needs HR & Payroll at Edit.' });
+      }
       const db = await getTenantDb(req.params.id);
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
       if (!run) return res.status(404).json({ error: 'Run not found' });
@@ -19251,14 +19329,28 @@ You can also view all your payslips in the employee portal.
       // GL: Dr Expense account, Cr Salaries & Wages Payable (at final HR approval only)
       if (claim?.status === 'HR_APPROVED') {
         try {
-          const expAcct = _glAccountForExpenseCategory(claim.category || claim.expense_type || '');
-          const amt = Number(claim.amount || 0);
-          if (amt > 0) {
+          // Booked from the claim's lines, one debit per expense account. This read
+          // claim.amount and claim.category, which the table does not have, so no
+          // claim was ever posted while payroll later cleared 2400 for it (HRMS-R0B).
+          const items: any[] = await db.query("SELECT category, amount FROM expense_claim_items WHERE claim_id = ?", [req.params.claimId]);
+          const byAcct = new Map<string, { code: string; name: string; amt: number }>();
+          for (const it of items) {
+            const acct = _glAccountForExpenseCategory(it.category || '');
+            const row = byAcct.get(acct.code) || { code: acct.code, name: acct.name, amt: 0 };
+            row.amt += Number(it.amount) || 0;
+            byAcct.set(acct.code, row);
+          }
+          const narration = `Expense claim ${claim.claim_number || req.params.claimId}`;
+          const lines: GlLine[] = [];
+          for (const acct of byAcct.values()) {
+            const v = Math.round(acct.amt * 100) / 100;
+            if (v > 0) lines.push({ account_code: acct.code, account_name: acct.name, dr_amount: v, cr_amount: 0, narration });
+          }
+          const total = Math.round(lines.reduce((sum, l) => sum + l.dr_amount, 0) * 100) / 100;
+          if (total > 0) {
+            lines.push({ account_code: '2400', account_name: 'Salaries & Wages Payable', dr_amount: 0, cr_amount: total, narration });
             const today = new Date().toISOString().slice(0, 10);
-            await _postGlEntries(db, req.params.id, `EXP-${req.params.claimId}`, today, 'EXPENSE_CLAIM', req.params.claimId, [
-              { account_code: expAcct.code, account_name: expAcct.name, dr_amount: amt, cr_amount: 0, narration: claim.description || 'Expense claim' },
-              { account_code: '2400', account_name: 'Salaries & Wages Payable', dr_amount: 0, cr_amount: amt, narration: claim.description || 'Expense claim' },
-            ], req.user?.id || req.user?.email || null);
+            await _postGlEntries(db, req.params.id, `EXP-${req.params.claimId}`, today, 'EXPENSE_CLAIM', req.params.claimId, lines, req.user?.id || req.user?.email || null);
           }
         } catch (glErr) { console.error('[GL] expense claim error:', glErr); }
       }
@@ -19289,6 +19381,50 @@ You can also view all your payslips in the employee portal.
     } catch (err: any) {
       console.error('hr/expenses reject error:', err);
       res.status(500).json({ error: err?.message || 'Reject failed' });
+    }
+  });
+
+  // Cancel a claim that has not been reimbursed (HRMS-R0B). An approved claim's
+  // journal is reversed. A claim on a payroll run that is past draft is refused,
+  // because that run's figures already include it.
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/cancel", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const claim: any = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      if (!claim) return res.status(404).json({ error: 'Claim not found' });
+      if (!['DRAFT', 'SUBMITTED', 'MANAGER_APPROVED', 'HR_APPROVED'].includes(String(claim.status))) {
+        return res.status(409).json({ error: `A ${claim.status} claim cannot be cancelled.`, claim });
+      }
+      if (claim.reimburse_with_payroll_run_id) {
+        const run: any = await db.get("SELECT status FROM payroll_runs WHERE id = ?", [claim.reimburse_with_payroll_run_id]);
+        if (run && run.status !== 'DRAFT') {
+          return res.status(409).json({ error: `This claim is on a payroll run that is ${run.status}, so it cannot be cancelled.`, claim });
+        }
+      }
+      const reason = String(req.body?.reason || '').trim() || 'Cancelled';
+      const stamp = new Date().toISOString();
+      const upd: any = await db.run(
+        `UPDATE expense_claims
+            SET status = 'CANCELLED', rejected_by = ?, rejected_at = ?, rejected_reason = ?, reimburse_with_payroll_run_id = NULL
+          WHERE id = ? AND status = ?`,
+        [req.user?.id || null, stamp, `Cancelled: ${reason}`, req.params.claimId, claim.status]
+      );
+      if (upd && upd.changes === 0) {
+        const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+        return res.status(409).json({ error: 'The claim changed while cancelling. Refresh and try again.', claim: fresh });
+      }
+      let reversal: any = null;
+      if (claim.status === 'HR_APPROVED') {
+        reversal = await _reverseJournal(db, req.params.id, `EXP-${req.params.claimId}`, {
+          date: stamp.slice(0, 10), sourceType: 'EXPENSE_CLAIM', sourceId: req.params.claimId,
+          reason, postedBy: req.user?.email || req.user?.id || null,
+        });
+      }
+      const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      res.json({ claim: fresh, reversal });
+    } catch (err: any) {
+      console.error('hr/expenses cancel error:', err);
+      res.status(500).json({ error: err?.message || 'Cancel failed' });
     }
   });
 
@@ -19619,7 +19755,7 @@ ${data.tenant.name}`;
       const { staff } = await resolveSelfStaff(req, req.params.id);
       // Strip secrets before returning
       const { password, ...safe } = staff;
-      res.json({ profile: safe });
+      res.json({ profile: _hrMaskRow(safe) });
     } catch (err: any) {
       res.status(401).json({ error: err?.message || 'Unauthorized' });
     }
@@ -59711,7 +59847,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/staff-picker", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      const staff = await db.query("SELECT id, name, role, COALESCE(employee_type, 'LOGIN') AS employee_type FROM attendance_staff WHERE is_active = 1 ORDER BY name").catch(() => []);
+      const staff = await db.query("SELECT id, name, role, COALESCE(employee_type, 'LOGIN') AS employee_type, COALESCE(default_hours, 8) AS default_hours FROM attendance_staff WHERE is_active = 1 ORDER BY name").catch(() => []);
       res.json(Array.isArray(staff) ? staff : []);
     } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to load staff picker' }); }
   });
@@ -59752,6 +59888,69 @@ ${data.tenant.name}`;
     } catch (err) {
       console.error("Create staff error:", err);
       res.status(500).json({ error: "Failed to create staff" });
+    }
+  });
+
+  // Staff: Bulk create — the Staff screen's Bulk Add posted here, but the route
+  // did not exist (HRMS-R0B). Each row follows the single-add rules; rows that
+  // fail are reported by row number and the others are created. A row without a
+  // login is an offline employee.
+  app.post("/api/owner/staff/bulk", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'STAFF', 3))) {
+        return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      }
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
+      const rows: any[] = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      if (!rows.length) return res.status(400).json({ error: 'Add at least one row with a name and a role.' });
+      if (rows.length > 200) return res.status(400).json({ error: 'Add up to 200 staff at a time.' });
+      const db = await getTenantDb(targetId);
+      const created: any[] = [];
+      const errors: any[] = [];
+      const seenLogins = new Set<string>();
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i] || {};
+        const row = i + 1;
+        const name = String(r.name || '').trim();
+        const role = String(r.role || '').trim();
+        const loginId = String(r.loginId || '').trim();
+        const password = String(r.password || '');
+        if (!name) { errors.push({ row, error: 'Name is required' }); continue; }
+        if (!role) { errors.push({ row, error: 'Role is required' }); continue; }
+        if (!!loginId !== !!password) { errors.push({ row, error: 'Give both a login ID and a password, or neither' }); continue; }
+        if (password && password.length < 6) { errors.push({ row, error: 'Password must be at least 6 characters' }); continue; }
+        if (loginId) {
+          const taken = seenLogins.has(loginId) || !!(await db.get("SELECT id FROM attendance_staff WHERE login_id = ?", [loginId]));
+          if (taken) { errors.push({ row, error: 'A staff member with this Login ID already exists.' }); continue; }
+        }
+        try {
+          const id = randomUUID();
+          const phone = r.phone ? String(r.phone).trim() : null;
+          const email = r.email ? String(r.email).trim() : null;
+          if (loginId) {
+            const hashed = await bcrypt.hash(password, 12);
+            await db.run(
+              "INSERT INTO attendance_staff (id, name, role, phone, email, login_id, password, hourly_rate, payroll_id, employee_type) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, 'LOGIN')",
+              [id, name, role, phone, email, loginId, hashed]
+            );
+            seenLogins.add(loginId);
+          } else {
+            await db.run(
+              "INSERT INTO attendance_staff (id, name, role, phone, email, hourly_rate, payroll_id, employee_type) VALUES (?, ?, ?, ?, ?, 0, NULL, 'OFFLINE')",
+              [id, name, role, phone, email]
+            );
+          }
+          created.push({ row, id, name });
+        } catch (e: any) {
+          console.error('Bulk create staff row error:', e);
+          errors.push({ row, error: 'Could not be saved' });
+        }
+      }
+      res.json({ success: true, created_count: created.length, created, errors });
+    } catch (err) {
+      console.error("Bulk create staff error:", err);
+      res.status(500).json({ error: "Failed to add staff" });
     }
   });
 
@@ -59808,6 +60007,12 @@ ${data.tenant.name}`;
     try {
       const { date, hours, type, note } = req.body;
       const db = await getTenantDb(req.user!.restaurantId);
+      // A day the manager approved is theirs to change (HRMS-R0B): a later
+      // self-log used to overwrite its hours while it stayed approved.
+      const prior: any = await db.get("SELECT status FROM attendance WHERE user_id = ? AND date = ?", [req.user!.id, date]).catch(() => null);
+      if (prior && String(prior.status || '').toUpperCase() === 'APPROVED') {
+        return res.status(409).json({ error: 'Your manager has already approved this day, so it cannot be changed here. Ask them to correct it.', code: 'ATTENDANCE_APPROVED' });
+      }
       const id = `ATT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       
       await db.run(`
@@ -59945,11 +60150,32 @@ ${data.tenant.name}`;
         return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
       }
       const db = await getTenantDb(req.user!.restaurantId);
-      const updates = req.body;
-      const keys = Object.keys(updates);
-      const setClause = keys.map(k => `${k} = ?`).join(", ");
-      const params = [...Object.values(updates), req.params.id];
-      await db.run(`UPDATE attendance_staff SET ${setClause} WHERE id = ?`, params);
+      // Allow-list (HRMS-R0B). The Staff screen changes name, role, login ID, phone
+      // and email, and switches staff on or off. Every other key used to become a
+      // column in this UPDATE: passwords, HR, statutory and bank fields could be
+      // overwritten around their own checks, and SQL passed through key names.
+      // Other keys are ignored; HR details go through HR & Payroll, passwords
+      // through Reset password.
+      const body = req.body || {};
+      const STAFF_PATCH_FIELDS = ['name', 'role', 'login_id', 'phone', 'email', 'is_active'];
+      const keys = STAFF_PATCH_FIELDS.filter(k => Object.prototype.hasOwnProperty.call(body, k));
+      if (!keys.length) {
+        return res.status(400).json({ error: 'Nothing to update. This screen changes name, role, login ID, phone, email and active status.', code: 'NO_ALLOWED_FIELDS' });
+      }
+      if (keys.includes('name') && !String(body.name ?? '').trim()) return res.status(400).json({ error: 'Name cannot be empty.' });
+      const values = keys.map(k => {
+        const v = body[k];
+        if (k === 'is_active') return Number(v) ? 1 : 0;
+        if (k === 'name') return String(v).trim();
+        if (k === 'login_id' || k === 'phone' || k === 'email') return v == null || String(v).trim() === '' ? null : String(v).trim();
+        return v;
+      });
+      const li = keys.indexOf('login_id');
+      if (li >= 0 && values[li]) {
+        const dup: any = await db.get("SELECT id FROM attendance_staff WHERE login_id = ? AND id <> ?", [values[li], req.params.id]);
+        if (dup) return res.status(400).json({ error: 'A staff member with this Login ID already exists.' });
+      }
+      await db.run(`UPDATE attendance_staff SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...values, req.params.id]);
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update staff" });
@@ -62639,8 +62865,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hrms-r0a-payroll-engine',
+    commit_marker: 'hrms-r0b-staff-data-attendance',
     code_features: [
+      'hrms-r0b-staff-data-attendance — PATCH /api/owner/staff/:id allow-list (name, role, login_id, phone, email, is_active; others ignored, 400 when none); POST /api/owner/staff/bulk (created_count, created[{row,id,name}], errors[{row,error}]); HR PAN/Aadhaar/bank_account masked in /hr/employees list/detail/PUT response/CSV, run payslips and /me/profile, ?reveal=1 needs HR_PAYROLL Edit and writes EMPLOYEE SENSITIVE_REVEALED, masked values skipped on PUT, password hash no longer returned; bank advice CSV needs HR_PAYROLL Edit; timesheet recompute counts only approved attendance; self-log on an APPROVED day 409 ATTENDANCE_APPROVED; expense claim HR approval posts EXP-<id> from its lines (Dr category accounts, Cr 2400); POST /hr/expenses/:claimId/cancel reverses it; hotel SERVICE_CHARGE credited to 4020 at settlement and in the year-end accrual; GET /timesheet returns status; staff-picker returns default_hours.',
       'hrms-r0a-payroll-engine — HR payroll compute reads approved attendance for unpaid days (ABSENT/LEAVE_WO_PAY 1, HALF_DAY 0.5); income tax per FY and regime from central_tax_years/central_tax_slabs with standard deduction, 87A rebate and marginal relief (FY 2025-26 seeded; a missing year returns 409 TAX_YEAR_MISSING); zero paid days pays zero; payslip paid/lop days NUMERIC; one structure per employee per run; stale payslips removed; failed compute resets PROCESSING; DELETE /payroll/runs/:runId for drafts; EPF ECR mapping via payslipToEcrRow (no s.basic); approve writes no petty-cash salary row; /reports/pnl payroll = approved payslips gross + employer PF/ESI; Form 16 standard deduction from the tax year; PT slabs by run period, seed only when empty.',
       'spa-wellness-charge-tips-shift — Owner decisions 14 Sep 2026. (1) POST /hotel/folios/:folioId/entries with entry_type WELLNESS (or SPA) on a spa-enabled property posts SPA_SERVICE, entry_subtype MANUAL, account_head SPA_REVENUE, cost_centre SPA, optional service_id (400 SERVICE_UNKNOWN): the GST rate entered is kept at check-out, credited to 4040, SAC 999722. Existing lines unchanged. The Add Manual Charge window offers the wellness option under the property module name (else Wellness session) with the wellness menu. (3) GET /spa/reports/tips and /spa/reports/tips.csv (SPA_REPORTS): each tip share with treatment, guest and bill; COLLECTED when the spa invoice is closed or the room bill settled, PENDING while open, REVERSED on a voided, cancelled or credit-noted bill; per-therapist collected, pending, reversed. (4) spaShiftProblem: staff booking (POST /spa/appointments) and moving (PUT /spa/appointments/:aid) outside a rostered therapist shift, on a day off or in a break returns 409 OUTSIDE_SHIFT (confirmable) unless confirm_outside_shift; then spa_appointments.shift_note is kept and audited OUTSIDE_SHIFT_CONFIRMED, shown as To be confirmed, and cleared on confirm or check-in or a move back inside the roster. Therapists with no roster are not checked; online booking is unchanged.',
       'spa-public-named-alternatives — POST /api/public/restaurant/:id/spa/booking: a refusal of a named therapist and cabin (the booking page always names them) now carries alternatives, the times still free that day, as a refusal with none named already did. The public booking page, on SLOT_UNAVAILABLE, returns the guest to the times, which reload, and names the free times. Found in UAT.',
