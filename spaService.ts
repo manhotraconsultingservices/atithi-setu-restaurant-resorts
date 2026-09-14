@@ -80,10 +80,32 @@ export async function therapistConflict(
   return rows[0] || null;
 }
 
-/** Returns a conflicting appointment row for a resource/cabin, or null. */
+/** A timestamp moved by some minutes, as 'YYYY-MM-DD HH:MM:SS'. Accepts the
+ *  'YYYY-MM-DD HH:MM[:SS]' strings the module passes around, or a Date as pg
+ *  returns a TIMESTAMP (read through its local components, which pg built). */
+export function tsShift(ts: any, minutes: number): string {
+  let y: number, mo: number, d: number, h: number, mi: number;
+  if (ts instanceof Date) {
+    y = ts.getFullYear(); mo = ts.getMonth() + 1; d = ts.getDate(); h = ts.getHours(); mi = ts.getMinutes();
+  } else {
+    const m = String(ts || "").match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+    if (!m) return String(ts || "");
+    y = Number(m[1]); mo = Number(m[2]); d = Number(m[3]); h = Number(m[4]); mi = Number(m[5]);
+  }
+  const t = new Date(Date.UTC(y, mo - 1, d, h, mi) + Number(minutes || 0) * 60000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${t.getUTCFullYear()}-${p(t.getUTCMonth() + 1)}-${p(t.getUTCDate())} ${p(t.getUTCHours())}:${p(t.getUTCMinutes())}:00`;
+}
+
+/** Returns a conflicting appointment row for a resource/cabin, or null. A cabin
+ *  with a turnaround needs that many minutes clear on either side of a booking,
+ *  for cleaning and resetting. */
 export async function resourceConflict(
-  tenantDb: DbInterface, resourceId: string, startAt: string, endAt: string, excludeApptId?: string
+  tenantDb: DbInterface, resourceId: string, startAt: any, endAt: any, excludeApptId?: string, turnaroundMin: number = 0
 ): Promise<any | null> {
+  const turn = Math.max(0, Number(turnaroundMin || 0));
+  const from = turn ? tsShift(startAt, -turn) : startAt;
+  const to = turn ? tsShift(endAt, turn) : endAt;
   const rows = await tenantDb.query(
     `SELECT id, start_at, end_at FROM spa_appointments
       WHERE resource_id = ?
@@ -91,9 +113,52 @@ export async function resourceConflict(
         AND start_at < ? AND end_at > ?
         ${excludeApptId ? "AND id <> ?" : ""}
       LIMIT 1`,
-    excludeApptId ? [resourceId, endAt, startAt, excludeApptId] : [resourceId, endAt, startAt]
+    excludeApptId ? [resourceId, to, from, excludeApptId] : [resourceId, to, from]
   );
   return rows[0] || null;
+}
+
+// ── Skills ─────────────────────────────────────────────────────────────────
+export const SPA_SKILL_LEVELS = ["TRAINEE", "QUALIFIED", "SENIOR"];
+/** 1 = trainee … 3 = senior; 0 for anything else. */
+export function spaLevelRank(level: any): number {
+  const i = SPA_SKILL_LEVELS.indexOf(String(level || "").toUpperCase());
+  return i < 0 ? 0 : i + 1;
+}
+
+/** The therapists qualified for a service on a date: every skill the service
+ *  names, at its minimum level, and — for a skill that needs certification — a
+ *  certificate that is recorded and still in date. Null when the service names no
+ *  skills, in which case the older rule applies (the therapist is mapped to it). */
+export async function spaQualifiedTherapistIds(tenantDb: DbInterface, serviceId: string, date: string): Promise<Set<string> | null> {
+  const reqs: any[] = await tenantDb.query(
+    `SELECT ss.skill_id, ss.min_level, COALESCE(sk.requires_certification, 0) AS requires_certification
+       FROM spa_service_skills ss JOIN spa_skills sk ON sk.id = ss.skill_id
+      WHERE ss.service_id = ? AND COALESCE(sk.is_active, 1) = 1`, [serviceId]).catch(() => []);
+  if (!reqs.length) return null;
+  const ids = reqs.map((r: any) => String(r.skill_id));
+  const held: any[] = await tenantDb.query(
+    `SELECT therapist_id, skill_id, level, certified_on, valid_until FROM spa_therapist_skills
+      WHERE skill_id IN (${ids.map(() => "?").join(",")})`, ids).catch(() => []);
+  const byTherapist = new Map<string, Map<string, any>>();
+  for (const h of held) {
+    const k = String(h.therapist_id);
+    if (!byTherapist.has(k)) byTherapist.set(k, new Map());
+    byTherapist.get(k)!.set(String(h.skill_id), h);
+  }
+  const out = new Set<string>();
+  for (const [therapistId, skills] of byTherapist) {
+    const ok = reqs.every((r: any) => {
+      const h = skills.get(String(r.skill_id));
+      if (!h) return false;
+      if (spaLevelRank(h.level) < spaLevelRank(r.min_level || "QUALIFIED")) return false;
+      if (h.valid_until && String(h.valid_until).slice(0, 10) < date) return false;
+      if (Number(r.requires_certification) === 1 && !h.certified_on) return false;
+      return true;
+    });
+    if (ok) out.add(therapistId);
+  }
+  return out;
 }
 
 /** Returns a manual block (THERAPIST or RESOURCE) overlapping the window, or null. */
@@ -191,36 +256,58 @@ export async function findAvailableSlots(
   const needRoom = Number(service.requires_room ?? 1) === 1;
   const needTherapist = Number(service.requires_therapist ?? 1) === 1;
   const dow = dowOf(opts.date);
+  const date = opts.date;
 
-  // Eligible therapists: have the skill + a schedule covering this weekday.
-  // (If the service doesn't require a therapist we still return one lane using
-  // any scheduled therapist, so the slot always carries an operator.)
+  // Therapists rostered that weekday, inside the shift's effective dates (stored
+  // and never read before), with any break in it.
   let therapists: any[] = await tenantDb.query(
-    `SELECT DISTINCT t.id, t.display_name, s.start_time, s.end_time
+    `SELECT t.id, t.display_name, s.start_time, s.end_time, s.break_start, s.break_end
        FROM spa_therapists t
        JOIN spa_therapist_schedules s ON s.therapist_id = t.id AND s.weekday = ?
-       LEFT JOIN spa_therapist_services ts ON ts.therapist_id = t.id AND ts.service_id = ?
       WHERE t.is_active = 1
-        ${needTherapist ? "AND ts.service_id IS NOT NULL" : ""}
+        AND (s.effective_from IS NULL OR s.effective_from = '' OR s.effective_from <= ?)
+        AND (s.effective_to IS NULL OR s.effective_to = '' OR s.effective_to >= ?)
         ${opts.therapistId ? "AND t.id = ?" : ""}
-      ORDER BY t.display_name`,
-    needTherapist
-      ? (opts.therapistId ? [dow, opts.serviceId, opts.therapistId] : [dow, opts.serviceId])
-      : (opts.therapistId ? [dow, opts.serviceId, opts.therapistId] : [dow, opts.serviceId])
+      ORDER BY t.display_name, s.start_time`,
+    opts.therapistId ? [dow, date, date, opts.therapistId] : [dow, date, date]
   );
+  // Who may deliver it: the skills the service names, at their level and in
+  // date; a service that names no skills keeps the older therapist-to-service
+  // mapping. (A service needing no therapist still gets one lane per rostered
+  // therapist, so the slot always carries an operator.)
+  if (needTherapist) {
+    const qualified = await spaQualifiedTherapistIds(tenantDb, service.id, date);
+    if (qualified) {
+      therapists = therapists.filter((t: any) => qualified.has(String(t.id)));
+    } else {
+      const mapped: any[] = await tenantDb.query("SELECT therapist_id FROM spa_therapist_services WHERE service_id = ?", [service.id]).catch(() => []);
+      const mappedIds = new Set(mapped.map((m: any) => String(m.therapist_id)));
+      therapists = therapists.filter((t: any) => mappedIds.has(String(t.id)));
+    }
+  }
 
-  // Active resources/cabins (only needed when the service requires a room).
+  // Cabins: active, not under maintenance or out of order, of the type the
+  // service needs when it names one. Each carries its turnaround.
   const resources: any[] = needRoom
-    ? await tenantDb.query("SELECT id, name FROM spa_resources WHERE is_active = 1 ORDER BY name")
+    ? await tenantDb.query(
+        `SELECT id, name, COALESCE(turnaround_min, 0) AS turnaround_min FROM spa_resources
+          WHERE is_active = 1 AND COALESCE(status, 'AVAILABLE') NOT IN ('MAINTENANCE', 'OUT_OF_ORDER')
+            ${service.cabin_type_id ? "AND cabin_type_id = ?" : ""}
+          ORDER BY name`,
+        service.cabin_type_id ? [service.cabin_type_id] : [])
     : [];
 
   const slots: SpaSlot[] = [];
   for (const t of therapists) {
     const schedStart = hhmmToMinutes(t.start_time);
     const schedEnd = hhmmToMinutes(t.end_time);
+    const breakStart = t.break_start ? hhmmToMinutes(t.break_start) : null;
+    const breakEnd = t.break_end ? hhmmToMinutes(t.break_end) : null;
     for (let startMin = schedStart; startMin + window <= schedEnd; startMin += granularity) {
       if (slots.length >= maxSlots) return slots;
       const endMin = startMin + window;
+      // Nothing is booked across the therapist's break.
+      if (breakStart != null && breakEnd != null && breakEnd > breakStart && startMin < breakEnd && endMin > breakStart) continue;
       const startAt = tsFromDateMinutes(opts.date, startMin);
       const endAt = tsFromDateMinutes(opts.date, endMin);
 
@@ -228,11 +315,11 @@ export async function findAvailableSlots(
       if (await therapistConflict(tenantDb, t.id, startAt, endAt)) continue;
       if (await blockConflict(tenantDb, "THERAPIST", t.id, startAt, endAt)) continue;
 
-      // resource free? (pick first available cabin)
+      // resource free? (first available cabin, turnaround included)
       let chosenResource: any = null;
       if (needRoom) {
         for (const r of resources) {
-          if (await resourceConflict(tenantDb, r.id, startAt, endAt)) continue;
+          if (await resourceConflict(tenantDb, r.id, startAt, endAt, undefined, Number(r.turnaround_min || 0))) continue;
           if (await blockConflict(tenantDb, "RESOURCE", r.id, startAt, endAt)) continue;
           chosenResource = r;
           break;
@@ -542,6 +629,70 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
   // One consumption line per appointment and item, so a completion retried after
   // a failure, or two completions at once, can never draw the same stock twice.
   await tenantDb.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_consumption_once ON stock_movements (reference_id, ingredient_id) WHERE movement_type = 'SPA_CONSUMPTION' AND reference_type = 'spa_appointment'`).catch(() => {});
+
+  // ── Phase 1 (Sep 2026): skills, cabin types, therapist profiles, rosters ────
+  // A therapist's "skills" were only the list of services they could deliver.
+  // Skills are now their own master, held at a level with certification dates,
+  // and a service names the skills (and minimum level) it needs.
+  await tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS spa_skills (
+      id                     TEXT PRIMARY KEY,
+      code                   TEXT NOT NULL,
+      name                   TEXT NOT NULL,
+      category               TEXT,
+      requires_certification INT DEFAULT 0,
+      is_active              INT DEFAULT 1,
+      created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_skills_code ON spa_skills(code);
+    CREATE TABLE IF NOT EXISTS spa_therapist_skills (
+      id           TEXT PRIMARY KEY,
+      therapist_id TEXT NOT NULL,
+      skill_id     TEXT NOT NULL,
+      level        TEXT DEFAULT 'QUALIFIED',
+      certified_on TEXT,
+      valid_until  TEXT,
+      notes        TEXT,
+      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_therapist_skill ON spa_therapist_skills(therapist_id, skill_id);
+    CREATE TABLE IF NOT EXISTS spa_service_skills (
+      id         TEXT PRIMARY KEY,
+      service_id TEXT NOT NULL,
+      skill_id   TEXT NOT NULL,
+      min_level  TEXT DEFAULT 'QUALIFIED',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_service_skill ON spa_service_skills(service_id, skill_id);
+    CREATE TABLE IF NOT EXISTS spa_cabin_types (
+      id          TEXT PRIMARY KEY,
+      code        TEXT NOT NULL,
+      name        TEXT NOT NULL,
+      description TEXT,
+      is_active   INT DEFAULT 1,
+      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_cabin_types_code ON spa_cabin_types(code);
+  `);
+  for (const ddl of [
+    `ALTER TABLE spa_therapists ADD COLUMN IF NOT EXISTS gender TEXT`,
+    `ALTER TABLE spa_therapists ADD COLUMN IF NOT EXISTS languages TEXT`,
+    `ALTER TABLE spa_therapists ADD COLUMN IF NOT EXISTS phone TEXT`,
+    `ALTER TABLE spa_therapists ADD COLUMN IF NOT EXISTS photo_url TEXT`,
+    `ALTER TABLE spa_therapists ADD COLUMN IF NOT EXISTS max_treatments_per_day INT`,
+    `ALTER TABLE spa_resources ADD COLUMN IF NOT EXISTS cabin_type_id TEXT`,
+    `ALTER TABLE spa_resources ADD COLUMN IF NOT EXISTS equipment TEXT`,
+    `ALTER TABLE spa_resources ADD COLUMN IF NOT EXISTS gender_designation TEXT DEFAULT 'ANY'`,
+    `ALTER TABLE spa_resources ADD COLUMN IF NOT EXISTS turnaround_min INT DEFAULT 0`,
+    `ALTER TABLE spa_resources ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'AVAILABLE'`,
+    `ALTER TABLE spa_resources ADD COLUMN IF NOT EXISTS status_reason TEXT`,
+    `ALTER TABLE spa_services ADD COLUMN IF NOT EXISTS cabin_type_id TEXT`,
+    `ALTER TABLE spa_services ADD COLUMN IF NOT EXISTS gender_rule TEXT DEFAULT 'ANY'`,
+    `ALTER TABLE spa_therapist_schedules ADD COLUMN IF NOT EXISTS break_start TEXT`,
+    `ALTER TABLE spa_therapist_schedules ADD COLUMN IF NOT EXISTS break_end TEXT`,
+  ]) {
+    await tenantDb.exec(ddl).catch(() => {});
+  }
 
   // ── Packages (prepaid series, auto-deduct) ─────────────────────────────────
   await tenantDb.exec(`

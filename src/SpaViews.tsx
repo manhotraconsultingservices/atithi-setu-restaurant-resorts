@@ -121,6 +121,28 @@ function SpaCatalog({ restaurantId, token }: Props) {
   // Deactivated treatments stay on file but out of the way until asked for.
   const [showInactive, setShowInactive] = useState(false);
   const inactiveServices = services.filter((s: any) => Number(s.is_active ?? 1) !== 1);
+  // What a treatment needs: skills at a minimum level and a cabin type. Saved
+  // only when changed, so an ordinary edit adds no audit entry.
+  const [skillList, setSkillList] = useState<any[]>([]);
+  const [cabinTypes, setCabinTypes] = useState<any[]>([]);
+  const emptyReq = { skills: [] as { skill_id: string; min_level: string }[], cabin_type_id: '', gender_rule: 'ANY' };
+  const [req, setReq] = useState(emptyReq);
+  const [reqLoaded, setReqLoaded] = useState(JSON.stringify(emptyReq));
+  useEffect(() => {
+    (async () => {
+      try { setSkillList(await api('/spa/skills')); } catch { /* */ }
+      try { setCabinTypes(await api('/spa/cabin-types')); } catch { /* */ }
+    })();
+  }, []);
+  const openReq = async (sid: string | null) => {
+    setReq(emptyReq); setReqLoaded(JSON.stringify(emptyReq));
+    if (!sid) return;
+    try {
+      const r = await api(`/spa/services/${sid}/requirements`);
+      const v = { skills: (r.skills || []).map((s: any) => ({ skill_id: s.skill_id, min_level: s.min_level || 'QUALIFIED' })), cabin_type_id: r.cabin_type_id || '', gender_rule: r.gender_rule || 'ANY' };
+      setReq(v); setReqLoaded(JSON.stringify(v));
+    } catch { /* */ }
+  };
 
   const load = async () => { setLoading(true); try { setServices(await api('/spa/services')); } catch { /* */ } finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
@@ -128,10 +150,16 @@ function SpaCatalog({ restaurantId, token }: Props) {
   const save = async () => {
     if (!canEdit) { alert('View-only access — you cannot change the service menu.'); return; }
     if (!form.name) return;
-    const body = { ...form, duration_min: Number(form.duration_min || 60), buffer_after_min: Number(form.buffer_after_min || 10), price: Number(form.price || 0), gst_percent: Number(form.gst_percent || 18) };
+    // Cabin type and gender rule belong to the requirements save below, not the treatment row.
+    const { cabin_type_id: _cabinType, gender_rule: _genderRule, ...formFields } = form;
+    const body = { ...formFields, duration_min: Number(form.duration_min || 60), buffer_after_min: Number(form.buffer_after_min || 10), price: Number(form.price || 0), gst_percent: Number(form.gst_percent || 18) };
     try {
+      let sid: string | null = edit?.id || null;
       if (edit) await api(`/spa/services/${edit.id}`, { method: 'PATCH', body: JSON.stringify(body) });
-      else await api('/spa/services', { method: 'POST', body: JSON.stringify(body) });
+      else { const created = await api('/spa/services', { method: 'POST', body: JSON.stringify(body) }); sid = created?.id || null; }
+      if (sid && JSON.stringify(req) !== reqLoaded) {
+        await api(`/spa/services/${sid}/requirements`, { method: 'PUT', body: JSON.stringify({ ...req, skills: req.skills.filter(s => s.skill_id), cabin_type_id: req.cabin_type_id || null }) });
+      }
       setShowForm(false); setEdit(null); setForm(blank); await load();
     } catch (e: any) { alert(e.message); }
   };
@@ -142,7 +170,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
       <SectionHeader icon={<Scissors size={18} />} title="Service Menu" sub="Treatments, durations, pricing & tax"
         action={<div className="flex gap-2 flex-wrap">
           {inactiveServices.length > 0 && <button className={BTN_GHOST} onClick={() => setShowInactive(v => !v)}>{showInactive ? 'Hide inactive' : `Show inactive (${inactiveServices.length})`}</button>}
-          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} /> Add Service</button>}
+          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); openReq(null); setShowForm(true); }}><Plus size={14} /> Add Service</button>}
         </div>} />
       <div className={CARD}>
         <DataTable
@@ -158,7 +186,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
             { key: 'is_active', label: 'Status', render: (r: any) => r.is_active ? <span className="text-emerald-600 text-xs font-bold">Active</span> : <span className="text-gray-400 text-xs">Inactive</span> },
             { key: '_a', label: '', render: (r: any) => (
               <div className="flex gap-1.5">
-                {canEdit && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...blank, ...r, duration_min: String(r.duration_min), buffer_after_min: String(r.buffer_after_min), price: String(r.price), gst_percent: String(r.gst_percent), requires_room: !!r.requires_room, requires_therapist: !!r.requires_therapist }); setShowForm(true); }}>Edit</button>}
+                {canEdit && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...blank, ...r, duration_min: String(r.duration_min), buffer_after_min: String(r.buffer_after_min), price: String(r.price), gst_percent: String(r.gst_percent), requires_room: !!r.requires_room, requires_therapist: !!r.requires_therapist }); openReq(r.id); setShowForm(true); }}>Edit</button>}
                 {canDel && <button className={`${BTN} bg-rose-50 text-rose-600 hover:bg-rose-100`} onClick={() => remove(r.id)}><Trash2 size={13} /></button>}
               </div>
             ) },
@@ -188,6 +216,36 @@ function SpaCatalog({ restaurantId, token }: Props) {
                   <img src={form.image_url} alt="preview" className="mt-2 h-24 w-full object-cover rounded-xl border border-[#e8dccf]" onError={e => (e.currentTarget.style.display = 'none')} />
                 )}
               </div>
+              <div className="col-span-2 rounded-xl border border-[#e8dccf] bg-[#faf7f2] p-3">
+                <div className="text-xs font-bold text-[#3d3128] mb-1">Who gives it, and where</div>
+                <p className="text-[11px] text-[#6b5d52] mb-2">Name the skills this therapy needs and it is offered only with therapists who hold them. With no skills named, the therapists ticked for it under Therapists & Cabins are offered.</p>
+                {req.skills.map((s, i) => (
+                  <div key={i} className="grid grid-cols-[1fr_auto_auto] gap-2 mb-1.5">
+                    <select className={INPUT} value={s.skill_id} onChange={e => setReq({ ...req, skills: req.skills.map((x, j) => j === i ? { ...x, skill_id: e.target.value } : x) })}>
+                      <option value="">Choose a skill</option>
+                      {skillList.filter((k: any) => Number(k.is_active ?? 1) === 1 || k.id === s.skill_id).map((k: any) => <option key={k.id} value={k.id}>{k.name}</option>)}
+                    </select>
+                    <select className={INPUT} value={s.min_level} onChange={e => setReq({ ...req, skills: req.skills.map((x, j) => j === i ? { ...x, min_level: e.target.value } : x) })}>
+                      <option value="TRAINEE">Trainee or above</option>
+                      <option value="QUALIFIED">Qualified or above</option>
+                      <option value="SENIOR">Senior</option>
+                    </select>
+                    <button className={`${BTN} bg-rose-50 text-rose-600 hover:bg-rose-100`} aria-label="Remove skill" onClick={() => setReq({ ...req, skills: req.skills.filter((_, j) => j !== i) })}><X size={13} /></button>
+                  </div>
+                ))}
+                {skillList.some((k: any) => Number(k.is_active ?? 1) === 1)
+                  ? <button className={BTN_GHOST} onClick={() => setReq({ ...req, skills: [...req.skills, { skill_id: '', min_level: 'QUALIFIED' }] })}><Plus size={13} /> Add a skill</button>
+                  : <p className="text-[11px] text-[#9c8e85]">No skills on file yet — add them under Therapists & Cabins → Skills & Cabin Types.</p>}
+                {form.requires_room && (
+                  <div className="mt-2">
+                    <label className={LABEL}>Cabin type</label>
+                    <select className={INPUT} value={req.cabin_type_id} onChange={e => setReq({ ...req, cabin_type_id: e.target.value })}>
+                      <option value="">Any cabin</option>
+                      {cabinTypes.filter((c: any) => Number(c.is_active ?? 1) === 1 || c.id === req.cabin_type_id).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                )}
+              </div>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.requires_room} onChange={e => setForm({ ...form, requires_room: e.target.checked })} /> Requires cabin</label>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.requires_therapist} onChange={e => setForm({ ...form, requires_therapist: e.target.checked })} /> Requires therapist</label>
             </div>
@@ -205,124 +263,581 @@ function SpaCatalog({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 // RESOURCES (cabins + therapists + schedules + skills)
 // ════════════════════════════════════════════════════════════════════════
+const SPA_LEVEL_LABEL: Record<string, string> = { TRAINEE: 'Trainee', QUALIFIED: 'Qualified', SENIOR: 'Senior' };
+const SPA_LEVEL_RANK: Record<string, number> = { TRAINEE: 1, QUALIFIED: 2, SENIOR: 3 };
+const SPA_GENDER_LABEL: Record<string, string> = { FEMALE: 'Female', MALE: 'Male', OTHER: 'Other' };
+const CABIN_STATUS: Record<string, { label: string; cls: string }> = {
+  AVAILABLE: { label: 'Available', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  CLEANING: { label: 'Cleaning', cls: 'bg-sky-50 text-sky-700 border-sky-200' },
+  MAINTENANCE: { label: 'Maintenance', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  OUT_OF_ORDER: { label: 'Out of order', cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+};
+const SPA_IMPORT_HELP: Record<'therapists' | 'cabins', { head: string; note: string; example: string }> = {
+  therapists: {
+    head: 'name,gender,phone,languages,skills',
+    note: 'Skills as Name:level, separated by semicolons — level is trainee, qualified or senior.',
+    example: 'name,gender,phone,languages,skills\nLakshmi Nair,female,9800000001,"Malayalam, English",Abhyanga:senior;Shirodhara:qualified',
+  },
+  cabins: {
+    head: 'name,type,capacity,turnaround,equipment',
+    note: 'Type as a cabin type code or name; turnaround in minutes.',
+    example: 'name,type,capacity,turnaround,equipment\nDroni Room 1,ABHYANGA_DRONI,1,15,Teak droni and oil warmer',
+  },
+};
+
+/** Reads pasted CSV into rows keyed by the header row. Quoted fields may hold
+ *  commas and doubled quotes. */
+function parseSpaCsv(text: string): Record<string, string>[] {
+  const rows: string[][] = [];
+  let row: string[] = [], cell = '', quoted = false;
+  const src = String(text || '').replace(/\r\n?/g, '\n');
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quoted) {
+      if (c === '"') { if (src[i + 1] === '"') { cell += '"'; i++; } else quoted = false; }
+      else cell += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += c;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  const filled = rows.filter(r => r.some(x => x.trim() !== ''));
+  if (filled.length < 2) return [];
+  const head = filled[0].map(h => h.trim().toLowerCase().replace(/\s+/g, '_'));
+  return filled.slice(1).map(r => Object.fromEntries(head.map((h, i) => [h, (r[i] ?? '').trim()])));
+}
+
+/** A held skill that does not count today: the certificate has expired, or the
+ *  skill needs a certificate and none is on file. Mirrors the slot engine. */
+const skillLapsed = (s: any, today: string) =>
+  (!!s?.valid_until && String(s.valid_until).slice(0, 10) < today) || (Number(s?.requires_certification) === 1 && !s?.certified_on);
+
 function SpaResources({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
   const canEdit = canWriteTab('SPA_RESOURCES');
-  const [tab, setTab] = useState<'CABINS' | 'THERAPISTS'>('CABINS');
+  const canDel = canDeleteTab('SPA_RESOURCES');
+  const [tab, setTab] = useState<'CABINS' | 'THERAPISTS' | 'SETUP'>('CABINS');
   const [resources, setResources] = useState<any[]>([]);
   const [therapists, setTherapists] = useState<any[]>([]);
   const [services, setServices] = useState<any[]>([]);
+  const [skillList, setSkillList] = useState<any[]>([]);
+  const [cabinTypes, setCabinTypes] = useState<any[]>([]);
+  const [staffOptions, setStaffOptions] = useState<any[]>([]);
   const [newCabin, setNewCabin] = useState('');
   const [newTher, setNewTher] = useState('');
   const [schedTher, setSchedTher] = useState<any>(null);
   const [schedules, setSchedules] = useState<any[]>([]);
-  const [skills, setSkills] = useState<string[]>([]);
-  const [sched, setSched] = useState({ weekday: '1', start_time: '09:00', end_time: '18:00' });
+  // Treatments a therapist is ticked for — used for a treatment that names no skills.
+  const [svcSkills, setSvcSkills] = useState<string[]>([]);
+  // Skills the therapist holds: skill id → level and certificate dates.
+  const [held, setHeld] = useState<Record<string, any>>({});
+  const [note, setNote] = useState('');
+  const blankShift = { weekday: '1', start_time: '09:00', end_time: '18:00', break_start: '', break_end: '', effective_from: '', effective_to: '' };
+  const [sched, setSched] = useState<any>(blankShift);
+  const [profile, setProfile] = useState<any>(null);
+  const [cabinEdit, setCabinEdit] = useState<any>(null);
+  // Finding a therapist: by name, a skill (at a minimum level), gender and language.
+  const [find, setFind] = useState({ q: '', skill: '', level: '', gender: '', lang: '' });
+  const [newSkill, setNewSkill] = useState({ name: '', requires_certification: false });
+  const [newType, setNewType] = useState({ name: '', description: '' });
+  const [starter, setStarter] = useState<any>(null);
+  const [importKind, setImportKind] = useState<'therapists' | 'cabins'>('therapists');
+  const [csv, setCsv] = useState('');
+  const [preview, setPreview] = useState<any>(null);
   // Deactivated cabins and therapists are hidden until asked for, and marked when shown.
   const [showInactive, setShowInactive] = useState(false);
   const isOn = (x: any) => Number(x?.is_active ?? 1) === 1;
   const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const today = istToday();
+  const viewOnly = (what: string) => { alert(`View-only access — you cannot ${what}.`); };
 
   const load = async () => {
     try { setResources(await api('/spa/resources')); } catch { /* */ }
     try { setTherapists(await api('/spa/therapists')); } catch { /* */ }
     try { setServices(await api('/spa/services')); } catch { /* */ }
+    try { setSkillList(await api('/spa/skills')); } catch { /* */ }
+    try { setCabinTypes(await api('/spa/cabin-types')); } catch { /* */ }
   };
   useEffect(() => { load(); }, []);
 
-  const addCabin = async () => { if (!canEdit) { alert('View-only access — you cannot add cabins.'); return; } if (!newCabin) return; try { await api('/spa/resources', { method: 'POST', body: JSON.stringify({ name: newCabin }) }); setNewCabin(''); await load(); } catch (e: any) { alert(e.message); } };
-  const addTher = async () => { if (!canEdit) { alert('View-only access — you cannot add therapists.'); return; } if (!newTher) return; try { await api('/spa/therapists', { method: 'POST', body: JSON.stringify({ display_name: newTher }) }); setNewTher(''); await load(); } catch (e: any) { alert(e.message); } };
+  const addCabin = async () => { if (!canEdit) { viewOnly('add cabins'); return; } if (!newCabin) return; try { await api('/spa/resources', { method: 'POST', body: JSON.stringify({ name: newCabin }) }); setNewCabin(''); await load(); } catch (e: any) { alert(e.message); } };
+  const addTher = async () => { if (!canEdit) { viewOnly('add therapists'); return; } if (!newTher) return; try { await api('/spa/therapists', { method: 'POST', body: JSON.stringify({ display_name: newTher }) }); setNewTher(''); await load(); } catch (e: any) { alert(e.message); } };
 
   const openSched = async (t: any) => {
-    setSchedTher(t);
+    setSchedTher(t); setSched(blankShift); setNote('');
     try { setSchedules(await api(`/spa/therapists/${t.id}/schedules`)); } catch { setSchedules([]); }
-    try { const sk = await api(`/spa/therapists/${t.id}/services`); setSkills(sk.map((x: any) => x.service_id)); } catch { setSkills([]); }
+    try { const sk = await api(`/spa/therapists/${t.id}/services`); setSvcSkills(sk.map((x: any) => x.service_id)); } catch { setSvcSkills([]); }
+    try {
+      const hs = await api(`/spa/therapists/${t.id}/skills`);
+      setHeld(Object.fromEntries(hs.map((h: any) => [h.skill_id, { level: h.level || 'QUALIFIED', certified_on: h.certified_on || '', valid_until: h.valid_until || '' }])));
+    } catch { setHeld({}); }
   };
   const addSched = async () => {
-    if (!canEdit) { alert('View-only access — you cannot change schedules.'); return; }
-    try { await api(`/spa/therapists/${schedTher.id}/schedules`, { method: 'POST', body: JSON.stringify({ weekday: Number(sched.weekday), start_time: sched.start_time, end_time: sched.end_time }) }); setSchedules(await api(`/spa/therapists/${schedTher.id}/schedules`)); } catch (e: any) { alert(e.message); }
+    if (!canEdit) { viewOnly('change schedules'); return; }
+    const body: any = { weekday: Number(sched.weekday), start_time: sched.start_time, end_time: sched.end_time };
+    for (const k of ['break_start', 'break_end', 'effective_from', 'effective_to']) if (sched[k]) body[k] = sched[k];
+    try {
+      await api(`/spa/therapists/${schedTher.id}/schedules`, { method: 'POST', body: JSON.stringify(body) });
+      setSchedules(await api(`/spa/therapists/${schedTher.id}/schedules`));
+    } catch (e: any) { alert(e.message); }
   };
-  const toggleSkill = async (sid: string) => {
-    if (!canEdit) { alert('View-only access — you cannot change skills.'); return; }
-    const next = skills.includes(sid) ? skills.filter(s => s !== sid) : [...skills, sid];
-    setSkills(next);
+  const removeSched = async (id: string) => {
+    if (!canDel) { viewOnly('remove shifts'); return; }
+    if (!window.confirm('Remove this shift?')) return;
+    try { await api(`/spa/schedules/${id}`, { method: 'DELETE' }); setSchedules(await api(`/spa/therapists/${schedTher.id}/schedules`)); } catch (e: any) { alert(e.message); }
+  };
+  const toggleSvc = async (sid: string) => {
+    if (!canEdit) { viewOnly('change the treatments a therapist delivers'); return; }
+    const next = svcSkills.includes(sid) ? svcSkills.filter(s => s !== sid) : [...svcSkills, sid];
+    setSvcSkills(next);
     try { await api(`/spa/therapists/${schedTher.id}/services`, { method: 'POST', body: JSON.stringify({ service_ids: next }) }); } catch (e: any) { alert(e.message); }
   };
+  const saveHeld = async () => {
+    if (!canEdit) { viewOnly('change skills'); return; }
+    const skills = Object.entries(held).map(([skill_id, h]: [string, any]) => ({ skill_id, level: h.level, certified_on: h.certified_on || null, valid_until: h.valid_until || null }));
+    try {
+      await api(`/spa/therapists/${schedTher.id}/skills`, { method: 'PUT', body: JSON.stringify({ skills }) });
+      setNote('Skills saved');
+      await load();
+    } catch (e: any) { setNote(''); alert(e.message); }
+  };
+
+  const openProfile = async (t: any) => {
+    setProfile({ id: t.id, display_name: t.display_name || '', gender: t.gender || '', languages: t.languages || '', phone: t.phone || '', photo_url: t.photo_url || '', staff_id: t.staff_id || '', bio: t.bio || '', is_active: isOn(t) });
+    if (!staffOptions.length) { try { setStaffOptions(await api('/spa/staff-options')); } catch { /* */ } }
+  };
+  const saveProfile = async () => {
+    if (!canEdit) { viewOnly('change therapist profiles'); return; }
+    if (!String(profile.display_name).trim()) { alert('Give the therapist a name.'); return; }
+    const { id, ...body } = profile;
+    try {
+      await api(`/spa/therapists/${id}`, { method: 'PATCH', body: JSON.stringify({ ...body, display_name: String(body.display_name).trim(), staff_id: body.staff_id || null, is_active: body.is_active ? 1 : 0 }) });
+      setProfile(null); await load();
+    } catch (e: any) { alert(e.message); }
+  };
+
+  const openCabin = (r: any) => setCabinEdit({
+    id: r.id, name: r.name || '', cabin_type_id: r.cabin_type_id || '', equipment: r.equipment || '', capacity: String(r.capacity ?? 1),
+    turnaround_min: String(r.turnaround_min ?? 0), status: String(r.status || 'AVAILABLE').toUpperCase(), status_reason: r.status_reason || '', notes: r.notes || '', is_active: isOn(r),
+  });
+  const saveCabin = async () => {
+    if (!canEdit) { viewOnly('change cabins'); return; }
+    if (!String(cabinEdit.name).trim()) { alert('Give the cabin a name.'); return; }
+    const { id, ...body } = cabinEdit;
+    try {
+      await api(`/spa/resources/${id}`, { method: 'PATCH', body: JSON.stringify({
+        ...body, name: String(body.name).trim(), capacity: Number(body.capacity || 1), turnaround_min: Number(body.turnaround_min || 0),
+        status_reason: body.status === 'AVAILABLE' ? '' : body.status_reason, is_active: body.is_active ? 1 : 0,
+      }) });
+      setCabinEdit(null); await load();
+    } catch (e: any) { alert(e.message); }
+  };
+
+  const previewStarter = async () => { try { setStarter(await api('/spa/setup/ayurveda-starter', { method: 'POST', body: JSON.stringify({ dry_run: true }) })); } catch (e: any) { alert(e.message); } };
+  const applyStarter = async () => {
+    if (!canEdit) { viewOnly('add the starter pack'); return; }
+    try { const r = await api('/spa/setup/ayurveda-starter', { method: 'POST', body: JSON.stringify({ dry_run: false }) }); setStarter(r); await load(); } catch (e: any) { alert(e.message); }
+  };
+  const addSkill = async () => {
+    if (!canEdit) { viewOnly('add skills'); return; }
+    if (newSkill.name.trim().length < 2) return;
+    try { await api('/spa/skills', { method: 'POST', body: JSON.stringify({ ...newSkill, name: newSkill.name.trim() }) }); setNewSkill({ name: '', requires_certification: false }); await load(); } catch (e: any) { alert(e.message); }
+  };
+  const patchSkill = async (id: string, body: any) => { if (!canEdit) { viewOnly('change skills'); return; } try { await api(`/spa/skills/${id}`, { method: 'PATCH', body: JSON.stringify(body) }); await load(); } catch (e: any) { alert(e.message); } };
+  const addType = async () => {
+    if (!canEdit) { viewOnly('add cabin types'); return; }
+    if (newType.name.trim().length < 2) return;
+    try { await api('/spa/cabin-types', { method: 'POST', body: JSON.stringify({ ...newType, name: newType.name.trim() }) }); setNewType({ name: '', description: '' }); await load(); } catch (e: any) { alert(e.message); }
+  };
+  const patchType = async (id: string, body: any) => { if (!canEdit) { viewOnly('change cabin types'); return; } try { await api(`/spa/cabin-types/${id}`, { method: 'PATCH', body: JSON.stringify(body) }); await load(); } catch (e: any) { alert(e.message); } };
+  const runImport = async (dry: boolean) => {
+    if (!canEdit) { viewOnly('import'); return; }
+    const rows = parseSpaCsv(csv);
+    if (!rows.length) { alert('Paste a header row and at least one row below it.'); return; }
+    try { const r = await api(`/spa/import/${importKind}`, { method: 'POST', body: JSON.stringify({ rows, dry_run: dry }) }); setPreview(r); if (!dry) await load(); } catch (e: any) { alert(e.message); }
+  };
+
+  const shownTherapists = therapists.filter(t => showInactive || isOn(t)).filter(t => {
+    if (find.q && !String(t.display_name || '').toLowerCase().includes(find.q.trim().toLowerCase())) return false;
+    if (find.gender && String(t.gender || '') !== find.gender) return false;
+    if (find.lang && !String(t.languages || '').toLowerCase().includes(find.lang.trim().toLowerCase())) return false;
+    if (find.skill) {
+      const h = (t.skills || []).find((s: any) => s.skill_id === find.skill);
+      if (!h || skillLapsed(h, today)) return false;
+      if (find.level && (SPA_LEVEL_RANK[String(h.level).toUpperCase()] || 0) < SPA_LEVEL_RANK[find.level]) return false;
+    }
+    return true;
+  });
+  const statusOf = (r: any) => CABIN_STATUS[String(r.status || 'AVAILABLE').toUpperCase()] || CABIN_STATUS.AVAILABLE;
 
   return (
     <div>
-      <SectionHeader icon={<DoorOpen size={18} />} title="Therapists & Cabins" sub="Resources the booking engine schedules against" />
-      <div className="flex gap-2 mb-4">
-        {(['CABINS', 'THERAPISTS'] as const).map(t => (
-          <button key={t} className={tab === t ? BTN_PRIMARY : BTN_GHOST} onClick={() => setTab(t)}>{t === 'CABINS' ? 'Treatment Cabins' : 'Therapists'}</button>
+      <SectionHeader icon={<DoorOpen size={18} />} title="Therapists & Cabins" sub="Who can give which therapy, in which cabin, and when" />
+      <div className="flex gap-2 mb-4 flex-wrap">
+        {([['CABINS', 'Treatment Cabins'], ['THERAPISTS', 'Therapists'], ['SETUP', 'Skills & Cabin Types']] as const).map(([k, label]) => (
+          <button key={k} className={tab === k ? BTN_PRIMARY : BTN_GHOST} onClick={() => setTab(k)}>{label}</button>
         ))}
-        {(tab === 'CABINS' ? resources : therapists).some(x => !isOn(x)) && (
+        {tab !== 'SETUP' && (tab === 'CABINS' ? resources : therapists).some(x => !isOn(x)) && (
           <button className={`${BTN_GHOST} ml-auto`} onClick={() => setShowInactive(v => !v)}>
             {showInactive ? 'Hide inactive' : `Show inactive (${(tab === 'CABINS' ? resources : therapists).filter(x => !isOn(x)).length})`}
           </button>
         )}
       </div>
 
-      {tab === 'CABINS' ? (
+      {tab === 'CABINS' && (
         <div className={CARD}>
           {canEdit && <div className="flex gap-2 mb-4">
             <input className={INPUT} placeholder="New cabin name" value={newCabin} onChange={e => setNewCabin(e.target.value)} />
             <button className={BTN_PRIMARY} onClick={addCabin}><Plus size={14} /> Add</button>
           </div>}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {resources.filter(r => showInactive || isOn(r)).map(r => (
-              <div key={r.id} className={`rounded-xl border border-[#e8dccf] p-3 flex items-center justify-between ${isOn(r) ? '' : 'opacity-60'}`}>
-                <span className="font-semibold text-sm">{r.name}</span>
-                <span className="text-[10px] text-[#6b5d52]">{isOn(r) ? r.resource_type : 'Inactive'}</span>
+              <div key={r.id} className={`rounded-xl border border-[#e8dccf] p-3 flex flex-col gap-1.5 ${isOn(r) ? '' : 'opacity-60'}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-sm break-words">{r.name}</div>
+                    <div className="text-[11px] text-[#6b5d52]">{r.cabin_type_name || 'No cabin type'}{Number(r.turnaround_min || 0) > 0 ? ` · ${r.turnaround_min} min turnaround` : ''}</div>
+                  </div>
+                  {isOn(r)
+                    ? <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border whitespace-nowrap ${statusOf(r).cls}`}>{statusOf(r).label}</span>
+                    : <span className="text-[10px] text-[#6b5d52]">Inactive</span>}
+                </div>
+                {isOn(r) && r.status_reason && String(r.status || 'AVAILABLE').toUpperCase() !== 'AVAILABLE' && <div className="text-[11px] text-[#6b5d52]">{r.status_reason}</div>}
+                {r.equipment && <div className="text-[11px] text-[#3d3128]">{r.equipment}</div>}
+                {canEdit && <div className="flex justify-end mt-auto"><button className={BTN_GHOST} onClick={() => openCabin(r)}>Edit</button></div>}
               </div>
             ))}
-            {!resources.filter(r => showInactive || isOn(r)).length && <p className="text-sm text-[#6b5d52] col-span-3">No cabins yet.</p>}
+            {!resources.filter(r => showInactive || isOn(r)).length && <p className="text-sm text-[#6b5d52] col-span-full">No cabins yet.</p>}
           </div>
         </div>
-      ) : (
+      )}
+
+      {tab === 'THERAPISTS' && (
         <div className={CARD}>
           {canEdit && <div className="flex gap-2 mb-4">
             <input className={INPUT} placeholder="New therapist name" value={newTher} onChange={e => setNewTher(e.target.value)} />
             <button className={BTN_PRIMARY} onClick={addTher}><Plus size={14} /> Add</button>
           </div>}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-4">
+            <input className={INPUT} placeholder="Search by name" value={find.q} onChange={e => setFind({ ...find, q: e.target.value })} />
+            <select className={INPUT} value={find.skill} onChange={e => setFind({ ...find, skill: e.target.value, level: e.target.value ? find.level : '' })}>
+              <option value="">Any skill</option>
+              {skillList.filter(isOn).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <select className={INPUT} value={find.level} disabled={!find.skill} onChange={e => setFind({ ...find, level: e.target.value })}>
+              <option value="">Any level</option>
+              <option value="QUALIFIED">Qualified or senior</option>
+              <option value="SENIOR">Senior only</option>
+            </select>
+            <select className={INPUT} value={find.gender} onChange={e => setFind({ ...find, gender: e.target.value })}>
+              <option value="">Any gender</option>
+              <option value="FEMALE">Female</option>
+              <option value="MALE">Male</option>
+              <option value="OTHER">Other</option>
+            </select>
+            <input className={INPUT} placeholder="Language" value={find.lang} onChange={e => setFind({ ...find, lang: e.target.value })} />
+          </div>
           <div className="space-y-2">
-            {therapists.filter(t => showInactive || isOn(t)).map(t => (
-              <div key={t.id} className={`rounded-xl border border-[#e8dccf] p-3 flex items-center justify-between ${isOn(t) ? '' : 'opacity-60'}`}>
-                <span className="font-semibold text-sm flex items-center gap-2"><User size={14} className="text-[#cc5a16]" /> {t.display_name}{!isOn(t) && <span className="text-[10px] font-normal text-[#6b5d52]">Inactive</span>}</span>
-                <button className={BTN_GHOST} onClick={() => openSched(t)}><Clock size={13} /> Schedule & Skills</button>
+            {shownTherapists.map(t => (
+              <div key={t.id} className={`rounded-xl border border-[#e8dccf] p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${isOn(t) ? '' : 'opacity-60'}`}>
+                <div className="min-w-0">
+                  <div className="font-semibold text-sm flex items-center gap-2 flex-wrap">
+                    <User size={14} className="text-[#cc5a16]" /> {t.display_name}
+                    {t.gender && <span className="text-[10px] font-normal text-[#6b5d52]">{SPA_GENDER_LABEL[t.gender] || t.gender}</span>}
+                    {t.languages && <span className="text-[10px] font-normal text-[#6b5d52]">· {t.languages}</span>}
+                    {!isOn(t) && <span className="text-[10px] font-normal text-[#6b5d52]">Inactive</span>}
+                  </div>
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {(t.skills || []).map((s: any) => {
+                      const lapsed = skillLapsed(s, today);
+                      const why = !lapsed ? undefined : (s.valid_until && String(s.valid_until).slice(0, 10) < today ? `Certificate expired ${String(s.valid_until).slice(0, 10)}` : 'Needs a certificate on file');
+                      return (
+                        <span key={s.skill_id} title={why}
+                          className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border ${lapsed ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-[#faf7f2] text-[#3d3128] border-[#e8dccf]'}`}>
+                          {s.name} · {SPA_LEVEL_LABEL[String(s.level).toUpperCase()] || s.level}{lapsed ? ' · not valid' : ''}
+                        </span>
+                      );
+                    })}
+                    {!(t.skills || []).length && <span className="text-[11px] text-[#9c8e85]">No skills recorded</span>}
+                  </div>
+                </div>
+                <div className="flex gap-1.5 shrink-0">
+                  <button className={BTN_GHOST} onClick={() => openProfile(t)}><User size={13} /> Profile</button>
+                  <button className={BTN_GHOST} onClick={() => openSched(t)}><Clock size={13} /> Schedule & Skills</button>
+                </div>
               </div>
             ))}
-            {!therapists.filter(t => showInactive || isOn(t)).length && <p className="text-sm text-[#6b5d52]">No therapists yet.</p>}
+            {!shownTherapists.length && <p className="text-sm text-[#6b5d52]">{therapists.some(t => showInactive || isOn(t)) ? 'No therapist matches these filters.' : 'No therapists yet.'}</p>}
           </div>
+        </div>
+      )}
+
+      {tab === 'SETUP' && (
+        <div className="space-y-4">
+          {canEdit && (
+            <div className={CARD}>
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-[#14110c] flex items-center gap-2"><Award size={16} className="text-[#cc5a16]" /> Ayurveda starter pack</h3>
+                  <p className="text-xs text-[#6b5d52] mt-1 max-w-xl">Thirteen therapy skills — Abhyanga, Pizhichil, Njavarakizhi, Shirodhara, Udvartana and more — and seven cabin types, from the droni cabin to the herbal steam room. Skills and cabin types already on file are kept as they are.</p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <button className={BTN_GHOST} onClick={previewStarter}>Preview</button>
+                  {starter?.dry_run && (Number(starter.skills_created) + Number(starter.cabin_types_created)) > 0 && <button className={BTN_PRIMARY} onClick={applyStarter}><Plus size={14} /> Add them</button>}
+                </div>
+              </div>
+              {starter && (
+                <p className="text-xs mt-3 text-[#3d3128]">
+                  {!starter.dry_run
+                    ? `Added ${starter.skills_created} skills and ${starter.cabin_types_created} cabin types.`
+                    : (Number(starter.skills_created) + Number(starter.cabin_types_created)) > 0
+                      ? `Adds ${starter.skills_created} skills and ${starter.cabin_types_created} cabin types. ${Number(starter.skills_existing) + Number(starter.cabin_types_existing)} already on file stay as they are.`
+                      : 'Everything in the starter pack is already on file.'}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className={CARD}>
+              <h3 className="font-bold text-[#14110c] mb-3">Skills</h3>
+              {canEdit && (
+                <div className="mb-3">
+                  <div className="flex gap-2">
+                    <input className={INPUT} placeholder="Skill name, e.g. Kati Dhara" value={newSkill.name} onChange={e => setNewSkill({ ...newSkill, name: e.target.value })} />
+                    <button className={BTN_PRIMARY} onClick={addSkill}><Plus size={14} /> Add</button>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-[#3d3128] mt-2"><input type="checkbox" checked={newSkill.requires_certification} onChange={e => setNewSkill({ ...newSkill, requires_certification: e.target.checked })} /> A therapist needs a certificate on file for this skill</label>
+                </div>
+              )}
+              <div className="divide-y divide-[#f0e9df]">
+                {skillList.map(s => (
+                  <div key={s.id} className={`py-2 flex items-center justify-between gap-2 ${isOn(s) ? '' : 'opacity-60'}`}>
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold break-words">{s.name}</div>
+                      <div className="text-[10px] text-[#6b5d52]">{s.code}{Number(s.requires_certification) === 1 ? ' · certificate needed' : ''}{isOn(s) ? '' : ' · inactive'}</div>
+                    </div>
+                    {canEdit && (
+                      <div className="flex gap-1.5 shrink-0">
+                        <button className={BTN_GHOST} onClick={() => patchSkill(s.id, { requires_certification: Number(s.requires_certification) === 1 ? 0 : 1 })}>{Number(s.requires_certification) === 1 ? 'No certificate' : 'Needs certificate'}</button>
+                        <button className={BTN_GHOST} onClick={() => patchSkill(s.id, { is_active: isOn(s) ? 0 : 1 })}>{isOn(s) ? 'Deactivate' : 'Activate'}</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {!skillList.length && <p className="text-sm text-[#6b5d52] py-2">No skills yet — add the starter pack or your own.</p>}
+              </div>
+            </div>
+
+            <div className={CARD}>
+              <h3 className="font-bold text-[#14110c] mb-3">Cabin types</h3>
+              {canEdit && (
+                <div className="mb-3 space-y-2">
+                  <div className="flex gap-2">
+                    <input className={INPUT} placeholder="Cabin type, e.g. Kizhi cabin" value={newType.name} onChange={e => setNewType({ ...newType, name: e.target.value })} />
+                    <button className={BTN_PRIMARY} onClick={addType}><Plus size={14} /> Add</button>
+                  </div>
+                  <input className={INPUT} placeholder="What it has (optional)" value={newType.description} onChange={e => setNewType({ ...newType, description: e.target.value })} />
+                </div>
+              )}
+              <div className="divide-y divide-[#f0e9df]">
+                {cabinTypes.map(c => (
+                  <div key={c.id} className={`py-2 flex items-center justify-between gap-2 ${isOn(c) ? '' : 'opacity-60'}`}>
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold break-words">{c.name}</div>
+                      <div className="text-[10px] text-[#6b5d52]">{c.code}{c.description ? ` · ${c.description}` : ''}{isOn(c) ? '' : ' · inactive'}</div>
+                    </div>
+                    {canEdit && <button className={`${BTN_GHOST} shrink-0`} onClick={() => patchType(c.id, { is_active: isOn(c) ? 0 : 1 })}>{isOn(c) ? 'Deactivate' : 'Activate'}</button>}
+                  </div>
+                ))}
+                {!cabinTypes.length && <p className="text-sm text-[#6b5d52] py-2">No cabin types yet — add the starter pack or your own.</p>}
+              </div>
+            </div>
+          </div>
+
+          {canEdit && (
+            <div className={CARD}>
+              <h3 className="font-bold text-[#14110c] mb-1 flex items-center gap-2"><FileText size={16} className="text-[#cc5a16]" /> Import from a spreadsheet</h3>
+              <p className="text-xs text-[#6b5d52] mb-3">Paste CSV with a header row. A row whose name matches a therapist or cabin on file updates it; any other row is added. Preview first — nothing is saved until you import.</p>
+              <div className="flex gap-2 mb-2">
+                {(['therapists', 'cabins'] as const).map(k => (
+                  <button key={k} className={importKind === k ? BTN_PRIMARY : BTN_GHOST} onClick={() => { setImportKind(k); setPreview(null); }}>{k === 'therapists' ? 'Therapists' : 'Cabins'}</button>
+                ))}
+              </div>
+              <p className="text-[11px] text-[#6b5d52] mb-1">Columns: <code className="text-[#3d3128]">{SPA_IMPORT_HELP[importKind].head}</code> — {SPA_IMPORT_HELP[importKind].note}</p>
+              <textarea className={`${INPUT} font-mono text-xs`} rows={6} value={csv} placeholder={SPA_IMPORT_HELP[importKind].example} onChange={e => { setCsv(e.target.value); setPreview(null); }} />
+              <div className="flex gap-2 mt-2">
+                <button className={BTN_GHOST} onClick={() => runImport(true)}>Preview</button>
+                {preview?.dry_run && (Number(preview.created) + Number(preview.updated)) > 0 && (
+                  <button className={BTN_PRIMARY} onClick={() => runImport(false)}>Import {Number(preview.created) + Number(preview.updated)} row(s)</button>
+                )}
+              </div>
+              {preview && (
+                <div className="mt-3">
+                  <p className="text-xs font-semibold text-[#3d3128] mb-2">
+                    {preview.dry_run ? `Preview: ${preview.created} to add, ${preview.updated} to update, ${preview.skipped} skipped` : `Imported: ${preview.created} added, ${preview.updated} updated, ${preview.skipped} skipped`}
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead><tr className="text-left text-[#6b5d52] border-b border-[#e8dccf]"><th className="py-1.5 pr-3">Row</th><th className="py-1.5 pr-3">Name</th><th className="py-1.5 pr-3">Action</th><th className="py-1.5">Notes</th></tr></thead>
+                      <tbody>
+                        {(preview.rows || []).map((r: any) => (
+                          <tr key={r.row} className="border-b border-[#f0e9df] align-top">
+                            <td className="py-1.5 pr-3 tabular-nums">{r.row}</td>
+                            <td className="py-1.5 pr-3 font-semibold">{r.name || '—'}</td>
+                            <td className={`py-1.5 pr-3 font-bold ${r.action === 'SKIP' ? 'text-rose-600' : r.action === 'CREATE' ? 'text-emerald-700' : 'text-[#3d3128]'}`}>{r.action === 'CREATE' ? 'Add' : r.action === 'UPDATE' ? 'Update' : 'Skip'}</td>
+                            <td className="py-1.5 text-[#6b5d52]">{[...(r.skills || []), ...(r.issues || [])].join(' · ') || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       {schedTher && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setSchedTher(null)}>
-          <div className="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[85vh] overflow-auto" onClick={e => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <h3 className="text-xl font-bold font-serif mb-1">{schedTher.display_name}</h3>
-            <p className="text-xs text-[#6b5d52] mb-4">Weekly availability + services they can deliver</p>
-            <h4 className="text-sm font-bold mb-2">Schedule</h4>
-            {canEdit && <div className="flex gap-2 mb-2 items-end">
-              <div><label className={LABEL}>Day</label><select className={INPUT} value={sched.weekday} onChange={e => setSched({ ...sched, weekday: e.target.value })}>{DOW.map((d, i) => <option key={i} value={i}>{d}</option>)}</select></div>
-              <div><label className={LABEL}>From</label><input className={INPUT} type="time" value={sched.start_time} onChange={e => setSched({ ...sched, start_time: e.target.value })} /></div>
-              <div><label className={LABEL}>To</label><input className={INPUT} type="time" value={sched.end_time} onChange={e => setSched({ ...sched, end_time: e.target.value })} /></div>
-              <button className={BTN_PRIMARY} onClick={addSched}><Plus size={14} /></button>
-            </div>}
-            <div className="flex flex-wrap gap-1.5 mb-4">
-              {schedules.map(s => <span key={s.id} className="px-2 py-1 rounded-lg bg-[#faf7f2] border border-[#e8dccf] text-[11px]">{DOW[s.weekday]} {s.start_time}–{s.end_time}</span>)}
+            <p className="text-xs text-[#6b5d52] mb-4">Weekly shifts, therapy skills, and the treatments they give</p>
+
+            <h4 className="text-sm font-bold mb-2">Shifts</h4>
+            {canEdit && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2 items-end">
+                <div><label className={LABEL}>Day</label><select className={INPUT} value={sched.weekday} onChange={e => setSched({ ...sched, weekday: e.target.value })}>{DOW.map((d, i) => <option key={i} value={i}>{d}</option>)}</select></div>
+                <div><label className={LABEL}>From</label><input className={INPUT} type="time" value={sched.start_time} onChange={e => setSched({ ...sched, start_time: e.target.value })} /></div>
+                <div><label className={LABEL}>To</label><input className={INPUT} type="time" value={sched.end_time} onChange={e => setSched({ ...sched, end_time: e.target.value })} /></div>
+                <div><label className={LABEL}>Break from</label><input className={INPUT} type="time" value={sched.break_start} onChange={e => setSched({ ...sched, break_start: e.target.value })} /></div>
+                <div><label className={LABEL}>Break to</label><input className={INPUT} type="time" value={sched.break_end} onChange={e => setSched({ ...sched, break_end: e.target.value })} /></div>
+                <div><label className={LABEL}>Starts on</label><input className={INPUT} type="date" value={sched.effective_from} onChange={e => setSched({ ...sched, effective_from: e.target.value })} /></div>
+                <div><label className={LABEL}>Ends on</label><input className={INPUT} type="date" value={sched.effective_to} onChange={e => setSched({ ...sched, effective_to: e.target.value })} /></div>
+                <button className={BTN_PRIMARY} onClick={addSched}><Plus size={14} /> Add shift</button>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-1.5 mb-5">
+              {schedules.map(s => (
+                <span key={s.id} className="px-2 py-1 rounded-lg bg-[#faf7f2] border border-[#e8dccf] text-[11px] flex items-center gap-1.5">
+                  {DOW[s.weekday]} {s.start_time}–{s.end_time}
+                  {s.break_start ? ` · break ${s.break_start}–${s.break_end}` : ''}
+                  {(s.effective_from || s.effective_to) ? ` · ${s.effective_from || 'from the start'} to ${s.effective_to || 'no end'}` : ''}
+                  {canDel && <button onClick={() => removeSched(s.id)} className="text-rose-600 hover:text-rose-800" aria-label="Remove shift"><X size={11} /></button>}
+                </span>
+              ))}
+              {!schedules.length && <span className="text-[11px] text-[#9c8e85]">No shifts — no slots are offered with this therapist.</span>}
             </div>
-            <h4 className="text-sm font-bold mb-2">Services (skills)</h4>
+
+            <h4 className="text-sm font-bold mb-1">Therapy skills</h4>
+            <p className="text-[11px] text-[#6b5d52] mb-2">A treatment that names skills is offered only with therapists who hold every one at the level it asks, with any certificate in date.</p>
+            {skillList.length > 0 && <div className="hidden sm:grid grid-cols-4 gap-2 text-[10px] font-semibold text-[#9c8e85] uppercase tracking-wide pb-1"><span>Skill</span><span>Level</span><span>Certified on</span><span>Valid until</span></div>}
+            <div className="divide-y divide-[#f0e9df] mb-2">
+              {skillList.filter(s => isOn(s) || held[s.id]).map(s => {
+                const h = held[s.id];
+                return (
+                  <div key={s.id} className="py-1.5 grid grid-cols-2 sm:grid-cols-4 gap-2 items-center">
+                    <label className="flex items-center gap-2 text-xs font-semibold text-[#3d3128]">
+                      <input type="checkbox" disabled={!canEdit} checked={!!h} onChange={e => { const on = e.target.checked; setNote(''); setHeld(prev => { const n = { ...prev }; if (on) n[s.id] = { level: 'QUALIFIED', certified_on: '', valid_until: '' }; else delete n[s.id]; return n; }); }} />
+                      <span>{s.name}{Number(s.requires_certification) === 1 && <span className="block text-[10px] font-normal text-[#9c8e85]">certificate needed</span>}</span>
+                    </label>
+                    {h ? (
+                      <>
+                        <select className={INPUT} disabled={!canEdit} value={h.level} onChange={e => { setNote(''); setHeld({ ...held, [s.id]: { ...h, level: e.target.value } }); }}>
+                          {Object.entries(SPA_LEVEL_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                        </select>
+                        <input className={INPUT} type="date" disabled={!canEdit} aria-label="Certified on" value={h.certified_on} onChange={e => { setNote(''); setHeld({ ...held, [s.id]: { ...h, certified_on: e.target.value } }); }} />
+                        <input className={INPUT} type="date" disabled={!canEdit} aria-label="Valid until" value={h.valid_until} onChange={e => { setNote(''); setHeld({ ...held, [s.id]: { ...h, valid_until: e.target.value } }); }} />
+                      </>
+                    ) : <span className="sm:col-span-3" />}
+                  </div>
+                );
+              })}
+              {!skillList.length && <p className="text-[11px] text-[#9c8e85] py-1">No skills on file yet — add them under Skills & Cabin Types.</p>}
+            </div>
+            {canEdit && skillList.length > 0 && (
+              <div className="flex items-center gap-2 mb-5">
+                <button className={BTN_PRIMARY} onClick={saveHeld}><Check size={14} /> Save skills</button>
+                {note && <span className="text-[11px] font-semibold text-emerald-700">{note}</span>}
+              </div>
+            )}
+
+            <h4 className="text-sm font-bold mb-1">Treatments they give</h4>
+            <p className="text-[11px] text-[#6b5d52] mb-2">Used for a treatment that names no skills.</p>
             <div className="flex flex-wrap gap-1.5">
               {/* Active treatments, plus any inactive one still assigned so it can be taken off. */}
-              {services.filter(s => isOn(s) || skills.includes(s.id)).map(s => (
-                <button key={s.id} onClick={() => toggleSkill(s.id)} disabled={!canEdit}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border disabled:opacity-60 ${skills.includes(s.id) ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>
+              {services.filter(s => isOn(s) || svcSkills.includes(s.id)).map(s => (
+                <button key={s.id} onClick={() => toggleSvc(s.id)} disabled={!canEdit}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border disabled:opacity-60 ${svcSkills.includes(s.id) ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>
                   {s.name}{isOn(s) ? '' : ' (inactive)'}
                 </button>
               ))}
             </div>
             <div className="flex justify-end mt-5"><button className={BTN_GHOST} onClick={() => setSchedTher(null)}>Done</button></div>
+          </div>
+        </div>
+      )}
+
+      {profile && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setProfile(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h3 className="text-xl font-bold font-serif mb-4">Therapist profile</h3>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2"><label className={LABEL}>Name</label><input className={INPUT} disabled={!canEdit} value={profile.display_name} onChange={e => setProfile({ ...profile, display_name: e.target.value })} /></div>
+              <div><label className={LABEL}>Gender</label>
+                <select className={INPUT} disabled={!canEdit} value={profile.gender} onChange={e => setProfile({ ...profile, gender: e.target.value })}>
+                  <option value="">Not recorded</option><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="OTHER">Other</option>
+                </select></div>
+              <div><label className={LABEL}>Phone</label><input className={INPUT} disabled={!canEdit} value={profile.phone} onChange={e => setProfile({ ...profile, phone: e.target.value })} /></div>
+              <div className="col-span-2"><label className={LABEL}>Languages</label><input className={INPUT} disabled={!canEdit} placeholder="Malayalam, Hindi, English" value={profile.languages} onChange={e => setProfile({ ...profile, languages: e.target.value })} /></div>
+              <div className="col-span-2"><label className={LABEL}>Staff record <span className="font-normal text-[#9d8b7e]">(links attendance, payroll and their login)</span></label>
+                <select className={INPUT} disabled={!canEdit} value={profile.staff_id} onChange={e => setProfile({ ...profile, staff_id: e.target.value })}>
+                  <option value="">Not linked</option>
+                  {staffOptions.map(s => <option key={s.id} value={s.id}>{s.name}{s.role ? ` · ${s.role}` : ''}</option>)}
+                  {profile.staff_id && !staffOptions.some(s => s.id === profile.staff_id) && <option value={profile.staff_id}>Linked staff record (inactive or not listed)</option>}
+                </select></div>
+              <div className="col-span-2"><label className={LABEL}>Photo URL</label><input className={INPUT} disabled={!canEdit} value={profile.photo_url} onChange={e => setProfile({ ...profile, photo_url: e.target.value })} /></div>
+              <div className="col-span-2"><label className={LABEL}>About</label><textarea className={INPUT} rows={2} disabled={!canEdit} value={profile.bio} onChange={e => setProfile({ ...profile, bio: e.target.value })} /></div>
+              <label className="flex items-center gap-2 text-sm col-span-2"><input type="checkbox" disabled={!canEdit} checked={profile.is_active} onChange={e => setProfile({ ...profile, is_active: e.target.checked })} /> Active — offered for bookings</label>
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button className={BTN_GHOST} onClick={() => setProfile(null)}>{canEdit ? 'Cancel' : 'Close'}</button>
+              {canEdit && <button className={BTN_PRIMARY} onClick={saveProfile}>Save</button>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cabinEdit && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setCabinEdit(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h3 className="text-xl font-bold font-serif mb-4">Edit cabin</h3>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2"><label className={LABEL}>Name</label><input className={INPUT} value={cabinEdit.name} onChange={e => setCabinEdit({ ...cabinEdit, name: e.target.value })} /></div>
+              <div className="col-span-2"><label className={LABEL}>Cabin type</label>
+                <select className={INPUT} value={cabinEdit.cabin_type_id} onChange={e => setCabinEdit({ ...cabinEdit, cabin_type_id: e.target.value })}>
+                  <option value="">No cabin type</option>
+                  {cabinTypes.filter(c => isOn(c) || c.id === cabinEdit.cabin_type_id).map(c => <option key={c.id} value={c.id}>{c.name}{isOn(c) ? '' : ' (inactive)'}</option>)}
+                </select></div>
+              <div><label className={LABEL}>Capacity</label><input className={INPUT} type="number" min={1} value={cabinEdit.capacity} onChange={e => setCabinEdit({ ...cabinEdit, capacity: e.target.value })} /></div>
+              <div><label className={LABEL}>Turnaround (min)</label><input className={INPUT} type="number" min={0} value={cabinEdit.turnaround_min} onChange={e => setCabinEdit({ ...cabinEdit, turnaround_min: e.target.value })} /></div>
+              <p className="col-span-2 -mt-2 text-[11px] text-[#6b5d52]">Minutes kept clear before and after every booking, for cleaning and resetting the cabin.</p>
+              <div className={cabinEdit.status === 'AVAILABLE' ? 'col-span-2' : ''}><label className={LABEL}>Status</label>
+                <select className={INPUT} value={cabinEdit.status} onChange={e => setCabinEdit({ ...cabinEdit, status: e.target.value })}>
+                  {Object.entries(CABIN_STATUS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                </select></div>
+              {cabinEdit.status !== 'AVAILABLE' && <div><label className={LABEL}>Reason</label><input className={INPUT} placeholder="e.g. droni being re-oiled" value={cabinEdit.status_reason} onChange={e => setCabinEdit({ ...cabinEdit, status_reason: e.target.value })} /></div>}
+              {(cabinEdit.status === 'MAINTENANCE' || cabinEdit.status === 'OUT_OF_ORDER') && <p className="col-span-2 -mt-2 text-[11px] text-amber-700">No new booking goes into this cabin until it is available again. Existing bookings stay as they are.</p>}
+              <div className="col-span-2"><label className={LABEL}>Equipment</label><textarea className={INPUT} rows={2} placeholder="Teak droni, oil warmer, dhara stand" value={cabinEdit.equipment} onChange={e => setCabinEdit({ ...cabinEdit, equipment: e.target.value })} /></div>
+              <div className="col-span-2"><label className={LABEL}>Notes</label><input className={INPUT} value={cabinEdit.notes} onChange={e => setCabinEdit({ ...cabinEdit, notes: e.target.value })} /></div>
+              <label className="flex items-center gap-2 text-sm col-span-2"><input type="checkbox" checked={cabinEdit.is_active} onChange={e => setCabinEdit({ ...cabinEdit, is_active: e.target.checked })} /> Active</label>
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button className={BTN_GHOST} onClick={() => setCabinEdit(null)}>Cancel</button>
+              <button className={BTN_PRIMARY} onClick={saveCabin}>Save</button>
+            </div>
           </div>
         </div>
       )}

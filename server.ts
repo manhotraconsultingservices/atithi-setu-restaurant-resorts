@@ -33547,7 +33547,19 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
-      const allow = ['name','category','description','duration_min','buffer_before_min','buffer_after_min','price','gst_percent','requires_room','requires_therapist','commission_pct','image_url','display_order','is_active'];
+      const allow = ['name','category','description','duration_min','buffer_before_min','buffer_after_min','price','gst_percent','requires_room','requires_therapist','commission_pct','image_url','display_order','is_active','cabin_type_id','gender_rule'];
+      // A blank gender rule is the default: any therapist.
+      if (b.gender_rule !== undefined) {
+        const rule = String(b.gender_rule || 'ANY').toUpperCase();
+        if (!['ANY', 'SAME_GENDER'].includes(rule)) return res.status(400).json({ error: 'Gender rule must be any or same gender.', code: 'GENDER_RULE_INVALID' });
+        b.gender_rule = rule;
+      }
+      if (b.cabin_type_id !== undefined) {
+        b.cabin_type_id = b.cabin_type_id || null;
+        if (b.cabin_type_id && !(await db.get("SELECT id FROM spa_cabin_types WHERE id = ?", [b.cabin_type_id]))) {
+          return res.status(400).json({ error: 'That cabin type does not exist.', code: 'CABIN_TYPE_UNKNOWN' });
+        }
+      }
       // The same rules as creation, so an edit cannot store what a new treatment may not.
       if (b.duration_min !== undefined && !(Number(b.duration_min) > 0)) return res.status(400).json({ error: "Duration must be more than 0 minutes.", code: 'DURATION_INVALID' });
       for (const k of ['buffer_before_min', 'buffer_after_min']) {
@@ -33651,7 +33663,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      res.json(await db.query("SELECT * FROM spa_resources ORDER BY name"));
+      res.json(await db.query(`SELECT r.*, ct.name AS cabin_type_name FROM spa_resources r LEFT JOIN spa_cabin_types ct ON ct.id = r.cabin_type_id ORDER BY r.name`));
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch resources" }); }
   });
 
@@ -33662,11 +33674,16 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       if (!b.name) return res.status(400).json({ error: "name is required" });
+      const cabin = await spaCabinProfile(db, b);
+      if (cabin.error) return res.status(400).json({ error: cabin.error, code: 'CABIN_INVALID' });
       const id = mkSpaId('SPARES');
       await db.run(
         `INSERT INTO spa_resources (id, name, resource_type, capacity, notes, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
         [id, b.name, b.resource_type || 'CABIN', Number(b.capacity || 1), b.notes || null]
       );
+      const cabinKeys = Object.keys(cabin.values).filter(k => k !== 'capacity');
+      if (cabinKeys.length) await db.run(`UPDATE spa_resources SET ${cabinKeys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...cabinKeys.map(k => cabin.values[k]), id]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CABIN', objectId: id, action: 'CREATED', summary: `Cabin "${b.name}" added` }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_resources WHERE id = ?", [id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to create resource" }); }
   });
@@ -33678,13 +33695,22 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
-      for (const k of ['name','resource_type','capacity','notes','is_active']) {
+      for (const k of ['name','resource_type','notes','is_active']) {
         if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
       }
+      const cabinP = await spaCabinProfile(db, b);
+      if (cabinP.error) return res.status(400).json({ error: cabinP.error, code: 'CABIN_INVALID' });
+      for (const k of Object.keys(cabinP.values)) { fields.push(`${k} = ?`); vals.push(cabinP.values[k]); }
       if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      const cabinBefore: any = await db.get("SELECT * FROM spa_resources WHERE id = ?", [req.params.rid]);
+      if (!cabinBefore) return res.status(404).json({ error: "Cabin not found" });
       vals.push(req.params.rid);
       await db.run(`UPDATE spa_resources SET ${fields.join(', ')} WHERE id = ?`, vals);
-      res.json(await db.get("SELECT * FROM spa_resources WHERE id = ?", [req.params.rid]));
+      const cabinAfter: any = await db.get("SELECT * FROM spa_resources WHERE id = ?", [req.params.rid]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CABIN', objectId: req.params.rid, action: 'UPDATED',
+        summary: `Cabin "${cabinAfter?.name}" updated${cabinBefore.status !== cabinAfter?.status ? ` · ${cabinBefore.status || 'AVAILABLE'} → ${cabinAfter?.status}` : ''}`,
+        before: cabinBefore, after: cabinAfter }).catch(() => {});
+      res.json(cabinAfter);
     } catch (err: any) { res.status(500).json({ error: "Failed to update resource" }); }
   });
 
@@ -33729,7 +33755,14 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      res.json(await db.query("SELECT * FROM spa_therapists ORDER BY display_name"));
+      const therapistRows: any[] = await db.query("SELECT * FROM spa_therapists ORDER BY display_name");
+      // Each therapist's skills, for the list and for finding therapists by skill.
+      const heldSkills: any[] = await db.query(
+        `SELECT ts.therapist_id, ts.skill_id, ts.level, ts.certified_on, ts.valid_until, sk.name, sk.code, COALESCE(sk.requires_certification, 0) AS requires_certification
+           FROM spa_therapist_skills ts JOIN spa_skills sk ON sk.id = ts.skill_id
+          WHERE COALESCE(sk.is_active, 1) = 1 ORDER BY sk.name`).catch(() => []);
+      for (const t of therapistRows) t.skills = heldSkills.filter((h: any) => h.therapist_id === t.id);
+      res.json(therapistRows);
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch therapists" }); }
   });
 
@@ -33740,11 +33773,16 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       if (!b.display_name) return res.status(400).json({ error: "display_name is required" });
+      const profile = spaTherapistProfile(b);
+      if (profile.error) return res.status(400).json({ error: profile.error, code: 'PROFILE_INVALID' });
       const id = mkSpaId('SPATHR');
       await db.run(
         `INSERT INTO spa_therapists (id, staff_id, display_name, bio, commission_pct_override, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
         [id, b.staff_id || null, b.display_name, b.bio || null, b.commission_pct_override ?? null]
       );
+      const profKeys = Object.keys(profile.values);
+      if (profKeys.length) await db.run(`UPDATE spa_therapists SET ${profKeys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...profKeys.map(k => profile.values[k]), id]);
+      writeObjectAudit(db, req, { objectType: 'SPA_THERAPIST', objectId: id, action: 'CREATED', summary: `Therapist "${b.display_name}" added` }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_therapists WHERE id = ?", [id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to create therapist" }); }
   });
@@ -33759,10 +33797,17 @@ ${data.tenant.name}`;
       for (const k of ['staff_id','display_name','bio','commission_pct_override','is_active']) {
         if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
       }
+      const profileP = spaTherapistProfile(b);
+      if (profileP.error) return res.status(400).json({ error: profileP.error, code: 'PROFILE_INVALID' });
+      for (const k of Object.keys(profileP.values)) { fields.push(`${k} = ?`); vals.push(profileP.values[k]); }
       if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      const therBefore: any = await db.get("SELECT * FROM spa_therapists WHERE id = ?", [req.params.tid]);
+      if (!therBefore) return res.status(404).json({ error: "Therapist not found" });
       vals.push(req.params.tid);
       await db.run(`UPDATE spa_therapists SET ${fields.join(', ')} WHERE id = ?`, vals);
-      res.json(await db.get("SELECT * FROM spa_therapists WHERE id = ?", [req.params.tid]));
+      const therAfter: any = await db.get("SELECT * FROM spa_therapists WHERE id = ?", [req.params.tid]);
+      writeObjectAudit(db, req, { objectType: 'SPA_THERAPIST', objectId: req.params.tid, action: 'UPDATED', summary: `Therapist "${therAfter?.display_name}" updated`, before: therBefore, after: therAfter }).catch(() => {});
+      res.json(therAfter);
     } catch (err: any) { res.status(500).json({ error: "Failed to update therapist" }); }
   });
 
@@ -33825,11 +33870,29 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       if (b.weekday === undefined || !b.start_time || !b.end_time) return res.status(400).json({ error: "weekday, start_time, end_time required" });
+      // A shift is checked before it is saved: the times, a break inside the shift,
+      // and effective dates in order. A bad shift silently removed every slot.
+      const hhmm = (v: any) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || '')) ? String(v) : null;
+      const wd = Number(b.weekday);
+      const shiftStart = hhmm(b.start_time), shiftEnd = hhmm(b.end_time);
+      if (!(Number.isInteger(wd) && wd >= 0 && wd <= 6)) return res.status(400).json({ error: 'Day must be 0 (Sunday) to 6 (Saturday).', code: 'SHIFT_INVALID' });
+      if (!shiftStart || !shiftEnd || shiftEnd <= shiftStart) return res.status(400).json({ error: 'A shift needs a start and an end time (HH:MM), with the end after the start.', code: 'SHIFT_INVALID' });
+      const breakStart = b.break_start ? hhmm(b.break_start) : null;
+      const breakEnd = b.break_end ? hhmm(b.break_end) : null;
+      if ((b.break_start || b.break_end) && (!breakStart || !breakEnd || breakEnd <= breakStart || breakStart < shiftStart || breakEnd > shiftEnd)) {
+        return res.status(400).json({ error: 'A break needs a start and an end inside the shift, with the end after the start.', code: 'BREAK_INVALID' });
+      }
+      const effFrom = b.effective_from ? spaYmd(b.effective_from) : null;
+      const effTo = b.effective_to ? spaYmd(b.effective_to) : null;
+      if ((b.effective_from && !effFrom) || (b.effective_to && !effTo) || (effFrom && effTo && effTo < effFrom)) {
+        return res.status(400).json({ error: 'Effective dates must be YYYY-MM-DD, with the end on or after the start.', code: 'DATES_INVALID' });
+      }
       const id = mkSpaId('SPASCH');
       await db.run(
-        `INSERT INTO spa_therapist_schedules (id, therapist_id, weekday, start_time, end_time, effective_from, effective_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [id, req.params.tid, Number(b.weekday), b.start_time, b.end_time, b.effective_from || null, b.effective_to || null]
+        `INSERT INTO spa_therapist_schedules (id, therapist_id, weekday, start_time, end_time, effective_from, effective_to, break_start, break_end) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, req.params.tid, wd, shiftStart, shiftEnd, effFrom, effTo, breakStart, breakEnd]
       );
+      writeObjectAudit(db, req, { objectType: 'SPA_THERAPIST', objectId: req.params.tid, action: 'SHIFT_ADDED', summary: `Shift ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][wd]} ${shiftStart}–${shiftEnd}${breakStart ? ` (break ${breakStart}–${breakEnd})` : ''}` }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_therapist_schedules WHERE id = ?", [id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to create schedule" }); }
   });
@@ -33842,6 +33905,486 @@ ${data.tenant.name}`;
       await db.run("DELETE FROM spa_therapist_schedules WHERE id = ?", [req.params.schedId]);
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to delete schedule" }); }
+  });
+
+  // ═══ Phase 1 (Sep 2026): skills, cabin types, therapist skills, service
+  // requirements, staff links, the Ayurveda starter pack and CSV import ═══════
+  const SPA_LEVELS = ['TRAINEE', 'QUALIFIED', 'SENIOR'];
+  const SPA_CABIN_STATUSES = ['AVAILABLE', 'CLEANING', 'MAINTENANCE', 'OUT_OF_ORDER'];
+  const spaCode = (s: any) => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+  const spaYmd = (v: any): string | null => { const s = String(v ?? '').trim(); return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null; };
+  const spaGender = (v: any): string | null => {
+    const s = String(v ?? '').trim().toUpperCase();
+    return s === 'F' || s === 'FEMALE' ? 'FEMALE' : s === 'M' || s === 'MALE' ? 'MALE' : s === 'OTHER' ? 'OTHER' : null;
+  };
+
+  /** Therapist profile fields a create, edit or import may carry, checked. Only the
+   *  keys present are returned, so an edit never blanks what it did not send. */
+  const spaTherapistProfile = (b: any): { error?: string; values: Record<string, any> } => {
+    const v: Record<string, any> = {};
+    if (b.gender !== undefined) {
+      if (b.gender && !spaGender(b.gender)) return { error: 'Gender must be female, male or other.', values: v };
+      v.gender = spaGender(b.gender);
+    }
+    if (b.max_treatments_per_day !== undefined) {
+      const raw = b.max_treatments_per_day;
+      const n = raw === null || raw === '' ? null : Number(raw);
+      if (n !== null && !(Number.isInteger(n) && n >= 1 && n <= 50)) return { error: 'Treatments per day must be a whole number from 1 to 50.', values: v };
+      v.max_treatments_per_day = n;
+    }
+    if (b.languages !== undefined) v.languages = String(b.languages || '').trim().slice(0, 200) || null;
+    if (b.phone !== undefined) v.phone = String(b.phone || '').trim().slice(0, 20) || null;
+    if (b.photo_url !== undefined) v.photo_url = String(b.photo_url || '').trim().slice(0, 500) || null;
+    return { values: v };
+  };
+
+  /** Cabin fields a create, edit or import may carry, checked. */
+  const spaCabinProfile = async (db: DbInterface, b: any): Promise<{ error?: string; values: Record<string, any> }> => {
+    const v: Record<string, any> = {};
+    if (b.cabin_type_id !== undefined) {
+      if (b.cabin_type_id) {
+        const ct: any = await db.get("SELECT id FROM spa_cabin_types WHERE id = ?", [b.cabin_type_id]);
+        if (!ct) return { error: 'That cabin type does not exist.', values: v };
+      }
+      v.cabin_type_id = b.cabin_type_id || null;
+    }
+    if (b.equipment !== undefined) v.equipment = String(b.equipment || '').trim().slice(0, 500) || null;
+    if (b.gender_designation !== undefined) {
+      const g = spaGender(b.gender_designation);
+      v.gender_designation = g === 'FEMALE' || g === 'MALE' ? g : 'ANY';
+    }
+    if (b.turnaround_min !== undefined) {
+      const n = b.turnaround_min === '' || b.turnaround_min === null ? 0 : Number(b.turnaround_min);
+      if (!(Number.isInteger(n) && n >= 0 && n <= 240)) return { error: 'Turnaround must be a whole number of minutes from 0 to 240.', values: v };
+      v.turnaround_min = n;
+    }
+    if (b.capacity !== undefined && b.capacity !== null && b.capacity !== '') {
+      const n = Number(b.capacity);
+      if (!(Number.isInteger(n) && n >= 1 && n <= 20)) return { error: 'Capacity must be a whole number from 1 to 20.', values: v };
+      v.capacity = n;
+    }
+    if (b.status !== undefined) {
+      const s = String(b.status || 'AVAILABLE').toUpperCase();
+      if (!SPA_CABIN_STATUSES.includes(s)) return { error: 'Status must be available, cleaning, maintenance or out of order.', values: v };
+      v.status = s;
+    }
+    if (b.status_reason !== undefined) v.status_reason = String(b.status_reason || '').trim().slice(0, 200) || null;
+    return { values: v };
+  };
+
+  // ── Skills master ──────────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/skills", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT * FROM spa_skills ORDER BY is_active DESC, name"));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch skills" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/skills", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const name = String(b.name || '').trim().slice(0, 80);
+      if (name.length < 2) return res.status(400).json({ error: 'Give the skill a name.', code: 'NAME_REQUIRED' });
+      const code = spaCode(b.code || name);
+      if (!code) return res.status(400).json({ error: 'The skill needs a code of letters or digits.', code: 'CODE_INVALID' });
+      const dup: any = await db.get("SELECT id FROM spa_skills WHERE code = ?", [code]);
+      if (dup) return res.status(409).json({ error: `A skill with the code ${code} already exists.`, code: 'SKILL_EXISTS', existing_id: dup.id });
+      const id = mkSpaId('SPASKL');
+      await db.run("INSERT INTO spa_skills (id, code, name, category, requires_certification, is_active) VALUES (?, ?, ?, ?, ?, 1)",
+        [id, code, name, b.category ? String(b.category).slice(0, 40) : null, b.requires_certification ? 1 : 0]);
+      writeObjectAudit(db, req, { objectType: 'SPA_SKILL', objectId: id, action: 'CREATED', summary: `Skill "${name}" (${code}) added` }).catch(() => {});
+      res.status(201).json(await db.get("SELECT * FROM spa_skills WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create skill" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/skills/:skid", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const before: any = await db.get("SELECT * FROM spa_skills WHERE id = ?", [req.params.skid]);
+      if (!before) return res.status(404).json({ error: 'Skill not found' });
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      if (b.name !== undefined) {
+        const name = String(b.name || '').trim().slice(0, 80);
+        if (name.length < 2) return res.status(400).json({ error: 'Give the skill a name.', code: 'NAME_REQUIRED' });
+        fields.push('name = ?'); vals.push(name);
+      }
+      if (b.category !== undefined) { fields.push('category = ?'); vals.push(b.category ? String(b.category).slice(0, 40) : null); }
+      if (b.requires_certification !== undefined) { fields.push('requires_certification = ?'); vals.push(b.requires_certification ? 1 : 0); }
+      if (b.is_active !== undefined) { fields.push('is_active = ?'); vals.push(b.is_active ? 1 : 0); }
+      if (!fields.length) return res.status(400).json({ error: 'No fields to update' });
+      vals.push(req.params.skid);
+      await db.run(`UPDATE spa_skills SET ${fields.join(', ')} WHERE id = ?`, vals);
+      const after: any = await db.get("SELECT * FROM spa_skills WHERE id = ?", [req.params.skid]);
+      writeObjectAudit(db, req, { objectType: 'SPA_SKILL', objectId: req.params.skid, action: 'UPDATED', summary: `Skill "${after.name}" updated`, before, after }).catch(() => {});
+      res.json(after);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update skill" }); }
+  });
+
+  // ── Cabin types master ─────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/cabin-types", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT * FROM spa_cabin_types ORDER BY is_active DESC, name"));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch cabin types" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/cabin-types", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const name = String(b.name || '').trim().slice(0, 80);
+      if (name.length < 2) return res.status(400).json({ error: 'Give the cabin type a name.', code: 'NAME_REQUIRED' });
+      const code = spaCode(b.code || name);
+      if (!code) return res.status(400).json({ error: 'The cabin type needs a code of letters or digits.', code: 'CODE_INVALID' });
+      const dup: any = await db.get("SELECT id FROM spa_cabin_types WHERE code = ?", [code]);
+      if (dup) return res.status(409).json({ error: `A cabin type with the code ${code} already exists.`, code: 'CABIN_TYPE_EXISTS', existing_id: dup.id });
+      const id = mkSpaId('SPACTY');
+      await db.run("INSERT INTO spa_cabin_types (id, code, name, description, is_active) VALUES (?, ?, ?, ?, 1)",
+        [id, code, name, b.description ? String(b.description).slice(0, 200) : null]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CABIN_TYPE', objectId: id, action: 'CREATED', summary: `Cabin type "${name}" (${code}) added` }).catch(() => {});
+      res.status(201).json(await db.get("SELECT * FROM spa_cabin_types WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create cabin type" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/cabin-types/:ctid", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const before: any = await db.get("SELECT * FROM spa_cabin_types WHERE id = ?", [req.params.ctid]);
+      if (!before) return res.status(404).json({ error: 'Cabin type not found' });
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      if (b.name !== undefined) {
+        const name = String(b.name || '').trim().slice(0, 80);
+        if (name.length < 2) return res.status(400).json({ error: 'Give the cabin type a name.', code: 'NAME_REQUIRED' });
+        fields.push('name = ?'); vals.push(name);
+      }
+      if (b.description !== undefined) { fields.push('description = ?'); vals.push(b.description ? String(b.description).slice(0, 200) : null); }
+      if (b.is_active !== undefined) { fields.push('is_active = ?'); vals.push(b.is_active ? 1 : 0); }
+      if (!fields.length) return res.status(400).json({ error: 'No fields to update' });
+      vals.push(req.params.ctid);
+      await db.run(`UPDATE spa_cabin_types SET ${fields.join(', ')} WHERE id = ?`, vals);
+      const after: any = await db.get("SELECT * FROM spa_cabin_types WHERE id = ?", [req.params.ctid]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CABIN_TYPE', objectId: req.params.ctid, action: 'UPDATED', summary: `Cabin type "${after.name}" updated`, before, after }).catch(() => {});
+      res.json(after);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update cabin type" }); }
+  });
+
+  // ── A therapist's skills: level and certification ──────────────────────────
+  app.get("/api/restaurant/:id/spa/therapists/:tid/skills", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query(
+        `SELECT ts.*, sk.name, sk.code, COALESCE(sk.requires_certification, 0) AS requires_certification, sk.is_active AS skill_active
+           FROM spa_therapist_skills ts JOIN spa_skills sk ON sk.id = ts.skill_id
+          WHERE ts.therapist_id = ? ORDER BY sk.name`, [req.params.tid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch therapist skills" }); }
+  });
+
+  app.put("/api/restaurant/:id/spa/therapists/:tid/skills", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const ther: any = await db.get("SELECT id, display_name FROM spa_therapists WHERE id = ?", [req.params.tid]);
+      if (!ther) return res.status(404).json({ error: 'Therapist not found' });
+      const list = Array.isArray(req.body?.skills) ? req.body.skills : null;
+      if (!list) return res.status(400).json({ error: 'Send the therapist\'s skills as a list.', code: 'SKILLS_REQUIRED' });
+      const clean: any[] = [];
+      const seen = new Set<string>();
+      for (const s of list) {
+        if (!s?.skill_id || seen.has(String(s.skill_id))) continue;
+        const sk: any = await db.get("SELECT id, name FROM spa_skills WHERE id = ?", [s.skill_id]);
+        if (!sk) return res.status(400).json({ error: 'One of the skills does not exist.', code: 'SKILL_UNKNOWN' });
+        const level = String(s.level || 'QUALIFIED').toUpperCase();
+        if (!SPA_LEVELS.includes(level)) return res.status(400).json({ error: `Level for ${sk.name} must be trainee, qualified or senior.`, code: 'LEVEL_INVALID' });
+        const certifiedOn = s.certified_on ? spaYmd(s.certified_on) : null;
+        const validUntil = s.valid_until ? spaYmd(s.valid_until) : null;
+        if ((s.certified_on && !certifiedOn) || (s.valid_until && !validUntil)) return res.status(400).json({ error: `Dates for ${sk.name} must be YYYY-MM-DD.`, code: 'DATE_INVALID' });
+        if (certifiedOn && validUntil && validUntil < certifiedOn) return res.status(400).json({ error: `The certificate for ${sk.name} cannot expire before it was issued.`, code: 'DATE_INVALID' });
+        seen.add(String(s.skill_id));
+        clean.push({ skill_id: sk.id, name: sk.name, level, certified_on: certifiedOn, valid_until: validUntil, notes: s.notes ? String(s.notes).slice(0, 200) : null });
+      }
+      const before: any[] = await db.query("SELECT skill_id, level, certified_on, valid_until FROM spa_therapist_skills WHERE therapist_id = ?", [ther.id]);
+      await db.run("DELETE FROM spa_therapist_skills WHERE therapist_id = ?", [ther.id]);
+      for (const c of clean) {
+        await db.run("INSERT INTO spa_therapist_skills (id, therapist_id, skill_id, level, certified_on, valid_until, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [mkSpaId('SPATSK'), ther.id, c.skill_id, c.level, c.certified_on, c.valid_until, c.notes]);
+      }
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_THERAPIST', objectId: ther.id, action: 'SKILLS_UPDATED',
+        summary: `Skills for ${ther.display_name}: ${clean.map(c => `${c.name} (${c.level.toLowerCase()})`).join(', ') || 'none'}`,
+        before: { skills: before }, after: { skills: clean.map(({ name, ...rest }) => rest) },
+      }).catch(() => {});
+      res.json(await db.query(
+        `SELECT ts.*, sk.name, sk.code FROM spa_therapist_skills ts JOIN spa_skills sk ON sk.id = ts.skill_id WHERE ts.therapist_id = ? ORDER BY sk.name`, [ther.id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to save therapist skills" }); }
+  });
+
+  // ── What a treatment needs: skills at a level, a cabin type, a gender rule ──
+  app.get("/api/restaurant/:id/spa/services/:sid/requirements", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const svc: any = await db.get("SELECT id, cabin_type_id, gender_rule FROM spa_services WHERE id = ?", [req.params.sid]);
+      if (!svc) return res.status(404).json({ error: 'Service not found' });
+      const skills = await db.query(
+        `SELECT ss.skill_id, ss.min_level, sk.name, sk.code FROM spa_service_skills ss JOIN spa_skills sk ON sk.id = ss.skill_id
+          WHERE ss.service_id = ? ORDER BY sk.name`, [svc.id]);
+      res.json({ service_id: svc.id, cabin_type_id: svc.cabin_type_id || null, gender_rule: svc.gender_rule || 'ANY', skills });
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch requirements" }); }
+  });
+
+  app.put("/api/restaurant/:id/spa/services/:sid/requirements", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const svc: any = await db.get("SELECT * FROM spa_services WHERE id = ?", [req.params.sid]);
+      if (!svc) return res.status(404).json({ error: 'Service not found' });
+      const b = req.body || {};
+      const genderRule = String(b.gender_rule || 'ANY').toUpperCase();
+      if (!['ANY', 'SAME_GENDER'].includes(genderRule)) return res.status(400).json({ error: 'Gender rule must be any or same gender.', code: 'GENDER_RULE_INVALID' });
+      let cabinTypeId: string | null = b.cabin_type_id || null;
+      if (cabinTypeId) {
+        const ct: any = await db.get("SELECT id FROM spa_cabin_types WHERE id = ?", [cabinTypeId]);
+        if (!ct) return res.status(400).json({ error: 'That cabin type does not exist.', code: 'CABIN_TYPE_UNKNOWN' });
+      }
+      const list = Array.isArray(b.skills) ? b.skills : [];
+      const clean: any[] = []; const seen = new Set<string>();
+      for (const s of list) {
+        if (!s?.skill_id || seen.has(String(s.skill_id))) continue;
+        const sk: any = await db.get("SELECT id, name FROM spa_skills WHERE id = ?", [s.skill_id]);
+        if (!sk) return res.status(400).json({ error: 'One of the skills does not exist.', code: 'SKILL_UNKNOWN' });
+        const minLevel = String(s.min_level || 'QUALIFIED').toUpperCase();
+        if (!SPA_LEVELS.includes(minLevel)) return res.status(400).json({ error: `Minimum level for ${sk.name} must be trainee, qualified or senior.`, code: 'LEVEL_INVALID' });
+        seen.add(String(s.skill_id));
+        clean.push({ skill_id: sk.id, name: sk.name, min_level: minLevel });
+      }
+      const before = { cabin_type_id: svc.cabin_type_id || null, gender_rule: svc.gender_rule || 'ANY',
+        skills: await db.query("SELECT skill_id, min_level FROM spa_service_skills WHERE service_id = ?", [svc.id]) };
+      await db.run("UPDATE spa_services SET cabin_type_id = ?, gender_rule = ? WHERE id = ?", [cabinTypeId, genderRule, svc.id]);
+      await db.run("DELETE FROM spa_service_skills WHERE service_id = ?", [svc.id]);
+      for (const c of clean) {
+        await db.run("INSERT INTO spa_service_skills (id, service_id, skill_id, min_level) VALUES (?, ?, ?, ?)", [mkSpaId('SPASVK'), svc.id, c.skill_id, c.min_level]);
+      }
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_SERVICE', objectId: svc.id, action: 'REQUIREMENTS_UPDATED',
+        summary: `"${svc.name}" needs ${clean.map(c => `${c.name} (${c.min_level.toLowerCase()}+)`).join(', ') || 'no named skills'}${genderRule === 'SAME_GENDER' ? ' · same-gender therapist' : ''}`,
+        before, after: { cabin_type_id: cabinTypeId, gender_rule: genderRule, skills: clean.map(({ name, ...rest }) => rest) },
+      }).catch(() => {});
+      res.json({ service_id: svc.id, cabin_type_id: cabinTypeId, gender_rule: genderRule, skills: clean });
+    } catch (err: any) { res.status(500).json({ error: "Failed to save requirements" }); }
+  });
+
+  // ── Staff a therapist can be linked to (HR record and login are one row) ────
+  app.get("/api/restaurant/:id/spa/staff-options", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT id, name, role, phone FROM attendance_staff WHERE is_active = 1 ORDER BY name").catch(() => []));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch staff" }); }
+  });
+
+  // ── Ayurveda starter pack: skills and cabin types, added once, never overwritten ──
+  const AYURVEDA_SKILLS: [string, string, string, number][] = [
+    ['ABHYANGA', 'Abhyanga (full-body oil massage)', 'MASSAGE', 0],
+    ['PIZHICHIL', 'Pizhichil (warm oil bath)', 'MASSAGE', 1],
+    ['NJAVARAKIZHI', 'Njavarakizhi (medicated rice bolus)', 'KIZHI', 1],
+    ['ELAKIZHI', 'Elakizhi (herbal leaf bolus)', 'KIZHI', 0],
+    ['PODIKIZHI', 'Podikizhi (herbal powder bolus)', 'KIZHI', 0],
+    ['SHIRODHARA', 'Shirodhara (oil poured on the forehead)', 'DHARA', 1],
+    ['UDVARTANA', 'Udvartana (herbal powder scrub)', 'BODY', 0],
+    ['PADABHYANGA', 'Padabhyanga (foot massage)', 'MASSAGE', 0],
+    ['MUKHABHYANGA', 'Mukhabhyanga (face massage)', 'FACE', 0],
+    ['THALAPOTHICHIL', 'Thalapothichil (herbal head pack)', 'HEAD', 0],
+    ['NETRA_TARPANA', 'Netra Tarpana (eye therapy)', 'FACE', 1],
+    ['LEPA', 'Lepa (herbal paste)', 'BODY', 0],
+    ['VASHPA_SNANA', 'Vashpa Snana (herbal steam)', 'STEAM', 0],
+  ];
+  const AYURVEDA_CABIN_TYPES: [string, string, string][] = [
+    ['ABHYANGA_DRONI', 'Abhyanga cabin with droni', 'Wooden or stone treatment table for oil therapies'],
+    ['PIZHICHIL', 'Pizhichil cabin', 'Droni with warm-oil pouring set-up'],
+    ['SHIRODHARA', 'Shirodhara cabin', 'Dhara stand and pot over a droni'],
+    ['HERBAL_STEAM', 'Herbal steam room', 'Steam chamber or box for Vashpa Snana'],
+    ['FACE_HEAD', 'Face and head therapy room', 'Recliner for face, head and eye therapies'],
+    ['COUPLE', 'Couple therapy room', 'Two drones side by side'],
+    ['CONSULTATION', 'Consultation room', 'Doctor consultation and assessment'],
+  ];
+
+  app.post("/api/restaurant/:id/spa/setup/ayurveda-starter", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      // Previews unless told otherwise, like the imports.
+      const dry = req.body?.dry_run !== false;
+      let skillsCreated = 0, skillsExisting = 0, typesCreated = 0, typesExisting = 0;
+      for (const [code, name, category, cert] of AYURVEDA_SKILLS) {
+        const has: any = await db.get("SELECT id FROM spa_skills WHERE code = ?", [code]);
+        if (has) { skillsExisting++; continue; }
+        if (dry) { skillsCreated++; continue; }
+        await db.run("INSERT INTO spa_skills (id, code, name, category, requires_certification, is_active) VALUES (?, ?, ?, ?, ?, 1) ON CONFLICT (code) DO NOTHING",
+          [mkSpaId('SPASKL'), code, name, category, cert]);
+        skillsCreated++;
+      }
+      for (const [code, name, description] of AYURVEDA_CABIN_TYPES) {
+        const has: any = await db.get("SELECT id FROM spa_cabin_types WHERE code = ?", [code]);
+        if (has) { typesExisting++; continue; }
+        if (dry) { typesCreated++; continue; }
+        await db.run("INSERT INTO spa_cabin_types (id, code, name, description, is_active) VALUES (?, ?, ?, ?, 1) ON CONFLICT (code) DO NOTHING",
+          [mkSpaId('SPACTY'), code, name, description]);
+        typesCreated++;
+      }
+      if (!dry) writeObjectAudit(db, req, { objectType: 'SPA_SETUP', objectId: req.params.id, action: 'STARTER_PACK', summary: `Ayurveda starter pack: ${skillsCreated} skill(s) and ${typesCreated} cabin type(s) added` }).catch(() => {});
+      res.json({ dry_run: dry, skills_created: skillsCreated, skills_existing: skillsExisting, cabin_types_created: typesCreated, cabin_types_existing: typesExisting });
+    } catch (err: any) { res.status(500).json({ error: "Failed to apply the starter pack" }); }
+  });
+
+  // ── CSV import: therapists (with skills) and cabins. Preview unless told otherwise ──
+  const spaPresent = (r: any, keys: string[]) => {
+    const out: any = {};
+    for (const k of keys) if (r[k] !== undefined && r[k] !== null && String(r[k]).trim() !== '') out[k] = r[k];
+    return out;
+  };
+
+  app.post("/api/restaurant/:id/spa/import/therapists", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = Array.isArray(req.body?.rows) ? req.body.rows.slice(0, 500) : [];
+      if (!rows.length) return res.status(400).json({ error: 'Send at least one row.', code: 'ROWS_REQUIRED' });
+      const dry = req.body?.dry_run !== false;
+      const skills: any[] = await db.query("SELECT id, code, name FROM spa_skills WHERE is_active = 1");
+      const findSkill = (tok: string) => skills.find(s => s.code === spaCode(tok)) || skills.find(s => String(s.name).trim().toLowerCase() === tok.trim().toLowerCase()) || null;
+      const existing: any[] = await db.query("SELECT id, display_name FROM spa_therapists");
+      const out: any[] = [];
+      let created = 0, updated = 0;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i] || {};
+        const name = String(r.name || r.display_name || '').trim().slice(0, 80);
+        if (!name) { out.push({ row: i + 1, name: '', action: 'SKIP', issues: ['No name'] }); continue; }
+        const given = spaPresent({ gender: r.gender, phone: r.phone, languages: r.languages, max_treatments_per_day: r.max_per_day ?? r.max_treatments_per_day }, ['gender', 'phone', 'languages', 'max_treatments_per_day']);
+        const prof = spaTherapistProfile(given);
+        if (prof.error) { out.push({ row: i + 1, name, action: 'SKIP', issues: [prof.error] }); continue; }
+        const issues: string[] = [];
+        const parsed: { skill_id: string; name: string; level: string }[] = [];
+        for (const tok of String(r.skills || '').split(/[;|]/).map((x: string) => x.trim()).filter(Boolean)) {
+          const [skillName, levelRaw] = tok.split(':').map((x: string) => x.trim());
+          const sk = findSkill(skillName);
+          const level = String(levelRaw || 'QUALIFIED').toUpperCase();
+          if (!sk) { issues.push(`Unknown skill "${skillName}"`); continue; }
+          if (!SPA_LEVELS.includes(level)) { issues.push(`Unknown level "${levelRaw}" for ${sk.name}`); continue; }
+          parsed.push({ skill_id: sk.id, name: sk.name, level });
+        }
+        const match = existing.find(t => String(t.display_name || '').trim().toLowerCase() === name.toLowerCase());
+        const action = match ? 'UPDATE' : 'CREATE';
+        if (!dry) {
+          let tid = match?.id;
+          const keys = Object.keys(prof.values);
+          if (!tid) {
+            tid = mkSpaId('SPATHR');
+            await db.run(`INSERT INTO spa_therapists (id, display_name, is_active${keys.map(k => `, ${k}`).join('')}) VALUES (?, ?, 1${keys.map(() => ', ?').join('')})`,
+              [tid, name, ...keys.map(k => prof.values[k])]);
+            existing.push({ id: tid, display_name: name });
+            created++;
+          } else {
+            if (keys.length) await db.run(`UPDATE spa_therapists SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...keys.map(k => prof.values[k]), tid]);
+            updated++;
+          }
+          for (const p of parsed) {
+            await db.run(
+              `INSERT INTO spa_therapist_skills (id, therapist_id, skill_id, level) VALUES (?, ?, ?, ?)
+               ON CONFLICT (therapist_id, skill_id) DO UPDATE SET level = EXCLUDED.level`,
+              [mkSpaId('SPATSK'), tid, p.skill_id, p.level]);
+          }
+        }
+        out.push({ row: i + 1, name, action, skills: parsed.map(p => `${p.name} (${p.level.toLowerCase()})`), issues });
+      }
+      if (!dry) writeObjectAudit(db, req, { objectType: 'SPA_SETUP', objectId: req.params.id, action: 'IMPORT_THERAPISTS', summary: `Imported therapists: ${created} added, ${updated} updated` }).catch(() => {});
+      res.json({
+        dry_run: dry,
+        created: dry ? out.filter(o => o.action === 'CREATE').length : created,
+        updated: dry ? out.filter(o => o.action === 'UPDATE').length : updated,
+        skipped: out.filter(o => o.action === 'SKIP').length,
+        rows: out,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to import therapists" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/import/cabins", authenticate, spaStaff, requireTabAction('SPA_RESOURCES', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = Array.isArray(req.body?.rows) ? req.body.rows.slice(0, 500) : [];
+      if (!rows.length) return res.status(400).json({ error: 'Send at least one row.', code: 'ROWS_REQUIRED' });
+      const dry = req.body?.dry_run !== false;
+      const types: any[] = await db.query("SELECT id, code, name FROM spa_cabin_types WHERE is_active = 1");
+      const existing: any[] = await db.query("SELECT id, name FROM spa_resources");
+      const out: any[] = [];
+      let created = 0, updated = 0;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i] || {};
+        const name = String(r.name || '').trim().slice(0, 80);
+        if (!name) { out.push({ row: i + 1, name: '', action: 'SKIP', issues: ['No name'] }); continue; }
+        const issues: string[] = [];
+        const input: any = spaPresent({ capacity: r.capacity, gender_designation: r.gender, turnaround_min: r.turnaround, equipment: r.equipment },
+          ['capacity', 'gender_designation', 'turnaround_min', 'equipment']);
+        if (input.capacity !== undefined) input.capacity = Number(input.capacity);
+        if (input.turnaround_min !== undefined) input.turnaround_min = Number(input.turnaround_min);
+        if (r.type !== undefined && String(r.type).trim() !== '') {
+          const tok = String(r.type).trim();
+          const ct = types.find(t => t.code === spaCode(tok)) || types.find(t => String(t.name).trim().toLowerCase() === tok.toLowerCase());
+          if (!ct) { out.push({ row: i + 1, name, action: 'SKIP', issues: [`Unknown cabin type "${tok}"`] }); continue; }
+          input.cabin_type_id = ct.id;
+        }
+        const prof = await spaCabinProfile(db, input);
+        if (prof.error) { out.push({ row: i + 1, name, action: 'SKIP', issues: [prof.error] }); continue; }
+        const match = existing.find(c => String(c.name || '').trim().toLowerCase() === name.toLowerCase());
+        const action = match ? 'UPDATE' : 'CREATE';
+        if (!dry) {
+          const keys = Object.keys(prof.values);
+          if (!match) {
+            const rid = mkSpaId('SPARES');
+            await db.run(`INSERT INTO spa_resources (id, name, resource_type, is_active${keys.map(k => `, ${k}`).join('')}) VALUES (?, ?, 'CABIN', 1${keys.map(() => ', ?').join('')})`,
+              [rid, name, ...keys.map(k => prof.values[k])]);
+            existing.push({ id: rid, name });
+            created++;
+          } else {
+            if (keys.length) await db.run(`UPDATE spa_resources SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...keys.map(k => prof.values[k]), match.id]);
+            updated++;
+          }
+        }
+        out.push({ row: i + 1, name, action, issues });
+      }
+      if (!dry) writeObjectAudit(db, req, { objectType: 'SPA_SETUP', objectId: req.params.id, action: 'IMPORT_CABINS', summary: `Imported cabins: ${created} added, ${updated} updated` }).catch(() => {});
+      res.json({
+        dry_run: dry,
+        created: dry ? out.filter(o => o.action === 'CREATE').length : created,
+        updated: dry ? out.filter(o => o.action === 'UPDATE').length : updated,
+        skipped: out.filter(o => o.action === 'SKIP').length,
+        rows: out,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to import cabins" }); }
   });
 
   // ─── SPA INVENTORY (ingredients tagged SPA_PRODUCT / SPA_RETAIL) ───────────
@@ -33893,8 +34436,13 @@ ${data.tenant.name}`;
       if (!t || Number(t.is_active) !== 1) return { error: 'That therapist is not active. Choose another therapist.', code: 'THERAPIST_INACTIVE' };
     }
     if (resourceId) {
-      const r: any = await db.get("SELECT is_active FROM spa_resources WHERE id = ?", [resourceId]);
+      const r: any = await db.get("SELECT is_active, status, status_reason FROM spa_resources WHERE id = ?", [resourceId]);
       if (!r || Number(r.is_active) !== 1) return { error: 'That cabin is not active. Choose another cabin.', code: 'CABIN_INACTIVE' };
+      // A cabin under maintenance or out of order takes no booking either.
+      const cabinStatus = String(r.status || 'AVAILABLE').toUpperCase();
+      if (cabinStatus === 'MAINTENANCE' || cabinStatus === 'OUT_OF_ORDER') {
+        return { error: `That cabin is ${cabinStatus === 'MAINTENANCE' ? 'under maintenance' : 'out of order'}${r.status_reason ? ` (${r.status_reason})` : ''}. Choose another cabin.`, code: 'CABIN_UNAVAILABLE' };
+      }
     }
     return null;
   };
@@ -33912,7 +34460,10 @@ ${data.tenant.name}`;
       if (await blockConflict(db, 'THERAPIST', therapistId, startAt, endAt)) return 'Therapist is blocked for this slot';
     }
     if (resourceId) {
-      if (await resourceConflict(db, resourceId, startAt, endAt, excludeId)) return 'Cabin is already booked for an overlapping slot';
+      const turnW: any = await db.get("SELECT COALESCE(turnaround_min, 0) AS t FROM spa_resources WHERE id = ?", [resourceId]).catch(() => null);
+      if (await resourceConflict(db, resourceId, startAt, endAt, excludeId, Number(turnW?.t || 0))) {
+        return Number(turnW?.t || 0) > 0 ? 'Cabin is booked, or still being turned around, for this slot' : 'Cabin is already booked for an overlapping slot';
+      }
       if (await blockConflict(db, 'RESOURCE', resourceId, startAt, endAt)) return 'Cabin is blocked for this slot';
     }
     return null;
@@ -34091,8 +34642,9 @@ ${data.tenant.name}`;
         }
       }
       if (b.resource_id) {
-        const rc = await resourceConflict(db, b.resource_id, win.startAt, win.endAt);
-        if (rc) return res.status(409).json({ error: "Cabin is already booked for an overlapping slot", conflict: rc });
+        const turnC: any = await db.get("SELECT COALESCE(turnaround_min, 0) AS t FROM spa_resources WHERE id = ?", [b.resource_id]).catch(() => null);
+        const rc = await resourceConflict(db, b.resource_id, win.startAt, win.endAt, undefined, Number(turnC?.t || 0));
+        if (rc) return res.status(409).json({ error: Number(turnC?.t || 0) > 0 ? "Cabin is booked, or still being turned around, for this slot" : "Cabin is already booked for an overlapping slot", conflict: rc });
         if (await blockConflict(db, 'RESOURCE', b.resource_id, win.startAt, win.endAt)) {
           return res.status(409).json({ error: "Cabin is blocked for this slot" });
         }
@@ -60176,8 +60728,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'stock-reductions-draw-batches',
+    commit_marker: 'spa-phase1-skills-cabins-rosters',
     code_features: [
+      'spa-phase1-skills-cabins-rosters — Spa Phase 1 of the traceability plan. Skills master (spa_skills) and cabin types (spa_cabin_types); therapist skills at trainee/qualified/senior with certified-on and valid-until (spa_therapist_skills, PUT /spa/therapists/:tid/skills); what a treatment needs (spa_service_skills, services.cabin_type_id, services.gender_rule — GET/PUT /spa/services/:sid/requirements); therapist profile (gender, languages, phone, photo, daily limit, staff link via GET /spa/staff-options); cabin profile (type, equipment, gender designation, turnaround, status with reason); shifts with a break and checked effective dates. The slot engine now honours effective dates and breaks, offers only therapists holding every required skill at its level with an in-date certificate (a treatment naming no skills keeps the old therapist-to-service mapping), and only active cabins of the right type that are not under maintenance or out of order, clear of their turnaround; booking checks cabin status and turnaround too. POST /spa/setup/ayurveda-starter (13 skills, 7 cabin types, once, never overwriting) and POST /spa/import/therapists and /spa/import/cabins (preview by default). Master changes are audited. Screens: Therapists & Cabins gains cabin editing (type, equipment, turnaround, status with reason), therapist profiles with the staff link, skills with level and certificate dates, shifts with a break and dates, finding therapists by skill, level, gender and language, and a Skills & Cabin Types tab with the starter pack preview and CSV import preview; the treatment form names the skills, minimum level and cabin type it needs. The same-gender rule, cabin gender and the daily limit are stored but not yet applied — that is Phase 2.',
       'stock-reductions-draw-batches — only order consumption and spa treatment completion took stock out of stock_batches. Wastage, a manual adjustment down, a stock count below book, a hotel issue or adjustment down and a spa retail sale lowered ingredients.current_stock_qty and left the batches untouched, so batch lists and the batch-cost valuation kept stock that had gone. One helper, _drawFromBatches (soonest to expire, then oldest, as order consumption), now runs on all five. Stock added without a goods receipt still creates no batch, as before.',
       'spa-inactive-off-booking-screens — the spa treatment, therapist and cabin lists return deactivated rows (the setup screens need them), and the booking screens did not filter them: a deactivated treatment was offered in New Appointment (and failed with Service not found), a deactivated therapist kept a calendar column, and the Therapists & Cabins page and skill chips listed them. Booking dropdown now offers active treatments only; the calendar shows active therapists plus any inactive one with appointments that day; Service Menu and Therapists & Cabins hide inactive rows behind a Show inactive toggle and mark them; skill chips show active treatments plus any already assigned. Server: spaInactiveProblem refuses a staff booking, reschedule or online booking on a deactivated therapist or cabin (409 THERAPIST_INACTIVE / CABIN_INACTIVE). Tests reuse one ZZ-UAT therapist, cabin and treatment across runs instead of creating new ones, and consume their whole test batch.',
       'spa-buffer-zero-and-offers-kept — two spa fixes found in the Phase 0 review. (1) Creating a treatment turned a 0-minute buffer into 10 (`Number(b.buffer_after_min || 10)`); a value that is sent is now used as sent, and create and edit both refuse a non-positive duration or a negative buffer. (2) GET /spa/profile returned offers as JSON text while the Public Page Settings screen expected a list, so it showed no offers and the next save wrote an empty list over them; the route now returns a list and the screen also accepts text.',
