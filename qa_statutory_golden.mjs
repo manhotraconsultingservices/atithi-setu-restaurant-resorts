@@ -683,6 +683,70 @@ eq('TDS NEW @ ₹25,00,000', applyTDSSlabs(2500000, TDS_NEW), statutoryRound(439
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 15. HRMS-R1D (Sep 2026) — Excel helpers and the employee import check
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const X = await import('./hrExcel.ts');
+  const cols = X.EMPLOYEE_IMPORT_COLUMNS;
+  const starred = cols.map((c) => (X.EMPLOYEE_IMPORT_REQUIRED.includes(c.key) ? { ...c, header: `${c.header} *` } : c));
+  const shuffled = [starred[1], starred[0], ...starred.slice(2), { key: 'extra', header: 'Notes from HR' }];
+  const buf = await X.buildWorkbook([{ name: 'Employees', columns: shuffled, rows: [
+    { name: 'Asha Rao', role: 'Manager', phone: '9876543210', joining_date: new Date(2026, 3, 1), dob: '15/08/1995', extra: 'x' },
+    {},
+    { name: 'Ravi', role: 'Chef' },
+  ] }]);
+  eq('the workbook is a zip file', buf.subarray(0, 2).toString('latin1'), 'PK');
+  const r = await X.readSheet(buf, cols);
+  eq('columns matched by header name in any order', r.missing.length, 0);
+  eq('an unknown column is reported', r.unknown.join(), 'Notes from HR');
+  eq('an empty row is skipped', r.rows.map((x) => x.row).join(), '2,4');
+  eq('a date cell reads as YYYY-MM-DD', r.rows[0].values.joining_date, '2026-04-01');
+  eq('a typed date stays as typed', r.rows[0].values.dob, '15/08/1995');
+  eq('text reads as text', r.rows[0].values.phone, '9876543210');
+  const r2 = await X.readSheet(await X.buildWorkbook([{ name: 'S', columns: [cols[0]], rows: [{ name: 'A' }] }]), cols);
+  eq('a missing column is reported', r2.missing.includes('Role'), true);
+  let junk = null;
+  try { await X.readSheet(Buffer.from('name,role'), cols); } catch (e) { junk = e; }
+  eq('a file that is not .xlsx is refused', junk?.code, 'SHEET_UNREADABLE');
+  let tooMany = null;
+  try { await X.readSheet(buf, cols, { maxRows: 1 }); } catch (e) { tooMany = e; }
+  eq('too many rows are refused', tooMany?.code, 'SHEET_UNREADABLE');
+  eq('day-first date', X.parseImportDate('01/04/2026'), '2026-04-01');
+  eq('ISO date', X.parseImportDate('2026-04-01'), '2026-04-01');
+  eq('an impossible date', X.parseImportDate('31/02/2026'), null);
+  eq('words are not a date', X.parseImportDate('April 1'), null);
+
+  const ctx = {
+    roles: [{ id: 'CUSTOM_FO_1', name: 'Front Office' }],
+    takenCodes: new Set(['EMP-0001']),
+    existing: new Set(X.staffMatchKeys('Meera', '98111 22333', null)),
+    departments: new Map([['front office', { id: 'D1', name: 'Front Office' }]]),
+    designations: new Map(),
+  };
+  const seen = { codes: new Set(), keys: new Set() };
+  const ok1 = X.validateImportRow(2, { name: 'Asha', role: 'front office', department: 'FRONT OFFICE', employment_type: 'on probation', gender: 'female', employee_code: 'emp-0101' }, ctx, seen);
+  eq('a new row', ok1.status, 'NEW');
+  eq('role matched by name in any case', ok1.data.role, 'CUSTOM_FO_1');
+  eq('department linked to the organisation list', ok1.data.department_id, 'D1');
+  eq('employment type from words', ok1.data.employment_type, 'PROBATION');
+  eq('gender from words', ok1.data.gender, 'F');
+  eq('employee code upper-cased', ok1.data.employee_code, 'EMP-0101');
+  const rep = X.validateImportRow(3, { name: 'Bina', role: 'CUSTOM_FO_1', employee_code: 'EMP-0101' }, ctx, seen);
+  eq('a code repeated in the file is refused', rep.status === 'INVALID' && rep.errors.some((x) => /repeated/.test(x)), true);
+  const taken = X.validateImportRow(4, { name: 'Chan', role: 'Front Office', employee_code: 'emp-0001' }, ctx, seen);
+  eq('a code in use is refused', taken.errors.some((x) => /already in use/.test(x)), true);
+  const bad = X.validateImportRow(5, { name: '', role: 'Chef', email: 'x@y', dob: '2026-13-01', gender: 'z' }, ctx, seen);
+  eq('every problem on a row is listed', bad.errors.length, 5);
+  const dup = X.validateImportRow(6, { name: 'meera', role: 'Front Office', phone: '9811122333' }, ctx, seen);
+  eq('an existing employee by name and phone is a duplicate', dup.status, 'DUPLICATE');
+  const noted = X.validateImportRow(7, { name: 'Dev', role: 'Front Office', department: 'Spa' }, ctx, seen);
+  eq('a department not in the list is noted, not refused', noted.status === 'NEW' && noted.notes.length === 1 && noted.data.department === 'Spa' && noted.data.department_id === null, true);
+  const recheck = X.validateImportRow(2, ok1.data, { ...ctx, takenCodes: new Set() }, { codes: new Set(), keys: new Set() });
+  eq('a previewed row passes the same check at commit', recheck.status === 'NEW' && recheck.data.role === 'CUSTOM_FO_1' && recheck.data.employment_type === 'PROBATION' && recheck.data.gender === 'F', true);
+  eq('the template guide lists the roles', X.importGuideRows(['Front Office', 'Chef'])[1].enter.includes('Front Office, Chef'), true);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Summary
 // ═══════════════════════════════════════════════════════════════════════════
 const total = pass + fail;

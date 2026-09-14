@@ -52,6 +52,11 @@ import {
   documentExpiryStage, documentNeedsAlert, encryptFileBuffer, decryptFileBuffer, safeDownloadName,
   type HrMasterKind,
 } from "./hrService.ts";
+import {
+  buildWorkbook, readSheet, SheetReadError, XLSX_MIME, EMPLOYEE_IMPORT_COLUMNS, EMPLOYEE_IMPORT_REQUIRED,
+  BUILTIN_STAFF_ROLES, validateImportRow, importGuideRows, staffMatchKeys,
+  type SheetColumn, type ImportContext, type ImportRole,
+} from "./hrExcel.ts";
 import { generatePayslipPdf, type PayslipData } from "./payslipService.ts";
 import {
   generateForm16Pdf,
@@ -18690,6 +18695,208 @@ async function startServer() {
     } catch (err: any) {
       console.error('hr/employees CSV error:', err);
       res.status(500).json({ error: err?.message || 'CSV export failed' });
+    }
+  });
+
+  // ── Employees in Excel (HRMS-R1D) ──────────────────────────────────────
+  // R1D-EXCEL-ROUTES. Export: the directory as .xlsx, with the CSV's number rule
+  // (full PAN, Aadhaar and bank account only with HR Sensitive Data at Edit, and
+  // logged). Import: a template, then a preview that checks every row and saves
+  // nothing, then a commit that checks every row again and adds new employees
+  // without a login. Importing needs HR & Payroll at Edit and Staff Directory at
+  // Full, the same as Bulk Add.
+  const HR_EMPLOYEE_EXPORT_COLUMNS: SheetColumn[] = [
+    { key: 'employee_code', header: 'Employee code', width: 14 },
+    { key: 'name', header: 'Name', width: 26 },
+    { key: 'role', header: 'Role', width: 18 },
+    { key: 'designation', header: 'Designation', width: 20 },
+    { key: 'department', header: 'Department', width: 20 },
+    { key: 'employment_type', header: 'Employment type', width: 16 },
+    { key: 'hr_status', header: 'HR status', width: 12 },
+    { key: 'reporting_manager', header: 'Reports to', width: 22 },
+    { key: 'joining_date', header: 'Joining date', width: 13, kind: 'date' },
+    { key: 'probation_end_date', header: 'Probation ends', width: 14, kind: 'date' },
+    { key: 'confirmation_date', header: 'Confirmed on', width: 13, kind: 'date' },
+    { key: 'date_of_leaving', header: 'Date of leaving', width: 14, kind: 'date' },
+    { key: 'phone', header: 'Phone', width: 15 },
+    { key: 'email', header: 'Email', width: 26 },
+    { key: 'dob', header: 'Date of birth', width: 13, kind: 'date' },
+    { key: 'gender', header: 'Gender', width: 9 },
+    { key: 'ctc', header: 'CTC (annual)', width: 13, kind: 'number' },
+    { key: 'hourly_rate', header: 'Hourly rate', width: 11, kind: 'number' },
+    { key: 'payroll_id', header: 'Payroll ID', width: 12 },
+    { key: 'pan', header: 'PAN', width: 14 },
+    { key: 'aadhaar', header: 'Aadhaar', width: 16 },
+    { key: 'uan', header: 'UAN', width: 14 },
+    { key: 'esic_number', header: 'ESIC', width: 14 },
+    { key: 'bank_account', header: 'Bank account', width: 18 },
+    { key: 'bank_ifsc', header: 'IFSC', width: 13 },
+    { key: 'bank_name', header: 'Bank', width: 16 },
+  ];
+  const _hrSheetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+  // The file type is proved by opening it (readSheet), not by the browser's MIME.
+  const _hrSheetUploadOne = (req: any, res: any, next: any) => _hrSheetUpload.single('file')(req, res, (err: any) => {
+    if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File too large. Maximum size is 5 MB.', code: 'FILE_TOO_LARGE' });
+    if (err) return next(err);
+    next();
+  });
+  // Roles offered for import: the property's own active roles, or the built-in
+  // roles while it has none (the Staff Directory pickers follow the same rule).
+  async function _hrImportRoles(db: DbInterface, tenantId: string): Promise<ImportRole[]> {
+    await _ensureCustomRoles(db).catch(() => {});
+    const rows: any[] = await db.query("SELECT id, name FROM custom_roles WHERE restaurant_id = ? AND is_active = 1 ORDER BY name", [tenantId]).catch(() => []);
+    return rows.length ? rows.map((r: any) => ({ id: String(r.id), name: String(r.name) })) : BUILTIN_STAFF_ROLES;
+  }
+  async function _hrImportContext(db: DbInterface, tenantId: string): Promise<ImportContext> {
+    const roles = await _hrImportRoles(db, tenantId);
+    const staff: any[] = await db.query("SELECT name, phone, email, employee_code FROM attendance_staff");
+    const takenCodes = new Set<string>(staff.map((s: any) => String(s.employee_code || '').toUpperCase()).filter(Boolean));
+    const existing = new Set<string>();
+    for (const s of staff) for (const k of staffMatchKeys(s.name, s.phone, s.email)) existing.add(k);
+    const masters: any[] = await db.query("SELECT id, kind, name FROM hr_masters WHERE is_active = 1 AND kind IN ('DEPARTMENT', 'DESIGNATION')").catch(() => []);
+    const departments = new Map<string, { id: string; name: string }>();
+    const designations = new Map<string, { id: string; name: string }>();
+    for (const m of masters) (m.kind === 'DEPARTMENT' ? departments : designations).set(String(m.name).trim().toLowerCase(), { id: String(m.id), name: String(m.name) });
+    return { roles, takenCodes, existing, departments, designations };
+  }
+  async function _hrImportGate(req: AuthRequest, res: Response): Promise<boolean> {
+    if (await _roleHasTab(req, 'STAFF', 3)) return true;
+    res.status(403).json({ error: 'Importing employees also needs Full access to Staff Directory.', required_tab: 'STAFF', required_level: 3 });
+    return false;
+  }
+
+  app.get("/api/restaurant/:id/hr/employees.xlsx", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      let rows: any[] = await db.query(
+        `SELECT s.id, s.name, s.role, s.designation, s.department, s.hr_status, s.employee_code, s.employment_type,
+                s.joining_date, s.probation_end_date, s.confirmation_date, s.date_of_leaving, s.ctc, s.hourly_rate, s.payroll_id,
+                s.pan, s.aadhaar, s.uan, s.esic_number, s.bank_account, s.bank_ifsc, s.bank_name,
+                s.phone, s.email, s.dob, s.gender, m.name AS reporting_manager
+           FROM attendance_staff s LEFT JOIN attendance_staff m ON m.id = s.reporting_manager_id
+          ORDER BY s.name`
+      );
+      await _ensureCustomRoles(db).catch(() => {});
+      const roleRows: any[] = await db.query("SELECT id, name FROM custom_roles WHERE restaurant_id = ?", [req.params.id]).catch(() => []);
+      const roleName = new Map<string, string>([...BUILTIN_STAFF_ROLES, ...roleRows].map((r: any) => [String(r.id).toUpperCase(), String(r.name)]));
+      const fullNumbers = (await _hrSensitiveLevel(req)) >= 2;
+      rows = rows.map(_hrDecryptRow);
+      if (fullNumbers) {
+        await _hrLogSensitive(db, req, null, 'EXPORTED', `Employee Excel with full PAN, Aadhaar and bank account (${rows.length} employees)`);
+        await writeObjectAudit(db, req, {
+          objectType: 'EMPLOYEE', objectId: 'ALL', action: 'SENSITIVE_EXPORTED',
+          summary: `Employee Excel exported with full PAN, Aadhaar and bank account (${rows.length} employees)`,
+        });
+      }
+      const gender: Record<string, string> = { M: 'Male', F: 'Female', O: 'Other' };
+      const out = (fullNumbers ? rows : rows.map(_hrMaskRow)).map((r: any) => ({
+        ...r,
+        role: roleName.get(String(r.role || '').toUpperCase()) || r.role,
+        gender: gender[String(r.gender || '')] || r.gender,
+      }));
+      const buf = await buildWorkbook([{ name: 'Employees', columns: HR_EMPLOYEE_EXPORT_COLUMNS, rows: out }]);
+      res.setHeader('Content-Type', XLSX_MIME);
+      res.setHeader('Content-Disposition', `attachment; filename="employees-${_hrTodayIst()}.xlsx"`);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.send(buf);
+    } catch (err: any) {
+      console.error('hr/employees Excel error:', err);
+      res.status(500).json({ error: err?.message || 'Excel export failed' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hr/employees/import-template.xlsx", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const roles = await _hrImportRoles(db, req.params.id);
+      const buf = await buildWorkbook([
+        { name: 'Employees', columns: EMPLOYEE_IMPORT_COLUMNS.map((c) => (EMPLOYEE_IMPORT_REQUIRED.includes(c.key) ? { ...c, header: `${c.header} *` } : c)), rows: [] },
+        {
+          name: 'How to fill',
+          columns: [{ key: 'column', header: 'Column', width: 18 }, { key: 'enter', header: 'What to enter', width: 80 }, { key: 'example', header: 'Example', width: 24 }],
+          rows: importGuideRows(roles.map((r) => r.name)),
+        },
+      ]);
+      res.setHeader('Content-Type', XLSX_MIME);
+      res.setHeader('Content-Disposition', 'attachment; filename="employee-import-template.xlsx"');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.send(buf);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Could not build the template' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/employees/import/preview", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), _hrSheetUploadOne, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _hrImportGate(req, res))) return;
+      if (!req.file) return res.status(400).json({ error: 'Choose an Excel file (.xlsx).' });
+      let sheet: Awaited<ReturnType<typeof readSheet>>;
+      try {
+        sheet = await readSheet(req.file.buffer, EMPLOYEE_IMPORT_COLUMNS, { maxRows: 500 });
+      } catch (e: any) {
+        if (e instanceof SheetReadError) return res.status(400).json({ error: e.message, code: e.code });
+        throw e;
+      }
+      const missingRequired = EMPLOYEE_IMPORT_COLUMNS
+        .filter((c) => EMPLOYEE_IMPORT_REQUIRED.includes(c.key) && sheet.missing.includes(c.header))
+        .map((c) => c.header);
+      if (missingRequired.length) {
+        return res.status(400).json({ error: `The sheet needs the columns ${missingRequired.join(' and ')}. Download the template to see every column.`, code: 'SHEET_COLUMNS_MISSING', missing: missingRequired });
+      }
+      const db = await getTenantDb(req.params.id);
+      const ctx = await _hrImportContext(db, req.params.id);
+      const seen = { codes: new Set<string>(), keys: new Set<string>() };
+      const rows = sheet.rows.map((r) => validateImportRow(r.row, r.values, ctx, seen));
+      const count = (st: string) => rows.filter((r) => r.status === st).length;
+      res.json({ sheet: sheet.sheet, rows, counts: { new: count('NEW'), duplicate: count('DUPLICATE'), invalid: count('INVALID') }, ignored_columns: sheet.unknown });
+    } catch (err: any) {
+      console.error('hr employee import preview error:', err);
+      res.status(500).json({ error: err?.message || 'Could not read the file' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/employees/import/commit", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _hrImportGate(req, res))) return;
+      const input: any[] = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      if (!input.length) return res.status(400).json({ error: 'There are no rows to import.' });
+      if (input.length > 500) return res.status(400).json({ error: 'Import up to 500 employees at a time.' });
+      const db = await getTenantDb(req.params.id);
+      const ctx = await _hrImportContext(db, req.params.id);
+      const seen = { codes: new Set<string>(), keys: new Set<string>() };
+      const autoCode = !!(await _hrSettings(db).catch(() => HR_SETTINGS_DEFAULTS)).auto_employee_code;
+      const created: any[] = [];
+      const skipped: any[] = [];
+      for (let i = 0; i < input.length; i++) {
+        const src = input[i] || {};
+        const rowNo = Number(src.row) || i + 1;
+        const v = validateImportRow(rowNo, src.data && typeof src.data === 'object' ? src.data : src, ctx, seen);
+        if (v.status !== 'NEW') { skipped.push({ row: rowNo, status: v.status, errors: v.errors, notes: v.notes }); continue; }
+        const d = v.data;
+        try {
+          const id = randomUUID();
+          await db.run(
+            `INSERT INTO attendance_staff (id, name, role, phone, email, hourly_rate, payroll_id, employee_type,
+               employee_code, designation, designation_id, department, department_id, employment_type, joining_date, dob, gender)
+             VALUES (?, ?, ?, ?, ?, 0, NULL, 'OFFLINE', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, d.name, d.role, d.phone, d.email,
+             d.employee_code, d.designation, d.designation_id, d.department, d.department_id, d.employment_type, d.joining_date, d.dob, d.gender]
+          );
+          const employee_code = d.employee_code || (autoCode ? await _assignEmployeeCode(db, id) : null);
+          created.push({ row: rowNo, id, name: d.name, employee_code });
+          await writeObjectAudit(db, req, {
+            objectType: 'EMPLOYEE', objectId: id, action: 'CREATED',
+            summary: `Added ${d.name} (${d.role_label || d.role}) from an Excel import${employee_code ? `, code ${employee_code}` : ''}`,
+          });
+        } catch (e: any) {
+          console.error('hr employee import row error:', e?.message || e);
+          skipped.push({ row: rowNo, status: 'INVALID', errors: ['Could not be saved'], notes: [] });
+        }
+      }
+      res.json({ ok: true, created_count: created.length, created, skipped });
+    } catch (err: any) {
+      console.error('hr employee import commit error:', err);
+      res.status(500).json({ error: err?.message || 'Import failed' });
     }
   });
 
@@ -63665,8 +63872,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hrms-r1c-private-documents',
+    commit_marker: 'hrms-r1d-excel',
     code_features: [
+      'hrms-r1d-excel — exceljs 4.4.0 dependency; hrExcel.ts buildWorkbook (bold frozen header, filter, real dates) and readSheet (header names in any order, dates as YYYY-MM-DD, SheetReadError for a non-xlsx file or over maxRows); GET /hr/employees.xlsx (CSV number rule: full PAN, Aadhaar and bank account only with HR_SENSITIVE Edit, logged EXPORTED); GET /hr/employees/import-template.xlsx (Employees sheet + How to fill sheet with this property roles); POST /hr/employees/import/preview (xlsx upload, validateImportRow per row: NEW, DUPLICATE by name with phone or email, INVALID with every problem; nothing saved) and /import/commit (every row checked again, OFFLINE employees with code, designation, department linked to hr_masters by name, employment type, joining date, date of birth, gender; audit CREATED from an Excel import); import needs HR_PAYROLL Edit and STAFF Full like Bulk Add; UI Export Excel and Import from Excel on the Employees directory; TC-HR-XLSX-ROUNDTRIP and static TC-HR-TAB-REGISTRIES.',
       'hrms-r1c-private-documents — hr_documents table (type, title, hr1: number, issuing country, issue and expiry dates, verified_by/at, storage + file_key, last_alert_stage) created in createHrTables; files AES-256-GCM encrypted (HRF1) by persistPrivateHrFile to R2 hr-private/ or disk uploads/hr-private (HR_PRIVATE_DIR), never a public URL; GET /hr/documents/:docId/file needs HR_SENSITIVE View and logs DOCUMENT_OPENED; a document number needs HR_SENSITIVE Edit; POST /hr/employees/:staffId/documents fixed at the same path (was a memory upload with an undefined file name overwriting notes; no tenant had entries) with 415, 400 and 404 guards; GET list, PATCH (a new expiry date clears last_alert_stage; verified), DELETE removes the file; GET /hr/documents/expiring; daily 09:15 IST _hrDocumentExpirySweep (D30, D7, EXPIRED once per stage; staff not RESIGNED or TERMINATED) fires HR_DOCUMENT_EXPIRING; POST /hr/documents/expiry-alerts/run (owner); HR_DOCUMENT history type; UI Documents section on the employee record and Documents due for renewal in Organisation.',
       'hrms-r1b-sensitive-data — New permission HR_SENSITIVE (not granted to existing roles): View reveals full PAN, Aadhaar and bank account (?reveal=1) and each reveal is logged, Edit changes them and downloads the bank advice and full employee CSV, Full reads /hr/sensitive/access-log and /hr/sensitive/status. The three fields are stored AES-256-GCM encrypted in place (hr1: values, key HR_DATA_KEY or derived from JWT_SECRET); plaintext values still read; every reader decrypts (HR list/detail/PUT/CSV, run payslips, payroll compute snapshot now masked, payslip PDF, bank advice, 24Q, Form 16, self profile). Owner-only POST /hr/sensitive/encrypt-existing encrypts values saved before. hr_sensitive_access_log table.',
       'hrms-r1a-org-record-history — hrService.ts createHrTables at tenant init (staff_advances, staff_payroll, pay columns moved out of request handlers; ensurePayrollTables is a no-op); hr_masters (DEPARTMENT, DESIGNATION, GRADE, COST_CENTRE) with /hr/masters CRUD, from-existing, deactivate when in use, rename copied to staff text; attendance_staff employee_code (unique), employment_type, reporting_manager_id (loop check), master links, probation/confirmation/leaving dates, notice days; /hr/org-chart; /hr/employees/assign-codes and hr_settings.auto_employee_code (EMP-#### from the highest code, no counter); /hr/settings; /hr/records/:type/:oid/audit for EMPLOYEE, PAYROLL_RUN, OFFER_LETTER, EXPENSE_CLAIM, HR_MASTER, HR_SETTINGS with writes on staff create/bulk/edit/delete/password/pay settings, HR profile, salary structure, payroll run create/compute/approve/lock/paid/delete, offers, expense claims; payroll_runs and salary_structures in the statutory edit log.',

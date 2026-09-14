@@ -71302,6 +71302,22 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
   const [query, setQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
+  const [importing, setImporting] = useState(false);   // HRMS-R1D
+  // The loader below is named fetch, so the download uses window.fetch.
+  const exportExcel = async () => {
+    try {
+      const res = await window.fetch(`/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees.xlsx`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `HTTP ${res.status}`); }
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `employees-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (err: any) { toast.error(err?.message || 'Excel export failed'); }
+  };
 
   const fetch = async () => {
     if (!restaurantId) return;
@@ -71340,7 +71356,7 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
           <div>
             <h3 className="text-xl font-bold text-[#1a1208]">👥 Employees</h3>
             <p className="text-xs text-[#6b5d52] mt-0.5">
-              Full HR profile — PAN, Aadhaar, UAN, ESIC, bank, emergency contact. CSV export available.
+              Full HR profile — PAN, Aadhaar, UAN, ESIC, bank, emergency contact. Export to Excel or CSV, or add employees from an Excel sheet.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -71354,6 +71370,12 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
                 <LayoutGrid size={15}/>
               </button>
             </div>
+            {canWriteTab('HR_PAYROLL') && (
+              <button type="button" onClick={() => setImporting(true)}
+                className="px-3 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612]">Import from Excel</button>
+            )}
+            <button type="button" onClick={exportExcel}
+              className="px-3 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5">📊 Export Excel</button>
             <a
               href={`/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees.csv?_=${Date.now()}`}
               target="_blank"
@@ -71446,7 +71468,131 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
           onSaved={() => { setEditingId(null); fetch(); }}
         />
       )}
+      {importing && (
+        <HrEmployeeImportModal
+          restaurantId={restaurantId}
+          token={token}
+          onClose={() => setImporting(false)}
+          onDone={() => { setImporting(false); fetch(); }}
+        />
+      )}
     </>
+  );
+}
+
+// ── Employee import from Excel (HRMS-R1D) ──────────────────────────
+function HrEmployeeImportModal({ restaurantId, token, onClose, onDone }: { restaurantId: string; token: string; onClose: () => void; onDone: () => void }) {
+  const toast = useToast();
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<any | null>(null);
+  const base = `/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees`;
+  const downloadTemplate = async () => {
+    try {
+      const res = await fetch(`${base}/import-template.xlsx`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `HTTP ${res.status}`); }
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'employee-import-template.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e: any) { toast.error(e.message || 'Could not download the template'); }
+  };
+  const check = async () => {
+    if (!file) { toast.error('Choose an Excel file (.xlsx).'); return; }
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`${base}/import/preview`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      setPreview(j);
+    } catch (e: any) { setPreview(null); toast.error(e.message || 'Could not read the file'); }
+    finally { setBusy(false); }
+  };
+  const counts = preview?.counts || { new: 0, duplicate: 0, invalid: 0 };
+  const commit = async () => {
+    const rows = (preview?.rows || []).filter((r: any) => r.status === 'NEW').map((r: any) => ({ row: r.row, data: r.data }));
+    if (!rows.length) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`${base}/import/commit`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ rows }) });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      const notAdded = (j.skipped || []).length;
+      toast.success(`Added ${j.created_count} employee${j.created_count === 1 ? '' : 's'}${notAdded ? `. ${notAdded} not added: the employee list changed after the check.` : ''}`);
+      onDone();
+    } catch (e: any) { toast.error(e.message || 'Import failed'); }
+    finally { setBusy(false); }
+  };
+  const STATUS: Record<string, { label: string; cls: string }> = {
+    NEW: { label: 'Will be added', cls: 'bg-emerald-100 text-emerald-800' },
+    DUPLICATE: { label: 'Already there', cls: 'bg-stone-100 text-stone-700' },
+    INVALID: { label: 'Needs fixing', cls: 'bg-rose-100 text-rose-800' },
+  };
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl my-8">
+        <div className="border-b border-[#cc5a16]/10 px-6 py-4 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">Employees</p>
+            <h2 className="text-xl font-bold text-[#1a1208]">Import from Excel</h2>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 rounded-full bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#3d3128]">×</button>
+        </div>
+        <div className="p-6 space-y-4">
+          <ol className="text-xs text-[#3d3128] space-y-1 list-decimal pl-4">
+            <li>Download the template. Its How to fill sheet lists this property's roles and what each column takes.</li>
+            <li>Fill one row per employee, choose the file and check it. Nothing is saved until you add the employees.</li>
+            <li>Employees are added without a login. PAN, Aadhaar and bank details go on each employee record.</li>
+          </ol>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button type="button" onClick={downloadTemplate} className="px-3 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5">Download template</button>
+            <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={e => { setFile(e.target.files?.[0] || null); setPreview(null); }} className="text-xs max-w-full" />
+            <button type="button" onClick={check} disabled={!file || busy} className="px-3 py-2 rounded-xl bg-[#1a1208] text-white text-xs font-bold disabled:opacity-40">{busy && !preview ? 'Checking…' : 'Check file'}</button>
+          </div>
+          {preview && (
+            <>
+              <div className="flex items-center gap-2 flex-wrap text-xs">
+                <span className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-800 font-bold">{counts.new} will be added</span>
+                <span className="px-2 py-1 rounded-full bg-stone-100 text-stone-700 font-bold">{counts.duplicate} already there</span>
+                <span className="px-2 py-1 rounded-full bg-rose-100 text-rose-800 font-bold">{counts.invalid} need fixing</span>
+                {(preview.ignored_columns || []).length > 0 && <span className="text-[#9c8e85]">Columns not used: {preview.ignored_columns.join(', ')}</span>}
+              </div>
+              <div className="overflow-x-auto max-h-[45vh] overflow-y-auto border border-[#e8dccf] rounded-xl">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-[#faf7f2]">
+                    <tr className="text-left text-[#6b5d52]"><th className="py-1.5 px-2">Row</th><th className="py-1.5 px-2">Name</th><th className="py-1.5 px-2">Role</th><th className="py-1.5 px-2">Status</th><th className="py-1.5 px-2">Details</th></tr>
+                  </thead>
+                  <tbody>
+                    {(preview.rows || []).length === 0 && <tr><td colSpan={5} className="py-4 text-center italic text-[#9c8e85]">The sheet has no filled rows.</td></tr>}
+                    {(preview.rows || []).map((r: any) => (
+                      <tr key={r.row} className="border-t border-[#f1ece3] align-top">
+                        <td className="py-1.5 px-2 font-mono text-[#9c8e85]">{r.row}</td>
+                        <td className="py-1.5 px-2 font-semibold text-[#1a1208]">{r.data?.name || '—'}</td>
+                        <td className="py-1.5 px-2">{r.data?.role_label || '—'}</td>
+                        <td className="py-1.5 px-2"><span className={cn('px-1.5 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap', STATUS[r.status]?.cls)}>{STATUS[r.status]?.label || r.status}</span></td>
+                        <td className="py-1.5 px-2 text-[#6b5d52]">{[...(r.errors || []), ...(r.notes || [])].join('. ') || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="border-t border-[#cc5a16]/10 px-6 py-4 flex items-center justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Close</button>
+          <button onClick={commit} disabled={busy || !counts.new} className="px-5 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">
+            {busy && preview ? 'Adding…' : `Add ${counts.new} employee${counts.new === 1 ? '' : 's'}`}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
