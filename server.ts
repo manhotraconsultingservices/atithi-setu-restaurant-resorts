@@ -21586,6 +21586,8 @@ ${data.tenant.name}`;
           reason || `Manual adjustment ${currentQty} → ${targetQty}`,
         ]
       );
+      // An adjustment down takes the difference out of the batches too.
+      if (delta < 0) await _drawFromBatches(db, req.params.id, -delta);
       res.json({ success: true, balance: targetQty, delta });
     } catch (err) {
       console.error("Adjust stock error:", err);
@@ -22638,6 +22640,34 @@ ${data.tenant.name}`;
   // skip / log) so we never produce a silently wrong stock movement.
   // Recipes commonly use grams/millilitres while ingredients are stocked in
   // kg/l — this fixes the otherwise-catastrophic 1000× over-deduction.
+  // Take stock out of an item's batches — the soonest to expire first, then the
+  // oldest — as order consumption already does. Wastage, a manual adjustment
+  // down, a stock count below book, a hotel issue and a spa retail sale all
+  // lowered the item's stock and left its batches as they were, so the batch
+  // lists, and the batch-cost valuation that reads them, went on showing stock
+  // that had gone. `qty` is in the item's stock unit; returns what was drawn.
+  // A batch that cannot be updated is logged, never thrown: the stock movement
+  // is the record, and it has already been written.
+  async function _drawFromBatches(db: DbInterface, ingredientId: string, qty: number): Promise<number> {
+    let left = Number(qty || 0);
+    if (!(left > 0)) return 0;
+    const batches: any[] = await db.query(
+      `SELECT id, remaining_qty FROM stock_batches
+        WHERE ingredient_id = ? AND remaining_qty > 0
+        ORDER BY CASE WHEN expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '7 days' THEN 0 ELSE 1 END,
+                 COALESCE(expiry_date, '2099-12-31'::date) ASC, received_at ASC`,
+      [ingredientId]).catch(() => [] as any[]);
+    let drawn = 0;
+    for (const b of batches) {
+      if (left <= 1e-9) break;
+      const d = Math.min(Number(b.remaining_qty), left);
+      const ok = await db.run("UPDATE stock_batches SET remaining_qty = GREATEST(remaining_qty - ?, 0) WHERE id = ?", [d, b.id])
+        .then(() => true).catch((e: any) => { console.error('[inventory] batch draw failed:', b.id, e?.message || e); return false; });
+      if (ok) { drawn += d; left -= d; }
+    }
+    return Math.round(drawn * 1e6) / 1e6;
+  }
+
   function convertQty(qty: number, fromUnit: string, toUnit: string): number | null {
     const f = String(fromUnit || '').toLowerCase().trim();
     const t = String(toUnit   || '').toLowerCase().trim();
@@ -24318,6 +24348,8 @@ ${data.tenant.name}`;
          VALUES (?, ?, ?, ?, 'WASTAGE', 'wastage', ?, ?, ?, ?)`,
         [movId(), ingredient_id, -stockQty, ing.unit, wid, balanceAfter, req.user!.id || null, `${safeReason}${notes ? ': ' + notes : ''}`]
       );
+      // What was thrown away leaves its batch as well as the stock figure.
+      await _drawFromBatches(db, ingredient_id, stockQty);
 
       res.json({ success: true, id: wid, balance: balanceAfter });
     } catch (err) {
@@ -24508,6 +24540,8 @@ ${data.tenant.name}`;
             `Reconciled from count ${req.params.id}: expected ${it.expected_qty} → actual ${it.actual_qty}`,
           ]
         );
+        // Counted below book: the shortfall comes out of the batches too.
+        if (variance < 0) await _drawFromBatches(db, it.ingredient_id, -variance);
         reconciled++;
       }
       await db.run(
@@ -25805,6 +25839,8 @@ ${data.tenant.name}`;
         [delta, req.params.itemId]
       ).catch(() => [] as any[]);
       if (!updated[0]) return res.status(404).json({ error: "Item not found" });
+      // An issue, or an adjustment down, takes from the batches too.
+      if (delta < 0) await _drawFromBatches(db, req.params.itemId, -delta);
       const balanceAfter = Number(updated[0].current_stock_qty);
       await db.run(
         `INSERT INTO stock_movements
@@ -34912,6 +34948,8 @@ ${data.tenant.name}`;
         `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
          VALUES (?, ?, ?, ?, 'SPA_RETAIL_SALE', 'spa_retail', NULL, ?, ?, ?, 'Spa retail sale')`,
         [mkSpaId('MOV'), b.ingredient_id, -qty, item.unit || 'unit', bal, item.default_unit_price || null, req.user?.id || null]).catch(() => {});
+      // A product sold leaves its batch as well as the stock figure.
+      await _drawFromBatches(db, b.ingredient_id, qty);
       const sale = await spaQuickSaleFolio(db, 'SPA_PRODUCT', `${item.name} × ${qty}`, lineAmount, gstPct, b.payment_method || 'CASH', req.user?.email || req.user?.id || null, item.id, req.params.id);
       res.status(201).json({ success: true, invoice_number: sale.invoiceNumber, grand_total: sale.grandTotal, stock_remaining: bal });
     } catch (err: any) { console.error("spa retail sale error:", err); res.status(500).json({ error: "Failed to record retail sale" }); }
@@ -60138,8 +60176,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-inactive-off-booking-screens',
+    commit_marker: 'stock-reductions-draw-batches',
     code_features: [
+      'stock-reductions-draw-batches — only order consumption and spa treatment completion took stock out of stock_batches. Wastage, a manual adjustment down, a stock count below book, a hotel issue or adjustment down and a spa retail sale lowered ingredients.current_stock_qty and left the batches untouched, so batch lists and the batch-cost valuation kept stock that had gone. One helper, _drawFromBatches (soonest to expire, then oldest, as order consumption), now runs on all five. Stock added without a goods receipt still creates no batch, as before.',
       'spa-inactive-off-booking-screens — the spa treatment, therapist and cabin lists return deactivated rows (the setup screens need them), and the booking screens did not filter them: a deactivated treatment was offered in New Appointment (and failed with Service not found), a deactivated therapist kept a calendar column, and the Therapists & Cabins page and skill chips listed them. Booking dropdown now offers active treatments only; the calendar shows active therapists plus any inactive one with appointments that day; Service Menu and Therapists & Cabins hide inactive rows behind a Show inactive toggle and mark them; skill chips show active treatments plus any already assigned. Server: spaInactiveProblem refuses a staff booking, reschedule or online booking on a deactivated therapist or cabin (409 THERAPIST_INACTIVE / CABIN_INACTIVE). Tests reuse one ZZ-UAT therapist, cabin and treatment across runs instead of creating new ones, and consume their whole test batch.',
       'spa-buffer-zero-and-offers-kept — two spa fixes found in the Phase 0 review. (1) Creating a treatment turned a 0-minute buffer into 10 (`Number(b.buffer_after_min || 10)`); a value that is sent is now used as sent, and create and edit both refuse a non-positive duration or a negative buffer. (2) GET /spa/profile returned offers as JSON text while the Public Page Settings screen expected a list, so it showed no offers and the next save wrote an empty list over them; the route now returns a list and the screen also accepts text.',
       'spa-phase0-and-module-name — Spa Phase 0 of the traceability plan (14 Sep 2026). (1) Spa invoices are numbered SPA-<FY>-NNNNN from _allocateFyInvoiceNumber (shared with event invoices), not the calendar year; FY 2026-27 continues the SPA-2026 sequence. (2) Completing an appointment draws each consumable from stock batches first-in-first-out at batch cost; the stock movement is no longer written with its error swallowed, a failed write puts the stock back and stops completion, a unique index keeps one SPA_CONSUMPTION line per appointment and item, and units are converted or refused before anything is drawn. (3) Month-end expected usage, forecast and the inventory dashboard count SPA_CONSUMPTION; the dashboard trend and top consumers are now module-scoped. (4) Appointment status follows SPA_TRANSITIONS (spaTransitionError), with conditional updates, a new start route, checked_in_at and started_at. (5) Reschedule keeps add-on time and checks blocked time via spaWindowProblem; online booking refuses a time that is not free with alternatives instead of taking the first slot of the day. (6) spaMustYield: two simultaneous bookings of a therapist or cabin, exactly one survives. (7) Per-property module name: restaurants.spa_module_label, set in spa Public Page Settings, used by the menu, home card, settings, reports, access matrix, accounting labels and the public page. Screens: IST today, Start and No-show buttons, confirm on cancel, therapist dashboard knows BOOKED and shows refused moves.',
