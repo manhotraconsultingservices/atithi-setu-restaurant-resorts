@@ -980,6 +980,58 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_spa_tip_splits_t ON spa_tip_splits(therapist_id)`,
     `CREATE INDEX IF NOT EXISTS idx_spa_tip_splits_appt ON spa_tip_splits(appointment_id)`,
+    // Phase 4: the guest's health record and course of care, for clinical staff,
+    // with every read logged; consent and intake before check-in; purchases linked
+    // to the guest.
+    `ALTER TABLE spa_services ADD COLUMN IF NOT EXISTS requires_consent INT DEFAULT 0`,
+    `ALTER TABLE spa_services ADD COLUMN IF NOT EXISTS contraindications TEXT`,
+    `ALTER TABLE spa_client_intake_forms ADD COLUMN IF NOT EXISTS signed_by_name TEXT`,
+    `ALTER TABLE spa_client_intake_forms ADD COLUMN IF NOT EXISTS recorded_by TEXT`,
+    `ALTER TABLE spa_clinical_notes ADD COLUMN IF NOT EXISTS locked_by TEXT`,
+    `ALTER TABLE spa_clinical_notes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP`,
+    `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS course_plan_id TEXT`,
+    `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS clinical_override_reason TEXT`,
+    `ALTER TABLE folios ADD COLUMN IF NOT EXISTS spa_client_id TEXT`,
+    `CREATE TABLE IF NOT EXISTS spa_client_assessments (
+      id           TEXT PRIMARY KEY,
+      client_id    TEXT NOT NULL,
+      constitution TEXT NOT NULL,
+      notes        TEXT,
+      assessed_by  TEXT,
+      assessed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_assess_client ON spa_client_assessments(client_id)`,
+    `CREATE TABLE IF NOT EXISTS spa_course_plans (
+      id            TEXT PRIMARY KEY,
+      client_id     TEXT NOT NULL,
+      title         TEXT NOT NULL,
+      prescribed_by TEXT,
+      start_date    TEXT,
+      end_date      TEXT,
+      status        TEXT DEFAULT 'ACTIVE',
+      notes         TEXT,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_plans_client ON spa_course_plans(client_id)`,
+    `CREATE TABLE IF NOT EXISTS spa_course_plan_items (
+      id                  TEXT PRIMARY KEY,
+      plan_id             TEXT NOT NULL,
+      service_id          TEXT NOT NULL,
+      sessions_prescribed INT NOT NULL,
+      frequency_note      TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_plan_items_plan ON spa_course_plan_items(plan_id)`,
+    `CREATE TABLE IF NOT EXISTS spa_clinical_access_log (
+      id          TEXT PRIMARY KEY,
+      client_id   TEXT NOT NULL,
+      section     TEXT,
+      actor_id    TEXT,
+      actor_email TEXT,
+      actor_role  TEXT,
+      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_clin_log_client ON spa_clinical_access_log(client_id, created_at)`,
   ]) {
     await tenantDb.exec(ddl).catch(() => {});
   }
@@ -1086,6 +1138,9 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
       updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  // Whether every treatment needs a signed consent and a health intake before
+  // check-in (a treatment can also require it on its own). Here, after the table.
+  await tenantDb.exec(`ALTER TABLE spa_profile ADD COLUMN IF NOT EXISTS require_intake_consent INT DEFAULT 0`).catch(() => {});
 }
 
 // ════════════════════════════════════════════════════════════════════════

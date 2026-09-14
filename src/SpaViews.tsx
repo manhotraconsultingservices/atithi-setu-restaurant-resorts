@@ -130,13 +130,15 @@ function SpaCatalog({ restaurantId, token }: Props) {
   // only when changed, so an ordinary edit adds no audit entry.
   const [skillList, setSkillList] = useState<any[]>([]);
   const [cabinTypes, setCabinTypes] = useState<any[]>([]);
-  const emptyReq = { skills: [] as { skill_id: string; min_level: string }[], cabin_type_id: '', gender_rule: 'ANY' };
+  const [conditions, setConditions] = useState<any[]>([]);
+  const emptyReq = { skills: [] as { skill_id: string; min_level: string }[], cabin_type_id: '', gender_rule: 'ANY', requires_consent: false, contraindications: [] as string[] };
   const [req, setReq] = useState(emptyReq);
   const [reqLoaded, setReqLoaded] = useState(JSON.stringify(emptyReq));
   useEffect(() => {
     (async () => {
       try { setSkillList(await api('/spa/skills')); } catch { /* */ }
       try { setCabinTypes(await api('/spa/cabin-types')); } catch { /* */ }
+      try { setConditions((await api('/spa/clinical/conditions')).conditions || []); } catch { /* */ }
     })();
   }, []);
   const openReq = async (sid: string | null) => {
@@ -144,7 +146,8 @@ function SpaCatalog({ restaurantId, token }: Props) {
     if (!sid) return;
     try {
       const r = await api(`/spa/services/${sid}/requirements`);
-      const v = { skills: (r.skills || []).map((s: any) => ({ skill_id: s.skill_id, min_level: s.min_level || 'QUALIFIED' })), cabin_type_id: r.cabin_type_id || '', gender_rule: r.gender_rule || 'ANY' };
+      const v = { skills: (r.skills || []).map((s: any) => ({ skill_id: s.skill_id, min_level: s.min_level || 'QUALIFIED' })), cabin_type_id: r.cabin_type_id || '', gender_rule: r.gender_rule || 'ANY',
+        requires_consent: !!r.requires_consent, contraindications: Array.isArray(r.contraindications) ? r.contraindications : [] };
       setReq(v); setReqLoaded(JSON.stringify(v));
     } catch { /* */ }
   };
@@ -259,6 +262,16 @@ function SpaCatalog({ restaurantId, token }: Props) {
                     <option value="SAME_GENDER">Same gender as the guest</option>
                   </select>
                   {req.gender_rule === 'SAME_GENDER' && <p className="text-[11px] text-[#6b5d52] mt-1">A booking then needs the guest's gender, and only therapists with their gender recorded are offered.</p>}
+                </div>
+                <div className="mt-3 pt-3 border-t border-[#e8dccf]">
+                  <label className="flex items-center gap-2 text-xs font-semibold text-[#3d3128]"><input type="checkbox" checked={req.requires_consent} onChange={e => setReq({ ...req, requires_consent: e.target.checked })} /> Needs a signed consent and a health intake before check-in</label>
+                  <label className={`${LABEL} mt-2`}>Not advised with</label>
+                  <div className="flex flex-wrap gap-1">
+                    {conditions.map((c: any) => { const on = req.contraindications.includes(c.code); return (
+                      <button key={c.code} type="button" onClick={() => setReq({ ...req, contraindications: on ? req.contraindications.filter((x: string) => x !== c.code) : [...req.contraindications, c.code] })}
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border ${on ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>{c.label}</button>); })}
+                  </div>
+                  {req.contraindications.length > 0 && <p className="text-[11px] text-[#6b5d52] mt-1">Where consent and intake are required, check-in is held when the guest's latest intake records one of these, until a clinician gives a reason.</p>}
                 </div>
                 {form.requires_room && (
                   <div className="mt-2">
@@ -631,6 +644,328 @@ function SpaBatchTrace({ restaurantId, token, items }: { restaurantId: string; t
             ]} />
         </div>
       )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// GUEST RECORD (Phase 4) — details, consent, packages; the timeline of every
+// treatment and purchase; and the health record for clinical staff.
+// ════════════════════════════════════════════════════════════════════════
+const SPA_EVENT_LABEL: Record<string, string> = {
+  TREATMENT: 'Treatment', PACKAGE_BOUGHT: 'Package bought', PACKAGE_REDEEMED: 'Package session used', MEMBERSHIP: 'Membership',
+  PURCHASE: 'Purchase', CONSENT: 'Consent', INTAKE: 'Health intake', ASSESSMENT: 'Assessment', COURSE_PLAN: 'Course plan', CLINICAL_NOTE: 'Clinical note',
+};
+const spaConstitutionLabel = (c: string) => c === 'TRIDOSHIC' ? 'Tridoshic' : String(c || '').split('_').map(x => x ? x[0] + x.slice(1).toLowerCase() : x).join('–');
+
+/** The health record: intake, assessment, course plans, clinical notes and who read it. */
+function SpaHealthRecord({ restaurantId, token, clientId }: { restaurantId: string; token: string; clientId: string }) {
+  const api = makeApi(restaurantId, token);
+  const [rec, setRec] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const [note, setNote] = useState('');
+  const [services, setServices] = useState<any[]>([]);
+  const [intake, setIntake] = useState({ conditions: [] as string[], allergies: '', medications: '', notes: '' });
+  const [asm, setAsm] = useState({ constitution: '', notes: '' });
+  const blankPlan = { title: '', start_date: '', end_date: '', items: [{ service_id: '', sessions_prescribed: '3', frequency_note: '' }] };
+  const [plan, setPlan] = useState<any>(blankPlan);
+  const [soap, setSoap] = useState({ soap_subjective: '', soap_objective: '', soap_assessment: '', soap_plan: '' });
+  const load = async () => { try { setRec(await api(`/spa/clients/${clientId}/clinical`)); } catch (e: any) { setErr(e.message); } };
+  useEffect(() => { load(); (async () => { try { setServices(await api('/spa/services')); } catch { /* the plan form lists none */ } })(); }, [clientId]);
+  const run = async (fn: () => Promise<any>, done: string) => { setErr(''); setNote(''); try { await fn(); setNote(done); await load(); } catch (e: any) { setErr(e.message); } };
+  if (!rec) return <p className="text-sm text-[#6b5d52] py-4">{err || 'Loading…'}</p>;
+  const condLabel = (c: string) => (rec.conditions || []).find((x: any) => x.code === c)?.label || c;
+  const latestIntake = (rec.forms || []).find((f: any) => f.form_type === 'INTAKE' || f.form_type === 'MEDICAL_HISTORY');
+  const canWrite = !!rec.can_write;
+  return (
+    <div className="space-y-4">
+      {err && <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{err}</p>}
+      {note && <p className="text-xs text-emerald-700">{note}</p>}
+      <p className="text-[11px] text-[#9c8e85]">Health information. Your viewing is logged.</p>
+
+      <section>
+        <h4 className="text-sm font-bold mb-1">Health intake</h4>
+        {latestIntake ? (
+          <div className="text-xs rounded-lg border border-[#e8dccf] p-2.5 mb-2">
+            <div className="text-[#9c8e85] mb-1">Recorded {spaTs(latestIntake.created_at)}</div>
+            <div><b>Conditions:</b> {(latestIntake.responses?.conditions || []).map(condLabel).join(', ') || 'none recorded'}</div>
+            {latestIntake.responses?.allergies && <div><b>Allergies:</b> {latestIntake.responses.allergies}</div>}
+            {latestIntake.responses?.medications && <div><b>Medications:</b> {latestIntake.responses.medications}</div>}
+            {latestIntake.responses?.notes && <div><b>Notes:</b> {latestIntake.responses.notes}</div>}
+          </div>
+        ) : <p className="text-xs text-[#9c8e85] mb-2">No intake on file.</p>}
+        {canWrite && (
+          <div className="rounded-lg border border-dashed border-[#e8dccf] p-2.5">
+            <div className="flex flex-wrap gap-1 mb-2">
+              {(rec.conditions || []).map((c: any) => { const on = intake.conditions.includes(c.code); return (
+                <button key={c.code} type="button" onClick={() => setIntake({ ...intake, conditions: on ? intake.conditions.filter(x => x !== c.code) : [...intake.conditions, c.code] })}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border ${on ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>{c.label}</button>); })}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input className={INPUT} placeholder="Allergies" value={intake.allergies} onChange={e => setIntake({ ...intake, allergies: e.target.value })} />
+              <input className={INPUT} placeholder="Medications" value={intake.medications} onChange={e => setIntake({ ...intake, medications: e.target.value })} />
+              <input className={`${INPUT} col-span-2`} placeholder="Other notes" value={intake.notes} onChange={e => setIntake({ ...intake, notes: e.target.value })} />
+            </div>
+            <div className="flex justify-end mt-2"><button className={BTN_PRIMARY} onClick={() => run(async () => { await api(`/spa/clients/${clientId}/forms`, { method: 'POST', body: JSON.stringify({ form_type: 'INTAKE', responses: intake }) }); setIntake({ conditions: [], allergies: '', medications: '', notes: '' }); }, 'Intake recorded')}>Record intake</button></div>
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h4 className="text-sm font-bold mb-1">Constitution</h4>
+        {(rec.assessments || []).slice(0, 3).map((a: any) => <div key={a.id} className="text-xs"><b>{spaConstitutionLabel(a.constitution)}</b> · {spaTs(a.assessed_at)}{a.notes ? ` · ${a.notes}` : ''}</div>)}
+        {!(rec.assessments || []).length && <p className="text-xs text-[#9c8e85]">Not assessed.</p>}
+        {canWrite && (
+          <div className="grid grid-cols-[10rem_1fr_auto] gap-2 mt-2">
+            <select className={INPUT} value={asm.constitution} onChange={e => setAsm({ ...asm, constitution: e.target.value })}>
+              <option value="">Constitution…</option>
+              {(rec.constitutions || []).map((c: string) => <option key={c} value={c}>{spaConstitutionLabel(c)}</option>)}
+            </select>
+            <input className={INPUT} placeholder="Observations" value={asm.notes} onChange={e => setAsm({ ...asm, notes: e.target.value })} />
+            <button className={BTN_GHOST} disabled={!asm.constitution} onClick={() => run(async () => { await api(`/spa/clients/${clientId}/assessments`, { method: 'POST', body: JSON.stringify(asm) }); setAsm({ constitution: '', notes: '' }); }, 'Assessment recorded')}>Record</button>
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h4 className="text-sm font-bold mb-1">Course plans</h4>
+        {(rec.plans || []).map((p: any) => (
+          <div key={p.id} className="text-xs rounded-lg border border-[#e8dccf] p-2.5 mb-2">
+            <div className="flex items-center justify-between gap-2">
+              <span><b>{p.title}</b> · {p.start_date || '—'}{p.end_date ? ` to ${p.end_date}` : ''} · <span className="uppercase text-[10px]">{p.status}</span></span>
+              {canWrite && p.status === 'ACTIVE' && <button className={BTN_GHOST} onClick={() => run(() => api(`/spa/course-plans/${p.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'COMPLETED' }) }), 'Course plan completed')}>Mark completed</button>}
+            </div>
+            {(p.items || []).map((it: any) => <div key={it.id} className="text-[#3d3128]">{it.service_name}: {Number(it.sessions_done)} of {it.sessions_prescribed} done{Number(it.sessions_booked) ? `, ${Number(it.sessions_booked)} booked` : ''}{it.frequency_note ? ` · ${it.frequency_note}` : ''}</div>)}
+          </div>
+        ))}
+        {!(rec.plans || []).length && <p className="text-xs text-[#9c8e85] mb-2">No course plans.</p>}
+        {canWrite && (
+          <div className="rounded-lg border border-dashed border-[#e8dccf] p-2.5">
+            <div className="grid grid-cols-3 gap-2 mb-2">
+              <input className={`${INPUT} col-span-3`} placeholder="Plan title, e.g. 7-day Abhyanga course" value={plan.title} onChange={e => setPlan({ ...plan, title: e.target.value })} />
+              <input className={INPUT} type="date" value={plan.start_date} onChange={e => setPlan({ ...plan, start_date: e.target.value })} />
+              <input className={INPUT} type="date" value={plan.end_date} onChange={e => setPlan({ ...plan, end_date: e.target.value })} />
+            </div>
+            {plan.items.map((it: any, i: number) => (
+              <div key={i} className="grid grid-cols-[1fr_5rem_1fr_auto] gap-2 mb-1.5">
+                <select className={INPUT} value={it.service_id} onChange={e => setPlan({ ...plan, items: plan.items.map((x: any, j: number) => j === i ? { ...x, service_id: e.target.value } : x) })}>
+                  <option value="">Treatment…</option>
+                  {services.filter((s: any) => Number(s.is_active ?? 1) === 1).map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <input className={INPUT} type="number" min={1} max={60} value={it.sessions_prescribed} onChange={e => setPlan({ ...plan, items: plan.items.map((x: any, j: number) => j === i ? { ...x, sessions_prescribed: e.target.value } : x) })} />
+                <input className={INPUT} placeholder="How often" value={it.frequency_note} onChange={e => setPlan({ ...plan, items: plan.items.map((x: any, j: number) => j === i ? { ...x, frequency_note: e.target.value } : x) })} />
+                <button className={`${BTN} bg-rose-50 text-rose-600`} aria-label="Remove treatment" onClick={() => setPlan({ ...plan, items: plan.items.filter((_: any, j: number) => j !== i) })}><X size={12} /></button>
+              </div>
+            ))}
+            <div className="flex justify-between mt-2">
+              <button className={BTN_GHOST} onClick={() => setPlan({ ...plan, items: [...plan.items, { service_id: '', sessions_prescribed: '3', frequency_note: '' }] })}><Plus size={12} /> Treatment</button>
+              <button className={BTN_PRIMARY} onClick={() => run(async () => { await api(`/spa/clients/${clientId}/course-plans`, { method: 'POST', body: JSON.stringify({ ...plan, start_date: plan.start_date || null, end_date: plan.end_date || null, items: plan.items.map((x: any) => ({ ...x, sessions_prescribed: Number(x.sessions_prescribed) })) }) }); setPlan(blankPlan); }, 'Course plan prescribed')}>Prescribe plan</button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h4 className="text-sm font-bold mb-1">Clinical notes</h4>
+        {(rec.notes || []).map((n: any) => (
+          <div key={n.id} className="text-xs rounded-lg border border-[#e8dccf] p-2.5 mb-2">
+            <div className="flex items-center justify-between gap-2 text-[#9c8e85] mb-1">
+              <span>{spaTs(n.created_at)}{n.service_name ? ` · ${n.service_name}` : ''}{n.locked_at ? ' · locked' : ''}</span>
+              {canWrite && !n.locked_at && <button className={BTN_GHOST} onClick={() => run(() => api(`/spa/clinical-notes/${n.id}/lock`, { method: 'POST' }), 'Note locked')}>Lock</button>}
+            </div>
+            {n.soap_subjective && <div><b>S:</b> {n.soap_subjective}</div>}
+            {n.soap_objective && <div><b>O:</b> {n.soap_objective}</div>}
+            {n.soap_assessment && <div><b>A:</b> {n.soap_assessment}</div>}
+            {n.soap_plan && <div><b>P:</b> {n.soap_plan}</div>}
+          </div>
+        ))}
+        {!(rec.notes || []).length && <p className="text-xs text-[#9c8e85] mb-2">No clinical notes.</p>}
+        {canWrite && (
+          <div className="rounded-lg border border-dashed border-[#e8dccf] p-2.5 grid grid-cols-2 gap-2">
+            <textarea className={INPUT} rows={2} placeholder="Subjective — what the guest reports" value={soap.soap_subjective} onChange={e => setSoap({ ...soap, soap_subjective: e.target.value })} />
+            <textarea className={INPUT} rows={2} placeholder="Objective — what you observed" value={soap.soap_objective} onChange={e => setSoap({ ...soap, soap_objective: e.target.value })} />
+            <textarea className={INPUT} rows={2} placeholder="Assessment" value={soap.soap_assessment} onChange={e => setSoap({ ...soap, soap_assessment: e.target.value })} />
+            <textarea className={INPUT} rows={2} placeholder="Plan" value={soap.soap_plan} onChange={e => setSoap({ ...soap, soap_plan: e.target.value })} />
+            <div className="col-span-2 flex justify-end"><button className={BTN_PRIMARY} onClick={() => run(async () => { await api(`/spa/clients/${clientId}/clinical-notes`, { method: 'POST', body: JSON.stringify(soap) }); setSoap({ soap_subjective: '', soap_objective: '', soap_assessment: '', soap_plan: '' }); }, 'Note added')}>Add note</button></div>
+          </div>
+        )}
+      </section>
+
+      {Array.isArray(rec.access_log) && (
+        <section>
+          <h4 className="text-sm font-bold mb-1">Who has read this record</h4>
+          <div className="max-h-40 overflow-auto text-[11px]">
+            {rec.access_log.map((l: any) => <div key={l.id} className="py-0.5 border-b border-[#f0e9df]">{spaTs(l.created_at)} · {l.actor_email || l.actor_id || 'unknown'} ({l.actor_role || '—'}) · {String(l.section || '').toLowerCase().replace(/_/g, ' ')}</div>)}
+            {!rec.access_log.length && <p className="text-[#9c8e85]">No reads logged yet.</p>}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/** The guest record: details and consent, the timeline, and the health record. */
+function SpaClientRecord({ restaurantId, token, clientId, packages, memberships, onClose }: { restaurantId: string; token: string; clientId: string; packages: any[]; memberships: any[]; onClose: () => void }) {
+  const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_CLIENTS');
+  const [tab, setTab] = useState<'OVERVIEW' | 'TIMELINE' | 'HEALTH'>('OVERVIEW');
+  const [profile, setProfile] = useState<any>(null);
+  const [edit, setEdit] = useState<any>(null);
+  const [editLoaded, setEditLoaded] = useState<any>(null);
+  const [consent, setConsent] = useState({ signed_by_name: '', agreed: false });
+  const [timeline, setTimeline] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const [note, setNote] = useState('');
+  const load = async () => {
+    try {
+      const p = await api(`/spa/clients/${clientId}`);
+      setProfile(p);
+      // Gender is stored as F, M, FEMALE or MALE; shown as Female or Male.
+      const g = String(p.client.gender || '').toUpperCase();
+      const v = { name: p.client.name || '', phone: p.client.phone || '', email: p.client.email || '',
+        gender: g === 'F' || g === 'FEMALE' ? 'FEMALE' : g === 'M' || g === 'MALE' ? 'MALE' : '',
+        dob: String(p.client.dob || '').slice(0, 10), preferences: p.client.preferences || '', notes: p.client.notes || '' };
+      setEdit(v); setEditLoaded(v);
+    } catch (e: any) { setErr(e.message); }
+  };
+  useEffect(() => { load(); }, [clientId]);
+  const run = async (fn: () => Promise<any>, done: string) => { setErr(''); setNote(''); try { await fn(); setNote(done); await load(); } catch (e: any) { setErr(e.message); } };
+  const openTimeline = async () => { setTab('TIMELINE'); setErr(''); try { setTimeline(await api(`/spa/clients/${clientId}/timeline`)); } catch (e: any) { setErr(e.message); } };
+  const printTimeline = () => {
+    if (!timeline) return;
+    const esc = (s: any) => String(s ?? '').replace(/[&<>"]/g, (c: string) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]);
+    const rows = (timeline.events || []).map((e: any) => {
+      const s = e.session;
+      const who = s ? (s.performers || []).map((p: any) => p.display_name).join(', ') : (e.booked?.therapist || '');
+      const used = s ? (s.consumables || []).map((c: any) => `${c.item} ${Number(c.actual_qty)} ${c.unit || ''}${(c.batches || []).length ? ` (batch ${c.batches.map((b: any) => b.batch_number || '—').join(', ')})` : ''}`).join('; ') : '';
+      return `<tr><td>${esc(spaTs(e.at))}</td><td>${esc(SPA_EVENT_LABEL[e.kind] || e.kind)}</td><td><b>${esc(e.title)}</b>${who ? `<br>${esc(who)}${s?.cabin ? ` · ${esc(s.cabin)}` : ''}` : ''}${used ? `<br>${esc(used)}` : ''}${s?.follow_up ? `<br>Follow-up: ${esc(s.follow_up)}` : ''}${e.detail ? `<br>${esc(e.detail)}` : ''}</td><td>${esc(e.invoice?.invoice_number || e.invoice_number || '')}</td></tr>`;
+    }).join('');
+    const w = window.open('', '_blank');
+    if (!w) { setErr('Allow pop-ups for this site to print the timeline.'); return; }
+    w.document.write(`<html><head><title>${esc(timeline.client?.name)} — treatment history</title><style>body{font:12px system-ui,sans-serif;margin:24px;color:#14110c}h2{margin:0 0 4px}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{border-bottom:1px solid #ddd;padding:6px;text-align:left;vertical-align:top}th{font-size:11px;color:#6b5d52}</style></head><body><h2>${esc(timeline.client?.name)}</h2><div>${esc(timeline.client?.phone || '')} ${esc(timeline.client?.email || '')}</div><table><thead><tr><th>When</th><th>What</th><th>Details</th><th>Invoice</th></tr></thead><tbody>${rows}</tbody></table></body></html>`);
+    w.document.close(); w.focus(); w.print();
+  };
+  const sell = (path: string, body: any, done: string) => run(() => api(`/spa/clients/${clientId}/${path}`, { method: 'POST', body: JSON.stringify(body) }), done);
+  // Only what changed is sent, so a field nobody touched is never rewritten.
+  const saveDetails = () => {
+    const changed: any = {};
+    for (const k of Object.keys(edit || {})) if (edit[k] !== editLoaded?.[k]) changed[k] = edit[k] === '' ? null : edit[k];
+    if (!Object.keys(changed).length) { setErr(''); setNote('Nothing has changed.'); return; }
+    if (changed.name !== undefined && !String(changed.name || '').trim()) { setNote(''); setErr("Enter the guest's name."); return; }
+    run(() => api(`/spa/clients/${clientId}`, { method: 'PATCH', body: JSON.stringify(changed) }), 'Details saved');
+  };
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 w-full max-w-3xl max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        {!profile ? <p className="text-sm text-[#6b5d52]">{err || 'Loading…'}</p> : (
+          <>
+            <h3 className="text-xl font-bold font-serif text-[#14110c]">{profile.client.name}</h3>
+            <p className="text-xs text-[#6b5d52] mb-3">{profile.client.phone || 'no phone'}{profile.client.email ? ` · ${profile.client.email}` : ''}</p>
+            <div className="flex gap-2 mb-4 flex-wrap">
+              <button className={tab === 'OVERVIEW' ? BTN_PRIMARY : BTN_GHOST} onClick={() => setTab('OVERVIEW')}>Overview</button>
+              <button className={tab === 'TIMELINE' ? BTN_PRIMARY : BTN_GHOST} onClick={openTimeline}>Timeline</button>
+              {profile.clinical_access && <button className={tab === 'HEALTH' ? BTN_PRIMARY : BTN_GHOST} onClick={() => setTab('HEALTH')}>Health record</button>}
+            </div>
+            {err && <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 mb-3">{err}</p>}
+            {note && <p className="text-xs text-emerald-700 mb-3">{note}</p>}
+
+            {tab === 'OVERVIEW' && edit && (
+              <div className="grid sm:grid-cols-2 gap-5">
+                <div>
+                  <h4 className="text-sm font-bold mb-2">Details</h4>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input className={`${INPUT} col-span-2`} disabled={!canEdit} value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} placeholder="Name" />
+                    <input className={INPUT} disabled={!canEdit} value={edit.phone} onChange={e => setEdit({ ...edit, phone: e.target.value })} placeholder="Phone" />
+                    <input className={INPUT} disabled={!canEdit} value={edit.email} onChange={e => setEdit({ ...edit, email: e.target.value })} placeholder="Email" />
+                    <select className={INPUT} disabled={!canEdit} value={edit.gender} onChange={e => setEdit({ ...edit, gender: e.target.value })}>
+                      <option value="">Gender not recorded</option><option value="FEMALE">Female</option><option value="MALE">Male</option>
+                    </select>
+                    <input className={INPUT} type="date" disabled={!canEdit} value={edit.dob} onChange={e => setEdit({ ...edit, dob: e.target.value })} />
+                    <input className={`${INPUT} col-span-2`} disabled={!canEdit} value={edit.preferences} onChange={e => setEdit({ ...edit, preferences: e.target.value })} placeholder="Preferences, e.g. light pressure, warm oil" />
+                    <input className={`${INPUT} col-span-2`} disabled={!canEdit} value={edit.notes} onChange={e => setEdit({ ...edit, notes: e.target.value })} placeholder="Notes" />
+                  </div>
+                  {canEdit && <div className="flex justify-end mt-2"><button className={BTN_PRIMARY} onClick={saveDetails}><Check size={13} /> Save</button></div>}
+                  <h4 className="text-sm font-bold mt-4 mb-1">Consent and intake</h4>
+                  <div className="text-xs space-y-0.5">
+                    <div>Consent: {profile.forms_summary?.consent_on ? `signed ${spaTs(profile.forms_summary.consent_on)}${profile.forms_summary.consent_signed_by ? ` by ${profile.forms_summary.consent_signed_by}` : ''}` : <span className="text-amber-700">not signed</span>}</div>
+                    <div>Health intake: {profile.forms_summary?.intake_on ? `recorded ${spaTs(profile.forms_summary.intake_on)}` : <span className="text-amber-700">not on file</span>}</div>
+                  </div>
+                  {canEdit && (
+                    <div className="rounded-lg border border-dashed border-[#e8dccf] p-2.5 mt-2">
+                      <label className="flex items-start gap-2 text-xs"><input type="checkbox" className="mt-0.5" checked={consent.agreed} onChange={e => setConsent({ ...consent, agreed: e.target.checked })} /> The guest has read the treatment information and agrees to the treatments, including warm oil and herbal preparations.</label>
+                      <div className="flex gap-2 mt-2">
+                        <input className={INPUT} placeholder="Name of the person signing" value={consent.signed_by_name} onChange={e => setConsent({ ...consent, signed_by_name: e.target.value })} />
+                        <button className={BTN_GHOST} disabled={!consent.agreed || !consent.signed_by_name.trim()} onClick={() => run(async () => { await api(`/spa/clients/${clientId}/forms`, { method: 'POST', body: JSON.stringify({ form_type: 'CONSENT', signed_by_name: consent.signed_by_name.trim(), responses: { agreed: true } }) }); setConsent({ signed_by_name: '', agreed: false }); }, 'Consent recorded')}>Record consent</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold mb-2">Packages</h4>
+                  <div className="space-y-1.5 mb-2">
+                    {profile.packages.map((p: any) => <div key={p.id} className="text-xs rounded-lg border border-[#e8dccf] p-2">{p.package_name} — {p.sessions_remaining}/{p.sessions_total} left <span className="text-[10px]">({p.status})</span></div>)}
+                    {!profile.packages.length && <p className="text-xs text-[#6b5d52]">None.</p>}
+                  </div>
+                  {canWriteTab('SPA_PACKAGES') && <select className={INPUT} onChange={e => e.target.value && sell('packages', { package_id: e.target.value, payment_method: 'CASH' }, 'Package sold')} value="">
+                    <option value="">+ Sell a package…</option>
+                    {packages.map((p: any) => <option key={p.id} value={p.id}>{p.name} — {money(p.price)}</option>)}
+                  </select>}
+                  <h4 className="text-sm font-bold mb-2 mt-3">Memberships</h4>
+                  <div className="space-y-1.5 mb-2">
+                    {profile.memberships.map((m: any) => <div key={m.id} className="text-xs rounded-lg border border-[#e8dccf] p-2">{m.plan_name} <span className="text-[10px]">({m.status})</span></div>)}
+                    {!profile.memberships.length && <p className="text-xs text-[#6b5d52]">None.</p>}
+                  </div>
+                  {canWriteTab('SPA_PACKAGES') && <select className={INPUT} onChange={e => e.target.value && sell('memberships', { plan_id: e.target.value, payment_method: 'CASH' }, 'Membership started')} value="">
+                    <option value="">+ Subscribe membership…</option>
+                    {memberships.map((m: any) => <option key={m.id} value={m.id}>{m.name} — {money(m.monthly_fee)}/mo</option>)}
+                  </select>}
+                  <h4 className="text-sm font-bold mb-2 mt-3">Recent visits</h4>
+                  <div className="space-y-1.5 max-h-40 overflow-auto">
+                    {profile.history.slice(0, 10).map((h: any) => <div key={h.id} className="text-xs rounded-lg border border-[#e8dccf] p-2">{spaTs(h.start_at)} · {h.service_name} <Pill status={h.status} /></div>)}
+                    {!profile.history.length && <p className="text-xs text-[#6b5d52]">No visits yet.</p>}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {tab === 'TIMELINE' && (
+              !timeline ? <p className="text-sm text-[#6b5d52]">Loading…</p> : (
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <p className="text-[11px] text-[#9c8e85]">Treatment records start from when treatments were first finished through the Finish screen.</p>
+                    <button className={BTN_GHOST} onClick={printTimeline}><FileText size={12} /> Print</button>
+                  </div>
+                  <div className="space-y-2">
+                    {(timeline.events || []).map((e: any, i: number) => (
+                      <div key={i} className="rounded-lg border border-[#e8dccf] p-2.5 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span><span className="text-[10px] uppercase tracking-wide text-[#9c8e85] mr-2">{SPA_EVENT_LABEL[e.kind] || e.kind}</span><b>{e.title}</b></span>
+                          <span className="text-[#6b5d52] whitespace-nowrap">{spaTs(e.at)}</span>
+                        </div>
+                        {e.kind === 'TREATMENT' && (
+                          <div className="mt-1 text-[#3d3128] space-y-0.5">
+                            <div>{e.session ? `Performed by ${(e.session.performers || []).map((p: any) => `${p.display_name}${p.role === 'ASSIST' ? ' (assisting)' : ''}`).join(', ') || '—'}` : `Booked with ${e.booked?.therapist || '—'}`}{(e.session?.cabin || e.booked?.cabin) ? ` · ${e.session?.cabin || e.booked?.cabin}` : ''} · <Pill status={e.status} /></div>
+                            {e.session && <div>{spaTs(e.session.started_at)} to {spaTs(e.session.finished_at)}{e.session.outcome ? ` · ${SPA_OUTCOME_LABEL[e.session.outcome] || e.session.outcome}` : ''}</div>}
+                            {e.session?.consumables?.length > 0 && <div>Used: {e.session.consumables.map((c: any) => `${c.item} ${Number(c.actual_qty)} ${c.unit || ''}${(c.batches || []).length ? ` (batch ${c.batches.map((b: any) => b.batch_number || '—').join(', ')})` : ''}`).join('; ')}</div>}
+                            {e.session?.follow_up && <div>Follow-up: {e.session.follow_up}{e.session.follow_up_date ? ` on ${e.session.follow_up_date}` : ''}</div>}
+                            {e.session?.notes && <div className="text-[#6b5d52]">Notes: {e.session.notes}</div>}
+                            {e.invoice && <div>Invoice {e.invoice.invoice_number} · {money(e.invoice.grand_total)}</div>}
+                          </div>
+                        )}
+                        {e.kind !== 'TREATMENT' && (e.detail || e.invoice_number || e.amount) && <div className="mt-1 text-[#3d3128]">{[e.detail, e.amount ? money(e.amount) : null, e.invoice_number ? `Invoice ${e.invoice_number}` : null].filter(Boolean).join(' · ')}</div>}
+                      </div>
+                    ))}
+                    {!(timeline.events || []).length && <p className="text-sm text-[#6b5d52]">Nothing yet.</p>}
+                  </div>
+                </div>
+              )
+            )}
+
+            {tab === 'HEALTH' && profile.clinical_access && <SpaHealthRecord restaurantId={restaurantId} token={token} clientId={clientId} />}
+          </>
+        )}
+        <div className="flex justify-end mt-5"><button className={BTN_GHOST} onClick={onClose}>Close</button></div>
+      </div>
     </div>
   );
 }
@@ -1270,6 +1605,9 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   // Finishing a treatment, and the record of a finished one.
   const [finishAppt, setFinishAppt] = useState<any>(null);
   const [sessionAppt, setSessionAppt] = useState<any>(null);
+  // Check-in held by the guest's health record: a clinician can go ahead with a reason.
+  const [checkinBlock, setCheckinBlock] = useState<any>(null);
+  const [overrideText, setOverrideText] = useState('');
 
   const load = async (q?: string) => {
     setLoading(true);
@@ -1343,6 +1681,16 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
       if (action === 'cancel') await api(`/spa/appointments/${a.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Cancelled by staff' }) });
       else await api(`/spa/appointments/${a.id}/${action}`, { method: 'POST' });
       await load();
+    } catch (e: any) {
+      if (action === 'check-in' && e?.status === 409 && e?.body?.code === 'CONTRAINDICATED' && e?.body?.overridable) { setOverrideText(''); setCheckinBlock({ appt: a, message: e.message }); return; }
+      alert(e.message);
+    }
+  };
+  const checkInWithReason = async () => {
+    if (!checkinBlock) return;
+    try {
+      await api(`/spa/appointments/${checkinBlock.appt.id}/check-in`, { method: 'POST', body: JSON.stringify({ clinical_override_reason: overrideText.trim() }) });
+      setCheckinBlock(null); await load();
     } catch (e: any) { alert(e.message); }
   };
   const doCheckout = async () => {
@@ -1672,6 +2020,20 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
         </div>
       )}
 
+      {checkinBlock && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={() => setCheckinBlock(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold font-serif mb-2 text-[#14110c]">Health caution</h3>
+            <p className="text-sm text-rose-700 mb-3">{checkinBlock.message}</p>
+            <label className={LABEL}>Clinical reason to check in anyway</label>
+            <textarea className={INPUT} rows={3} value={overrideText} onChange={e => setOverrideText(e.target.value)} placeholder="e.g. Reviewed with the guest; blood pressure normal today; pressure reduced" />
+            <div className="flex justify-end gap-2 mt-4">
+              <button className={BTN_GHOST} onClick={() => setCheckinBlock(null)}>Do not check in</button>
+              <button className={BTN_PRIMARY} disabled={overrideText.trim().length < 5} onClick={checkInWithReason}>Check in with this reason</button>
+            </div>
+          </div>
+        </div>
+      )}
       {finishAppt && <SpaFinishDialog restaurantId={restaurantId} token={token} appt={finishAppt} onClose={() => setFinishAppt(null)} onDone={() => { setFinishAppt(null); load(); }} />}
       {sessionAppt && <SpaSessionDialog restaurantId={restaurantId} token={token} appt={sessionAppt} onClose={() => setSessionAppt(null)} />}
 
@@ -1737,9 +2099,8 @@ function SpaClients({ restaurantId, token }: Props) {
   useEffect(() => { (async () => { try { setPackages(await api('/spa/packages')); } catch {} try { setMemberships(await api('/spa/memberships')); } catch {} })(); }, []);
 
   const addClient = async () => { if (!canEdit) { alert('View-only access — you cannot add clients.'); return; } if (!form.name) return; try { await api('/spa/clients', { method: 'POST', body: JSON.stringify(form) }); setShowForm(false); setForm({ name: '', phone: '', email: '' }); await load(); } catch (e: any) { alert(e.message); } };
-  const openProfile = async (c: any) => { try { setProfile(await api(`/spa/clients/${c.id}`)); } catch (e: any) { alert(e.message); } };
-  const buyPackage = async (pkgId: string) => { if (!canEdit) { alert('View-only access — you cannot sell packages.'); return; } try { await api(`/spa/clients/${profile.client.id}/packages`, { method: 'POST', body: JSON.stringify({ package_id: pkgId, payment_method: 'CASH' }) }); await openProfile(profile.client); } catch (e: any) { alert(e.message); } };
-  const subscribe = async (planId: string) => { if (!canEdit) { alert('View-only access — you cannot subscribe memberships.'); return; } try { await api(`/spa/clients/${profile.client.id}/memberships`, { method: 'POST', body: JSON.stringify({ plan_id: planId, payment_method: 'CASH' }) }); await openProfile(profile.client); } catch (e: any) { alert(e.message); } };
+  // The guest record opens in its own window, which loads and edits the guest.
+  const openProfile = (c: any) => setProfile({ id: c.id });
 
   return (
     <div>
@@ -1775,44 +2136,7 @@ function SpaClients({ restaurantId, token }: Props) {
         </div>
       )}
 
-      {profile && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setProfile(null)}>
-          <div className="bg-white rounded-2xl p-6 w-full max-w-2xl max-h-[88vh] overflow-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="text-xl font-bold font-serif">{profile.client.name}</h3>
-            <p className="text-xs text-[#6b5d52] mb-4">{profile.client.phone} · {profile.client.email}</p>
-            <div className="grid sm:grid-cols-2 gap-4">
-              <div>
-                <h4 className="text-sm font-bold mb-2">Visit History</h4>
-                <div className="space-y-1.5 max-h-40 overflow-auto">
-                  {profile.history.map((h: any) => <div key={h.id} className="text-xs rounded-lg border border-[#e8dccf] p-2">{h.start_at?.slice(0, 16)} · {h.service_name} <Pill status={h.status} /></div>)}
-                  {!profile.history.length && <p className="text-xs text-[#6b5d52]">No visits yet.</p>}
-                </div>
-              </div>
-              <div>
-                <h4 className="text-sm font-bold mb-2">Packages</h4>
-                <div className="space-y-1.5 mb-2">
-                  {profile.packages.map((p: any) => <div key={p.id} className="text-xs rounded-lg border border-[#e8dccf] p-2">{p.package_name} — {p.sessions_remaining}/{p.sessions_total} left <span className="text-[10px]">({p.status})</span></div>)}
-                  {!profile.packages.length && <p className="text-xs text-[#6b5d52]">None.</p>}
-                </div>
-                {canEdit && <select className={INPUT} onChange={e => e.target.value && buyPackage(e.target.value)} value="">
-                  <option value="">+ Sell a package…</option>
-                  {packages.map(p => <option key={p.id} value={p.id}>{p.name} — {money(p.price)}</option>)}
-                </select>}
-                <h4 className="text-sm font-bold mb-2 mt-3">Memberships</h4>
-                <div className="space-y-1.5 mb-2">
-                  {profile.memberships.map((m: any) => <div key={m.id} className="text-xs rounded-lg border border-[#e8dccf] p-2">{m.plan_name} <span className="text-[10px]">({m.status})</span></div>)}
-                  {!profile.memberships.length && <p className="text-xs text-[#6b5d52]">None.</p>}
-                </div>
-                {canEdit && <select className={INPUT} onChange={e => e.target.value && subscribe(e.target.value)} value="">
-                  <option value="">+ Subscribe membership…</option>
-                  {memberships.map(m => <option key={m.id} value={m.id}>{m.name} — {money(m.monthly_fee)}/mo</option>)}
-                </select>}
-              </div>
-            </div>
-            <div className="flex justify-end mt-5"><button className={BTN_GHOST} onClick={() => setProfile(null)}>Close</button></div>
-          </div>
-        </div>
-      )}
+      {profile && <SpaClientRecord restaurantId={restaurantId} token={token} clientId={profile.id} packages={packages} memberships={memberships} onClose={() => { setProfile(null); load(); }} />}
     </div>
   );
 }
@@ -2009,6 +2333,16 @@ function SpaSettings({ restaurantId, token }: Props) {
         <input className={INPUT} maxLength={40} placeholder="Spa & Wellness" value={profile.module_label || ''}
           onChange={e => setProfile((p: any) => ({ ...p, module_label: e.target.value }))} disabled={!canEdit} />
         <p className="text-[11px] text-[#6b5d52] mt-1">For example Ayurvedic Wellness. Leave blank to use Spa &amp; Wellness.</p>
+      </div>
+
+      {/* Consent and a health intake before every treatment. */}
+      <div className={CARD}>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-1" disabled={!canEdit} checked={Number(profile.require_intake_consent || 0) === 1}
+            onChange={e => setProfile((p: any) => ({ ...p, require_intake_consent: e.target.checked ? 1 : 0 }))} />
+          <span><b>Require a signed consent and a health intake before check-in</b>
+            <span className="block text-[11px] text-[#6b5d52]">For every treatment. A treatment can also require it on its own, in the Service Menu. Save to apply.</span></span>
+        </label>
       </div>
 
       {/* public link */}

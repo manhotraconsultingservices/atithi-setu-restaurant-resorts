@@ -29087,7 +29087,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'SPA_APPOINTMENTS', label: 'Spa Appointments',   description: 'Appointment list, status, checkout to folio / invoice.', spaOnly: true },
               { id: 'SPA_CATALOG',      label: 'Spa Catalog',        description: 'Treatments / services master — duration, price, resources, therapists.', spaOnly: true },
               { id: 'SPA_RESOURCES',    label: 'Spa Resources',      description: 'Rooms / tables / equipment used for appointment scheduling.', spaOnly: true },
-              { id: 'SPA_CLIENTS',      label: 'Spa Clients',        description: 'Spa CRM — client profiles, intake forms, visit history.', spaOnly: true },
+              { id: 'SPA_CLIENTS',      label: 'Spa Clients',        description: 'Spa CRM — client profiles, consent status, visit history and timeline.', spaOnly: true },
+              { id: 'SPA_CLINICAL',     label: 'Spa Clinical Records', description: 'Health information — intake answers, assessments, course plans and clinical notes. View reads, Edit records; every read is logged.', spaOnly: true },
               { id: 'SPA_PACKAGES',     label: 'Spa Packages',       description: 'Packages, memberships and retail products for spa sale.', spaOnly: true },
               { id: 'SPA_REPORTS',      label: 'Spa Reports',        description: 'Spa revenue, therapist utilization, top treatments — reporting hub.', spaOnly: true },
               { id: 'SPA_BILLING',      label: 'Spa Billing',        description: 'Spa invoices and payments.', spaOnly: true },
@@ -29120,7 +29121,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               MONITOR: 'OVERVIEW', INVOICES: 'OVERVIEW',
               ROOMS: 'FRONTDESK', HOTEL_BOOKINGS: 'FRONTDESK', SERVICES: 'FRONTDESK', SERVICE_REQUESTS: 'FRONTDESK', HOUSEKEEPING: 'FRONTDESK', CHECKLISTS: 'FRONTDESK', FOLIOS: 'FRONTDESK', COMPLIANCE: 'FRONTDESK', CONCIERGE_FAQ: 'FRONTDESK', FRONT_OFFICE_REPORTS: 'FRONTDESK',
               ORDERS: 'RESTAURANT', MENU: 'RESTAURANT', DELIVERY: 'RESTAURANT', QR: 'RESTAURANT', BOOKINGS: 'RESTAURANT', RESTAURANT_REPORTS: 'RESTAURANT',
-              SPA_CALENDAR: 'SPA', SPA_APPOINTMENTS: 'SPA', SPA_CATALOG: 'SPA', SPA_RESOURCES: 'SPA', SPA_CLIENTS: 'SPA', SPA_PACKAGES: 'SPA', SPA_REPORTS: 'SPA', SPA_BILLING: 'SPA', SPA_SETTINGS: 'SPA',
+              SPA_CALENDAR: 'SPA', SPA_APPOINTMENTS: 'SPA', SPA_CATALOG: 'SPA', SPA_RESOURCES: 'SPA', SPA_CLIENTS: 'SPA', SPA_CLINICAL: 'SPA', SPA_PACKAGES: 'SPA', SPA_REPORTS: 'SPA', SPA_BILLING: 'SPA', SPA_SETTINGS: 'SPA',
               EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_ADDONS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
               EXPENSE_JOURNAL: 'ACCOUNTS', PROCUREMENT: 'ACCOUNTS', RECEIVABLES: 'ACCOUNTS', CUSTOMER_ACCOUNTS: 'ACCOUNTS',
               ACCOUNTING: 'ACCOUNTS', ACCOUNTS_PNL: 'ACCOUNTS', ACCOUNTS_CASHFLOW: 'ACCOUNTS', ACCOUNTS_GST: 'ACCOUNTS', ACCOUNTS_VENDOR_AGING: 'ACCOUNTS', ACCOUNTS_MSME_43B: 'ACCOUNTS', CASH_DRAWER: 'ACCOUNTS',
@@ -55160,7 +55161,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // Spa & Wellness tabs (shown only when the selected restaurant has spa_enabled)
   const SPA_TABS = [
     'SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS',
-    'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_BILLING', 'SPA_SETTINGS', 'SPA_INVENTORY',
+    'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_BILLING', 'SPA_SETTINGS', 'SPA_INVENTORY', 'SPA_CLINICAL',
   ];
   // Compose the active tab list based on the currently-selected restaurant's modules.
   const selectedRestaurantRow = restaurants.find(r => r.id === permSelectedRestaurant);

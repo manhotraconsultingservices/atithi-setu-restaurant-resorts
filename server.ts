@@ -7503,7 +7503,7 @@ const restaurantAdmin = requireModuleAccess(['SETTINGS'], RESTAURANT_ADMIN_ROLES
 // appointments for hotel guests; restaurant cashiers handle spa checkout. Tab-level
 // permissions (SPA_*) do the fine-grained access control on top.
 const SPA_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'WAITER', 'CHEF', 'THERAPIST'];
-const SPA_TAB_IDS = ['SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_BILLING', 'SPA_SETTINGS', 'SPA_INVENTORY'];
+const SPA_TAB_IDS = ['SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_BILLING', 'SPA_SETTINGS', 'SPA_INVENTORY', 'SPA_CLINICAL'];
 const spaStaff = requireModuleAccess(SPA_TAB_IDS, SPA_OPERATIONAL_ROLES, 'Spa & Wellness');
 
 // Events & Convention mutations: open to operational roles plus the dedicated
@@ -34251,12 +34251,13 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const svc: any = await db.get("SELECT id, cabin_type_id, gender_rule FROM spa_services WHERE id = ?", [req.params.sid]);
+      const svc: any = await db.get("SELECT id, cabin_type_id, gender_rule, requires_consent, contraindications FROM spa_services WHERE id = ?", [req.params.sid]);
       if (!svc) return res.status(404).json({ error: 'Service not found' });
       const skills = await db.query(
         `SELECT ss.skill_id, ss.min_level, sk.name, sk.code FROM spa_service_skills ss JOIN spa_skills sk ON sk.id = ss.skill_id
           WHERE ss.service_id = ? ORDER BY sk.name`, [svc.id]);
-      res.json({ service_id: svc.id, cabin_type_id: svc.cabin_type_id || null, gender_rule: svc.gender_rule || 'ANY', skills });
+      res.json({ service_id: svc.id, cabin_type_id: svc.cabin_type_id || null, gender_rule: svc.gender_rule || 'ANY', skills,
+        requires_consent: Number(svc.requires_consent || 0) === 1, contraindications: spaParseList(svc.contraindications) });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch requirements" }); }
   });
 
@@ -34286,9 +34287,20 @@ ${data.tenant.name}`;
         seen.add(String(s.skill_id));
         clean.push({ skill_id: sk.id, name: sk.name, min_level: minLevel });
       }
-      const before = { cabin_type_id: svc.cabin_type_id || null, gender_rule: svc.gender_rule || 'ANY',
+      // Consent and intake before check-in, and conditions the treatment is not
+      // advised with. Only when sent, so an older caller never clears them.
+      const consentReq = b.requires_consent !== undefined ? (b.requires_consent ? 1 : 0) : Number(svc.requires_consent || 0);
+      let contraList: string[] = spaParseList(svc.contraindications);
+      if (b.contraindications !== undefined) {
+        if (!Array.isArray(b.contraindications)) return res.status(400).json({ error: 'Contraindications must be a list.', code: 'CONDITIONS_INVALID' });
+        const badCond = (b.contraindications as any[]).map(String).filter((c: string) => !SPA_CONDITION_CODES.has(c));
+        if (badCond.length) return res.status(400).json({ error: `Unknown condition: ${badCond.join(', ')}.`, code: 'CONDITION_UNKNOWN' });
+        contraList = Array.from(new Set((b.contraindications as any[]).map(String)));
+      }
+      const before = { cabin_type_id: svc.cabin_type_id || null, gender_rule: svc.gender_rule || 'ANY', requires_consent: Number(svc.requires_consent || 0), contraindications: spaParseList(svc.contraindications),
         skills: await db.query("SELECT skill_id, min_level FROM spa_service_skills WHERE service_id = ?", [svc.id]) };
-      await db.run("UPDATE spa_services SET cabin_type_id = ?, gender_rule = ? WHERE id = ?", [cabinTypeId, genderRule, svc.id]);
+      await db.run("UPDATE spa_services SET cabin_type_id = ?, gender_rule = ?, requires_consent = ?, contraindications = ? WHERE id = ?",
+        [cabinTypeId, genderRule, consentReq, contraList.length ? JSON.stringify(contraList) : null, svc.id]);
       await db.run("DELETE FROM spa_service_skills WHERE service_id = ?", [svc.id]);
       for (const c of clean) {
         await db.run("INSERT INTO spa_service_skills (id, service_id, skill_id, min_level) VALUES (?, ?, ?, ?)", [mkSpaId('SPASVK'), svc.id, c.skill_id, c.min_level]);
@@ -34296,9 +34308,9 @@ ${data.tenant.name}`;
       writeObjectAudit(db, req, {
         objectType: 'SPA_SERVICE', objectId: svc.id, action: 'REQUIREMENTS_UPDATED',
         summary: `"${svc.name}" needs ${clean.map(c => `${c.name} (${c.min_level.toLowerCase()}+)`).join(', ') || 'no named skills'}${genderRule === 'SAME_GENDER' ? ' · same-gender therapist' : ''}`,
-        before, after: { cabin_type_id: cabinTypeId, gender_rule: genderRule, skills: clean.map(({ name, ...rest }) => rest) },
+        before, after: { cabin_type_id: cabinTypeId, gender_rule: genderRule, requires_consent: consentReq, contraindications: contraList, skills: clean.map(({ name, ...rest }) => rest) },
       }).catch(() => {});
-      res.json({ service_id: svc.id, cabin_type_id: cabinTypeId, gender_rule: genderRule, skills: clean });
+      res.json({ service_id: svc.id, cabin_type_id: cabinTypeId, gender_rule: genderRule, skills: clean, requires_consent: consentReq === 1, contraindications: contraList });
     } catch (err: any) { res.status(500).json({ error: "Failed to save requirements" }); }
   });
 
@@ -34920,6 +34932,16 @@ ${data.tenant.name}`;
       const price = round2(Number(service.price || 0) + addonPrice);
       const gstPct = Number(service.gst_percent ?? 18);
 
+      // A treatment booked under a course plan counts toward it; the plan must be
+      // active and the guest's own.
+      let coursePlanId: string | null = null;
+      if (b.course_plan_id) {
+        const plan: any = await db.get("SELECT id, client_id, status FROM spa_course_plans WHERE id = ?", [b.course_plan_id]).catch(() => null);
+        if (!plan || String(plan.status) !== 'ACTIVE') return res.status(400).json({ error: 'That course plan is not active.', code: 'COURSE_PLAN_INVALID' });
+        const who: any = b.client_id ? { id: b.client_id } : (b.client_phone ? await db.get("SELECT id FROM spa_clients WHERE phone = ? LIMIT 1", [b.client_phone]).catch(() => null) : null);
+        if (!who || String(who.id) !== String(plan.client_id)) return res.status(400).json({ error: "That course plan is another guest's.", code: 'COURSE_PLAN_INVALID' });
+        coursePlanId = plan.id;
+      }
       // resolve / upsert client by phone if provided without id
       let clientId = b.client_id || null;
       if (!clientId && b.client_phone) {
@@ -34967,6 +34989,10 @@ ${data.tenant.name}`;
         return res.status(409).json({ error: "That slot was just booked by someone else. Pick another time.", code: 'SLOT_TAKEN' });
       }
       // What the guest told us, and why the booking stands outside the rules.
+      if (coursePlanId) {
+        await db.run("UPDATE spa_appointments SET course_plan_id = ? WHERE id = ?", [coursePlanId, id])
+          .catch((e: any) => console.error('[spa] course plan link not saved:', id, e?.message || e));
+      }
       if (createGuestGender || createPref || createProblems.length) {
         await db.run("UPDATE spa_appointments SET client_gender = ?, therapist_gender_pref = ?, assignment_override_reason = ? WHERE id = ?",
           [createGuestGender, createPref, createProblems.length ? createOverride : null, id])
@@ -35117,6 +35143,10 @@ ${data.tenant.name}`;
     if (from === target) return appt;
     const bad = spaTransitionError(from, target);
     if (bad) { res.status(409).json({ error: bad, code: 'INVALID_TRANSITION', status: from }); return null; }
+    if (target === 'CHECKED_IN') {
+      const gate = await spaCheckInGate(db, req, appt);
+      if (gate) { res.status(gate.status).json(gate.body); return null; }
+    }
     // Conditional on the status it was read in, so two people acting at once
     // cannot both move it.
     const moved = await db.run(`UPDATE spa_appointments SET status = ?${extraSet ? ', ' + extraSet : ''} WHERE id = ? AND COALESCE(status, 'BOOKED') = ?`, [target, appt.id, from]);
@@ -36082,6 +36112,7 @@ ${data.tenant.name}`;
       const pkg: any = await db.get("SELECT * FROM spa_packages WHERE id = ?", [b.package_id]);
       if (!pkg) return res.status(404).json({ error: "Package not found" });
       const sale = await spaQuickSaleFolio(db, 'PACKAGE_PURCHASE', `Package: ${pkg.name}`, Number(pkg.price || 0), Number(pkg.gst_percent ?? 18), b.payment_method || 'CASH', req.user?.email || req.user?.id || null, pkg.id, req.params.id);
+      await db.run("UPDATE folios SET spa_client_id = ? WHERE id = ?", [req.params.cid, sale.folioId]).catch(() => {});
       const cpId = mkSpaId('SPACP');
       const expiresAt = new Date(Date.now() + Number(pkg.validity_days || 365) * 86400000).toISOString();
       await db.run(
@@ -36092,7 +36123,7 @@ ${data.tenant.name}`;
     } catch (err: any) { console.error("spa package purchase error:", err); res.status(500).json({ error: "Failed to purchase package" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/clients/:cid/packages", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/clients/:cid/packages", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_client_packages WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid])); }
@@ -36131,6 +36162,7 @@ ${data.tenant.name}`;
       const plan: any = await db.get("SELECT * FROM spa_membership_plans WHERE id = ?", [req.body?.plan_id]);
       if (!plan) return res.status(404).json({ error: "Membership plan not found" });
       const sale = await spaQuickSaleFolio(db, 'MEMBERSHIP_FEE', `Membership: ${plan.name}`, Number(plan.monthly_fee || 0), Number(plan.gst_percent ?? 18), req.body?.payment_method || 'CASH', req.user?.email || req.user?.id || null, plan.id, req.params.id);
+      await db.run("UPDATE folios SET spa_client_id = ? WHERE id = ?", [req.params.cid, sale.folioId]).catch(() => {});
       const id = mkSpaId('SPACM');
       const start = new Date(); const end = new Date(Date.now() + 30 * 86400000);
       await db.run(
@@ -36141,7 +36173,7 @@ ${data.tenant.name}`;
     } catch (err: any) { console.error("spa membership subscribe error:", err); res.status(500).json({ error: "Failed to subscribe membership" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/clients/:cid/memberships", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/clients/:cid/memberships", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_client_memberships WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid])); }
@@ -36174,12 +36206,97 @@ ${data.tenant.name}`;
       // A product sold leaves its batch as well as the stock figure.
       await _drawFromBatches(db, b.ingredient_id, qty);
       const sale = await spaQuickSaleFolio(db, 'SPA_PRODUCT', `${item.name} × ${qty}`, lineAmount, gstPct, b.payment_method || 'CASH', req.user?.email || req.user?.id || null, item.id, req.params.id);
+      if (b.client_id) await db.run("UPDATE folios SET spa_client_id = ? WHERE id = ?", [String(b.client_id), sale.folioId]).catch(() => {});
       res.status(201).json({ success: true, invoice_number: sale.invoiceNumber, grand_total: sale.grandTotal, stock_remaining: bal });
     } catch (err: any) { console.error("spa retail sale error:", err); res.status(500).json({ error: "Failed to record retail sale" }); }
   });
 
+  // ─── GUEST HEALTH RECORD (Phase 4) ─────────────────────────────────────────
+  // Conditions an intake records, and a treatment can list as not advised. A
+  // neutral list: which treatment each rules out is the property's decision.
+  const SPA_CONDITIONS: { code: string; label: string }[] = [
+    { code: 'HIGH_BP', label: 'High blood pressure' },
+    { code: 'LOW_BP', label: 'Low blood pressure' },
+    { code: 'HEART', label: 'Heart condition' },
+    { code: 'DIABETES', label: 'Diabetes' },
+    { code: 'PREGNANCY', label: 'Pregnancy' },
+    { code: 'EPILEPSY', label: 'Epilepsy or seizures' },
+    { code: 'FEVER', label: 'Fever or acute infection' },
+    { code: 'SKIN', label: 'Skin condition, rash or open wound' },
+    { code: 'RECENT_SURGERY', label: 'Surgery in the last six months' },
+    { code: 'VARICOSE', label: 'Varicose veins or blood clots' },
+    { code: 'CANCER', label: 'Cancer treatment' },
+    { code: 'ALLERGY_OIL', label: 'Allergy to oils, herbs or nuts' },
+    { code: 'HEAD_INJURY', label: 'Head or neck injury' },
+    { code: 'MIGRAINE', label: 'Migraine' },
+    { code: 'MENSTRUATION', label: 'Menstruating' },
+  ];
+  const SPA_CONDITION_CODES = new Set(SPA_CONDITIONS.map(c => c.code));
+  const SPA_CONSTITUTIONS = ['VATA', 'PITTA', 'KAPHA', 'VATA_PITTA', 'PITTA_KAPHA', 'VATA_KAPHA', 'TRIDOSHIC'];
+  const spaParseList = (v: any): string[] => {
+    try { const p = typeof v === 'string' ? JSON.parse(v) : v; return Array.isArray(p) ? p.map(String) : []; } catch { return []; }
+  };
+  const spaYmdOk = (v: any) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+
+  // Health information — what an intake says, assessments, course plans and
+  // clinical notes — needs the Clinical records permission (SPA_CLINICAL),
+  // whatever else a role can see. A role whose permissions were never saved has
+  // none here, though the ordinary spa gates let it through.
+  const spaClinicalLevel = async (req: AuthRequest): Promise<number> => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (role === 'OWNER' || role === 'SUPER_ADMIN' || role === 'CTO') return 3;
+    try {
+      const perms: any = await getTabPermissionsForRole((req.user as any)?.restaurantId || req.params.id, role);
+      return perms ? Number(perms.SPA_CLINICAL || 0) : 0;
+    } catch { return 0; }
+  };
+  const spaClinicalGate = (minLevel: number) => async (req: AuthRequest, res: Response, next: NextFunction) => {
+    if ((await spaClinicalLevel(req)) >= minLevel) return next();
+    return res.status(403).json({ error: 'Health records are for staff with clinical access. Ask the owner to grant Clinical records in Staff Access.', code: 'CLINICAL_ACCESS_REQUIRED', required_tab: 'SPA_CLINICAL' });
+  };
+  // Every read of health information is logged: who, when, which guest, what part.
+  const spaLogClinicalRead = (db: DbInterface, req: AuthRequest, clientId: string, section: string) =>
+    db.run("INSERT INTO spa_clinical_access_log (id, client_id, section, actor_id, actor_email, actor_role) VALUES (?, ?, ?, ?, ?, ?)",
+      [mkSpaId('SPACAL'), clientId, section, req.user?.id || null, req.user?.email || null, req.user?.role || null])
+      .catch((e: any) => console.error('[spa] clinical read not logged:', clientId, e?.message || e));
+
+  // Before a guest is checked in for a treatment that needs it — the treatment
+  // is marked, or the property requires it for all — a signed consent, a health
+  // intake on file, and none of the treatment's contraindications in the latest
+  // intake. A clinician can check in past a contraindication with a reason, kept
+  // on the appointment. Staff without clinical access are not told the condition.
+  const spaCheckInGate = async (db: DbInterface, req: AuthRequest, appt: any): Promise<{ status: number; body: any } | null> => {
+    const svc: any = await db.get("SELECT name, requires_consent, contraindications FROM spa_services WHERE id = ?", [appt.service_id]).catch(() => null);
+    const prof: any = await db.get("SELECT require_intake_consent FROM spa_profile WHERE restaurant_id = ?", [req.params.id]).catch(() => null);
+    const needed = Number(svc?.requires_consent || 0) === 1 || Number(prof?.require_intake_consent || 0) === 1;
+    if (!needed) return null;
+    if (!appt.client_id) return { status: 409, body: { error: 'Record this guest as a client first, so their consent and health intake can be taken.', code: 'CLIENT_REQUIRED' } };
+    const consent: any = await db.get("SELECT id FROM spa_client_intake_forms WHERE client_id = ? AND form_type IN ('CONSENT', 'MEDICAL_CONSENT') ORDER BY created_at DESC LIMIT 1", [appt.client_id]).catch(() => null);
+    if (!consent) return { status: 409, body: { error: 'The guest has not signed the treatment consent. Take their consent before check-in.', code: 'CONSENT_REQUIRED' } };
+    const intake: any = await db.get("SELECT responses FROM spa_client_intake_forms WHERE client_id = ? AND form_type IN ('INTAKE', 'MEDICAL_HISTORY') ORDER BY created_at DESC LIMIT 1", [appt.client_id]).catch(() => null);
+    if (!intake) return { status: 409, body: { error: 'The guest has no health intake on file. Someone with clinical access must take it before check-in.', code: 'INTAKE_REQUIRED' } };
+    const contra = spaParseList(svc?.contraindications);
+    let conds: string[] = [];
+    try { conds = spaParseList(JSON.parse(intake.responses || '{}')?.conditions); } catch { conds = []; }
+    const hits = contra.filter(c => conds.includes(c));
+    if (!hits.length) return null;
+    const level = await spaClinicalLevel(req);
+    const reason = String(req.body?.clinical_override_reason || '').trim();
+    if (level >= 2 && reason.length >= 5) {
+      await db.run("UPDATE spa_appointments SET clinical_override_reason = ? WHERE id = ?", [reason, appt.id]).catch(() => {});
+      writeObjectAudit(db, req, { objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'CLINICAL_OVERRIDE',
+        summary: `Checked in by a clinician past a caution on "${svc?.name || 'the treatment'}"`, after: { reason } }).catch(() => {});
+      return null;
+    }
+    if (level < 1) return { status: 409, body: { error: "The guest's health record flags this treatment. Someone with clinical access must review it before check-in.", code: 'CONTRAINDICATED', overridable: false } };
+    const labels = hits.map(h => SPA_CONDITIONS.find(c => c.code === h)?.label || h);
+    return { status: 409, body: {
+      error: `${svc?.name || 'This treatment'} is not advised with: ${labels.join(', ')}.${level >= 2 ? ' Give a clinical reason to check the guest in anyway.' : ' A clinician must review it.'}`,
+      code: 'CONTRAINDICATED', conditions: hits, overridable: level >= 2 } };
+  };
+
   // ─── CLIENTS / CRM + forms ───────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/clients", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/clients", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36210,11 +36327,12 @@ ${data.tenant.name}`;
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, b.name, b.phone || null, b.email || null, b.gender || null, b.dob || null,
          b.preferences || null, b.tags || null, b.marketing_opt_in ? 1 : 0, b.linked_guest_phone || null, b.notes || null]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: id, action: 'CREATED', summary: `Client "${b.name}" added` }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_clients WHERE id = ?", [id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to create client" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/clients/:cid", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/clients/:cid", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36224,8 +36342,16 @@ ${data.tenant.name}`;
       const history = await db.query("SELECT * FROM spa_appointments WHERE client_id = ? ORDER BY start_at DESC LIMIT 100", [req.params.cid]);
       const packages = await db.query("SELECT * FROM spa_client_packages WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid]);
       const memberships = await db.query("SELECT * FROM spa_client_memberships WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid]);
-      const forms = await db.query("SELECT * FROM spa_client_intake_forms WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid]);
-      res.json({ client, history, packages, memberships, forms });
+      const formRows: any[] = await db.query("SELECT * FROM spa_client_intake_forms WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid]);
+      // Whether consent and intake are on file is for the front desk; what the
+      // intake says is for clinical staff, and their read is logged.
+      const consentRow = formRows.find((f: any) => f.form_type === 'CONSENT' || f.form_type === 'MEDICAL_CONSENT');
+      const intakeRow = formRows.find((f: any) => f.form_type === 'INTAKE' || f.form_type === 'MEDICAL_HISTORY');
+      const clinical = (await spaClinicalLevel(req)) >= 1;
+      if (clinical && formRows.length) spaLogClinicalRead(db, req, req.params.cid, 'PROFILE_FORMS');
+      res.json({ client, history, packages, memberships, forms: clinical ? formRows : [],
+        forms_summary: { consent_on: consentRow?.created_at || null, consent_signed_by: consentRow?.signed_by_name || null, intake_on: intakeRow?.created_at || null },
+        clinical_access: clinical });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch client" }); }
   });
 
@@ -36242,15 +36368,24 @@ ${data.tenant.name}`;
       if (!fields.length) return res.status(400).json({ error: "No fields to update" });
       fields.push("updated_at = CURRENT_TIMESTAMP");
       vals.push(req.params.cid);
+      const clientBefore: any = await db.get("SELECT * FROM spa_clients WHERE id = ?", [req.params.cid]);
+      if (!clientBefore) return res.status(404).json({ error: "Client not found" });
       await db.run(`UPDATE spa_clients SET ${fields.join(', ')} WHERE id = ?`, vals);
-      res.json(await db.get("SELECT * FROM spa_clients WHERE id = ?", [req.params.cid]));
+      const clientAfter: any = await db.get("SELECT * FROM spa_clients WHERE id = ?", [req.params.cid]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: req.params.cid, action: 'UPDATED', summary: `Client "${clientAfter?.name}" updated`, before: clientBefore, after: clientAfter }).catch(() => {});
+      res.json(clientAfter);
     } catch (err: any) { res.status(500).json({ error: "Failed to update client" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/clients/:cid/forms", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/clients/:cid/forms", authenticate, spaStaff, spaClinicalGate(1), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
-    try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_client_intake_forms WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid])); }
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM spa_client_intake_forms WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid]);
+      spaLogClinicalRead(db, req, req.params.cid, 'FORMS');
+      res.json(rows);
+    }
     catch (err: any) { res.status(500).json({ error: "Failed to fetch forms" }); }
   });
 
@@ -36260,15 +36395,292 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
+      const client: any = await db.get("SELECT id, name FROM spa_clients WHERE id = ?", [req.params.cid]);
+      if (!client) return res.status(404).json({ error: "Client not found" });
+      const formType = String(b.form_type || 'INTAKE').toUpperCase();
+      if (!['INTAKE', 'CONSENT', 'MEDICAL_HISTORY', 'MEDICAL_CONSENT'].includes(formType)) return res.status(400).json({ error: 'Form type must be intake or consent.', code: 'FORM_TYPE_INVALID' });
+      const isConsent = formType === 'CONSENT' || formType === 'MEDICAL_CONSENT';
+      // A consent can be taken at the front desk; a health intake is health
+      // information, recorded by staff with clinical access.
+      if (!isConsent && (await spaClinicalLevel(req)) < 2) return res.status(403).json({ error: 'A health intake is recorded by staff with clinical access.', code: 'CLINICAL_ACCESS_REQUIRED', required_tab: 'SPA_CLINICAL' });
+      let responses: any = b.responses;
+      if (typeof responses === 'string') { try { responses = JSON.parse(responses); } catch { return res.status(400).json({ error: 'The form answers could not be read.', code: 'RESPONSES_INVALID' }); } }
+      if (!responses || typeof responses !== 'object' || Array.isArray(responses)) responses = {};
+      if (!isConsent && responses.conditions !== undefined) {
+        if (!Array.isArray(responses.conditions)) return res.status(400).json({ error: 'Conditions must be a list.', code: 'CONDITIONS_INVALID' });
+        const unknown = (responses.conditions as any[]).map(String).filter((c: string) => !SPA_CONDITION_CODES.has(c));
+        if (unknown.length) return res.status(400).json({ error: `Unknown condition: ${unknown.join(', ')}.`, code: 'CONDITION_UNKNOWN' });
+        responses.conditions = Array.from(new Set((responses.conditions as any[]).map(String)));
+      }
+      const signedBy = isConsent ? String(b.signed_by_name || '').trim().slice(0, 120) : '';
+      if (isConsent && !signedBy) return res.status(400).json({ error: 'Enter the name of the person signing the consent.', code: 'SIGNER_REQUIRED' });
+      if (isConsent && responses.agreed !== true) return res.status(400).json({ error: 'The guest has to agree to the consent.', code: 'CONSENT_NOT_AGREED' });
       const id = mkSpaId('SPAFRM');
       await db.run(
-        `INSERT INTO spa_client_intake_forms (id, client_id, appointment_id, form_type, responses, signature_url, signed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [id, req.params.cid, b.appointment_id || null, b.form_type || 'INTAKE',
-         typeof b.responses === 'string' ? b.responses : JSON.stringify(b.responses || {}),
-         b.signature_url || null, b.signed_at || null]);
+        `INSERT INTO spa_client_intake_forms (id, client_id, appointment_id, form_type, responses, signature_url, signed_at, signed_by_name, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ${isConsent ? 'CURRENT_TIMESTAMP' : 'NULL'}, ?, ?)`,
+        [id, client.id, b.appointment_id || null, formType, JSON.stringify(responses), b.signature_url || null, signedBy || null, req.user?.id || null]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: client.id, action: 'FORM_RECORDED',
+        summary: isConsent ? `Treatment consent signed by ${signedBy}` : 'Health intake recorded' }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_client_intake_forms WHERE id = ?", [id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to save form" }); }
+  });
+
+  // Conditions and constitutions, for the intake and the treatment form.
+  app.get("/api/restaurant/:id/spa/clinical/conditions", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
+    res.json({ conditions: SPA_CONDITIONS, constitutions: SPA_CONSTITUTIONS });
+  });
+
+  // The guest's health record: intakes and consents, assessments, course plans
+  // with progress, clinical notes, and — for full clinical access — who has read it.
+  app.get("/api/restaurant/:id/spa/clients/:cid/clinical", authenticate, spaStaff, spaClinicalGate(1), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const client: any = await db.get("SELECT id, name, gender, dob FROM spa_clients WHERE id = ?", [req.params.cid]);
+      if (!client) return res.status(404).json({ error: "Client not found" });
+      const level = await spaClinicalLevel(req);
+      const forms = ((await db.query("SELECT * FROM spa_client_intake_forms WHERE client_id = ? ORDER BY created_at DESC", [client.id])) as any[])
+        .map((f: any) => { let r: any = {}; try { r = JSON.parse(f.responses || '{}'); } catch { r = {}; } return { ...f, responses: r }; });
+      const assessments = await db.query("SELECT * FROM spa_client_assessments WHERE client_id = ? ORDER BY assessed_at DESC", [client.id]);
+      const plans: any[] = await db.query("SELECT * FROM spa_course_plans WHERE client_id = ? ORDER BY created_at DESC", [client.id]);
+      for (const p of plans) {
+        p.items = await db.query(
+          `SELECT i.*, s.name AS service_name,
+                  (SELECT COUNT(*) FROM spa_appointments a WHERE a.course_plan_id = i.plan_id AND a.service_id = i.service_id AND a.status = 'COMPLETED') AS sessions_done,
+                  (SELECT COUNT(*) FROM spa_appointments a WHERE a.course_plan_id = i.plan_id AND a.service_id = i.service_id AND a.status IN ('BOOKED','CONFIRMED','CHECKED_IN','IN_PROGRESS')) AS sessions_booked
+             FROM spa_course_plan_items i LEFT JOIN spa_services s ON s.id = i.service_id
+            WHERE i.plan_id = ? ORDER BY s.name`, [p.id]);
+      }
+      const notes = await db.query(
+        `SELECT n.*, a.service_name, a.start_at FROM spa_clinical_notes n LEFT JOIN spa_appointments a ON a.id = n.appointment_id
+          WHERE n.client_id = ? ORDER BY n.created_at DESC`, [client.id]);
+      const accessLog = level >= 3 ? await db.query("SELECT * FROM spa_clinical_access_log WHERE client_id = ? ORDER BY created_at DESC LIMIT 100", [client.id]) : null;
+      spaLogClinicalRead(db, req, client.id, 'CLINICAL_RECORD');
+      res.json({ client, forms, assessments, plans, notes, access_log: accessLog, can_write: level >= 2, conditions: SPA_CONDITIONS, constitutions: SPA_CONSTITUTIONS });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load the health record" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/clients/:cid/assessments", authenticate, spaStaff, spaClinicalGate(2), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const client: any = await db.get("SELECT id FROM spa_clients WHERE id = ?", [req.params.cid]);
+      if (!client) return res.status(404).json({ error: "Client not found" });
+      const b = req.body || {};
+      const constitution = String(b.constitution || '').toUpperCase();
+      if (!SPA_CONSTITUTIONS.includes(constitution)) return res.status(400).json({ error: 'Choose the constitution assessed.', code: 'CONSTITUTION_INVALID' });
+      const id = mkSpaId('SPAASM');
+      await db.run("INSERT INTO spa_client_assessments (id, client_id, constitution, notes, assessed_by) VALUES (?, ?, ?, ?, ?)",
+        [id, client.id, constitution, b.notes ? String(b.notes).slice(0, 2000) : null, req.user?.id || null]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: client.id, action: 'ASSESSMENT_RECORDED', summary: 'Constitution assessment recorded' }).catch(() => {});
+      res.status(201).json(await db.get("SELECT * FROM spa_client_assessments WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to record the assessment" }); }
+  });
+
+  // A course of care prescribed for the guest: which treatments, how many sessions.
+  app.post("/api/restaurant/:id/spa/clients/:cid/course-plans", authenticate, spaStaff, spaClinicalGate(2), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const client: any = await db.get("SELECT id FROM spa_clients WHERE id = ?", [req.params.cid]);
+      if (!client) return res.status(404).json({ error: "Client not found" });
+      const b = req.body || {};
+      const title = String(b.title || '').trim();
+      if (title.length < 2) return res.status(400).json({ error: 'Give the course plan a title.', code: 'TITLE_REQUIRED' });
+      if ((b.start_date && !spaYmdOk(b.start_date)) || (b.end_date && !spaYmdOk(b.end_date)) || (b.start_date && b.end_date && String(b.end_date) < String(b.start_date))) {
+        return res.status(400).json({ error: 'Dates must be YYYY-MM-DD, with the end on or after the start.', code: 'DATES_INVALID' });
+      }
+      const items: any[] = Array.isArray(b.items) ? b.items : [];
+      if (!items.length) return res.status(400).json({ error: 'Add at least one treatment to the course plan.', code: 'ITEMS_REQUIRED' });
+      const clean: any[] = [];
+      for (const it of items) {
+        const svc: any = await db.get("SELECT id, name FROM spa_services WHERE id = ?", [it?.service_id]);
+        if (!svc) return res.status(400).json({ error: 'One of the treatments is not on the menu.', code: 'SERVICE_UNKNOWN' });
+        const n = Number(it.sessions_prescribed);
+        if (!(Number.isInteger(n) && n >= 1 && n <= 60)) return res.status(400).json({ error: `Sessions for ${svc.name} must be a whole number from 1 to 60.`, code: 'SESSIONS_INVALID' });
+        clean.push({ service_id: svc.id, name: svc.name, sessions: n, frequency_note: it.frequency_note ? String(it.frequency_note).slice(0, 120) : null });
+      }
+      const id = mkSpaId('SPACRS');
+      await db.run("INSERT INTO spa_course_plans (id, client_id, title, prescribed_by, start_date, end_date, status, notes) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?)",
+        [id, client.id, title.slice(0, 120), req.user?.id || null, b.start_date || null, b.end_date || null, b.notes ? String(b.notes).slice(0, 2000) : null]);
+      for (const c of clean) {
+        await db.run("INSERT INTO spa_course_plan_items (id, plan_id, service_id, sessions_prescribed, frequency_note) VALUES (?, ?, ?, ?, ?)",
+          [mkSpaId('SPACRI'), id, c.service_id, c.sessions, c.frequency_note]);
+      }
+      writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: client.id, action: 'COURSE_PLAN_CREATED', summary: `Course plan "${title}" prescribed` }).catch(() => {});
+      const plan: any = await db.get("SELECT * FROM spa_course_plans WHERE id = ?", [id]);
+      plan.items = await db.query("SELECT * FROM spa_course_plan_items WHERE plan_id = ?", [id]);
+      res.status(201).json(plan);
+    } catch (err: any) { res.status(500).json({ error: "Failed to create the course plan" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/course-plans/:pid", authenticate, spaStaff, spaClinicalGate(2), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const before: any = await db.get("SELECT * FROM spa_course_plans WHERE id = ?", [req.params.pid]);
+      if (!before) return res.status(404).json({ error: "Course plan not found" });
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      if (b.status !== undefined) {
+        const st = String(b.status || '').toUpperCase();
+        if (!['ACTIVE', 'COMPLETED', 'CANCELLED'].includes(st)) return res.status(400).json({ error: 'Status must be active, completed or cancelled.', code: 'STATUS_INVALID' });
+        fields.push('status = ?'); vals.push(st);
+      }
+      if (b.notes !== undefined) { fields.push('notes = ?'); vals.push(b.notes ? String(b.notes).slice(0, 2000) : null); }
+      if (b.end_date !== undefined) {
+        if (b.end_date && (!spaYmdOk(b.end_date) || (before.start_date && String(b.end_date) < String(before.start_date)))) return res.status(400).json({ error: 'The end date must be YYYY-MM-DD and not before the start.', code: 'DATES_INVALID' });
+        fields.push('end_date = ?'); vals.push(b.end_date || null);
+      }
+      if (!fields.length) return res.status(400).json({ error: 'Nothing to change.' });
+      await db.run(`UPDATE spa_course_plans SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [...vals, before.id]);
+      const after: any = await db.get("SELECT * FROM spa_course_plans WHERE id = ?", [before.id]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: before.client_id, action: 'COURSE_PLAN_UPDATED', summary: `Course plan "${before.title}" ${after.status !== before.status ? `marked ${String(after.status).toLowerCase()}` : 'updated'}` }).catch(() => {});
+      res.json(after);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update the course plan" }); }
+  });
+
+  // Clinical notes (subjective, objective, assessment, plan). Once locked a note
+  // cannot be changed.
+  app.post("/api/restaurant/:id/spa/clients/:cid/clinical-notes", authenticate, spaStaff, spaClinicalGate(2), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const client: any = await db.get("SELECT id FROM spa_clients WHERE id = ?", [req.params.cid]);
+      if (!client) return res.status(404).json({ error: "Client not found" });
+      const b = req.body || {};
+      const f = (k: string) => (b[k] ? String(b[k]).slice(0, 4000) : null);
+      if (!f('soap_subjective') && !f('soap_objective') && !f('soap_assessment') && !f('soap_plan')) return res.status(400).json({ error: 'Write something in the note.', code: 'NOTE_EMPTY' });
+      if (b.appointment_id) {
+        const ap: any = await db.get("SELECT id FROM spa_appointments WHERE id = ? AND client_id = ?", [b.appointment_id, client.id]);
+        if (!ap) return res.status(400).json({ error: "That appointment is not this guest's.", code: 'APPOINTMENT_INVALID' });
+      }
+      const id = mkSpaId('SPACLN');
+      await db.run(
+        "INSERT INTO spa_clinical_notes (id, client_id, appointment_id, soap_subjective, soap_objective, soap_assessment, soap_plan, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [id, client.id, b.appointment_id || null, f('soap_subjective'), f('soap_objective'), f('soap_assessment'), f('soap_plan'), req.user?.id || null]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: client.id, action: 'CLINICAL_NOTE_ADDED', summary: 'Clinical note added' }).catch(() => {});
+      res.status(201).json(await db.get("SELECT * FROM spa_clinical_notes WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to add the note" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/clinical-notes/:nid", authenticate, spaStaff, spaClinicalGate(2), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const note: any = await db.get("SELECT * FROM spa_clinical_notes WHERE id = ?", [req.params.nid]);
+      if (!note) return res.status(404).json({ error: "Note not found" });
+      if (note.locked_at) return res.status(409).json({ error: 'This note is locked and cannot be changed. Add a new note instead.', code: 'NOTE_LOCKED' });
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      for (const k of ['soap_subjective', 'soap_objective', 'soap_assessment', 'soap_plan']) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(b[k] ? String(b[k]).slice(0, 4000) : null); }
+      }
+      if (!fields.length) return res.status(400).json({ error: 'Nothing to change.' });
+      await db.run(`UPDATE spa_clinical_notes SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [...vals, note.id]);
+      writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: note.client_id, action: 'CLINICAL_NOTE_EDITED', summary: 'Clinical note edited' }).catch(() => {});
+      res.json(await db.get("SELECT * FROM spa_clinical_notes WHERE id = ?", [note.id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to edit the note" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/clinical-notes/:nid/lock", authenticate, spaStaff, spaClinicalGate(2), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const note: any = await db.get("SELECT * FROM spa_clinical_notes WHERE id = ?", [req.params.nid]);
+      if (!note) return res.status(404).json({ error: "Note not found" });
+      if (!note.locked_at) {
+        await db.run("UPDATE spa_clinical_notes SET locked_at = CURRENT_TIMESTAMP, locked_by = ? WHERE id = ? AND locked_at IS NULL", [req.user?.id || null, note.id]);
+        writeObjectAudit(db, req, { objectType: 'SPA_CLIENT', objectId: note.client_id, action: 'CLINICAL_NOTE_LOCKED', summary: 'Clinical note locked' }).catch(() => {});
+      }
+      res.json(await db.get("SELECT * FROM spa_clinical_notes WHERE id = ?", [note.id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to lock the note" }); }
+  });
+
+  // The guest's timeline: every treatment — who performed it, the cabin, the
+  // actual times, what it used and from which batch, follow-up and the invoice —
+  // with packages bought and redeemed, memberships, retail purchases, and consent
+  // and intake dates. Treatment notes and clinical entries only for clinical
+  // staff, whose read is logged. Oldest records start from when each was kept.
+  app.get("/api/restaurant/:id/spa/clients/:cid/timeline", authenticate, spaStaff, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const client: any = await db.get("SELECT id, name, phone, email, gender, dob, created_at FROM spa_clients WHERE id = ?", [req.params.cid]);
+      if (!client) return res.status(404).json({ error: "Client not found" });
+      const clinical = (await spaClinicalLevel(req)) >= 1;
+      const events: any[] = [];
+      const appts: any[] = await db.query(
+        `SELECT a.*, t.display_name AS therapist_name, r.name AS resource_name FROM spa_appointments a
+           LEFT JOIN spa_therapists t ON t.id = a.therapist_id LEFT JOIN spa_resources r ON r.id = a.resource_id
+          WHERE a.client_id = ? ORDER BY a.start_at DESC LIMIT 200`, [client.id]);
+      await spaAttachAssistants(db, appts);
+      const folioIds = appts.map((a: any) => a.folio_id).filter(Boolean);
+      const folioRows: any[] = folioIds.length
+        ? await db.query(`SELECT id, invoice_number, grand_total, status FROM folios WHERE id IN (${folioIds.map(() => '?').join(',')})`, folioIds).catch(() => [])
+        : [];
+      for (const a of appts) {
+        const s = await spaReadSession(db, a.id);
+        const f = folioRows.find((x: any) => x.id === a.folio_id);
+        events.push({
+          kind: 'TREATMENT', at: a.start_at, appointment_id: a.id, title: a.service_name, status: a.status,
+          booked: { therapist: a.therapist_name || null, assistants: a.assistant_names || [], cabin: a.resource_name || null, start_at: a.start_at, end_at: a.end_at },
+          session: s ? {
+            started_at: s.started_at, finished_at: s.finished_at, cabin: s.resource_name || null, performers: s.performers,
+            outcome: s.outcome, follow_up: s.follow_up, follow_up_date: s.follow_up_date, tips: s.tips,
+            consumables: s.consumables.map((c: any) => ({ item: c.ingredient_name, standard_qty: c.standard_qty, actual_qty: c.actual_qty, unit: c.unit,
+              batches: c.batches.map((bt: any) => ({ batch_number: bt.batch_number, qty: bt.qty, expiry_date: bt.expiry_date })) })),
+            ...(clinical ? { notes: s.notes } : {}),
+          } : null,
+          invoice: f ? { id: f.id, invoice_number: f.invoice_number, grand_total: f.grand_total, status: f.status } : null,
+          course_plan_id: a.course_plan_id || null,
+        });
+      }
+      const pkgs: any[] = await db.query(
+        "SELECT cp.*, f.invoice_number FROM spa_client_packages cp LEFT JOIN folios f ON f.id = cp.folio_id WHERE cp.client_id = ? ORDER BY cp.created_at DESC", [client.id]).catch(() => []);
+      for (const p of pkgs) events.push({ kind: 'PACKAGE_BOUGHT', at: p.created_at, title: p.package_name, detail: `${p.sessions_total} sessions, ${p.sessions_remaining} left`, amount: p.price_paid, invoice_number: p.invoice_number || null, status: p.status });
+      const reds: any[] = await db.query(
+        `SELECT r.redeemed_at, r.sessions_drawn, cp.package_name, a.service_name FROM spa_package_redemptions r
+           JOIN spa_client_packages cp ON cp.id = r.client_package_id LEFT JOIN spa_appointments a ON a.id = r.appointment_id
+          WHERE cp.client_id = ? ORDER BY r.redeemed_at DESC`, [client.id]).catch(() => []);
+      for (const r of reds) events.push({ kind: 'PACKAGE_REDEEMED', at: r.redeemed_at, title: r.package_name, detail: `${r.sessions_drawn} session(s) for ${r.service_name || 'a treatment'}` });
+      const mems: any[] = await db.query(
+        "SELECT m.*, f.invoice_number FROM spa_client_memberships m LEFT JOIN folios f ON f.id = m.folio_id WHERE m.client_id = ? ORDER BY m.created_at DESC", [client.id]).catch(() => []);
+      for (const m of mems) events.push({ kind: 'MEMBERSHIP', at: m.created_at, title: m.plan_name, detail: `${String(m.current_period_start || '').slice(0, 10)} to ${String(m.current_period_end || '').slice(0, 10)}`, invoice_number: m.invoice_number || null, status: m.status });
+      const buys: any[] = await db.query(
+        `SELECT f.id, f.invoice_number, f.grand_total, f.status, f.settled_at,
+                (SELECT string_agg(e.description, ', ') FROM folio_entries e WHERE e.folio_id = f.id) AS items
+           FROM folios f
+          WHERE f.spa_client_id = ? AND f.folio_kind = 'SPA'
+            AND EXISTS (SELECT 1 FROM folio_entries e WHERE e.folio_id = f.id AND e.entry_type = 'SPA_PRODUCT')
+          ORDER BY f.settled_at DESC NULLS LAST`, [client.id]).catch(() => []);
+      for (const p of buys) events.push({ kind: 'PURCHASE', at: p.settled_at, title: p.items || 'Retail purchase', amount: p.grand_total, invoice_number: p.invoice_number, status: p.status });
+      const forms: any[] = await db.query("SELECT id, form_type, created_at, signed_by_name FROM spa_client_intake_forms WHERE client_id = ? ORDER BY created_at DESC", [client.id]).catch(() => []);
+      for (const fm of forms) {
+        const isConsent = fm.form_type === 'CONSENT' || fm.form_type === 'MEDICAL_CONSENT';
+        events.push({ kind: isConsent ? 'CONSENT' : 'INTAKE', at: fm.created_at, title: isConsent ? `Consent signed${fm.signed_by_name ? ` by ${fm.signed_by_name}` : ''}` : 'Health intake recorded' });
+      }
+      if (clinical) {
+        const asm: any[] = await db.query("SELECT * FROM spa_client_assessments WHERE client_id = ? ORDER BY assessed_at DESC", [client.id]).catch(() => []);
+        for (const x of asm) events.push({ kind: 'ASSESSMENT', at: x.assessed_at, title: `Constitution: ${String(x.constitution).replace('_', ' / ').toLowerCase()}`, detail: x.notes || null });
+        const plans: any[] = await db.query("SELECT * FROM spa_course_plans WHERE client_id = ? ORDER BY created_at DESC", [client.id]).catch(() => []);
+        for (const p of plans) events.push({ kind: 'COURSE_PLAN', at: p.created_at, title: p.title, detail: `${p.start_date || ''}${p.end_date ? ` to ${p.end_date}` : ''}`, status: p.status });
+        const cnotes: any[] = await db.query("SELECT * FROM spa_clinical_notes WHERE client_id = ? ORDER BY created_at DESC", [client.id]).catch(() => []);
+        for (const n of cnotes) events.push({ kind: 'CLINICAL_NOTE', at: n.created_at, title: 'Clinical note', detail: [n.soap_subjective, n.soap_assessment, n.soap_plan].filter(Boolean).join(' · ').slice(0, 300), locked: !!n.locked_at });
+        spaLogClinicalRead(db, req, client.id, 'TIMELINE');
+      }
+      events.sort((x, y) => new Date(y.at || 0).getTime() - new Date(x.at || 0).getTime());
+      res.json({ client, clinical_access: clinical, events });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load the timeline" }); }
   });
 
   // ─── REPORTS ─────────────────────────────────────────────────────────────────
@@ -36387,6 +36799,10 @@ ${data.tenant.name}`;
            offers = EXCLUDED.offers`,
         [req.params.id, hero_image_url || null, tagline || null, offers ? JSON.stringify(offers) : null]
       );
+      // Whether every treatment needs a signed consent and a health intake before check-in.
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, 'require_intake_consent')) {
+        await db.run("UPDATE spa_profile SET require_intake_consent = ? WHERE restaurant_id = ?", [req.body.require_intake_consent ? 1 : 0, req.params.id]);
+      }
       // The module's name for this property. Only when sent, so a caller that does
       // not know the field never blanks it.
       if (Object.prototype.hasOwnProperty.call(req.body || {}, 'module_label')) {
@@ -61436,8 +61852,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-phase3-treatment-record',
+    commit_marker: 'spa-phase4a-guest-health-record',
     code_features: [
+      'spa-phase4a-guest-health-record — Spa Phase 4a. New permission SPA_CLINICAL (in SPA_TAB_IDS; not granted to existing roles). Health information needs it at View (read) or Edit (write) via spaClinicalLevel, which refuses a role whose permissions were never saved; every read is logged to spa_clinical_access_log (full access sees the log). GET /spa/clients/:cid now returns forms only to clinical staff (others get forms_summary with consent and intake dates) and client reads need spa module access. POST forms: a consent (signer name, agreed, signed at the server time) at SPA_CLIENTS; a health intake (conditions from a fixed list) needs clinical Edit. Check-in is held when the treatment requires consent (spa_services.requires_consent) or the property requires it for all (spa_profile.require_intake_consent): 409 CLIENT_REQUIRED, CONSENT_REQUIRED, INTAKE_REQUIRED, or CONTRAINDICATED when the latest intake has a condition the treatment lists (spa_services.contraindications); a clinician passes with clinical_override_reason, kept on the appointment and audited; staff without clinical access are not told the condition. Treatment requirements PUT takes requires_consent and contraindications. Constitution assessments, course plans with items and progress (appointments carry course_plan_id; booking checks the plan is active and the guest\'s), clinical notes that lock. GET /spa/clients/:cid/timeline lists treatments with performers, cabin, actual times, consumables and batches, follow-up and invoice, plus packages, redemptions, memberships, retail purchases (folios.spa_client_id), consent and intake dates, and clinical entries for clinical staff. Client create and edit are audited. Nothing existing is linked, merged or backfilled.',
       'spa-phase3-treatment-record — Spa Phase 3. Finishing a treatment records what happened: spa_treatment_sessions (actual start from check-in/start, finish, cabin used, notes, outcome IMPROVED/NO_CHANGE/WORSE/NOT_ASSESSED, follow-up and date), spa_session_therapists (who performed it, lead and assisting). GET /spa/appointments/:aid/finish-plan pre-fills each consumable of the treatment and of its booked add-ons at its standard quantity with the batches it would draw from. POST /complete keeps working with no body (standard quantities, as before) and takes consumables [{ingredient_id, qty, batch_id}], performers, resource_id, notes, outcome, follow_up, follow_up_date; an item marked as varying (spa_service_consumables.is_variable) must be entered (409 VARIABLE_QTY_REQUIRED without a body, 400 with one). The chosen batch is drawn first, the rest oldest first; every draw is recorded in spa_consumption_batches and each item against its standard in spa_session_consumables. GET/PUT /spa/appointments/:aid/session reads and edits the record (not what it used). GET /spa/batch-trace lists an item batches with their use on treatments, or every treatment and guest a batch went into. Consumables can belong to an add-on (addon_id), are checked for unit and quantity, can be edited (PATCH /spa/consumables/:cid) and are audited; add-ons can be edited (PATCH /spa/addons/:adid). Checkout shares a tip among the therapists who performed the treatment (spa_tip_splits), equally or as split. Appointment where-used lists assisting therapists, performers and batches used. Tips still post to Spa Revenue 4040 as before. Also fixed: getFolioOutstanding filtered folio_entries on is_voided, a column that table never had, so every folio read with its balance (hotel check-out, spa invoice detail) listed no lines; totals were never affected.',
       'spa-calendar-time-grid — the spa Appointment Calendar is a time grid by therapist or by cabin (it was a list per therapist). Treatments are placed by time, cancelled and no-shows stay off it, and a treatment with assisting therapists shows under each of them. Dragging a booked, confirmed or checked-in treatment moves its time, or gives it to another therapist or cabin, through the reschedule route, which re-checks conflicts, blocks and the treatment rules; a move outside the rules asks for a reason. Clicking an empty time opens New Appointment for that time and picks the matching slot once slots are found. Screen only; no server behaviour changed.',
       'spa-phase2b-multi-therapist — Spa Phase 2b. A treatment can be given by 1 to 4 therapists (spa_services.therapists_required). The lead stays on the appointment and those assisting are rows in spa_appointment_therapists. Slots find the others free at the same time within their shifts, breaks and daily limits. Staff booking, reschedule and online booking take assistant_ids, check each is active, free, not blocked and meets the rules (staff can give a reason for an exception), save them before the double-booking guard and remove them if the booking gives way. Conflict checks, the double-booking guard, the daily limit and therapist search count a treatment a therapist assists on. Appointment lists, a single appointment and my-appointments carry assistant_ids and assistant_names (and my_role LEAD or ASSIST). Utilization counts time spent assisting; productivity counts assisted treatments separately and keeps treatment value with the lead. Screens: therapists needed on the treatment form, slots and bookings show those assisting, the calendar lists a treatment under each therapist on it, and the therapist dashboard marks Assisting. Also the Phase 2 booking screens: guest on file, gender and preference, therapist and cabin picked with reasons and an override reason, the gender rule on treatments, cabins kept for one gender, daily limits, and the online page asking for gender where needed.',
