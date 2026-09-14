@@ -1039,6 +1039,8 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
     `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS room_charged_at TIMESTAMP`,
     `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS room_charge_entry_ids TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_spa_appt_room_booking ON spa_appointments(room_booking_id)`,
+    // Booked or moved outside the therapist's roster, and not yet confirmed: why.
+    `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS shift_note TEXT`,
   ]) {
     await tenantDb.exec(ddl).catch(() => {});
   }

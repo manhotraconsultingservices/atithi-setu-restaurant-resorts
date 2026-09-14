@@ -1681,7 +1681,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     } catch { setSuggest([]); }
     if (!cabins.length) { try { setCabins(await api('/spa/resources')); } catch { /* */ } }
   };
-  const book = async (withReason: boolean) => {
+  const book = async (withReason: boolean, confirmShift = false) => {
     if (!canEdit) { toast.error('View-only access — you cannot book appointments.'); return; }
     if (!chosenSlot || !bk.client_name) { toast.error('Pick a slot and enter client name'); return; }
     try {
@@ -1692,12 +1692,18 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
         client_gender: bk.client_gender || undefined, therapist_gender_pref: bk.therapist_gender_pref || undefined,
         room_booking_id: bk.room_booking_id || undefined,
         override_reason: withReason ? overrideReason.trim() : undefined,
+        confirm_outside_shift: confirmShift || undefined,
       }) });
       setShowBook(false); setSlots([]); setChosenSlot(null); setRuleProblems([]); setOverrideReason(''); setBk({ ...blankBk, date: day });
       await load();
     } catch (e: any) {
       // Outside the treatment's rules: show why, and let a reason be given.
       if (e?.status === 409 && e?.body?.code === 'ASSIGNMENT_RULES') { setRuleProblems(e.body.problems || []); return; }
+      // Outside the therapist's roster: booked only if staff confirm, to be confirmed.
+      if (e?.status === 409 && e?.body?.code === 'OUTSIDE_SHIFT') {
+        if (await confirmDlg({ title: 'Book outside the roster?', body: `${e.body.error} It will show as To be confirmed until the appointment is confirmed or the guest checks in.`, confirmLabel: 'Book, to be confirmed', cancelLabel: 'Choose another time' })) await book(withReason, true);
+        return;
+      }
       toast.error(e.message);
     }
   };
@@ -1793,7 +1799,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   const hhmmOfMin = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   // A treatment dragged to a new time, therapist or cabin. The server re-checks it
   // as a reschedule; a move outside the treatment's rules asks for a reason.
-  const dropAppt = async (a: any, fromCol: string, toCol: string, startMin: number, reason?: string) => {
+  const dropAppt = async (a: any, fromCol: string, toCol: string, startMin: number, reason?: string, confirmShift = false) => {
     if (!canEdit) { toast.error('View-only access — you cannot reschedule appointments.'); return; }
     const body: any = { start_at: `${day} ${hhmmOfMin(startMin)}` };
     if (toCol !== fromCol) {
@@ -1808,12 +1814,17 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
       return;
     }
     if (reason) body.override_reason = reason;
+    if (confirmShift) body.confirm_outside_shift = true;
     try {
       await api(`/spa/appointments/${a.id}`, { method: 'PUT', body: JSON.stringify(body) });
       setMoveRules(null); setMoveReason('');
       await load();
     } catch (e: any) {
       if (e?.status === 409 && e?.body?.code === 'ASSIGNMENT_RULES') { setMoveReason(''); setMoveRules({ appt: a, fromCol, toCol, startMin, problems: e.body.problems || [] }); return; }
+      if (e?.status === 409 && e?.body?.code === 'OUTSIDE_SHIFT') {
+        if (await confirmDlg({ title: 'Move outside the roster?', body: `${e.body.error} It will show as To be confirmed until the appointment is confirmed or the guest checks in.`, confirmLabel: 'Move, to be confirmed', cancelLabel: 'Keep it where it was' })) await dropAppt(a, fromCol, toCol, startMin, reason, true);
+        return;
+      }
       toast.error(e.message);
     }
   };
@@ -1906,6 +1917,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                             <div className="font-bold tabular-nums">{fmtTime(a.start_at)}–{fmtTime(a.end_at)}</div>
                             <div className="truncate">{a.client_name || 'Guest'}</div>
                             <div className="truncate opacity-80">{a.service_name}{assisting ? ' · assisting' : ''}</div>
+                            {a.shift_note && <div className="truncate font-semibold text-amber-700" title={a.shift_note}>To be confirmed</div>}
                           </div>
                         );
                       })}
@@ -1952,6 +1964,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                   {canEdit && ['CHECKED_IN', 'IN_PROGRESS'].includes(r.status) && <button className={BTN_GHOST} onClick={() => setFinishAppt(r)}><Check size={12} /> Finish</button>}
                   {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} title="The guest did not arrive" onClick={() => transition(r, 'no-show')}>No-show</button>}
                   {canEdit && r.status === 'COMPLETED' && !r.folio_id && !r.room_folio_id && <button className={BTN_PRIMARY} onClick={() => openCheckout(r)}>Checkout</button>}
+                  {r.shift_note && <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200" title={r.shift_note}>To be confirmed</span>}
                   {r.room_folio_id && <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200" title="On the room bill, paid at hotel check-out">Charged to room {r.room_number || ''}</span>}
                   {!r.room_folio_id && r.room_booking_id && r.room_number && <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-sky-50 text-sky-700" title="Staying with us">Room {r.room_number}</span>}
                   {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { toast.error(err.message); } }}><FileText size={12} /> Invoice</button>}
@@ -2307,24 +2320,27 @@ function SpaReports({ restaurantId, token }: Props) {
   const [loadingR, setLoadingR] = useState(false);
   const [rev, setRev] = useState<any[]>([]);
   const [rebook, setRebook] = useState<any>(null);
+  const [tips, setTips] = useState<any>(null);
   const loadRange = async () => {
     setLoadingR(true);
     try { setRange(await api(`/spa/reports/range?from=${from}&to=${to}`)); }
     catch (e: any) { toast.error(`Could not load the reports: ${e.message}`); }
+    try { setTips(await api(`/spa/reports/tips?from=${from}&to=${to}`)); }
+    catch (e: any) { toast.error(`Could not load the tips: ${e.message}`); }
     finally { setLoadingR(false); }
   };
   useEffect(() => { loadRange(); (async () => {
     try { setRev(await api('/spa/reports/revenue-per-treatment')); } catch (e: any) { toast.error(`Could not load revenue per treatment: ${e.message}`); }
     try { setRebook(await api('/spa/reports/rebooking-rate')); } catch (e: any) { toast.error(`Could not load the rebooking rate: ${e.message}`); }
   })(); }, []);
-  const exportCsv = async () => {
+  const exportCsv = async (kind: 'treatments' | 'tips') => {
     try {
-      const res = await fetch(`/api/restaurant/${restaurantId}/spa/reports/treatments.csv?from=${from}&to=${to}`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(`/api/restaurant/${restaurantId}/spa/reports/${kind}.csv?from=${from}&to=${to}`, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'The export failed.'); }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = `spa-treatments-${from}-to-${to}.csv`;
+      a.href = url; a.download = `spa-${kind}-${from}-to-${to}.csv`;
       document.body.appendChild(a); a.click();
       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
     } catch (e: any) { toast.error(e.message); }
@@ -2339,7 +2355,7 @@ function SpaReports({ restaurantId, token }: Props) {
           <div><label className={LABEL}>From</label><input type="date" className={INPUT} value={from} max={to} onChange={e => setFrom(e.target.value)} /></div>
           <div><label className={LABEL}>To</label><input type="date" className={INPUT} value={to} min={from} onChange={e => setTo(e.target.value)} /></div>
           <button className={BTN_PRIMARY} onClick={loadRange} disabled={loadingR}>{loadingR ? 'Loading…' : 'Show'}</button>
-          <button className={BTN_GHOST} onClick={exportCsv}><FileText size={13} /> Export treatments (CSV)</button>
+          <button className={BTN_GHOST} onClick={() => exportCsv('treatments')}><FileText size={13} /> Export treatments (CSV)</button>
         </div>
         {s && (
           <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 mt-4">
@@ -2390,6 +2406,36 @@ function SpaReports({ restaurantId, token }: Props) {
               { key: 'cost', label: 'Cost', render: (r: any) => money(r.cost) },
             ]} />
           </div>
+        </div>
+      )}
+      {tips && (
+        <div className={`${CARD} mt-4`}>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+            <h4 className="font-bold">Tips to pay</h4>
+            <button className={BTN_GHOST} onClick={() => exportCsv('tips')}><FileText size={13} /> Export tips (CSV)</button>
+          </div>
+          <p className="text-[11px] text-[#6b5d52] mb-3">{tips.note}</p>
+          <DataTable data={tips.therapists} rowKey={(r: any) => r.therapist_id} columns={[
+            { key: 'therapist', label: 'Therapist' },
+            { key: 'collected', label: 'To pay (collected)', render: (r: any) => <span className="font-semibold">{money(r.collected)}</span> },
+            { key: 'pending', label: 'Pending', render: (r: any) => money(r.pending) },
+            { key: 'reversed', label: 'Reversed', render: (r: any) => money(r.reversed) },
+            { key: 'shares', label: 'Treatments' },
+          ]} />
+          {(tips.lines || []).length > 0 && (
+            <div className="mt-4">
+              <h5 className="text-sm font-bold mb-2">Each share</h5>
+              <DataTable data={tips.lines} rowKey={(r: any) => r.id} columns={[
+                { key: 'therapist', label: 'Therapist' },
+                { key: 'at', label: 'When' },
+                { key: 'guest', label: 'Guest' },
+                { key: 'treatment', label: 'Treatment' },
+                { key: 'bill', label: 'Bill' },
+                { key: 'status', label: 'Status', render: (r: any) => <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${r.status === 'COLLECTED' ? 'bg-emerald-50 text-emerald-700' : r.status === 'PENDING' ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{r.status === 'COLLECTED' ? 'Collected' : r.status === 'PENDING' ? 'Pending' : 'Reversed'}</span> },
+                { key: 'amount', label: 'Share', render: (r: any) => money(r.amount) },
+              ]} />
+            </div>
+          )}
         </div>
       )}
       <div className="grid sm:grid-cols-2 gap-4 mt-4">

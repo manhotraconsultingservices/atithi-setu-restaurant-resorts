@@ -34641,6 +34641,40 @@ ${data.tenant.name}`;
     }
     return null;
   };
+  // Whether a rostered therapist works a window: null when it sits inside one of
+  // their shifts for that date and clear of the break, or when they have no roster
+  // at all (nothing to check); otherwise why not, in words.
+  const spaShiftProblem = async (db: DbInterface, therapistId: string | null, startAt: any, endAt: any): Promise<string | null> => {
+    if (!therapistId) return null;
+    const rows: any[] = await db.query(
+      "SELECT weekday, start_time, end_time, break_start, break_end, effective_from, effective_to FROM spa_therapist_schedules WHERE therapist_id = ?",
+      [therapistId]).catch(() => []);
+    if (!rows.length) return null;
+    const hm = (t: any): number | null => { const m = /^(\d{1,2}):(\d{2})/.exec(String(t || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+    const st = tsShift(startAt, 0), en = tsShift(endAt, 0);
+    const date = st.slice(0, 10);
+    const who: any = await db.get("SELECT display_name FROM spa_therapists WHERE id = ?", [therapistId]).catch(() => null);
+    const name = who?.display_name || 'The therapist';
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const wd = new Date(`${date}T00:00:00Z`).getUTCDay();
+    const onDay = rows.filter((r: any) => Number(r.weekday) === wd
+      && (!r.effective_from || date >= String(r.effective_from).slice(0, 10))
+      && (!r.effective_to || date <= String(r.effective_to).slice(0, 10)));
+    if (!onDay.length) return `${name} is not rostered on ${dayNames[wd]}.`;
+    const sm = hm(st.slice(11, 16));
+    const endHm = hm(en.slice(11, 16));
+    const em = endHm == null ? null : (en.slice(0, 10) === date ? endHm : 24 * 60 + endHm);
+    let breakHit: any = null;
+    for (const r of onDay) {
+      const a = hm(r.start_time), b = hm(r.end_time);
+      if (a == null || b == null || sm == null || em == null || sm < a || em > b) continue;
+      const bs = hm(r.break_start), be = hm(r.break_end);
+      if (bs != null && be != null && be > bs && sm < be && em > bs) { breakHit = r; continue; }
+      return null;
+    }
+    if (breakHit) return `This falls in ${name}'s break (${breakHit.break_start}–${breakHit.break_end}).`;
+    return `This is outside ${name}'s shift on ${dayNames[wd]} (${onDay.map((r: any) => `${r.start_time}–${r.end_time}`).join(', ')}).`;
+  };
   // The therapists assisting on each appointment, as ids and names.
   const spaAttachAssistants = async (db: DbInterface, rows: any[]): Promise<void> => {
     const byId = new Map<string, any>();
@@ -35041,6 +35075,19 @@ ${data.tenant.name}`;
         }
       }
 
+      // A time outside a rostered therapist's shift — a day off, before or after the
+      // shift, or in a break — is booked only once staff confirm it, and shows as
+      // to be confirmed until the appointment is confirmed or checked in. A
+      // therapist with no roster is not checked.
+      const createShiftNotes: string[] = [];
+      for (const tid of [b.therapist_id, ...assistantIds].filter(Boolean).map(String)) {
+        const note = await spaShiftProblem(db, tid, win.startAt, win.endAt);
+        if (note) createShiftNotes.push(note);
+      }
+      if (createShiftNotes.length && !b.confirm_outside_shift) {
+        return res.status(409).json({ error: createShiftNotes.join(' '), code: 'OUTSIDE_SHIFT', confirmable: true, notes: createShiftNotes });
+      }
+
       // price snapshot = service price + add-on prices
       const addonPrice = addons.reduce((s, a) => s + Number(a.extra_price || 0), 0);
       const price = round2(Number(service.price || 0) + addonPrice);
@@ -35118,6 +35165,11 @@ ${data.tenant.name}`;
       if (roomBookingId) {
         await db.run("UPDATE spa_appointments SET room_booking_id = ? WHERE id = ?", [roomBookingId, id])
           .catch((e: any) => console.error('[spa] stay link not saved:', id, e?.message || e));
+      }
+      if (createShiftNotes.length) {
+        await db.run("UPDATE spa_appointments SET shift_note = ? WHERE id = ?", [createShiftNotes.join(' '), id])
+          .catch((e: any) => console.error('[spa] shift note not saved:', id, e?.message || e));
+        writeObjectAudit(db, req, { objectType: 'SPA_APPOINTMENT', objectId: id, action: 'OUTSIDE_SHIFT_CONFIRMED', summary: `Booked outside the roster, to be confirmed: ${createShiftNotes.join(' ')}` }).catch(() => {});
       }
       if (createGuestGender || createPref || createProblems.length) {
         await db.run("UPDATE spa_appointments SET client_gender = ?, therapist_gender_pref = ?, assignment_override_reason = ? WHERE id = ?",
@@ -35217,6 +35269,18 @@ ${data.tenant.name}`;
           return res.status(409).json({ error: reschedProblems.map((p: any) => p.message).join(' '), code: 'ASSIGNMENT_RULES', problems: reschedProblems, overridable: true });
         }
       }
+      // Outside a rostered therapist's shift: moved only once staff confirm it.
+      const shiftChecked = !!b.start_at || b.therapist_id !== undefined || assistChanged;
+      const reschedShiftNotes: string[] = [];
+      if (shiftChecked) {
+        for (const tid of [therapistId, ...nextAssist].filter(Boolean).map(String)) {
+          const note = await spaShiftProblem(db, tid, win.startAt, win.endAt);
+          if (note) reschedShiftNotes.push(note);
+        }
+        if (reschedShiftNotes.length && !b.confirm_outside_shift) {
+          return res.status(409).json({ error: reschedShiftNotes.join(' '), code: 'OUTSIDE_SHIFT', confirmable: true, notes: reschedShiftNotes });
+        }
+      }
       await db.run(
         "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
         [therapistId || null, resourceId || null, win.startAt, win.endAt, appt.id]
@@ -35243,6 +35307,13 @@ ${data.tenant.name}`;
           summary: `Moved outside the rules (${reschedProblems.map(p => p.code).join(', ')}): ${reschedOverride}`,
           after: { problems: reschedProblems, reason: reschedOverride },
         }).catch(() => {});
+      }
+      if (shiftChecked) {
+        await db.run("UPDATE spa_appointments SET shift_note = ? WHERE id = ?", [reschedShiftNotes.length ? reschedShiftNotes.join(' ') : null, appt.id])
+          .catch((e: any) => console.error('[spa] shift note not saved:', appt.id, e?.message || e));
+        if (reschedShiftNotes.length) {
+          writeObjectAudit(db, req, { objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'OUTSIDE_SHIFT_CONFIRMED', summary: `Moved outside the roster, to be confirmed: ${reschedShiftNotes.join(' ')}` }).catch(() => {});
+        }
       }
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'RESCHEDULED',
@@ -35311,13 +35382,13 @@ ${data.tenant.name}`;
 
   app.post("/api/restaurant/:id/spa/appointments/:aid/confirm", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
-      const row = await spaSetStatus(req, res, 'CONFIRMED');
+      const row = await spaSetStatus(req, res, 'CONFIRMED', 'shift_note = NULL');
       if (row) { notifySpa(req.params.id, 'SPA_APPOINTMENT_CONFIRMED', row); res.json(row); }
     }
     catch (err: any) { res.status(500).json({ error: "Failed to confirm" }); }
   });
   app.post("/api/restaurant/:id/spa/appointments/:aid/check-in", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
-    try { const row = await spaSetStatus(req, res, 'CHECKED_IN', 'checked_in_at = CURRENT_TIMESTAMP'); if (row) res.json(row); }
+    try { const row = await spaSetStatus(req, res, 'CHECKED_IN', 'checked_in_at = CURRENT_TIMESTAMP, shift_note = NULL'); if (row) res.json(row); }
     catch (err: any) { res.status(500).json({ error: "Failed to check in" }); }
   });
   // Start — the treatment has begun, and when. The booking never recorded it.
@@ -37169,6 +37240,87 @@ ${data.tenant.name}`;
         },
       });
     } catch (err: any) { console.error('[spa] range report:', err?.message || err); res.status(500).json({ error: "Failed to compute the reports" }); }
+  });
+
+  // Tips each therapist is owed for a date range: every share with its treatment,
+  // guest and bill. Collected once that bill is paid (a spa invoice closed, a room
+  // bill settled at check-out); pending while it is open; reversed when the bill
+  // was cancelled or credit-noted. In the accounts tips are still credited to Spa
+  // Revenue; this is what to pay out.
+  const spaTipLines = async (db: DbInterface, from: string, to: string): Promise<any[]> => {
+    const rows: any[] = await db.query(
+      `SELECT ts.id, ts.therapist_id, t.display_name, ts.amount, ts.folio_id, ts.appointment_id,
+              to_char(a.start_at, 'YYYY-MM-DD HH24:MI') AS at, a.client_name, a.service_name, a.room_booking_id,
+              f.folio_kind, f.status AS folio_status, f.invoice_number,
+              EXISTS (SELECT 1 FROM folios c WHERE c.parent_folio_id = f.id AND c.doc_type = 'CREDIT_NOTE') AS credit_noted
+         FROM spa_tip_splits ts
+         JOIN spa_appointments a ON a.id = ts.appointment_id
+         JOIN folios f ON f.id = ts.folio_id
+         LEFT JOIN spa_therapists t ON t.id = ts.therapist_id
+        WHERE a.start_at >= ? AND a.start_at <= ?
+        ORDER BY t.display_name, a.start_at`, [`${from} 00:00:00`, `${to} 23:59:59`]);
+    await spaAttachStays(db, rows);
+    return rows.map((r: any) => {
+      const st = String(r.folio_status || '').toLowerCase();
+      const onRoom = String(r.folio_kind || '').toUpperCase() !== 'SPA';
+      const reversed = st === 'voided' || st === 'cancelled' || r.credit_noted === true || r.credit_noted === 1 || r.credit_noted === 't';
+      const status = reversed ? 'REVERSED' : (onRoom ? (st === 'settled' ? 'COLLECTED' : 'PENDING') : (st === 'closed' ? 'COLLECTED' : 'PENDING'));
+      return {
+        id: r.id, therapist_id: r.therapist_id, therapist: r.display_name || r.therapist_id, amount: round2(r.amount), at: r.at,
+        guest: r.client_name, treatment: r.service_name, folio_id: r.folio_id, appointment_id: r.appointment_id, status,
+        bill_kind: onRoom ? 'ROOM' : 'SPA', bill: onRoom ? (r.room_number ? `Room ${r.room_number} bill` : 'Room bill') : (r.invoice_number || 'Spa invoice'),
+      };
+    });
+  };
+  const spaCsvCell = (v: any) => {
+    let s = v == null ? '' : String(v);
+    if (/^[=+\-@]/.test(s)) s = `'${s}`;
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  app.get("/api/restaurant/:id/spa/reports/tips", authenticate, spaStaff, requireTabAccess('SPA_REPORTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const rg = spaRange(req);
+    if (rg.error !== undefined) return res.status(400).json(rg);
+    const { from, to } = rg as { from: string; to: string; days: number };
+    try {
+      const db = await getTenantDb(req.params.id);
+      const lines = await spaTipLines(db, from, to);
+      const byTherapist = new Map<string, any>();
+      for (const l of lines) {
+        const e = byTherapist.get(l.therapist_id) || { therapist_id: l.therapist_id, therapist: l.therapist, collected: 0, pending: 0, reversed: 0, shares: 0 };
+        if (l.status === 'COLLECTED') e.collected += l.amount;
+        else if (l.status === 'PENDING') e.pending += l.amount;
+        else e.reversed += l.amount;
+        e.shares += 1;
+        byTherapist.set(l.therapist_id, e);
+      }
+      const therapists = Array.from(byTherapist.values())
+        .map((e: any) => ({ ...e, collected: round2(e.collected), pending: round2(e.pending), reversed: round2(e.reversed) }))
+        .sort((x: any, y: any) => String(x.therapist).localeCompare(String(y.therapist)));
+      const sum = (k: string) => round2(therapists.reduce((s: number, t: any) => s + Number(t[k] || 0), 0));
+      res.json({
+        from, to, therapists, lines, totals: { collected: sum('collected'), pending: sum('pending'), reversed: sum('reversed') },
+        note: 'Pay each therapist the collected amount. Pending tips are on bills not yet paid; reversed tips were on bills that were cancelled or credit-noted. In the accounts, tips are credited to Spa Revenue.',
+      });
+    } catch (err: any) { console.error('[spa] tips report:', err?.message || err); res.status(500).json({ error: "Failed to compute the tips" }); }
+  });
+  app.get("/api/restaurant/:id/spa/reports/tips.csv", authenticate, spaStaff, requireTabAccess('SPA_REPORTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const rg = spaRange(req);
+    if (rg.error !== undefined) return res.status(400).json(rg);
+    const { from, to } = rg as { from: string; to: string; days: number };
+    try {
+      const db = await getTenantDb(req.params.id);
+      const lines = await spaTipLines(db, from, to);
+      const label: Record<string, string> = { COLLECTED: 'Collected', PENDING: 'Pending', REVERSED: 'Reversed' };
+      const out = [['Therapist', 'Date', 'Guest', 'Treatment', 'Bill', 'Status', 'Share'].join(',')];
+      for (const l of lines) out.push([l.therapist, l.at, l.guest, l.treatment, l.bill, label[l.status] || l.status, Number(l.amount).toFixed(2)].map(spaCsvCell).join(','));
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="spa-tips-${from}-to-${to}.csv"`);
+      res.send('﻿' + out.join('\r\n'));
+    } catch (err: any) { console.error('[spa] tips export:', err?.message || err); res.status(500).json({ error: "Failed to export the tips" }); }
   });
 
   // Every treatment in the range, as a spreadsheet: guest, treatment, who and
@@ -53704,14 +53856,34 @@ ${data.tenant.name}`;
       const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [req.params.folioId]);
       if (!folio) return res.status(404).json({ error: "Folio not found" });
       if (folio.status !== 'open') return res.status(409).json({ error: `Folio is ${folio.status} — entries can only be added to open folios` });
+      // A wellness treatment charged to the room by hand is charged as the spa
+      // charges it: its own GST rate kept at check-out, Spa Revenue 4040 and SAC
+      // 999722. A line sent as "SPA" was stored as typed and re-taxed at the room rate.
+      const lineKind = String(entry_type || '').toUpperCase();
+      const wellness = (lineKind === 'WELLNESS' || lineKind === 'SPA') && (await ensureSpaEnabled(req.params.id)).ok;
+      let wellnessServiceId: string | null = null;
+      if (wellness && req.body?.service_id) {
+        const svc: any = await tenantDb.get("SELECT id FROM spa_services WHERE id = ?", [req.body.service_id]).catch(() => null);
+        if (!svc) return res.status(400).json({ error: 'That treatment is not on the wellness menu.', code: 'SERVICE_UNKNOWN' });
+        wellnessServiceId = svc.id;
+      }
       const eid = `FE-MAN-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-      await tenantDb.run(
-        `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, posted_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-        [eid, folio.id, entry_type || 'MANUAL_CHARGE', String(description).trim(),
-         qty, +(amt).toFixed(2), +(amt * qty).toFixed(2), rate, gst_amount,
-         (req as any).user?.id || null]
-      );
+      if (wellness) {
+        await tenantDb.run(
+          `INSERT INTO folio_entries (id, folio_id, entry_type, entry_subtype, description, quantity, unit_price, amount, gst_rate, gst_amount, source_id, account_head, cost_centre, posted_by, created_at)
+           VALUES (?, ?, 'SPA_SERVICE', 'MANUAL', ?, ?, ?, ?, ?, ?, ?, 'SPA_REVENUE', 'SPA', ?, NOW())`,
+          [eid, folio.id, String(description).trim(), qty, +(amt).toFixed(2), +(amt * qty).toFixed(2), rate, gst_amount,
+           wellnessServiceId, (req as any).user?.id || null]
+        );
+      } else {
+        await tenantDb.run(
+          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, posted_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+          [eid, folio.id, entry_type || 'MANUAL_CHARGE', String(description).trim(),
+           qty, +(amt).toFixed(2), +(amt * qty).toFixed(2), rate, gst_amount,
+           (req as any).user?.id || null]
+        );
+      }
       await recomputeFolioTotals(tenantDb, folio.id);
       const updated: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
       await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: folio.id, action: 'LINE_ADDED', summary: `Line added: ${String(description).trim()} × ${qty} = ₹${(amt * qty).toFixed(2)}`, after: { entry_id: eid, amount: +(amt * qty).toFixed(2), gst_amount } }).catch(() => {});
@@ -62411,8 +62583,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-public-named-alternatives',
+    commit_marker: 'spa-wellness-charge-tips-shift',
     code_features: [
+      'spa-wellness-charge-tips-shift — Owner decisions 14 Sep 2026. (1) POST /hotel/folios/:folioId/entries with entry_type WELLNESS (or SPA) on a spa-enabled property posts SPA_SERVICE, entry_subtype MANUAL, account_head SPA_REVENUE, cost_centre SPA, optional service_id (400 SERVICE_UNKNOWN): the GST rate entered is kept at check-out, credited to 4040, SAC 999722. Existing lines unchanged. The Add Manual Charge window offers the wellness option under the property module name (else Wellness session) with the wellness menu. (3) GET /spa/reports/tips and /spa/reports/tips.csv (SPA_REPORTS): each tip share with treatment, guest and bill; COLLECTED when the spa invoice is closed or the room bill settled, PENDING while open, REVERSED on a voided, cancelled or credit-noted bill; per-therapist collected, pending, reversed. (4) spaShiftProblem: staff booking (POST /spa/appointments) and moving (PUT /spa/appointments/:aid) outside a rostered therapist shift, on a day off or in a break returns 409 OUTSIDE_SHIFT (confirmable) unless confirm_outside_shift; then spa_appointments.shift_note is kept and audited OUTSIDE_SHIFT_CONFIRMED, shown as To be confirmed, and cleared on confirm or check-in or a move back inside the roster. Therapists with no roster are not checked; online booking is unchanged.',
       'spa-public-named-alternatives — POST /api/public/restaurant/:id/spa/booking: a refusal of a named therapist and cabin (the booking page always names them) now carries alternatives, the times still free that day, as a refusal with none named already did. The public booking page, on SLOT_UNAVAILABLE, returns the guest to the times, which reload, and names the free times. Found in UAT.',
       'spa-clinician-intake-gate — POST /spa/clients/:cid/forms: a health intake (INTAKE, MEDICAL_HISTORY) no longer also needs SPA_CLIENTS at Edit; it needs SPA_CLINICAL at Edit, as before. A consent still needs SPA_CLIENTS at Edit. Found in UAT: a clinician with view-only guest access was refused an intake, so check-in stayed held.',
       'spa-phase5-records-reports — Spa Phase 5. GET /spa/records/:type/:oid/audit and /where-used for SPA_SERVICE (Service Menu), SPA_THERAPIST, SPA_CABIN, SPA_SKILL, SPA_CABIN_TYPE (Resources) and SPA_CLIENT (Clients), each behind the page it belongs to; a guest history hides health entries from staff without clinical access, and a guest where-used lists course plans only for them. Audit entries added for treatment create and edit (what changed; deactivated or reactivated), treatments offered by a therapist, and shift removal. GET /spa/reports/range?from&to (up to a year): therapists with rostered minutes from shifts less breaks and blocked time, booked minutes including assisting, utilisation, completed, no-shows and rate, value, commission (therapist override else treatment commission %) and tips; cabins with treatments, booked, turnaround and blocked minutes; consumption per treatment and item with standard, actual, variance and cost; a summary. GET /spa/reports/treatments.csv exports the treatments of a range (no health information; formula cells escaped). All spa report routes now need Spa Reports. The spa screens use in-app messages and dialogs instead of browser alerts, show load failures, have History buttons on treatments, therapists, cabins and guests, and draw the booking QR code in the app instead of fetching it from an outside site.',

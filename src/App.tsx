@@ -12077,6 +12077,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [addChargeGst, setAddChargeGst] = useState('0');
   const [addChargeQty, setAddChargeQty] = useState('1');
   const [addChargeSaving, setAddChargeSaving] = useState(false);
+  // A wellness treatment charged to the room, under the property's wellness name.
+  const [addChargeKind, setAddChargeKind] = useState<'OTHER' | 'WELLNESS'>('OTHER');
+  const [addChargeServiceId, setAddChargeServiceId] = useState('');
+  const [wellnessMenu, setWellnessMenu] = useState<any[]>([]);
   const [folioSlideBooking, setFolioSlideBooking] = useState<any>(null);
   // Sprint RS — F&B charge modal state (phone-in room service, minibar, banquet)
   const [fnbChargeFolio, setFnbChargeFolio] = useState<any>(null);
@@ -38090,7 +38094,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 )}
                 {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'open' && (
                   <button
-                    onClick={() => { setAddChargeDesc(''); setAddChargeAmt(''); setAddChargeGst('0'); setAddChargeQty('1'); setAddChargeOpen(true); }}
+                    onClick={() => { setAddChargeDesc(''); setAddChargeAmt(''); setAddChargeGst('0'); setAddChargeQty('1'); setAddChargeKind('OTHER'); setAddChargeServiceId(''); setAddChargeOpen(true); }}
                     className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700"
                   ><Plus size={13}/> Add Charge</button>
                 )}
@@ -38501,6 +38505,47 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <button onClick={() => setAddChargeOpen(false)} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400"><X size={18}/></button>
             </div>
             <div className="flex flex-col gap-3">
+              {isSpaEnabled && (
+                <div className="flex gap-2">
+                  {(['OTHER', 'WELLNESS'] as const).map(k => (
+                    <button key={k} type="button"
+                      onClick={async () => {
+                        setAddChargeKind(k); setAddChargeServiceId('');
+                        if (k !== 'WELLNESS') return;
+                        if (!addChargeDesc.trim()) setAddChargeDesc(spaCustomName ? `${spaCustomName} session` : 'Wellness session');
+                        setAddChargeGst('18');
+                        if (!wellnessMenu.length) {
+                          try {
+                            const r = await fetch(`/api/restaurant/${restaurantId}/spa/services`, { headers: { Authorization: `Bearer ${token}` } });
+                            const j = await r.json();
+                            if (r.ok && Array.isArray(j)) setWellnessMenu(j.filter((s: any) => Number(s.is_active ?? 1) === 1));
+                          } catch { /* no menu: a session can still be typed */ }
+                        }
+                      }}
+                      className={`flex-1 px-3 py-2 rounded-xl text-xs font-semibold border ${addChargeKind === k ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-gray-200'}`}>
+                      {k === 'OTHER' ? 'Other charge' : (spaCustomName || 'Wellness session')}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {addChargeKind === 'WELLNESS' && (
+                <div>
+                  <label className="block text-xs font-semibold text-[#6b5d52] mb-1">Treatment</label>
+                  <select
+                    value={addChargeServiceId}
+                    onChange={e => {
+                      const s = wellnessMenu.find((x: any) => x.id === e.target.value);
+                      setAddChargeServiceId(e.target.value);
+                      if (s) { setAddChargeDesc(s.name); setAddChargeAmt(String(s.price ?? '')); setAddChargeGst(String(Number(s.gst_percent ?? 18))); }
+                    }}
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                  >
+                    <option value="">Not on the menu — type the session below</option>
+                    {wellnessMenu.map((s: any) => <option key={s.id} value={s.id}>{s.name} — ₹{Number(s.price || 0).toLocaleString('en-IN')}</option>)}
+                  </select>
+                  <p className="text-[11px] text-[#6b5d52] mt-1">Charged to the room as {spaCustomName || 'wellness'}: it keeps its own GST rate at check-out and is booked as wellness revenue, not room.</p>
+                </div>
+              )}
               <div>
                 <label className="block text-xs font-semibold text-[#6b5d52] mb-1">Description *</label>
                 <input
@@ -38563,7 +38608,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         amount: Number(addChargeAmt),
                         gst_rate: Number(addChargeGst),
                         quantity: Number(addChargeQty || 1),
-                        entry_type: 'MANUAL_CHARGE',
+                        entry_type: addChargeKind === 'WELLNESS' ? 'WELLNESS' : 'MANUAL_CHARGE',
+                        service_id: addChargeKind === 'WELLNESS' && addChargeServiceId ? addChargeServiceId : undefined,
                       }),
                     });
                     const body = await res.json();
