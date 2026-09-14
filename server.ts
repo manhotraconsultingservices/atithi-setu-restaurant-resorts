@@ -33849,12 +33849,28 @@ ${data.tenant.name}`;
     return { startAt: tsFromDateMinutes(date, startMin), endAt: tsFromDateMinutes(date, endMin), date };
   };
 
+  // A deactivated therapist or cabin takes no booking — not even from a screen
+  // opened before it was deactivated, or a public page that sends the id itself.
+  const spaInactiveProblem = async (db: DbInterface, therapistId: string | null, resourceId: string | null): Promise<{ error: string; code: string } | null> => {
+    if (therapistId) {
+      const t: any = await db.get("SELECT is_active FROM spa_therapists WHERE id = ?", [therapistId]);
+      if (!t || Number(t.is_active) !== 1) return { error: 'That therapist is not active. Choose another therapist.', code: 'THERAPIST_INACTIVE' };
+    }
+    if (resourceId) {
+      const r: any = await db.get("SELECT is_active FROM spa_resources WHERE id = ?", [resourceId]);
+      if (!r || Number(r.is_active) !== 1) return { error: 'That cabin is not active. Choose another cabin.', code: 'CABIN_INACTIVE' };
+    }
+    return null;
+  };
+
   // Every check an appointment window must pass, in one place, so a staff
   // booking, a reschedule and an online booking cannot disagree. Returns why the
   // window cannot be booked, or null.
   const spaWindowProblem = async (
     db: DbInterface, therapistId: string | null, resourceId: string | null, startAt: any, endAt: any, excludeId?: string,
   ): Promise<string | null> => {
+    const inactive = await spaInactiveProblem(db, therapistId, resourceId);
+    if (inactive) return inactive.error;
     if (therapistId) {
       if (await therapistConflict(db, therapistId, startAt, endAt, excludeId)) return 'Therapist is already booked for an overlapping slot';
       if (await blockConflict(db, 'THERAPIST', therapistId, startAt, endAt)) return 'Therapist is blocked for this slot';
@@ -34028,6 +34044,8 @@ ${data.tenant.name}`;
       if (needTherapist && !b.therapist_id) return res.status(400).json({ error: "therapist_id is required for this service" });
       if (needRoom && !b.resource_id) return res.status(400).json({ error: "resource_id (cabin) is required for this service" });
 
+      const inactiveCreate = await spaInactiveProblem(db, b.therapist_id || null, b.resource_id || null);
+      if (inactiveCreate) return res.status(409).json(inactiveCreate);
       // Dual-resource conflict guard (check-then-insert, matching hotel booking convention)
       if (b.therapist_id) {
         const tc = await therapistConflict(db, b.therapist_id, win.startAt, win.endAt);
@@ -60120,8 +60138,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-buffer-zero-and-offers-kept',
+    commit_marker: 'spa-inactive-off-booking-screens',
     code_features: [
+      'spa-inactive-off-booking-screens — the spa treatment, therapist and cabin lists return deactivated rows (the setup screens need them), and the booking screens did not filter them: a deactivated treatment was offered in New Appointment (and failed with Service not found), a deactivated therapist kept a calendar column, and the Therapists & Cabins page and skill chips listed them. Booking dropdown now offers active treatments only; the calendar shows active therapists plus any inactive one with appointments that day; Service Menu and Therapists & Cabins hide inactive rows behind a Show inactive toggle and mark them; skill chips show active treatments plus any already assigned. Server: spaInactiveProblem refuses a staff booking, reschedule or online booking on a deactivated therapist or cabin (409 THERAPIST_INACTIVE / CABIN_INACTIVE). Tests reuse one ZZ-UAT therapist, cabin and treatment across runs instead of creating new ones, and consume their whole test batch.',
       'spa-buffer-zero-and-offers-kept — two spa fixes found in the Phase 0 review. (1) Creating a treatment turned a 0-minute buffer into 10 (`Number(b.buffer_after_min || 10)`); a value that is sent is now used as sent, and create and edit both refuse a non-positive duration or a negative buffer. (2) GET /spa/profile returned offers as JSON text while the Public Page Settings screen expected a list, so it showed no offers and the next save wrote an empty list over them; the route now returns a list and the screen also accepts text.',
       'spa-phase0-and-module-name — Spa Phase 0 of the traceability plan (14 Sep 2026). (1) Spa invoices are numbered SPA-<FY>-NNNNN from _allocateFyInvoiceNumber (shared with event invoices), not the calendar year; FY 2026-27 continues the SPA-2026 sequence. (2) Completing an appointment draws each consumable from stock batches first-in-first-out at batch cost; the stock movement is no longer written with its error swallowed, a failed write puts the stock back and stops completion, a unique index keeps one SPA_CONSUMPTION line per appointment and item, and units are converted or refused before anything is drawn. (3) Month-end expected usage, forecast and the inventory dashboard count SPA_CONSUMPTION; the dashboard trend and top consumers are now module-scoped. (4) Appointment status follows SPA_TRANSITIONS (spaTransitionError), with conditional updates, a new start route, checked_in_at and started_at. (5) Reschedule keeps add-on time and checks blocked time via spaWindowProblem; online booking refuses a time that is not free with alternatives instead of taking the first slot of the day. (6) spaMustYield: two simultaneous bookings of a therapist or cabin, exactly one survives. (7) Per-property module name: restaurants.spa_module_label, set in spa Public Page Settings, used by the menu, home card, settings, reports, access matrix, accounting labels and the public page. Screens: IST today, Start and No-show buttons, confirm on cancel, therapist dashboard knows BOOKED and shows refused moves.',
       'partial-refunds-receipt-refunds — (1) PART REFUNDS OF AN ADVANCE. POST /receipt-vouchers/:id/refund takes an optional amount (default: all still held). The amount is reserved on receipt_vouchers.refunded_amount by one conditional UPDATE, so two refunds at once cannot exceed the advance; each refund has its own RFV-<refund voucher id> journal (older refunds used RFV-<receipt voucher id>) and Rule 51 voucher, tax in proportion, the last refund takes exactly what is left; the voucher is REFUNDED only when nothing is held. The receipt is no longer voided: a hotel folio gets a REFUND row carrying the refund voucher, an event booking a negative row. Settlement nets those REFUND rows off the advance and applies only the tax still held; hotel booking cancel does the same; GSTR-1 11A/11B release tax per refund on its own date, and on adjustment or cancellation only what was still held. A refunded advance, and its refund row, cannot be voided or deleted. (2) LATENT BUG FIXED: a REFUND folio payment without a refund voucher (API, spa) was posted at settlement as money RECEIVED (Dr cash, Cr AR) by all three settlement journals; it is now Dr AR, Cr cash. Live rows affected: none. (3) RECEIPT REFUNDS: POST /events/payments/:pid/refund returns money from a receipt that paid an event invoice once no invoice stands — Dr the receivable its journal credited, Cr cash, negative row with refund_of_payment_id, reserved on event_payments.refunded_amount; refused while an invoice stands, for an advance (use its voucher) and for receipts not taken against an invoice. _eventAdvanceHeld counts only refunds that carry a refund voucher. Payments GET and hotel folio GET say what each receipt can still be refunded.',

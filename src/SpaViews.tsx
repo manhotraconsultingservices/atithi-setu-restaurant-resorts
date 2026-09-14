@@ -118,6 +118,9 @@ function SpaCatalog({ restaurantId, token }: Props) {
   const [edit, setEdit] = useState<any>(null);
   const blank = { name: '', category: 'MASSAGE', duration_min: '60', buffer_after_min: '10', price: '', gst_percent: '18', requires_room: true, requires_therapist: true, image_url: '', description: '' };
   const [form, setForm] = useState<any>(blank);
+  // Deactivated treatments stay on file but out of the way until asked for.
+  const [showInactive, setShowInactive] = useState(false);
+  const inactiveServices = services.filter((s: any) => Number(s.is_active ?? 1) !== 1);
 
   const load = async () => { setLoading(true); try { setServices(await api('/spa/services')); } catch { /* */ } finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
@@ -137,10 +140,13 @@ function SpaCatalog({ restaurantId, token }: Props) {
   return (
     <div>
       <SectionHeader icon={<Scissors size={18} />} title="Service Menu" sub="Treatments, durations, pricing & tax"
-        action={canEdit ? <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} /> Add Service</button> : null} />
+        action={<div className="flex gap-2 flex-wrap">
+          {inactiveServices.length > 0 && <button className={BTN_GHOST} onClick={() => setShowInactive(v => !v)}>{showInactive ? 'Hide inactive' : `Show inactive (${inactiveServices.length})`}</button>}
+          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} /> Add Service</button>}
+        </div>} />
       <div className={CARD}>
         <DataTable
-          data={services}
+          data={showInactive ? services : services.filter((s: any) => Number(s.is_active ?? 1) === 1)}
           loading={loading}
           rowKey={(r: any) => r.id}
           columns={[
@@ -212,6 +218,9 @@ function SpaResources({ restaurantId, token }: Props) {
   const [schedules, setSchedules] = useState<any[]>([]);
   const [skills, setSkills] = useState<string[]>([]);
   const [sched, setSched] = useState({ weekday: '1', start_time: '09:00', end_time: '18:00' });
+  // Deactivated cabins and therapists are hidden until asked for, and marked when shown.
+  const [showInactive, setShowInactive] = useState(false);
+  const isOn = (x: any) => Number(x?.is_active ?? 1) === 1;
   const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   const load = async () => {
@@ -247,6 +256,11 @@ function SpaResources({ restaurantId, token }: Props) {
         {(['CABINS', 'THERAPISTS'] as const).map(t => (
           <button key={t} className={tab === t ? BTN_PRIMARY : BTN_GHOST} onClick={() => setTab(t)}>{t === 'CABINS' ? 'Treatment Cabins' : 'Therapists'}</button>
         ))}
+        {(tab === 'CABINS' ? resources : therapists).some(x => !isOn(x)) && (
+          <button className={`${BTN_GHOST} ml-auto`} onClick={() => setShowInactive(v => !v)}>
+            {showInactive ? 'Hide inactive' : `Show inactive (${(tab === 'CABINS' ? resources : therapists).filter(x => !isOn(x)).length})`}
+          </button>
+        )}
       </div>
 
       {tab === 'CABINS' ? (
@@ -256,13 +270,13 @@ function SpaResources({ restaurantId, token }: Props) {
             <button className={BTN_PRIMARY} onClick={addCabin}><Plus size={14} /> Add</button>
           </div>}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {resources.map(r => (
-              <div key={r.id} className="rounded-xl border border-[#e8dccf] p-3 flex items-center justify-between">
+            {resources.filter(r => showInactive || isOn(r)).map(r => (
+              <div key={r.id} className={`rounded-xl border border-[#e8dccf] p-3 flex items-center justify-between ${isOn(r) ? '' : 'opacity-60'}`}>
                 <span className="font-semibold text-sm">{r.name}</span>
-                <span className="text-[10px] text-[#6b5d52]">{r.resource_type}</span>
+                <span className="text-[10px] text-[#6b5d52]">{isOn(r) ? r.resource_type : 'Inactive'}</span>
               </div>
             ))}
-            {!resources.length && <p className="text-sm text-[#6b5d52] col-span-3">No cabins yet.</p>}
+            {!resources.filter(r => showInactive || isOn(r)).length && <p className="text-sm text-[#6b5d52] col-span-3">No cabins yet.</p>}
           </div>
         </div>
       ) : (
@@ -272,13 +286,13 @@ function SpaResources({ restaurantId, token }: Props) {
             <button className={BTN_PRIMARY} onClick={addTher}><Plus size={14} /> Add</button>
           </div>}
           <div className="space-y-2">
-            {therapists.map(t => (
-              <div key={t.id} className="rounded-xl border border-[#e8dccf] p-3 flex items-center justify-between">
-                <span className="font-semibold text-sm flex items-center gap-2"><User size={14} className="text-[#cc5a16]" /> {t.display_name}</span>
+            {therapists.filter(t => showInactive || isOn(t)).map(t => (
+              <div key={t.id} className={`rounded-xl border border-[#e8dccf] p-3 flex items-center justify-between ${isOn(t) ? '' : 'opacity-60'}`}>
+                <span className="font-semibold text-sm flex items-center gap-2"><User size={14} className="text-[#cc5a16]" /> {t.display_name}{!isOn(t) && <span className="text-[10px] font-normal text-[#6b5d52]">Inactive</span>}</span>
                 <button className={BTN_GHOST} onClick={() => openSched(t)}><Clock size={13} /> Schedule & Skills</button>
               </div>
             ))}
-            {!therapists.length && <p className="text-sm text-[#6b5d52]">No therapists yet.</p>}
+            {!therapists.filter(t => showInactive || isOn(t)).length && <p className="text-sm text-[#6b5d52]">No therapists yet.</p>}
           </div>
         </div>
       )}
@@ -300,10 +314,11 @@ function SpaResources({ restaurantId, token }: Props) {
             </div>
             <h4 className="text-sm font-bold mb-2">Services (skills)</h4>
             <div className="flex flex-wrap gap-1.5">
-              {services.map(s => (
+              {/* Active treatments, plus any inactive one still assigned so it can be taken off. */}
+              {services.filter(s => isOn(s) || skills.includes(s.id)).map(s => (
                 <button key={s.id} onClick={() => toggleSkill(s.id)} disabled={!canEdit}
                   className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border disabled:opacity-60 ${skills.includes(s.id) ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>
-                  {s.name}
+                  {s.name}{isOn(s) ? '' : ' (inactive)'}
                 </button>
               ))}
             </div>
@@ -409,6 +424,10 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   };
 
   const fmtTime = (ts: string) => String(ts || '').slice(11, 16);
+  // Only active treatments can be booked. The calendar shows active therapists,
+  // plus any inactive one who still has appointments on the day shown.
+  const activeServices = services.filter((s: any) => Number(s.is_active ?? 1) === 1);
+  const calTherapists = therapists.filter((t: any) => Number(t.is_active ?? 1) === 1 || appts.some((a: any) => a.therapist_id === t.id));
 
   return (
     <div>
@@ -420,14 +439,14 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
             style={{ width: 180 }} />
           {!search.trim() && <input className={INPUT} type="date" value={day} onChange={e => setDay(e.target.value)} style={{ width: 'auto' }} />}
           <button className={BTN_GHOST} onClick={() => load(search)}><RefreshCw size={13} /></button>
-          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setBk({ service_id: services[0]?.id || '', date: day, client_name: '', client_phone: '' }); setShowBook(true); }}><Plus size={14} /> New Appointment</button>}
+          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setBk({ service_id: activeServices[0]?.id || '', date: day, client_name: '', client_phone: '' }); setShowBook(true); }}><Plus size={14} /> New Appointment</button>}
         </div>} />
 
       {calendar ? (
-        <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.max(1, therapists.length)}, minmax(180px, 1fr))` }}>
-          {therapists.map(t => (
+        <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.max(1, calTherapists.length)}, minmax(180px, 1fr))` }}>
+          {calTherapists.map(t => (
             <div key={t.id} className={CARD}>
-              <h4 className="font-bold text-sm mb-2 flex items-center gap-1.5"><User size={13} className="text-[#cc5a16]" /> {t.display_name}</h4>
+              <h4 className="font-bold text-sm mb-2 flex items-center gap-1.5"><User size={13} className="text-[#cc5a16]" /> {t.display_name}{Number(t.is_active ?? 1) !== 1 && <span className="text-[10px] font-normal text-[#6b5d52]">(inactive)</span>}</h4>
               <div className="space-y-1.5">
                 {appts.filter(a => a.therapist_id === t.id).sort((a, b) => a.start_at.localeCompare(b.start_at)).map(a => (
                   <div key={a.id} className="rounded-lg border border-[#e8dccf] p-2 text-xs">
@@ -440,7 +459,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
               </div>
             </div>
           ))}
-          {!therapists.length && <p className="text-sm text-[#6b5d52]">Add therapists first (Therapists & Cabins).</p>}
+          {!calTherapists.length && <p className="text-sm text-[#6b5d52]">Add therapists first (Therapists & Cabins).</p>}
         </div>
       ) : (
         <div className={CARD}>
@@ -485,7 +504,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
               <div className="col-span-2"><label className={LABEL}>Service</label>
                 <select className={INPUT} value={bk.service_id} onChange={e => { setBk({ ...bk, service_id: e.target.value }); setSlots([]); }}>
                   <option value="">Select…</option>
-                  {services.map(s => <option key={s.id} value={s.id}>{s.name} · {s.duration_min}min · {money(s.price)}</option>)}
+                  {activeServices.map(s => <option key={s.id} value={s.id}>{s.name} · {s.duration_min}min · {money(s.price)}</option>)}
                 </select></div>
               <div><label className={LABEL}>Date</label><input className={INPUT} type="date" value={bk.date} onChange={e => { setBk({ ...bk, date: e.target.value }); setSlots([]); }} /></div>
               <div className="flex items-end"><button className={BTN_PRIMARY} onClick={searchSlots} disabled={!bk.service_id}>{slotLoading ? 'Searching…' : 'Find Slots'}</button></div>
