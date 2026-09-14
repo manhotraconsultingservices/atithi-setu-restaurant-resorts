@@ -950,6 +950,7 @@ function SpaClientRecord({ restaurantId, token, clientId, packages, memberships,
                             {e.session?.follow_up && <div>Follow-up: {e.session.follow_up}{e.session.follow_up_date ? ` on ${e.session.follow_up_date}` : ''}</div>}
                             {e.session?.notes && <div className="text-[#6b5d52]">Notes: {e.session.notes}</div>}
                             {e.invoice && <div>Invoice {e.invoice.invoice_number} · {money(e.invoice.grand_total)}</div>}
+                            {e.charged_to_room && <div>Charged to the room bill</div>}
                           </div>
                         )}
                         {e.kind !== 'TREATMENT' && (e.detail || e.invoice_number || e.amount) && <div className="mt-1 text-[#3d3128]">{[e.detail, e.amount ? money(e.amount) : null, e.invoice_number ? `Invoice ${e.invoice_number}` : null].filter(Boolean).join(' · ')}</div>}
@@ -1581,7 +1582,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
 
   // booking modal
   const [showBook, setShowBook] = useState(false);
-  const blankBk = { service_id: '', date: istToday(), client_id: '', client_name: '', client_phone: '', client_gender: '', therapist_gender_pref: '' };
+  const blankBk = { service_id: '', date: istToday(), client_id: '', client_name: '', client_phone: '', client_gender: '', therapist_gender_pref: '', room_booking_id: '' };
   const [bk, setBk] = useState<any>(blankBk);
   // A guest on file, the gender question, and the therapist and cabin picked for the slot.
   const [clientQ, setClientQ] = useState('');
@@ -1608,6 +1609,11 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   // Check-in held by the guest's health record: a clinician can go ahead with a reason.
   const [checkinBlock, setCheckinBlock] = useState<any>(null);
   const [overrideText, setOverrideText] = useState('');
+  // Guests checked in to a room: a treatment can be linked to the stay and
+  // charged to the room bill.
+  const [inHouse, setInHouse] = useState<any[]>([]);
+  const lastTen = (p: any) => String(p || '').replace(/\D/g, '').slice(-10);
+  const stayForPhone = (phone: any) => (lastTen(phone).length === 10 ? inHouse.find((g: any) => lastTen(g.guest_phone) === lastTen(phone)) : undefined);
 
   const load = async (q?: string) => {
     setLoading(true);
@@ -1622,7 +1628,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     } catch { /* */ } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, [day]);
-  useEffect(() => { (async () => { try { setServices(await api('/spa/services')); } catch {} try { setTherapists(await api('/spa/therapists')); } catch {} if (calendar) { try { setCabins(await api('/spa/resources')); } catch {} } })(); }, []);
+  useEffect(() => { (async () => { try { setServices(await api('/spa/services')); } catch {} try { setTherapists(await api('/spa/therapists')); } catch {} if (calendar) { try { setCabins(await api('/spa/resources')); } catch {} } try { setInHouse((await api('/spa/in-house-guests')).guests || []); } catch {} })(); }, []);
 
   const genderQs = () => `${bk.client_gender ? `&guest_gender=${bk.client_gender}` : ''}${bk.therapist_gender_pref ? `&therapist_gender=${bk.therapist_gender_pref}` : ''}`;
   const searchSlots = async () => {
@@ -1641,7 +1647,8 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   };
   const pickClient = (c: any) => {
     const g = String(c.gender || '').toUpperCase();
-    setBk({ ...bk, client_id: c.id, client_name: c.name || '', client_phone: c.phone || '', client_gender: g === 'FEMALE' || g === 'MALE' ? g : bk.client_gender });
+    setBk({ ...bk, client_id: c.id, client_name: c.name || '', client_phone: c.phone || '', client_gender: g === 'FEMALE' || g === 'MALE' ? g : bk.client_gender,
+      room_booking_id: bk.room_booking_id || stayForPhone(c.phone)?.booking_id || '' });
     setClientHits([]); setClientQ(''); setClientSearched(false); setSlots([]); setChosenSlot(null);
   };
   // A slot fills in its therapist and cabin, and lists who else could give the
@@ -1663,6 +1670,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
         resource_id: pick.resource_id || null, client_id: bk.client_id || undefined, client_name: bk.client_name, client_phone: bk.client_phone,
         assistant_ids: Array.isArray(chosenSlot.assistant_ids) ? chosenSlot.assistant_ids.filter((x: string) => x !== pick.therapist_id) : undefined,
         client_gender: bk.client_gender || undefined, therapist_gender_pref: bk.therapist_gender_pref || undefined,
+        room_booking_id: bk.room_booking_id || undefined,
         override_reason: withReason ? overrideReason.trim() : undefined,
       }) });
       setShowBook(false); setSlots([]); setChosenSlot(null); setRuleProblems([]); setOverrideReason(''); setBk({ ...blankBk, date: day });
@@ -1693,8 +1701,28 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
       setCheckinBlock(null); await load();
     } catch (e: any) { alert(e.message); }
   };
+  const openCheckout = (r: any) => {
+    const linked = r.room_booking_id && inHouse.some((g: any) => g.booking_id === r.room_booking_id) ? r.room_booking_id : '';
+    const stay = linked || stayForPhone(r.client_phone)?.booking_id || '';
+    setCoAppt(r); setCoResult(null);
+    setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH', charge_to_room: !!stay, room_booking_id: stay });
+  };
   const doCheckout = async () => {
     if (!canEdit) { alert('View-only access — you cannot check out appointments.'); return; }
+    // Charged to the room: added to the room bill, paid at hotel check-out.
+    if (coState.charge_to_room) {
+      if (!coState.room_booking_id) { alert('Choose the room to charge.'); return; }
+      try {
+        const r = await api(`/spa/appointments/${coAppt.id}/checkout`, { method: 'POST', body: JSON.stringify({
+          charge_to_room: true, room_booking_id: coState.room_booking_id,
+          use_package: coState.use_package, apply_membership: coState.apply_membership, tip_amount: Number(coState.tip_amount || 0),
+          discount: Number(coState.discount || 0),
+        }) });
+        setCoResult({ ...r, charged_to_room: true });
+        await load();
+      } catch (e: any) { alert(e.message); }
+      return;
+    }
     try {
       const r = await api(`/spa/appointments/${coAppt.id}/checkout`, { method: 'POST', body: JSON.stringify({
         use_package: coState.use_package, apply_membership: coState.apply_membership, tip_amount: Number(coState.tip_amount || 0),
@@ -1903,7 +1931,9 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                   {canEdit && r.status === 'CHECKED_IN' && <button className={BTN_GHOST} onClick={() => transition(r, 'start')}>Start</button>}
                   {canEdit && ['CHECKED_IN', 'IN_PROGRESS'].includes(r.status) && <button className={BTN_GHOST} onClick={() => setFinishAppt(r)}><Check size={12} /> Finish</button>}
                   {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} title="The guest did not arrive" onClick={() => transition(r, 'no-show')}>No-show</button>}
-                  {canEdit && r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH' }); }}>Checkout</button>}
+                  {canEdit && r.status === 'COMPLETED' && !r.folio_id && !r.room_folio_id && <button className={BTN_PRIMARY} onClick={() => openCheckout(r)}>Checkout</button>}
+                  {r.room_folio_id && <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200" title="On the room bill, paid at hotel check-out">Charged to room {r.room_number || ''}</span>}
+                  {!r.room_folio_id && r.room_booking_id && r.room_number && <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-sky-50 text-sky-700" title="Staying with us">Room {r.room_number}</span>}
                   {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={12} /> Invoice</button>}
                   {r.status === 'COMPLETED' && <button className={BTN_GHOST} title="What happened in this treatment" onClick={() => setSessionAppt(r)}>Record</button>}
                   {canEdit && ['BOOKED', 'CONFIRMED', 'CHECKED_IN'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} title="Cancel appointment" onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
@@ -1948,6 +1978,16 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
               </div>
               <div><label className={LABEL}>Client Name</label><input className={INPUT} value={bk.client_name} onChange={e => setBk({ ...bk, client_name: e.target.value })} /></div>
               <div><label className={LABEL}>Client Phone</label><input className={INPUT} value={bk.client_phone} onChange={e => setBk({ ...bk, client_phone: e.target.value })} /></div>
+              {inHouse.length > 0 && (
+                <div><label className={LABEL}>Staying with us</label>
+                  <select className={INPUT} value={bk.room_booking_id} onChange={e => {
+                    const g = inHouse.find((x: any) => x.booking_id === e.target.value);
+                    setBk({ ...bk, room_booking_id: e.target.value, client_name: bk.client_name || g?.guest_name || '', client_phone: bk.client_phone || g?.guest_phone || '' });
+                  }}>
+                    <option value="">Not staying in a room</option>
+                    {inHouse.map((g: any) => <option key={g.booking_id} value={g.booking_id}>Room {g.room_number || g.room_name} — {g.guest_name}</option>)}
+                  </select></div>
+              )}
               <div><label className={LABEL}>Guest gender</label>
                 <select className={INPUT} value={bk.client_gender} onChange={e => { setBk({ ...bk, client_gender: e.target.value }); setSlots([]); setChosenSlot(null); }}>
                   <option value="">Not recorded</option><option value="FEMALE">Female</option><option value="MALE">Male</option>
@@ -2052,24 +2092,52 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                     <div><label className={LABEL}>Discount (₹)</label><input className={INPUT} type="number" min={0} value={coState.discount} onChange={e => setCoState({ ...coState, discount: e.target.value })} placeholder="0" /></div>
                     <div><label className={LABEL}>Tip (₹) <span className="font-normal text-[#9d8b7e]">shared by the therapists</span></label><input className={INPUT} type="number" min={0} value={coState.tip_amount} onChange={e => setCoState({ ...coState, tip_amount: e.target.value })} placeholder="0" /></div>
                   </div>
-                  <div><label className={LABEL}>Promo code (optional)</label><input className={`${INPUT} uppercase`} value={coState.promo_code} onChange={e => setCoState({ ...coState, promo_code: e.target.value.toUpperCase() })} placeholder="e.g. WELCOME10" /></div>
-                  <div><label className={LABEL}>Payment method</label>
-                    <select className={INPUT} value={coState.payment_method} onChange={e => setCoState({ ...coState, payment_method: e.target.value })}>
-                      {['CASH', 'CARD', 'UPI', 'BANK_TRANSFER'].map(m => <option key={m}>{m}</option>)}
-                    </select></div>
+                  {inHouse.length > 0 && (
+                    <div className="rounded-xl border border-[#e8dccf] p-2.5">
+                      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!coState.charge_to_room} onChange={e => setCoState({ ...coState, charge_to_room: e.target.checked })} /> Charge to the guest&apos;s room</label>
+                      {coState.charge_to_room && (
+                        <>
+                          <select className={`${INPUT} mt-2`} value={coState.room_booking_id || ''} onChange={e => setCoState({ ...coState, room_booking_id: e.target.value })}>
+                            <option value="">Choose the room…</option>
+                            {inHouse.map((g: any) => <option key={g.booking_id} value={g.booking_id}>Room {g.room_number || g.room_name} — {g.guest_name}</option>)}
+                          </select>
+                          <p className="text-[11px] text-[#6b5d52] mt-1">Added to the room bill and paid at hotel check-out. No spa invoice is raised.</p>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {!coState.charge_to_room && (
+                    <>
+                      <div><label className={LABEL}>Promo code (optional)</label><input className={`${INPUT} uppercase`} value={coState.promo_code} onChange={e => setCoState({ ...coState, promo_code: e.target.value.toUpperCase() })} placeholder="e.g. WELCOME10" /></div>
+                      <div><label className={LABEL}>Payment method</label>
+                        <select className={INPUT} value={coState.payment_method} onChange={e => setCoState({ ...coState, payment_method: e.target.value })}>
+                          {['CASH', 'CARD', 'UPI', 'BANK_TRANSFER'].map(m => <option key={m}>{m}</option>)}
+                        </select></div>
+                    </>
+                  )}
                 </div>
                 <div className="flex justify-end gap-2">
                   <button className={BTN_GHOST} onClick={() => setCoAppt(null)}>Cancel</button>
-                  <button className={BTN_PRIMARY} onClick={doCheckout}>Generate Invoice & Pay</button>
+                  <button className={BTN_PRIMARY} onClick={doCheckout}>{coState.charge_to_room ? 'Charge to room' : 'Generate Invoice & Pay'}</button>
                 </div>
               </>
             ) : (
               <div className="text-center py-4">
                 <Check size={40} className="mx-auto text-emerald-500 mb-2" />
-                <p className="font-bold">Invoice {coResult.invoice_number}</p>
-                <p className="text-sm text-[#6b5d52] mb-1">Total {money(coResult.folio?.grand_total)}</p>
-                <p className="text-xs text-emerald-600 mb-4">Paid in full</p>
-                <button className={BTN_PRIMARY + ' inline-flex'} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${coResult.folio?.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${coResult.invoice_number || coResult.folio?.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={13} /> Download Invoice</button>
+                {coResult.charged_to_room ? (
+                  <>
+                    <p className="font-bold">Charged to room {coResult.room_number || ''}</p>
+                    <p className="text-sm text-[#6b5d52] mb-1">{coResult.guest_name ? `${coResult.guest_name} · ` : ''}{money(Number(coResult.service_amount || 0) + Number(coResult.gst_amount || 0) + Number(coResult.tip || 0))} added to the room bill</p>
+                    <p className="text-xs text-emerald-600 mb-4">Paid at hotel check-out</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-bold">Invoice {coResult.invoice_number}</p>
+                    <p className="text-sm text-[#6b5d52] mb-1">Total {money(coResult.folio?.grand_total)}</p>
+                    <p className="text-xs text-emerald-600 mb-4">Paid in full</p>
+                  </>
+                )}
+                {!coResult.charged_to_room && (<button className={BTN_PRIMARY + ' inline-flex'} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${coResult.folio?.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${coResult.invoice_number || coResult.folio?.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={13} /> Download Invoice</button>)}
                 <div className="mt-3"><button className={BTN_GHOST + ' mx-auto'} onClick={() => setCoAppt(null)}>Close</button></div>
               </div>
             )}

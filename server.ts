@@ -3676,9 +3676,12 @@ async function writeGstRegisterFromFolio(
 
   const entries: any[] = await tenantDb.query(
     `SELECT * FROM folio_entries
-      WHERE folio_id = ? AND amount > 0 AND reversal_of_entry_id IS NULL`,
+      WHERE folio_id = ? AND amount > 0 AND reversal_of_entry_id IS NULL
+        AND COALESCE(entry_type, '') <> 'SPA_TIP'`,
     [folioId]
   );
+  // (A gratuity charged to the room with a treatment is not a supply, so it has
+  // no register line.)
 
   // settled_at from PostgreSQL arrives as a Date object at runtime even
   // though the declared type is string|null — coerce via new Date() so
@@ -3695,6 +3698,7 @@ async function writeGstRegisterFromFolio(
     SERVICE_CHARGE_REVENUE:  '996311',
     F_AND_B_REVENUE:         '996331',
     ANCILLARY_REVENUE:       '999700',
+    SPA_REVENUE:             '999722',
     ADJUSTMENT:              '',
   };
 
@@ -5282,8 +5286,10 @@ async function reapplyHotelGstRates(tenantDb: DbInterface, restaurantId: string,
   const incRow: any = await centralDb.get("SELECT rates_include_gst FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
   const inclusive = Number(incRow?.rates_include_gst ?? 1) === 1;
   const entries: any[] = await tenantDb.query(
+    // Spa treatments and tips charged to the room keep the spa rate: the room
+    // slab is for accommodation.
     `SELECT id, amount, gst_rate, gst_amount FROM folio_entries
-     WHERE folio_id = ? AND entry_type NOT IN ('F_AND_B', 'PAYMENT')`,
+     WHERE folio_id = ? AND entry_type NOT IN ('F_AND_B', 'PAYMENT', 'SPA_SERVICE', 'SPA_TIP')`,
     [folioId]
   );
   for (const e of entries) {
@@ -5746,10 +5752,22 @@ async function _folioRevenueGlLines(tenantDb: any, folioId: string, subtotal: nu
     fnbSub = Math.max(0, Math.round(Number(r?.fnb || 0) * 100) / 100);
   } catch { fnbSub = 0; }
   fnbSub = Math.min(Math.max(0, subtotal), fnbSub);
-  const roomSub = Math.round((subtotal - fnbSub) * 100) / 100;
+  // Spa treatments and tips charged to the room are spa revenue (4040), as they
+  // are when the spa bills them itself.
+  let spaSub = 0;
+  try {
+    const s: any = await tenantDb.get(
+      "SELECT COALESCE(SUM(amount),0) AS spa FROM folio_entries WHERE folio_id = ? AND entry_type IN ('SPA_SERVICE', 'SPA_TIP')",
+      [folioId]
+    );
+    spaSub = Math.max(0, Math.round(Number(s?.spa || 0) * 100) / 100);
+  } catch { spaSub = 0; }
+  spaSub = Math.min(Math.max(0, subtotal - fnbSub), spaSub);
+  const roomSub = Math.round((subtotal - fnbSub - spaSub) * 100) / 100;
   const lines: GlLine[] = [];
   if (roomSub > 0) lines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: roomSub, narration: `Room revenue folio ${folioId}` });
   if (fnbSub  > 0) lines.push({ account_code: '4010', account_name: 'F&B Revenue', dr_amount: 0, cr_amount: fnbSub,  narration: `F&B revenue (charged to room) folio ${folioId}` });
+  if (spaSub  > 0) lines.push({ account_code: '4040', account_name: 'Spa Revenue', dr_amount: 0, cr_amount: spaSub,  narration: `Spa revenue (charged to room) folio ${folioId}` });
   // Safety: never drop revenue to a rounding gap — if both rounded to 0 but the
   // subtotal is positive, keep a single Room line so the journal still balances.
   if (lines.length === 0 && subtotal > 0) lines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: Math.round(subtotal * 100) / 100, narration: `Room revenue folio ${folioId}` });
@@ -6573,6 +6591,7 @@ async function _computeYearEndAccrual(db: any, restaurantId: string, asOf: strin
     if (kind === 'SPA')        { code = '4040'; name = 'Spa Revenue'; mod = 'SPA'; }
     else if (kind === 'EVENT') { code = '4050'; name = 'Banquet & Events Revenue'; mod = 'EVENTS'; }
     else if (et === 'F_AND_B') { code = '4010'; name = 'F&B Revenue'; }
+    else if (et === 'SPA_SERVICE' || et === 'SPA_TIP') { code = '4040'; name = 'Spa Revenue'; mod = 'SPA'; }
 
     lines.push({
       source: 'FOLIO', source_id: fid, ref: String(e.id), date: d, module: mod, kind: et,
@@ -23863,7 +23882,7 @@ ${data.tenant.name}`;
         SlNo: String(i + 1),
         PrdDesc: String(e.description || `Line ${i + 1}`).slice(0, 300),
         IsServc: 'Y',
-        HsnCd: e.entry_type === 'ROOM_CHARGE' ? '996311' : e.entry_type === 'F_AND_B' ? '996331' : '996319',
+        HsnCd: e.entry_type === 'ROOM_CHARGE' ? '996311' : e.entry_type === 'F_AND_B' ? '996331' : (e.entry_type === 'SPA_SERVICE' || e.entry_type === 'SPA_TIP') ? '999722' : '996319',
         Qty: Number(e.quantity || 1),
         Unit: 'NOS',
         UnitPrice: Number(e.unit_price || 0),
@@ -34701,6 +34720,70 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to search therapists" }); }
   });
 
+  // ─── IN-HOUSE GUESTS (Phase 4b) ─────────────────────────────────────────────
+  // A stay the spa can charge: checked in, with its open room bill. Null when the
+  // stay is not in house, or the property has no hotel.
+  const spaInHouseStay = async (db: DbInterface, bookingId: string): Promise<any | null> => {
+    if (!bookingId) return null;
+    return db.get(
+      `SELECT b.id AS booking_id, b.room_id, b.guest_name, b.guest_phone, r.room_number, r.name AS room_name,
+              (SELECT f.id FROM folios f WHERE f.booking_id = b.id AND f.status = 'open' ORDER BY f.created_at DESC LIMIT 1) AS folio_id
+         FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+        WHERE b.id = ? AND UPPER(COALESCE(b.status, '')) = 'CHECKED_IN'`, [bookingId]).catch(() => null);
+  };
+  // The room and guest of each appointment linked to a stay.
+  const spaAttachStays = async (db: DbInterface, rows: any[]): Promise<void> => {
+    const ids = Array.from(new Set(rows.map((r: any) => r?.room_booking_id).filter(Boolean).map(String)));
+    if (!ids.length) return;
+    const stays: any[] = await db.query(
+      `SELECT b.id, b.status, b.guest_name, r.room_number FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+        WHERE b.id IN (${ids.map(() => '?').join(',')})`, ids).catch(() => []);
+    for (const r of rows) {
+      const s = stays.find((x: any) => String(x.id) === String(r.room_booking_id));
+      if (s) { r.room_number = s.room_number; r.stay_status = s.status; r.stay_guest_name = s.guest_name; }
+    }
+  };
+  // The tip goes to the therapists who gave the treatment — as split at
+  // checkout, or equally, any odd paisa to the lead.
+  const spaRecordTipShares = async (db: DbInterface, appt: any, folioId: string, tip: number, splitsIn: { therapist_id: string; amount: number }[] | null): Promise<void> => {
+    let shares: { therapist_id: string; amount: number }[] = splitsIn || [];
+    if (!shares.length) {
+      let givers: string[] = ((await db.query(
+        "SELECT therapist_id FROM spa_session_therapists WHERE appointment_id = ? ORDER BY CASE WHEN role = 'LEAD' THEN 0 ELSE 1 END, therapist_id",
+        [appt.id]).catch(() => [])) as any[]).map((r: any) => String(r.therapist_id));
+      if (!givers.length) {
+        const assisting: any[] = await db.query("SELECT therapist_id FROM spa_appointment_therapists WHERE appointment_id = ?", [appt.id]).catch(() => []);
+        givers = [appt.therapist_id, ...assisting.map((r: any) => r.therapist_id)].filter(Boolean).map(String);
+      }
+      if (givers.length) {
+        const each = Math.floor((tip * 100) / givers.length) / 100;
+        shares = givers.map((tid, i) => ({ therapist_id: tid, amount: i === 0 ? round2(tip - each * (givers.length - 1)) : each }));
+      }
+    }
+    for (const sh of shares) {
+      await db.run("INSERT INTO spa_tip_splits (id, folio_id, appointment_id, therapist_id, amount) VALUES (?, ?, ?, ?, ?)",
+        [mkSpaId('SPATIP'), folioId, appt.id, sh.therapist_id, sh.amount])
+        .catch((e: any) => console.error('[spa] tip share not recorded:', folioId, e?.message || e));
+    }
+  };
+
+  // Guests checked in with an open room bill, for booking and charging treatments.
+  app.get("/api/restaurant/:id/spa/in-house-guests", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT b.id AS booking_id, b.guest_name, b.guest_phone, to_char(b.check_out_date, 'YYYY-MM-DD') AS check_out_date,
+                r.room_number, r.name AS room_name,
+                (SELECT f.id FROM folios f WHERE f.booking_id = b.id AND f.status = 'open' ORDER BY f.created_at DESC LIMIT 1) AS folio_id
+           FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE UPPER(COALESCE(b.status, '')) = 'CHECKED_IN'
+          ORDER BY r.room_number`).catch(() => []);
+      res.json({ guests: rows.filter((g: any) => g.folio_id) });
+    } catch (err: any) { res.status(500).json({ error: "Failed to list in-house guests" }); }
+  });
+
   app.get("/api/restaurant/:id/spa/appointments", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -34729,6 +34812,7 @@ ${data.tenant.name}`;
            ${where}
           ORDER BY a.start_at DESC LIMIT 1000`, params);
       await spaAttachAssistants(db, rows);
+      await spaAttachStays(db, rows);
       res.json(rows);
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch appointments" }); }
   });
@@ -34942,6 +35026,14 @@ ${data.tenant.name}`;
         if (!who || String(who.id) !== String(plan.client_id)) return res.status(400).json({ error: "That course plan is another guest's.", code: 'COURSE_PLAN_INVALID' });
         coursePlanId = plan.id;
       }
+      // A treatment for an in-house guest is linked to the stay, so it can be
+      // charged to the room. From go-live: nothing earlier is linked.
+      let roomBookingId: string | null = null;
+      if (b.room_booking_id) {
+        const stay = await spaInHouseStay(db, String(b.room_booking_id));
+        if (!stay) return res.status(400).json({ error: 'That guest is not checked in, so the treatment cannot be linked to the stay.', code: 'STAY_NOT_IN_HOUSE' });
+        roomBookingId = stay.booking_id;
+      }
       // resolve / upsert client by phone if provided without id
       let clientId = b.client_id || null;
       if (!clientId && b.client_phone) {
@@ -34992,6 +35084,10 @@ ${data.tenant.name}`;
       if (coursePlanId) {
         await db.run("UPDATE spa_appointments SET course_plan_id = ? WHERE id = ?", [coursePlanId, id])
           .catch((e: any) => console.error('[spa] course plan link not saved:', id, e?.message || e));
+      }
+      if (roomBookingId) {
+        await db.run("UPDATE spa_appointments SET room_booking_id = ? WHERE id = ?", [roomBookingId, id])
+          .catch((e: any) => console.error('[spa] stay link not saved:', id, e?.message || e));
       }
       if (createGuestGender || createPref || createProblems.length) {
         await db.run("UPDATE spa_appointments SET client_gender = ?, therapist_gender_pref = ?, assignment_override_reason = ? WHERE id = ?",
@@ -35641,6 +35737,10 @@ ${data.tenant.name}`;
         const existing = await getFolioOutstanding(db, appt.folio_id);
         return res.json({ folio: existing?.folio, outstanding: existing?.outstanding, invoice_number: existing?.folio?.invoice_number, reused: true });
       }
+      // Already charged to the guest's room.
+      if (appt.room_folio_id) {
+        return res.json({ charged_to_room: true, room_folio_id: appt.room_folio_id, room_booking_id: appt.room_booking_id, reused: true });
+      }
       if (appt.status !== 'COMPLETED') return res.status(409).json({ error: "Appointment must be COMPLETED before checkout" });
 
       const b = req.body || {};
@@ -35652,6 +35752,112 @@ ${data.tenant.name}`;
         const splitSum = round2(tipSplitsIn.reduce((acc, x) => acc + x.amount, 0));
         if (Math.abs(splitSum - tipIn) > 0.01) return res.status(400).json({ error: `The tip is ₹${tipIn} but the shares add up to ₹${splitSum}.`, code: 'TIP_SPLIT_MISMATCH' });
       }
+      // Charged to the room: the treatment and any tip go onto the guest's open
+      // room bill and are paid with the stay at hotel check-out. No spa invoice is
+      // raised and no payment is taken here.
+      if (b.charge_to_room) {
+        const stay: any = await spaInHouseStay(db, String(b.room_booking_id || appt.room_booking_id || ''));
+        if (!stay) return res.status(409).json({ error: 'The guest is not checked in to a room, so the treatment cannot be charged to it. Take payment instead.', code: 'STAY_NOT_IN_HOUSE' });
+        if (!stay.folio_id) return res.status(409).json({ error: 'The stay has no open room bill to charge. Take payment instead.', code: 'ROOM_FOLIO_MISSING' });
+        const manualDisc = round2(b.discount || 0);
+        if (manualDisc < 0) return res.status(400).json({ error: 'The discount cannot be negative.', code: 'DISCOUNT_INVALID' });
+        const priceR = round2(appt.price_snapshot || 0);
+        const gstPctR = Number(appt.gst_percent_snapshot ?? 18);
+        // A package session to use, found before anything is written.
+        let cpR: any = null;
+        if (b.use_package) {
+          if (b.client_package_id) {
+            cpR = await db.get("SELECT * FROM spa_client_packages WHERE id = ? AND status = 'ACTIVE' AND sessions_remaining > 0", [b.client_package_id]);
+          } else if (appt.client_id) {
+            cpR = await db.get(
+              `SELECT * FROM spa_client_packages
+                WHERE client_id = ? AND status = 'ACTIVE' AND sessions_remaining > 0
+                  AND (service_id IS NULL OR service_id = ?)
+                ORDER BY expires_at NULLS LAST LIMIT 1`, [appt.client_id, appt.service_id]);
+          }
+        }
+        // A discount comes off the treatment line, never below nothing.
+        let discR = 0;
+        if (!cpR) {
+          discR = manualDisc;
+          if (b.apply_membership && appt.client_id && priceR > 0) {
+            const mem: any = await db.get("SELECT * FROM spa_client_memberships WHERE client_id = ? AND status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1", [appt.client_id]);
+            if (mem) {
+              let benefits: any = {};
+              try { benefits = JSON.parse(mem.benefits_snapshot || '{}'); } catch { benefits = {}; }
+              const pct = Number(benefits.discount_pct || 0);
+              if (pct > 0) discR = round2(discR + priceR * pct / 100);
+            }
+          }
+          discR = Math.min(priceR, round2(discR));
+        }
+        const netService = cpR ? 0 : round2(priceR - discR);
+        const gstR = round2(netService * gstPctR / 100);
+        // Claimed first, so two people charging at once cannot both post it.
+        const claim = await db.run(
+          "UPDATE spa_appointments SET room_folio_id = ?, room_booking_id = ?, room_charged_at = CURRENT_TIMESTAMP WHERE id = ? AND folio_id IS NULL AND room_folio_id IS NULL AND status = 'COMPLETED'",
+          [stay.folio_id, stay.booking_id, appt.id]);
+        if (Number(claim?.changes || 0) !== 1) return res.status(409).json({ error: 'This treatment was just checked out by someone else. Reload to see it.', code: 'APPOINTMENT_CHANGED' });
+        const entryIds: string[] = [];
+        try {
+          if (netService > 0) {
+            const eid = mkSpaId('FE');
+            await db.run(
+              `INSERT INTO folio_entries (id, folio_id, entry_type, entry_subtype, description, quantity, unit_price, amount, gst_rate, gst_amount, source_id, reference_number, account_head, cost_centre, posted_by)
+               VALUES (?, ?, 'SPA_SERVICE', 'SPA_TREATMENT', ?, 1, ?, ?, ?, ?, ?, ?, 'SPA_REVENUE', 'SPA', ?)`,
+              [eid, stay.folio_id, `${appt.service_name || 'Spa treatment'}${discR > 0 ? ` (less ₹${discR} discount)` : ''}`, netService, netService, gstPctR, gstR,
+               appt.service_id || null, appt.id, req.user?.id || null]);
+            entryIds.push(eid);
+          }
+          if (tipIn > 0) {
+            const tid = mkSpaId('FE');
+            await db.run(
+              `INSERT INTO folio_entries (id, folio_id, entry_type, entry_subtype, description, quantity, unit_price, amount, gst_rate, gst_amount, reference_number, account_head, cost_centre, posted_by)
+               VALUES (?, ?, 'SPA_TIP', 'SPA_TIP', ?, 1, ?, ?, 0, 0, ?, 'SPA_TIP', 'SPA', ?)`,
+              [tid, stay.folio_id, `Gratuity — ${appt.service_name || 'spa treatment'}`, tipIn, tipIn, appt.id, req.user?.id || null]);
+            entryIds.push(tid);
+          }
+          await recomputeFolioTotals(db, stay.folio_id);
+        } catch (e: any) {
+          console.error('[spa] charge to room failed and was undone:', appt.id, e?.message || e);
+          for (const x of entryIds) await db.run("DELETE FROM folio_entries WHERE id = ?", [x]).catch(() => {});
+          await recomputeFolioTotals(db, stay.folio_id).catch(() => {});
+          await db.run("UPDATE spa_appointments SET room_folio_id = NULL, room_charged_at = NULL WHERE id = ?", [appt.id]).catch(() => {});
+          return res.status(500).json({ error: 'The treatment could not be added to the room bill, so nothing was charged.' });
+        }
+        if (cpR) {
+          const redemptionId = mkSpaId('SPARED');
+          await db.run("INSERT INTO spa_package_redemptions (id, client_package_id, appointment_id, sessions_drawn) VALUES (?, ?, ?, 1)", [redemptionId, cpR.id, appt.id]);
+          const remaining = Number(cpR.sessions_remaining) - 1;
+          await db.run("UPDATE spa_client_packages SET sessions_remaining = ?, status = ? WHERE id = ?",
+            [remaining, remaining <= 0 ? 'EXHAUSTED' : 'ACTIVE', cpR.id]);
+          await db.run("UPDATE spa_appointments SET package_redemption_id = ? WHERE id = ?", [redemptionId, appt.id]);
+        }
+        if (tipIn > 0) await spaRecordTipShares(db, appt, stay.folio_id, tipIn, tipSplitsIn);
+        await db.run("UPDATE spa_appointments SET room_charge_entry_ids = ? WHERE id = ?", [JSON.stringify(entryIds), appt.id]).catch(() => {});
+        const tipShares: any[] = tipIn > 0
+          ? await db.query("SELECT therapist_id, amount FROM spa_tip_splits WHERE folio_id = ? AND appointment_id = ?", [stay.folio_id, appt.id]).catch(() => [])
+          : [];
+        const roomLabel = stay.room_number || stay.room_name || '';
+        const chargedTotal = round2(netService + gstR + tipIn);
+        writeObjectAudit(db, req, {
+          objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'CHARGED_TO_ROOM',
+          summary: `Charged to room ${roomLabel}${stay.guest_name ? ` · ${stay.guest_name}` : ''} (₹${chargedTotal.toFixed(2)})`,
+          after: { room_booking_id: stay.booking_id, room_folio_id: stay.folio_id, service_amount: netService, gst_amount: gstR, discount: discR, tip: tipIn, package_redeemed: !!cpR, entry_ids: entryIds },
+        }).catch(() => {});
+        if (entryIds.length) {
+          writeObjectAudit(db, req, {
+            objectType: 'FOLIO', objectId: stay.folio_id, action: 'LINE_ADDED',
+            summary: `Spa: ${appt.service_name || 'treatment'}${tipIn > 0 ? ' and gratuity' : ''} charged to the room (₹${chargedTotal.toFixed(2)})`,
+            after: { appointment_id: appt.id, entry_ids: entryIds },
+          }).catch(() => {});
+        }
+        return res.status(201).json({
+          charged_to_room: true, room_booking_id: stay.booking_id, room_folio_id: stay.folio_id, room_number: roomLabel, guest_name: stay.guest_name,
+          service_amount: netService, gst_amount: gstR, discount: discR, tip: tipIn, tip_shares: tipShares, package_redeemed: !!cpR, entry_ids: entryIds,
+        });
+      }
+
       const folioId = mkSpaId('SPAFOL');
       await db.run(
         `INSERT INTO folios (id, folio_kind, appointment_id, status, currency_snapshot, tax_label_snapshot, doc_type)
@@ -35705,27 +35911,7 @@ ${data.tenant.name}`;
         await db.run(
           `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
            VALUES (?, ?, 'TIP', 'Gratuity', 1, ?, ?, 0, 0)`, [mkSpaId('FE'), folioId, tip, tip]);
-        // The tip goes to the therapists who gave the treatment — as split at
-        // checkout, or equally, any odd paisa to the lead.
-        let shares: { therapist_id: string; amount: number }[] = tipSplitsIn || [];
-        if (!shares.length) {
-          let givers: string[] = ((await db.query(
-            "SELECT therapist_id FROM spa_session_therapists WHERE appointment_id = ? ORDER BY CASE WHEN role = 'LEAD' THEN 0 ELSE 1 END, therapist_id",
-            [appt.id]).catch(() => [])) as any[]).map((r: any) => String(r.therapist_id));
-          if (!givers.length) {
-            const assisting: any[] = await db.query("SELECT therapist_id FROM spa_appointment_therapists WHERE appointment_id = ?", [appt.id]).catch(() => []);
-            givers = [appt.therapist_id, ...assisting.map((r: any) => r.therapist_id)].filter(Boolean).map(String);
-          }
-          if (givers.length) {
-            const each = Math.floor((tip * 100) / givers.length) / 100;
-            shares = givers.map((tid, i) => ({ therapist_id: tid, amount: i === 0 ? round2(tip - each * (givers.length - 1)) : each }));
-          }
-        }
-        for (const sh of shares) {
-          await db.run("INSERT INTO spa_tip_splits (id, folio_id, appointment_id, therapist_id, amount) VALUES (?, ?, ?, ?, ?)",
-            [mkSpaId('SPATIP'), folioId, appt.id, sh.therapist_id, sh.amount])
-            .catch((e: any) => console.error('[spa] tip share not recorded:', folioId, e?.message || e));
-        }
+        await spaRecordTipShares(db, appt, folioId, tip, tipSplitsIn);
       }
 
       // Membership discount (auto-applied) on the service amount
@@ -36643,6 +36829,7 @@ ${data.tenant.name}`;
           } : null,
           invoice: f ? { id: f.id, invoice_number: f.invoice_number, grand_total: f.grand_total, status: f.status } : null,
           course_plan_id: a.course_plan_id || null,
+          charged_to_room: !!a.room_folio_id,
         });
       }
       const pkgs: any[] = await db.query(
@@ -36708,14 +36895,19 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query(
+        // Spa invoices, and treatments charged to a guest's room (a line on the
+        // room bill naming its appointment) unless that line was reversed.
         `SELECT a.service_id, a.service_name,
                 COUNT(*) AS times_sold,
                 COALESCE(SUM(e.amount), 0) AS revenue,
                 COALESCE(SUM(e.gst_amount), 0) AS gst
            FROM folio_entries e
-           JOIN folios f ON f.id = e.folio_id AND f.folio_kind = 'SPA'
-           LEFT JOIN spa_appointments a ON a.id = f.appointment_id
+           JOIN folios f ON f.id = e.folio_id
+           LEFT JOIN spa_appointments a ON a.id = CASE WHEN f.folio_kind = 'SPA' THEN f.appointment_id ELSE e.reference_number END
           WHERE e.entry_type = 'SPA_SERVICE'
+            AND (f.folio_kind = 'SPA'
+                 OR (e.entry_subtype = 'SPA_TREATMENT' AND e.reversal_of_entry_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM folio_entries r WHERE r.reversal_of_entry_id = e.id)))
           GROUP BY a.service_id, a.service_name
           ORDER BY revenue DESC`);
       res.json(rows);
@@ -39641,7 +39833,7 @@ ${data.tenant.name}`;
         `SELECT COALESCE(SUM(f.grand_total - COALESCE(fnb.fnb_total, 0)), 0)::float AS rev
            FROM folios f
            LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
-                        FROM folio_entries WHERE entry_type = 'F_AND_B' GROUP BY folio_id) fnb
+                        FROM folio_entries WHERE entry_type IN ('F_AND_B', 'SPA_SERVICE', 'SPA_TIP') GROUP BY folio_id) fnb
                   ON fnb.folio_id = f.id
           WHERE (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
             AND f.status = 'settled'
@@ -39766,7 +39958,7 @@ ${data.tenant.name}`;
            LEFT JOIN rooms r ON r.id = f.room_id
            LEFT JOIN room_types rt ON rt.id = r.type_id
            LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
-                        FROM folio_entries WHERE entry_type = 'F_AND_B' GROUP BY folio_id) fnb
+                        FROM folio_entries WHERE entry_type IN ('F_AND_B', 'SPA_SERVICE', 'SPA_TIP') GROUP BY folio_id) fnb
                   ON fnb.folio_id = f.id
           WHERE f.status='settled' AND (f.doc_type IS NULL OR f.doc_type='INVOICE')
             AND TO_CHAR(f.settled_at,'YYYY-MM-DD') BETWEEN ? AND ?
@@ -53213,6 +53405,24 @@ ${data.tenant.name}`;
          entry.id, (req as any).user?.id || null]
       );
       await recomputeFolioTotals(tenantDb, folio.id);
+      // A spa treatment or tip charged to this room, now reversed: a reversed tip
+      // no longer counts for the therapists, and once nothing of the treatment is
+      // left on the bill the spa can check it out again.
+      if ((entry.entry_type === 'SPA_SERVICE' || entry.entry_type === 'SPA_TIP') && entry.reference_number) {
+        try {
+          if (entry.entry_type === 'SPA_TIP') {
+            await tenantDb.run("DELETE FROM spa_tip_splits WHERE folio_id = ? AND appointment_id = ?", [folio.id, entry.reference_number]);
+          }
+          const left: any = await tenantDb.get(
+            `SELECT COUNT(*)::int AS n FROM folio_entries e
+              WHERE e.folio_id = ? AND e.reference_number = ? AND e.entry_type IN ('SPA_SERVICE', 'SPA_TIP') AND e.reversal_of_entry_id IS NULL
+                AND NOT EXISTS (SELECT 1 FROM folio_entries r WHERE r.reversal_of_entry_id = e.id)`, [folio.id, entry.reference_number]);
+          if (Number(left?.n || 0) === 0) {
+            await tenantDb.run("UPDATE spa_appointments SET room_folio_id = NULL, room_charged_at = NULL, room_charge_entry_ids = NULL WHERE id = ? AND room_folio_id = ?", [entry.reference_number, folio.id]);
+            writeObjectAudit(tenantDb, req, { objectType: 'SPA_APPOINTMENT', objectId: entry.reference_number, action: 'ROOM_CHARGE_REVERSED', summary: `Room charge reversed on the room bill (${entry.description})` }).catch(() => {});
+          }
+        } catch (e: any) { console.error('[spa] room charge reversal not reflected on the treatment:', entry.reference_number, e?.message || e); }
+      }
       const updated: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
       await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: folio.id, action: 'LINE_REVERSED', summary: `Line reversed: ${entry.description} (−₹${Number(entry.amount || 0).toFixed(2)})`, before: { entry_id: entry.id, amount: entry.amount }, after: { reversal_id: rid } }).catch(() => {});
       res.json({ reversal_id: rid, subtotal: updated.subtotal, gst_amount: updated.gst_amount, grand_total: updated.grand_total });
@@ -53361,7 +53571,7 @@ ${data.tenant.name}`;
         `SELECT COALESCE(SUM(f.grand_total - COALESCE(fnb.fnb_total, 0)), 0) AS rev, COUNT(*) AS n
          FROM folios f
          LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
-                      FROM folio_entries WHERE entry_type = 'F_AND_B' GROUP BY folio_id) fnb
+                      FROM folio_entries WHERE entry_type IN ('F_AND_B', 'SPA_SERVICE', 'SPA_TIP') GROUP BY folio_id) fnb
                 ON fnb.folio_id = f.id
          WHERE f.status = 'settled'
            AND f.settled_at >= NOW() - INTERVAL '30 days'
@@ -61852,8 +62062,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-phase4a-guest-health-record',
+    commit_marker: 'spa-phase4b-charge-to-room',
     code_features: [
+      'spa-phase4b-charge-to-room — Spa Phase 4b. GET /spa/in-house-guests lists checked-in stays with an open room bill. A booking takes room_booking_id (must be in house, 400 STAY_NOT_IN_HOUSE), saved on spa_appointments; the appointment list carries room_number. Checkout with charge_to_room posts the treatment (net of membership or manual discount, at the spa GST rate, entry_type SPA_SERVICE, entry_subtype SPA_TREATMENT, account_head SPA_REVENUE, reference_number the appointment) and any tip (SPA_TIP, no GST) onto the open room folio, claims the appointment first (room_folio_id), undoes itself on failure, shares the tip among the therapists (spaRecordTipShares, now used by both checkouts), raises no spa invoice and takes no payment; 409 STAY_NOT_IN_HOUSE or ROOM_FOLIO_MISSING otherwise; a second call returns reused. On the hotel side: reapplyHotelGstRates leaves SPA_SERVICE and SPA_TIP at their own rate; _folioRevenueGlLines credits them to Spa Revenue 4040; the year-end accrual follows; the GST register gives SPA_REVENUE SAC 999722 and has no line for SPA_TIP; the e-invoice uses 999722; night audit, revenue by room type and hotel analytics leave them out of room revenue; reversing a spa line on the room bill removes its tip shares and, once nothing of the treatment is left, frees the appointment. The revenue-per-treatment report counts unreversed room-charged treatments. The hotel check-out window shows Spa and wellness apart from the room. Manual SPA lines typed on a room bill are unchanged.',
       'spa-phase4a-guest-health-record — Spa Phase 4a. New permission SPA_CLINICAL (in SPA_TAB_IDS; not granted to existing roles). Health information needs it at View (read) or Edit (write) via spaClinicalLevel, which refuses a role whose permissions were never saved; every read is logged to spa_clinical_access_log (full access sees the log). GET /spa/clients/:cid now returns forms only to clinical staff (others get forms_summary with consent and intake dates) and client reads need spa module access. POST forms: a consent (signer name, agreed, signed at the server time) at SPA_CLIENTS; a health intake (conditions from a fixed list) needs clinical Edit. Check-in is held when the treatment requires consent (spa_services.requires_consent) or the property requires it for all (spa_profile.require_intake_consent): 409 CLIENT_REQUIRED, CONSENT_REQUIRED, INTAKE_REQUIRED, or CONTRAINDICATED when the latest intake has a condition the treatment lists (spa_services.contraindications); a clinician passes with clinical_override_reason, kept on the appointment and audited; staff without clinical access are not told the condition. Treatment requirements PUT takes requires_consent and contraindications. Constitution assessments, course plans with items and progress (appointments carry course_plan_id; booking checks the plan is active and the guest\'s), clinical notes that lock. GET /spa/clients/:cid/timeline lists treatments with performers, cabin, actual times, consumables and batches, follow-up and invoice, plus packages, redemptions, memberships, retail purchases (folios.spa_client_id), consent and intake dates, and clinical entries for clinical staff. Client create and edit are audited. Nothing existing is linked, merged or backfilled.',
       'spa-phase3-treatment-record — Spa Phase 3. Finishing a treatment records what happened: spa_treatment_sessions (actual start from check-in/start, finish, cabin used, notes, outcome IMPROVED/NO_CHANGE/WORSE/NOT_ASSESSED, follow-up and date), spa_session_therapists (who performed it, lead and assisting). GET /spa/appointments/:aid/finish-plan pre-fills each consumable of the treatment and of its booked add-ons at its standard quantity with the batches it would draw from. POST /complete keeps working with no body (standard quantities, as before) and takes consumables [{ingredient_id, qty, batch_id}], performers, resource_id, notes, outcome, follow_up, follow_up_date; an item marked as varying (spa_service_consumables.is_variable) must be entered (409 VARIABLE_QTY_REQUIRED without a body, 400 with one). The chosen batch is drawn first, the rest oldest first; every draw is recorded in spa_consumption_batches and each item against its standard in spa_session_consumables. GET/PUT /spa/appointments/:aid/session reads and edits the record (not what it used). GET /spa/batch-trace lists an item batches with their use on treatments, or every treatment and guest a batch went into. Consumables can belong to an add-on (addon_id), are checked for unit and quantity, can be edited (PATCH /spa/consumables/:cid) and are audited; add-ons can be edited (PATCH /spa/addons/:adid). Checkout shares a tip among the therapists who performed the treatment (spa_tip_splits), equally or as split. Appointment where-used lists assisting therapists, performers and batches used. Tips still post to Spa Revenue 4040 as before. Also fixed: getFolioOutstanding filtered folio_entries on is_voided, a column that table never had, so every folio read with its balance (hotel check-out, spa invoice detail) listed no lines; totals were never affected.',
       'spa-calendar-time-grid — the spa Appointment Calendar is a time grid by therapist or by cabin (it was a list per therapist). Treatments are placed by time, cancelled and no-shows stay off it, and a treatment with assisting therapists shows under each of them. Dragging a booked, confirmed or checked-in treatment moves its time, or gives it to another therapist or cabin, through the reschedule route, which re-checks conflicts, blocks and the treatment rules; a move outside the rules asks for a reason. Clicking an empty time opens New Appointment for that time and picks the matching slot once slots are found. Screen only; no server behaviour changed.',

@@ -394,6 +394,8 @@ export function entryTypeLabel(t: string): string {
     case 'SERVICE_CHARGE': return 'Service charge';   // Phase H2 — per-night charge on rooms
     case 'F&B':
     case 'F_AND_B':        return 'Food & Beverage';   // DB stores F_AND_B; 'F&B' kept as alias
+    case 'SPA_SERVICE':    return 'Spa & wellness';
+    case 'SPA_TIP':        return 'Gratuity';
     default:               return t.replace(/_/g, ' ');
   }
 }
@@ -405,6 +407,8 @@ export function hsnForEntry(t: string): string {
     case 'F_AND_B':        return '996331';
     case 'SERVICE':        return '999799';
     case 'SERVICE_CHARGE': return '996311';  // Bundled with the room — same accommodation HSN
+    case 'SPA_SERVICE':
+    case 'SPA_TIP':        return '999722';  // Physical well-being services (spa)
     default:               return '996311';
   }
 }

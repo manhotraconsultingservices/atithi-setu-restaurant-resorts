@@ -46082,7 +46082,12 @@ const CheckoutModal: React.FC<{
     ? data.entries.filter((e: any) => e.entry_type === 'F_AND_B')
         .reduce((s: number, e: any) => s + Number(e.amount || 0) + Number(e.gst_amount || 0), 0)
     : 0;
-  const roomTotal = Math.max(0, Math.round((grand - fnbTotal) * 100) / 100);
+  // Spa treatments and tips charged to the room are spa, not room.
+  const spaTotal = Array.isArray(data?.entries)
+    ? data.entries.filter((e: any) => e.entry_type === 'SPA_SERVICE' || e.entry_type === 'SPA_TIP')
+        .reduce((s: number, e: any) => s + Number(e.amount || 0) + Number(e.gst_amount || 0), 0)
+    : 0;
+  const roomTotal = Math.max(0, Math.round((grand - fnbTotal - spaTotal) * 100) / 100);
   // Apply optional final payment + discount preview client-side so the
   // staff sees the post-payment outstanding live as they type.
   const previewPay = Number(payNow.amount || 0);
@@ -46268,10 +46273,11 @@ const CheckoutModal: React.FC<{
                 <div className="text-[11px] text-[#6b5d52] space-y-0.5">
                   {/* BILL-SPLIT — Room bill vs Restaurant (F&B) bill, auto-derived
                       from the folio so revenue is recognised once, not twice. */}
-                  {fnbTotal > 0 && (
+                  {(fnbTotal > 0 || spaTotal > 0) && (
                     <>
                       <div className="flex justify-between"><span>🛏 Room &amp; accommodation</span><span className="font-mono">{fmt(roomTotal)}</span></div>
-                      <div className="flex justify-between"><span>🍽 Restaurant / F&amp;B</span><span className="font-mono">{fmt(fnbTotal)}</span></div>
+                      {fnbTotal > 0 && <div className="flex justify-between"><span>🍽 Restaurant / F&amp;B</span><span className="font-mono">{fmt(fnbTotal)}</span></div>}
+                      {spaTotal > 0 && <div className="flex justify-between"><span>🌿 Spa &amp; wellness</span><span className="font-mono">{fmt(spaTotal)}</span></div>}
                       <div className="border-t border-[#cc5a16]/10 my-0.5"></div>
                     </>
                   )}
@@ -46284,14 +46290,14 @@ const CheckoutModal: React.FC<{
               {/* ── Folio charge breakdown (room + F&B + services) ── */}
               {Array.isArray(data.entries) && data.entries.length > 0 && (() => {
                 // Group entries by type in display order
-                const TYPE_ORDER = ['ROOM_CHARGE', 'SERVICE_CHARGE', 'F_AND_B', 'SERVICE', 'EXTRA_PERSON', 'ADJUSTMENT', 'TAX', 'DISCOUNT'];
+                const TYPE_ORDER = ['ROOM_CHARGE', 'SERVICE_CHARGE', 'F_AND_B', 'SERVICE', 'SPA_SERVICE', 'SPA_TIP', 'EXTRA_PERSON', 'ADJUSTMENT', 'TAX', 'DISCOUNT'];
                 const TYPE_ICONS: Record<string, string> = {
-                  ROOM_CHARGE: '🛏', SERVICE_CHARGE: '🔧', F_AND_B: '🍽', SERVICE: '🛎',
+                  ROOM_CHARGE: '🛏', SERVICE_CHARGE: '🔧', F_AND_B: '🍽', SERVICE: '🛎', SPA_SERVICE: '🌿', SPA_TIP: '🌿',
                   EXTRA_PERSON: '👤', ADJUSTMENT: '✏️', TAX: '📋', DISCOUNT: '🏷',
                 };
                 const TYPE_LABELS: Record<string, string> = {
                   ROOM_CHARGE: 'Room charges', SERVICE_CHARGE: 'Service charge',
-                  F_AND_B: 'Food & beverage', SERVICE: 'Hotel services',
+                  F_AND_B: 'Food & beverage', SERVICE: 'Hotel services', SPA_SERVICE: 'Spa & wellness', SPA_TIP: 'Spa gratuity',
                   EXTRA_PERSON: 'Extra person', ADJUSTMENT: 'Adjustments',
                   TAX: 'Tax', DISCOUNT: 'Discounts',
                 };

@@ -1032,6 +1032,13 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
       created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
     `CREATE INDEX IF NOT EXISTS idx_spa_clin_log_client ON spa_clinical_access_log(client_id, created_at)`,
+    // Phase 4b: a treatment for an in-house guest, linked to the stay from go-live
+    // and charged to the room bill.
+    `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS room_booking_id TEXT`,
+    `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS room_folio_id TEXT`,
+    `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS room_charged_at TIMESTAMP`,
+    `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS room_charge_entry_ids TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_appt_room_booking ON spa_appointments(room_booking_id)`,
   ]) {
     await tenantDb.exec(ddl).catch(() => {});
   }
