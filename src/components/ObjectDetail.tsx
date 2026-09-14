@@ -352,8 +352,8 @@ export function buildObjectResolver(restaurantId: string, token: string) {
         });
       }
       // HR records (HRMS-R1A): history only.
-      case 'EMPLOYEE': case 'PAYROLL_RUN': case 'OFFER_LETTER': case 'EXPENSE_CLAIM': case 'HR_MASTER': {
-        const label = ({ EMPLOYEE: 'Employee', PAYROLL_RUN: 'Payroll run', OFFER_LETTER: 'Offer letter', EXPENSE_CLAIM: 'Expense claim', HR_MASTER: 'Organisation list entry' } as Record<string, string>)[objectType];
+      case 'EMPLOYEE': case 'PAYROLL_RUN': case 'OFFER_LETTER': case 'EXPENSE_CLAIM': case 'HR_MASTER': case 'HR_DOCUMENT': {
+        const label = ({ EMPLOYEE: 'Employee', PAYROLL_RUN: 'Payroll run', OFFER_LETTER: 'Offer letter', EXPENSE_CLAIM: 'Expense claim', HR_MASTER: 'Organisation list entry', HR_DOCUMENT: 'HR document' } as Record<string, string>)[objectType];
         return mk({
           title: hint?.label || objectId, subtitle: hint?.subtitle || label,
           auditUrl: `${base}/hr/records/${objectType}/${objectId}/audit`,

@@ -69962,7 +69962,7 @@ function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: st
 // ─── HR record history (HRMS-R1A) ──────────────────────────────────
 const HR_RECORD_LABEL: Record<string, string> = {
   EMPLOYEE: 'Employee', PAYROLL_RUN: 'Payroll run', OFFER_LETTER: 'Offer letter',
-  EXPENSE_CLAIM: 'Expense claim', HR_MASTER: 'Organisation list entry', HR_SETTINGS: 'HR settings',
+  EXPENSE_CLAIM: 'Expense claim', HR_MASTER: 'Organisation list entry', HR_SETTINGS: 'HR settings', HR_DOCUMENT: 'HR document',
 };
 function HrHistoryOverlay({ kind, id, title, subtitle, facts, restaurantId, token, onClose }: {
   kind: string; id: string; title: string; subtitle?: string; facts?: Array<[string, any]>;
@@ -70056,6 +70056,246 @@ function HrSensitiveDataCard({ restaurantId, token }: { restaurantId: string; to
                 <td className="py-1 pr-2">{e.actor_email || e.actor_id || '—'}<span className="text-[#9c8e85]"> {e.actor_role ? `· ${prettyRoleLabel(e.actor_role)}` : ''}</span></td>
                 <td className="py-1 pr-2">{e.staff_name || (e.staff_id ? e.staff_id : 'All employees')}</td>
                 <td className="py-1 pr-2">{e.detail || e.action}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── HR documents: private files, numbers and expiry (HRMS-R1C) ───
+const HR_DOC_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'AADHAAR', label: 'Aadhaar' }, { value: 'PAN', label: 'PAN card' }, { value: 'PASSPORT', label: 'Passport' },
+  { value: 'VISA', label: 'Visa' }, { value: 'WORK_PERMIT', label: 'Work permit' }, { value: 'FRRO_REGISTRATION', label: 'FRRO registration' },
+  { value: 'DRIVING_LICENCE', label: 'Driving licence' }, { value: 'VOTER_ID', label: 'Voter ID' }, { value: 'BANK_PROOF', label: 'Bank proof' },
+  { value: 'ADDRESS_PROOF', label: 'Address proof' }, { value: 'PHOTO', label: 'Photograph' }, { value: 'EDUCATION', label: 'Education certificate' },
+  { value: 'EXPERIENCE_LETTER', label: 'Experience letter' }, { value: 'OFFER_LETTER', label: 'Offer letter' },
+  { value: 'APPOINTMENT_LETTER', label: 'Appointment letter' }, { value: 'CONTRACT', label: 'Contract' },
+  { value: 'MEDICAL_FITNESS', label: 'Medical fitness certificate' }, { value: 'FOOD_HANDLER_CERTIFICATE', label: 'Food handler certificate' },
+  { value: 'POLICE_VERIFICATION', label: 'Police verification' }, { value: 'OTHER', label: 'Other document' },
+];
+const HR_DOC_STAGE_CHIP: Record<string, { label: string; cls: string }> = {
+  EXPIRED: { label: 'Expired', cls: 'bg-red-100 text-red-700' },
+  D7: { label: 'Within 7 days', cls: 'bg-amber-100 text-amber-800' },
+  D30: { label: 'Within 30 days', cls: 'bg-yellow-50 text-yellow-800 border border-yellow-200' },
+};
+// Same rule as the server (hrService documentExpiryStage), on the India date.
+function hrDocStage(expiry: string | null | undefined): string | null {
+  if (!expiry) return null;
+  const today = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  const days = Math.round((Date.parse(`${expiry}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+  return days < 0 ? 'EXPIRED' : days <= 7 ? 'D7' : days <= 30 ? 'D30' : null;
+}
+const HR_DOC_EMPTY_FORM = { doc_type: 'AADHAAR', title: '', doc_number: '', issuing_country: '', issue_date: '', expiry_date: '' };
+
+function HrDocumentsSection({ restaurantId, token, staffId, restaurant }: { restaurantId: string; token: string; staffId: string; restaurant?: any }) {
+  const toast = useToast();
+  const showConfirm = useConfirm();
+  const canAdd = canWriteTab('HR_PAYROLL');
+  const canRemove = canDeleteTab('HR_PAYROLL');
+  const canNumber = tabLevel('HR_SENSITIVE') >= 2;
+  const [docs, setDocs] = useState<any[]>([]);
+  const [canOpen, setCanOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState<Record<string, string>>(HR_DOC_EMPTY_FORM);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<{ url: string; mime: string; name: string } | null>(null);
+  const [history, setHistory] = useState<any | null>(null);
+  const base = `/api/restaurant/${encodeURIComponent(restaurantId)}`;
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch(`${base}/hr/employees/${encodeURIComponent(staffId)}/documents`, { headers: { Authorization: `Bearer ${token}` } });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      setDocs(j.documents || []);
+      setCanOpen(!!j.can_open_files);
+    } catch (e: any) { toast.error(e.message || 'Could not load documents'); }
+    // eslint-disable-next-line
+  }, [restaurantId, staffId, token]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview.url); }, [preview]);
+  const fmt = (d: string | null | undefined) => (d ? formatDateForTenant(d, restaurant?.date_format) : '—');
+
+  const upload = async () => {
+    if (!file) { toast.error('Choose a file (image or PDF).'); return; }
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      for (const [k, v] of Object.entries(form)) if (v && (k !== 'doc_number' || canNumber)) fd.append(k, String(v));
+      const r = await fetch(`${base}/hr/employees/${encodeURIComponent(staffId)}/documents`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      toast.success(`${j.document?.doc_type_label || 'Document'} added`);
+      setForm({ ...HR_DOC_EMPTY_FORM, doc_type: form.doc_type });
+      setFile(null);
+      setAdding(false);
+      load();
+    } catch (e: any) { toast.error(e.message || 'Upload failed'); }
+    finally { setBusy(false); }
+  };
+  const open = async (d: any) => {
+    try {
+      const r = await fetch(`${base}/hr/documents/${encodeURIComponent(d.id)}/file`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || `HTTP ${r.status}`); }
+      const blob = await r.blob();
+      setPreview({ url: URL.createObjectURL(blob), mime: blob.type || d.mime_type || '', name: d.file_name || d.doc_type_label || 'document' });
+    } catch (e: any) { toast.error(e.message || 'Could not open the document'); }
+  };
+  const markVerified = async (d: any) => {
+    try {
+      const r = await fetch(`${base}/hr/documents/${encodeURIComponent(d.id)}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ verified: true }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      toast.success(`${d.doc_type_label} marked verified`);
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const remove = async (d: any) => {
+    if (!await showConfirm({ title: `Remove ${d.doc_type_label}${d.file_name ? ` (${d.file_name})` : ''}? Its file is deleted.`, danger: true })) return;
+    try {
+      const r = await fetch(`${base}/hr/documents/${encodeURIComponent(d.id)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      toast.success('Document removed');
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const setFF = (k: string, v: string) => setForm({ ...form, [k]: v });
+  const showable = (m: string) => /^image\/(jpeg|jpg|png|webp|gif)$/.test(m);
+
+  return (
+    <section>
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Documents</p>
+        {canAdd && !adding && <button type="button" onClick={() => setAdding(true)} className="text-[11px] font-bold text-[#cc5a16] hover:underline">Add document</button>}
+      </div>
+      <p className="text-[11px] text-[#9c8e85] mb-2">Files are stored encrypted. {canOpen ? 'Each time one is opened, it is recorded in the sensitive data log.' : 'Opening them needs the HR Sensitive Data permission.'}</p>
+      {adding && (
+        <div className="border border-[#e8dccf] rounded-xl p-3 mb-3 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <SelectField label="Document type" value={form.doc_type} onChange={(v) => setFF('doc_type', v)} options={HR_DOC_TYPE_OPTIONS} />
+            <Field label="Title (optional)" value={form.title} onChange={(v) => setFF('title', v)} placeholder="e.g. Front and back" />
+            {canNumber
+              ? <Field label="Document number" value={form.doc_number} onChange={(v) => setFF('doc_number', String(v).toUpperCase())} placeholder="Stored encrypted" />
+              : <p className="text-[11px] text-[#9c8e85] self-end pb-2">Saving a document number needs HR Sensitive Data at Edit.</p>}
+            <Field label="Issuing country" value={form.issuing_country} onChange={(v) => setFF('issuing_country', v)} placeholder="India" />
+            <Field label="Issued on" value={form.issue_date} onChange={(v) => setFF('issue_date', v)} type="date" />
+            <Field label="Expires on" value={form.expiry_date} onChange={(v) => setFF('expiry_date', v)} type="date" />
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" onChange={e => setFile(e.target.files?.[0] || null)} className="text-xs max-w-full" />
+            <span className="text-[11px] text-[#9c8e85]">Image or PDF, up to 10 MB</span>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => { setAdding(false); setFile(null); }} className="px-3 py-1.5 rounded-xl border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold">Cancel</button>
+            <button type="button" onClick={upload} disabled={busy || !file} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold disabled:opacity-50">{busy ? 'Uploading…' : 'Upload'}</button>
+          </div>
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-[#9c8e85] border-b border-[#e8dccf]">
+              <th className="py-1 pr-2">Document</th><th className="py-1 pr-2">Number</th><th className="py-1 pr-2">Expires</th><th className="py-1 pr-2">Verified</th><th className="py-1"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {docs.length === 0 && <tr><td colSpan={5} className="py-3 text-center italic text-[#9c8e85]">No documents yet.</td></tr>}
+            {docs.map((d: any) => {
+              const stage = hrDocStage(d.expiry_date);
+              return (
+                <tr key={d.id} className="border-b border-[#f1ece3] align-top">
+                  <td className="py-1.5 pr-2">
+                    <div className="font-semibold text-[#1a1208]">{d.doc_type_label}{d.title ? ` · ${d.title}` : ''}</div>
+                    <div className="text-[10px] text-[#9c8e85] break-all">{[d.file_name, d.issuing_country].filter(Boolean).join(' · ')}</div>
+                  </td>
+                  <td className="py-1.5 pr-2 font-mono">{d.doc_number || '—'}</td>
+                  <td className="py-1.5 pr-2">
+                    <div className="whitespace-nowrap">{fmt(d.expiry_date)}</div>
+                    {stage && <span className={cn('inline-block mt-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap', HR_DOC_STAGE_CHIP[stage].cls)}>{HR_DOC_STAGE_CHIP[stage].label}</span>}
+                  </td>
+                  <td className="py-1.5 pr-2">
+                    {d.verified_at
+                      ? <span className="text-green-700 font-semibold" title={d.verified_by || ''}>Yes</span>
+                      : canAdd ? <button type="button" onClick={() => markVerified(d)} className="text-[#cc5a16] font-bold hover:underline whitespace-nowrap">Mark verified</button> : 'No'}
+                  </td>
+                  <td className="py-1.5 text-right whitespace-nowrap">
+                    <div className="inline-flex gap-2">
+                      {canOpen && d.has_file && <button type="button" onClick={() => open(d)} className="text-[#cc5a16] font-bold hover:underline">Open</button>}
+                      <button type="button" onClick={() => setHistory(d)} className="text-[#6b5d52] font-bold hover:underline">History</button>
+                      {canRemove && <button type="button" onClick={() => remove(d)} className="text-red-600 font-bold hover:underline">Remove</button>}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {preview && (
+        <div className="fixed inset-0 z-[130] bg-black/80 flex items-center justify-center p-4" onClick={() => setPreview(null)}>
+          <div className="w-full max-w-4xl max-h-[92vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 bg-white rounded-t-2xl px-4 py-2">
+              <p className="font-bold text-sm text-[#1a1208] truncate">{preview.name}</p>
+              <div className="flex items-center gap-2">
+                <a href={preview.url} download={preview.name} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-[11px] font-bold">Download</a>
+                <button type="button" onClick={() => setPreview(null)} className="w-8 h-8 rounded-full bg-[#faf7f2] text-[#3d3128]">×</button>
+              </div>
+            </div>
+            <div className="bg-stone-900 rounded-b-2xl overflow-auto flex items-center justify-center min-h-[50vh]">
+              {showable(preview.mime) && <img src={preview.url} alt={preview.name} className="max-w-full max-h-[80vh] object-contain" />}
+              {preview.mime.includes('pdf') && <iframe src={preview.url} title={preview.name} className="w-full h-[80vh] bg-white" />}
+              {!showable(preview.mime) && !preview.mime.includes('pdf') && <p className="text-white text-sm p-6">This file cannot be shown here. Use Download.</p>}
+            </div>
+          </div>
+        </div>
+      )}
+      {history && (
+        <HrHistoryOverlay
+          kind="HR_DOCUMENT" id={history.id} title={history.doc_type_label}
+          subtitle={history.file_name || 'HR document'}
+          facts={[['Document', history.doc_type_label], ['Number', history.doc_number], ['Issuing country', history.issuing_country], ['Expires', fmt(history.expiry_date)], ['Verified', history.verified_at ? `Yes${history.verified_by ? ` (${history.verified_by})` : ''}` : 'No']]}
+          restaurantId={restaurantId} token={token} onClose={() => setHistory(null)}
+        />
+      )}
+    </section>
+  );
+}
+
+function HrExpiringDocumentsCard({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [rows, setRows] = useState<any[] | null>(null);
+  useEffect(() => {
+    fetch(`/api/restaurant/${encodeURIComponent(restaurantId)}/hr/documents/expiring?days=60`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : { documents: [] })
+      .then(j => setRows(j.documents || []))
+      .catch(() => setRows([]));
+  }, [restaurantId, token]);
+  return (
+    <div className="bg-white rounded-3xl border border-[#e8dccf] p-5 space-y-2">
+      <div>
+        <h3 className="text-lg font-bold text-[#1a1208]">Documents due for renewal</h3>
+        <p className="text-xs text-[#6b5d52] mt-0.5">Employee documents that have expired or expire in the next 60 days, for staff who have not left. For a daily list at 09:15, switch on Employee Documents Expiring in Notifications.</p>
+      </div>
+      <div className="overflow-x-auto max-h-64 overflow-y-auto">
+        <table className="w-full text-xs">
+          <thead><tr className="text-left text-[#9c8e85] border-b border-[#e8dccf]"><th className="py-1 pr-2">Employee</th><th className="py-1 pr-2">Document</th><th className="py-1 pr-2">Expires</th><th className="py-1 pr-2">Status</th></tr></thead>
+          <tbody>
+            {rows === null && <tr><td colSpan={4} className="py-4 text-center text-[#9c8e85]">Loading…</td></tr>}
+            {rows !== null && rows.length === 0 && <tr><td colSpan={4} className="py-4 text-center italic text-[#9c8e85]">Nothing expired or due in the next 60 days.</td></tr>}
+            {(rows || []).map((d: any) => (
+              <tr key={d.id} className="border-b border-[#f1ece3]">
+                <td className="py-1 pr-2">{d.staff_name}{d.employee_code && <span className="ml-1 font-mono text-[10px] text-[#9c8e85]">{d.employee_code}</span>}</td>
+                <td className="py-1 pr-2">{d.doc_type_label}{d.title ? ` · ${d.title}` : ''}</td>
+                <td className="py-1 pr-2 whitespace-nowrap">{d.expiry_date}</td>
+                <td className="py-1 pr-2">
+                  {d.stage && HR_DOC_STAGE_CHIP[d.stage]
+                    ? <span className={cn('px-1.5 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap', HR_DOC_STAGE_CHIP[d.stage].cls)}>{HR_DOC_STAGE_CHIP[d.stage].label}</span>
+                    : <span className="text-[#6b5d52] whitespace-nowrap">In {d.days_left} days</span>}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -70280,6 +70520,8 @@ function HrOrganisationView({ restaurantId, token }: { restaurantId: string; tok
           Give new staff a code automatically
         </label>
       </div>
+
+      <HrExpiringDocumentsCard restaurantId={restaurantId} token={token} />
 
       <HrSensitiveDataCard restaurantId={restaurantId} token={token} />
 
@@ -71468,6 +71710,9 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
               <Field label="Emergency contact phone" value={emp.emergency_contact_phone || ''} onChange={(v) => setF('emergency_contact_phone', v)} />
             </div>
           </section>
+
+          {/* ── Documents (HRMS-R1C) ─────────────────────────────── */}
+          <HrDocumentsSection restaurantId={restaurantId} token={token} staffId={staffId} restaurant={restaurant} />
 
           {/* ── Salary structure history (read-only) ────────────── */}
           {structures.length > 0 && (
@@ -73854,6 +74099,7 @@ const NOTIFICATION_EVENTS: {
   { id: 'SHIFT_REMINDER',             label: 'Shift Reminder',                roles: ['MANAGER'],                                           group: 'Staff', description: 'Reminder sent to a staff member before their shift', schedulable: true },
   { id: 'SHIFT_CANCELLED',            label: 'Shift Cancelled',               roles: ['MANAGER'],                                           group: 'Staff', description: 'Fired when a scheduled shift is cancelled' },
   { id: 'PAYROLL_RUN_AUTOCREATED',    label: 'Payroll Run Created',           roles: ['OWNER'],                                             group: 'Staff', description: 'Fired when a monthly payroll run is auto-created' },
+  { id: 'HR_DOCUMENT_EXPIRING',       label: 'Employee Documents Expiring',   roles: ['OWNER'],                                             group: 'Staff', description: 'Daily at 09:15: employee documents 30 or 7 days from expiry, or expired (each once per stage)' },
   // Delivery & OTA
   { id: 'NEW_PLATFORM_ORDER',         label: 'New Delivery-Platform Order',   roles: ['OWNER', 'CHEF'],                                     group: 'Delivery & OTA', description: 'Fired on a new order from a delivery platform (Swiggy / Zomato / ONDC)' },
   { id: 'PLATFORM_ORDER_CANCELLED',   label: 'Platform Order Cancelled',      roles: ['OWNER', 'CHEF'],                                     group: 'Delivery & OTA', description: 'Fired when a delivery-platform order is cancelled' },

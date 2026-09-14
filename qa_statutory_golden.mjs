@@ -638,6 +638,51 @@ eq('TDS NEW @ ₹25,00,000', applyTDSSlabs(2500000, TDS_NEW), statutoryRound(439
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 14. HRMS-R1C (Sep 2026) — HR documents: encrypted files, expiry stages
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const hr = await import('./hrService.ts');
+  const prevKey = process.env.HR_DATA_KEY;
+  delete process.env.HR_DATA_KEY;
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  const enc = hr.encryptFileBuffer(png);
+  eq('stored file starts with HRF1', enc.subarray(0, 4).toString('latin1'), 'HRF1');
+  eq('stored file does not contain the original bytes', enc.includes(png), false);
+  eq('stored file reads back', hr.decryptFileBuffer(enc)?.equals(png), true);
+  const changed = Buffer.from(enc); changed[changed.length - 1] ^= 1;
+  eq('a changed stored file does not read', hr.decryptFileBuffer(changed), null);
+  eq('a plain file is not taken for a stored one', hr.decryptFileBuffer(png), null);
+  process.env.HR_DATA_KEY = Buffer.alloc(32, 9).toString('base64');
+  eq('files stored before HR_DATA_KEY still read', hr.decryptFileBuffer(enc)?.equals(png), true);
+  delete process.env.HR_DATA_KEY;
+  if (prevKey !== undefined) process.env.HR_DATA_KEY = prevKey;
+
+  const T = '2026-09-15';
+  eq('no expiry date, no stage', hr.documentExpiryStage(null, T), null);
+  eq('31 days to go, no stage', hr.documentExpiryStage('2026-10-16', T), null);
+  eq('30 days to go, D30', hr.documentExpiryStage('2026-10-15', T), 'D30');
+  eq('8 days to go, D30', hr.documentExpiryStage('2026-09-23', T), 'D30');
+  eq('7 days to go, D7', hr.documentExpiryStage('2026-09-22', T), 'D7');
+  eq('expires today, D7', hr.documentExpiryStage('2026-09-15', T), 'D7');
+  eq('expired yesterday, EXPIRED', hr.documentExpiryStage('2026-09-14', T), 'EXPIRED');
+  eq('a pg DATE (local midnight) reads as its date', hr.documentExpiryStage(new Date(2026, 8, 22), T), 'D7');
+  eq('first alert at D30', hr.documentNeedsAlert('D30', null), true);
+  eq('no repeat at the same stage', hr.documentNeedsAlert('D30', 'D30'), false);
+  eq('D7 after D30', hr.documentNeedsAlert('D7', 'D30'), true);
+  eq('EXPIRED after D7', hr.documentNeedsAlert('EXPIRED', 'D7'), true);
+  eq('never back to an earlier stage', hr.documentNeedsAlert('D30', 'EXPIRED'), false);
+  eq('no stage, no alert', hr.documentNeedsAlert(null, null), false);
+  eq('document type from words', hr.normaliseDocType('work permit'), 'WORK_PERMIT');
+  eq('unknown document type', hr.normaliseDocType('spaceship'), null);
+  eq('leap day is a date', hr.isYmd('2028-02-29'), true);
+  eq('30 February is not', hr.isYmd('2026-02-30'), false);
+  eq('add days across a month', hr.addDaysYmd('2026-09-25', 10), '2026-10-05');
+  eq('days between dates', hr.daysBetweenYmd('2026-09-15', '2026-09-10'), -5);
+  eq('safe download name', hr.safeDownloadName('my "passport".png'), 'my_passport_.png');
+  eq('empty download name falls back', hr.safeDownloadName(''), 'document');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Summary
 // ═══════════════════════════════════════════════════════════════════════════
 const total = pass + fail;

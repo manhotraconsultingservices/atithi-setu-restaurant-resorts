@@ -48,6 +48,8 @@ import {
   HR_MASTER_KINDS, HR_MASTER_LINKS, EMPLOYMENT_TYPES, HR_SETTINGS_DEFAULTS, HR_FIELD_LABELS,
   normaliseMasterCode, wouldCreateManagerCycle, nextEmployeeCodeFrom, diffFields,
   HR_ENCRYPTED_FIELDS, encryptSensitive, decryptSensitive, isEncryptedSensitive, hrDataKeySource,
+  HR_DOCUMENT_TYPES, HR_DOCUMENT_TYPE_LABELS, normaliseDocType, isYmd, ymdOf, addDaysYmd, daysBetweenYmd,
+  documentExpiryStage, documentNeedsAlert, encryptFileBuffer, decryptFileBuffer, safeDownloadName,
   type HrMasterKind,
 } from "./hrService.ts";
 import { generatePayslipPdf, type PayslipData } from "./payslipService.ts";
@@ -78,7 +80,7 @@ import {
 import { buildUpiUri } from "./upiLink.ts";
 import multer from "multer";
 import cron from "node-cron";
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 
 // ── Multi-platform delivery integration ──────────────────────────────────
 import {
@@ -275,6 +277,75 @@ function getR2Client(): S3Client {
 }
 
 const useR2ForMenuImages = () => process.env.UPLOAD_BACKEND === "r2";
+
+// ── Private HR files (HRMS-R1C) ──────────────────────────────────────────────
+// Employee documents are encrypted before they are stored (encryptFileBuffer)
+// and read back only through the signed-in HR document route. On R2 they go
+// under hr-private/, a key never sent to a browser; the bucket's public domain
+// would serve only ciphertext. On disk they sit in hr-private/ inside the
+// persisted uploads volume, which /uploads/:filename cannot reach (one path
+// segment). HR_PRIVATE_DIR moves the disk folder.
+const _HR_PRIVATE_KEY_RE = /^[A-Za-z0-9_-]{1,64}\/[0-9a-f-]{36}\.bin$/;
+function _hrPrivateDiskDir(): string {
+  return process.env.HR_PRIVATE_DIR || path.join(process.cwd(), "public", "uploads", "hr-private");
+}
+async function persistPrivateHrFile(tenantId: string, plain: Buffer): Promise<{ storage: 'R2' | 'DISK'; key: string }> {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new Error("Invalid tenant id for file storage");
+  const key = `${tenantId}/${randomUUID()}.bin`;
+  const body = encryptFileBuffer(plain);
+  if (useR2ForMenuImages()) {
+    const bucket = process.env.R2_BUCKET;
+    if (!bucket) throw new Error("R2 is enabled but R2_BUCKET is not set");
+    await getR2Client().send(new PutObjectCommand({
+      Bucket: bucket, Key: `hr-private/${key}`, Body: body,
+      ContentType: 'application/octet-stream', CacheControl: 'private, no-store',
+    }));
+    return { storage: 'R2', key };
+  }
+  const dir = path.join(_hrPrivateDiskDir(), tenantId);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(_hrPrivateDiskDir(), key), body);
+  return { storage: 'DISK', key };
+}
+/** The original bytes, or null when the file is missing or cannot be decrypted. */
+async function readPrivateHrFile(storage: string, key: string): Promise<Buffer | null> {
+  if (!_HR_PRIVATE_KEY_RE.test(String(key || ''))) return null;
+  let stored: Buffer;
+  if (storage === 'R2') {
+    const bucket = process.env.R2_BUCKET;
+    if (!bucket) throw new Error("R2_BUCKET is not set");
+    let out: any;
+    try {
+      out = await getR2Client().send(new GetObjectCommand({ Bucket: bucket, Key: `hr-private/${key}` }));
+    } catch (e: any) {
+      if (e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404) return null;
+      throw e;
+    }
+    const bodyStream: any = out?.Body;
+    if (bodyStream && typeof bodyStream.transformToByteArray === 'function') {
+      stored = Buffer.from(await bodyStream.transformToByteArray());
+    } else {
+      const chunks: Buffer[] = [];
+      for await (const chunk of bodyStream) chunks.push(Buffer.from(chunk));
+      stored = Buffer.concat(chunks);
+    }
+  } else {
+    const p = path.join(_hrPrivateDiskDir(), key);
+    if (!fs.existsSync(p)) return null;
+    stored = fs.readFileSync(p);
+  }
+  return decryptFileBuffer(stored);
+}
+async function deletePrivateHrFile(storage: string, key: string): Promise<void> {
+  if (!_HR_PRIVATE_KEY_RE.test(String(key || ''))) return;
+  if (storage === 'R2') {
+    const bucket = process.env.R2_BUCKET;
+    if (bucket) await getR2Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: `hr-private/${key}` }));
+    return;
+  }
+  const p = path.join(_hrPrivateDiskDir(), key);
+  if (fs.existsSync(p)) fs.unlinkSync(p);
+}
 
 /**
  * Persists an uploaded menu image either to Cloudflare R2 or to the local
@@ -17983,7 +18054,7 @@ async function startServer() {
   }
 
   // ── HR history, settings and employee codes (HRMS-R1A) ─────────────────
-  const HR_AUDIT_TYPES = ['EMPLOYEE', 'PAYROLL_RUN', 'OFFER_LETTER', 'EXPENSE_CLAIM', 'HR_MASTER', 'HR_SETTINGS'];
+  const HR_AUDIT_TYPES = ['EMPLOYEE', 'PAYROLL_RUN', 'OFFER_LETTER', 'EXPENSE_CLAIM', 'HR_MASTER', 'HR_SETTINGS', 'HR_DOCUMENT'];
   const _hrAuditMask = (k: string, v: any) => (HR_MASKED_FIELDS.includes(k) ? _hrMaskValue(v) : v);
   async function _hrSettings(db: DbInterface): Promise<Record<string, any>> {
     const row: any = await db.get("SELECT settings FROM hr_settings WHERE id = 'SINGLETON'").catch(() => null);
@@ -18622,35 +18693,272 @@ async function startServer() {
     }
   });
 
-  // Document upload (multipart). Reuses the existing multer pipeline
-  // and stores the resulting /uploads/<file> URL keyed by staff_id.
-  // We piggy-back on the existing `guest_documents` table pattern —
-  // for HR we'd ideally have a dedicated `hr_documents` table but
-  // Phase 1 stays minimal: docs are URLs on a JSON column.
-  // (Track as a Phase 2 follow-up if multi-doc-per-staff is needed.)
-  app.post("/api/restaurant/:id/hr/employees/:staffId/documents", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
+  // ── Private HR documents (HRMS-R1C) ────────────────────────────────────
+  // R1C-DOC-ROUTES-BLOCK. One row per document in hr_documents. The file is
+  // encrypted in private storage (persistPrivateHrFile) and opens only through
+  // /file below, which needs HR Sensitive Data at View and is logged. A number
+  // on the document (passport, visa, licence) is saved like PAN: HR Sensitive
+  // Data at Edit, stored as an hr1: value, masked in lists. The upload route
+  // keeps its path; it used to keep a URL built from a file name that memory
+  // uploads do not have in the employee notes, overwriting them (no tenant had
+  // such entries on 15 Sep 2026).
+  const HR_DOC_FIELDS = 'id, staff_id, doc_type, title, doc_number, issuing_country, issue_date, expiry_date, storage, file_name, mime_type, size_bytes, notes, verified_by, verified_at, last_alert_stage, last_alert_at, uploaded_by, created_at, updated_at';
+  function _hrDocOut(row: any): any {
+    if (!row) return row;
+    const num = row.doc_number ? decryptSensitive(row.doc_number) : null;
+    const out: any = {
+      ...row,
+      doc_number: num ? _hrMaskValue(num) : null,
+      has_file: !!row.storage,
+      doc_type_label: HR_DOCUMENT_TYPE_LABELS[row.doc_type] || row.doc_type,
+      issue_date: ymdOf(row.issue_date),
+      expiry_date: ymdOf(row.expiry_date),
+    };
+    delete out.storage;
+    return out;
+  }
+  function _hrTodayIst(): string {
+    return new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  }
+  // multer errors answered here, whatever order the app-level handlers are in.
+  const _hrDocUpload = (req: any, res: any, next: any) => idDocUpload.single('file')(req, res, (err: any) => {
+    if (err?.code === 'UNSUPPORTED_MIME') return res.status(415).json({ error: 'Upload an image (JPG, PNG, WebP, HEIC) or a PDF.', code: 'UNSUPPORTED_MIME' });
+    if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File too large. Maximum size is 10 MB.', code: 'FILE_TOO_LARGE' });
+    if (err) return next(err);
+    next();
+  });
+
+  app.post("/api/restaurant/:id/hr/employees/:staffId/documents", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), _hrDocUpload, async (req: AuthRequest, res: Response) => {
     try {
-      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-      const url = `/uploads/${req.file.filename}`;
-      const docType = String(req.body?.doc_type || 'OTHER').toUpperCase();
+      if (!req.file) return res.status(400).json({ error: 'Choose a file to upload (image or PDF).' });
+      const b: any = req.body || {};
+      const docType = normaliseDocType(b.doc_type || 'OTHER');
+      if (!docType) return res.status(400).json({ error: `Unknown document type. Use one of: ${HR_DOCUMENT_TYPES.join(', ')}` });
+      const issue = b.issue_date ? String(b.issue_date) : null;
+      const expiry = b.expiry_date ? String(b.expiry_date) : null;
+      if (issue && !isYmd(issue)) return res.status(400).json({ error: 'The issue date must be a date (YYYY-MM-DD).' });
+      if (expiry && !isYmd(expiry)) return res.status(400).json({ error: 'The expiry date must be a date (YYYY-MM-DD).' });
+      if (issue && expiry && expiry < issue) return res.status(400).json({ error: 'The expiry date is before the issue date.' });
+      const number = String(b.doc_number ?? '').trim();
+      if (number && (await _hrSensitiveLevel(req)) < 2) return res.status(403).json({ error: 'Saving a document number needs HR Sensitive Data at Edit.', code: 'HR_SENSITIVE_REQUIRED' });
       const db = await getTenantDb(req.params.id);
-      // Store as a doc list in `notes` for now (JSON-encoded). Lean
-      // approach — proper hr_documents table is a Phase 2 follow-up.
-      const staff: any = await db.get("SELECT notes FROM attendance_staff WHERE id = ?", [req.params.staffId]);
-      let docs: any[] = [];
-      try {
-        const existing = JSON.parse(String(staff?.notes || '{}'));
-        docs = Array.isArray(existing.documents) ? existing.documents : [];
-      } catch { docs = []; }
-      docs.push({ url, type: docType, uploaded_at: new Date().toISOString(), original_name: req.file.originalname });
+      const staff: any = await db.get("SELECT id, name FROM attendance_staff WHERE id = ?", [req.params.staffId]);
+      if (!staff) return res.status(404).json({ error: 'Employee not found' });
+      const stored = await persistPrivateHrFile(req.params.id, req.file.buffer);
+      const docId = randomUUID();
       await db.run(
-        "UPDATE attendance_staff SET notes = ? WHERE id = ?",
-        [JSON.stringify({ documents: docs }), req.params.staffId]
+        `INSERT INTO hr_documents (id, staff_id, doc_type, title, doc_number, issuing_country, issue_date, expiry_date, storage, file_key, file_name, mime_type, size_bytes, notes, uploaded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [docId, staff.id, docType, String(b.title || '').trim().slice(0, 120) || null, number ? encryptSensitive(number) : null,
+         String(b.issuing_country || '').trim().slice(0, 60) || null, issue, expiry, stored.storage, stored.key,
+         String(req.file.originalname || '').slice(0, 200) || null, req.file.mimetype || null, req.file.size || null,
+         String(b.notes || '').trim().slice(0, 500) || null, req.user?.email || req.user?.id || null]
       );
-      res.json({ ok: true, url, doc_type: docType, total_docs: docs.length });
+      const label = HR_DOCUMENT_TYPE_LABELS[docType] || docType;
+      const summary = `Added ${label}${expiry ? ` (expires ${expiry})` : ''}`;
+      await writeObjectAudit(db, req, { objectType: 'HR_DOCUMENT', objectId: docId, action: 'CREATED', summary,
+        after: { staff_id: staff.id, doc_type: docType, expiry_date: expiry, file_name: req.file.originalname || null, doc_number: number ? _hrMaskValue(number) : null } });
+      await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: staff.id, action: 'DOCUMENT_ADDED', summary });
+      if (number) await _hrLogSensitive(db, req, staff.id, 'DOCUMENT_NUMBER_SAVED', `Saved the ${label} number`);
+      const row: any = await db.get(`SELECT ${HR_DOC_FIELDS} FROM hr_documents WHERE id = ?`, [docId]);
+      res.status(201).json({ ok: true, document: _hrDocOut(row) });
     } catch (err: any) {
-      console.error('hr/employees document upload error:', err);
+      console.error('hr document upload error:', err);
       res.status(500).json({ error: err?.message || 'Upload failed' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hr/employees/:staffId/documents", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(`SELECT ${HR_DOC_FIELDS} FROM hr_documents WHERE staff_id = ? ORDER BY created_at DESC`, [req.params.staffId]);
+      res.json({ documents: rows.map(_hrDocOut), can_open_files: (await _hrSensitiveLevel(req)) >= 1 });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load documents' });
+    }
+  });
+
+  // Documents expired or expiring within ?days (default 60) for staff who have not left.
+  app.get("/api/restaurant/:id/hr/documents/expiring", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const n = Number(req.query.days ?? 60);
+      const days = Math.min(365, Math.max(0, Math.round(Number.isFinite(n) ? n : 60)));
+      const today = _hrTodayIst();
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT d.id, d.staff_id, d.doc_type, d.title, d.expiry_date, d.last_alert_stage, d.verified_at, s.name AS staff_name, s.employee_code
+           FROM hr_documents d JOIN attendance_staff s ON s.id = d.staff_id
+          WHERE d.expiry_date IS NOT NULL AND d.expiry_date <= ?
+            AND COALESCE(s.hr_status, 'ACTIVE') NOT IN ('RESIGNED', 'TERMINATED')
+          ORDER BY d.expiry_date ASC LIMIT 500`,
+        [addDaysYmd(today, days)]
+      );
+      res.json({
+        today, days,
+        documents: rows.map((r: any) => {
+          const expiry = ymdOf(r.expiry_date);
+          return { ...r, expiry_date: expiry, doc_type_label: HR_DOCUMENT_TYPE_LABELS[r.doc_type] || r.doc_type,
+            stage: documentExpiryStage(expiry, today), days_left: expiry ? daysBetweenYmd(today, expiry) : null };
+        }),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load expiring documents' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hr/documents/:docId/file", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      if ((await _hrSensitiveLevel(req)) < 1) return res.status(403).json({ error: 'Opening HR documents needs HR Sensitive Data at View.', code: 'HR_SENSITIVE_REQUIRED' });
+      const db = await getTenantDb(req.params.id);
+      const doc: any = await db.get("SELECT id, staff_id, doc_type, storage, file_key, file_name, mime_type FROM hr_documents WHERE id = ?", [req.params.docId]);
+      if (!doc || !doc.storage) return res.status(404).json({ error: 'Document not found' });
+      const bytes = await readPrivateHrFile(doc.storage, doc.file_key);
+      if (!bytes) return res.status(404).json({ error: 'The stored file could not be read.' });
+      const label = HR_DOCUMENT_TYPE_LABELS[doc.doc_type] || doc.doc_type;
+      await _hrLogSensitive(db, req, doc.staff_id, 'DOCUMENT_OPENED', `Opened ${label}${doc.file_name ? ` (${doc.file_name})` : ''}`);
+      const mime = String(doc.mime_type || '').toLowerCase();
+      res.setHeader('Content-Type', GENERAL_ALLOWED_MIMES.has(mime) ? mime : 'application/octet-stream');
+      res.setHeader('Content-Disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="${safeDownloadName(doc.file_name)}"`);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.send(bytes);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to open the document' });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/hr/documents/:docId", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const b: any = req.body || {};
+      const db = await getTenantDb(req.params.id);
+      const doc: any = await db.get(`SELECT ${HR_DOC_FIELDS} FROM hr_documents WHERE id = ?`, [req.params.docId]);
+      if (!doc) return res.status(404).json({ error: 'Document not found' });
+      const sets: string[] = []; const vals: any[] = [];
+      const before: any = {}; const after: any = {};
+      const put = (col: string, v: any, shownBefore: any, shownAfter: any) => {
+        sets.push(`${col} = ?`); vals.push(v); before[col] = shownBefore; after[col] = shownAfter;
+      };
+      const text = (v: any, max: number) => String(v ?? '').trim().slice(0, max) || null;
+      if (b.doc_type !== undefined) {
+        const t = normaliseDocType(b.doc_type);
+        if (!t) return res.status(400).json({ error: 'Unknown document type.' });
+        if (t !== doc.doc_type) put('doc_type', t, doc.doc_type, t);
+      }
+      if (b.title !== undefined && text(b.title, 120) !== (doc.title || null)) put('title', text(b.title, 120), doc.title, text(b.title, 120));
+      if (b.issuing_country !== undefined && text(b.issuing_country, 60) !== (doc.issuing_country || null)) put('issuing_country', text(b.issuing_country, 60), doc.issuing_country, text(b.issuing_country, 60));
+      if (b.notes !== undefined && text(b.notes, 500) !== (doc.notes || null)) put('notes', text(b.notes, 500), doc.notes, text(b.notes, 500));
+      const oldIssue = ymdOf(doc.issue_date), oldExpiry = ymdOf(doc.expiry_date);
+      let issue = oldIssue, expiry = oldExpiry;
+      if (b.issue_date !== undefined) {
+        const v = b.issue_date ? String(b.issue_date) : null;
+        if (v && !isYmd(v)) return res.status(400).json({ error: 'The issue date must be a date (YYYY-MM-DD).' });
+        issue = v;
+        if (v !== oldIssue) put('issue_date', v, oldIssue, v);
+      }
+      if (b.expiry_date !== undefined) {
+        const v = b.expiry_date ? String(b.expiry_date) : null;
+        if (v && !isYmd(v)) return res.status(400).json({ error: 'The expiry date must be a date (YYYY-MM-DD).' });
+        expiry = v;
+        if (v !== oldExpiry) { put('expiry_date', v, oldExpiry, v); sets.push('last_alert_stage = NULL'); }
+      }
+      if (issue && expiry && expiry < issue) return res.status(400).json({ error: 'The expiry date is before the issue date.' });
+      if (b.doc_number !== undefined) {
+        const v = String(b.doc_number ?? '').trim();
+        const oldNum = doc.doc_number ? decryptSensitive(doc.doc_number) : null;
+        // A masked number sent back unchanged is kept as it is.
+        if (!v.includes('•') && (v || null) !== (oldNum || null)) {
+          if ((await _hrSensitiveLevel(req)) < 2) return res.status(403).json({ error: 'Changing a document number needs HR Sensitive Data at Edit.', code: 'HR_SENSITIVE_REQUIRED' });
+          put('doc_number', v ? encryptSensitive(v) : null, oldNum ? _hrMaskValue(oldNum) : null, v ? _hrMaskValue(v) : null);
+        }
+      }
+      if (b.verified !== undefined && !!b.verified !== !!doc.verified_at) {
+        if (b.verified) { sets.push('verified_by = ?', 'verified_at = CURRENT_TIMESTAMP'); vals.push(req.user?.email || req.user?.id || null); }
+        else sets.push('verified_by = NULL', 'verified_at = NULL');
+        before.verified = !!doc.verified_at; after.verified = !!b.verified;
+      }
+      if (!Object.keys(after).length) return res.json({ ok: true, unchanged: true, document: _hrDocOut(doc) });
+      sets.push('updated_at = CURRENT_TIMESTAMP');
+      await db.run(`UPDATE hr_documents SET ${sets.join(', ')} WHERE id = ?`, [...vals, doc.id]);
+      const label = HR_DOCUMENT_TYPE_LABELS[doc.doc_type] || doc.doc_type;
+      const keys = Object.keys(after);
+      const summary = keys.length === 1 && keys[0] === 'verified'
+        ? `${after.verified ? 'Verified' : 'Removed verification from'} ${label}`
+        : `Changed ${keys.map((k) => k.replace(/_/g, ' ')).join(', ')} on ${label}`;
+      await writeObjectAudit(db, req, { objectType: 'HR_DOCUMENT', objectId: doc.id, action: 'UPDATED', summary, before, after });
+      if ('doc_number' in after) await _hrLogSensitive(db, req, doc.staff_id, 'DOCUMENT_NUMBER_SAVED', `Changed the ${label} number`);
+      const row: any = await db.get(`SELECT ${HR_DOC_FIELDS} FROM hr_documents WHERE id = ?`, [doc.id]);
+      res.json({ ok: true, document: _hrDocOut(row) });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to update the document' });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hr/documents/:docId", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const doc: any = await db.get("SELECT id, staff_id, doc_type, storage, file_key, file_name, expiry_date FROM hr_documents WHERE id = ?", [req.params.docId]);
+      if (!doc) return res.status(404).json({ error: 'Document not found' });
+      await db.run("DELETE FROM hr_documents WHERE id = ?", [doc.id]);
+      try { if (doc.storage) await deletePrivateHrFile(doc.storage, doc.file_key); }
+      catch (e: any) { console.error('[hr] document file not removed:', e?.message || e); }
+      const label = HR_DOCUMENT_TYPE_LABELS[doc.doc_type] || doc.doc_type;
+      const summary = `Removed ${label}${doc.file_name ? ` (${doc.file_name})` : ''}`;
+      await writeObjectAudit(db, req, { objectType: 'HR_DOCUMENT', objectId: doc.id, action: 'DELETED', summary,
+        before: { staff_id: doc.staff_id, doc_type: doc.doc_type, file_name: doc.file_name, expiry_date: ymdOf(doc.expiry_date) } });
+      await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: doc.staff_id, action: 'DOCUMENT_REMOVED', summary });
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to remove the document' });
+    }
+  });
+
+  // Documents that reached a later alert stage (30 days, 7 days, expired) than the
+  // last alert sent, for staff who have not left. One notification per tenant lists
+  // them (only if the owner switched the event on), then each is marked with its
+  // stage so it is not repeated. A new expiry date clears the mark (PATCH above).
+  async function _hrDocumentExpirySweep(tenantId: string, opts: { staffId?: string | null; notify?: boolean } = {}): Promise<{ today: string; documents: any[] }> {
+    const today = _hrTodayIst();
+    const db = await getTenantDb(tenantId);
+    const params: any[] = [addDaysYmd(today, 30)];
+    if (opts.staffId) params.push(opts.staffId);
+    const rows: any[] = await db.query(
+      `SELECT d.id, d.staff_id, d.doc_type, d.title, d.expiry_date, d.last_alert_stage, s.name AS staff_name, s.employee_code
+         FROM hr_documents d JOIN attendance_staff s ON s.id = d.staff_id
+        WHERE d.expiry_date IS NOT NULL AND d.expiry_date <= ?
+          AND COALESCE(s.hr_status, 'ACTIVE') NOT IN ('RESIGNED', 'TERMINATED')
+          ${opts.staffId ? 'AND d.staff_id = ?' : ''}
+        ORDER BY d.expiry_date ASC`,
+      params
+    );
+    const due = rows
+      .map((r: any) => ({ id: r.id, staff_id: r.staff_id, staff_name: r.staff_name, employee_code: r.employee_code,
+        doc_type: r.doc_type, doc_type_label: HR_DOCUMENT_TYPE_LABELS[r.doc_type] || r.doc_type, title: r.title,
+        expiry_date: ymdOf(r.expiry_date), stage: documentExpiryStage(r.expiry_date, today), previous_stage: r.last_alert_stage || null }))
+      .filter((r: any) => documentNeedsAlert(r.stage, r.previous_stage));
+    if (!due.length) return { today, documents: [] };
+    if (opts.notify !== false) {
+      triggerNotification(tenantId, 'HR_DOCUMENT_EXPIRING', { today, count: due.length, documents: due })
+        .catch((e: any) => console.error(`[hr-doc-expiry] ${tenantId} notification failed:`, e?.message || e));
+    }
+    for (const d of due) {
+      await db.run("UPDATE hr_documents SET last_alert_stage = ?, last_alert_at = CURRENT_TIMESTAMP WHERE id = ?", [d.stage, d.id]);
+    }
+    return { today, documents: due };
+  }
+
+  // Run the expiry check now for this property (owner). send_notification: false
+  // marks the stages without sending, for checks.
+  app.post("/api/restaurant/:id/hr/documents/expiry-alerts/run", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const role = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN', 'CTO'].includes(role)) return res.status(403).json({ error: 'Only the owner can run the document expiry check.' });
+      const out = await _hrDocumentExpirySweep(req.params.id, {
+        staffId: req.body?.staff_id ? String(req.body.staff_id) : null,
+        notify: req.body?.send_notification !== false,
+      });
+      res.json({ ok: true, today: out.today, alerted: out.documents.length, documents: out.documents });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to run the expiry check' });
     }
   });
 
@@ -63357,8 +63665,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hrms-r1b-sensitive-data',
+    commit_marker: 'hrms-r1c-private-documents',
     code_features: [
+      'hrms-r1c-private-documents — hr_documents table (type, title, hr1: number, issuing country, issue and expiry dates, verified_by/at, storage + file_key, last_alert_stage) created in createHrTables; files AES-256-GCM encrypted (HRF1) by persistPrivateHrFile to R2 hr-private/ or disk uploads/hr-private (HR_PRIVATE_DIR), never a public URL; GET /hr/documents/:docId/file needs HR_SENSITIVE View and logs DOCUMENT_OPENED; a document number needs HR_SENSITIVE Edit; POST /hr/employees/:staffId/documents fixed at the same path (was a memory upload with an undefined file name overwriting notes; no tenant had entries) with 415, 400 and 404 guards; GET list, PATCH (a new expiry date clears last_alert_stage; verified), DELETE removes the file; GET /hr/documents/expiring; daily 09:15 IST _hrDocumentExpirySweep (D30, D7, EXPIRED once per stage; staff not RESIGNED or TERMINATED) fires HR_DOCUMENT_EXPIRING; POST /hr/documents/expiry-alerts/run (owner); HR_DOCUMENT history type; UI Documents section on the employee record and Documents due for renewal in Organisation.',
       'hrms-r1b-sensitive-data — New permission HR_SENSITIVE (not granted to existing roles): View reveals full PAN, Aadhaar and bank account (?reveal=1) and each reveal is logged, Edit changes them and downloads the bank advice and full employee CSV, Full reads /hr/sensitive/access-log and /hr/sensitive/status. The three fields are stored AES-256-GCM encrypted in place (hr1: values, key HR_DATA_KEY or derived from JWT_SECRET); plaintext values still read; every reader decrypts (HR list/detail/PUT/CSV, run payslips, payroll compute snapshot now masked, payslip PDF, bank advice, 24Q, Form 16, self profile). Owner-only POST /hr/sensitive/encrypt-existing encrypts values saved before. hr_sensitive_access_log table.',
       'hrms-r1a-org-record-history — hrService.ts createHrTables at tenant init (staff_advances, staff_payroll, pay columns moved out of request handlers; ensurePayrollTables is a no-op); hr_masters (DEPARTMENT, DESIGNATION, GRADE, COST_CENTRE) with /hr/masters CRUD, from-existing, deactivate when in use, rename copied to staff text; attendance_staff employee_code (unique), employment_type, reporting_manager_id (loop check), master links, probation/confirmation/leaving dates, notice days; /hr/org-chart; /hr/employees/assign-codes and hr_settings.auto_employee_code (EMP-#### from the highest code, no counter); /hr/settings; /hr/records/:type/:oid/audit for EMPLOYEE, PAYROLL_RUN, OFFER_LETTER, EXPENSE_CLAIM, HR_MASTER, HR_SETTINGS with writes on staff create/bulk/edit/delete/password/pay settings, HR profile, salary structure, payroll run create/compute/approve/lock/paid/delete, offers, expense claims; payroll_runs and salary_structures in the statutory edit log.',
       'stockout-measured-to-now — GET /inventory/stockouts counted time up to the END of the last day of the report (toTs), and `to` defaults to today, so every span reached into hours that had not happened yet. An item still out was charged for the rest of today, and an item created minutes ago already had hours of history; between midnight and 05:30 IST that was more than a day, because toTs is 05:30 IST tomorrow, so the one-day guard published availability from seconds of data. TC-INV-STOCKOUT-NEEDS-A-DAY passed and then failed on the same build (b58b8f8) for exactly this reason: the failing run ended 00:42 IST and read tracked 1.2d, availability 100. Tracked, still-out and still-low spans now end at endTs = min(toTs, now). Unchanged: which movements fall in the window, the opening balance, events, currently_out and period.days. The portfolio rate still divides out time by tracked time over the same items, both now measured to endTs. The still-out and still-low spans are floored at zero, since a window that starts after today, or an item created after a past window ended, has startTs later than endTs and read as negative days out. Day boundaries stay at UTC midnight (05:30 IST) exactly as in the month-end close, whose SQL uses the same ::date cut; moving only this report to IST days would make its opening balance disagree with the close, so that is left for a deliberate decision. Smoke: TC-INV-STOCKOUT-MEASURED-TO-NOW takes the fixture out a third time and asserts, for items made seconds ago, days_tracked and days_out of at most 0.1 with 3 events and out now; the old code reads at least 0.2 day at every hour, so the test catches it whenever the suite runs.',
@@ -69048,6 +69357,30 @@ ${data.tenant.name}`;
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[offer-expiry] Daily 09:00 IST offer expiry cron started');
+
+  // ═════════════════════════════════════════════════════════════════
+  // HRMS-R1C — HR document expiry alerts (daily 09:15 IST)
+  // ═════════════════════════════════════════════════════════════════
+  cron.schedule('15 9 * * *', async () => {
+    try {
+      const tenants: any[] = await centralDb.query(
+        `SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM' AND access_revoked = 0`
+      );
+      let alerted = 0;
+      for (const t of tenants) {
+        try {
+          const out = await _hrDocumentExpirySweep(t.id);
+          alerted += out.documents.length;
+        } catch (err) {
+          console.error(`[hr-doc-expiry] tenant ${t.id} failed:`, err);
+        }
+      }
+      if (alerted > 0) console.log(`[hr-doc-expiry] ${alerted} document alert(s) across ${tenants.length} tenants`);
+    } catch (err) {
+      console.error('[hr-doc-expiry] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[hr-doc-expiry] Daily 09:15 IST HR document expiry cron started');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase I2 — Daily auto-PO draft generation (06:00 IST) ───────────────

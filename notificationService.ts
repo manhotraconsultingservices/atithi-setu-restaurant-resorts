@@ -1222,6 +1222,27 @@ export function buildNotificationContent(
       };
     }
 
+    case 'HR_DOCUMENT_EXPIRING': {
+      const esc = (s: any) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[ch]);
+      const docs: any[] = Array.isArray(data.documents) ? data.documents : [];
+      const line = (d: any) =>
+        `${d.staff_name || 'Employee'}${d.employee_code ? ` (${d.employee_code})` : ''}: ${d.doc_type_label || 'Document'}${d.title ? ` - ${d.title}` : ''} ` +
+        `${d.stage === 'EXPIRED' ? 'expired on' : 'expires on'} ${d.expiry_date}`;
+      const n = docs.length;
+      return {
+        subject: `${n} employee document${n === 1 ? '' : 's'} due for renewal at ${r}`,
+        text: `These employee documents have expired or expire soon:\n\n${docs.map((d) => `- ${line(d)}`).join('\n')}\n\nSee them in HR & Payroll, Organisation.\n\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#7c5e3c;margin-top:0">Employee documents due for renewal</h2>` +
+          `<p>These employee documents have expired or expire soon:</p>` +
+          `<ul>${docs.map((d) => `<li>${esc(line(d))}</li>`).join('')}</ul>` +
+          `<p>See them in HR &amp; Payroll, Organisation.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${esc(r)}</p>` +
+          `</div>`,
+      };
+    }
+
     case 'EXPENSE_SUBMITTED': {
       const name = data.staff_name || 'A team member';
       const amt = data.total_amount ? `₹${Number(data.total_amount).toLocaleString('en-IN')}` : '—';

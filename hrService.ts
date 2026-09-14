@@ -128,6 +128,37 @@ export async function createHrTables(db: DbInterface): Promise<void> {
   `).catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_hr_sensitive_log ON hr_sensitive_access_log (staff_id, created_at)`).catch(() => {});
 
+  // ── Private HR documents (HRMS-R1C) ──
+  // The file is stored encrypted under file_key (R2 or disk) and the number on the
+  // document is an hr1: value like PAN. Nothing in this table is a public address.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS hr_documents (
+      id               TEXT PRIMARY KEY,
+      staff_id         TEXT NOT NULL,
+      doc_type         TEXT NOT NULL,
+      title            TEXT,
+      doc_number       TEXT,
+      issuing_country  TEXT,
+      issue_date       DATE,
+      expiry_date      DATE,
+      storage          TEXT,
+      file_key         TEXT,
+      file_name        TEXT,
+      mime_type        TEXT,
+      size_bytes       INT,
+      notes            TEXT,
+      verified_by      TEXT,
+      verified_at      TIMESTAMP,
+      last_alert_stage TEXT,
+      last_alert_at    TIMESTAMP,
+      uploaded_by      TEXT,
+      created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_hr_documents_staff ON hr_documents (staff_id)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_hr_documents_expiry ON hr_documents (expiry_date)`).catch(() => {});
+
   // ── HR settings (one row per tenant, JSON) ──
   await db.exec(`
     CREATE TABLE IF NOT EXISTS hr_settings (
@@ -272,3 +303,111 @@ export const HR_FIELD_LABELS: Record<string, string> = {
   probation_end_date: 'probation end', confirmation_date: 'confirmation date', notice_period_days: 'notice period',
   date_of_leaving: 'date of leaving', default_hours: 'default hours', pay_type: 'pay type', monthly_wage: 'monthly wage',
 };
+
+// ─────────────────────────── HR documents (HRMS-R1C) ───────────────────────────
+
+export const HR_DOCUMENT_TYPES = [
+  'AADHAAR', 'PAN', 'PASSPORT', 'VISA', 'WORK_PERMIT', 'FRRO_REGISTRATION',
+  'DRIVING_LICENCE', 'VOTER_ID', 'BANK_PROOF', 'ADDRESS_PROOF', 'PHOTO',
+  'EDUCATION', 'EXPERIENCE_LETTER', 'OFFER_LETTER', 'APPOINTMENT_LETTER', 'CONTRACT',
+  'MEDICAL_FITNESS', 'FOOD_HANDLER_CERTIFICATE', 'POLICE_VERIFICATION', 'OTHER',
+] as const;
+
+export const HR_DOCUMENT_TYPE_LABELS: Record<string, string> = {
+  AADHAAR: 'Aadhaar', PAN: 'PAN card', PASSPORT: 'Passport', VISA: 'Visa', WORK_PERMIT: 'Work permit',
+  FRRO_REGISTRATION: 'FRRO registration', DRIVING_LICENCE: 'Driving licence', VOTER_ID: 'Voter ID',
+  BANK_PROOF: 'Bank proof', ADDRESS_PROOF: 'Address proof', PHOTO: 'Photograph',
+  EDUCATION: 'Education certificate', EXPERIENCE_LETTER: 'Experience letter', OFFER_LETTER: 'Offer letter',
+  APPOINTMENT_LETTER: 'Appointment letter', CONTRACT: 'Contract', MEDICAL_FITNESS: 'Medical fitness certificate',
+  FOOD_HANDLER_CERTIFICATE: 'Food handler certificate', POLICE_VERIFICATION: 'Police verification', OTHER: 'Other document',
+};
+
+/** A document type from input: upper case, spaces and hyphens to underscores; null when unknown. */
+export function normaliseDocType(v: any): string | null {
+  const s = String(v ?? '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  return (HR_DOCUMENT_TYPES as readonly string[]).includes(s) ? s : null;
+}
+
+/** True for a real calendar date written YYYY-MM-DD. */
+export function isYmd(v: any): boolean {
+  const s = String(v ?? '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+/** YYYY-MM-DD from a pg DATE (a Date at local midnight) or a date string. */
+export function ymdOf(v: any): string | null {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) {
+    if (isNaN(v.getTime())) return null;
+    return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  }
+  const s = String(v);
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null;
+}
+
+/** Whole days from one YYYY-MM-DD to another (negative when `to` is earlier). */
+export function daysBetweenYmd(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
+}
+
+export function addDaysYmd(ymd: string, days: number): string {
+  return new Date(Date.parse(`${ymd}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
+}
+
+export type HrDocumentAlertStage = 'D30' | 'D7' | 'EXPIRED';
+const _DOC_STAGE_RANK: Record<string, number> = { D30: 1, D7: 2, EXPIRED: 3 };
+
+/**
+ * Where a document stands on `today`: EXPIRED after its expiry date, D7 from seven
+ * days before up to and including the expiry date, D30 from thirty days before,
+ * otherwise null (no expiry date, or more than thirty days to go).
+ */
+export function documentExpiryStage(expiry: any, today: string): HrDocumentAlertStage | null {
+  const e = ymdOf(expiry);
+  if (!e) return null;
+  const days = daysBetweenYmd(today, e);
+  if (days < 0) return 'EXPIRED';
+  if (days <= 7) return 'D7';
+  if (days <= 30) return 'D30';
+  return null;
+}
+
+/** Alert only when a document reaches a later stage than the last alert sent for it. */
+export function documentNeedsAlert(stage: HrDocumentAlertStage | null, lastSent: any): boolean {
+  if (!stage) return false;
+  return (_DOC_STAGE_RANK[stage] || 0) > (_DOC_STAGE_RANK[String(lastSent || '')] || 0);
+}
+
+// Stored HR files are HRF1 | iv (12 bytes) | tag (16 bytes) | ciphertext, with the
+// same keys as the hr1: values above, so an object read straight from storage is
+// unreadable.
+const _HR_FILE_MAGIC = Buffer.from('HRF1', 'ascii');
+
+export function encryptFileBuffer(plain: Buffer): Buffer {
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', _hrDataKeys()[0], iv);
+  const enc = Buffer.concat([c.update(plain), c.final()]);
+  return Buffer.concat([_HR_FILE_MAGIC, iv, c.getAuthTag(), enc]);
+}
+
+/** The original bytes; null when the buffer is not a stored HR file or no key opens it. */
+export function decryptFileBuffer(stored: Buffer): Buffer | null {
+  if (!Buffer.isBuffer(stored) || stored.length < 32 || !stored.subarray(0, 4).equals(_HR_FILE_MAGIC)) return null;
+  const iv = stored.subarray(4, 16), tag = stored.subarray(16, 32), data = stored.subarray(32);
+  for (const key of _hrDataKeys()) {
+    try {
+      const d = createDecipheriv('aes-256-gcm', key, iv);
+      d.setAuthTag(tag);
+      return Buffer.concat([d.update(data), d.final()]);
+    } catch { /* try the next key */ }
+  }
+  return null;
+}
+
+/** A file name safe inside a Content-Disposition header. */
+export function safeDownloadName(name: any, fallback = 'document'): string {
+  const s = String(name ?? '').replace(/[^\w.\-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 100);
+  return s || fallback;
+}
