@@ -37464,6 +37464,12 @@ ${data.tenant.name}`;
       const pubGuest = spaGenderCode(b.client_gender);
       const pubPref = spaGenderCode(b.therapist_gender_pref);
       let therapistId = b.therapist_id, resourceId = b.resource_id;
+      // The times still free that day, for a refusal. The booking page always names
+      // the slot's therapist and cabin, so a named booking needs them as well.
+      const pubAlternatives = async (): Promise<string[]> => {
+        const free: any[] = await findAvailableSlots(db, { serviceId: b.service_id, date: m[1], maxSlots: 200, guestGender: pubGuest, therapistGender: pubPref }).catch(() => []);
+        return Array.from(new Set(free.map((s: any) => String(s.start_at).slice(11, 16)))).sort().slice(0, 6);
+      };
       if (!therapistId || !resourceId) {
         const slots = await findAvailableSlots(db, { serviceId: b.service_id, date: m[1], maxSlots: 200, guestGender: pubGuest, therapistGender: pubPref });
         const match = slots.find(s => s.start_at === startAt && (!therapistId || s.therapist_id === therapistId));
@@ -37477,14 +37483,14 @@ ${data.tenant.name}`;
       }
       // The same checks as a staff booking, blocked time included.
       if (await spaWindowProblem(db, therapistId || null, resourceId || null, startAt, endAt)) {
-        return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+        return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE', alternatives: await pubAlternatives() });
       }
       // The rules a staff booking meets, with no override online.
       const pubProblems = await spaAssignmentProblems(db, { service, therapistId: therapistId || null, resourceId: resourceId || null, date: m[1], guestGender: pubGuest, preference: pubPref });
       if (pubProblems.some(p => p.code === 'GUEST_GENDER_REQUIRED')) {
         return res.status(400).json({ error: "Please tell us your gender — this treatment is arranged by gender.", code: 'GUEST_GENDER_REQUIRED' });
       }
-      if (pubProblems.length) return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+      if (pubProblems.length) return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE', alternatives: await pubAlternatives() });
       // A treatment for more than one therapist: the others, checked the same way.
       const pubNeedA = Number(service.requires_therapist ?? 1) === 1 ? Math.max(1, Math.min(4, Number(service.therapists_required || 1))) - 1 : 0;
       const pubAssist: string[] = Array.from(new Set((Array.isArray(b.assistant_ids) ? b.assistant_ids : []).map(String).filter((x: string) => x && x !== String(therapistId || ''))));
@@ -62405,8 +62411,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-clinician-intake-gate',
+    commit_marker: 'spa-public-named-alternatives',
     code_features: [
+      'spa-public-named-alternatives — POST /api/public/restaurant/:id/spa/booking: a refusal of a named therapist and cabin (the booking page always names them) now carries alternatives, the times still free that day, as a refusal with none named already did. The public booking page, on SLOT_UNAVAILABLE, returns the guest to the times, which reload, and names the free times. Found in UAT.',
       'spa-clinician-intake-gate — POST /spa/clients/:cid/forms: a health intake (INTAKE, MEDICAL_HISTORY) no longer also needs SPA_CLIENTS at Edit; it needs SPA_CLINICAL at Edit, as before. A consent still needs SPA_CLIENTS at Edit. Found in UAT: a clinician with view-only guest access was refused an intake, so check-in stayed held.',
       'spa-phase5-records-reports — Spa Phase 5. GET /spa/records/:type/:oid/audit and /where-used for SPA_SERVICE (Service Menu), SPA_THERAPIST, SPA_CABIN, SPA_SKILL, SPA_CABIN_TYPE (Resources) and SPA_CLIENT (Clients), each behind the page it belongs to; a guest history hides health entries from staff without clinical access, and a guest where-used lists course plans only for them. Audit entries added for treatment create and edit (what changed; deactivated or reactivated), treatments offered by a therapist, and shift removal. GET /spa/reports/range?from&to (up to a year): therapists with rostered minutes from shifts less breaks and blocked time, booked minutes including assisting, utilisation, completed, no-shows and rate, value, commission (therapist override else treatment commission %) and tips; cabins with treatments, booked, turnaround and blocked minutes; consumption per treatment and item with standard, actual, variance and cost; a summary. GET /spa/reports/treatments.csv exports the treatments of a range (no health information; formula cells escaped). All spa report routes now need Spa Reports. The spa screens use in-app messages and dialogs instead of browser alerts, show load failures, have History buttons on treatments, therapists, cabins and guests, and draw the booking QR code in the app instead of fetching it from an outside site.',
       'spa-phase4b-charge-to-room — Spa Phase 4b. GET /spa/in-house-guests lists checked-in stays with an open room bill. A booking takes room_booking_id (must be in house, 400 STAY_NOT_IN_HOUSE), saved on spa_appointments; the appointment list carries room_number. Checkout with charge_to_room posts the treatment (net of membership or manual discount, at the spa GST rate, entry_type SPA_SERVICE, entry_subtype SPA_TREATMENT, account_head SPA_REVENUE, reference_number the appointment) and any tip (SPA_TIP, no GST) onto the open room folio, claims the appointment first (room_folio_id), undoes itself on failure, shares the tip among the therapists (spaRecordTipShares, now used by both checkouts), raises no spa invoice and takes no payment; 409 STAY_NOT_IN_HOUSE or ROOM_FOLIO_MISSING otherwise; a second call returns reused. On the hotel side: reapplyHotelGstRates leaves SPA_SERVICE and SPA_TIP at their own rate; _folioRevenueGlLines credits them to Spa Revenue 4040; the year-end accrual follows; the GST register gives SPA_REVENUE SAC 999722 and has no line for SPA_TIP; the e-invoice uses 999722; night audit, revenue by room type and hotel analytics leave them out of room revenue; reversing a spa line on the room bill removes its tip shares and, once nothing of the treatment is left, frees the appointment. The revenue-per-treatment report counts unreversed room-charged treatments. The hotel check-out window shows Spa and wellness apart from the room. Manual SPA lines typed on a room bill are unchanged.',

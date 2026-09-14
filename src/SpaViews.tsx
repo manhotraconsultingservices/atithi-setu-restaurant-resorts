@@ -2929,7 +2929,17 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
           client_gender: genderPick.guest_gender || undefined, therapist_gender_pref: genderPick.therapist_gender || undefined }),
       });
       const b = await r.json();
-      if (!r.ok) { setError(b.error || 'Booking failed. Please try again.'); return; }
+      if (!r.ok) {
+        // The time went while the guest was filling in their details: back to the
+        // times, which reload, saying which are still free.
+        if (r.status === 409 && b.code === 'SLOT_UNAVAILABLE') {
+          const alts: string[] = Array.isArray(b.alternatives) ? b.alternatives : [];
+          setError(alts.length ? `That time was just taken. Still free that day: ${alts.join(', ')}.` : 'That time was just taken, and nothing else is free that day. Please choose another date.');
+          setStep(2);
+          return;
+        }
+        setError(b.error || 'Booking failed. Please try again.'); return;
+      }
       setDone(b);
     } catch { setError('Network error. Please check your connection.'); } finally { setBusy(false); }
   };
@@ -3187,6 +3197,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
         )}
 
         {/* ════ Step 2: Date & Time ════ */}
+        {step === 2 && error && <div style={{ padding: '12px 16px', borderRadius: 12, background: '#fff5f5', border: '1px solid #fecaca', color: '#c0392b', fontSize: 12, marginBottom: 16 }}>{error}</div>}
         {step === 2 && (
           <div>
             <button onClick={() => { setStep(1); setSlots([]); setSlot(null); }} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: SPA_BRAND, background: 'none', border: 'none', cursor: 'pointer', marginBottom: 20, padding: 0 }}>
@@ -3263,7 +3274,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
                   })}
                 </div>
                 {slot && !(needsGender && !genderPick.guest_gender) && (
-                  <button onClick={() => setStep(3)} style={{ width: '100%', marginTop: 20, padding: '15px 0', borderRadius: 18, color: SPA_GOLD, fontWeight: 700, fontSize: 14, background: `linear-gradient(135deg, ${SPA_DARK} 0%, #1a3828 100%)`, border: 'none', cursor: 'pointer', boxShadow: '0 4px 16px rgba(13,31,24,0.3)', letterSpacing: 0.3 }}>
+                  <button onClick={() => { setError(''); setStep(3); }} style={{ width: '100%', marginTop: 20, padding: '15px 0', borderRadius: 18, color: SPA_GOLD, fontWeight: 700, fontSize: 14, background: `linear-gradient(135deg, ${SPA_DARK} 0%, #1a3828 100%)`, border: 'none', cursor: 'pointer', boxShadow: '0 4px 16px rgba(13,31,24,0.3)', letterSpacing: 0.3 }}>
                     Continue with {fmtTime(slot.start_at)} →
                   </button>
                 )}
