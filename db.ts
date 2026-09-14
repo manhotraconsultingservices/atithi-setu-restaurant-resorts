@@ -673,7 +673,10 @@ export async function initDb() {
     -- pre-filled — no gateway, no commission. Leave VPA blank to
     -- disable the feature for a tenant.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS upi_vpa          TEXT;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS upi_payee_name   TEXT
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS upi_payee_name   TEXT;
+    -- The spa module's name as this property shows it, for example Ayurvedic
+    -- Wellness. Blank means the product default, Spa and Wellness.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS spa_module_label TEXT
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`

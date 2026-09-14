@@ -70,6 +70,9 @@ const BTN_GHOST = `${BTN} bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] ho
 const INPUT = "w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white focus:outline-none focus:border-[#cc5a16]";
 const LABEL = "text-xs font-semibold text-[#6b5d52] mb-1 block";
 const money = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+// Today in India. `new Date().toISOString()` is UTC, so before 05:30 IST the
+// appointment screens opened on yesterday.
+const istToday = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 
 const STATUS_COLOR: Record<string, string> = {
   BOOKED: 'bg-blue-50 text-blue-700 border-blue-200',
@@ -322,12 +325,12 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   const [services, setServices] = useState<any[]>([]);
   const [therapists, setTherapists] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-  const [day, setDay] = useState(new Date().toISOString().slice(0, 10));
+  const [day, setDay] = useState(istToday());
   const [search, setSearch] = useState('');
 
   // booking modal
   const [showBook, setShowBook] = useState(false);
-  const [bk, setBk] = useState<any>({ service_id: '', date: new Date().toISOString().slice(0, 10), client_name: '', client_phone: '' });
+  const [bk, setBk] = useState<any>({ service_id: '', date: istToday(), client_name: '', client_phone: '' });
   const [slots, setSlots] = useState<any[]>([]);
   const [slotLoading, setSlotLoading] = useState(false);
   const [chosenSlot, setChosenSlot] = useState<any>(null);
@@ -373,6 +376,8 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   };
   const transition = async (a: any, action: string) => {
     if (!canEdit) { alert('View-only access — you cannot change appointment status.'); return; }
+    if (action === 'cancel' && !window.confirm(`Cancel ${a.client_name || 'this guest'}'s ${a.service_name || 'appointment'}?`)) return;
+    if (action === 'no-show' && !window.confirm(`Mark ${a.client_name || 'this guest'} as a no-show?`)) return;
     try {
       if (action === 'cancel') await api(`/spa/appointments/${a.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Cancelled by staff' }) });
       else await api(`/spa/appointments/${a.id}/${action}`, { method: 'POST' });
@@ -454,10 +459,13 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                 <div className="flex gap-1 flex-wrap">
                   {canEdit && r.status === 'BOOKED' && <button className={BTN_GHOST} onClick={() => transition(r, 'confirm')}>Confirm</button>}
                   {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'check-in')}>Check-in</button>}
-                  {canEdit && ['CHECKED_IN', 'IN_PROGRESS', 'CONFIRMED', 'BOOKED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'complete')}><Check size={12} /> Complete</button>}
+                  {/* A treatment starts only once the guest has checked in, and completes only after that. */}
+                  {canEdit && r.status === 'CHECKED_IN' && <button className={BTN_GHOST} onClick={() => transition(r, 'start')}>Start</button>}
+                  {canEdit && ['CHECKED_IN', 'IN_PROGRESS'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'complete')}><Check size={12} /> Complete</button>}
+                  {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} title="The guest did not arrive" onClick={() => transition(r, 'no-show')}>No-show</button>}
                   {canEdit && r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH' }); }}>Checkout</button>}
                   {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={12} /> Invoice</button>}
-                  {canEdit && !['COMPLETED', 'CANCELLED', 'NO_SHOW'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
+                  {canEdit && ['BOOKED', 'CONFIRMED', 'CHECKED_IN'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} title="Cancel appointment" onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
                   <button className={BTN_GHOST} title="Audit log — who changed this appointment" onClick={() => setHistory({ id: r.id, meta: { title: r.service_name || r.id, subtitle: [r.status, r.client_name].filter(Boolean).join(' · '), facts: [['Service', r.service_name], ['Status', r.status], ['Client', r.client_name], ['Time', `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}`], ['Therapist', r.therapist_name], ['Cabin', r.resource_name]] } })}><History size={12} /></button>
                 </div>
               ) },
@@ -801,7 +809,12 @@ function SpaSettings({ restaurantId, token }: Props) {
   const save = async () => {
     if (!canEdit) { alert('View-only access — you cannot change the public page.'); return; }
     setSaving(true); setSaved(false);
-    try { await api('/spa/profile', { method: 'PUT', body: JSON.stringify(profile) }); setSaved(true); setTimeout(() => setSaved(false), 2500); }
+    try {
+      await api('/spa/profile', { method: 'PUT', body: JSON.stringify({ ...profile, module_label: String(profile.module_label || '').trim() }) });
+      setSaved(true); setTimeout(() => setSaved(false), 2500);
+      // The menu reads the name from the property record: have it reloaded.
+      window.dispatchEvent(new Event('atithi:restaurant-changed'));
+    }
     catch (e: any) { alert(e.message); } finally { setSaving(false); }
   };
 
@@ -820,6 +833,14 @@ function SpaSettings({ restaurantId, token }: Props) {
   return (
     <div className="space-y-6">
       <SectionHeader icon={<Calendar size={18} />} title="Public Page Settings" sub="What guests see at your online booking page" />
+
+      {/* The module's name for this property — the menu, settings, reports and the public page use it. */}
+      <div className={CARD}>
+        <label className={LABEL}>Module name</label>
+        <input className={INPUT} maxLength={40} placeholder="Spa & Wellness" value={profile.module_label || ''}
+          onChange={e => setProfile((p: any) => ({ ...p, module_label: e.target.value }))} disabled={!canEdit} />
+        <p className="text-[11px] text-[#6b5d52] mt-1">For example Ayurvedic Wellness. Leave blank to use Spa &amp; Wellness.</p>
+      </div>
 
       {/* public link */}
       <div className={CARD}>
@@ -1180,7 +1201,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const [step, setStep] = useState(1);
   const [service, setService] = useState<any>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(istToday());
   const [slots, setSlots] = useState<any[]>([]);
   const [slot, setSlot] = useState<any>(null);
   const [slotsLoading, setSlotsLoading] = useState(false);
@@ -1233,7 +1254,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const SERIF: React.CSSProperties = { fontFamily: "'Playfair Display', Georgia, serif" };
   const fmtDate = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
   const fmtTime = (iso: string) => iso.slice(11, 16);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = istToday();
   const addDays = (iso: string, n: number) => { const d = new Date(iso); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
 
   // ── Loading ──────────────────────────────────────────────────────────────
@@ -1276,7 +1297,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
         <div style={{ position: 'relative', height: 4, background: `linear-gradient(90deg, transparent, ${SPA_GOLD}, transparent)`, marginBottom: 0 }} />
         {data.property?.logo_url && <img src={data.property.logo_url} alt="" style={{ height: 48, margin: '0 auto 14px', borderRadius: 12, objectFit: 'contain', filter: 'brightness(0) invert(1)', opacity: 0.9 }} />}
         <h1 style={{ ...SERIF, fontSize: 26, fontWeight: 700, letterSpacing: -0.3 }}>{data.property?.name}</h1>
-        <p style={{ color: SPA_GOLD, fontSize: 10, letterSpacing: 3, textTransform: 'uppercase', marginTop: 8, fontWeight: 600 }}>Spa & Wellness</p>
+        <p style={{ color: SPA_GOLD, fontSize: 10, letterSpacing: 3, textTransform: 'uppercase', marginTop: 8, fontWeight: 600 }}>{data.property?.module_label || 'Spa & Wellness'}</p>
       </div>
       <div style={{ maxWidth: 440, margin: '-52px auto 0', padding: '0 16px 48px' }}>
         <div style={{ background: '#fff', borderRadius: 28, boxShadow: '0 20px 60px rgba(0,0,0,0.15)', overflow: 'hidden' }}>
@@ -1380,7 +1401,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
               )}
             </>
           ) : (
-            <p style={{ fontSize: 10, opacity: 0.42, letterSpacing: 3, textTransform: 'uppercase', paddingTop: 16 }}>{data.property?.name} · {profile.tagline || 'Spa & Wellness'}</p>
+            <p style={{ fontSize: 10, opacity: 0.42, letterSpacing: 3, textTransform: 'uppercase', paddingTop: 16 }}>{data.property?.name} · {profile.tagline || data.property?.module_label || 'Spa & Wellness'}</p>
           )}
         </div>
       </div>

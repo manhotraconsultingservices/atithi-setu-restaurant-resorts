@@ -110,6 +110,59 @@ export async function blockConflict(
   return rows[0] || null;
 }
 
+// ── Appointment lifecycle ──────────────────────────────────────────────────
+// The moves an appointment may make. The routes used to set whatever status they
+// were asked for: a booked guest who never arrived could be completed, and a
+// guest already checked in could be marked a no-show.
+export const SPA_TRANSITIONS: Record<string, string[]> = {
+  BOOKED:      ["CONFIRMED", "CHECKED_IN", "CANCELLED", "NO_SHOW"],
+  CONFIRMED:   ["CHECKED_IN", "CANCELLED", "NO_SHOW"],
+  CHECKED_IN:  ["IN_PROGRESS", "COMPLETED", "CANCELLED"],
+  IN_PROGRESS: ["COMPLETED"],
+  COMPLETED:   [],
+  CANCELLED:   [],
+  NO_SHOW:     [],
+};
+
+/** Why an appointment cannot move from `from` to `to`, or null if it can. A move
+ *  to the status it already has is not an error; callers treat it as done. */
+export function spaTransitionError(fromRaw: string, to: string): string | null {
+  const from = String(fromRaw || "BOOKED").toUpperCase();
+  if (from === to) return null;
+  if ((SPA_TRANSITIONS[from] || []).includes(to)) return null;
+  const word: Record<string, string> = {
+    BOOKED: "booked", CONFIRMED: "confirmed", CHECKED_IN: "checked in", IN_PROGRESS: "in progress",
+    COMPLETED: "completed", CANCELLED: "cancelled", NO_SHOW: "marked a no-show",
+  };
+  const w = (s: string) => word[s] || s.toLowerCase();
+  if (["COMPLETED", "CANCELLED", "NO_SHOW"].includes(from)) return `This appointment is already ${w(from)}.`;
+  if (to === "COMPLETED") return "Check the guest in before completing the treatment.";
+  if (to === "IN_PROGRESS") return "Check the guest in before starting the treatment.";
+  if (to === "NO_SHOW") return "The guest has already checked in, so this cannot be a no-show.";
+  if (to === "CANCELLED") return "A treatment in progress cannot be cancelled. Complete it instead.";
+  return `This appointment is ${w(from)}, so it cannot be ${w(to)}.`;
+}
+
+/** Two bookings written at the same moment can both pass the conflict checks:
+ *  the database layer has no transaction across statements. Call this after
+ *  writing an appointment. If another live appointment for the same therapist
+ *  or cabin overlaps it and was created earlier (ties broken by id), this one
+ *  must give way. Both sides reach the same answer, so exactly one survives. */
+export async function spaMustYield(tenantDb: DbInterface, apptId: string): Promise<boolean> {
+  const row = await tenantDb.get(
+    `SELECT o.id FROM spa_appointments o, spa_appointments me
+      WHERE me.id = ? AND o.id <> me.id
+        AND o.status NOT IN ('CANCELLED','NO_SHOW')
+        AND o.start_at < me.end_at AND o.end_at > me.start_at
+        AND ((me.therapist_id IS NOT NULL AND o.therapist_id = me.therapist_id)
+          OR (me.resource_id IS NOT NULL AND o.resource_id = me.resource_id))
+        AND (o.created_at < me.created_at OR (o.created_at = me.created_at AND o.id < me.id))
+      LIMIT 1`,
+    [apptId]
+  );
+  return !!row;
+}
+
 // ── Dual-resource availability slot engine ─────────────────────────────────
 // For a service + date (+ optional therapist filter), returns bookable slots,
 // each carrying BOTH a free therapist and a free resource. Granularity = 30m.
@@ -482,6 +535,13 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
   // ever carry a phone number, so a client could not be emailed. Existing rows
   // still resolve through spa_clients.email where the client is on file.
   await tenantDb.exec(`ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS client_email TEXT`).catch(() => {});
+  // When the guest was checked in and when the treatment actually started. The
+  // booking kept only the scheduled times and a completion time.
+  await tenantDb.exec(`ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMP`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS started_at TIMESTAMP`).catch(() => {});
+  // One consumption line per appointment and item, so a completion retried after
+  // a failure, or two completions at once, can never draw the same stock twice.
+  await tenantDb.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_consumption_once ON stock_movements (reference_id, ingredient_id) WHERE movement_type = 'SPA_CONSUMPTION' AND reference_type = 'spa_appointment'`).catch(() => {});
 
   // ── Packages (prepaid series, auto-deduct) ─────────────────────────────────
   await tenantDb.exec(`

@@ -22,6 +22,7 @@ import { generatePOPdf, buildPOEmailBody, type POPdfData } from "./poService.ts"
 import {
   createSpaTables, seedSpaDefaults,
   findAvailableSlots, serviceWindowMinutes, therapistConflict, resourceConflict, blockConflict,
+  spaTransitionError, spaMustYield,
   tsFromDateMinutes, hhmmToMinutes, minutesToHHMM,
 } from "./spaService.ts";
 import {
@@ -3361,10 +3362,18 @@ async function _eventAdvanceHeld(db: any, bookingId: string): Promise<number> {
  *  path already used (an imported invoice) is skipped. It used to be "count of
  *  event invoices + 1". FY = Indian financial year in IST, as hotel invoices. */
 async function _allocateEventInvoiceNumber(db: any): Promise<string> {
+  return _allocateFyInvoiceNumber(db, 'EVT', 'event-invoice');
+}
+
+/** A document serial <CODE>-<FY>-NNNNN from the tenant sequence <seqBase>-<FY>:
+ *  atomic, unique within the Indian financial year in IST (Rule 46(b)), seeded
+ *  above the highest number already issued under the prefix, and skipping a
+ *  number another path already used. Event and spa invoices both draw here. */
+async function _allocateFyInvoiceNumber(db: any, code: string, seqBase: string): Promise<string> {
   const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
   const fy = ist.getUTCMonth() >= 3 ? ist.getUTCFullYear() : ist.getUTCFullYear() - 1;
-  const prefix = `EVT-${fy}-`;
-  const seqName = `event-invoice-${fy}`;
+  const prefix = `${code}-${fy}-`;
+  const seqName = `${seqBase}-${fy}`;
   const maxRow: any = await db.get(
     `SELECT COALESCE(MAX(CAST(SUBSTRING(invoice_number FROM ${prefix.length + 1}) AS INTEGER)), 0) AS m
        FROM folios
@@ -3380,7 +3389,7 @@ async function _allocateEventInvoiceNumber(db: any): Promise<string> {
     const clash = await db.get("SELECT id FROM folios WHERE invoice_number = ? LIMIT 1", [num]);
     if (!clash) return num;
   }
-  throw new Error('Could not allocate an event invoice number');
+  throw new Error(`Could not allocate a ${code} invoice number`);
 }
 
 /** What has been refunded so far on each receipt voucher, summed from its refund
@@ -20933,7 +20942,7 @@ ${data.tenant.name}`;
               COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
                                  AND sm.movement_type = 'WASTAGE' THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS wastage_qty,
               COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
-                                 AND sm.movement_type = 'CONSUMPTION' THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS theoretical_qty,
+                                 AND sm.movement_type IN ('CONSUMPTION','SPA_CONSUMPTION') THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS theoretical_qty,
               COALESCE(SUM(CASE WHEN sm.recorded_at < ?::date + INTERVAL '1 day' THEN sm.qty_delta ELSE 0 END), 0) AS closing_qty
          FROM ingredients i
          LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id
@@ -24720,7 +24729,7 @@ ${data.tenant.name}`;
         `SELECT qty_delta, recorded_at
            FROM stock_movements
           WHERE ingredient_id = ?
-            AND movement_type IN ('CONSUMPTION', 'WASTAGE')
+            AND movement_type IN ('CONSUMPTION', 'SPA_CONSUMPTION', 'WASTAGE')
             AND recorded_at >= NOW() - INTERVAL '28 days'`,
         [ing.id]
       ).catch(() => [] as any[]);
@@ -24877,7 +24886,7 @@ ${data.tenant.name}`;
         `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)), 0) AS v
            FROM stock_movements sm
            LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
-          WHERE sm.movement_type = 'CONSUMPTION'
+          WHERE sm.movement_type IN ('CONSUMPTION', 'SPA_CONSUMPTION')
             AND sm.recorded_at >= DATE_TRUNC('month', CURRENT_DATE)${dmfI.sql}`, dmfI.params
       );
       // Revenue for THIS module. It used to be the tenant's restaurant orders
@@ -25012,10 +25021,10 @@ ${data.tenant.name}`;
                 SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)) AS cost
            FROM stock_movements sm
            LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
-          WHERE sm.movement_type IN ('CONSUMPTION', 'WASTAGE')
-            AND sm.recorded_at >= NOW() - INTERVAL '30 days'
+          WHERE sm.movement_type IN ('CONSUMPTION', 'SPA_CONSUMPTION', 'WASTAGE')
+            AND sm.recorded_at >= NOW() - INTERVAL '30 days'${dmfI.sql}
           GROUP BY DATE_TRUNC('day', sm.recorded_at)
-          ORDER BY d ASC`
+          ORDER BY d ASC`, dmfI.params
       );
 
       // 4. Top consumers (last 30 days by cost)
@@ -25025,11 +25034,11 @@ ${data.tenant.name}`;
                 SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)) AS total_cost
            FROM stock_movements sm
            JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
-          WHERE sm.movement_type = 'CONSUMPTION'
-            AND sm.recorded_at >= NOW() - INTERVAL '30 days'
+          WHERE sm.movement_type IN ('CONSUMPTION', 'SPA_CONSUMPTION')
+            AND sm.recorded_at >= NOW() - INTERVAL '30 days'${dmfI.sql}
           GROUP BY i.id, i.name, i.unit, i.category
           ORDER BY total_cost DESC
-          LIMIT 10`
+          LIMIT 10`, dmfI.params
       );
 
       // 5. Wastage breakdown by reason (last 30 days) — JOIN stock_movements
@@ -33827,6 +33836,30 @@ ${data.tenant.name}`;
     return { startAt: tsFromDateMinutes(date, startMin), endAt: tsFromDateMinutes(date, endMin), date };
   };
 
+  // Every check an appointment window must pass, in one place, so a staff
+  // booking, a reschedule and an online booking cannot disagree. Returns why the
+  // window cannot be booked, or null.
+  const spaWindowProblem = async (
+    db: DbInterface, therapistId: string | null, resourceId: string | null, startAt: any, endAt: any, excludeId?: string,
+  ): Promise<string | null> => {
+    if (therapistId) {
+      if (await therapistConflict(db, therapistId, startAt, endAt, excludeId)) return 'Therapist is already booked for an overlapping slot';
+      if (await blockConflict(db, 'THERAPIST', therapistId, startAt, endAt)) return 'Therapist is blocked for this slot';
+    }
+    if (resourceId) {
+      if (await resourceConflict(db, resourceId, startAt, endAt, excludeId)) return 'Cabin is already booked for an overlapping slot';
+      if (await blockConflict(db, 'RESOURCE', resourceId, startAt, endAt)) return 'Cabin is blocked for this slot';
+    }
+    return null;
+  };
+  // The add-ons an appointment was booked with, so its window keeps their time.
+  const spaApptAddons = async (db: DbInterface, appt: any): Promise<any[]> => {
+    let ids: string[] = [];
+    try { const p = JSON.parse(appt?.addon_ids || '[]'); ids = Array.isArray(p) ? p.map(String) : []; } catch { ids = []; }
+    if (!ids.length) return [];
+    return db.query(`SELECT * FROM spa_service_addons WHERE id IN (${ids.map(() => '?').join(',')})`, ids).catch(() => []);
+  };
+
   app.get("/api/restaurant/:id/spa/appointments", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -34030,6 +34063,12 @@ ${data.tenant.name}`;
          win.startAt, win.endAt, price, gstPct, Number(b.deposit_amount || 0),
          b.booking_source || 'STAFF', b.notes || null]
       );
+      // Two bookings made at the same moment both pass the checks above; the later
+      // one gives way here, so a therapist or cabin is never booked twice.
+      if (await spaMustYield(db, id)) {
+        await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]);
+        return res.status(409).json({ error: "That slot was just booked by someone else. Pick another time.", code: 'SLOT_TAKEN' });
+      }
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: id, action: 'CREATED',
         summary: `Appointment booked — "${service.name}"${b.client_name ? ` · ${b.client_name}` : ''} @ ${win.startAt} (₹${price})`,
@@ -34047,26 +34086,32 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
       if (!appt) return res.status(404).json({ error: "Appointment not found" });
-      if (['COMPLETED','CANCELLED','NO_SHOW'].includes(appt.status)) return res.status(409).json({ error: `Cannot reschedule a ${appt.status} appointment` });
+      // A treatment already under way has its therapist and cabin in use.
+      if (['COMPLETED','CANCELLED','NO_SHOW','IN_PROGRESS'].includes(appt.status)) return res.status(409).json({ error: `Cannot reschedule a ${appt.status} appointment` });
       const b = req.body || {};
       const therapistId = b.therapist_id ?? appt.therapist_id;
       const resourceId = b.resource_id ?? appt.resource_id;
       const service: any = await db.get("SELECT * FROM spa_services WHERE id = ?", [appt.service_id]);
-      const windowMin = serviceWindowMinutes(service, []);
+      // The window keeps the add-ons it was booked with. It was rebuilt from the
+      // service alone, so a moved treatment lost its add-on time and overlapped
+      // the next guest.
+      const windowMin = serviceWindowMinutes(service, await spaApptAddons(db, appt));
       const win = b.start_at ? spaApptWindow(b.start_at, windowMin) : { startAt: appt.start_at, endAt: appt.end_at, date: '' };
       if (!win) return res.status(400).json({ error: "Invalid start_at" });
-      if (therapistId) {
-        const tc = await therapistConflict(db, therapistId, win.startAt, win.endAt, appt.id);
-        if (tc) return res.status(409).json({ error: "Therapist is already booked for an overlapping slot" });
-      }
-      if (resourceId) {
-        const rc = await resourceConflict(db, resourceId, win.startAt, win.endAt, appt.id);
-        if (rc) return res.status(409).json({ error: "Cabin is already booked for an overlapping slot" });
-      }
+      // The same checks as a new booking, blocked time included: a reschedule
+      // skipped the blocks, so a therapist on leave could be moved into the gap.
+      const problem = await spaWindowProblem(db, therapistId || null, resourceId || null, win.startAt, win.endAt, appt.id);
+      if (problem) return res.status(409).json({ error: problem });
       await db.run(
         "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
         [therapistId || null, resourceId || null, win.startAt, win.endAt, appt.id]
       );
+      if (await spaMustYield(db, appt.id)) {
+        await db.run(
+          "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
+          [appt.therapist_id || null, appt.resource_id || null, appt.start_at, appt.end_at, appt.id]);
+        return res.status(409).json({ error: "That slot was just booked by someone else. Pick another time.", code: 'SLOT_TAKEN' });
+      }
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'RESCHEDULED',
         summary: `Appointment "${appt.service_name || 'service'}" rescheduled${appt.start_at !== win.startAt ? ` — ${appt.start_at} → ${win.startAt}` : ''}`,
@@ -34078,13 +34123,24 @@ ${data.tenant.name}`;
   });
 
   // Lifecycle transitions
+  // Returns the updated row, or null once it has sent an error — callers only
+  // respond when they get a row. (It used to return the error response itself,
+  // which callers then tried to send a second time.)
   const spaSetStatus = async (req: AuthRequest, res: Response, target: string, extraSet: string = '') => {
     const check = await ensureSpaEnabled(req.params.id);
-    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    if (!check.ok) { res.status(check.status).json({ error: check.error }); return null; }
     const db = await getTenantDb(req.params.id);
     const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
-    if (!appt) return res.status(404).json({ error: "Appointment not found" });
-    await db.run(`UPDATE spa_appointments SET status = ?${extraSet ? ', ' + extraSet : ''} WHERE id = ?`, [target, appt.id]);
+    if (!appt) { res.status(404).json({ error: "Appointment not found" }); return null; }
+    const from = String(appt.status || 'BOOKED').toUpperCase();
+    // Asking for the status it already has changes nothing.
+    if (from === target) return appt;
+    const bad = spaTransitionError(from, target);
+    if (bad) { res.status(409).json({ error: bad, code: 'INVALID_TRANSITION', status: from }); return null; }
+    // Conditional on the status it was read in, so two people acting at once
+    // cannot both move it.
+    const moved = await db.run(`UPDATE spa_appointments SET status = ?${extraSet ? ', ' + extraSet : ''} WHERE id = ? AND COALESCE(status, 'BOOKED') = ?`, [target, appt.id, from]);
+    if (Number(moved?.changes || 0) !== 1) { res.status(409).json({ error: 'This appointment changed while you were updating it. Reload and try again.', code: 'APPOINTMENT_CHANGED' }); return null; }
     writeObjectAudit(db, req, {
       objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'STATUS_CHANGED',
       summary: `Appointment "${appt.service_name || 'service'}"${appt.client_name ? ` · ${appt.client_name}` : ''} — ${appt.status} → ${target}`,
@@ -34125,8 +34181,13 @@ ${data.tenant.name}`;
     catch (err: any) { res.status(500).json({ error: "Failed to confirm" }); }
   });
   app.post("/api/restaurant/:id/spa/appointments/:aid/check-in", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
-    try { const row = await spaSetStatus(req, res, 'CHECKED_IN'); if (row) res.json(row); }
+    try { const row = await spaSetStatus(req, res, 'CHECKED_IN', 'checked_in_at = CURRENT_TIMESTAMP'); if (row) res.json(row); }
     catch (err: any) { res.status(500).json({ error: "Failed to check in" }); }
+  });
+  // Start — the treatment has begun, and when. The booking never recorded it.
+  app.post("/api/restaurant/:id/spa/appointments/:aid/start", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    try { const row = await spaSetStatus(req, res, 'IN_PROGRESS', 'started_at = CURRENT_TIMESTAMP'); if (row) res.json(row); }
+    catch (err: any) { res.status(500).json({ error: "Failed to start" }); }
   });
   app.post("/api/restaurant/:id/spa/appointments/:aid/cancel", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
@@ -34134,8 +34195,14 @@ ${data.tenant.name}`;
       if (!check.ok) return res.status(check.status).json({ error: check.error });
       const db = await getTenantDb(req.params.id);
       const before: any = await db.get("SELECT status, service_name, client_name FROM spa_appointments WHERE id = ?", [req.params.aid]).catch(() => null);
-      await db.run("UPDATE spa_appointments SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancellation_reason = ? WHERE id = ?",
-        [req.body?.reason || null, req.params.aid]);
+      if (!before) return res.status(404).json({ error: "Appointment not found" });
+      const fromC = String(before.status || 'BOOKED').toUpperCase();
+      if (fromC === 'CANCELLED') return res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
+      const badC = spaTransitionError(fromC, 'CANCELLED');
+      if (badC) return res.status(409).json({ error: badC, code: 'INVALID_TRANSITION', status: fromC });
+      const cancelledRow = await db.run("UPDATE spa_appointments SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancellation_reason = ? WHERE id = ? AND COALESCE(status, 'BOOKED') = ?",
+        [req.body?.reason || null, req.params.aid, fromC]);
+      if (Number(cancelledRow?.changes || 0) !== 1) return res.status(409).json({ error: 'This appointment changed while you were updating it. Reload and try again.', code: 'APPOINTMENT_CHANGED' });
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: req.params.aid, action: 'CANCELLED',
         summary: `Appointment "${before?.service_name || 'service'}"${before?.client_name ? ` · ${before.client_name}` : ''} cancelled${req.body?.reason ? ` — ${req.body.reason}` : ''}`,
@@ -34152,7 +34219,13 @@ ${data.tenant.name}`;
       if (!check.ok) return res.status(check.status).json({ error: check.error });
       const db = await getTenantDb(req.params.id);
       const before: any = await db.get("SELECT status, service_name, client_name FROM spa_appointments WHERE id = ?", [req.params.aid]).catch(() => null);
-      await db.run("UPDATE spa_appointments SET status = 'NO_SHOW', no_show_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.aid]);
+      if (!before) return res.status(404).json({ error: "Appointment not found" });
+      const fromN = String(before.status || 'BOOKED').toUpperCase();
+      if (fromN === 'NO_SHOW') return res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
+      const badN = spaTransitionError(fromN, 'NO_SHOW');
+      if (badN) return res.status(409).json({ error: badN, code: 'INVALID_TRANSITION', status: fromN });
+      const noShowRow = await db.run("UPDATE spa_appointments SET status = 'NO_SHOW', no_show_at = CURRENT_TIMESTAMP WHERE id = ? AND COALESCE(status, 'BOOKED') = ?", [req.params.aid, fromN]);
+      if (Number(noShowRow?.changes || 0) !== 1) return res.status(409).json({ error: 'This appointment changed while you were updating it. Reload and try again.', code: 'APPOINTMENT_CHANGED' });
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: req.params.aid, action: 'NO_SHOW',
         summary: `Appointment "${before?.service_name || 'service'}"${before?.client_name ? ` · ${before.client_name}` : ''} marked no-show`,
@@ -34171,28 +34244,91 @@ ${data.tenant.name}`;
       const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
       if (!appt) return res.status(404).json({ error: "Appointment not found" });
       if (appt.status === 'COMPLETED') return res.json(appt); // idempotent
-      // Deduct consumables
+      const fromS = String(appt.status || 'BOOKED').toUpperCase();
+      const badS = spaTransitionError(fromS, 'COMPLETED');
+      if (badS) return res.status(409).json({ error: badS, code: 'INVALID_TRANSITION', status: fromS });
+      // Consumables. Each item's stock and its ledger line now move together, drawn
+      // from batches oldest (and soonest to expire) first, at their cost. The line
+      // used to be written with its error swallowed after the stock had gone, so oil
+      // could leave the shelf with no record — and it was costed at list price
+      // while stock is valued at batch cost.
       const cons: any[] = await db.query(
-        `SELECT c.*, i.unit AS ing_unit, i.default_unit_price FROM spa_service_consumables c
+        `SELECT c.*, i.name AS ing_name, i.unit AS ing_unit FROM spa_service_consumables c
            JOIN ingredients i ON i.id = c.ingredient_id WHERE c.service_id = ?`, [appt.service_id]);
+      // Every unit checked before anything is drawn, so a bad setting stops the
+      // whole completion rather than half of it.
+      const plan: { c: any; qty: number }[] = [];
       for (const c of cons) {
-        const qty = Number(c.qty_per_service || 0);
-        if (qty <= 0) continue;
+        const raw = Number(c.qty_per_service || 0);
+        if (!(raw > 0)) continue;
+        const fromUnit = String(c.unit || c.ing_unit || '');
+        const qty = fromUnit && c.ing_unit && fromUnit !== String(c.ing_unit) ? convertQty(raw, fromUnit, String(c.ing_unit)) : raw;
+        if (qty == null || !(qty > 0)) {
+          return res.status(409).json({ error: `${c.ing_name} is set to ${raw} ${fromUnit} per treatment, which cannot be converted to its stock unit (${c.ing_unit}). Correct the treatment's consumables, then complete it again.`, code: 'CONSUMABLE_UNIT_MISMATCH' });
+        }
+        plan.push({ c, qty });
+      }
+      const consumed: any[] = [];
+      for (const { c, qty } of plan) {
+        // Once per appointment and item: a retry never draws twice.
+        const already: any = await db.get(
+          "SELECT id FROM stock_movements WHERE movement_type = 'SPA_CONSUMPTION' AND reference_type = 'spa_appointment' AND reference_id = ? AND ingredient_id = ? LIMIT 1",
+          [appt.id, c.ingredient_id]);
+        if (already) continue;
+        const fb: any = await db.get(`SELECT ${_INV_UNIT_COST_SQL} AS c FROM ingredients i WHERE i.id = ?`, [c.ingredient_id]).catch(() => null);
+        const fallbackCost = Number(fb?.c || 0);
+        const batches: any[] = await db.query(
+          `SELECT id, remaining_qty, unit_cost FROM stock_batches
+            WHERE ingredient_id = ? AND remaining_qty > 0
+            ORDER BY CASE WHEN expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '7 days' THEN 0 ELSE 1 END,
+                     COALESCE(expiry_date, '2099-12-31'::date) ASC, received_at ASC`, [c.ingredient_id]);
+        let left = qty, cost = 0;
+        const draws: { id: string; qty: number }[] = [];
+        for (const bt of batches) {
+          if (left <= 1e-9) break;
+          const d = Math.min(Number(bt.remaining_qty), left);
+          draws.push({ id: bt.id, qty: d });
+          cost += d * (bt.unit_cost != null ? Number(bt.unit_cost) : fallbackCost);
+          left -= d;
+        }
+        if (left > 1e-9) cost += left * fallbackCost;
+        const unitCost = Math.round((cost / qty) * 10000) / 10000;
         const upd: any[] = await db.query(
           "UPDATE ingredients SET current_stock_qty = current_stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING current_stock_qty",
           [qty, c.ingredient_id]);
         const bal = Number(upd[0]?.current_stock_qty ?? 0);
-        await db.run(
-          `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
-           VALUES (?, ?, ?, ?, 'SPA_CONSUMPTION', 'spa_appointment', ?, ?, ?, ?, ?)`,
-          [mkSpaId('MOV'), c.ingredient_id, -qty, c.unit || c.ing_unit || 'unit', appt.id, bal, c.default_unit_price || null, req.user?.id || null, 'Spa service consumption']
-        ).catch(() => {});
+        try {
+          await db.run(
+            `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
+             VALUES (?, ?, ?, ?, 'SPA_CONSUMPTION', 'spa_appointment', ?, ?, ?, ?, ?)`,
+            [mkSpaId('MOV'), c.ingredient_id, -qty, c.ing_unit || 'unit', appt.id, bal, unitCost, req.user?.id || null,
+             draws.length ? 'Spa service consumption (drawn from batches)' : 'Spa service consumption']);
+        } catch (e: any) {
+          // Put the stock back: nothing leaves the shelf without its ledger line.
+          await db.run("UPDATE ingredients SET current_stock_qty = current_stock_qty + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [qty, c.ingredient_id]).catch(() => {});
+          // Written by a completion running at the same moment: already consumed.
+          if (String(e?.code) === '23505') continue;
+          console.error('[spa] consumption not recorded:', e?.message || e);
+          return res.status(500).json({ error: `Stock used for ${c.ing_name} could not be recorded, so the treatment was not completed. Try again.`, code: 'CONSUMPTION_NOT_RECORDED' });
+        }
+        for (const d of draws) {
+          await db.run("UPDATE stock_batches SET remaining_qty = GREATEST(remaining_qty - ?, 0) WHERE id = ?", [d.qty, d.id])
+            .catch((e: any) => console.error('[spa] batch draw failed:', d.id, e?.message || e));
+        }
+        consumed.push({ item: c.ing_name, qty, unit: c.ing_unit, unit_cost: unitCost });
       }
-      await db.run("UPDATE spa_appointments SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP WHERE id = ?", [appt.id]);
+      const doneRow = await db.run(
+        "UPDATE spa_appointments SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP WHERE id = ? AND COALESCE(status, 'BOOKED') = ?",
+        [appt.id, fromS]);
+      if (Number(doneRow?.changes || 0) !== 1) {
+        const nowRow: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]);
+        if (String(nowRow?.status) === 'COMPLETED') return res.json(nowRow);
+        return res.status(409).json({ error: 'This appointment changed while you were completing it. Reload and try again.', code: 'APPOINTMENT_CHANGED' });
+      }
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'COMPLETED',
-        summary: `Appointment "${appt.service_name || 'service'}"${appt.client_name ? ` · ${appt.client_name}` : ''} completed`,
-        before: { status: appt.status }, after: { status: 'COMPLETED' },
+        summary: `Appointment "${appt.service_name || 'service'}"${appt.client_name ? ` · ${appt.client_name}` : ''} completed${consumed.length ? ` · used ${consumed.map(x => `${x.qty} ${x.unit} ${x.item}`).join(', ')}` : ''}`,
+        before: { status: appt.status }, after: { status: 'COMPLETED', consumed },
       }).catch(() => {});
       res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]));
     } catch (err: any) { console.error("spa complete error:", err); res.status(500).json({ error: "Failed to complete appointment" }); }
@@ -34287,10 +34423,8 @@ ${data.tenant.name}`;
 
       await recomputeFolioTotals(db, folioId);
 
-      // Invoice number
-      const year = new Date().getFullYear();
-      const seq = await getNextTenantSequence(db, `spa-invoice-${year}`);
-      const invNum = `SPA-${year}-${String(seq).padStart(5, '0')}`;
+      // Invoice number — the financial-year series (it took the calendar year).
+      const invNum = await _allocateFyInvoiceNumber(db, 'SPA', 'spa-invoice');
       await db.run("UPDATE folios SET invoice_number = ? WHERE id = ?", [invNum, folioId]);
       await db.run("UPDATE spa_appointments SET folio_id = ? WHERE id = ?", [folioId, appt.id]);
 
@@ -34506,7 +34640,10 @@ ${data.tenant.name}`;
       const entries: any[] = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC", [req.params.fid]);
       const hotel = check.restaurant;
       const out = await getFolioOutstanding(db, folio.id).catch(() => null);
-      const invNum = folio.invoice_number || `SPA-${new Date().getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
+      // A label only for a folio with no serial (rendering never mints one): FY, like the series.
+      const _istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
+      const _fyLabel = _istNow.getUTCMonth() >= 3 ? _istNow.getUTCFullYear() : _istNow.getUTCFullYear() - 1;
+      const invNum = folio.invoice_number || `SPA-${_fyLabel}-${String(folio.id).slice(-6).toUpperCase()}`;
       const pdf = await generateInvoicePdf({
         hotel: _invoiceSeller(hotel),
         policies: _invoicePolicies(hotel, 'hotel'),
@@ -34606,9 +34743,8 @@ ${data.tenant.name}`;
        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
       [mkSpaId('FE'), folioId, entryType, description, amt, amt, gstPct, gstAmt, sourceId || null]);
     await recomputeFolioTotals(db, folioId);
-    const year = new Date().getFullYear();
-    const seq = await getNextTenantSequence(db, `spa-invoice-${year}`);
-    const invNum = `SPA-${year}-${String(seq).padStart(5, '0')}`;
+    // Financial-year series, as at checkout.
+    const invNum = await _allocateFyInvoiceNumber(db, 'SPA', 'spa-invoice');
     const out = await getFolioOutstanding(db, folioId);
     await recordFolioPayment(db, { restaurantId, folioId, amount: out?.outstanding || amt + gstAmt, method: paymentMethod || 'CASH', type: 'FINAL', recordedBy });
     await db.run("UPDATE folios SET invoice_number = ?, status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
@@ -34931,8 +35067,8 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const profile = await db.get("SELECT * FROM spa_profile WHERE restaurant_id = ?", [req.params.id]);
-      const restRow: any = await centralDb.get("SELECT booking_slug FROM restaurants WHERE id = ?", [req.params.id]);
-      res.json({ ...(profile || { restaurant_id: req.params.id, hero_image_url: null, tagline: null, offers: null }), booking_slug: restRow?.booking_slug || null });
+      const restRow: any = await centralDb.get("SELECT booking_slug, spa_module_label FROM restaurants WHERE id = ?", [req.params.id]);
+      res.json({ ...(profile || { restaurant_id: req.params.id, hero_image_url: null, tagline: null, offers: null }), booking_slug: restRow?.booking_slug || null, module_label: restRow?.spa_module_label || null });
     } catch (err: any) { res.status(500).json({ error: "Failed to load spa profile" }); }
   });
 
@@ -34951,6 +35087,12 @@ ${data.tenant.name}`;
            offers = EXCLUDED.offers`,
         [req.params.id, hero_image_url || null, tagline || null, offers ? JSON.stringify(offers) : null]
       );
+      // The module's name for this property. Only when sent, so a caller that does
+      // not know the field never blanks it.
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, 'module_label')) {
+        const label = String(req.body.module_label || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+        await centralDb.run("UPDATE restaurants SET spa_module_label = ? WHERE id = ?", [label || null, req.params.id]);
+      }
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to save spa profile" }); }
   });
@@ -35027,7 +35169,7 @@ ${data.tenant.name}`;
       const profile = await db.get("SELECT hero_image_url, tagline, offers FROM spa_profile WHERE restaurant_id = ?", [req.params.id]);
       const r = gate.restaurant;
       res.json({
-        property: { name: r.name, city: r.city, state: r.state, phone: r.phone, logo_url: r.logo_url, currency_symbol: r.currency_symbol || '₹' },
+        property: { name: r.name, city: r.city, state: r.state, phone: r.phone, logo_url: r.logo_url, currency_symbol: r.currency_symbol || '₹', module_label: r.spa_module_label || null },
         services,
         profile: profile ? { ...profile, offers: profile.offers ? JSON.parse(profile.offers) : [] } : { hero_image_url: null, tagline: null, offers: [] },
       });
@@ -35064,17 +35206,24 @@ ${data.tenant.name}`;
       const startMin = Number(m[2]) * 60 + Number(m[3]);
       const startAt = tsFromDateMinutes(m[1], startMin);
       const endAt = tsFromDateMinutes(m[1], startMin + windowMin);
-      // Use the requested therapist/resource, else first available from the engine.
+      // The requested therapist and cabin, else the ones free at exactly the chosen
+      // time. It fell back to the first free slot of the day, so a guest whose time
+      // had just gone was booked at a time they never chose.
       let therapistId = b.therapist_id, resourceId = b.resource_id;
       if (!therapistId || !resourceId) {
         const slots = await findAvailableSlots(db, { serviceId: b.service_id, date: m[1], maxSlots: 200 });
-        const match = slots.find(s => s.start_at === startAt) || slots[0];
-        if (!match) return res.status(409).json({ error: "No availability for the selected time" });
+        const match = slots.find(s => s.start_at === startAt && (!therapistId || s.therapist_id === therapistId));
+        if (!match) {
+          const alternatives = Array.from(new Set(slots.map(s => String(s.start_at).slice(11, 16)))).sort().slice(0, 6);
+          return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE', alternatives });
+        }
         therapistId = therapistId || match.therapist_id;
         resourceId = resourceId || match.resource_id;
       }
-      if (therapistId && await therapistConflict(db, therapistId, startAt, endAt)) return res.status(409).json({ error: "Selected time is no longer available" });
-      if (resourceId && await resourceConflict(db, resourceId, startAt, endAt)) return res.status(409).json({ error: "Selected time is no longer available" });
+      // The same checks as a staff booking, blocked time included.
+      if (await spaWindowProblem(db, therapistId || null, resourceId || null, startAt, endAt)) {
+        return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+      }
       // upsert client by phone
       let clientId: string;
       const existing: any = await db.get("SELECT id FROM spa_clients WHERE phone = ? LIMIT 1", [b.client_phone]);
@@ -35085,6 +35234,10 @@ ${data.tenant.name}`;
         `INSERT INTO spa_appointments (id, client_id, client_name, client_phone, client_email, service_id, service_name, addon_ids, therapist_id, resource_id, start_at, end_at, status, price_snapshot, gst_percent_snapshot, booking_source)
          VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, 'BOOKED', ?, ?, 'ONLINE')`,
         [id, clientId, b.client_name, b.client_phone, b.client_email || null, service.id, service.name, therapistId || null, resourceId || null, startAt, endAt, round2(service.price || 0), Number(service.gst_percent ?? 18)]);
+      if (await spaMustYield(db, id)) {
+        await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]);
+        return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+      }
       res.status(201).json({ success: true, appointment_id: id, start_at: startAt, end_at: endAt });
     } catch (err: any) { console.error("public spa booking error:", err); res.status(500).json({ error: "Failed to book" }); }
   });
@@ -59948,8 +60101,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'partial-refunds-receipt-refunds',
+    commit_marker: 'spa-phase0-and-module-name',
     code_features: [
+      'spa-phase0-and-module-name — Spa Phase 0 of the traceability plan (14 Sep 2026). (1) Spa invoices are numbered SPA-<FY>-NNNNN from _allocateFyInvoiceNumber (shared with event invoices), not the calendar year; FY 2026-27 continues the SPA-2026 sequence. (2) Completing an appointment draws each consumable from stock batches first-in-first-out at batch cost; the stock movement is no longer written with its error swallowed, a failed write puts the stock back and stops completion, a unique index keeps one SPA_CONSUMPTION line per appointment and item, and units are converted or refused before anything is drawn. (3) Month-end expected usage, forecast and the inventory dashboard count SPA_CONSUMPTION; the dashboard trend and top consumers are now module-scoped. (4) Appointment status follows SPA_TRANSITIONS (spaTransitionError), with conditional updates, a new start route, checked_in_at and started_at. (5) Reschedule keeps add-on time and checks blocked time via spaWindowProblem; online booking refuses a time that is not free with alternatives instead of taking the first slot of the day. (6) spaMustYield: two simultaneous bookings of a therapist or cabin, exactly one survives. (7) Per-property module name: restaurants.spa_module_label, set in spa Public Page Settings, used by the menu, home card, settings, reports, access matrix, accounting labels and the public page. Screens: IST today, Start and No-show buttons, confirm on cancel, therapist dashboard knows BOOKED and shows refused moves.',
       'partial-refunds-receipt-refunds — (1) PART REFUNDS OF AN ADVANCE. POST /receipt-vouchers/:id/refund takes an optional amount (default: all still held). The amount is reserved on receipt_vouchers.refunded_amount by one conditional UPDATE, so two refunds at once cannot exceed the advance; each refund has its own RFV-<refund voucher id> journal (older refunds used RFV-<receipt voucher id>) and Rule 51 voucher, tax in proportion, the last refund takes exactly what is left; the voucher is REFUNDED only when nothing is held. The receipt is no longer voided: a hotel folio gets a REFUND row carrying the refund voucher, an event booking a negative row. Settlement nets those REFUND rows off the advance and applies only the tax still held; hotel booking cancel does the same; GSTR-1 11A/11B release tax per refund on its own date, and on adjustment or cancellation only what was still held. A refunded advance, and its refund row, cannot be voided or deleted. (2) LATENT BUG FIXED: a REFUND folio payment without a refund voucher (API, spa) was posted at settlement as money RECEIVED (Dr cash, Cr AR) by all three settlement journals; it is now Dr AR, Cr cash. Live rows affected: none. (3) RECEIPT REFUNDS: POST /events/payments/:pid/refund returns money from a receipt that paid an event invoice once no invoice stands — Dr the receivable its journal credited, Cr cash, negative row with refund_of_payment_id, reserved on event_payments.refunded_amount; refused while an invoice stands, for an advance (use its voucher) and for receipts not taken against an invoice. _eventAdvanceHeld counts only refunds that carry a refund voucher. Payments GET and hotel folio GET say what each receipt can still be refunded.',
       'credit-noted-folio-owes-nothing — seen on screen after the refund work: a hotel folio whose invoice had been credit-noted showed its refunded advance as outstanding, because the viewer total ignores credit notes and a refunded advance no longer counts as paid. GET /hotel/folios/:id now reports outstanding 0 and names the credit note when one exists; the viewer says so and no longer offers a second credit note. The payment action buttons wrap instead of clipping, and the Method and Amount headers no longer run together.',
       'refunds-serials-event-receipts — three fixes from the post-M-2 review. (1) REFUND OF AN ADVANCE, RULE 51: POST /receipt-vouchers/:id/refund refunds an advance that is still held (voucher ISSUED — one adjusted against a live invoice is refused until that invoice is credit-noted or cancelled). Journal RFV-<voucher>: Dr 2100 and the advance GST exactly as the receipt credited them, Cr cash or bank. A refund voucher RFV-<FY>-NNNNN is issued with the Rule 51 particulars and prints as a PDF. The voucher becomes REFUNDED, closing it in GSTR-1 11A/11B like a cancellation. The receipt stops counting: a hotel folio payment is voided (settlement already ignores voided rows) and an event booking gets a negative receipt row, and neither half can be deleted. Refund is full, dated today or earlier and not before the receipt, and refused in a closed period. (2) EVENT INVOICE NUMBERS were count of event invoices plus one, so two invoices raised together shared a number. Now EVT-<FY>-NNNNN from an atomic tenant sequence seeded above the highest number issued under the prefix, skipping any number already on a folio. The visible format is unchanged for this financial year. (3) EVENT RECEIPTS AFTER THE INVOICE credited Advances from Guests, leaving the invoice owed and the money also held as an advance. A receipt while an invoice stands now clears the receivable that invoice debited (read from its journal, source EVENT_RECEIPT). A re-issued invoice applies only what the ledger holds as an advance, so a receipt that paid the earlier invoice, or a refunded advance, is not taken out of 2100 twice. Historical postings are unchanged.',

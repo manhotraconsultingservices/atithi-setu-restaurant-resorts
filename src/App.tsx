@@ -10916,7 +10916,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
               {[
                 { g: 'Restaurant', s: ['FNB_ORDER'] },
                 { g: 'Hotel', s: ['FOLIO_SETTLEMENT', 'FOLIO_ADVANCE', 'FOLIO_PAYMENT', 'BOOKING_CANCEL'] },
-                { g: 'Spa & Wellness', s: ['SPA_SETTLEMENT', 'SPA_SALE', 'SPA_INTERIM', 'SPA_INTERIM_REVERSAL'] },
+                { g: COST_MODULE_LABEL.SPA, s: ['SPA_SETTLEMENT', 'SPA_SALE', 'SPA_INTERIM', 'SPA_INTERIM_REVERSAL'] },
                 { g: 'Events & Convention', s: ['EVENT_SETTLEMENT', 'EVENT_ADVANCE', 'EVENT_CANCEL_REVERSAL', 'EVENT_ADVANCE_REVERSAL'] },
                 { g: 'Purchases', s: ['SUPPLIER_INVOICE', 'SUPPLIER_PAYMENT'] },
                 { g: 'Payroll', s: ['STAFF_ADVANCE', 'STAFF_PAYROLL', 'PAYROLL_RUN'] },
@@ -12100,6 +12100,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Spa & Wellness is gated by a dedicated flag (orthogonal to property_type).
   // Default 0 on every existing tenant → the SPA nav module never renders.
   const isSpaEnabled = !!restaurant && Number((restaurant as any).spa_enabled) === 1;
+  // The spa module's name for this property ("Ayurvedic Wellness"), else the default.
+  const spaCustomName = String((restaurant as any)?.spa_module_label || '').trim();
+  const spaName = spaCustomName || 'Spa & Wellness';
+  // Accounting screens read the module labels from one shared map.
+  useEffect(() => { COST_MODULE_LABEL.SPA = spaName; }, [spaName]);
   // Events & Convention — same orthogonal-flag pattern as spa. Default 0 → hidden.
   const isEventsEnabled = !!restaurant && Number((restaurant as any).events_enabled) === 1;
   // Tenant's secondary language for the i18n toggle (null = English-only).
@@ -15308,6 +15313,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       // Silent error
     }
   };
+  // A settings screen that changes the property record (the spa module's name)
+  // asks for it to be reloaded, so the menu shows the change straight away.
+  useEffect(() => {
+    const onChanged = () => { fetchRestaurant(); };
+    window.addEventListener('atithi:restaurant-changed', onChanged);
+    return () => window.removeEventListener('atithi:restaurant-changed', onChanged);
+  }, [restaurantId]);
 
   // ─── Hospitality module: API helpers ─────────────────────────────────────
   const hotelApi = async (path: string, init: RequestInit = {}): Promise<any> => {
@@ -16983,7 +16995,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
-            id: 'SPA', label: 'Spa & Wellness', icon: <Sparkles size={16} />,
+            id: 'SPA', label: spaName, icon: <Sparkles size={16} />,
             visible: isSpaEnabled,
             tabs: [
               { id: 'SPA_CALENDAR',     label: 'Appointment Calendar' },
@@ -16992,7 +17004,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'SPA_RESOURCES',    label: 'Therapists & Cabins' },
               { id: 'SPA_CLIENTS',      label: 'Clients' },
               { id: 'SPA_PACKAGES',     label: 'Packages & Memberships' },
-              { id: 'SPA_REPORTS',      label: 'Spa Reports' },
+              { id: 'SPA_REPORTS',      label: spaCustomName ? `${spaCustomName} Reports` : 'Spa Reports' },
               { id: 'SPA_BILLING',      label: 'Invoices & Payments' },
               { id: 'SPA_SETTINGS',     label: 'Public Page Settings' },
             ],
@@ -17088,7 +17100,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // the Events API gate — the exact leak EVENTS_CHECKLISTS caused.
               // It is an inventory permission, and it is named like one.
               { id: 'INVENTORY_EVENTS', label: 'Events Inventory',  requires: 'events' },
-              { id: 'SPA_INVENTORY',   label: 'Spa Inventory',     requires: 'spa' },
+              { id: 'SPA_INVENTORY',   label: spaCustomName ? `${spaCustomName} Inventory` : 'Spa Inventory',     requires: 'spa' },
             ],
           },
           {
@@ -17396,6 +17408,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           isHotelEnabled={isHotelEnabled}
           isRestaurantEnabled={isRestaurantEnabled}
           isSpaEnabled={isSpaEnabled}
+          spaName={spaCustomName || undefined}
           isEventsEnabled={isEventsEnabled}
           onOpenHotel={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
           onOpenRestaurant={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
@@ -21248,7 +21261,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       }).map((row: any) => {
                         const labels: Record<string,string> = {
                           hotel_collections: 'Hotel Collections',
-                          spa_collections:   'Spa & Wellness',
+                          spa_collections:   spaName,
                           restaurant_cash:   'Restaurant Sales',
                           refunds_out:       'Refunds Issued',
                         };
@@ -21580,7 +21593,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <option value="BOTH">All modules</option>
                       {isRestaurantEnabled && <option value="RESTAURANT">Restaurant only</option>}
                       {isHotelEnabled && <option value="HOTEL">Hotel / Front Desk only</option>}
-                      {isSpaEnabled && <option value="SPA">Spa &amp; Wellness only</option>}
+                      {isSpaEnabled && <option value="SPA">{spaName} only</option>}
                       {isEventsEnabled && <option value="EVENTS">Events only</option>}
                     </select>
                   </div>
@@ -29128,7 +29141,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { key: 'OVERVIEW',   label: 'Overview' },
               { key: 'FRONTDESK',  label: 'Hotel / Front Desk' },
               { key: 'RESTAURANT', label: 'Restaurant' },
-              { key: 'SPA',        label: 'Spa & Wellness' },
+              { key: 'SPA',        label: spaName },
               { key: 'EVENTS',     label: 'Events' },
               { key: 'ACCOUNTS',   label: 'Finance' },
               { key: 'SALES',      label: 'Sales & Marketing' },
@@ -30137,7 +30150,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             const secs = ([
               { id: 'BUSINESS', label: 'Restaurant', on: true },
               { id: 'HOTEL', label: 'Hotel', on: isHotelEnabled },
-              { id: 'SPA', label: 'Spa & Wellness', on: isSpaEnabled },
+              { id: 'SPA', label: spaName, on: isSpaEnabled },
               { id: 'EVENTS', label: 'Events & Convention', on: isEventsEnabled },
             ] as { id: any; label: string; on: boolean }[]).filter(s => s.on);
             return (
@@ -31863,7 +31876,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* ═══ SPA section — the full spa config lives on its own tab ═══ */}
           {settingsSection === 'SPA' && (
             <div onClick={() => setActiveTab('SPA_SETTINGS')} className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm cursor-pointer hover:bg-[#cc5a16]/5 transition-all">
-              <h3 className="text-2xl font-bold font-serif mb-1">Spa &amp; Wellness</h3>
+              <h3 className="text-2xl font-bold font-serif mb-1">{spaName}</h3>
               <p className="text-xs text-[#6b5d52] mb-4">Public spa page, hero image, tagline, and featured offers.</p>
               <span className="inline-flex items-center gap-2 text-sm font-bold text-[#cc5a16]">Open Spa settings →</span>
             </div>
@@ -46680,8 +46693,9 @@ const HotelLateFeeBanner: React.FC<{
 function HotelHomeLaunchpad({
   restaurantId, token, propertyName, restaurantImageUrl, isHotelEnabled, isRestaurantEnabled,
   onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports, isSpaEnabled, onOpenSpa, role,
-  isEventsEnabled, onOpenEvents,
+  isEventsEnabled, onOpenEvents, spaName,
 }: {
+  spaName?: string;
   restaurantId: string; token: string; propertyName: string; restaurantImageUrl?: string;
   isHotelEnabled: boolean; isRestaurantEnabled: boolean; isSpaEnabled: boolean; isEventsEnabled?: boolean;
   onOpenHotel: () => void; onOpenRestaurant: () => void; onOpenSpa: () => void; onOpenEvents?: () => void;
@@ -46814,7 +46828,7 @@ function HotelHomeLaunchpad({
                   <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: '#f3eef7', color: '#7e5792' }}><Sparkles size={22} /></span>
                 </div>
                 <div className="mt-auto">
-                  <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: '#7e5792' }}>{tr('Spa & Wellness')}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: '#7e5792' }}>{spaName || tr('Spa & Wellness')}</div>
                   <div className="text-xl font-bold font-serif truncate text-[#1a1208]">{propertyName}</div>
                   <div className="text-[12px] mb-2 text-[#3d3128]">{tr('Appointments · therapists · packages')}</div>
                   <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: '#7e5792' }}>{tr('Manage spa')} <ChevronRight size={15} /></div>
@@ -62445,9 +62459,12 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
 const TableBillModal = PostpaidInvoiceModal;
 
 // ─── THERAPIST DASHBOARD ─────────────────────────────────────────────────────
-const SPA_APPT_STATUSES = ['PENDING','CONFIRMED','CHECKED_IN','IN_PROGRESS','COMPLETED','CANCELLED','NO_SHOW'] as const;
+// The spa books appointments as BOOKED; this dashboard only knew PENDING, so a
+// booked appointment offered no action at all here.
+const SPA_APPT_STATUSES = ['BOOKED','PENDING','CONFIRMED','CHECKED_IN','IN_PROGRESS','COMPLETED','CANCELLED','NO_SHOW'] as const;
 type SpaApptStatus = typeof SPA_APPT_STATUSES[number];
 const STATUS_COLORS: Record<SpaApptStatus, string> = {
+  BOOKED:     'bg-yellow-100 text-yellow-800',
   PENDING:    'bg-yellow-100 text-yellow-800',
   CONFIRMED:  'bg-blue-100 text-blue-800',
   CHECKED_IN: 'bg-indigo-100 text-indigo-800',
@@ -62457,13 +62474,17 @@ const STATUS_COLORS: Record<SpaApptStatus, string> = {
   NO_SHOW:    'bg-gray-100 text-gray-700',
 };
 const NEXT_ACTIONS: Partial<Record<SpaApptStatus, { label: string; next: string; cls: string }>> = {
-  PENDING:    { label: 'Confirm',   next: 'confirm',   cls: 'bg-blue-600 text-white' },
-  CONFIRMED:  { label: 'Check-In',  next: 'check-in',  cls: 'bg-indigo-600 text-white' },
-  CHECKED_IN: { label: 'Complete',  next: 'complete',  cls: 'bg-green-600 text-white' },
+  BOOKED:      { label: 'Confirm',   next: 'confirm',   cls: 'bg-blue-600 text-white' },
+  PENDING:     { label: 'Confirm',   next: 'confirm',   cls: 'bg-blue-600 text-white' },
+  CONFIRMED:   { label: 'Check-In',  next: 'check-in',  cls: 'bg-indigo-600 text-white' },
+  CHECKED_IN:  { label: 'Start',     next: 'start',     cls: 'bg-purple-600 text-white' },
+  IN_PROGRESS: { label: 'Complete',  next: 'complete',  cls: 'bg-green-600 text-white' },
 };
 
 function TherapistDashboard({ restaurantId, token }: { restaurantId: string; token: string }) {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const toast = useToast();
+  // Today in India, not UTC: before 05:30 IST the UTC date is yesterday.
+  const todayStr = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
   const [date, setDate] = React.useState(todayStr);
   const [data, setData] = React.useState<{ therapist_id: string | null; appointments: any[] } | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -62484,9 +62505,11 @@ function TherapistDashboard({ restaurantId, token }: { restaurantId: string; tok
   const transition = async (aid: string, action: string) => {
     setBusy(b => ({ ...b, [aid]: true }));
     try {
-      await fetch(`/api/restaurant/${restaurantId}/spa/appointments/${aid}/${action}`, {
+      const r = await fetch(`/api/restaurant/${restaurantId}/spa/appointments/${aid}/${action}`, {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       });
+      // A refused move used to fail silently and simply reload.
+      if (!r.ok) { const j = await r.json().catch(() => ({})); toast.error(j?.error || 'Could not update the appointment'); }
       await load(date);
     } finally { setBusy(b => ({ ...b, [aid]: false })); }
   };
