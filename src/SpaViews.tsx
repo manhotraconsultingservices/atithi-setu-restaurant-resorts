@@ -273,6 +273,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.requires_room} onChange={e => setForm({ ...form, requires_room: e.target.checked })} /> Requires cabin</label>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.requires_therapist} onChange={e => setForm({ ...form, requires_therapist: e.target.checked })} /> Requires therapist</label>
             </div>
+            {edit && <SpaServiceSupplies restaurantId={restaurantId} token={token} serviceId={edit.id} />}
             <div className="flex justify-end gap-2 mt-5">
               <button className={BTN_GHOST} onClick={() => setShowForm(false)}>Cancel</button>
               <button className={BTN_PRIMARY} onClick={save}>Save</button>
@@ -287,6 +288,353 @@ function SpaCatalog({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 // RESOURCES (cabins + therapists + schedules + skills)
 // ════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════
+// TREATMENT RECORD (Phase 3) — add-ons and consumables of a treatment, finishing
+// a treatment, its record, and tracing a batch to the guests who received it.
+// ════════════════════════════════════════════════════════════════════════
+const SPA_OUTCOME_LABEL: Record<string, string> = { IMPROVED: 'Improved', NO_CHANGE: 'No change', WORSE: 'Worse', NOT_ASSESSED: 'Not assessed' };
+const spaTs = (v: any) => (v ? String(v).slice(0, 16).replace('T', ' ') : '—');
+
+/** A treatment's add-ons and the items it uses, edited in place. */
+function SpaServiceSupplies({ restaurantId, token, serviceId }: { restaurantId: string; token: string; serviceId: string }) {
+  const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_CATALOG');
+  const canDel = canDeleteTab('SPA_CATALOG');
+  const [addons, setAddons] = useState<any[]>([]);
+  const [cons, setCons] = useState<any[]>([]);
+  const [items, setItems] = useState<any[]>([]);
+  const [newAddon, setNewAddon] = useState({ name: '', extra_duration_min: '', extra_price: '' });
+  const [newCon, setNewCon] = useState({ ingredient_id: '', qty_per_service: '', is_variable: false, addon_id: '' });
+  const [err, setErr] = useState('');
+  const load = async () => {
+    try { setAddons(await api(`/spa/services/${serviceId}/addons`)); } catch (e: any) { setErr(e.message); }
+    try { setCons(await api(`/spa/services/${serviceId}/consumables`)); } catch (e: any) { setErr(e.message); }
+  };
+  useEffect(() => { load(); (async () => { try { setItems(await api('/spa/inventory')); } catch { /* the add form shows no items */ } })(); }, [serviceId]);
+  const run = async (fn: () => Promise<any>) => { setErr(''); try { await fn(); await load(); } catch (e: any) { setErr(e.message); } };
+  const addAddon = () => run(async () => {
+    if (!newAddon.name.trim()) throw new Error('Give the add-on a name.');
+    await api(`/spa/services/${serviceId}/addons`, { method: 'POST', body: JSON.stringify({ name: newAddon.name.trim(), extra_duration_min: Number(newAddon.extra_duration_min || 0), extra_price: Number(newAddon.extra_price || 0) }) });
+    setNewAddon({ name: '', extra_duration_min: '', extra_price: '' });
+  });
+  const addCon = () => run(async () => {
+    if (!newCon.ingredient_id) throw new Error('Choose the item used.');
+    await api(`/spa/services/${serviceId}/consumables`, { method: 'POST', body: JSON.stringify({ ingredient_id: newCon.ingredient_id, qty_per_service: Number(newCon.qty_per_service || 0), is_variable: newCon.is_variable, addon_id: newCon.addon_id || null }) });
+    setNewCon({ ingredient_id: '', qty_per_service: '', is_variable: false, addon_id: '' });
+  });
+  const unitOf = (id: string) => items.find((i: any) => i.id === id)?.unit || '';
+  return (
+    <div className="mt-5 space-y-4">
+      {err && <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{err}</p>}
+      <div className="rounded-xl border border-[#e8dccf] p-3">
+        <div className="text-xs font-bold text-[#3d3128] mb-2">Add-ons</div>
+        {addons.map((a: any) => (
+          <div key={a.id} className="flex items-center justify-between gap-2 py-1 text-xs border-b border-[#f0e9df] last:border-0">
+            <span><b>{a.name}</b> · +{a.extra_duration_min} min · +{money(a.extra_price)}</span>
+            {canEdit && <button className={BTN_GHOST} onClick={() => run(() => api(`/spa/addons/${a.id}`, { method: 'PATCH', body: JSON.stringify({ is_active: 0 }) }))}>Remove</button>}
+          </div>
+        ))}
+        {!addons.length && <p className="text-[11px] text-[#9c8e85]">No add-ons.</p>}
+        {canEdit && (
+          <div className="grid grid-cols-[1fr_5rem_5rem_auto] gap-2 mt-2">
+            <input className={INPUT} placeholder="Add-on, e.g. Herbal steam" value={newAddon.name} onChange={e => setNewAddon({ ...newAddon, name: e.target.value })} />
+            <input className={INPUT} type="number" min={0} placeholder="+min" value={newAddon.extra_duration_min} onChange={e => setNewAddon({ ...newAddon, extra_duration_min: e.target.value })} />
+            <input className={INPUT} type="number" min={0} placeholder="+₹" value={newAddon.extra_price} onChange={e => setNewAddon({ ...newAddon, extra_price: e.target.value })} />
+            <button className={BTN_GHOST} onClick={addAddon}><Plus size={13} /></button>
+          </div>
+        )}
+      </div>
+      <div className="rounded-xl border border-[#e8dccf] p-3">
+        <div className="text-xs font-bold text-[#3d3128] mb-1">Consumables</div>
+        <p className="text-[11px] text-[#6b5d52] mb-2">Pre-filled at Finish for the therapist to confirm. Mark an item as varying when the amount has to be entered every time.</p>
+        {cons.map((c: any) => (
+          <div key={c.id} className="grid grid-cols-[1fr_6rem_auto_auto] gap-2 items-center py-1 text-xs border-b border-[#f0e9df] last:border-0">
+            <span><b>{c.ingredient_name || c.ingredient_id}</b>{c.addon_name ? <span className="text-[#6b5d52]"> · with {c.addon_name}</span> : null}</span>
+            {canEdit
+              ? <input className={INPUT} type="number" min={0} step="any" defaultValue={c.qty_per_service} disabled={!!c.is_variable}
+                  onBlur={e => { const v = Number(e.target.value); if (v !== Number(c.qty_per_service)) run(() => api(`/spa/consumables/${c.id}`, { method: 'PATCH', body: JSON.stringify({ qty_per_service: v }) })); }} />
+              : <span className="tabular-nums">{c.is_variable ? 'varies' : `${c.qty_per_service} ${c.unit || c.ingredient_unit || ''}`}</span>}
+            <label className="flex items-center gap-1 text-[11px]"><input type="checkbox" disabled={!canEdit} checked={!!c.is_variable}
+              onChange={e => run(() => api(`/spa/consumables/${c.id}`, { method: 'PATCH', body: JSON.stringify({ is_variable: e.target.checked ? 1 : 0, ...(e.target.checked ? {} : { qty_per_service: Number(c.qty_per_service) > 0 ? Number(c.qty_per_service) : 1 }) }) }))} /> varies</label>
+            {canDel ? <button className={`${BTN} bg-rose-50 text-rose-600 hover:bg-rose-100`} aria-label="Remove item" onClick={() => run(() => api(`/spa/consumables/${c.id}`, { method: 'DELETE' }))}><Trash2 size={12} /></button> : <span />}
+          </div>
+        ))}
+        {!cons.length && <p className="text-[11px] text-[#9c8e85]">No consumables — Finish will draw no stock for this treatment.</p>}
+        {canEdit && (
+          <div className="grid grid-cols-2 sm:grid-cols-[1fr_6rem_auto_1fr_auto] gap-2 mt-2 items-center">
+            <select className={INPUT} value={newCon.ingredient_id} onChange={e => setNewCon({ ...newCon, ingredient_id: e.target.value })}>
+              <option value="">Item used…</option>
+              {items.map((i: any) => <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}
+            </select>
+            <input className={INPUT} type="number" min={0} step="any" placeholder={newCon.is_variable ? 'varies' : `qty ${unitOf(newCon.ingredient_id)}`} disabled={newCon.is_variable} value={newCon.qty_per_service} onChange={e => setNewCon({ ...newCon, qty_per_service: e.target.value })} />
+            <label className="flex items-center gap-1 text-[11px]"><input type="checkbox" checked={newCon.is_variable} onChange={e => setNewCon({ ...newCon, is_variable: e.target.checked })} /> varies</label>
+            <select className={INPUT} value={newCon.addon_id} onChange={e => setNewCon({ ...newCon, addon_id: e.target.value })}>
+              <option value="">For the treatment</option>
+              {addons.map((a: any) => <option key={a.id} value={a.id}>With {a.name}</option>)}
+            </select>
+            <button className={BTN_GHOST} onClick={addCon}><Plus size={13} /></button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Finishing a treatment: who performed it, the cabin used, what it used —
+ *  pre-filled from the treatment's standard, with the batch to draw first — and
+ *  notes, outcome and follow-up. Used by Appointments and the therapist's dashboard. */
+export function SpaFinishDialog({ restaurantId, token, appt, onClose, onDone }: { restaurantId: string; token: string; appt: any; onClose: () => void; onDone: () => void }) {
+  const api = makeApi(restaurantId, token);
+  const [plan, setPlan] = useState<any>(null);
+  const [loadError, setLoadError] = useState('');
+  const [therapists, setTherapists] = useState<any[]>([]);
+  const [cabins, setCabins] = useState<any[]>([]);
+  const [performers, setPerformers] = useState<string[]>([]);
+  const [resourceId, setResourceId] = useState('');
+  const [lines, setLines] = useState<Record<string, { qty: string; batch_id: string }>>({});
+  const [outcome, setOutcome] = useState('');
+  const [notes, setNotes] = useState('');
+  const [followUp, setFollowUp] = useState('');
+  const [followDate, setFollowDate] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const p = await api(`/spa/appointments/${appt.id}/finish-plan`);
+        setPlan(p);
+        setPerformers(p.booked_therapist_ids || []);
+        setResourceId(p.booked_resource_id || '');
+        setLines(Object.fromEntries((p.consumables || []).map((c: any) => [c.ingredient_id, { qty: c.is_variable ? '' : String(c.standard_qty), batch_id: '' }])));
+      } catch (e: any) { setLoadError(e.message || 'This treatment could not be loaded.'); }
+      try { setTherapists(await api('/spa/therapists')); } catch { /* booked therapists still named */ }
+      try { setCabins(await api('/spa/resources')); } catch { /* cabin list stays empty */ }
+    })();
+  }, [appt.id]);
+  const shown = therapists.filter((t: any) => Number(t.is_active ?? 1) === 1 || performers.includes(t.id));
+  const toggle = (id: string) => setPerformers(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id]);
+  const submit = async () => {
+    setError('');
+    if (!performers.length) { setError('Choose at least one therapist who performed the treatment.'); return; }
+    for (const c of (plan?.consumables || [])) {
+      if (c.is_variable && !(lines[c.ingredient_id]?.qty ?? '').toString().trim()) { setError(`Enter how much ${c.name} was used.`); return; }
+    }
+    setBusy(true);
+    try {
+      await api(`/spa/appointments/${appt.id}/complete`, { method: 'POST', body: JSON.stringify({
+        performers, resource_id: resourceId || null, outcome: outcome || null, notes, follow_up: followUp, follow_up_date: followDate || null,
+        consumables: (plan?.consumables || []).map((c: any) => {
+          const l = lines[c.ingredient_id] || { qty: '', batch_id: '' };
+          return { ingredient_id: c.ingredient_id, qty: String(l.qty).trim() === '' ? undefined : Number(l.qty), batch_id: l.batch_id || undefined };
+        }),
+      }) });
+      onDone();
+    } catch (e: any) { setError(e.message || 'The treatment could not be finished.'); } finally { setBusy(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <h3 className="text-xl font-bold font-serif mb-1 text-[#14110c]">Finish treatment</h3>
+        <p className="text-xs text-[#6b5d52] mb-4">{appt.service_name} · {appt.client_name || 'Guest'}{plan?.started_at ? ` · started ${spaTs(plan.started_at).slice(11)}` : ''}</p>
+        {loadError ? <p className="text-sm text-rose-700 mb-3">{loadError}</p> : !plan ? <p className="text-sm text-[#6b5d52] mb-3">Loading…</p> : (
+          <>
+            <label className={LABEL}>Performed by</label>
+            <div className="flex flex-wrap gap-1.5 mb-3">
+              {shown.map((t: any) => (
+                <button key={t.id} type="button" onClick={() => toggle(t.id)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${performers.includes(t.id) ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>{t.display_name}</button>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div><label className={LABEL}>Cabin used</label>
+                <select className={INPUT} value={resourceId} onChange={e => setResourceId(e.target.value)}>
+                  <option value="">No cabin</option>
+                  {cabins.filter((c: any) => Number(c.is_active ?? 1) === 1 || c.id === resourceId).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select></div>
+              <div><label className={LABEL}>Outcome</label>
+                <select className={INPUT} value={outcome} onChange={e => setOutcome(e.target.value)}>
+                  <option value="">Not recorded</option>
+                  {Object.entries(SPA_OUTCOME_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select></div>
+            </div>
+            <label className={LABEL}>Consumables used</label>
+            {!(plan.consumables || []).length ? <p className="text-[11px] text-[#9c8e85] mb-3">This treatment has no consumables set up, so no stock is drawn.</p> : (
+              <div className="overflow-x-auto mb-3">
+                <table className="w-full text-xs">
+                  <thead><tr className="text-left text-[#6b5d52] border-b border-[#e8dccf]"><th className="py-1.5 pr-2">Item</th><th className="py-1.5 pr-2 text-right">Standard</th><th className="py-1.5 pr-2">Used</th><th className="py-1.5">Draw first from</th></tr></thead>
+                  <tbody>
+                    {plan.consumables.map((c: any) => {
+                      const l = lines[c.ingredient_id] || { qty: '', batch_id: '' };
+                      return (
+                        <tr key={c.ingredient_id} className="border-b border-[#f0e9df] align-top">
+                          <td className="py-1.5 pr-2 font-semibold">{c.name}
+                            {c.is_variable && <span className="block text-[10px] font-normal text-amber-700">varies — enter the amount</span>}
+                            {c.unit_problem && <span className="block text-[10px] font-normal text-rose-700">{c.unit_problem}</span>}</td>
+                          <td className="py-1.5 pr-2 text-right tabular-nums whitespace-nowrap">{c.is_variable && !c.standard_qty ? '—' : `${c.standard_qty} ${c.unit}`}</td>
+                          <td className="py-1.5 pr-2"><div className="flex items-center gap-1">
+                            <input className={`${INPUT} w-24`} type="number" min={0} step="any" value={l.qty} onChange={e => setLines({ ...lines, [c.ingredient_id]: { ...l, qty: e.target.value } })} />
+                            <span className="text-[#6b5d52]">{c.unit}</span></div></td>
+                          <td className="py-1.5">
+                            <select className={INPUT} value={l.batch_id} onChange={e => setLines({ ...lines, [c.ingredient_id]: { ...l, batch_id: e.target.value } })}>
+                              <option value="">{(c.batches || []).length ? 'Oldest batch first' : 'No batch in stock'}</option>
+                              {(c.batches || []).map((bt: any) => <option key={bt.id} value={bt.id}>{bt.batch_number || 'Batch'} · {Number(bt.remaining_qty)} {c.unit} left{bt.expiry_date ? ` · exp ${String(bt.expiry_date).slice(0, 10)}` : ''}</option>)}
+                            </select></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <label className={LABEL}>Notes</label>
+            <textarea className={`${INPUT} mb-3`} rows={2} value={notes} onChange={e => setNotes(e.target.value)} placeholder="How the treatment went; anything to note for next time" />
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <div className="col-span-2"><label className={LABEL}>Follow-up advice</label><input className={INPUT} value={followUp} onChange={e => setFollowUp(e.target.value)} placeholder="e.g. Rest; repeat in 3 days" /></div>
+              <div><label className={LABEL}>Follow-up on</label><input className={INPUT} type="date" value={followDate} onChange={e => setFollowDate(e.target.value)} /></div>
+            </div>
+          </>
+        )}
+        {error && <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 mb-3">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button className={BTN_GHOST} onClick={onClose}>Cancel</button>
+          <button className={BTN_PRIMARY} disabled={busy || !plan} onClick={submit}><Check size={14} /> {busy ? 'Finishing…' : 'Finish treatment'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The record of a finished treatment; its notes, outcome and follow-up can be put right. */
+function SpaSessionDialog({ restaurantId, token, appt, onClose }: { restaurantId: string; token: string; appt: any; onClose: () => void }) {
+  const api = makeApi(restaurantId, token);
+  const canEdit = canWriteTab('SPA_APPOINTMENTS');
+  const [s, setS] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const [form, setForm] = useState({ notes: '', outcome: '', follow_up: '', follow_up_date: '' });
+  const [note, setNote] = useState('');
+  const load = async () => {
+    try {
+      const r = await api(`/spa/appointments/${appt.id}/session`);
+      setS(r); setForm({ notes: r.notes || '', outcome: r.outcome || '', follow_up: r.follow_up || '', follow_up_date: r.follow_up_date || '' });
+    } catch (e: any) { setErr(e.message); }
+  };
+  useEffect(() => { load(); }, [appt.id]);
+  const save = async () => {
+    setErr(''); setNote('');
+    try { await api(`/spa/appointments/${appt.id}/session`, { method: 'PUT', body: JSON.stringify({ ...form, outcome: form.outcome || null, follow_up_date: form.follow_up_date || null }) }); setNote('Saved'); await load(); }
+    catch (e: any) { setErr(e.message); }
+  };
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <h3 className="text-xl font-bold font-serif mb-1 text-[#14110c]">Treatment record</h3>
+        <p className="text-xs text-[#6b5d52] mb-4">{appt.service_name} · {appt.client_name || 'Guest'}</p>
+        {!s ? <p className="text-sm text-[#6b5d52]">{err || 'Loading…'}</p> : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[12px] mb-4">
+              <div><span className="text-[#9c8e85] block">Started</span><b>{spaTs(s.started_at)}</b></div>
+              <div><span className="text-[#9c8e85] block">Finished</span><b>{spaTs(s.finished_at)}</b></div>
+              <div><span className="text-[#9c8e85] block">Cabin used</span><b>{s.resource_name || '—'}</b></div>
+              <div><span className="text-[#9c8e85] block">Performed by</span><b>{(s.performers || []).map((p: any) => `${p.display_name || p.therapist_id}${p.role === 'ASSIST' ? ' (assisting)' : ''}`).join(', ') || '—'}</b></div>
+            </div>
+            <div className="text-xs font-bold text-[#3d3128] mb-1">Consumables used</div>
+            {!(s.consumables || []).length ? <p className="text-[11px] text-[#9c8e85] mb-4">None.</p> : (
+              <div className="overflow-x-auto mb-4">
+                <table className="w-full text-xs">
+                  <thead><tr className="text-left text-[#6b5d52] border-b border-[#e8dccf]"><th className="py-1.5 pr-2">Item</th><th className="py-1.5 pr-2 text-right">Standard</th><th className="py-1.5 pr-2 text-right">Used</th><th className="py-1.5">Batches</th></tr></thead>
+                  <tbody>
+                    {s.consumables.map((c: any) => (
+                      <tr key={c.ingredient_id} className="border-b border-[#f0e9df]">
+                        <td className="py-1.5 pr-2 font-semibold">{c.ingredient_name || c.ingredient_id}</td>
+                        <td className="py-1.5 pr-2 text-right tabular-nums">{Number(c.standard_qty)} {c.unit}</td>
+                        <td className={`py-1.5 pr-2 text-right tabular-nums ${Number(c.actual_qty) !== Number(c.standard_qty) ? 'text-amber-700 font-semibold' : ''}`}>{Number(c.actual_qty)} {c.unit}</td>
+                        <td className="py-1.5 text-[#6b5d52]">{(c.batches || []).map((b: any) => `${b.batch_number || (b.batch_id ? 'batch' : 'no batch')} ${Number(b.qty)}`).join(' · ') || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {(s.tips || []).length > 0 && <p className="text-xs text-[#3d3128] mb-4">Tip shared: {s.tips.map((t: any) => `${t.display_name || t.therapist_id} ${money(t.amount)}`).join(' · ')}</p>}
+            <label className={LABEL}>Notes</label>
+            <textarea className={`${INPUT} mb-3`} rows={2} disabled={!canEdit} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+              <div><label className={LABEL}>Outcome</label>
+                <select className={INPUT} disabled={!canEdit} value={form.outcome} onChange={e => setForm({ ...form, outcome: e.target.value })}>
+                  <option value="">Not recorded</option>
+                  {Object.entries(SPA_OUTCOME_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select></div>
+              <div className="sm:col-span-2"><label className={LABEL}>Follow-up advice</label><input className={INPUT} disabled={!canEdit} value={form.follow_up} onChange={e => setForm({ ...form, follow_up: e.target.value })} /></div>
+              <div><label className={LABEL}>Follow-up on</label><input className={INPUT} type="date" disabled={!canEdit} value={form.follow_up_date} onChange={e => setForm({ ...form, follow_up_date: e.target.value })} /></div>
+            </div>
+            {err && <p className="text-xs text-rose-700 mb-2">{err}</p>}
+          </>
+        )}
+        <div className="flex justify-end items-center gap-2">
+          {note && <span className="text-[11px] font-semibold text-emerald-700 mr-auto">{note}</span>}
+          <button className={BTN_GHOST} onClick={onClose}>Close</button>
+          {s && canEdit && <button className={BTN_PRIMARY} onClick={save}><Check size={14} /> Save</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Trace a batch of a spa item to every treatment and guest it went into. */
+function SpaBatchTrace({ restaurantId, token, items }: { restaurantId: string; token: string; items: any[] }) {
+  const api = makeApi(restaurantId, token);
+  const [itemId, setItemId] = useState('');
+  const [batches, setBatches] = useState<any[]>([]);
+  const [trace, setTrace] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const pickItem = async (id: string) => {
+    setItemId(id); setTrace(null); setErr(''); setBatches([]);
+    if (!id) return;
+    try { const r = await api(`/spa/batch-trace?ingredient_id=${id}`); setBatches(r.batches || []); } catch (e: any) { setErr(e.message); }
+  };
+  const openBatch = async (bid: string) => { setErr(''); try { setTrace(await api(`/spa/batch-trace?batch_id=${bid}`)); } catch (e: any) { setErr(e.message); } };
+  return (
+    <div className={`${CARD} mt-4`}>
+      <h3 className="font-bold text-[#14110c] mb-1">Trace a batch</h3>
+      <p className="text-xs text-[#6b5d52] mb-3">Pick an item to see its batches, then open a batch to list every treatment and guest it went into — for a recall or a guest's reaction.</p>
+      <select className={`${INPUT} max-w-md mb-3`} value={itemId} onChange={e => pickItem(e.target.value)}>
+        <option value="">Choose an item…</option>
+        {items.map((i: any) => <option key={i.id} value={i.id}>{i.name}</option>)}
+      </select>
+      {err && <p className="text-xs text-rose-700 mb-2">{err}</p>}
+      {itemId && (
+        <DataTable data={batches} rowKey={(r: any) => r.id} exportFilename="spa-item-batches" emptyMessage="No batches received for this item."
+          columns={[
+            { key: 'batch_number', label: 'Batch', render: (r: any) => <span className="font-semibold">{r.batch_number || '—'}</span> },
+            { key: 'supplier_name', label: 'Supplier' },
+            { key: 'received_at', label: 'Received', render: (r: any) => String(r.received_at || '').slice(0, 10), exportValue: (r: any) => String(r.received_at || '').slice(0, 10) },
+            { key: 'expiry_date', label: 'Expiry', render: (r: any) => r.expiry_date ? String(r.expiry_date).slice(0, 10) : '—', exportValue: (r: any) => r.expiry_date ? String(r.expiry_date).slice(0, 10) : '' },
+            { key: 'qty_received', label: 'Received qty', render: (r: any) => `${Number(r.qty_received)} ${r.unit}` },
+            { key: 'remaining_qty', label: 'Left', render: (r: any) => `${Number(r.remaining_qty)} ${r.unit}` },
+            { key: 'used_on_treatments', label: 'Used on treatments', render: (r: any) => `${Number(r.used_on_treatments)} ${r.unit}` },
+            { key: 'treatments', label: 'Treatments' },
+            { key: '_t', label: '', noExport: true, render: (r: any) => <button className={BTN_GHOST} onClick={() => openBatch(r.id)}>Trace</button> },
+          ]} />
+      )}
+      {trace && (
+        <div className="mt-4">
+          <p className="text-sm font-semibold text-[#14110c] mb-2">Batch {trace.batch?.batch_number || trace.batch?.id} of {trace.batch?.ingredient_name}: {trace.treatments} treatment(s), {trace.guests} guest(s)</p>
+          <DataTable data={trace.uses || []} rowKey={(r: any, i: number) => `${r.appointment_id}-${i}`} exportFilename={`batch-trace-${trace.batch?.batch_number || trace.batch?.id}`} emptyMessage="No treatment has used this batch."
+            columns={[
+              { key: 'start_at', label: 'When', render: (r: any) => spaTs(r.start_at), exportValue: (r: any) => spaTs(r.start_at) },
+              { key: 'client_name', label: 'Guest', render: (r: any) => <span className="font-semibold">{r.client_name || 'Guest'}</span> },
+              { key: 'client_phone', label: 'Phone' },
+              { key: 'service_name', label: 'Treatment' },
+              { key: 'therapist_name', label: 'Therapist' },
+              { key: 'qty', label: 'Used', render: (r: any) => `${Number(r.qty)} ${trace.batch?.ingredient_unit || ''}` },
+              { key: 'status', label: 'Status', render: (r: any) => <Pill status={r.status} /> },
+            ]} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 const SPA_LEVEL_LABEL: Record<string, string> = { TRAINEE: 'Trainee', QUALIFIED: 'Qualified', SENIOR: 'Senior' };
 const SPA_LEVEL_RANK: Record<string, number> = { TRAINEE: 1, QUALIFIED: 2, SENIOR: 3 };
 const SPA_GENDER_LABEL: Record<string, string> = { FEMALE: 'Female', MALE: 'Male', OTHER: 'Other' };
@@ -919,6 +1267,9 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   const [coState, setCoState] = useState<any>({ use_package: false, apply_membership: false, tip_amount: '', payment_method: 'CASH' });
   const [coResult, setCoResult] = useState<any>(null);
   const [history, setHistory] = useState<any>(null); // appointment History (audit log) overlay
+  // Finishing a treatment, and the record of a finished one.
+  const [finishAppt, setFinishAppt] = useState<any>(null);
+  const [sessionAppt, setSessionAppt] = useState<any>(null);
 
   const load = async (q?: string) => {
     setLoading(true);
@@ -1202,10 +1553,11 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                   {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'check-in')}>Check-in</button>}
                   {/* A treatment starts only once the guest has checked in, and completes only after that. */}
                   {canEdit && r.status === 'CHECKED_IN' && <button className={BTN_GHOST} onClick={() => transition(r, 'start')}>Start</button>}
-                  {canEdit && ['CHECKED_IN', 'IN_PROGRESS'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'complete')}><Check size={12} /> Complete</button>}
+                  {canEdit && ['CHECKED_IN', 'IN_PROGRESS'].includes(r.status) && <button className={BTN_GHOST} onClick={() => setFinishAppt(r)}><Check size={12} /> Finish</button>}
                   {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} title="The guest did not arrive" onClick={() => transition(r, 'no-show')}>No-show</button>}
                   {canEdit && r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH' }); }}>Checkout</button>}
                   {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={12} /> Invoice</button>}
+                  {r.status === 'COMPLETED' && <button className={BTN_GHOST} title="What happened in this treatment" onClick={() => setSessionAppt(r)}>Record</button>}
                   {canEdit && ['BOOKED', 'CONFIRMED', 'CHECKED_IN'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} title="Cancel appointment" onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
                   <button className={BTN_GHOST} title="Audit log — who changed this appointment" onClick={() => setHistory({ id: r.id, meta: { title: r.service_name || r.id, subtitle: [r.status, r.client_name].filter(Boolean).join(' · '), facts: [['Service', r.service_name], ['Status', r.status], ['Client', r.client_name], ['Time', `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}`], ['Therapist', r.therapist_name], ['Cabin', r.resource_name]] } })}><History size={12} /></button>
                 </div>
@@ -1320,6 +1672,9 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
         </div>
       )}
 
+      {finishAppt && <SpaFinishDialog restaurantId={restaurantId} token={token} appt={finishAppt} onClose={() => setFinishAppt(null)} onDone={() => { setFinishAppt(null); load(); }} />}
+      {sessionAppt && <SpaSessionDialog restaurantId={restaurantId} token={token} appt={sessionAppt} onClose={() => setSessionAppt(null)} />}
+
       {/* Checkout modal */}
       {coAppt && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setCoAppt(null)}>
@@ -1333,7 +1688,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                   <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={coState.apply_membership} onChange={e => setCoState({ ...coState, apply_membership: e.target.checked })} /> Apply membership discount</label>
                   <div className="grid grid-cols-2 gap-2">
                     <div><label className={LABEL}>Discount (₹)</label><input className={INPUT} type="number" min={0} value={coState.discount} onChange={e => setCoState({ ...coState, discount: e.target.value })} placeholder="0" /></div>
-                    <div><label className={LABEL}>Tip (₹)</label><input className={INPUT} type="number" min={0} value={coState.tip_amount} onChange={e => setCoState({ ...coState, tip_amount: e.target.value })} placeholder="0" /></div>
+                    <div><label className={LABEL}>Tip (₹) <span className="font-normal text-[#9d8b7e]">shared by the therapists</span></label><input className={INPUT} type="number" min={0} value={coState.tip_amount} onChange={e => setCoState({ ...coState, tip_amount: e.target.value })} placeholder="0" /></div>
                   </div>
                   <div><label className={LABEL}>Promo code (optional)</label><input className={`${INPUT} uppercase`} value={coState.promo_code} onChange={e => setCoState({ ...coState, promo_code: e.target.value.toUpperCase() })} placeholder="e.g. WELCOME10" /></div>
                   <div><label className={LABEL}>Payment method</label>
@@ -1592,6 +1947,7 @@ function SpaInventory({ restaurantId, token }: Props) {
         ]} />
         <p className="text-xs text-[#6b5d52] mt-3">Spa products flow through the shared Supply Chain — raise a PO under <b>Procurement &amp; AP</b> to restock.</p>
       </div>
+      <SpaBatchTrace restaurantId={restaurantId} token={token} items={items} />
     </div>
   );
 }

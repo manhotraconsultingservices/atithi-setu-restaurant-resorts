@@ -6,7 +6,7 @@ import { AllReportsHub } from './components/AllReportsHub';
 import { useToast } from './components/Toast';
 import { useConfirm } from './components/ConfirmDialog';
 import { usePaymentDialog } from './components/PaymentDialog';
-import { SpaModule, SpaBookingPage } from './SpaViews';
+import { SpaModule, SpaBookingPage, SpaFinishDialog } from './SpaViews';
 import { HousekeepingModule } from './Housekeeping';
 import { ChecklistTemplates } from './ChecklistTemplates';
 import { PrintTemplateStudio, renderKot as renderKotTemplate, renderInvoice as renderInvoiceTemplate, DEFAULT_KOT as KOT_TEMPLATE_DEFAULT, DEFAULT_INVOICE as INVOICE_TEMPLATE_DEFAULT, PTS_CSS } from './PrintTemplateStudio';
@@ -62487,6 +62487,8 @@ function TherapistDashboard({ restaurantId, token }: { restaurantId: string; tok
   const todayStr = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
   const [date, setDate] = React.useState(todayStr);
   const [data, setData] = React.useState<{ therapist_id: string | null; appointments: any[] } | null>(null);
+  // Finishing records who performed it, the cabin used and what it used.
+  const [finishFor, setFinishFor] = React.useState<any>(null);
   const [loading, setLoading] = React.useState(false);
   const [busy, setBusy] = React.useState<Record<string, boolean>>({});
 
@@ -62567,7 +62569,7 @@ function TherapistDashboard({ restaurantId, token }: { restaurantId: string; tok
             </div>
             {action && (
               <button
-                onClick={() => transition(a.id, action.next)}
+                onClick={() => action.next === 'complete' ? setFinishFor(a) : transition(a.id, action.next)}
                 disabled={busy[a.id]}
                 className={`shrink-0 px-3 py-1.5 rounded-lg text-sm font-medium disabled:opacity-50 ${action.cls}`}
               >
@@ -62577,6 +62579,7 @@ function TherapistDashboard({ restaurantId, token }: { restaurantId: string; tok
           </div>
         );
       })}
+      {finishFor && <SpaFinishDialog restaurantId={restaurantId} token={token} appt={finishFor} onClose={() => setFinishFor(null)} onDone={() => { setFinishFor(null); load(date); }} />}
     </div>
   );
 }

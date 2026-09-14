@@ -3033,14 +3033,16 @@ async function getFolioOutstanding(tenantDb: DbInterface, folioId: string): Prom
   if (!folio) return null;
   // Folio line-items (room nights, F&B, services, adjustments, taxes).
   // Exclude PAYMENT type (those live in folio_payments, not here).
+  // No is_voided filter: folio_entries has no such column (voiding is a flag on
+  // folio_payments; an entry is undone by a reversal line). The filter made the
+  // query fail, and the swallowed error returned every folio with no lines.
   const entries: any[] = await tenantDb.query(
     `SELECT * FROM folio_entries
      WHERE folio_id = ?
        AND entry_type NOT IN ('PAYMENT')
-       AND (is_voided IS NULL OR is_voided = 0)
      ORDER BY created_at ASC`,
     [folioId]
-  ).catch(() => []);
+  ).catch((e: any) => { console.error('[folio] lines could not be read:', folioId, e?.message || e); return []; });
   const payments: any[] = await tenantDb.query(
     "SELECT * FROM folio_payments WHERE folio_id = ? ORDER BY recorded_at",
     [folioId]
@@ -33623,8 +33625,39 @@ ${data.tenant.name}`;
          VALUES (?, ?, ?, ?, ?, ?, 1)`,
         [id, req.params.sid, b.name, Number(b.extra_duration_min || 0), Number(b.extra_price || 0), Number(b.gst_percent ?? 18)]
       );
+      writeObjectAudit(db, req, { objectType: 'SPA_SERVICE', objectId: req.params.sid, action: 'ADDON_ADDED', summary: `Add-on "${b.name}" added` }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_service_addons WHERE id = ?", [id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to create add-on" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/addons/:adid", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const before: any = await db.get("SELECT * FROM spa_service_addons WHERE id = ?", [req.params.adid]);
+      if (!before) return res.status(404).json({ error: "Add-on not found" });
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      if (b.name !== undefined) {
+        const n = String(b.name || '').trim();
+        if (!n) return res.status(400).json({ error: "Give the add-on a name.", code: 'NAME_REQUIRED' });
+        fields.push('name = ?'); vals.push(n.slice(0, 120));
+      }
+      for (const k of ['extra_duration_min', 'extra_price', 'gst_percent']) {
+        if (b[k] !== undefined) {
+          const n = Number(b[k]);
+          if (!Number.isFinite(n) || n < 0 || (k === 'gst_percent' && n > 28)) return res.status(400).json({ error: `${k === 'extra_duration_min' ? 'Extra minutes' : k === 'extra_price' ? 'Extra price' : 'GST %'} is not valid.`, code: 'VALUE_INVALID' });
+          fields.push(`${k} = ?`); vals.push(k === 'extra_duration_min' ? Math.round(n) : n);
+        }
+      }
+      if (b.is_active !== undefined) { fields.push('is_active = ?'); vals.push(b.is_active ? 1 : 0); }
+      if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      await db.run(`UPDATE spa_service_addons SET ${fields.join(', ')} WHERE id = ?`, [...vals, before.id]);
+      const after: any = await db.get("SELECT * FROM spa_service_addons WHERE id = ?", [before.id]);
+      writeObjectAudit(db, req, { objectType: 'SPA_SERVICE', objectId: before.service_id, action: 'ADDON_UPDATED', summary: `Add-on "${after.name}" updated`, before, after }).catch(() => {});
+      res.json(after);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update add-on" }); }
   });
 
   // service consumables (supply-chain bridge → ingredient_id)
@@ -33634,9 +33667,10 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query(
-        `SELECT c.*, i.name AS ingredient_name, i.unit AS ingredient_unit, i.current_stock_qty
+        `SELECT c.*, i.name AS ingredient_name, i.unit AS ingredient_unit, i.current_stock_qty, ad.name AS addon_name
            FROM spa_service_consumables c LEFT JOIN ingredients i ON i.id = c.ingredient_id
-          WHERE c.service_id = ?`, [req.params.sid]);
+           LEFT JOIN spa_service_addons ad ON ad.id = c.addon_id
+          WHERE c.service_id = ? ORDER BY ad.name NULLS FIRST, i.name`, [req.params.sid]);
       res.json(rows);
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch consumables" }); }
   });
@@ -33648,11 +33682,31 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       if (!b.ingredient_id) return res.status(400).json({ error: "ingredient_id is required" });
+      const svcRow: any = await db.get("SELECT id, name FROM spa_services WHERE id = ?", [req.params.sid]);
+      if (!svcRow) return res.status(404).json({ error: "Service not found" });
+      const ing: any = await db.get("SELECT id, name, unit FROM ingredients WHERE id = ?", [b.ingredient_id]);
+      if (!ing) return res.status(400).json({ error: "That item is not in inventory.", code: 'ITEM_UNKNOWN' });
+      const qtyPer = Number(b.qty_per_service || 0);
+      const variable = b.is_variable ? 1 : 0;
+      if (!Number.isFinite(qtyPer) || qtyPer < 0) return res.status(400).json({ error: "The quantity per treatment cannot be negative.", code: 'QTY_INVALID' });
+      if (!variable && !(qtyPer > 0)) return res.status(400).json({ error: "Give the standard quantity used per treatment, or mark the item as varying.", code: 'QTY_REQUIRED' });
+      const unitIn = b.unit ? String(b.unit) : null;
+      if (unitIn && ing.unit && unitIn !== String(ing.unit) && convertQty(1, unitIn, String(ing.unit)) == null) {
+        return res.status(400).json({ error: `${ing.name} is stocked in ${ing.unit}; ${unitIn} cannot be converted to it.`, code: 'UNIT_INVALID' });
+      }
+      let addonId: string | null = null;
+      if (b.addon_id) {
+        const ad: any = await db.get("SELECT id FROM spa_service_addons WHERE id = ? AND service_id = ?", [b.addon_id, req.params.sid]);
+        if (!ad) return res.status(400).json({ error: "That add-on is not one of this treatment's.", code: 'ADDON_UNKNOWN' });
+        addonId = ad.id;
+      }
       const id = mkSpaId('SPACON');
       await db.run(
-        `INSERT INTO spa_service_consumables (id, service_id, ingredient_id, qty_per_service, unit) VALUES (?, ?, ?, ?, ?)`,
-        [id, req.params.sid, b.ingredient_id, Number(b.qty_per_service || 0), b.unit || null]
+        `INSERT INTO spa_service_consumables (id, service_id, ingredient_id, qty_per_service, unit, addon_id, is_variable) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, req.params.sid, b.ingredient_id, qtyPer, unitIn, addonId, variable]
       );
+      writeObjectAudit(db, req, { objectType: 'SPA_SERVICE', objectId: req.params.sid, action: 'CONSUMABLE_ADDED',
+        summary: `"${svcRow.name}" uses ${variable ? 'a varying amount of' : `${qtyPer} ${unitIn || ing.unit || ''}`} ${ing.name}${addonId ? ' (with its add-on)' : ''}` }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_service_consumables WHERE id = ?", [id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to add consumable" }); }
   });
@@ -33662,9 +33716,54 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
+      const gone: any = await db.get(
+        `SELECT c.*, i.name AS ing_name FROM spa_service_consumables c LEFT JOIN ingredients i ON i.id = c.ingredient_id WHERE c.id = ?`, [req.params.cid]).catch(() => null);
       await db.run("DELETE FROM spa_service_consumables WHERE id = ?", [req.params.cid]);
+      if (gone) writeObjectAudit(db, req, { objectType: 'SPA_SERVICE', objectId: gone.service_id, action: 'CONSUMABLE_REMOVED', summary: `${gone.ing_name || 'An item'} no longer used`, before: gone }).catch(() => {});
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to remove consumable" }); }
+  });
+
+  // A consumable's standard quantity, unit, add-on, or whether it varies.
+  app.patch("/api/restaurant/:id/spa/consumables/:cid", authenticate, spaStaff, requireTabAction('SPA_CATALOG', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const before: any = await db.get(
+        `SELECT c.*, i.name AS ing_name, i.unit AS ing_unit FROM spa_service_consumables c LEFT JOIN ingredients i ON i.id = c.ingredient_id WHERE c.id = ?`, [req.params.cid]);
+      if (!before) return res.status(404).json({ error: "Consumable not found" });
+      const b = req.body || {};
+      const next: any = { qty_per_service: Number(before.qty_per_service || 0), unit: before.unit || null, is_variable: Number(before.is_variable || 0), addon_id: before.addon_id || null };
+      if (b.qty_per_service !== undefined) {
+        const n = Number(b.qty_per_service);
+        if (!Number.isFinite(n) || n < 0) return res.status(400).json({ error: "The quantity per treatment cannot be negative.", code: 'QTY_INVALID' });
+        next.qty_per_service = n;
+      }
+      if (b.unit !== undefined) {
+        const u = b.unit ? String(b.unit) : null;
+        if (u && before.ing_unit && u !== String(before.ing_unit) && convertQty(1, u, String(before.ing_unit)) == null) {
+          return res.status(400).json({ error: `${before.ing_name} is stocked in ${before.ing_unit}; ${u} cannot be converted to it.`, code: 'UNIT_INVALID' });
+        }
+        next.unit = u;
+      }
+      if (b.is_variable !== undefined) next.is_variable = b.is_variable ? 1 : 0;
+      if (b.addon_id !== undefined) {
+        if (b.addon_id) {
+          const ad: any = await db.get("SELECT id FROM spa_service_addons WHERE id = ? AND service_id = ?", [b.addon_id, before.service_id]);
+          if (!ad) return res.status(400).json({ error: "That add-on is not one of this treatment's.", code: 'ADDON_UNKNOWN' });
+          next.addon_id = ad.id;
+        } else next.addon_id = null;
+      }
+      if (!next.is_variable && !(next.qty_per_service > 0)) return res.status(400).json({ error: "Give the standard quantity used per treatment, or mark the item as varying.", code: 'QTY_REQUIRED' });
+      await db.run("UPDATE spa_service_consumables SET qty_per_service = ?, unit = ?, is_variable = ?, addon_id = ? WHERE id = ?",
+        [next.qty_per_service, next.unit, next.is_variable, next.addon_id, before.id]);
+      const after: any = await db.get("SELECT * FROM spa_service_consumables WHERE id = ?", [before.id]);
+      writeObjectAudit(db, req, { objectType: 'SPA_SERVICE', objectId: before.service_id, action: 'CONSUMABLE_UPDATED',
+        summary: `${before.ing_name || 'Item'}: ${next.is_variable ? 'varies per treatment' : `${next.qty_per_service} ${next.unit || before.ing_unit || ''} per treatment`}`,
+        before: { qty_per_service: before.qty_per_service, unit: before.unit, is_variable: before.is_variable, addon_id: before.addon_id }, after: next }).catch(() => {});
+      res.json(after);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update consumable" }); }
   });
 
   // ─── RESOURCES (cabins) + blocks ───────────────────────────────────────────
@@ -34711,6 +34810,19 @@ ${data.tenant.name}`;
         const r: any = await db.get("SELECT id, name FROM spa_resources WHERE id = ?", [a.resource_id]).catch(() => null);
         if (r) groups.push({ group: 'Cabin', items: [{ type: 'Cabin', id: r.id, label: r.name || r.id, sublabel: '', link: null }] });
       }
+      const assistRows: any[] = await db.query(
+        "SELECT x.therapist_id, t.display_name FROM spa_appointment_therapists x LEFT JOIN spa_therapists t ON t.id = x.therapist_id WHERE x.appointment_id = ?", [a.id]).catch(() => []);
+      if (assistRows.length) groups.push({ group: 'Assisting therapists', items: assistRows.map((x: any) => ({ type: 'Therapist', id: x.therapist_id, label: x.display_name || x.therapist_id, sublabel: 'booked to assist', link: null })) });
+      const sess = await spaReadSession(db, a.id);
+      if (sess) {
+        if (sess.performers.length) groups.push({ group: 'Performed by', items: sess.performers.map((p: any) => ({ type: 'Therapist', id: p.therapist_id, label: p.display_name || p.therapist_id, sublabel: p.role === 'LEAD' ? 'lead' : 'assisting', link: null })) });
+        const lines: any[] = [];
+        for (const c of sess.consumables) {
+          if (!c.batches.length) lines.push({ type: 'Item', id: `${c.ingredient_id}`, label: c.ingredient_name || c.ingredient_id, sublabel: `${Number(c.actual_qty)} ${c.unit || ''}`, link: null });
+          for (const bt of c.batches) lines.push({ type: 'Item', id: `${c.ingredient_id}-${bt.batch_id || 'none'}`, label: c.ingredient_name || c.ingredient_id, sublabel: `${Number(bt.qty)} ${c.unit || ''} · batch ${bt.batch_number || (bt.batch_id ? bt.batch_id : 'not recorded')}`, link: null });
+        }
+        if (lines.length) groups.push({ group: 'Consumables used', items: lines });
+      }
       res.json({ groups });
     } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
   });
@@ -35103,7 +35215,141 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to mark no-show" }); }
   });
 
-  // Complete — deducts service consumables from inventory (stock_movements).
+  // ─── TREATMENT SESSION (Phase 3) ──────────────────────────────────────────
+  // What a treatment will use, for the Finish screen: every consumable of the
+  // treatment and of the add-ons it was booked with — one line per item, at its
+  // standard quantity — with the batches it would be drawn from, and the
+  // therapists and cabin booked.
+  const spaFinishPlan = async (db: DbInterface, appt: any) => {
+    let addonIds: string[] = [];
+    try { const p = JSON.parse(appt?.addon_ids || '[]'); addonIds = Array.isArray(p) ? p.map(String) : []; } catch { addonIds = []; }
+    const rows: any[] = await db.query(
+      `SELECT c.*, i.name AS ing_name, i.unit AS ing_unit, i.current_stock_qty FROM spa_service_consumables c
+         JOIN ingredients i ON i.id = c.ingredient_id
+        WHERE c.service_id = ? AND (c.addon_id IS NULL OR c.addon_id = ''${addonIds.length ? ` OR c.addon_id IN (${addonIds.map(() => '?').join(',')})` : ''})
+        ORDER BY i.name`,
+      [appt.service_id, ...addonIds]);
+    const items = new Map<string, any>();
+    for (const c of rows) {
+      const raw = Number(c.qty_per_service || 0);
+      const variable = Number(c.is_variable || 0) === 1;
+      if (!(raw > 0) && !variable) continue;
+      const fromUnit = String(c.unit || c.ing_unit || '');
+      const conv = raw > 0 && fromUnit && c.ing_unit && fromUnit !== String(c.ing_unit) ? convertQty(raw, fromUnit, String(c.ing_unit)) : raw;
+      const key = String(c.ingredient_id);
+      const it = items.get(key) || { ingredient_id: c.ingredient_id, name: c.ing_name, unit: c.ing_unit, in_stock: Number(c.current_stock_qty || 0), standard_qty: 0, is_variable: false, unit_problem: null as string | null, batches: [] as any[] };
+      if (conv == null) it.unit_problem = `${c.ing_name} is set to ${raw} ${fromUnit} per treatment, which cannot be converted to its stock unit (${c.ing_unit}).`;
+      else if (conv > 0) it.standard_qty = Math.round((it.standard_qty + conv) * 1e6) / 1e6;
+      if (variable) it.is_variable = true;
+      items.set(key, it);
+    }
+    for (const it of items.values()) {
+      it.batches = await db.query(
+        `SELECT id, batch_number, remaining_qty, expiry_date, received_at, unit_cost FROM stock_batches
+          WHERE ingredient_id = ? AND remaining_qty > 0
+          ORDER BY CASE WHEN expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '7 days' THEN 0 ELSE 1 END,
+                   COALESCE(expiry_date, '2099-12-31'::date) ASC, received_at ASC`, [it.ingredient_id]).catch(() => []);
+    }
+    const assisting: any[] = await db.query("SELECT therapist_id FROM spa_appointment_therapists WHERE appointment_id = ?", [appt.id]).catch(() => []);
+    return {
+      appointment_id: appt.id, status: appt.status,
+      started_at: appt.started_at || null, checked_in_at: appt.checked_in_at || null,
+      booked_therapist_ids: [appt.therapist_id, ...assisting.map((a: any) => a.therapist_id)].filter(Boolean).map(String),
+      booked_resource_id: appt.resource_id || null,
+      consumables: Array.from(items.values()),
+    };
+  };
+
+  const SPA_OUTCOMES = ['IMPROVED', 'NO_CHANGE', 'WORSE', 'NOT_ASSESSED'];
+  // Who performed a treatment, the cabin used, notes, outcome and follow-up, as
+  // sent by the Finish screen or a later edit. Only the keys sent are returned.
+  const spaSessionInputs = async (db: DbInterface, b: any): Promise<{ error?: { status: number; body: any }; v: any }> => {
+    const v: any = {};
+    if (b.performers !== undefined) {
+      if (!Array.isArray(b.performers)) return { error: { status: 400, body: { error: 'Name the therapists who performed the treatment as a list.', code: 'PERFORMERS_INVALID' } }, v };
+      const ids: string[] = Array.from(new Set((b.performers as any[]).map(String).filter(Boolean)));
+      if (!ids.length) return { error: { status: 400, body: { error: 'Name at least one therapist who performed the treatment.', code: 'PERFORMERS_REQUIRED' } }, v };
+      for (const tid of ids) {
+        if (!(await db.get("SELECT id FROM spa_therapists WHERE id = ?", [tid]))) return { error: { status: 400, body: { error: 'One of the therapists named is not on file.', code: 'PERFORMER_UNKNOWN' } }, v };
+      }
+      v.performers = ids;
+    }
+    if (b.resource_id !== undefined) {
+      const rid = b.resource_id ? String(b.resource_id) : null;
+      if (rid && !(await db.get("SELECT id FROM spa_resources WHERE id = ?", [rid]))) return { error: { status: 400, body: { error: 'That cabin is not on file.', code: 'CABIN_UNKNOWN' } }, v };
+      v.resource_id = rid;
+    }
+    if (b.outcome !== undefined) {
+      const o = b.outcome ? String(b.outcome).toUpperCase() : null;
+      if (o && !SPA_OUTCOMES.includes(o)) return { error: { status: 400, body: { error: 'Outcome must be improved, no change, worse or not assessed.', code: 'OUTCOME_INVALID' } }, v };
+      v.outcome = o;
+    }
+    if (b.notes !== undefined) v.notes = b.notes ? String(b.notes).slice(0, 4000) : null;
+    if (b.follow_up !== undefined) v.follow_up = b.follow_up ? String(b.follow_up).slice(0, 1000) : null;
+    if (b.follow_up_date !== undefined) {
+      const d = b.follow_up_date ? String(b.follow_up_date) : '';
+      if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) return { error: { status: 400, body: { error: 'Follow-up date must be YYYY-MM-DD.', code: 'DATE_INVALID' } }, v };
+      v.follow_up_date = d || null;
+    }
+    return { v };
+  };
+
+  // The therapists who performed it: the lead is the booked therapist when named,
+  // otherwise the first named.
+  const spaSavePerformers = async (db: DbInterface, appt: any, ids: string[]) => {
+    await db.run("DELETE FROM spa_session_therapists WHERE appointment_id = ?", [appt.id]);
+    const lead = ids.includes(String(appt.therapist_id || '')) ? String(appt.therapist_id) : ids[0];
+    for (const tid of ids) {
+      await db.run("INSERT INTO spa_session_therapists (id, appointment_id, therapist_id, role) VALUES (?, ?, ?, ?)",
+        [mkSpaId('SPAPRF'), appt.id, tid, tid === lead ? 'LEAD' : 'ASSIST']);
+    }
+  };
+
+  // The treatment record of an appointment: times, performers, cabin, notes and
+  // follow-up, what it used against its standard with the batches, and the tips
+  // shared out on an invoice that stands. Null when it was never finished here.
+  const spaReadSession = async (db: DbInterface, apptId: string): Promise<any | null> => {
+    const session: any = await db.get(
+      `SELECT s.*, r.name AS resource_name FROM spa_treatment_sessions s LEFT JOIN spa_resources r ON r.id = s.resource_id WHERE s.appointment_id = ?`,
+      [apptId]).catch(() => null);
+    if (!session) return null;
+    const performers: any[] = await db.query(
+      `SELECT p.therapist_id, p.role, t.display_name FROM spa_session_therapists p LEFT JOIN spa_therapists t ON t.id = p.therapist_id
+        WHERE p.appointment_id = ? ORDER BY CASE WHEN p.role = 'LEAD' THEN 0 ELSE 1 END, t.display_name`, [apptId]).catch(() => []);
+    const consumables: any[] = await db.query(
+      `SELECT sc.ingredient_id, sc.standard_qty, sc.actual_qty, sc.unit, sc.unit_cost, i.name AS ingredient_name
+         FROM spa_session_consumables sc LEFT JOIN ingredients i ON i.id = sc.ingredient_id
+        WHERE sc.appointment_id = ? ORDER BY i.name`, [apptId]).catch(() => []);
+    const batches: any[] = await db.query(
+      `SELECT cb.ingredient_id, cb.batch_id, cb.qty, cb.unit_cost, sb.batch_number, sb.expiry_date
+         FROM spa_consumption_batches cb LEFT JOIN stock_batches sb ON sb.id = cb.batch_id
+        WHERE cb.appointment_id = ? ORDER BY cb.created_at`, [apptId]).catch(() => []);
+    for (const c of consumables) c.batches = batches.filter((x: any) => x.ingredient_id === c.ingredient_id);
+    const tips: any[] = await db.query(
+      `SELECT ts.therapist_id, ts.amount, t.display_name FROM spa_tip_splits ts
+         JOIN folios f ON f.id = ts.folio_id
+         LEFT JOIN spa_therapists t ON t.id = ts.therapist_id
+        WHERE ts.appointment_id = ? AND LOWER(COALESCE(f.status, '')) NOT IN ('voided', 'cancelled')
+        ORDER BY t.display_name`, [apptId]).catch(() => []);
+    return { ...session, performers, consumables, tips };
+  };
+
+  app.get("/api/restaurant/:id/spa/appointments/:aid/finish-plan", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      if (!appt) return res.status(404).json({ error: "Appointment not found" });
+      res.json(await spaFinishPlan(db, appt));
+    } catch (err: any) { res.status(500).json({ error: "Failed to prepare the finish screen" }); }
+  });
+
+  // Complete — records the treatment session and deducts what it used. With no
+  // body it takes each item's standard quantity, as before. The Finish screen
+  // sends the quantities actually used (with a batch to draw first), who
+  // performed it, the cabin used, notes, outcome and follow-up. An item marked as
+  // varying has no standard to assume, so its quantity has to be entered.
   app.post("/api/restaurant/:id/spa/appointments/:aid/complete", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -35115,76 +35361,130 @@ ${data.tenant.name}`;
       const fromS = String(appt.status || 'BOOKED').toUpperCase();
       const badS = spaTransitionError(fromS, 'COMPLETED');
       if (badS) return res.status(409).json({ error: badS, code: 'INVALID_TRANSITION', status: fromS });
-      // Consumables. Each item's stock and its ledger line now move together, drawn
-      // from batches oldest (and soonest to expire) first, at their cost. The line
-      // used to be written with its error swallowed after the stock had gone, so oil
-      // could leave the shelf with no record — and it was costed at list price
-      // while stock is valued at batch cost.
-      const cons: any[] = await db.query(
-        `SELECT c.*, i.name AS ing_name, i.unit AS ing_unit FROM spa_service_consumables c
-           JOIN ingredients i ON i.id = c.ingredient_id WHERE c.service_id = ?`, [appt.service_id]);
-      // Every unit checked before anything is drawn, so a bad setting stops the
-      // whole completion rather than half of it.
-      const plan: { c: any; qty: number }[] = [];
-      for (const c of cons) {
-        const raw = Number(c.qty_per_service || 0);
-        if (!(raw > 0)) continue;
-        const fromUnit = String(c.unit || c.ing_unit || '');
-        const qty = fromUnit && c.ing_unit && fromUnit !== String(c.ing_unit) ? convertQty(raw, fromUnit, String(c.ing_unit)) : raw;
-        if (qty == null || !(qty > 0)) {
-          return res.status(409).json({ error: `${c.ing_name} is set to ${raw} ${fromUnit} per treatment, which cannot be converted to its stock unit (${c.ing_unit}). Correct the treatment's consumables, then complete it again.`, code: 'CONSUMABLE_UNIT_MISMATCH' });
+      const b = req.body || {};
+      const inputs = await spaSessionInputs(db, b);
+      if (inputs.error) return res.status(inputs.error.status).json(inputs.error.body);
+      const plan = await spaFinishPlan(db, appt);
+      const finishSent = Array.isArray(b.consumables);
+      const given = new Map<string, any>();
+      if (finishSent) for (const x of b.consumables) if (x?.ingredient_id) given.set(String(x.ingredient_id), x);
+      for (const key of given.keys()) {
+        if (!plan.consumables.some((it: any) => String(it.ingredient_id) === key)) {
+          return res.status(400).json({ error: 'One of the items sent is not a consumable of this treatment or its add-ons.', code: 'CONSUMABLE_UNKNOWN', ingredient_id: key });
         }
-        plan.push({ c, qty });
+      }
+      // Every unit, quantity and batch checked before anything is drawn, so a bad
+      // entry stops the whole completion rather than half of it.
+      const work: { it: any; qty: number; batchId: string | null }[] = [];
+      for (const it of plan.consumables) {
+        if (it.unit_problem) return res.status(409).json({ error: `${it.unit_problem} Correct the treatment's consumables, then complete it again.`, code: 'CONSUMABLE_UNIT_MISMATCH' });
+        const g = given.get(String(it.ingredient_id));
+        let qty = Number(it.standard_qty || 0);
+        if (g && g.qty !== undefined && g.qty !== null && g.qty !== '') {
+          qty = Number(g.qty);
+          if (!Number.isFinite(qty) || qty < 0) return res.status(400).json({ error: `Enter the quantity of ${it.name} used, in ${it.unit}.`, code: 'QTY_INVALID', ingredient_id: it.ingredient_id });
+        } else if (it.is_variable) {
+          return res.status(finishSent ? 400 : 409).json({ error: `${it.name} varies from treatment to treatment — enter how much was used when finishing.`, code: 'VARIABLE_QTY_REQUIRED', ingredient_id: it.ingredient_id });
+        }
+        const batchId = g?.batch_id ? String(g.batch_id) : null;
+        if (batchId && !it.batches.some((x: any) => String(x.id) === batchId)) {
+          return res.status(400).json({ error: `That batch of ${it.name} has none left.`, code: 'BATCH_INVALID', ingredient_id: it.ingredient_id });
+        }
+        work.push({ it, qty: Math.round(qty * 1e6) / 1e6, batchId });
       }
       const consumed: any[] = [];
-      for (const { c, qty } of plan) {
+      for (const { it, qty, batchId } of work) {
         // Once per appointment and item: a retry never draws twice.
         const already: any = await db.get(
           "SELECT id FROM stock_movements WHERE movement_type = 'SPA_CONSUMPTION' AND reference_type = 'spa_appointment' AND reference_id = ? AND ingredient_id = ? LIMIT 1",
-          [appt.id, c.ingredient_id]);
+          [appt.id, it.ingredient_id]);
         if (already) continue;
-        const fb: any = await db.get(`SELECT ${_INV_UNIT_COST_SQL} AS c FROM ingredients i WHERE i.id = ?`, [c.ingredient_id]).catch(() => null);
+        if (!(qty > 0)) {
+          await db.run(
+            `INSERT INTO spa_session_consumables (id, appointment_id, ingredient_id, standard_qty, actual_qty, unit) VALUES (?, ?, ?, ?, 0, ?)
+             ON CONFLICT (appointment_id, ingredient_id) DO NOTHING`,
+            [mkSpaId('SPASC'), appt.id, it.ingredient_id, it.standard_qty, it.unit || null])
+            .catch((e: any) => console.error('[spa] session item not recorded:', appt.id, e?.message || e));
+          consumed.push({ item: it.name, qty: 0, unit: it.unit, standard_qty: it.standard_qty });
+          continue;
+        }
+        const fb: any = await db.get(`SELECT ${_INV_UNIT_COST_SQL} AS c FROM ingredients i WHERE i.id = ?`, [it.ingredient_id]).catch(() => null);
         const fallbackCost = Number(fb?.c || 0);
-        const batches: any[] = await db.query(
+        let batches: any[] = await db.query(
           `SELECT id, remaining_qty, unit_cost FROM stock_batches
             WHERE ingredient_id = ? AND remaining_qty > 0
             ORDER BY CASE WHEN expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '7 days' THEN 0 ELSE 1 END,
-                     COALESCE(expiry_date, '2099-12-31'::date) ASC, received_at ASC`, [c.ingredient_id]);
+                     COALESCE(expiry_date, '2099-12-31'::date) ASC, received_at ASC`, [it.ingredient_id]);
+        // The batch chosen at Finish goes first; the rest, oldest first, as always.
+        if (batchId) batches = [...batches.filter((x: any) => String(x.id) === batchId), ...batches.filter((x: any) => String(x.id) !== batchId)];
         let left = qty, cost = 0;
-        const draws: { id: string; qty: number }[] = [];
+        const draws: { id: string; qty: number; unitCost: number }[] = [];
         for (const bt of batches) {
           if (left <= 1e-9) break;
           const d = Math.min(Number(bt.remaining_qty), left);
-          draws.push({ id: bt.id, qty: d });
-          cost += d * (bt.unit_cost != null ? Number(bt.unit_cost) : fallbackCost);
+          const uc = bt.unit_cost != null ? Number(bt.unit_cost) : fallbackCost;
+          draws.push({ id: bt.id, qty: d, unitCost: uc });
+          cost += d * uc;
           left -= d;
         }
         if (left > 1e-9) cost += left * fallbackCost;
         const unitCost = Math.round((cost / qty) * 10000) / 10000;
         const upd: any[] = await db.query(
           "UPDATE ingredients SET current_stock_qty = current_stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING current_stock_qty",
-          [qty, c.ingredient_id]);
+          [qty, it.ingredient_id]);
         const bal = Number(upd[0]?.current_stock_qty ?? 0);
+        const movId = mkSpaId('MOV');
         try {
           await db.run(
             `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
              VALUES (?, ?, ?, ?, 'SPA_CONSUMPTION', 'spa_appointment', ?, ?, ?, ?, ?)`,
-            [mkSpaId('MOV'), c.ingredient_id, -qty, c.ing_unit || 'unit', appt.id, bal, unitCost, req.user?.id || null,
-             draws.length ? 'Spa service consumption (drawn from batches)' : 'Spa service consumption']);
+            [movId, it.ingredient_id, -qty, it.unit || 'unit', appt.id, bal, unitCost, req.user?.id || null,
+             batchId ? 'Spa treatment consumption (batch chosen at finish)' : draws.length ? 'Spa service consumption (drawn from batches)' : 'Spa service consumption']);
         } catch (e: any) {
           // Put the stock back: nothing leaves the shelf without its ledger line.
-          await db.run("UPDATE ingredients SET current_stock_qty = current_stock_qty + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [qty, c.ingredient_id]).catch(() => {});
+          await db.run("UPDATE ingredients SET current_stock_qty = current_stock_qty + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [qty, it.ingredient_id]).catch(() => {});
           // Written by a completion running at the same moment: already consumed.
           if (String(e?.code) === '23505') continue;
           console.error('[spa] consumption not recorded:', e?.message || e);
-          return res.status(500).json({ error: `Stock used for ${c.ing_name} could not be recorded, so the treatment was not completed. Try again.`, code: 'CONSUMPTION_NOT_RECORDED' });
+          return res.status(500).json({ error: `Stock used for ${it.name} could not be recorded, so the treatment was not completed. Try again.`, code: 'CONSUMPTION_NOT_RECORDED' });
         }
         for (const d of draws) {
           await db.run("UPDATE stock_batches SET remaining_qty = GREATEST(remaining_qty - ?, 0) WHERE id = ?", [d.qty, d.id])
             .catch((e: any) => console.error('[spa] batch draw failed:', d.id, e?.message || e));
         }
-        consumed.push({ item: c.ing_name, qty, unit: c.ing_unit, unit_cost: unitCost });
+        // The trace: each batch that went into this treatment, and what the
+        // treatment used against its standard.
+        for (const d of draws) {
+          await db.run("INSERT INTO spa_consumption_batches (id, appointment_id, ingredient_id, batch_id, qty, unit_cost) VALUES (?, ?, ?, ?, ?, ?)",
+            [mkSpaId('SPACB'), appt.id, it.ingredient_id, d.id, d.qty, d.unitCost])
+            .catch((e: any) => console.error('[spa] batch trace not recorded:', appt.id, e?.message || e));
+        }
+        if (left > 1e-9) {
+          await db.run("INSERT INTO spa_consumption_batches (id, appointment_id, ingredient_id, batch_id, qty, unit_cost) VALUES (?, ?, ?, NULL, ?, ?)",
+            [mkSpaId('SPACB'), appt.id, it.ingredient_id, Math.round(left * 1e6) / 1e6, fallbackCost])
+            .catch((e: any) => console.error('[spa] batch trace not recorded:', appt.id, e?.message || e));
+        }
+        await db.run(
+          `INSERT INTO spa_session_consumables (id, appointment_id, ingredient_id, standard_qty, actual_qty, unit, unit_cost, movement_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (appointment_id, ingredient_id) DO NOTHING`,
+          [mkSpaId('SPASC'), appt.id, it.ingredient_id, it.standard_qty, qty, it.unit || null, unitCost, movId])
+          .catch((e: any) => console.error('[spa] session item not recorded:', appt.id, e?.message || e));
+        consumed.push({ item: it.name, qty, unit: it.unit, unit_cost: unitCost, standard_qty: it.standard_qty });
       }
+      // The treatment record. It never undoes a completion whose stock has moved:
+      // a failure here is logged and the record can be completed by editing it.
+      const perfIds: string[] = inputs.v.performers || plan.booked_therapist_ids;
+      try {
+        await db.run(
+          `INSERT INTO spa_treatment_sessions (id, appointment_id, started_at, finished_at, resource_id, notes, outcome, follow_up, follow_up_date, recorded_by)
+           VALUES (?, ?, (SELECT started_at FROM spa_appointments WHERE id = ?), CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (appointment_id) DO UPDATE SET finished_at = EXCLUDED.finished_at, resource_id = EXCLUDED.resource_id, notes = EXCLUDED.notes,
+             outcome = EXCLUDED.outcome, follow_up = EXCLUDED.follow_up, follow_up_date = EXCLUDED.follow_up_date,
+             recorded_by = EXCLUDED.recorded_by, updated_at = CURRENT_TIMESTAMP`,
+          [mkSpaId('SPASES'), appt.id, appt.id, inputs.v.resource_id !== undefined ? inputs.v.resource_id : plan.booked_resource_id,
+           inputs.v.notes ?? null, inputs.v.outcome ?? null, inputs.v.follow_up ?? null, inputs.v.follow_up_date ?? null, req.user?.id || null]);
+        if (perfIds.length) await spaSavePerformers(db, appt, perfIds);
+      } catch (e: any) { console.error('[spa] treatment session not recorded:', appt.id, e?.message || e); }
       const doneRow = await db.run(
         "UPDATE spa_appointments SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP WHERE id = ? AND COALESCE(status, 'BOOKED') = ?",
         [appt.id, fromS]);
@@ -35196,10 +35496,103 @@ ${data.tenant.name}`;
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'COMPLETED',
         summary: `Appointment "${appt.service_name || 'service'}"${appt.client_name ? ` · ${appt.client_name}` : ''} completed${consumed.length ? ` · used ${consumed.map(x => `${x.qty} ${x.unit} ${x.item}`).join(', ')}` : ''}`,
-        before: { status: appt.status }, after: { status: 'COMPLETED', consumed },
+        before: { status: appt.status },
+        after: { status: 'COMPLETED', consumed, performers: perfIds, resource_id: inputs.v.resource_id !== undefined ? inputs.v.resource_id : plan.booked_resource_id, outcome: inputs.v.outcome ?? null },
       }).catch(() => {});
-      res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]));
+      const doneAppt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]);
+      res.json({ ...doneAppt, session: await spaReadSession(db, appt.id) });
     } catch (err: any) { console.error("spa complete error:", err); res.status(500).json({ error: "Failed to complete appointment" }); }
+  });
+
+  // The treatment record of an appointment.
+  app.get("/api/restaurant/:id/spa/appointments/:aid/session", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const appt: any = await db.get("SELECT id FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      if (!appt) return res.status(404).json({ error: "Appointment not found" });
+      const s = await spaReadSession(db, appt.id);
+      if (!s) return res.status(404).json({ error: 'This treatment has no record: it was completed before treatment records began, or is not finished yet.', code: 'NO_SESSION' });
+      res.json(s);
+    } catch (err: any) { res.status(500).json({ error: "Failed to load the treatment record" }); }
+  });
+
+  // Notes, outcome, follow-up, the cabin used and who performed it can be put
+  // right after a treatment is finished. What it used cannot: that stock has moved.
+  app.put("/api/restaurant/:id/spa/appointments/:aid/session", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      if (!appt) return res.status(404).json({ error: "Appointment not found" });
+      if (String(appt.status) !== 'COMPLETED') return res.status(409).json({ error: 'Finish the treatment first.', code: 'NOT_COMPLETED' });
+      const before = await spaReadSession(db, appt.id);
+      if (!before) return res.status(404).json({ error: 'This treatment has no record to edit: it was completed before treatment records began.', code: 'NO_SESSION' });
+      const b = req.body || {};
+      if (b.consumables !== undefined) return res.status(400).json({ error: 'What a treatment used cannot be changed after it is finished.', code: 'CONSUMABLES_LOCKED' });
+      const inputs = await spaSessionInputs(db, b);
+      if (inputs.error) return res.status(inputs.error.status).json(inputs.error.body);
+      const v = inputs.v;
+      const fields: string[] = []; const vals: any[] = [];
+      for (const k of ['resource_id', 'notes', 'outcome', 'follow_up', 'follow_up_date']) {
+        if (v[k] !== undefined) { fields.push(`${k} = ?`); vals.push(v[k]); }
+      }
+      if (!fields.length && !v.performers) return res.status(400).json({ error: 'Nothing to change.', code: 'NOTHING_TO_CHANGE' });
+      if (fields.length) await db.run(`UPDATE spa_treatment_sessions SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE appointment_id = ?`, [...vals, appt.id]);
+      if (v.performers) await spaSavePerformers(db, appt, v.performers);
+      const after = await spaReadSession(db, appt.id);
+      const pick = (s: any) => ({ resource_id: s?.resource_id || null, notes: s?.notes || null, outcome: s?.outcome || null, follow_up: s?.follow_up || null, follow_up_date: s?.follow_up_date || null, performers: (s?.performers || []).map((p: any) => `${p.therapist_id}:${p.role}`) });
+      writeObjectAudit(db, req, {
+        objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'SESSION_UPDATED',
+        summary: `Treatment record for "${appt.service_name || 'service'}"${appt.client_name ? ` · ${appt.client_name}` : ''} updated`,
+        before: pick(before), after: pick(after),
+      }).catch(() => {});
+      res.json(after);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update the treatment record" }); }
+  });
+
+  // Batch trace: the batches of a spa item and how much of each went into
+  // treatments; or, for one batch, every treatment and guest it went into — for a
+  // recall or a guest's reaction.
+  app.get("/api/restaurant/:id/spa/batch-trace", authenticate, spaStaff, requireTabAccess('SPA_INVENTORY'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const q: any = req.query || {};
+      const isSpaItem = async (ingredientId: string) => !!(await db.get(
+        "SELECT id FROM ingredients WHERE id = ? AND (COALESCE(module, 'RESTAURANT') = 'SPA' OR item_type IN ('SPA_PRODUCT', 'SPA_RETAIL'))", [ingredientId]));
+      if (q.batch_id) {
+        const batch: any = await db.get(
+          `SELECT sb.*, i.name AS ingredient_name, i.unit AS ingredient_unit, s.name AS supplier_name FROM stock_batches sb
+             LEFT JOIN ingredients i ON i.id = sb.ingredient_id LEFT JOIN suppliers s ON s.id = sb.supplier_id WHERE sb.id = ?`, [String(q.batch_id)]);
+        if (!batch || !(await isSpaItem(batch.ingredient_id))) return res.status(404).json({ error: 'Batch not found' });
+        const uses: any[] = await db.query(
+          `SELECT cb.appointment_id, cb.qty, cb.unit_cost, a.start_at, a.status, a.client_id, a.client_name, a.client_phone, a.service_name,
+                  t.display_name AS therapist_name
+             FROM spa_consumption_batches cb
+             JOIN spa_appointments a ON a.id = cb.appointment_id
+             LEFT JOIN spa_therapists t ON t.id = a.therapist_id
+            WHERE cb.batch_id = ?
+            ORDER BY a.start_at DESC`, [batch.id]);
+        const guests = new Set(uses.map((u: any) => String(u.client_id || u.client_phone || u.client_name || ''))).size;
+        return res.json({ batch, uses, treatments: new Set(uses.map((u: any) => u.appointment_id)).size, guests });
+      }
+      if (q.ingredient_id) {
+        if (!(await isSpaItem(String(q.ingredient_id)))) return res.status(404).json({ error: 'Item not found' });
+        const batches: any[] = await db.query(
+          `SELECT sb.id, sb.batch_number, sb.received_at, sb.expiry_date, sb.qty_received, sb.remaining_qty, sb.unit, s.name AS supplier_name,
+                  (SELECT COALESCE(SUM(cb.qty), 0) FROM spa_consumption_batches cb WHERE cb.batch_id = sb.id) AS used_on_treatments,
+                  (SELECT COUNT(DISTINCT cb.appointment_id) FROM spa_consumption_batches cb WHERE cb.batch_id = sb.id) AS treatments
+             FROM stock_batches sb LEFT JOIN suppliers s ON s.id = sb.supplier_id
+            WHERE sb.ingredient_id = ?
+            ORDER BY sb.received_at DESC LIMIT 200`, [String(q.ingredient_id)]);
+        return res.json({ batches });
+      }
+      res.status(400).json({ error: 'Choose an item or a batch.' });
+    } catch (err: any) { res.status(500).json({ error: "Failed to trace the batch" }); }
   });
 
   // ─── CHECKOUT → folio → invoice ─────────────────────────────────────────────
@@ -35221,6 +35614,14 @@ ${data.tenant.name}`;
       if (appt.status !== 'COMPLETED') return res.status(409).json({ error: "Appointment must be COMPLETED before checkout" });
 
       const b = req.body || {};
+      // A tip split by hand must add up to the tip, checked before anything is written.
+      const tipIn = round2(b.tip_amount || 0);
+      let tipSplitsIn: { therapist_id: string; amount: number }[] | null = null;
+      if (tipIn > 0 && Array.isArray(b.tip_splits) && b.tip_splits.length) {
+        tipSplitsIn = (b.tip_splits as any[]).map((x: any) => ({ therapist_id: String(x?.therapist_id || ''), amount: round2(x?.amount || 0) })).filter(x => x.therapist_id && x.amount > 0);
+        const splitSum = round2(tipSplitsIn.reduce((acc, x) => acc + x.amount, 0));
+        if (Math.abs(splitSum - tipIn) > 0.01) return res.status(400).json({ error: `The tip is ₹${tipIn} but the shares add up to ₹${splitSum}.`, code: 'TIP_SPLIT_MISMATCH' });
+      }
       const folioId = mkSpaId('SPAFOL');
       await db.run(
         `INSERT INTO folios (id, folio_kind, appointment_id, status, currency_snapshot, tax_label_snapshot, doc_type)
@@ -35274,6 +35675,27 @@ ${data.tenant.name}`;
         await db.run(
           `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
            VALUES (?, ?, 'TIP', 'Gratuity', 1, ?, ?, 0, 0)`, [mkSpaId('FE'), folioId, tip, tip]);
+        // The tip goes to the therapists who gave the treatment — as split at
+        // checkout, or equally, any odd paisa to the lead.
+        let shares: { therapist_id: string; amount: number }[] = tipSplitsIn || [];
+        if (!shares.length) {
+          let givers: string[] = ((await db.query(
+            "SELECT therapist_id FROM spa_session_therapists WHERE appointment_id = ? ORDER BY CASE WHEN role = 'LEAD' THEN 0 ELSE 1 END, therapist_id",
+            [appt.id]).catch(() => [])) as any[]).map((r: any) => String(r.therapist_id));
+          if (!givers.length) {
+            const assisting: any[] = await db.query("SELECT therapist_id FROM spa_appointment_therapists WHERE appointment_id = ?", [appt.id]).catch(() => []);
+            givers = [appt.therapist_id, ...assisting.map((r: any) => r.therapist_id)].filter(Boolean).map(String);
+          }
+          if (givers.length) {
+            const each = Math.floor((tip * 100) / givers.length) / 100;
+            shares = givers.map((tid, i) => ({ therapist_id: tid, amount: i === 0 ? round2(tip - each * (givers.length - 1)) : each }));
+          }
+        }
+        for (const sh of shares) {
+          await db.run("INSERT INTO spa_tip_splits (id, folio_id, appointment_id, therapist_id, amount) VALUES (?, ?, ?, ?, ?)",
+            [mkSpaId('SPATIP'), folioId, appt.id, sh.therapist_id, sh.amount])
+            .catch((e: any) => console.error('[spa] tip share not recorded:', folioId, e?.message || e));
+        }
       }
 
       // Membership discount (auto-applied) on the service amount
@@ -61014,8 +61436,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-calendar-time-grid',
+    commit_marker: 'spa-phase3-treatment-record',
     code_features: [
+      'spa-phase3-treatment-record — Spa Phase 3. Finishing a treatment records what happened: spa_treatment_sessions (actual start from check-in/start, finish, cabin used, notes, outcome IMPROVED/NO_CHANGE/WORSE/NOT_ASSESSED, follow-up and date), spa_session_therapists (who performed it, lead and assisting). GET /spa/appointments/:aid/finish-plan pre-fills each consumable of the treatment and of its booked add-ons at its standard quantity with the batches it would draw from. POST /complete keeps working with no body (standard quantities, as before) and takes consumables [{ingredient_id, qty, batch_id}], performers, resource_id, notes, outcome, follow_up, follow_up_date; an item marked as varying (spa_service_consumables.is_variable) must be entered (409 VARIABLE_QTY_REQUIRED without a body, 400 with one). The chosen batch is drawn first, the rest oldest first; every draw is recorded in spa_consumption_batches and each item against its standard in spa_session_consumables. GET/PUT /spa/appointments/:aid/session reads and edits the record (not what it used). GET /spa/batch-trace lists an item batches with their use on treatments, or every treatment and guest a batch went into. Consumables can belong to an add-on (addon_id), are checked for unit and quantity, can be edited (PATCH /spa/consumables/:cid) and are audited; add-ons can be edited (PATCH /spa/addons/:adid). Checkout shares a tip among the therapists who performed the treatment (spa_tip_splits), equally or as split. Appointment where-used lists assisting therapists, performers and batches used. Tips still post to Spa Revenue 4040 as before. Also fixed: getFolioOutstanding filtered folio_entries on is_voided, a column that table never had, so every folio read with its balance (hotel check-out, spa invoice detail) listed no lines; totals were never affected.',
       'spa-calendar-time-grid — the spa Appointment Calendar is a time grid by therapist or by cabin (it was a list per therapist). Treatments are placed by time, cancelled and no-shows stay off it, and a treatment with assisting therapists shows under each of them. Dragging a booked, confirmed or checked-in treatment moves its time, or gives it to another therapist or cabin, through the reschedule route, which re-checks conflicts, blocks and the treatment rules; a move outside the rules asks for a reason. Clicking an empty time opens New Appointment for that time and picks the matching slot once slots are found. Screen only; no server behaviour changed.',
       'spa-phase2b-multi-therapist — Spa Phase 2b. A treatment can be given by 1 to 4 therapists (spa_services.therapists_required). The lead stays on the appointment and those assisting are rows in spa_appointment_therapists. Slots find the others free at the same time within their shifts, breaks and daily limits. Staff booking, reschedule and online booking take assistant_ids, check each is active, free, not blocked and meets the rules (staff can give a reason for an exception), save them before the double-booking guard and remove them if the booking gives way. Conflict checks, the double-booking guard, the daily limit and therapist search count a treatment a therapist assists on. Appointment lists, a single appointment and my-appointments carry assistant_ids and assistant_names (and my_role LEAD or ASSIST). Utilization counts time spent assisting; productivity counts assisted treatments separately and keeps treatment value with the lead. Screens: therapists needed on the treatment form, slots and bookings show those assisting, the calendar lists a treatment under each therapist on it, and the therapist dashboard marks Assisting. Also the Phase 2 booking screens: guest on file, gender and preference, therapist and cabin picked with reasons and an override reason, the gender rule on treatments, cabins kept for one gender, daily limits, and the online page asking for gender where needed.',
       'spa-phase2a-booking-rules-search — Spa Phase 2a. The slot engine reads the day\'s bookings and blocks once (it queried per therapist, cabin and slot) and applies the same-gender rule once the guest\'s gender is known, the guest\'s therapist preference, a cabin kept for one gender (open cabins chosen first) and the therapist\'s daily limit. spaAssignmentProblems holds those rules plus skills and cabin type for a therapist or cabin picked by hand: staff booking and reschedule return 409 ASSIGNMENT_RULES with the problems unless override_reason (5+ characters) is given, which is saved on the appointment and audited as RULES_OVERRIDDEN; online booking has no override (400 GUEST_GENDER_REQUIRED, else 409 SLOT_UNAVAILABLE). Appointments keep client_gender and therapist_gender_pref; availability returns needs_guest_gender. New GET /spa/therapist-search lists each active therapist with eligible, free and reasons. Skills & Cabin Types hides inactive entries behind Show inactive.',

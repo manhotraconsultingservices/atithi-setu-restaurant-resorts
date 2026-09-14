@@ -918,6 +918,68 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
     )`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_appt_therapist ON spa_appointment_therapists(appointment_id, therapist_id)`,
     `CREATE INDEX IF NOT EXISTS idx_spa_appt_therapist_t ON spa_appointment_therapists(therapist_id)`,
+    // Phase 3: what happened in a treatment — the actual times, who performed it,
+    // the cabin used, notes and follow-up — and what it used against its standard,
+    // batch by batch. An add-on can carry consumables; an item can vary per treatment.
+    `ALTER TABLE spa_service_consumables ADD COLUMN IF NOT EXISTS addon_id TEXT`,
+    `ALTER TABLE spa_service_consumables ADD COLUMN IF NOT EXISTS is_variable INT DEFAULT 0`,
+    `CREATE TABLE IF NOT EXISTS spa_treatment_sessions (
+      id             TEXT PRIMARY KEY,
+      appointment_id TEXT NOT NULL,
+      started_at     TIMESTAMP,
+      finished_at    TIMESTAMP,
+      resource_id    TEXT,
+      notes          TEXT,
+      outcome        TEXT,
+      follow_up      TEXT,
+      follow_up_date TEXT,
+      recorded_by    TEXT,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_session_appt ON spa_treatment_sessions(appointment_id)`,
+    `CREATE TABLE IF NOT EXISTS spa_session_therapists (
+      id             TEXT PRIMARY KEY,
+      appointment_id TEXT NOT NULL,
+      therapist_id   TEXT NOT NULL,
+      role           TEXT DEFAULT 'LEAD',
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_session_therapist ON spa_session_therapists(appointment_id, therapist_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_session_therapist_t ON spa_session_therapists(therapist_id)`,
+    `CREATE TABLE IF NOT EXISTS spa_session_consumables (
+      id             TEXT PRIMARY KEY,
+      appointment_id TEXT NOT NULL,
+      ingredient_id  TEXT NOT NULL,
+      standard_qty   DOUBLE PRECISION DEFAULT 0,
+      actual_qty     DOUBLE PRECISION DEFAULT 0,
+      unit           TEXT,
+      unit_cost      DOUBLE PRECISION,
+      movement_id    TEXT,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_session_item ON spa_session_consumables(appointment_id, ingredient_id)`,
+    `CREATE TABLE IF NOT EXISTS spa_consumption_batches (
+      id             TEXT PRIMARY KEY,
+      appointment_id TEXT NOT NULL,
+      ingredient_id  TEXT NOT NULL,
+      batch_id       TEXT,
+      qty            DOUBLE PRECISION NOT NULL,
+      unit_cost      DOUBLE PRECISION,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_cons_batch ON spa_consumption_batches(batch_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_cons_appt ON spa_consumption_batches(appointment_id)`,
+    `CREATE TABLE IF NOT EXISTS spa_tip_splits (
+      id             TEXT PRIMARY KEY,
+      folio_id       TEXT NOT NULL,
+      appointment_id TEXT,
+      therapist_id   TEXT NOT NULL,
+      amount         DOUBLE PRECISION NOT NULL,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_tip_splits_t ON spa_tip_splits(therapist_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_tip_splits_appt ON spa_tip_splits(appointment_id)`,
   ]) {
     await tenantDb.exec(ddl).catch(() => {});
   }
