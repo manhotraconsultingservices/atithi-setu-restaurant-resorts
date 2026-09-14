@@ -802,7 +802,14 @@ function SpaSettings({ restaurantId, token }: Props) {
   const blankOffer = { badge: '', title: '', description: '', valid_until: '' };
 
   useEffect(() => { (async () => {
-    try { const p = await api('/spa/profile'); setProfile({ ...p, offers: Array.isArray(p.offers) ? p.offers : [] }); }
+    try {
+      const p = await api('/spa/profile');
+      // Accept the offers as a list or as stored JSON text: reading text as "no
+      // offers" is how a save used to erase them.
+      let offers: any = p.offers;
+      if (typeof offers === 'string') { try { offers = JSON.parse(offers); } catch { offers = []; } }
+      setProfile({ ...p, offers: Array.isArray(offers) ? offers : [] });
+    }
     catch { /* */ }
   })(); }, []);
 

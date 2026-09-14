@@ -33481,12 +33481,20 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       if (!b.name) return res.status(400).json({ error: "name is required" });
+      // A value that was sent is used as sent — 0 included. `|| 10` turned a
+      // 0-minute buffer into 10, so a treatment set up with no cleanup gap got one.
+      const _given = (v: any) => v !== undefined && v !== null && v !== '';
+      const svcDuration = _given(b.duration_min) ? Number(b.duration_min) : 60;
+      const svcBufBefore = _given(b.buffer_before_min) ? Number(b.buffer_before_min) : 0;
+      const svcBufAfter = _given(b.buffer_after_min) ? Number(b.buffer_after_min) : 10;
+      if (!(svcDuration > 0)) return res.status(400).json({ error: "Duration must be more than 0 minutes.", code: 'DURATION_INVALID' });
+      if (!(svcBufBefore >= 0) || !(svcBufAfter >= 0)) return res.status(400).json({ error: "Buffers cannot be negative.", code: 'BUFFER_INVALID' });
       const id = mkSpaId('SPASVC');
       await db.run(
         `INSERT INTO spa_services (id, name, category, description, duration_min, buffer_before_min, buffer_after_min, price, gst_percent, requires_room, requires_therapist, commission_pct, image_url, display_order, is_active)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [id, b.name, b.category || 'MASSAGE', b.description || null,
-         Number(b.duration_min || 60), Number(b.buffer_before_min || 0), Number(b.buffer_after_min || 10),
+         svcDuration, svcBufBefore, svcBufAfter,
          Number(b.price || 0), Number(b.gst_percent ?? 18),
          b.requires_room === false ? 0 : 1, b.requires_therapist === false ? 0 : 1,
          Number(b.commission_pct || 0), b.image_url || null, Number(b.display_order || 0)]
@@ -33504,6 +33512,11 @@ ${data.tenant.name}`;
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
       const allow = ['name','category','description','duration_min','buffer_before_min','buffer_after_min','price','gst_percent','requires_room','requires_therapist','commission_pct','image_url','display_order','is_active'];
+      // The same rules as creation, so an edit cannot store what a new treatment may not.
+      if (b.duration_min !== undefined && !(Number(b.duration_min) > 0)) return res.status(400).json({ error: "Duration must be more than 0 minutes.", code: 'DURATION_INVALID' });
+      for (const k of ['buffer_before_min', 'buffer_after_min']) {
+        if (b[k] !== undefined && !(Number(b[k]) >= 0)) return res.status(400).json({ error: "Buffers cannot be negative.", code: 'BUFFER_INVALID' });
+      }
       for (const k of allow) {
         if (b[k] !== undefined) {
           fields.push(`${k} = ?`);
@@ -35068,7 +35081,13 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const profile = await db.get("SELECT * FROM spa_profile WHERE restaurant_id = ?", [req.params.id]);
       const restRow: any = await centralDb.get("SELECT booking_slug, spa_module_label FROM restaurants WHERE id = ?", [req.params.id]);
-      res.json({ ...(profile || { restaurant_id: req.params.id, hero_image_url: null, tagline: null, offers: null }), booking_slug: restRow?.booking_slug || null, module_label: restRow?.spa_module_label || null });
+      // Offers are stored as JSON text. They went back to the settings screen as
+      // that text, which the screen did not recognise as a list — so it showed
+      // none, and the next save wrote an empty list over them. Returned as a list
+      // now, the way the public page already reads them.
+      let offersList: any[] = [];
+      try { const parsed = profile?.offers ? JSON.parse(profile.offers) : []; offersList = Array.isArray(parsed) ? parsed : []; } catch { offersList = []; }
+      res.json({ ...(profile || { restaurant_id: req.params.id, hero_image_url: null, tagline: null }), offers: offersList, booking_slug: restRow?.booking_slug || null, module_label: restRow?.spa_module_label || null });
     } catch (err: any) { res.status(500).json({ error: "Failed to load spa profile" }); }
   });
 
@@ -60101,8 +60120,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-phase0-and-module-name',
+    commit_marker: 'spa-buffer-zero-and-offers-kept',
     code_features: [
+      'spa-buffer-zero-and-offers-kept — two spa fixes found in the Phase 0 review. (1) Creating a treatment turned a 0-minute buffer into 10 (`Number(b.buffer_after_min || 10)`); a value that is sent is now used as sent, and create and edit both refuse a non-positive duration or a negative buffer. (2) GET /spa/profile returned offers as JSON text while the Public Page Settings screen expected a list, so it showed no offers and the next save wrote an empty list over them; the route now returns a list and the screen also accepts text.',
       'spa-phase0-and-module-name — Spa Phase 0 of the traceability plan (14 Sep 2026). (1) Spa invoices are numbered SPA-<FY>-NNNNN from _allocateFyInvoiceNumber (shared with event invoices), not the calendar year; FY 2026-27 continues the SPA-2026 sequence. (2) Completing an appointment draws each consumable from stock batches first-in-first-out at batch cost; the stock movement is no longer written with its error swallowed, a failed write puts the stock back and stops completion, a unique index keeps one SPA_CONSUMPTION line per appointment and item, and units are converted or refused before anything is drawn. (3) Month-end expected usage, forecast and the inventory dashboard count SPA_CONSUMPTION; the dashboard trend and top consumers are now module-scoped. (4) Appointment status follows SPA_TRANSITIONS (spaTransitionError), with conditional updates, a new start route, checked_in_at and started_at. (5) Reschedule keeps add-on time and checks blocked time via spaWindowProblem; online booking refuses a time that is not free with alternatives instead of taking the first slot of the day. (6) spaMustYield: two simultaneous bookings of a therapist or cabin, exactly one survives. (7) Per-property module name: restaurants.spa_module_label, set in spa Public Page Settings, used by the menu, home card, settings, reports, access matrix, accounting labels and the public page. Screens: IST today, Start and No-show buttons, confirm on cancel, therapist dashboard knows BOOKED and shows refused moves.',
       'partial-refunds-receipt-refunds — (1) PART REFUNDS OF AN ADVANCE. POST /receipt-vouchers/:id/refund takes an optional amount (default: all still held). The amount is reserved on receipt_vouchers.refunded_amount by one conditional UPDATE, so two refunds at once cannot exceed the advance; each refund has its own RFV-<refund voucher id> journal (older refunds used RFV-<receipt voucher id>) and Rule 51 voucher, tax in proportion, the last refund takes exactly what is left; the voucher is REFUNDED only when nothing is held. The receipt is no longer voided: a hotel folio gets a REFUND row carrying the refund voucher, an event booking a negative row. Settlement nets those REFUND rows off the advance and applies only the tax still held; hotel booking cancel does the same; GSTR-1 11A/11B release tax per refund on its own date, and on adjustment or cancellation only what was still held. A refunded advance, and its refund row, cannot be voided or deleted. (2) LATENT BUG FIXED: a REFUND folio payment without a refund voucher (API, spa) was posted at settlement as money RECEIVED (Dr cash, Cr AR) by all three settlement journals; it is now Dr AR, Cr cash. Live rows affected: none. (3) RECEIPT REFUNDS: POST /events/payments/:pid/refund returns money from a receipt that paid an event invoice once no invoice stands — Dr the receivable its journal credited, Cr cash, negative row with refund_of_payment_id, reserved on event_payments.refunded_amount; refused while an invoice stands, for an advance (use its voucher) and for receipts not taken against an invoice. _eventAdvanceHeld counts only refunds that carry a refund voucher. Payments GET and hotel folio GET say what each receipt can still be refunded.',
       'credit-noted-folio-owes-nothing — seen on screen after the refund work: a hotel folio whose invoice had been credit-noted showed its refunded advance as outstanding, because the viewer total ignores credit notes and a refunded advance no longer counts as paid. GET /hotel/folios/:id now reports outstanding 0 and names the credit note when one exists; the viewer says so and no longer offers a second credit note. The payment action buttons wrap instead of clipping, and the Method and Amount headers no longer run together.',
