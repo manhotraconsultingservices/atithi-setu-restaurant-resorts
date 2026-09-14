@@ -658,6 +658,11 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // A refund row (negative amount) and the receipt it refunds both carry the
   // Rule 51 refund voucher.
   await tenantDb.exec(`ALTER TABLE event_payments ADD COLUMN IF NOT EXISTS refund_voucher_id TEXT`).catch(() => {});
+  // A refund row names the receipt it returns money from, and the receipt keeps
+  // a running total of what has gone back — reserved in one conditional
+  // statement, so two refunds at once cannot exceed it.
+  await tenantDb.exec(`ALTER TABLE event_payments ADD COLUMN IF NOT EXISTS refund_of_payment_id TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_payments ADD COLUMN IF NOT EXISTS refunded_amount DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   // Lost-reason capture on cancel (makes win-rate actionable). The structured
   // reason category reuses the existing `cancellation_reason` column; this adds
   // an optional free-text note alongside it.

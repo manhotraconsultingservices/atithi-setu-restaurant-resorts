@@ -939,15 +939,26 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
     catch (e: any) { alert(e.message); }
   };
   const delPay = async (pid: string) => { try { await api(`/events/payments/${pid}`, { method: 'DELETE' }); await load(); onChanged(); } catch (e: any) { alert(e.message); } };
-  // Refund an advance that is still held, under a Rule 51 refund voucher. The
-  // server refuses while the advance is adjusted against a live invoice.
+  // Refund money received, all of it or part. An advance refunds through its
+  // receipt voucher (a Rule 51 refund voucher is issued and the tax on the part
+  // refunded comes back out); a receipt that paid an invoice refunds once no
+  // invoice stands. The server says what each receipt can still be refunded.
   const refundPay = async (p: any) => {
-    const reason = window.prompt(`Refund this advance of ${money(p.amount)}?\n\nA refund voucher is issued and the tax paid on the advance is reversed.\n\nReason for the refund:`);
+    const held = Number(p.refundable || 0);
+    const amountStr = window.prompt(`Refund from this receipt of ${money(p.amount)}.\n\nUp to ${money(held)} can be refunded. Amount to refund:`, String(held));
+    if (amountStr == null) return;
+    const amount = Math.round(Number(amountStr) * 100) / 100;
+    if (!(amount > 0) || amount > held + 0.005) { alert(`Enter an amount more than 0 and no more than ${money(held)}.`); return; }
+    const reason = window.prompt(p.refund_kind === 'VOUCHER'
+      ? 'A refund voucher is issued and the tax paid on the part refunded is reversed.\n\nReason for the refund:'
+      : 'Reason for the refund:');
     if (reason == null) return;
     const method = window.prompt('Refunded by — CASH, UPI, CARD, BANK or CHEQUE:', String(p.method || 'CASH').toUpperCase());
     if (method == null) return;
     try {
-      await api(`/receipt-vouchers/${p.receipt_voucher_id}/refund`, { method: 'POST', body: JSON.stringify({ reason, method: method.trim().toUpperCase() }) });
+      const body = JSON.stringify({ amount, reason, method: method.trim().toUpperCase() });
+      if (p.refund_kind === 'VOUCHER') await api(`/receipt-vouchers/${p.receipt_voucher_id}/refund`, { method: 'POST', body });
+      else await api(`/events/payments/${p.id}/refund`, { method: 'POST', body });
       await load(); onChanged();
     } catch (e: any) { alert(e.message); }
   };
@@ -1010,13 +1021,17 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
           {p.refund_voucher_id && (
             <button className={`${BTN_GHOST} py-0.5 text-rose-700`} title="Print the refund voucher"
               onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/refund-vouchers/${p.refund_voucher_id}/pdf`, token)}>
-              <FileText size={12} />{isRefund ? 'Refund voucher' : 'Refunded'}
+              <FileText size={12} />{isRefund ? 'Refund voucher' : (Number(p.refundable) > 0.009 ? 'Part refunded' : 'Refunded')}
             </button>
           )}
-          {canRecord && p.receipt_voucher_id && !p.refund_voucher_id && !isRefund && (
-            <button className={`${BTN_GHOST} py-0.5`} title="Refund this advance and issue a refund voucher" onClick={() => refundPay(p)}>Refund</button>
+          {/* A receipt that paid an invoice is refunded without a voucher — it was never an advance. */}
+          {!isRefund && !p.refund_voucher_id && Number(p.refunded) > 0.009 && (
+            <span className="text-[10px] font-semibold text-rose-700">{Number(p.refundable) > 0.009 ? 'Part refunded' : 'Refunded'}</span>
           )}
-          {editable && !p.refund_voucher_id && <button onClick={() => delPay(p.id)}><X size={12} className="text-rose-500" /></button>}
+          {canRecord && !isRefund && Number(p.refundable) > 0.009 && !p.refund_blocked_reason && (
+            <button className={`${BTN_GHOST} py-0.5`} title={p.refund_kind === 'VOUCHER' ? 'Refund all or part of this advance and issue a refund voucher' : 'Refund all or part of this receipt'} onClick={() => refundPay(p)}>Refund</button>
+          )}
+          {editable && !p.refund_voucher_id && !p.refund_of_payment_id && !(Number(p.refunded) > 0.009) && <button onClick={() => delPay(p.id)}><X size={12} className="text-rose-500" /></button>}
         </div>
         );
       })}

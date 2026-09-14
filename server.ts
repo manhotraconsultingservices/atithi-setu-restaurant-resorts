@@ -3242,14 +3242,26 @@ async function _postFolioAdvanceGl(db: any, restaurantId: string, payment: any, 
 async function _advanceApplicationLines(
   db: any, folio: any, advances: any[], capAt: number | null, ar: { code: string; name: string },
 ): Promise<{ lines: GlLine[]; rvIds: string[] }> {
-  const advTotal = +(advances || []).reduce((s: number, p: any) => s + Number(p.amount || 0), 0).toFixed(2);
+  const kind = String(folio?.folio_kind || 'HOTEL').toUpperCase();
+  // Part of an advance refunded under a refund voucher has already left 2100 and
+  // the advance GST; its REFUND row takes it off what is applied here. (An event
+  // folio's advance row is already net: it is read from the ledger.)
+  const refundedRow: any = kind === 'EVENT' ? null : await db.get(
+    `SELECT COALESCE(SUM(amount), 0) AS v FROM folio_payments
+      WHERE folio_id = ? AND payment_type = 'REFUND' AND refund_voucher_id IS NOT NULL AND (is_voided IS NULL OR is_voided = 0)`,
+    [folio.id]).catch(() => null);
+  const advTotal = +((advances || []).reduce((s: number, p: any) => s + Number(p.amount || 0), 0) - Number(refundedRow?.v || 0)).toFixed(2);
   if (!(advTotal > 0)) return { lines: [], rvIds: [] };
   const applied = +Math.min(advTotal, capAt === null ? advTotal : Number(capAt)).toFixed(2);
   if (!(applied > 0)) return { lines: [], rvIds: [] };
-  const kind = String(folio?.folio_kind || 'HOTEL').toUpperCase();
+  // The tax still held on each voucher: what it charged, less what its refunds took back.
+  const _heldTaxSql = `SELECT rv.id, rv.cgst - COALESCE(rf.cgst, 0) AS cgst, rv.sgst - COALESCE(rf.sgst, 0) AS sgst, rv.igst - COALESCE(rf.igst, 0) AS igst
+      FROM receipt_vouchers rv
+      LEFT JOIN (SELECT receipt_voucher_id, SUM(cgst) AS cgst, SUM(sgst) AS sgst, SUM(igst) AS igst FROM refund_vouchers GROUP BY receipt_voucher_id) rf
+        ON rf.receipt_voucher_id = rv.id`;
   const rvs: any[] = kind === 'EVENT'
-    ? await db.query("SELECT id, cgst, sgst, igst FROM receipt_vouchers WHERE event_booking_id = ? AND status = 'ISSUED'", [folio.event_booking_id]).catch(() => [])
-    : await db.query("SELECT id, cgst, sgst, igst FROM receipt_vouchers WHERE folio_id = ? AND status = 'ISSUED'", [folio.id]).catch(() => []);
+    ? await db.query(`${_heldTaxSql} WHERE rv.event_booking_id = ? AND rv.status = 'ISSUED'`, [folio.event_booking_id]).catch(() => [])
+    : await db.query(`${_heldTaxSql} WHERE rv.folio_id = ? AND rv.status = 'ISSUED'`, [folio.id]).catch(() => []);
   const ratio = applied / advTotal;
   const c = +((rvs || []).reduce((s: number, r: any) => s + Number(r.cgst || 0), 0) * ratio).toFixed(2);
   const sg = +((rvs || []).reduce((s: number, r: any) => s + Number(r.sgst || 0), 0) * ratio).toFixed(2);
@@ -3325,11 +3337,14 @@ async function _eventInvoiceArAccount(db: any, folioId: string): Promise<{ code:
  *  invoice would take it out of 2100 a second time. Receipts posted before this
  *  rule count exactly as they were posted. */
 async function _eventAdvanceHeld(db: any, bookingId: string): Promise<number> {
-  const pays: any[] = await db.query("SELECT id, amount FROM event_payments WHERE booking_id = ?", [bookingId]).catch(() => []);
+  const pays: any[] = await db.query("SELECT id, amount, refund_voucher_id FROM event_payments WHERE booking_id = ?", [bookingId]).catch(() => []);
   let held = 0;
   for (const p of pays || []) {
     const amt = Number(p.amount || 0);
-    if (amt < 0) { held += amt; continue; }            // a refund row
+    // A refund of an advance carries a refund voucher and takes it out of what is
+    // held. A refund of a receipt that paid an invoice returns money that was
+    // never an advance, so it does not.
+    if (amt < 0) { if (p.refund_voucher_id) held += amt; continue; }
     const g: any = await db.get(
       `SELECT COALESCE(SUM(cr_amount - dr_amount), 0) AS v FROM gl_entries
         WHERE journal_ref = ? AND is_reversed = 0 AND account_code IN ('2100','2201','2211','2221')`,
@@ -3368,19 +3383,38 @@ async function _allocateEventInvoiceNumber(db: any): Promise<string> {
   throw new Error('Could not allocate an event invoice number');
 }
 
+/** What has been refunded so far on each receipt voucher, summed from its refund
+ *  vouchers — the record itself, so it covers every refund ever issued. */
+async function _rvRefundTotals(db: any, rvIds: string[]): Promise<Record<string, { amount: number; taxable: number; cgst: number; sgst: number; igst: number; count: number }>> {
+  const out: Record<string, any> = {};
+  const ids = (rvIds || []).filter(Boolean).map(String);
+  if (!ids.length) return out;
+  const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+  const rows: any[] = await db.query(
+    `SELECT receipt_voucher_id AS rv, COALESCE(SUM(amount), 0) AS amount, COALESCE(SUM(taxable_value), 0) AS taxable,
+            COALESCE(SUM(cgst), 0) AS cgst, COALESCE(SUM(sgst), 0) AS sgst, COALESCE(SUM(igst), 0) AS igst, COUNT(*) AS n
+       FROM refund_vouchers WHERE receipt_voucher_id IN (${ids.map(() => '?').join(',')}) GROUP BY receipt_voucher_id`, ids).catch(() => []);
+  for (const r of rows || []) {
+    out[String(r.rv)] = { amount: r2(r.amount), taxable: r2(r.taxable), cgst: r2(r.cgst), sgst: r2(r.sgst), igst: r2(r.igst), count: Number(r.n || 0) };
+  }
+  return out;
+}
+
 /**
- * Refund an advance that is still held — Rule 51 refund voucher.
+ * Refund an advance that is still held, in whole or in part — Rule 51 refund voucher.
  * Only an ISSUED receipt voucher holds an advance: one ADJUSTED against a live
  * invoice must have that invoice reversed first (a credit note, or cancelling
- * the event invoice), which returns it to ISSUED. The journal takes the advance
- * back out exactly as the receipt put it in — Dr Advances from Guests and the
- * advance GST, Cr cash or bank — and the receipt that brought it in stops
- * counting: a hotel folio payment is voided (settlement ignores voided rows), an
- * event booking gets a negative receipt row (its paid total is the sum).
+ * the event invoice), which returns it to ISSUED. The journal takes the refunded
+ * part back out as the receipt put it in — Dr Advances from Guests and the
+ * advance GST in the same proportion, Cr cash or bank. The receipt keeps its own
+ * row and the refund gets one beside it: a REFUND payment row on a hotel folio
+ * (netted off the advance at settlement and never posted again), a negative
+ * receipt row on an event booking. The voucher is REFUNDED once nothing is left.
+ * A refund used to return the whole advance and void the receipt.
  */
 async function _refundAdvance(db: any, restaurantId: string, rv: any, o: {
-  refundDate: string; method: string; reference: string | null; reason: string; issuedBy: string | null;
-}): Promise<{ fail?: { status: number; error: string; code: string }; rfv?: any; journalRef?: string }> {
+  refundDate: string; method: string; reference: string | null; reason: string; issuedBy: string | null; amount?: number | null;
+}): Promise<{ fail?: { status: number; error: string; code: string }; rfv?: any; journalRef?: string; heldAfter?: number }> {
   const status = String(rv?.status || '').toUpperCase();
   if (status !== 'ISSUED') {
     if (status === 'ADJUSTED') {
@@ -3389,18 +3423,45 @@ async function _refundAdvance(db: any, restaurantId: string, rv: any, o: {
     if (status === 'REFUNDED') return { fail: { status: 409, code: 'RV_REFUNDED', error: 'This advance has already been refunded.' } };
     return { fail: { status: 409, code: 'RV_CANCELLED', error: 'This receipt voucher is cancelled — there is no advance left to refund.' } };
   }
-  const journalRef = `RFV-${rv.id}`;
-  const dup = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ? LIMIT 1", [journalRef]);
-  if (dup) return { fail: { status: 409, code: 'RV_REFUNDED', error: 'This advance has already been refunded.' } };
   const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
-  const amount = r2(rv.amount), cgst = r2(rv.cgst), sgst = r2(rv.sgst), igst = r2(rv.igst);
+  const done = (await _rvRefundTotals(db, [rv.id]))[String(rv.id)] || { amount: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, count: 0 };
+  const held = {
+    amount: r2(Number(rv.amount || 0) - done.amount),
+    cgst: r2(Number(rv.cgst || 0) - done.cgst), sgst: r2(Number(rv.sgst || 0) - done.sgst), igst: r2(Number(rv.igst || 0) - done.igst),
+  };
+  if (!(held.amount > 0.004)) return { fail: { status: 409, code: 'RV_REFUNDED', error: 'This advance has already been refunded.' } };
+  const want = o.amount == null ? held.amount : r2(o.amount);
+  if (!(want > 0)) return { fail: { status: 400, code: 'AMOUNT_INVALID', error: 'The amount to refund must be more than zero.' } };
+  if (want > held.amount + 0.005) {
+    return { fail: { status: 400, code: 'AMOUNT_EXCEEDS_HELD', error: `Only Rs.${held.amount.toFixed(2)} of this advance is still held, so no more than that can be refunded.` } };
+  }
+  // The last refund takes exactly what is left, so no paisa of tax is stranded.
+  const whole = want >= held.amount - 0.005;
+  const amount = whole ? held.amount : want;
+  const share = amount / held.amount;
+  const cgst = whole ? held.cgst : r2(held.cgst * share);
+  const sgst = whole ? held.sgst : r2(held.sgst * share);
+  const igst = whole ? held.igst : r2(held.igst * share);
   const tax = r2(cgst + sgst + igst);
-  if (!(amount > 0)) return { fail: { status: 400, code: 'RV_EMPTY', error: 'This receipt voucher carries no amount to refund.' } };
+  const taxable = r2(amount - tax);
+  // Reserve the amount on the voucher first, in one conditional statement: two
+  // refunds made at the same moment cannot together return more than was received.
+  const reserved = await db.run(
+    `UPDATE receipt_vouchers SET refunded_amount = COALESCE(refunded_amount, 0) + ?
+      WHERE id = ? AND status = 'ISSUED' AND COALESCE(refunded_amount, 0) + ? <= amount + 0.005`,
+    [amount, rv.id, amount]);
+  if (Number(reserved?.changes || 0) !== 1) {
+    return { fail: { status: 409, code: 'RV_CHANGED', error: 'This advance changed while the refund was being made. Reload it and try again.' } };
+  }
+  const release = () => db.run(
+    "UPDATE receipt_vouchers SET refunded_amount = GREATEST(COALESCE(refunded_amount, 0) - ?, 0) WHERE id = ?", [amount, rv.id]).catch(() => {});
   const module = String(rv.module || '').toUpperCase() === 'EVENTS' ? 'EVENTS' : 'HOTEL';
   const cashAcct = _glAccountForPaymentMethod(o.method);
-  const narr = `Refund of advance ${rv.rv_number}`;
+  const id = `RFVC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  const journalRef = `RFV-${id}`;
+  const narr = `Refund of advance ${rv.rv_number}${whole && done.count === 0 ? '' : ' (part)'}`;
   const lines: GlLine[] = [
-    { account_code: '2100', account_name: 'Advances from Guests', dr_amount: r2(amount - tax), cr_amount: 0, narration: narr },
+    { account_code: '2100', account_name: 'Advances from Guests', dr_amount: taxable, cr_amount: 0, narration: narr },
   ];
   if (cgst > 0) lines.push({ account_code: _ADV_GST.cgst.code, account_name: _ADV_GST.cgst.name, dr_amount: cgst, cr_amount: 0, narration: `CGST on refunded advance ${rv.rv_number}` });
   if (sgst > 0) lines.push({ account_code: _ADV_GST.sgst.code, account_name: _ADV_GST.sgst.name, dr_amount: sgst, cr_amount: 0, narration: `SGST on refunded advance ${rv.rv_number}` });
@@ -3408,15 +3469,33 @@ async function _refundAdvance(db: any, restaurantId: string, rv: any, o: {
   lines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: amount, narration: narr });
   const posted = await _postGlEntries(db, restaurantId, journalRef, o.refundDate, 'ADVANCE_REFUND', rv.id, lines, o.issuedBy, module);
   if (!posted.ok) {
+    await release();
     return { fail: { status: 409, code: 'REFUND_NOT_POSTED', error: posted.reason === 'ACCOUNTING_PERIOD_CLOSED' ? 'The books are closed for the refund date. Reopen that period, or date the refund inside an open one.' : `The refund could not be posted to the ledger: ${posted.reason}` } };
   }
   const y = Number(o.refundDate.slice(0, 4)), m = Number(o.refundDate.slice(5, 7));
   const fy = m >= 4 ? y : y - 1;
-  const id = `RFVC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
   let rfvNumber = '';
+  let hotelRowId: string | null = null, eventRowId: string | null = null;
   try {
     const seq = await getNextTenantSequence(db, `refund-voucher-${fy}`);
     rfvNumber = `RFV-${fy}-${String(seq).padStart(5, '0')}`;
+    if (rv.payment_source === 'folio_payments' && rv.payment_id) {
+      const orig: any = await db.get("SELECT folio_id FROM folio_payments WHERE id = ?", [rv.payment_id]);
+      const folioId = orig?.folio_id || rv.folio_id;
+      if (folioId) {
+        hotelRowId = `FP-RF-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        await db.run(
+          `INSERT INTO folio_payments (id, folio_id, amount, payment_method, payment_type, reference_number, recorded_by, notes, refund_voucher_id)
+           VALUES (?, ?, ?, ?, 'REFUND', ?, ?, ?, ?)`,
+          [hotelRowId, folioId, amount, o.method, o.reference, o.issuedBy, `Refund ${rfvNumber} of advance ${rv.rv_number}`, id]);
+      }
+    } else if (rv.payment_source === 'event_payments' && rv.event_booking_id) {
+      eventRowId = `EPY-RF-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO event_payments (id, booking_id, amount, method, reference, paid_at, note, recorded_by, refund_voucher_id, refund_of_payment_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [eventRowId, rv.event_booking_id, -amount, o.method, o.reference, o.refundDate, `Refund ${rfvNumber} of ${rv.rv_number}`, o.issuedBy, id, rv.payment_id || null]);
+    }
     await db.run(
       `INSERT INTO refund_vouchers
          (id, rfv_number, module, refund_date, receipt_voucher_id, rv_number, rv_date, amount, taxable_value, gst_rate,
@@ -3424,33 +3503,86 @@ async function _refundAdvance(db: any, restaurantId: string, rv: any, o: {
           payment_method, reference, booking_id, event_booking_id, folio_id, payment_id, journal_ref, issued_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       // 27 columns, 27 placeholders, bound in column order.
-      [id, rfvNumber, module, o.refundDate, rv.id, rv.rv_number, rv.receipt_date, amount, r2(rv.taxable_value), Number(rv.gst_rate || 0),
+      [id, rfvNumber, module, o.refundDate, rv.id, rv.rv_number, rv.receipt_date, amount, taxable, Number(rv.gst_rate || 0),
        cgst, sgst, igst, rv.place_of_supply || null, rv.customer_name || null, rv.customer_gstin || null, rv.customer_address || null,
        rv.description || null, o.reason,
        o.method, o.reference, rv.booking_id || null, rv.event_booking_id || null, rv.folio_id || null, rv.payment_id || null, journalRef, o.issuedBy]);
   } catch (e: any) {
-    // No voucher, no refund: take the journal straight back out so the books
-    // never show money returned without the document that evidences it.
+    // No voucher, no refund: take everything back out so the books never show
+    // money returned without the document that evidences it.
+    if (hotelRowId) await db.run("UPDATE folio_payments SET is_voided = 1, voided_at = ?, voided_by = ?, voided_reason = ? WHERE id = ?",
+      [new Date().toISOString(), o.issuedBy, 'Refund voucher could not be issued', hotelRowId]).catch(() => {});
+    if (eventRowId) await db.run("DELETE FROM event_payments WHERE id = ?", [eventRowId]).catch(() => {});
     await _reverseJournal(db, restaurantId, journalRef, { date: o.refundDate, sourceType: 'ADVANCE_REFUND_REVERSAL', sourceId: rv.id, reason: 'Refund voucher could not be issued', postedBy: o.issuedBy });
+    await release();
     return { fail: { status: 500, code: 'REFUND_VOUCHER_FAILED', error: `The refund voucher could not be issued: ${e?.message || e}` } };
   }
-  await db.run(
-    "UPDATE receipt_vouchers SET status = 'REFUNDED', refunded_at = ?, refund_voucher_id = ? WHERE id = ? AND status = 'ISSUED'",
-    [o.refundDate, id, rv.id]);
+  // The receipt names its latest refund voucher — which is also what stops it
+  // being voided or deleted while a refund voucher stands against it.
   if (rv.payment_source === 'folio_payments' && rv.payment_id) {
+    await db.run("UPDATE folio_payments SET refund_voucher_id = ? WHERE id = ?", [id, rv.payment_id]);
+  } else if (rv.payment_source === 'event_payments' && rv.payment_id) {
+    await db.run("UPDATE event_payments SET refund_voucher_id = ? WHERE id = ?", [id, rv.payment_id]);
+  }
+  const heldAfter = r2(held.amount - amount);
+  if (heldAfter <= 0.004) {
     await db.run(
-      "UPDATE folio_payments SET is_voided = 1, voided_at = ?, voided_by = ?, voided_reason = ?, refund_voucher_id = ? WHERE id = ?",
-      [new Date().toISOString(), o.issuedBy, `Refunded under ${rfvNumber}`, id, rv.payment_id]);
-  } else if (rv.payment_source === 'event_payments' && rv.event_booking_id) {
-    if (rv.payment_id) await db.run("UPDATE event_payments SET refund_voucher_id = ? WHERE id = ?", [id, rv.payment_id]);
-    await db.run(
-      `INSERT INTO event_payments (id, booking_id, amount, method, reference, paid_at, note, recorded_by, refund_voucher_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [`EPY-RF-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`, rv.event_booking_id, -amount, o.method,
-       o.reference, o.refundDate, `Refund ${rfvNumber} of ${rv.rv_number}`, o.issuedBy, id]);
+      "UPDATE receipt_vouchers SET status = 'REFUNDED', refunded_at = ?, refund_voucher_id = ? WHERE id = ? AND status = 'ISSUED'",
+      [o.refundDate, id, rv.id]);
   }
   const rfv = await db.get("SELECT * FROM refund_vouchers WHERE id = ?", [id]);
-  return { rfv, journalRef };
+  return { rfv, journalRef, heldAfter: Math.max(0, heldAfter) };
+}
+
+/** A refund recorded on a folio WITHOUT a refund voucher (money handed back at the
+ *  desk), posted at settlement: Dr the receivable, Cr the cash or bank it was paid
+ *  from. It used to go through the receipts loop — Dr cash, Cr receivable — so
+ *  money paid back was booked as money received. */
+function _refundPaidGlLines(p: any, arCode: string, arName: string, folioId: string): GlLine[] {
+  const amt = +Number(p.amount || 0).toFixed(2);
+  if (!(amt > 0)) return [];
+  const cash = _glAccountForPaymentMethod(p.payment_method);
+  return [
+    { account_code: arCode, account_name: arName, dr_amount: amt, cr_amount: 0, narration: `Refund paid ${folioId}` },
+    { account_code: cash.code, account_name: cash.name, dr_amount: 0, cr_amount: amt, narration: `Refund paid ${folioId}` },
+  ];
+}
+
+/** What each receipt on an event booking can still be refunded, and how, so the
+ *  screen offers only a refund the server will make. An advance refunds through
+ *  its receipt voucher; a receipt that paid an invoice refunds once no invoice
+ *  stands. Adds refunded / refundable / refund_kind / refund_blocked_reason. */
+async function _annotateEventRefunds(db: any, bk: any, rows: any[]): Promise<void> {
+  const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+  for (const p of rows || []) { p.refunded = 0; p.refundable = 0; p.refund_kind = null; p.refund_blocked_reason = null; }
+  const pos = (rows || []).filter((p: any) => Number(p.amount) > 0);
+  if (!pos.length) return;
+  const rvIds = pos.map((p: any) => p.receipt_voucher_id).filter(Boolean).map(String);
+  const rvs: any[] = rvIds.length ? await db.query(
+    `SELECT id, status, amount, adjusted_invoice_number FROM receipt_vouchers WHERE id IN (${rvIds.map(() => '?').join(',')})`, rvIds).catch(() => []) : [];
+  const rvDone = await _rvRefundTotals(db, rvIds);
+  const refs = pos.filter((p: any) => !p.receipt_voucher_id).map((p: any) => `EVENT-PAY-${p.id}`);
+  const srcRows: any[] = refs.length ? await db.query(
+    `SELECT DISTINCT journal_ref, source_type FROM gl_entries WHERE journal_ref IN (${refs.map(() => '?').join(',')})`, refs).catch(() => []) : [];
+  const src: Record<string, string> = {};
+  for (const s of srcRows || []) src[String(s.journal_ref)] = String(s.source_type);
+  const live = await _liveEventInvoice(db, bk);
+  for (const p of pos) {
+    if (p.receipt_voucher_id) {
+      const rv = (rvs || []).find((x: any) => String(x.id) === String(p.receipt_voucher_id));
+      const done = rvDone[String(p.receipt_voucher_id)]?.amount || 0;
+      p.refund_kind = 'VOUCHER'; p.refunded = r2(done);
+      const st = String(rv?.status || '').toUpperCase();
+      if (st === 'ISSUED') p.refundable = r2(Math.max(0, Number(rv.amount || 0) - done));
+      else if (st === 'ADJUSTED') p.refund_blocked_reason = `Adjusted against invoice ${rv.adjusted_invoice_number || ''} — cancel or revise that invoice first`;
+    } else if (src[`EVENT-PAY-${p.id}`] === 'EVENT_RECEIPT') {
+      const done = r2(-(rows || []).filter((q: any) => q.refund_of_payment_id === p.id && !q.refund_voucher_id)
+        .reduce((s: number, q: any) => s + Number(q.amount || 0), 0));
+      p.refund_kind = 'RECEIPT'; p.refunded = done;
+      p.refundable = r2(Math.max(0, Number(p.amount || 0) - done));
+      if (live && p.refundable > 0) p.refund_blocked_reason = `Invoice ${live.invoice_number || live.id} stands and this receipt pays it — cancel or revise the invoice first`;
+    }
+  }
 }
 
 
@@ -5256,6 +5388,13 @@ async function settleFolioForBooking(
           // Sold on credit: no money moved, so the AR raised by the invoice block
           // above stays open instead of being cleared into the bank.
           if (_isCreditTender(p.payment_method)) continue;
+          // A REFUND row is money paid back. One made under a refund voucher is in
+          // the ledger already and netted off the advance above; any other is paid
+          // out now, putting the receivable back.
+          if (String(p.payment_type || '').toUpperCase() === 'REFUND') {
+            if (!p.refund_voucher_id) glLines.push(..._refundPaidGlLines(p, '1100', 'Accounts Receivable — Guests', folio.id));
+            continue;
+          }
           glLines.push(..._tenderGlLines(mdrFolio, p.payment_method, amt, `${p.payment_method} ${folio.id}`));
           glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
         }
@@ -5313,6 +5452,8 @@ const GL_SOURCE_MODULE: Record<string, string> = {
   EVENT_ADVANCE: 'EVENTS',
   EVENT_ADVANCE_REVERSAL: 'EVENTS',
   EVENT_RECEIPT: 'EVENTS',
+  EVENT_RECEIPT_REFUND: 'EVENTS',
+  EVENT_RECEIPT_REFUND_REVERSAL: 'EVENTS',
   SPA_INTERIM: 'SPA',
   BOOKING_CANCEL: 'HOTEL',
   // Property-wide by nature: they fund or measure the whole business, and
@@ -6846,6 +6987,12 @@ async function _postFolioGl(
       if (amt <= 0) continue;
       // Same rule for event and spa folios, which both settle through here.
       if (_isCreditTender(p.payment_method)) continue;
+      // A REFUND row is money paid back: under a refund voucher it is posted
+      // already; otherwise it is paid out now, putting the receivable back.
+      if (String(p.payment_type || '').toUpperCase() === 'REFUND') {
+        if (!p.refund_voucher_id) lines.push(..._refundPaidGlLines(p, arCode, arName, folioId));
+        continue;
+      }
       lines.push(..._tenderGlLines(mdrF, p.payment_method, amt, `${p.payment_method || 'CASH'} ${folioId}`));
       lines.push({ account_code: arCode, account_name: arName, dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folioId}` });
     }
@@ -31670,8 +31817,10 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query("SELECT * FROM event_payments WHERE booking_id = ? ORDER BY created_at DESC", [req.params.bid]).catch(() => []);
-      const bk: any = await db.get("SELECT total_amount FROM event_bookings WHERE id = ?", [req.params.bid]);
+      const bk: any = await db.get("SELECT total_amount, folio_id FROM event_bookings WHERE id = ?", [req.params.bid]);
       const paid = round2((rows || []).reduce((s, r) => s + Number(r.amount || 0), 0));
+      // What each receipt can still be refunded, and how.
+      await _annotateEventRefunds(db, bk, rows || []);
       res.json({ payments: rows, paid, total: Number(bk?.total_amount || 0), balance: round2(Number(bk?.total_amount || 0) - paid) });
     } catch (err: any) { res.status(500).json({ error: "Failed to load payments" }); }
   });
@@ -31801,6 +31950,108 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to record payment" }); }
   });
 
+  // POST /events/payments/:pid/refund — money back from a receipt that paid an
+  // event invoice, once no invoice stands (it was cancelled or revised, or the
+  // booking cancelled). That receipt cleared the invoice's receivable, so the
+  // refund puts it back: Dr the same receivable, Cr cash or bank. It was never an
+  // advance and carries no tax, so there is no refund voucher — an advance is
+  // refunded through its receipt voucher instead. In whole or in part.
+  // Body: { amount?, method, reference?, reason, refund_date? }
+  app.post("/api/restaurant/:id/events/payments/:pid/refund", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const role = String(req.user?.role || '').toUpperCase();
+    if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role) && !(await _roleHasTab(req, 'EVENTS_BOOKINGS', 2))) {
+      return res.status(403).json({ error: 'You need Edit access to Event Bookings to refund a receipt.' });
+    }
+    try {
+      const db = await getTenantDb(req.params.id);
+      const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
+      const ymd = (v: any) => v instanceof Date
+        ? `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`
+        : String(v || '').slice(0, 10);
+      const by = req.user?.email || req.user?.id || null;
+      const pay: any = await db.get("SELECT * FROM event_payments WHERE id = ?", [req.params.pid]);
+      if (!pay) return res.status(404).json({ error: 'Payment not found' });
+      if (!(Number(pay.amount) > 0)) return res.status(409).json({ error: 'This row is itself a refund.', code: 'NOT_A_RECEIPT' });
+      if (pay.receipt_voucher_id) {
+        return res.status(409).json({ error: 'This receipt is an advance with a receipt voucher. Refund it from its voucher, so a refund voucher is issued and the tax paid on it comes back out.', code: 'USE_VOUCHER_REFUND' });
+      }
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [pay.booking_id]);
+      if (!bk) return res.status(404).json({ error: 'Booking not found' });
+      const jl: any[] = await db.query(
+        "SELECT account_code, account_name, cr_amount, source_type FROM gl_entries WHERE journal_ref = ?", [`EVENT-PAY-${pay.id}`]);
+      const arLine = (jl || []).find((l: any) => String(l.source_type) === 'EVENT_RECEIPT' && Number(l.cr_amount) > 0 && /^11/.test(String(l.account_code)));
+      if (!arLine) {
+        return res.status(409).json({ error: 'This receipt was not taken against an invoice, so there is no receivable to put back. Only a receipt that paid an event invoice is refunded here.', code: 'NOT_AN_INVOICE_RECEIPT' });
+      }
+      const live = await _liveEventInvoice(db, bk);
+      if (live) {
+        return res.status(409).json({ error: `Invoice ${live.invoice_number || live.id} stands for this booking and this receipt pays it. Cancel or revise the invoice first.`, code: 'INVOICE_STANDS' });
+      }
+      const b = req.body || {};
+      const reason = String(b.reason || '').trim();
+      if (reason.length < 3) return res.status(400).json({ error: 'Give the reason for the refund — it is kept in the audit trail.', code: 'REASON_REQUIRED' });
+      const method = String(b.method || pay.method || 'CASH').toUpperCase().trim();
+      if (!_REFUND_METHODS.includes(method)) return res.status(400).json({ error: `method must be one of ${_REFUND_METHODS.join(', ')}`, code: 'METHOD_INVALID' });
+      const today = new Date().toISOString().slice(0, 10);
+      const refundDate = /^\d{4}-\d{2}-\d{2}$/.test(String(b.refund_date || '')) ? String(b.refund_date) : today;
+      if (refundDate > today) return res.status(400).json({ error: 'A refund cannot be dated in the future.', code: 'DATE_INVALID' });
+      const paidOn = ymd(pay.paid_at);
+      if (paidOn && refundDate < paidOn) return res.status(400).json({ error: `A refund cannot be dated before the money was received (${paidOn}).`, code: 'DATE_INVALID' });
+      if (await _blockIfAcctClosed(res, db, refundDate)) return;
+      const doneRow: any = await db.get("SELECT COALESCE(SUM(-amount), 0) AS v FROM event_payments WHERE refund_of_payment_id = ? AND refund_voucher_id IS NULL", [pay.id]);
+      const held = r2(Number(pay.amount) - Number(doneRow?.v || 0));
+      if (!(held > 0.004)) return res.status(409).json({ error: 'This receipt has already been refunded in full.', code: 'ALREADY_REFUNDED' });
+      const want = (b.amount === undefined || b.amount === null || b.amount === '') ? held : r2(b.amount);
+      if (!(want > 0)) return res.status(400).json({ error: 'The amount to refund must be more than zero.', code: 'AMOUNT_INVALID' });
+      if (want > held + 0.005) return res.status(400).json({ error: `Only Rs.${held.toFixed(2)} of this receipt is left to refund.`, code: 'AMOUNT_EXCEEDS_HELD' });
+      const amount = want >= held - 0.005 ? held : want;
+      // Reserve on the receipt row first: two refunds made at the same moment
+      // cannot together return more than it brought in.
+      const reserved = await db.run(
+        "UPDATE event_payments SET refunded_amount = COALESCE(refunded_amount, 0) + ? WHERE id = ? AND COALESCE(refunded_amount, 0) + ? <= amount + 0.005",
+        [amount, pay.id, amount]);
+      if (Number(reserved?.changes || 0) !== 1) {
+        return res.status(409).json({ error: 'This receipt changed while the refund was being made. Reload it and try again.', code: 'RECEIPT_CHANGED' });
+      }
+      const release = () => db.run("UPDATE event_payments SET refunded_amount = GREATEST(COALESCE(refunded_amount, 0) - ?, 0) WHERE id = ?", [amount, pay.id]).catch(() => {});
+      const rowId = `EPY-RR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const journalRef = `EVENT-RFD-${rowId}`;
+      const cash = _glAccountForPaymentMethod(method);
+      const posted = await _postGlEntries(db, req.params.id, journalRef, refundDate, 'EVENT_RECEIPT_REFUND', pay.id, [
+        { account_code: String(arLine.account_code), account_name: String(arLine.account_name || 'Accounts Receivable — Guests'), dr_amount: amount, cr_amount: 0, narration: `Refund of event receipt ${pay.id}` },
+        { account_code: cash.code, account_name: cash.name, dr_amount: 0, cr_amount: amount, narration: `Refund of event receipt ${bk.customer_name || ''}`.trim() },
+      ], by, 'EVENTS');
+      if (!posted.ok) {
+        await release();
+        return res.status(409).json({ error: posted.reason === 'ACCOUNTING_PERIOD_CLOSED' ? 'The books are closed for the refund date.' : `The refund could not be posted to the ledger: ${posted.reason}`, code: 'REFUND_NOT_POSTED' });
+      }
+      try {
+        await db.run(
+          `INSERT INTO event_payments (id, booking_id, amount, method, reference, paid_at, note, recorded_by, refund_of_payment_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [rowId, pay.booking_id, -amount, method, b.reference ? String(b.reference).slice(0, 120) : null, refundDate,
+           `Refund of receipt dated ${paidOn || '—'}: ${reason.slice(0, 200)}`, by, pay.id]);
+      } catch (e: any) {
+        await _reverseJournal(db, req.params.id, journalRef, { date: refundDate, sourceType: 'EVENT_RECEIPT_REFUND_REVERSAL', sourceId: pay.id, reason: 'Refund row could not be recorded', postedBy: by });
+        await release();
+        return res.status(500).json({ error: `The refund could not be recorded: ${e?.message || e}` });
+      }
+      await recomputeEventPaid(db, pay.booking_id).catch(() => {});
+      await reconcileEventSchedule(db, pay.booking_id).catch(() => {});
+      await _syncAccountInvoiceForEvent(db, pay.booking_id);
+      await writeObjectAudit(db, req, {
+        objectType: 'EVENT_BOOKING', objectId: pay.booking_id, action: 'RECEIPT_REFUNDED',
+        summary: `Rs.${amount.toFixed(2)} refunded from receipt of Rs.${Number(pay.amount).toFixed(2)} (${paidOn}) by ${method} — ${reason}`,
+      }).catch(() => {});
+      res.status(201).json({ success: true, refund_payment_id: rowId, journal_ref: journalRef, amount, remaining: r2(held - amount) });
+    } catch (err: any) {
+      console.error('[event-receipt-refund] error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to refund the receipt' });
+    }
+  });
+
   app.delete("/api/restaurant/:id/events/payments/:pid", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -31815,6 +32066,15 @@ ${data.tenant.name}`;
           error: Number(pay.amount) < 0
             ? 'This is a refund recorded under a refund voucher and cannot be deleted.'
             : 'This receipt has been refunded under a refund voucher and cannot be deleted.',
+          code: 'REFUNDED',
+        });
+      }
+      // A refund of a receipt that paid an invoice, and the receipt it returned
+      // money from, are one record of cash in and cash out.
+      const _refundedFrom: any = await db.get("SELECT id FROM event_payments WHERE refund_of_payment_id = ? LIMIT 1", [pay.id]).catch(() => null);
+      if (pay.refund_of_payment_id || _refundedFrom) {
+        return res.status(409).json({
+          error: pay.refund_of_payment_id ? 'This is a refund and cannot be deleted.' : 'This receipt has been refunded, in part or in full, and cannot be deleted.',
           code: 'REFUNDED',
         });
       }
@@ -47946,6 +48206,13 @@ ${data.tenant.name}`;
             [cf.id]
           ).catch(() => []);
           advTotal = (advs || []).reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+          // Refunded under a refund voucher: that part has already gone back out of
+          // 2100 and the advance GST, so it is not unwound a second time here.
+          const _rfd: any = await tenantDb.get(
+            `SELECT COALESCE(SUM(amount), 0) AS v FROM folio_payments
+              WHERE folio_id = ? AND payment_type = 'REFUND' AND refund_voucher_id IS NOT NULL AND is_voided = 0`,
+            [cf.id]).catch(() => null);
+          advTotal -= Number(_rfd?.v || 0);
           if (advs && advs[0]?.payment_method) advMethod = advs[0].payment_method;
         }
         advTotal = +advTotal.toFixed(2);
@@ -47961,8 +48228,13 @@ ${data.tenant.name}`;
             // was made), while the FORFEITED part is consideration for the
             // cancellation — a taxable supply — so its tax moves to output GST
             // and stays paid.
+            // The tax still held on each voucher: charged, less what refunds took back.
             const _cRvs: any[] = await tenantDb.query(
-              "SELECT id, cgst, sgst, igst FROM receipt_vouchers WHERE folio_id = ? AND status = 'ISSUED'", [cf.id]).catch(() => []);
+              `SELECT rv.id, rv.cgst - COALESCE(rf.cgst, 0) AS cgst, rv.sgst - COALESCE(rf.sgst, 0) AS sgst, rv.igst - COALESCE(rf.igst, 0) AS igst
+                 FROM receipt_vouchers rv
+                 LEFT JOIN (SELECT receipt_voucher_id, SUM(cgst) AS cgst, SUM(sgst) AS sgst, SUM(igst) AS igst FROM refund_vouchers GROUP BY receipt_voucher_id) rf
+                   ON rf.receipt_voucher_id = rv.id
+                WHERE rv.folio_id = ? AND rv.status = 'ISSUED'`, [cf.id]).catch(() => []);
             const _rc = +(_cRvs || []).reduce((s: number, r: any) => s + Number(r.cgst || 0), 0).toFixed(2);
             const _rs = +(_cRvs || []).reduce((s: number, r: any) => s + Number(r.sgst || 0), 0).toFixed(2);
             const _ri = +(_cRvs || []).reduce((s: number, r: any) => s + Number(r.igst || 0), 0).toFixed(2);
@@ -49661,6 +49933,20 @@ ${data.tenant.name}`;
         delete r.adjusted_folio_invoice_number;
         visible.push(r);
       }
+      // What each voucher has had refunded, read from its refund vouchers, and
+      // what it still holds.
+      const _done = await _rvRefundTotals(db, visible.map((r: any) => r.id));
+      for (const r of visible) {
+        const d = _done[String(r.id)];
+        r.refunded_amount = d ? d.amount : 0;
+        r.refunded_taxable = d ? d.taxable : 0;
+        r.refunded_cgst = d ? d.cgst : 0;
+        r.refunded_sgst = d ? d.sgst : 0;
+        r.refunded_igst = d ? d.igst : 0;
+        r.refund_count = d ? d.count : 0;
+        r.held_amount = ['ISSUED', 'ADJUSTED'].includes(String(r.status || '').toUpperCase())
+          ? Math.max(0, Math.round((Number(r.amount || 0) - r.refunded_amount) * 100) / 100) : 0;
+      }
       res.json(visible);
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to list receipt vouchers' }); }
   });
@@ -49678,9 +49964,12 @@ ${data.tenant.name}`;
       }
       const refundOf: any = rv.refund_voucher_id
         ? await db.get("SELECT rfv_number, refund_date FROM refund_vouchers WHERE id = ?", [rv.refund_voucher_id]).catch(() => null) : null;
+      const _refunds: any[] = await db.query(
+        "SELECT rfv_number, refund_date, amount FROM refund_vouchers WHERE receipt_voucher_id = ? ORDER BY rfv_number", [rv.id]).catch(() => []);
       const rest: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [req.params.id]).catch(() => ({}));
       const seller = _invoiceSeller(rest || {});
       const pdf = await generateReceiptVoucherPdf({
+        refunds: (_refunds || []).map((x: any) => ({ rfv_number: x.rfv_number, refund_date: x.refund_date, amount: Number(x.amount || 0) })),
         rv_number: rv.rv_number, receipt_date: rv.receipt_date, status: rv.status, module: rv.module,
         seller: { name: seller.name, address: seller.address, city: seller.city, state: seller.state, pincode: seller.pincode, gstin: seller.gstin, phone: seller.phone, email: seller.email },
         customer: { name: rv.customer_name, address: rv.customer_address, gstin: rv.customer_gstin },
@@ -49726,6 +50015,8 @@ ${data.tenant.name}`;
       const out = await _refundAdvance(db, req.params.id, rv, {
         refundDate, method, reference: b.reference ? String(b.reference).slice(0, 120) : null,
         reason: reason.slice(0, 300), issuedBy: req.user?.email || req.user?.id || null,
+        // Omitted: whatever is still held. A number: that much of it.
+        amount: (b.amount === undefined || b.amount === null || b.amount === '') ? null : Number(b.amount),
       });
       if (out.fail) return res.status(out.fail.status).json({ error: out.fail.error, code: out.fail.code });
       if (isEvents && rv.event_booking_id) {
@@ -49739,9 +50030,9 @@ ${data.tenant.name}`;
         objectType: isEvents ? 'EVENT_BOOKING' : 'FOLIO',
         objectId: isEvents ? (rv.event_booking_id || rv.id) : (rv.folio_id || rv.id),
         action: 'ADVANCE_REFUNDED',
-        summary: `Advance ${rv.rv_number} (Rs.${Number(rv.amount || 0).toFixed(2)}) refunded under ${out.rfv?.rfv_number} by ${method} — ${reason}`,
+        summary: `Rs.${Number(out.rfv?.amount || 0).toFixed(2)} of advance ${rv.rv_number} (Rs.${Number(rv.amount || 0).toFixed(2)}) refunded under ${out.rfv?.rfv_number} by ${method} — ${reason}`,
       }).catch(() => {});
-      res.status(201).json({ refund_voucher: out.rfv, journal_ref: out.journalRef });
+      res.status(201).json({ refund_voucher: out.rfv, journal_ref: out.journalRef, held_after: out.heldAfter });
     } catch (err: any) {
       console.error('[RFV] refund error:', err);
       res.status(500).json({ error: err?.message || 'Failed to refund the advance' });
@@ -49756,7 +50047,15 @@ ${data.tenant.name}`;
       if (!(await _canSeeVoucher(req, f.module))) return res.status(403).json({ error: 'Forbidden' });
       const rest: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [req.params.id]).catch(() => ({}));
       const seller = _invoiceSeller(rest || {});
+      // A part refund says what the advance was and what is still held after it.
+      const _rvRow: any = await db.get("SELECT amount FROM receipt_vouchers WHERE id = ?", [f.receipt_voucher_id]).catch(() => null);
+      const _before: any = await db.get(
+        "SELECT COALESCE(SUM(amount), 0) AS v FROM refund_vouchers WHERE receipt_voucher_id = ? AND rfv_number < ?", [f.receipt_voucher_id, f.rfv_number]).catch(() => null);
+      const _rvAmt = Number(_rvRow?.amount || 0);
+      const _prior = Math.round(Number(_before?.v || 0) * 100) / 100;
       const pdf = await generateRefundVoucherPdf({
+        rv_amount: _rvAmt || null, refunded_before: _prior,
+        held_after: _rvAmt ? Math.max(0, Math.round((_rvAmt - _prior - Number(f.amount || 0)) * 100) / 100) : null,
         rfv_number: f.rfv_number, refund_date: f.refund_date, module: f.module,
         seller: { name: seller.name, address: seller.address, city: seller.city, state: seller.state, pincode: seller.pincode, gstin: seller.gstin, phone: seller.phone, email: seller.email },
         customer: { name: f.customer_name, address: f.customer_address, gstin: f.customer_gstin },
@@ -49836,6 +50135,16 @@ ${data.tenant.name}`;
       const payment: any = await tenantDb.get("SELECT * FROM folio_payments WHERE id = ?", [req.params.paymentId]);
       if (!payment) return res.status(404).json({ error: 'Payment not found' });
       if (payment.is_voided) return res.status(409).json({ error: 'Payment already voided' });
+      // A refund, and an advance that money has been refunded from, belong to a
+      // refund voucher: voiding either would undo half of it.
+      if (payment.refund_voucher_id) {
+        return res.status(409).json({
+          error: String(payment.payment_type || '').toUpperCase() === 'REFUND'
+            ? 'This refund was made under a refund voucher and cannot be voided.'
+            : 'Part or all of this advance has been refunded under a refund voucher, so it cannot be voided.',
+          code: 'REFUNDED',
+        });
+      }
       const reason = String(req.body?.reason || '').trim();
       if (!reason) return res.status(400).json({ error: 'reason is required for audit trail' });
       const now = new Date().toISOString();
@@ -49901,6 +50210,25 @@ ${data.tenant.name}`;
       // whatever its receipts add up to once an advance has been refunded.
       const _cn: any = folio.doc_type === 'CREDIT_NOTE' ? null : await tenantDb.get(
         "SELECT id, invoice_number FROM folios WHERE parent_folio_id = ? AND doc_type = 'CREDIT_NOTE' LIMIT 1", [folio.id]).catch(() => null);
+      // What each advance can still be refunded, so the viewer offers only a
+      // refund the server will make.
+      const _pays: any[] = _out ? _out.payments : [];
+      const _rvIds = _pays.map((p: any) => p.receipt_voucher_id).filter(Boolean).map(String);
+      if (_rvIds.length) {
+        const _rvs: any[] = await tenantDb.query(
+          `SELECT id, status, amount, adjusted_invoice_number FROM receipt_vouchers WHERE id IN (${_rvIds.map(() => '?').join(',')})`, _rvIds).catch(() => []);
+        const _done = await _rvRefundTotals(tenantDb, _rvIds);
+        for (const p of _pays) {
+          const rv = (_rvs || []).find((x: any) => String(x.id) === String(p.receipt_voucher_id));
+          if (!rv) continue;
+          const st = String(rv.status || '').toUpperCase();
+          const done = _done[String(rv.id)]?.amount || 0;
+          p.rv_status = rv.status;
+          p.refunded = done;
+          p.refundable = st === 'ISSUED' && Number(p.is_voided) !== 1 ? Math.max(0, Math.round((Number(rv.amount || 0) - done) * 100) / 100) : 0;
+          p.refund_blocked_reason = st === 'ADJUSTED' ? `Adjusted against invoice ${rv.adjusted_invoice_number || ''} — issue a credit note first` : null;
+        }
+      }
       res.json({
         ...folio,
         entries,
@@ -51077,6 +51405,12 @@ ${data.tenant.name}`;
             const amt = Number(p.amount);
             if (amt <= 0) continue;
             if (_isCreditTender(p.payment_method)) continue;
+            // A REFUND row is money paid back: under a refund voucher it is posted
+            // already; otherwise it is paid out now, putting the receivable back.
+            if (String(p.payment_type || '').toUpperCase() === 'REFUND') {
+              if (!p.refund_voucher_id) glLines.push(..._refundPaidGlLines(p, '1100', 'Accounts Receivable — Guests', folio.id));
+              continue;
+            }
             const cashAcct = _glAccountForPaymentMethod(p.payment_method);
             glLines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method} ${folio.id}` });
             glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
@@ -59614,8 +59948,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'credit-noted-folio-owes-nothing',
+    commit_marker: 'partial-refunds-receipt-refunds',
     code_features: [
+      'partial-refunds-receipt-refunds — (1) PART REFUNDS OF AN ADVANCE. POST /receipt-vouchers/:id/refund takes an optional amount (default: all still held). The amount is reserved on receipt_vouchers.refunded_amount by one conditional UPDATE, so two refunds at once cannot exceed the advance; each refund has its own RFV-<refund voucher id> journal (older refunds used RFV-<receipt voucher id>) and Rule 51 voucher, tax in proportion, the last refund takes exactly what is left; the voucher is REFUNDED only when nothing is held. The receipt is no longer voided: a hotel folio gets a REFUND row carrying the refund voucher, an event booking a negative row. Settlement nets those REFUND rows off the advance and applies only the tax still held; hotel booking cancel does the same; GSTR-1 11A/11B release tax per refund on its own date, and on adjustment or cancellation only what was still held. A refunded advance, and its refund row, cannot be voided or deleted. (2) LATENT BUG FIXED: a REFUND folio payment without a refund voucher (API, spa) was posted at settlement as money RECEIVED (Dr cash, Cr AR) by all three settlement journals; it is now Dr AR, Cr cash. Live rows affected: none. (3) RECEIPT REFUNDS: POST /events/payments/:pid/refund returns money from a receipt that paid an event invoice once no invoice stands — Dr the receivable its journal credited, Cr cash, negative row with refund_of_payment_id, reserved on event_payments.refunded_amount; refused while an invoice stands, for an advance (use its voucher) and for receipts not taken against an invoice. _eventAdvanceHeld counts only refunds that carry a refund voucher. Payments GET and hotel folio GET say what each receipt can still be refunded.',
       'credit-noted-folio-owes-nothing — seen on screen after the refund work: a hotel folio whose invoice had been credit-noted showed its refunded advance as outstanding, because the viewer total ignores credit notes and a refunded advance no longer counts as paid. GET /hotel/folios/:id now reports outstanding 0 and names the credit note when one exists; the viewer says so and no longer offers a second credit note. The payment action buttons wrap instead of clipping, and the Method and Amount headers no longer run together.',
       'refunds-serials-event-receipts — three fixes from the post-M-2 review. (1) REFUND OF AN ADVANCE, RULE 51: POST /receipt-vouchers/:id/refund refunds an advance that is still held (voucher ISSUED — one adjusted against a live invoice is refused until that invoice is credit-noted or cancelled). Journal RFV-<voucher>: Dr 2100 and the advance GST exactly as the receipt credited them, Cr cash or bank. A refund voucher RFV-<FY>-NNNNN is issued with the Rule 51 particulars and prints as a PDF. The voucher becomes REFUNDED, closing it in GSTR-1 11A/11B like a cancellation. The receipt stops counting: a hotel folio payment is voided (settlement already ignores voided rows) and an event booking gets a negative receipt row, and neither half can be deleted. Refund is full, dated today or earlier and not before the receipt, and refused in a closed period. (2) EVENT INVOICE NUMBERS were count of event invoices plus one, so two invoices raised together shared a number. Now EVT-<FY>-NNNNN from an atomic tenant sequence seeded above the highest number issued under the prefix, skipping any number already on a folio. The visible format is unchanged for this financial year. (3) EVENT RECEIPTS AFTER THE INVOICE credited Advances from Guests, leaving the invoice owed and the money also held as an advance. A receipt while an invoice stands now clears the receivable that invoice debited (read from its journal, source EVENT_RECEIPT). A re-issued invoice applies only what the ledger holds as an advance, so a receipt that paid the earlier invoice, or a refunded advance, is not taken out of 2100 twice. Historical postings are unchanged.',
       'accrual-schedule-all-lines — GET /accounting/year-end-accrual gains ?lines=all. The schedule returns its 500 largest lines by default (unchanged) and now says so with lines_truncated; with lines=all it returns every line the accrual journal is built from, so the full schedule can be checked. Found because the H-3 regression check looked for a 75-rupee test order in the capped list: once the tenant passed 500 accrual lines the order fell off the end, and the check that a settled order is NOT accrued had become vacuous. The check now reads the full list.',
@@ -61599,22 +61934,50 @@ ${data.tenant.name}`;
       // period appears in neither — its tax went into 2201/2211 and came out again
       // inside the window, exactly as the portal expects.
       const advRows: any[] = await db.query("SELECT * FROM receipt_vouchers", []).catch(() => []);
+      // Refunds, part or whole, each release the tax on what they return on
+      // their own date (Rule 51). A voucher adjusted or cancelled after part of it
+      // was refunded releases only what was still held then.
+      const rfvRows: any[] = await db.query("SELECT receipt_voucher_id, refund_date, amount, taxable_value, cgst, sgst, igst FROM refund_vouchers", []).catch(() => []);
+      const _rfBy: Record<string, any[]> = {};
+      for (const f of rfvRows || []) { const k = String(f.receipt_voucher_id); (_rfBy[k] = _rfBy[k] || []).push(f); }
       const _inWin = (d: any) => !!d && (!from || String(d) >= from) && (!to || String(d) <= to);
-      const _closedOn = (rv: any) => rv.adjusted_at || rv.cancelled_at || rv.refunded_at || null;
-      const _bucket = (list: any[]) => {
+      const _F = ['amount', 'taxable_value', 'cgst', 'sgst', 'igst'];
+      const _zero = (): Record<string, number> => ({ amount: 0, taxable_value: 0, cgst: 0, sgst: 0, igst: 0 });
+      const _add = (a: Record<string, number>, b: any, sign = 1) => { for (const k of _F) a[k] += sign * Number(b?.[k] || 0); return a; };
+      // What a voucher released inside the window: its refunds dated in it and,
+      // if it was adjusted or cancelled in it, whatever it still held then.
+      const _releasedIn = (rv: any) => {
+        const out = _zero();
+        const refunds = _rfBy[String(rv.id)] || [];
+        for (const f of refunds) if (_inWin(f.refund_date)) _add(out, f);
+        const st = String(rv.status || '').toUpperCase();
+        const closedOn = st === 'ADJUSTED' ? rv.adjusted_at : st === 'CANCELLED' ? rv.cancelled_at : null;
+        if (closedOn && _inWin(closedOn)) {
+          const rem = _add(_zero(), rv);
+          for (const f of refunds) _add(rem, f, -1);
+          _add(out, rem);
+        }
+        return out;
+      };
+      const _bucket = (list: { rv: any; part: Record<string, number> }[]) => {
         const mp: Record<string, any> = {};
-        for (const rv of list) {
+        for (const { rv, part } of list) {
           const rate = Number(rv.gst_rate || 0);
           const k = `${rate}|${rv.place_of_supply || ''}`;
           const cur = mp[k] || { rate, place_of_supply: rv.place_of_supply || pos, gross_advance: 0, taxable: 0, cgst: 0, sgst: 0, igst: 0, vouchers: 0 };
-          cur.gross_advance += Number(rv.amount || 0); cur.taxable += Number(rv.taxable_value || 0);
-          cur.cgst += Number(rv.cgst || 0); cur.sgst += Number(rv.sgst || 0); cur.igst += Number(rv.igst || 0); cur.vouchers += 1;
+          cur.gross_advance += part.amount; cur.taxable += part.taxable_value;
+          cur.cgst += part.cgst; cur.sgst += part.sgst; cur.igst += part.igst; cur.vouchers += 1;
           mp[k] = cur;
         }
         return Object.values(mp).map((x: any) => ({ ...x, gross_advance: round(x.gross_advance), taxable: round(x.taxable), cgst: round(x.cgst), sgst: round(x.sgst), igst: round(x.igst), tax: round(x.cgst + x.sgst + x.igst) })).sort((a: any, b: any) => a.rate - b.rate);
       };
-      const t11a = _bucket((advRows || []).filter((rv: any) => _inWin(rv.receipt_date) && !(_closedOn(rv) && _inWin(_closedOn(rv))) && !(_closedOn(rv) && to && String(_closedOn(rv)) <= to && (!from || String(_closedOn(rv)) >= from))));
-      const t11b = _bucket((advRows || []).filter((rv: any) => !!from && !!rv.receipt_date && String(rv.receipt_date) < from && _inWin(_closedOn(rv))));
+      const _some = (p: Record<string, number>) => Math.abs(p.amount) + Math.abs(p.cgst) + Math.abs(p.sgst) + Math.abs(p.igst) > 0.004;
+      // 11A: received in the window, less what was released within it.
+      const t11a = _bucket((advRows || []).filter((rv: any) => _inWin(rv.receipt_date))
+        .map((rv: any) => ({ rv, part: _add(_add(_zero(), rv), _releasedIn(rv), -1) })).filter((x: any) => _some(x.part)));
+      // 11B: received before the window, released within it.
+      const t11b = _bucket((advRows || []).filter((rv: any) => !!from && !!rv.receipt_date && String(rv.receipt_date) < from)
+        .map((rv: any) => ({ rv, part: _releasedIn(rv) })).filter((x: any) => _some(x.part)));
       const adv11aTax = round(t11a.reduce((a: number, r: any) => a + r.tax, 0));
       const adv11bTax = round(t11b.reduce((a: number, r: any) => a + r.tax, 0));
 

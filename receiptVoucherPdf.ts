@@ -46,6 +46,8 @@ export interface ReceiptVoucherPdfData {
   cancel_reason: string | null;
   refund_voucher_number?: string | null;
   refunded_at?: string | null;
+  // Every refund voucher issued against this advance, oldest first (part refunds).
+  refunds?: { rfv_number: string; refund_date: string; amount: number }[];
 }
 
 const money = (n: number) =>
@@ -89,9 +91,13 @@ export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promi
         .text(d.rv_number, left + width * 0.6, titleY, { width: width * 0.4, align: 'right' });
       doc.font('Helvetica').fontSize(9).fillColor(MUTED)
         .text(`Date: ${d.receipt_date}`, left + width * 0.6, doc.y, { width: width * 0.4, align: 'right' });
+      const refunds = d.refunds || [];
+      const refundedTotal = Math.round(refunds.reduce((s, r) => s + Number(r.amount || 0), 0) * 100) / 100;
+      const stillHeld = Math.max(0, Math.round((Number(d.amount || 0) - refundedTotal) * 100) / 100);
       const statusLabel = d.status === 'ADJUSTED' ? 'Adjusted against invoice'
         : d.status === 'CANCELLED' ? 'CANCELLED'
-        : d.status === 'REFUNDED' ? 'Refunded' : 'Advance held';
+        : d.status === 'REFUNDED' ? 'Refunded'
+        : refundedTotal > 0 ? 'Advance held — part refunded' : 'Advance held';
       doc.font('Helvetica-Bold').fontSize(9).fillColor(d.status === 'CANCELLED' ? '#b42318' : INK)
         .text(statusLabel, left + width * 0.6, doc.y, { width: width * 0.4, align: 'right' });
 
@@ -149,13 +155,18 @@ export async function generateReceiptVoucherPdf(d: ReceiptVoucherPdfData): Promi
       doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text('TRACEABILITY', left, doc.y, { width });
       doc.fillColor(INK).font('Helvetica').fontSize(9);
       doc.text(`Taken against ${d.module === 'EVENTS' ? 'event booking' : 'booking'}: ${d.booking_ref || '—'}`, { width });
+      for (const r of refunds) doc.text(`${money(r.amount)} refunded under refund voucher ${r.rfv_number} on ${r.refund_date}.`, { width });
       if (d.status === 'ADJUSTED') {
-        doc.text(`Adjusted against tax invoice ${d.adjusted_invoice_number || '—'} on ${d.adjusted_at || '—'}.`, { width });
+        doc.text(refundedTotal > 0
+          ? `The remaining ${money(stillHeld)} was adjusted against tax invoice ${d.adjusted_invoice_number || '—'} on ${d.adjusted_at || '—'}.`
+          : `Adjusted against tax invoice ${d.adjusted_invoice_number || '—'} on ${d.adjusted_at || '—'}.`, { width });
       } else if (d.status === 'REFUNDED') {
-        doc.text(`Refunded under refund voucher ${d.refund_voucher_number || '—'} on ${d.refunded_at || '—'}.`, { width });
+        if (!refunds.length) doc.text(`Refunded under refund voucher ${d.refund_voucher_number || '—'} on ${d.refunded_at || '—'}.`, { width });
       } else if (d.status === 'CANCELLED') {
         doc.fillColor('#b42318').text(`Cancelled on ${d.cancelled_at || '—'}${d.cancel_reason ? ` — ${d.cancel_reason}` : ''}.`, { width });
         doc.fillColor(INK);
+      } else if (refundedTotal > 0) {
+        doc.text(`${money(stillHeld)} is still held — it will be set against the tax invoice when the bill is raised.`, { width });
       } else {
         doc.text('Not yet adjusted — it will be set against the tax invoice when the bill is raised.', { width });
       }

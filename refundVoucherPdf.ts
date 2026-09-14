@@ -37,6 +37,11 @@ export interface RefundVoucherPdfData {
   reference: string | null;
   reason: string | null;
   booking_ref: string | null;
+  // A part refund: the advance on the receipt voucher, what earlier refund
+  // vouchers returned, and what is still held after this one.
+  rv_amount?: number | null;
+  refunded_before?: number | null;
+  held_after?: number | null;
 }
 
 const money = (n: number) =>
@@ -110,6 +115,8 @@ export async function generateRefundVoucherPdf(d: RefundVoucherPdfData): Promise
       doc.moveDown(0.5);
 
       row('Receipt voucher', `${d.rv_number} dated ${d.rv_date}`);
+      const partRefund = !!d.rv_amount && (Number(d.refunded_before || 0) > 0.004 || Number(d.held_after || 0) > 0.004);
+      if (partRefund) row('Advance received on that voucher', money(Number(d.rv_amount)));
       row('Amount refunded', money(d.amount), true);
       if (d.gst_rate > 0) {
         row('Value refunded (excluding tax)', money(d.taxable_value));
@@ -133,6 +140,9 @@ export async function generateRefundVoucherPdf(d: RefundVoucherPdfData): Promise
       doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8).text('TRACEABILITY', left, doc.y, { width });
       doc.fillColor(INK).font('Helvetica').fontSize(9);
       doc.text(`Advance received against ${d.module === 'EVENTS' ? 'event booking' : 'booking'} ${d.booking_ref || '—'} under receipt voucher ${d.rv_number}.`, { width });
+      if (partRefund) {
+        doc.text(`A part refund: ${money(Number(d.refunded_before || 0))} was refunded before this voucher, and ${money(Number(d.held_after || 0))} of the advance is still held after it.`, { width });
+      }
       if (d.reason) doc.text(`Reason for refund: ${d.reason}`, { width });
 
       doc.moveDown(2.2);

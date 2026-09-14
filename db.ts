@@ -3308,6 +3308,10 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     CREATE INDEX IF NOT EXISTS idx_rfv_receipt_voucher ON refund_vouchers (receipt_voucher_id);
     ALTER TABLE receipt_vouchers ADD COLUMN IF NOT EXISTS refunded_at TEXT;
     ALTER TABLE receipt_vouchers ADD COLUMN IF NOT EXISTS refund_voucher_id TEXT;
+    -- Refunds may return part of an advance. Their running total is reserved on
+    -- the voucher in one conditional statement, so two refunds made at the same
+    -- moment cannot return more than was received.
+    ALTER TABLE receipt_vouchers ADD COLUMN IF NOT EXISTS refunded_amount DOUBLE PRECISION DEFAULT 0;
 
     -- Statutory edit log — Rule 3(1), Companies (Accounts) Rules 2014.
     -- Written by the data layer for every change to the books of account, so it
