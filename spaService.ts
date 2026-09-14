@@ -66,9 +66,11 @@ export function serviceWindowMinutes(
 
 /** Returns a conflicting appointment row for a therapist, or null. */
 export async function therapistConflict(
-  tenantDb: DbInterface, therapistId: string, startAt: string, endAt: string, excludeApptId?: string
+  tenantDb: DbInterface, therapistId: string, startAt: any, endAt: any, excludeApptId?: string
 ): Promise<any | null> {
-  const rows = await tenantDb.query(
+  // A treatment they assist on takes their time as one they lead does. The
+  // lead-only query stands in should the assisting table be missing.
+  const leadOnly = () => tenantDb.query(
     `SELECT id, start_at, end_at FROM spa_appointments
       WHERE therapist_id = ?
         AND status NOT IN ('CANCELLED','NO_SHOW')
@@ -77,6 +79,15 @@ export async function therapistConflict(
       LIMIT 1`,
     excludeApptId ? [therapistId, endAt, startAt, excludeApptId] : [therapistId, endAt, startAt]
   );
+  const rows = await tenantDb.query(
+    `SELECT a.id, a.start_at, a.end_at FROM spa_appointments a
+      WHERE (a.therapist_id = ? OR EXISTS (SELECT 1 FROM spa_appointment_therapists x WHERE x.appointment_id = a.id AND x.therapist_id = ?))
+        AND a.status NOT IN ('CANCELLED','NO_SHOW')
+        AND a.start_at < ? AND a.end_at > ?
+        ${excludeApptId ? "AND a.id <> ?" : ""}
+      LIMIT 1`,
+    excludeApptId ? [therapistId, therapistId, endAt, startAt, excludeApptId] : [therapistId, therapistId, endAt, startAt]
+  ).catch(() => leadOnly());
   return rows[0] || null;
 }
 
@@ -192,6 +203,23 @@ export async function spaSkillGaps(tenantDb: DbInterface, serviceId: string, the
   return gaps;
 }
 
+/** Treatments a therapist leads or assists on, on a date (cancelled and no-shows
+ *  aside), leaving one appointment out when asked. */
+export async function spaTherapistDayCount(tenantDb: DbInterface, therapistId: string, date: string, excludeApptId?: string): Promise<number> {
+  const dayStart = `${date} 00:00:00`, dayEnd = tsShift(`${date} 00:00:00`, 1440);
+  const tail = excludeApptId ? "AND a.id <> ?" : "";
+  const n: any = await tenantDb.get(
+    `SELECT COUNT(*) AS n FROM spa_appointments a
+      WHERE (a.therapist_id = ? OR EXISTS (SELECT 1 FROM spa_appointment_therapists x WHERE x.appointment_id = a.id AND x.therapist_id = ?))
+        AND a.status NOT IN ('CANCELLED','NO_SHOW') AND a.start_at >= ? AND a.start_at < ? ${tail}`,
+    excludeApptId ? [therapistId, therapistId, dayStart, dayEnd, excludeApptId] : [therapistId, therapistId, dayStart, dayEnd]
+  ).catch(() => tenantDb.get(
+    `SELECT COUNT(*) AS n FROM spa_appointments a
+      WHERE a.therapist_id = ? AND a.status NOT IN ('CANCELLED','NO_SHOW') AND a.start_at >= ? AND a.start_at < ? ${tail}`,
+    excludeApptId ? [therapistId, dayStart, dayEnd, excludeApptId] : [therapistId, dayStart, dayEnd]));
+  return Number(n?.n || 0);
+}
+
 export interface SpaAssignmentProblem { code: string; message: string }
 
 /** The rules the slot engine applies, checked for a therapist and cabin chosen
@@ -220,13 +248,7 @@ export async function spaAssignmentProblems(
     if (pref && spaGenderCode(t?.gender) !== pref) out.push({ code: "PREFERENCE_MISMATCH", message: `The guest asked for a ${pref.toLowerCase()} therapist.` });
     const cap = Number(t?.max_treatments_per_day || 0);
     if (cap > 0) {
-      const dayStart = `${o.date} 00:00:00`, dayEnd = tsShift(`${o.date} 00:00:00`, 1440);
-      const n: any = await tenantDb.get(
-        `SELECT COUNT(*) AS n FROM spa_appointments
-          WHERE therapist_id = ? AND status NOT IN ('CANCELLED','NO_SHOW') AND start_at >= ? AND start_at < ?
-            ${o.excludeApptId ? "AND id <> ?" : ""}`,
-        o.excludeApptId ? [o.therapistId, dayStart, dayEnd, o.excludeApptId] : [o.therapistId, dayStart, dayEnd]);
-      const count = Number(n?.n || 0);
+      const count = await spaTherapistDayCount(tenantDb, o.therapistId, o.date, o.excludeApptId);
       if (count >= cap) out.push({ code: "DAILY_LIMIT", message: `${name} already has ${count} treatment(s) that day — the limit is ${cap}.` });
     }
   }
@@ -311,6 +333,23 @@ export function spaTransitionError(fromRaw: string, to: string): string | null {
  *  or cabin overlaps it and was created earlier (ties broken by id), this one
  *  must give way. Both sides reach the same answer, so exactly one survives. */
 export async function spaMustYield(tenantDb: DbInterface, apptId: string): Promise<boolean> {
+  // The two share the cabin, or a therapist — leading or assisting on either.
+  const shared = await tenantDb.get(
+    `SELECT o.id FROM spa_appointments o, spa_appointments me
+      WHERE me.id = ? AND o.id <> me.id
+        AND o.status NOT IN ('CANCELLED','NO_SHOW')
+        AND o.start_at < me.end_at AND o.end_at > me.start_at
+        AND ((me.resource_id IS NOT NULL AND o.resource_id = me.resource_id)
+          OR (me.therapist_id IS NOT NULL AND (o.therapist_id = me.therapist_id
+                OR EXISTS (SELECT 1 FROM spa_appointment_therapists y WHERE y.appointment_id = o.id AND y.therapist_id = me.therapist_id)))
+          OR EXISTS (SELECT 1 FROM spa_appointment_therapists x WHERE x.appointment_id = me.id
+                AND (x.therapist_id = o.therapist_id
+                  OR EXISTS (SELECT 1 FROM spa_appointment_therapists y WHERE y.appointment_id = o.id AND y.therapist_id = x.therapist_id))))
+        AND (o.created_at < me.created_at OR (o.created_at = me.created_at AND o.id < me.id))
+      LIMIT 1`,
+    [apptId]
+  ).then((r: any) => ({ ok: true, row: r })).catch(() => ({ ok: false, row: null }));
+  if (shared.ok) return !!shared.row;
   const row = await tenantDb.get(
     `SELECT o.id FROM spa_appointments o, spa_appointments me
       WHERE me.id = ? AND o.id <> me.id
@@ -338,6 +377,9 @@ export interface SpaSlot {
   resource_name: string | null;
   /** FEMALE or MALE when the chosen cabin is kept for one gender. */
   resource_gender?: string | null;
+  /** The other therapists, for a treatment given by more than one. */
+  assistant_ids?: string[];
+  assistant_names?: string[];
 }
 
 export async function findAvailableSlots(
@@ -358,9 +400,12 @@ export async function findAvailableSlots(
   const date = opts.date;
   const guestGender = spaGenderCode(opts.guestGender);
   const preference = spaGenderCode(opts.therapistGender);
+  // How many therapists give it together: the lead and those assisting.
+  const required = needTherapist ? Math.max(1, Math.min(4, Number(service.therapists_required || 1))) : 1;
 
   // Therapists rostered that weekday, inside the shift's effective dates, with
-  // any break in it.
+  // any break in it — all of them, so a treatment for more than one therapist
+  // can find the others when one therapist's slots are asked for.
   let therapists: any[] = await tenantDb.query(
     `SELECT t.id, t.display_name, t.gender, t.max_treatments_per_day, s.start_time, s.end_time, s.break_start, s.break_end
        FROM spa_therapists t
@@ -368,9 +413,8 @@ export async function findAvailableSlots(
       WHERE t.is_active = 1
         AND (s.effective_from IS NULL OR s.effective_from = '' OR s.effective_from <= ?)
         AND (s.effective_to IS NULL OR s.effective_to = '' OR s.effective_to >= ?)
-        ${opts.therapistId ? "AND t.id = ?" : ""}
       ORDER BY t.display_name, s.start_time`,
-    opts.therapistId ? [dow, date, date, opts.therapistId] : [dow, date, date]
+    [dow, date, date]
   );
   // Who may deliver it: the skills the service names, at their level and in
   // date; a service that names no skills keeps the older therapist-to-service
@@ -392,6 +436,8 @@ export async function findAvailableSlots(
     therapists = therapists.filter((t: any) => spaGenderCode(t.gender) === guestGender);
   }
   if (preference) therapists = therapists.filter((t: any) => spaGenderCode(t.gender) === preference);
+  // The therapists slots are led by: the one asked for, or every one.
+  const leads = opts.therapistId ? therapists.filter((t: any) => String(t.id) === String(opts.therapistId)) : therapists;
 
   // Cabins: active, not under maintenance or out of order, of the type the
   // service needs when it names one, and not kept for the other gender. A cabin
@@ -416,6 +462,12 @@ export async function findAvailableSlots(
     `SELECT therapist_id, resource_id, to_char(start_at, 'YYYY-MM-DD HH24:MI:SS') AS s, to_char(end_at, 'YYYY-MM-DD HH24:MI:SS') AS e
        FROM spa_appointments
       WHERE status NOT IN ('CANCELLED','NO_SHOW') AND start_at < ? AND end_at > ?`, [loadTo, loadFrom]);
+  // Assisting on a treatment takes a therapist's time as leading one does.
+  const assisting: any[] = await tenantDb.query(
+    `SELECT x.therapist_id, to_char(a.start_at, 'YYYY-MM-DD HH24:MI:SS') AS s, to_char(a.end_at, 'YYYY-MM-DD HH24:MI:SS') AS e
+       FROM spa_appointment_therapists x JOIN spa_appointments a ON a.id = x.appointment_id
+      WHERE a.status NOT IN ('CANCELLED','NO_SHOW') AND a.start_at < ? AND a.end_at > ?`, [loadTo, loadFrom]).catch(() => []);
+  for (const x of assisting) booked.push({ therapist_id: x.therapist_id, resource_id: null, s: x.s, e: x.e });
   const blocks: any[] = await tenantDb.query(
     `SELECT scope, scope_id, to_char(start_at, 'YYYY-MM-DD HH24:MI:SS') AS s, to_char(end_at, 'YYYY-MM-DD HH24:MI:SS') AS e
        FROM spa_resource_blocks WHERE start_at < ? AND end_at > ?`, [loadTo, loadFrom]);
@@ -425,26 +477,50 @@ export async function findAvailableSlots(
   for (const bk of booked) {
     if (bk.therapist_id && String(bk.s).slice(0, 10) === date) dayCount.set(String(bk.therapist_id), (dayCount.get(String(bk.therapist_id)) || 0) + 1);
   }
+  // A shift row covers a window, clear of its break.
+  const covers = (row: any, startMin: number, endMin: number) => {
+    const from = hhmmToMinutes(row.start_time), to = hhmmToMinutes(row.end_time);
+    if (!(from <= startMin && endMin <= to)) return false;
+    const bs = row.break_start ? hhmmToMinutes(row.break_start) : null;
+    const be = row.break_end ? hhmmToMinutes(row.break_end) : null;
+    return !(bs != null && be != null && be > bs && startMin < be && endMin > bs);
+  };
+  const underCap = (row: any) => {
+    const cap = Number(row.max_treatments_per_day || 0);
+    return !(cap > 0 && (dayCount.get(String(row.id)) || 0) >= cap);
+  };
+  const freeAt = (therapistId: any, startAt: string, endAt: string) =>
+    !booked.some(bk => bk.therapist_id === therapistId && overlaps(bk.s, bk.e, startAt, endAt))
+    && !blocks.some(k => k.scope === "THERAPIST" && k.scope_id === therapistId && overlaps(k.s, k.e, startAt, endAt));
 
   const slots: SpaSlot[] = [];
-  for (const t of therapists) {
-    const cap = Number(t.max_treatments_per_day || 0);
-    if (cap > 0 && (dayCount.get(String(t.id)) || 0) >= cap) continue;
+  for (const t of leads) {
+    if (!underCap(t)) continue;
     const schedStart = hhmmToMinutes(t.start_time);
     const schedEnd = hhmmToMinutes(t.end_time);
-    const breakStart = t.break_start ? hhmmToMinutes(t.break_start) : null;
-    const breakEnd = t.break_end ? hhmmToMinutes(t.break_end) : null;
     for (let startMin = schedStart; startMin + window <= schedEnd; startMin += granularity) {
       if (slots.length >= maxSlots) return slots;
       const endMin = startMin + window;
       // Nothing is booked across the therapist's break.
-      if (breakStart != null && breakEnd != null && breakEnd > breakStart && startMin < breakEnd && endMin > breakStart) continue;
+      if (!covers(t, startMin, endMin)) continue;
       const startAt = tsFromDateMinutes(opts.date, startMin);
       const endAt = tsFromDateMinutes(opts.date, endMin);
 
       // therapist free?
-      if (booked.some(bk => bk.therapist_id === t.id && overlaps(bk.s, bk.e, startAt, endAt))) continue;
-      if (blocks.some(k => k.scope === "THERAPIST" && k.scope_id === t.id && overlaps(k.s, k.e, startAt, endAt))) continue;
+      if (!freeAt(t.id, startAt, endAt)) continue;
+
+      // A treatment for more than one therapist needs the others free then too.
+      const assistants: any[] = [];
+      if (required > 1) {
+        const taken = new Set<string>([String(t.id)]);
+        for (const o of therapists) {
+          if (assistants.length >= required - 1) break;
+          if (taken.has(String(o.id)) || !covers(o, startMin, endMin) || !underCap(o) || !freeAt(o.id, startAt, endAt)) continue;
+          taken.add(String(o.id));
+          assistants.push(o);
+        }
+        if (assistants.length < required - 1) continue;
+      }
 
       // resource free? (first available cabin, turnaround included)
       let chosenResource: any = null;
@@ -469,6 +545,7 @@ export async function findAvailableSlots(
         resource_id: chosenResource ? chosenResource.id : null,
         resource_name: chosenResource ? chosenResource.name : null,
         resource_gender: chosenResource ? spaGenderCode(chosenResource.gender_designation) : null,
+        ...(assistants.length ? { assistant_ids: assistants.map((a: any) => a.id), assistant_names: assistants.map((a: any) => a.display_name) } : {}),
       });
     }
   }
@@ -830,6 +907,17 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
     `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS client_gender TEXT`,
     `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS therapist_gender_pref TEXT`,
     `ALTER TABLE spa_appointments ADD COLUMN IF NOT EXISTS assignment_override_reason TEXT`,
+    // Phase 2b: a treatment given by more than one therapist — the lead stays on
+    // the appointment, those assisting are listed here.
+    `ALTER TABLE spa_services ADD COLUMN IF NOT EXISTS therapists_required INT DEFAULT 1`,
+    `CREATE TABLE IF NOT EXISTS spa_appointment_therapists (
+      id             TEXT PRIMARY KEY,
+      appointment_id TEXT NOT NULL,
+      therapist_id   TEXT NOT NULL,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_spa_appt_therapist ON spa_appointment_therapists(appointment_id, therapist_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_spa_appt_therapist_t ON spa_appointment_therapists(therapist_id)`,
   ]) {
     await tenantDb.exec(ddl).catch(() => {});
   }

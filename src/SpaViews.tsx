@@ -58,7 +58,12 @@ function makeApi(restaurantId: string, token: string) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) },
     });
     const b = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error((b && b.error) || `HTTP ${r.status}`);
+    if (!r.ok) {
+      // The status and body ride along, for a screen that acts on an error's code.
+      const err: any = new Error((b && b.error) || `HTTP ${r.status}`);
+      err.status = r.status; err.body = b;
+      throw err;
+    }
     return b;
   };
 }
@@ -116,7 +121,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [edit, setEdit] = useState<any>(null);
-  const blank = { name: '', category: 'MASSAGE', duration_min: '60', buffer_after_min: '10', price: '', gst_percent: '18', requires_room: true, requires_therapist: true, image_url: '', description: '' };
+  const blank = { name: '', category: 'MASSAGE', duration_min: '60', buffer_after_min: '10', price: '', gst_percent: '18', requires_room: true, requires_therapist: true, therapists_required: '1', image_url: '', description: '' };
   const [form, setForm] = useState<any>(blank);
   // Deactivated treatments stay on file but out of the way until asked for.
   const [showInactive, setShowInactive] = useState(false);
@@ -152,7 +157,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
     if (!form.name) return;
     // Cabin type and gender rule belong to the requirements save below, not the treatment row.
     const { cabin_type_id: _cabinType, gender_rule: _genderRule, ...formFields } = form;
-    const body = { ...formFields, duration_min: Number(form.duration_min || 60), buffer_after_min: Number(form.buffer_after_min || 10), price: Number(form.price || 0), gst_percent: Number(form.gst_percent || 18) };
+    const body = { ...formFields, duration_min: Number(form.duration_min || 60), buffer_after_min: Number(form.buffer_after_min || 10), price: Number(form.price || 0), gst_percent: Number(form.gst_percent || 18), therapists_required: Math.max(1, Math.min(4, Number(form.therapists_required || 1))) };
     try {
       let sid: string | null = edit?.id || null;
       if (edit) await api(`/spa/services/${edit.id}`, { method: 'PATCH', body: JSON.stringify(body) });
@@ -186,7 +191,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
             { key: 'is_active', label: 'Status', render: (r: any) => r.is_active ? <span className="text-emerald-600 text-xs font-bold">Active</span> : <span className="text-gray-400 text-xs">Inactive</span> },
             { key: '_a', label: '', render: (r: any) => (
               <div className="flex gap-1.5">
-                {canEdit && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...blank, ...r, duration_min: String(r.duration_min), buffer_after_min: String(r.buffer_after_min), price: String(r.price), gst_percent: String(r.gst_percent), requires_room: !!r.requires_room, requires_therapist: !!r.requires_therapist }); openReq(r.id); setShowForm(true); }}>Edit</button>}
+                {canEdit && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...blank, ...r, duration_min: String(r.duration_min), buffer_after_min: String(r.buffer_after_min), price: String(r.price), gst_percent: String(r.gst_percent), requires_room: !!r.requires_room, requires_therapist: !!r.requires_therapist, therapists_required: String(r.therapists_required ?? 1) }); openReq(r.id); setShowForm(true); }}>Edit</button>}
                 {canDel && <button className={`${BTN} bg-rose-50 text-rose-600 hover:bg-rose-100`} onClick={() => remove(r.id)}><Trash2 size={13} /></button>}
               </div>
             ) },
@@ -236,6 +241,25 @@ function SpaCatalog({ restaurantId, token }: Props) {
                 {skillList.some((k: any) => Number(k.is_active ?? 1) === 1)
                   ? <button className={BTN_GHOST} onClick={() => setReq({ ...req, skills: [...req.skills, { skill_id: '', min_level: 'QUALIFIED' }] })}><Plus size={13} /> Add a skill</button>
                   : <p className="text-[11px] text-[#9c8e85]">No skills on file yet — add them under Therapists & Cabins → Skills & Cabin Types.</p>}
+                {form.requires_therapist && (
+                  <div className="mt-2">
+                    <label className={LABEL}>Therapists who give it together</label>
+                    <select className={INPUT} value={String(form.therapists_required || '1')} onChange={e => setForm({ ...form, therapists_required: e.target.value })}>
+                      <option value="1">One therapist</option>
+                      <option value="2">Two therapists (four hands)</option>
+                      <option value="3">Three therapists</option>
+                      <option value="4">Four therapists</option>
+                    </select>
+                  </div>
+                )}
+                <div className="mt-2">
+                  <label className={LABEL}>Therapist gender</label>
+                  <select className={INPUT} value={req.gender_rule} onChange={e => setReq({ ...req, gender_rule: e.target.value })}>
+                    <option value="ANY">Any therapist</option>
+                    <option value="SAME_GENDER">Same gender as the guest</option>
+                  </select>
+                  {req.gender_rule === 'SAME_GENDER' && <p className="text-[11px] text-[#6b5d52] mt-1">A booking then needs the guest's gender, and only therapists with their gender recorded are offered.</p>}
+                </div>
                 {form.requires_room && (
                   <div className="mt-2">
                     <label className={LABEL}>Cabin type</label>
@@ -332,6 +356,7 @@ function SpaResources({ restaurantId, token }: Props) {
   const [svcSkills, setSvcSkills] = useState<string[]>([]);
   // Skills the therapist holds: skill id → level and certificate dates.
   const [held, setHeld] = useState<Record<string, any>>({});
+  const [heldAtOpen, setHeldAtOpen] = useState<string[]>([]);
   const [note, setNote] = useState('');
   const blankShift = { weekday: '1', start_time: '09:00', end_time: '18:00', break_start: '', break_end: '', effective_from: '', effective_to: '' };
   const [sched, setSched] = useState<any>(blankShift);
@@ -371,7 +396,8 @@ function SpaResources({ restaurantId, token }: Props) {
     try {
       const hs = await api(`/spa/therapists/${t.id}/skills`);
       setHeld(Object.fromEntries(hs.map((h: any) => [h.skill_id, { level: h.level || 'QUALIFIED', certified_on: h.certified_on || '', valid_until: h.valid_until || '' }])));
-    } catch { setHeld({}); }
+      setHeldAtOpen(hs.map((h: any) => String(h.skill_id)));
+    } catch { setHeld({}); setHeldAtOpen([]); }
   };
   const addSched = async () => {
     if (!canEdit) { viewOnly('change schedules'); return; }
@@ -404,7 +430,7 @@ function SpaResources({ restaurantId, token }: Props) {
   };
 
   const openProfile = async (t: any) => {
-    setProfile({ id: t.id, display_name: t.display_name || '', gender: t.gender || '', languages: t.languages || '', phone: t.phone || '', photo_url: t.photo_url || '', staff_id: t.staff_id || '', bio: t.bio || '', is_active: isOn(t) });
+    setProfile({ id: t.id, display_name: t.display_name || '', gender: t.gender || '', languages: t.languages || '', phone: t.phone || '', photo_url: t.photo_url || '', staff_id: t.staff_id || '', bio: t.bio || '', max_treatments_per_day: t.max_treatments_per_day == null ? '' : String(t.max_treatments_per_day), is_active: isOn(t) });
     if (!staffOptions.length) { try { setStaffOptions(await api('/spa/staff-options')); } catch { /* */ } }
   };
   const saveProfile = async () => {
@@ -419,7 +445,7 @@ function SpaResources({ restaurantId, token }: Props) {
 
   const openCabin = (r: any) => setCabinEdit({
     id: r.id, name: r.name || '', cabin_type_id: r.cabin_type_id || '', equipment: r.equipment || '', capacity: String(r.capacity ?? 1),
-    turnaround_min: String(r.turnaround_min ?? 0), status: String(r.status || 'AVAILABLE').toUpperCase(), status_reason: r.status_reason || '', notes: r.notes || '', is_active: isOn(r),
+    turnaround_min: String(r.turnaround_min ?? 0), gender_designation: String(r.gender_designation || 'ANY').toUpperCase(), status: String(r.status || 'AVAILABLE').toUpperCase(), status_reason: r.status_reason || '', notes: r.notes || '', is_active: isOn(r),
   });
   const saveCabin = async () => {
     if (!canEdit) { viewOnly('change cabins'); return; }
@@ -474,6 +500,8 @@ function SpaResources({ restaurantId, token }: Props) {
   const inactivePool: any[] = tab === 'CABINS' ? resources : tab === 'THERAPISTS' ? therapists : [...skillList, ...cabinTypes];
   const shownSkills = skillList.filter(s => showInactive || isOn(s));
   const shownTypes = cabinTypes.filter(c => showInactive || isOn(c));
+  // Skills in a therapist's window: active ones, and any they held when it opened.
+  const modalSkills = skillList.filter(s => isOn(s) || !!held[s.id] || heldAtOpen.includes(String(s.id)));
 
   return (
     <div>
@@ -501,7 +529,7 @@ function SpaResources({ restaurantId, token }: Props) {
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="font-semibold text-sm break-words">{r.name}</div>
-                    <div className="text-[11px] text-[#6b5d52]">{r.cabin_type_name || 'No cabin type'}{Number(r.turnaround_min || 0) > 0 ? ` · ${r.turnaround_min} min turnaround` : ''}</div>
+                    <div className="text-[11px] text-[#6b5d52]">{r.cabin_type_name || 'No cabin type'}{Number(r.turnaround_min || 0) > 0 ? ` · ${r.turnaround_min} min turnaround` : ''}{String(r.gender_designation || '').toUpperCase() === 'FEMALE' ? ' · female guests only' : String(r.gender_designation || '').toUpperCase() === 'MALE' ? ' · male guests only' : ''}</div>
                   </div>
                   {isOn(r)
                     ? <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border whitespace-nowrap ${statusOf(r).cls}`}>{statusOf(r).label}</span>
@@ -550,6 +578,7 @@ function SpaResources({ restaurantId, token }: Props) {
                     <User size={14} className="text-[#cc5a16]" /> {t.display_name}
                     {t.gender && <span className="text-[10px] font-normal text-[#6b5d52]">{SPA_GENDER_LABEL[t.gender] || t.gender}</span>}
                     {t.languages && <span className="text-[10px] font-normal text-[#6b5d52]">· {t.languages}</span>}
+                    {Number(t.max_treatments_per_day || 0) > 0 && <span className="text-[10px] font-normal text-[#6b5d52]">· up to {t.max_treatments_per_day} a day</span>}
                     {!isOn(t) && <span className="text-[10px] font-normal text-[#6b5d52]">Inactive</span>}
                   </div>
                   <div className="flex flex-wrap gap-1 mt-1.5">
@@ -737,9 +766,9 @@ function SpaResources({ restaurantId, token }: Props) {
 
             <h4 className="text-sm font-bold mb-1">Therapy skills</h4>
             <p className="text-[11px] text-[#6b5d52] mb-2">A treatment that names skills is offered only with therapists who hold every one at the level it asks, with any certificate in date.</p>
-            {skillList.length > 0 && <div className="hidden sm:grid grid-cols-4 gap-2 text-[10px] font-semibold text-[#9c8e85] uppercase tracking-wide pb-1"><span>Skill</span><span>Level</span><span>Certified on</span><span>Valid until</span></div>}
+            {modalSkills.length > 0 && <div className="hidden sm:grid grid-cols-4 gap-2 text-[10px] font-semibold text-[#9c8e85] uppercase tracking-wide pb-1"><span>Skill</span><span>Level</span><span>Certified on</span><span>Valid until</span></div>}
             <div className="divide-y divide-[#f0e9df] mb-2">
-              {skillList.filter(s => isOn(s) || held[s.id]).map(s => {
+              {modalSkills.map(s => {
                 const h = held[s.id];
                 return (
                   <div key={s.id} className="py-1.5 grid grid-cols-2 sm:grid-cols-4 gap-2 items-center">
@@ -759,9 +788,9 @@ function SpaResources({ restaurantId, token }: Props) {
                   </div>
                 );
               })}
-              {!skillList.length && <p className="text-[11px] text-[#9c8e85] py-1">No skills on file yet — add them under Skills & Cabin Types.</p>}
+              {!modalSkills.length && <p className="text-[11px] text-[#9c8e85] py-1">No skills on file yet — add them under Skills & Cabin Types.</p>}
             </div>
-            {canEdit && skillList.length > 0 && (
+            {canEdit && modalSkills.length > 0 && (
               <div className="flex items-center gap-2 mb-5">
                 <button className={BTN_PRIMARY} onClick={saveHeld}><Check size={14} /> Save skills</button>
                 {note && <span className="text-[11px] font-semibold text-emerald-700">{note}</span>}
@@ -796,6 +825,7 @@ function SpaResources({ restaurantId, token }: Props) {
                 </select></div>
               <div><label className={LABEL}>Phone</label><input className={INPUT} disabled={!canEdit} value={profile.phone} onChange={e => setProfile({ ...profile, phone: e.target.value })} /></div>
               <div className="col-span-2"><label className={LABEL}>Languages</label><input className={INPUT} disabled={!canEdit} placeholder="Malayalam, Hindi, English" value={profile.languages} onChange={e => setProfile({ ...profile, languages: e.target.value })} /></div>
+              <div className="col-span-2"><label className={LABEL}>Most treatments in a day <span className="font-normal text-[#9d8b7e]">(blank for no limit)</span></label><input className={INPUT} type="number" min={1} max={50} disabled={!canEdit} value={profile.max_treatments_per_day} onChange={e => setProfile({ ...profile, max_treatments_per_day: e.target.value })} /></div>
               <div className="col-span-2"><label className={LABEL}>Staff record <span className="font-normal text-[#9d8b7e]">(links attendance, payroll and their login)</span></label>
                 <select className={INPUT} disabled={!canEdit} value={profile.staff_id} onChange={e => setProfile({ ...profile, staff_id: e.target.value })}>
                   <option value="">Not linked</option>
@@ -828,6 +858,10 @@ function SpaResources({ restaurantId, token }: Props) {
               <div><label className={LABEL}>Capacity</label><input className={INPUT} type="number" min={1} value={cabinEdit.capacity} onChange={e => setCabinEdit({ ...cabinEdit, capacity: e.target.value })} /></div>
               <div><label className={LABEL}>Turnaround (min)</label><input className={INPUT} type="number" min={0} value={cabinEdit.turnaround_min} onChange={e => setCabinEdit({ ...cabinEdit, turnaround_min: e.target.value })} /></div>
               <p className="col-span-2 -mt-2 text-[11px] text-[#6b5d52]">Minutes kept clear before and after every booking, for cleaning and resetting the cabin.</p>
+              <div className="col-span-2"><label className={LABEL}>Kept for</label>
+                <select className={INPUT} value={cabinEdit.gender_designation} onChange={e => setCabinEdit({ ...cabinEdit, gender_designation: e.target.value })}>
+                  <option value="ANY">All guests</option><option value="FEMALE">Female guests only</option><option value="MALE">Male guests only</option>
+                </select></div>
               <div className={cabinEdit.status === 'AVAILABLE' ? 'col-span-2' : ''}><label className={LABEL}>Status</label>
                 <select className={INPUT} value={cabinEdit.status} onChange={e => setCabinEdit({ ...cabinEdit, status: e.target.value })}>
                   {Object.entries(CABIN_STATUS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
@@ -864,7 +898,18 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
 
   // booking modal
   const [showBook, setShowBook] = useState(false);
-  const [bk, setBk] = useState<any>({ service_id: '', date: istToday(), client_name: '', client_phone: '' });
+  const blankBk = { service_id: '', date: istToday(), client_id: '', client_name: '', client_phone: '', client_gender: '', therapist_gender_pref: '' };
+  const [bk, setBk] = useState<any>(blankBk);
+  // A guest on file, the gender question, and the therapist and cabin picked for the slot.
+  const [clientQ, setClientQ] = useState('');
+  const [clientHits, setClientHits] = useState<any[]>([]);
+  const [clientSearched, setClientSearched] = useState(false);
+  const [needsGender, setNeedsGender] = useState(false);
+  const [suggest, setSuggest] = useState<any[]>([]);
+  const [cabins, setCabins] = useState<any[]>([]);
+  const [pick, setPick] = useState({ therapist_id: '', resource_id: '' });
+  const [ruleProblems, setRuleProblems] = useState<any[]>([]);
+  const [overrideReason, setOverrideReason] = useState('');
   const [slots, setSlots] = useState<any[]>([]);
   const [slotLoading, setSlotLoading] = useState(false);
   const [chosenSlot, setChosenSlot] = useState<any>(null);
@@ -890,23 +935,54 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   useEffect(() => { load(); }, [day]);
   useEffect(() => { (async () => { try { setServices(await api('/spa/services')); } catch {} try { setTherapists(await api('/spa/therapists')); } catch {} })(); }, []);
 
+  const genderQs = () => `${bk.client_gender ? `&guest_gender=${bk.client_gender}` : ''}${bk.therapist_gender_pref ? `&therapist_gender=${bk.therapist_gender_pref}` : ''}`;
   const searchSlots = async () => {
     if (!bk.service_id || !bk.date) return;
-    setSlotLoading(true); setChosenSlot(null);
-    try { const r = await api(`/spa/availability?service_id=${bk.service_id}&date=${bk.date}`); setSlots(r.slots || []); }
-    catch (e: any) { alert(e.message); setSlots([]); } finally { setSlotLoading(false); }
+    setSlotLoading(true); setChosenSlot(null); setSuggest([]); setRuleProblems([]); setOverrideReason('');
+    try {
+      const r = await api(`/spa/availability?service_id=${bk.service_id}&date=${bk.date}${genderQs()}`);
+      setSlots(r.slots || []); setNeedsGender(!!r.needs_guest_gender);
+    } catch (e: any) { alert(e.message); setSlots([]); } finally { setSlotLoading(false); }
   };
-  const book = async () => {
+  const findClients = async () => {
+    const q = clientQ.trim();
+    if (q.length < 2) { setClientHits([]); setClientSearched(false); return; }
+    try { setClientHits((await api(`/spa/clients?search=${encodeURIComponent(q)}`)).slice(0, 8)); } catch { setClientHits([]); }
+    setClientSearched(true);
+  };
+  const pickClient = (c: any) => {
+    const g = String(c.gender || '').toUpperCase();
+    setBk({ ...bk, client_id: c.id, client_name: c.name || '', client_phone: c.phone || '', client_gender: g === 'FEMALE' || g === 'MALE' ? g : bk.client_gender });
+    setClientHits([]); setClientQ(''); setClientSearched(false); setSlots([]); setChosenSlot(null);
+  };
+  // A slot fills in its therapist and cabin, and lists who else could give the
+  // treatment then — and why the others cannot.
+  const chooseSlot = async (s: any) => {
+    setChosenSlot(s); setPick({ therapist_id: s.therapist_id || '', resource_id: s.resource_id || '' }); setRuleProblems([]); setOverrideReason('');
+    try {
+      const r = await api(`/spa/therapist-search?service_id=${bk.service_id}&start_at=${encodeURIComponent(String(s.start_at).slice(0, 16))}${genderQs()}`);
+      setSuggest(r.therapists || []);
+    } catch { setSuggest([]); }
+    if (!cabins.length) { try { setCabins(await api('/spa/resources')); } catch { /* */ } }
+  };
+  const book = async (withReason: boolean) => {
     if (!canEdit) { alert('View-only access — you cannot book appointments.'); return; }
     if (!chosenSlot || !bk.client_name) { alert('Pick a slot and enter client name'); return; }
     try {
       await api('/spa/appointments', { method: 'POST', body: JSON.stringify({
-        service_id: bk.service_id, start_at: chosenSlot.start_at, therapist_id: chosenSlot.therapist_id,
-        resource_id: chosenSlot.resource_id, client_name: bk.client_name, client_phone: bk.client_phone,
+        service_id: bk.service_id, start_at: chosenSlot.start_at, therapist_id: pick.therapist_id || null,
+        resource_id: pick.resource_id || null, client_id: bk.client_id || undefined, client_name: bk.client_name, client_phone: bk.client_phone,
+        assistant_ids: Array.isArray(chosenSlot.assistant_ids) ? chosenSlot.assistant_ids.filter((x: string) => x !== pick.therapist_id) : undefined,
+        client_gender: bk.client_gender || undefined, therapist_gender_pref: bk.therapist_gender_pref || undefined,
+        override_reason: withReason ? overrideReason.trim() : undefined,
       }) });
-      setShowBook(false); setSlots([]); setChosenSlot(null); setBk({ service_id: '', date: day, client_name: '', client_phone: '' });
+      setShowBook(false); setSlots([]); setChosenSlot(null); setRuleProblems([]); setOverrideReason(''); setBk({ ...blankBk, date: day });
       await load();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) {
+      // Outside the treatment's rules: show why, and let a reason be given.
+      if (e?.status === 409 && e?.body?.code === 'ASSIGNMENT_RULES') { setRuleProblems(e.body.problems || []); return; }
+      alert(e.message);
+    }
   };
   const transition = async (a: any, action: string) => {
     if (!canEdit) { alert('View-only access — you cannot change appointment status.'); return; }
@@ -946,7 +1022,9 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   // Only active treatments can be booked. The calendar shows active therapists,
   // plus any inactive one who still has appointments on the day shown.
   const activeServices = services.filter((s: any) => Number(s.is_active ?? 1) === 1);
-  const calTherapists = therapists.filter((t: any) => Number(t.is_active ?? 1) === 1 || appts.some((a: any) => a.therapist_id === t.id));
+  // A treatment shows under every therapist on it, leading or assisting.
+  const onAppt = (a: any, tid: string) => a.therapist_id === tid || (a.assistant_ids || []).includes(tid);
+  const calTherapists = therapists.filter((t: any) => Number(t.is_active ?? 1) === 1 || appts.some((a: any) => onAppt(a, t.id)));
 
   return (
     <div>
@@ -958,7 +1036,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
             style={{ width: 180 }} />
           {!search.trim() && <input className={INPUT} type="date" value={day} onChange={e => setDay(e.target.value)} style={{ width: 'auto' }} />}
           <button className={BTN_GHOST} onClick={() => load(search)}><RefreshCw size={13} /></button>
-          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setBk({ service_id: activeServices[0]?.id || '', date: day, client_name: '', client_phone: '' }); setShowBook(true); }}><Plus size={14} /> New Appointment</button>}
+          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setBk({ ...blankBk, service_id: activeServices[0]?.id || '', date: day }); setSlots([]); setChosenSlot(null); setRuleProblems([]); setOverrideReason(''); setClientHits([]); setClientQ(''); setClientSearched(false); setNeedsGender(false); setShowBook(true); }}><Plus size={14} /> New Appointment</button>}
         </div>} />
 
       {calendar ? (
@@ -967,14 +1045,14 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
             <div key={t.id} className={CARD}>
               <h4 className="font-bold text-sm mb-2 flex items-center gap-1.5"><User size={13} className="text-[#cc5a16]" /> {t.display_name}{Number(t.is_active ?? 1) !== 1 && <span className="text-[10px] font-normal text-[#6b5d52]">(inactive)</span>}</h4>
               <div className="space-y-1.5">
-                {appts.filter(a => a.therapist_id === t.id).sort((a, b) => a.start_at.localeCompare(b.start_at)).map(a => (
+                {appts.filter(a => onAppt(a, t.id)).sort((a, b) => a.start_at.localeCompare(b.start_at)).map(a => (
                   <div key={a.id} className="rounded-lg border border-[#e8dccf] p-2 text-xs">
                     <div className="font-semibold">{fmtTime(a.start_at)}–{fmtTime(a.end_at)}</div>
-                    <div className="text-[#6b5d52]">{a.service_name} · {a.client_name}</div>
+                    <div className="text-[#6b5d52]">{a.service_name} · {a.client_name}{a.therapist_id !== t.id ? ' · assisting' : ''}</div>
                     <Pill status={a.status} />
                   </div>
                 ))}
-                {!appts.filter(a => a.therapist_id === t.id).length && <p className="text-[11px] text-[#6b5d52]">No appointments.</p>}
+                {!appts.filter(a => onAppt(a, t.id)).length && <p className="text-[11px] text-[#6b5d52]">No appointments.</p>}
               </div>
             </div>
           ))}
@@ -990,7 +1068,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
               { key: 'service_name', label: 'Service' },
               { key: 'client_name', label: 'Client' },
               { key: 'client_phone', label: 'Phone' },
-              { key: 'therapist_name', label: 'Therapist' },
+              { key: 'therapist_name', label: 'Therapist', render: (r: any) => (r.assistant_names?.length ? `${r.therapist_name || '—'} + ${r.assistant_names.join(', ')}` : (r.therapist_name || '—')), exportValue: (r: any) => [r.therapist_name, ...(r.assistant_names || [])].filter(Boolean).join(' + ') },
               { key: 'resource_name', label: 'Cabin' },
               { key: 'status', label: 'Status', render: (r: any) => <Pill status={r.status} /> },
               { key: '_a', label: 'Actions', noExport: true, render: (r: any) => (
@@ -1017,36 +1095,98 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
       {/* Booking modal */}
       {showBook && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setShowBook(false)}>
-          <div className="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[88vh] overflow-auto" onClick={e => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <h3 className="text-xl font-bold font-serif mb-4">New Appointment</h3>
             <div className="grid grid-cols-2 gap-3 mb-3">
               <div className="col-span-2"><label className={LABEL}>Service</label>
-                <select className={INPUT} value={bk.service_id} onChange={e => { setBk({ ...bk, service_id: e.target.value }); setSlots([]); }}>
+                <select className={INPUT} value={bk.service_id} onChange={e => { setBk({ ...bk, service_id: e.target.value }); setSlots([]); setChosenSlot(null); }}>
                   <option value="">Select…</option>
                   {activeServices.map(s => <option key={s.id} value={s.id}>{s.name} · {s.duration_min}min · {money(s.price)}</option>)}
                 </select></div>
-              <div><label className={LABEL}>Date</label><input className={INPUT} type="date" value={bk.date} onChange={e => { setBk({ ...bk, date: e.target.value }); setSlots([]); }} /></div>
-              <div className="flex items-end"><button className={BTN_PRIMARY} onClick={searchSlots} disabled={!bk.service_id}>{slotLoading ? 'Searching…' : 'Find Slots'}</button></div>
+              <div className="col-span-2">
+                <label className={LABEL}>Guest on file <span className="font-normal text-[#9d8b7e]">(search by name or phone, or type a new guest below)</span></label>
+                <div className="flex gap-2">
+                  <input className={INPUT} placeholder="Name or phone" value={clientQ} onChange={e => setClientQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') findClients(); }} />
+                  <button className={BTN_GHOST} onClick={findClients}>Find</button>
+                </div>
+                {clientHits.length > 0 && (
+                  <div className="mt-1.5 rounded-xl border border-[#e8dccf] divide-y divide-[#f0e9df] max-h-40 overflow-auto">
+                    {clientHits.map(c => (
+                      <button key={c.id} className="w-full text-left px-3 py-2 text-xs hover:bg-[#faf7f2]" onClick={() => pickClient(c)}>
+                        <span className="font-semibold">{c.name}</span> · {c.phone || 'no phone'}{c.gender ? ` · ${String(c.gender).toLowerCase()}` : ''}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {clientSearched && clientHits.length === 0 && <p className="text-[11px] text-[#9c8e85] mt-1">No guest on file matches — type the guest's details below.</p>}
+                {bk.client_id && <p className="text-[11px] text-emerald-700 mt-1">Booking for a guest on file. <button className="underline" onClick={() => setBk({ ...bk, client_id: '' })}>Book as a new guest instead</button></p>}
+              </div>
               <div><label className={LABEL}>Client Name</label><input className={INPUT} value={bk.client_name} onChange={e => setBk({ ...bk, client_name: e.target.value })} /></div>
               <div><label className={LABEL}>Client Phone</label><input className={INPUT} value={bk.client_phone} onChange={e => setBk({ ...bk, client_phone: e.target.value })} /></div>
+              <div><label className={LABEL}>Guest gender</label>
+                <select className={INPUT} value={bk.client_gender} onChange={e => { setBk({ ...bk, client_gender: e.target.value }); setSlots([]); setChosenSlot(null); }}>
+                  <option value="">Not recorded</option><option value="FEMALE">Female</option><option value="MALE">Male</option>
+                </select></div>
+              <div><label className={LABEL}>Therapist preference</label>
+                <select className={INPUT} value={bk.therapist_gender_pref} onChange={e => { setBk({ ...bk, therapist_gender_pref: e.target.value }); setSlots([]); setChosenSlot(null); }}>
+                  <option value="">No preference</option><option value="FEMALE">Female therapist</option><option value="MALE">Male therapist</option>
+                </select></div>
+              <div><label className={LABEL}>Date</label><input className={INPUT} type="date" value={bk.date} onChange={e => { setBk({ ...bk, date: e.target.value }); setSlots([]); setChosenSlot(null); }} /></div>
+              <div className="flex items-end"><button className={BTN_PRIMARY} onClick={searchSlots} disabled={!bk.service_id}>{slotLoading ? 'Searching…' : 'Find Slots'}</button></div>
             </div>
+            {needsGender && !bk.client_gender && (
+              <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">This treatment, or a cabin it can use, is arranged by gender. Choose the guest's gender and find slots again to see the right therapists and cabins.</p>
+            )}
             {slots.length > 0 && (
               <div className="mb-3">
                 <label className={LABEL}>Available slots (therapist + cabin)</label>
-                <div className="grid grid-cols-3 gap-1.5 max-h-44 overflow-auto">
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-44 overflow-auto">
                   {slots.map((s, i) => (
-                    <button key={i} onClick={() => setChosenSlot(s)}
+                    <button key={i} onClick={() => chooseSlot(s)}
                       className={`px-2 py-1.5 rounded-lg text-[11px] border ${chosenSlot === s ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf]'}`}>
-                      {s.start_at.slice(11, 16)}<br /><span className="opacity-70">{s.therapist_name}</span>
+                      {s.start_at.slice(11, 16)}<br /><span className="opacity-70">{s.therapist_name}{s.assistant_names?.length ? ` + ${s.assistant_names.join(', ')}` : ''}</span>
                     </button>
                   ))}
                 </div>
               </div>
             )}
             {slots.length === 0 && !slotLoading && bk.service_id && <p className="text-xs text-[#6b5d52] mb-3">Click "Find Slots" to see availability.</p>}
+            {chosenSlot && (
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <div><label className={LABEL}>Therapist</label>
+                  <select className={INPUT} value={pick.therapist_id} onChange={e => { setPick({ ...pick, therapist_id: e.target.value }); setRuleProblems([]); }}>
+                    {pick.therapist_id && !suggest.some(t => t.id === pick.therapist_id) && <option value={pick.therapist_id}>{chosenSlot.therapist_name}</option>}
+                    {suggest.map(t => <option key={t.id} value={t.id}>{t.display_name}{t.eligible ? '' : ` — ${t.reasons[0]}`}</option>)}
+                  </select>
+                  {(() => { const t = suggest.find(x => x.id === pick.therapist_id); return t && !t.eligible ? <p className="text-[11px] text-amber-800 mt-1">{t.reasons.join(' · ')}</p> : null; })()}
+                </div>
+                <div><label className={LABEL}>Cabin</label>
+                  <select className={INPUT} value={pick.resource_id} onChange={e => { setPick({ ...pick, resource_id: e.target.value }); setRuleProblems([]); }}>
+                    {!pick.resource_id && <option value="">No cabin</option>}
+                    {pick.resource_id && !cabins.some(c => c.id === pick.resource_id) && <option value={pick.resource_id}>{chosenSlot.resource_name}</option>}
+                    {cabins.filter(c => Number(c.is_active ?? 1) === 1 || c.id === pick.resource_id).map(c => {
+                      const st = String(c.status || 'AVAILABLE').toUpperCase();
+                      return <option key={c.id} value={c.id}>{c.name}{c.cabin_type_name ? ` · ${c.cabin_type_name}` : ''}{st === 'MAINTENANCE' ? ' — under maintenance' : st === 'OUT_OF_ORDER' ? ' — out of order' : ''}</option>;
+                    })}
+                  </select></div>
+              </div>
+            )}
+            {chosenSlot?.assistant_names?.length > 0 && (
+              <p className="text-[11px] text-[#3d3128] mb-3">Given together with {chosenSlot.assistant_names.join(', ')}.</p>
+            )}
+            {ruleProblems.length > 0 && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 mb-3">
+                <p className="text-xs font-bold text-amber-800 mb-1">This booking is outside the treatment's rules</p>
+                <ul className="list-disc pl-4 text-[11px] text-amber-800 space-y-0.5 mb-2">{ruleProblems.map((p, i) => <li key={i}>{p.message}</li>)}</ul>
+                <label className={LABEL}>Reason for booking it anyway <span className="font-normal text-[#9d8b7e]">(kept on the appointment and in its audit log)</span></label>
+                <textarea className={INPUT} rows={2} value={overrideReason} onChange={e => setOverrideReason(e.target.value)} placeholder="e.g. Guest asked for this therapist by name" />
+              </div>
+            )}
             <div className="flex justify-end gap-2">
               <button className={BTN_GHOST} onClick={() => setShowBook(false)}>Cancel</button>
-              <button className={BTN_PRIMARY} onClick={book} disabled={!chosenSlot}>Book Appointment</button>
+              {ruleProblems.length > 0
+                ? <button className={BTN_PRIMARY} onClick={() => book(true)} disabled={overrideReason.trim().length < 5}>Book with this reason</button>
+                : <button className={BTN_PRIMARY} onClick={() => book(false)} disabled={!chosenSlot}>Book Appointment</button>}
             </div>
           </div>
         </div>
@@ -1751,6 +1891,9 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const [slot, setSlot] = useState<any>(null);
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [guest, setGuest] = useState({ client_name: '', client_phone: '', client_email: '' });
+  // A therapist preference, and the guest's gender where a treatment or room is arranged by gender.
+  const [genderPick, setGenderPick] = useState({ guest_gender: '', therapist_gender: '' });
+  const [needsGender, setNeedsGender] = useState(false);
   const [done, setDone] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -1773,9 +1916,10 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   useEffect(() => {
     if (step !== 2 || !service || !date) return;
     setSlotsLoading(true); setSlot(null); setSlots([]);
-    fetch(`/api/public/restaurant/${restaurantId}/spa/availability?service_id=${service.id}&date=${date}`)
-      .then(r => r.json()).then(b => setSlots(b.slots || [])).catch(() => setSlots([])).finally(() => setSlotsLoading(false));
-  }, [step, service, date, restaurantId]);
+    const gq = `${genderPick.guest_gender ? `&guest_gender=${genderPick.guest_gender}` : ''}${genderPick.therapist_gender ? `&therapist_gender=${genderPick.therapist_gender}` : ''}`;
+    fetch(`/api/public/restaurant/${restaurantId}/spa/availability?service_id=${service.id}&date=${date}${gq}`)
+      .then(r => r.json()).then(b => { setSlots(b.slots || []); setNeedsGender(!!b.needs_guest_gender); }).catch(() => setSlots([])).finally(() => setSlotsLoading(false));
+  }, [step, service, date, restaurantId, genderPick.guest_gender, genderPick.therapist_gender]);
 
   const submit = async () => {
     if (!slot || !guest.client_name || !guest.client_phone) return;
@@ -1783,7 +1927,8 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
     try {
       const r = await fetch(`/api/public/restaurant/${restaurantId}/spa/booking`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ service_id: service.id, start_at: slot.start_at, therapist_id: slot.therapist_id, resource_id: slot.resource_id, ...guest }),
+        body: JSON.stringify({ service_id: service.id, start_at: slot.start_at, therapist_id: slot.therapist_id, resource_id: slot.resource_id, assistant_ids: slot.assistant_ids, ...guest,
+          client_gender: genderPick.guest_gender || undefined, therapist_gender_pref: genderPick.therapist_gender || undefined }),
       });
       const b = await r.json();
       if (!r.ok) { setError(b.error || 'Booking failed. Please try again.'); return; }
@@ -1833,7 +1978,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
     ? { backgroundImage: `linear-gradient(to bottom, rgba(13,31,24,0.5) 0%, rgba(13,31,24,0.88) 100%), url(${profile.hero_image_url})`, backgroundSize: 'cover', backgroundPosition: 'center' }
     : { background: `linear-gradient(145deg, ${SPA_DARK} 0%, #1a3828 50%, #0d2318 100%)` };
 
-  const resetFlow = () => { setDone(null); setStep(1); setService(null); setSlot(null); setSlots([]); setGuest({ client_name: '', client_phone: '', client_email: '' }); setError(''); };
+  const resetFlow = () => { setDone(null); setStep(1); setService(null); setSlot(null); setSlots([]); setGuest({ client_name: '', client_phone: '', client_email: '' }); setGenderPick({ guest_gender: '', therapist_gender: '' }); setNeedsGender(false); setError(''); };
 
   // ── Confirmation screen ──────────────────────────────────────────────────
   if (done) return (
@@ -2078,6 +2223,28 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
             </div>
             <p style={{ fontSize: 12, textAlign: 'center', color: '#9d8b7e', marginBottom: 20 }}>{fmtDate(date)}</p>
 
+            <div style={{ display: 'grid', gridTemplateColumns: needsGender || genderPick.guest_gender ? '1fr 1fr' : '1fr', gap: 8, marginBottom: 14 }}>
+              <label style={{ display: 'block' }}>
+                <span style={{ display: 'block', fontSize: 11, fontWeight: 600, color: '#5a4535', marginBottom: 4 }}>Therapist</span>
+                <select value={genderPick.therapist_gender} onChange={e => { setGenderPick({ ...genderPick, therapist_gender: e.target.value }); setSlot(null); }} style={{ width: '100%', padding: '10px 12px', borderRadius: 12, border: '1.5px solid #ede5d8', background: '#fff', fontSize: 13, color: '#0d1a14', outline: 'none' }}>
+                  <option value="">No preference</option><option value="FEMALE">Female therapist</option><option value="MALE">Male therapist</option>
+                </select>
+              </label>
+              {(needsGender || genderPick.guest_gender) && (
+                <label style={{ display: 'block' }}>
+                  <span style={{ display: 'block', fontSize: 11, fontWeight: 600, color: '#5a4535', marginBottom: 4 }}>You are <span style={{ color: SPA_BRAND }}>*</span></span>
+                  <select value={genderPick.guest_gender} onChange={e => { setGenderPick({ ...genderPick, guest_gender: e.target.value }); setSlot(null); }} style={{ width: '100%', padding: '10px 12px', borderRadius: 12, border: '1.5px solid #ede5d8', background: '#fff', fontSize: 13, color: '#0d1a14', outline: 'none' }}>
+                    <option value="">Choose</option><option value="FEMALE">Female</option><option value="MALE">Male</option>
+                  </select>
+                </label>
+              )}
+            </div>
+            {needsGender && !genderPick.guest_gender && (
+              <p style={{ fontSize: 11, color: '#7a4f12', background: '#fdf6e9', border: '1px solid #f0dfbf', borderRadius: 10, padding: '8px 12px', marginBottom: 14 }}>
+                Some of our therapies and rooms are arranged by gender. Tell us yours to see the times open to you.
+              </p>
+            )}
+
             {slotsLoading ? (
               <div style={{ textAlign: 'center', padding: '48px 0' }}>
                 <div style={{ width: 36, height: 36, borderRadius: '50%', border: '2px solid rgba(201,169,110,0.25)', borderTop: '2px solid #c9a96e', animation: 'spin 1.2s linear infinite', margin: '0 auto 12px' }} />
@@ -2097,7 +2264,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
                     );
                   })}
                 </div>
-                {slot && (
+                {slot && !(needsGender && !genderPick.guest_gender) && (
                   <button onClick={() => setStep(3)} style={{ width: '100%', marginTop: 20, padding: '15px 0', borderRadius: 18, color: SPA_GOLD, fontWeight: 700, fontSize: 14, background: `linear-gradient(135deg, ${SPA_DARK} 0%, #1a3828 100%)`, border: 'none', cursor: 'pointer', boxShadow: '0 4px 16px rgba(13,31,24,0.3)', letterSpacing: 0.3 }}>
                     Continue with {fmtTime(slot.start_at)} →
                   </button>

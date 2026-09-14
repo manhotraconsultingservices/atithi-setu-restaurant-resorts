@@ -62553,11 +62553,15 @@ function TherapistDashboard({ restaurantId, token }: { restaurantId: string; tok
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="font-semibold text-gray-900 truncate">{a.client_name || 'Guest'}</span>
+                {a.my_role === 'ASSIST' && <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-100 text-amber-800">Assisting</span>}
                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[status] ?? 'bg-gray-100 text-gray-600'}`}>
                   {status.replace('_', ' ')}
                 </span>
               </div>
               <div className="text-sm text-gray-600 mt-0.5">{a.service_name_full || a.service_name}</div>
+              {(a.my_role === 'ASSIST' || a.assistant_names?.length > 0) && (
+                <div className="text-xs text-gray-500 mt-0.5">{a.my_role === 'ASSIST' ? `Led by ${a.therapist_name || 'another therapist'}` : `With ${a.assistant_names.join(', ')}`}</div>
+              )}
               {a.resource_name && <div className="text-xs text-gray-400">{a.resource_name}</div>}
               {a.notes && <div className="text-xs text-gray-500 italic mt-1">{a.notes}</div>}
             </div>

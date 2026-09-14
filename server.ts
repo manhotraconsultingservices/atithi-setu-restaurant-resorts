@@ -24,7 +24,7 @@ import {
   findAvailableSlots, serviceWindowMinutes, therapistConflict, resourceConflict, blockConflict,
   spaTransitionError, spaMustYield,
   tsFromDateMinutes, hhmmToMinutes, minutesToHHMM,
-  tsShift, spaLevelRank, spaGenderCode, spaSkillGaps, spaAssignmentProblems, spaNeedsGuestGender,
+  tsShift, spaLevelRank, spaGenderCode, spaSkillGaps, spaAssignmentProblems, spaNeedsGuestGender, spaTherapistDayCount,
 } from "./spaService.ts";
 import {
   createEventTables, seedEventDefaults,
@@ -33526,6 +33526,9 @@ ${data.tenant.name}`;
       const svcBufAfter = _given(b.buffer_after_min) ? Number(b.buffer_after_min) : 10;
       if (!(svcDuration > 0)) return res.status(400).json({ error: "Duration must be more than 0 minutes.", code: 'DURATION_INVALID' });
       if (!(svcBufBefore >= 0) || !(svcBufAfter >= 0)) return res.status(400).json({ error: "Buffers cannot be negative.", code: 'BUFFER_INVALID' });
+      // How many therapists give it together — four-hands therapies need two.
+      const svcTherapists = _given(b.therapists_required) ? Number(b.therapists_required) : 1;
+      if (!(Number.isInteger(svcTherapists) && svcTherapists >= 1 && svcTherapists <= 4)) return res.status(400).json({ error: "A treatment is given by 1 to 4 therapists.", code: 'THERAPISTS_REQUIRED_INVALID' });
       const id = mkSpaId('SPASVC');
       await db.run(
         `INSERT INTO spa_services (id, name, category, description, duration_min, buffer_before_min, buffer_after_min, price, gst_percent, requires_room, requires_therapist, commission_pct, image_url, display_order, is_active)
@@ -33536,6 +33539,7 @@ ${data.tenant.name}`;
          b.requires_room === false ? 0 : 1, b.requires_therapist === false ? 0 : 1,
          Number(b.commission_pct || 0), b.image_url || null, Number(b.display_order || 0)]
       );
+      if (svcTherapists !== 1) await db.run("UPDATE spa_services SET therapists_required = ? WHERE id = ?", [svcTherapists, id]);
       const row = await db.get("SELECT * FROM spa_services WHERE id = ?", [id]);
       res.status(201).json(row);
     } catch (err: any) { res.status(500).json({ error: "Failed to create service" }); }
@@ -33548,7 +33552,12 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
-      const allow = ['name','category','description','duration_min','buffer_before_min','buffer_after_min','price','gst_percent','requires_room','requires_therapist','commission_pct','image_url','display_order','is_active','cabin_type_id','gender_rule'];
+      const allow = ['name','category','description','duration_min','buffer_before_min','buffer_after_min','price','gst_percent','requires_room','requires_therapist','commission_pct','image_url','display_order','is_active','cabin_type_id','gender_rule','therapists_required'];
+      if (b.therapists_required !== undefined) {
+        const n = Number(b.therapists_required);
+        if (!(Number.isInteger(n) && n >= 1 && n <= 4)) return res.status(400).json({ error: "A treatment is given by 1 to 4 therapists.", code: 'THERAPISTS_REQUIRED_INVALID' });
+        b.therapists_required = n;
+      }
       // A blank gender rule is the default: any therapist.
       if (b.gender_rule !== undefined) {
         const rule = String(b.gender_rule || 'ANY').toUpperCase();
@@ -34472,6 +34481,21 @@ ${data.tenant.name}`;
     }
     return null;
   };
+  // The therapists assisting on each appointment, as ids and names.
+  const spaAttachAssistants = async (db: DbInterface, rows: any[]): Promise<void> => {
+    const byId = new Map<string, any>();
+    for (const r of rows) { r.assistant_ids = []; r.assistant_names = []; if (r?.id) byId.set(String(r.id), r); }
+    if (!byId.size) return;
+    const ids = Array.from(byId.keys());
+    const found: any[] = await db.query(
+      `SELECT x.appointment_id, x.therapist_id, t.display_name FROM spa_appointment_therapists x
+         LEFT JOIN spa_therapists t ON t.id = x.therapist_id
+        WHERE x.appointment_id IN (${ids.map(() => '?').join(',')}) ORDER BY t.display_name`, ids).catch(() => []);
+    for (const f of found) {
+      const r = byId.get(String(f.appointment_id));
+      if (r) { r.assistant_ids.push(f.therapist_id); r.assistant_names.push(f.display_name || f.therapist_id); }
+    }
+  };
   // The add-ons an appointment was booked with, so its window keeps their time.
   const spaApptAddons = async (db: DbInterface, appt: any): Promise<any[]> => {
     let ids: string[] = [];
@@ -34552,12 +34576,7 @@ ${data.tenant.name}`;
           const blocked: any = await blockConflict(db, 'THERAPIST', t.id, win.startAt, win.endAt);
           if (blocked) reasons.push(`Blocked${blocked.reason ? `: ${blocked.reason}` : ''}`);
           const cap = Number(t.max_treatments_per_day || 0);
-          if (cap > 0) {
-            const n: any = await db.get(
-              `SELECT COUNT(*) AS n FROM spa_appointments WHERE therapist_id = ? AND status NOT IN ('CANCELLED','NO_SHOW') AND start_at >= ? AND start_at < ?`,
-              [t.id, `${win.date} 00:00:00`, tsShift(`${win.date} 00:00:00`, 1440)]);
-            if (Number(n?.n || 0) >= cap) reasons.push(`Daily limit reached (${cap})`);
-          }
+          if (cap > 0 && (await spaTherapistDayCount(db, t.id, win.date)) >= cap) reasons.push(`Daily limit reached (${cap})`);
           free = !!shift && !busy && !blocked;
         }
         out.push({
@@ -34580,7 +34599,8 @@ ${data.tenant.name}`;
       if (req.query.from) { clauses.push("a.start_at >= ?"); params.push(req.query.from); }
       if (req.query.to) { clauses.push("a.start_at <= ?"); params.push(req.query.to); }
       if (req.query.status) { clauses.push("a.status = ?"); params.push(req.query.status); }
-      if (req.query.therapist_id) { clauses.push("a.therapist_id = ?"); params.push(req.query.therapist_id); }
+      // A therapist's appointments include those they assist on.
+      if (req.query.therapist_id) { clauses.push("(a.therapist_id = ? OR EXISTS (SELECT 1 FROM spa_appointment_therapists x WHERE x.appointment_id = a.id AND x.therapist_id = ?))"); params.push(req.query.therapist_id, req.query.therapist_id); }
       if (req.query.q) {
         const q = `%${String(req.query.q).trim()}%`;
         clauses.push("(a.client_name LIKE ? OR c.phone LIKE ?)");
@@ -34597,6 +34617,7 @@ ${data.tenant.name}`;
            LEFT JOIN spa_clients c ON c.id = a.client_id
            ${where}
           ORDER BY a.start_at DESC LIMIT 1000`, params);
+      await spaAttachAssistants(db, rows);
       res.json(rows);
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch appointments" }); }
   });
@@ -34621,7 +34642,8 @@ ${data.tenant.name}`;
       const toNext = new Date(to + 'T00:00:00Z'); toNext.setUTCDate(toNext.getUTCDate() + 1);
       const clauses = [`a.start_at >= ? AND a.start_at < ?`];
       const params: any[] = [from, toNext.toISOString().slice(0, 10)];
-      if (therapistId) { clauses.push("a.therapist_id = ?"); params.push(therapistId); }
+      // Treatments they lead, and those they assist on.
+      if (therapistId) { clauses.push("(a.therapist_id = ? OR EXISTS (SELECT 1 FROM spa_appointment_therapists x WHERE x.appointment_id = a.id AND x.therapist_id = ?))"); params.push(therapistId, therapistId); }
       const rows = await db.query(
         `SELECT a.*, s.name AS service_name_full, t.display_name AS therapist_name, r.name AS resource_name, c.phone AS client_phone
            FROM spa_appointments a
@@ -34631,6 +34653,8 @@ ${data.tenant.name}`;
            LEFT JOIN spa_clients c ON c.id = a.client_id
           WHERE ${clauses.join(' AND ')}
           ORDER BY a.start_at`, params);
+      await spaAttachAssistants(db, rows);
+      for (const r of rows) r.my_role = therapistId ? (r.therapist_id === therapistId ? 'LEAD' : 'ASSIST') : null;
       res.json({ therapist_id: therapistId, appointments: rows });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch my appointments" }); }
   });
@@ -34648,6 +34672,7 @@ ${data.tenant.name}`;
            LEFT JOIN spa_resources r ON r.id = a.resource_id
           WHERE a.id = ?`, [req.params.aid]);
       if (!row) return res.status(404).json({ error: "Appointment not found" });
+      await spaAttachAssistants(db, [row]);
       res.json(row);
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch appointment" }); }
   });
@@ -34741,6 +34766,22 @@ ${data.tenant.name}`;
         service, therapistId: b.therapist_id || null, resourceId: b.resource_id || null, date: win.date,
         guestGender: createGuestGender, preference: createPref,
       });
+      // A treatment for more than one therapist names the others. Each is active,
+      // free, and meets the same rules as the lead.
+      const needAssistants = needTherapist ? Math.max(1, Math.min(4, Number(service.therapists_required || 1))) - 1 : 0;
+      const assistantIds: string[] = Array.from(new Set((Array.isArray(b.assistant_ids) ? b.assistant_ids : []).map(String).filter((x: string) => x && x !== String(b.therapist_id || ''))));
+      if (assistantIds.length !== needAssistants) {
+        return res.status(400).json({ error: needAssistants ? `This treatment is given by ${needAssistants + 1} therapists — choose ${needAssistants} besides the lead.` : 'This treatment is given by one therapist.', code: 'THERAPIST_COUNT' });
+      }
+      for (const tid of assistantIds) {
+        const inactiveA = await spaInactiveProblem(db, tid, null);
+        if (inactiveA) return res.status(409).json(inactiveA);
+        if (await therapistConflict(db, tid, win.startAt, win.endAt)) return res.status(409).json({ error: "An assisting therapist is already booked for an overlapping slot", code: 'ASSISTANT_BUSY', therapist_id: tid });
+        if (await blockConflict(db, 'THERAPIST', tid, win.startAt, win.endAt)) return res.status(409).json({ error: "An assisting therapist is blocked for this slot", code: 'ASSISTANT_BLOCKED', therapist_id: tid });
+        for (const p of await spaAssignmentProblems(db, { service, therapistId: tid, resourceId: null, date: win.date, guestGender: createGuestGender, preference: createPref })) {
+          if (!createProblems.some(q => q.code === p.code && q.message === p.message)) createProblems.push(p);
+        }
+      }
       const createOverride = String(b.override_reason || '').trim();
       if (createProblems.length && createOverride.length < 5) {
         return res.status(409).json({ error: createProblems.map(p => p.message).join(' '), code: 'ASSIGNMENT_RULES', problems: createProblems, overridable: true });
@@ -34794,9 +34835,22 @@ ${data.tenant.name}`;
          win.startAt, win.endAt, price, gstPct, Number(b.deposit_amount || 0),
          b.booking_source || 'STAFF', b.notes || null]
       );
+      if (assistantIds.length) {
+        try {
+          for (const tid of assistantIds) {
+            await db.run("INSERT INTO spa_appointment_therapists (id, appointment_id, therapist_id) VALUES (?, ?, ?)", [mkSpaId('SPAAST'), id, tid]);
+          }
+        } catch (e: any) {
+          console.error('[spa] assisting therapists not saved:', id, e?.message || e);
+          await db.run("DELETE FROM spa_appointment_therapists WHERE appointment_id = ?", [id]).catch(() => {});
+          await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]).catch(() => {});
+          return res.status(500).json({ error: "The assisting therapists could not be saved, so the booking was not made." });
+        }
+      }
       // Two bookings made at the same moment both pass the checks above; the later
       // one gives way here, so a therapist or cabin is never booked twice.
       if (await spaMustYield(db, id)) {
+        await db.run("DELETE FROM spa_appointment_therapists WHERE appointment_id = ?", [id]).catch(() => {});
         await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]);
         return res.status(409).json({ error: "That slot was just booked by someone else. Pick another time.", code: 'SLOT_TAKEN' });
       }
@@ -34819,7 +34873,7 @@ ${data.tenant.name}`;
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: id, action: 'CREATED',
         summary: `Appointment booked — "${service.name}"${b.client_name ? ` · ${b.client_name}` : ''} @ ${win.startAt} (₹${price})`,
-        after: { service_name: service.name, client_name: b.client_name || null, client_phone: b.client_phone || null, therapist_id: b.therapist_id || null, resource_id: b.resource_id || null, start_at: win.startAt, end_at: win.endAt, price_snapshot: price },
+        after: { service_name: service.name, client_name: b.client_name || null, client_phone: b.client_phone || null, therapist_id: b.therapist_id || null, assistant_ids: assistantIds.length ? assistantIds : undefined, resource_id: b.resource_id || null, start_at: win.startAt, end_at: win.endAt, price_snapshot: price },
       }).catch(() => {});
       res.status(201).json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [id]));
     } catch (err: any) { console.error("spa book error:", err); res.status(500).json({ error: err?.message || "Failed to book appointment" }); }
@@ -34867,14 +34921,54 @@ ${data.tenant.name}`;
           return res.status(409).json({ error: reschedProblems.map(p => p.message).join(' '), code: 'ASSIGNMENT_RULES', problems: reschedProblems, overridable: true });
         }
       }
+      // Those assisting move with the treatment, or are replaced when others are named.
+      const curAssist: string[] = ((await db.query("SELECT therapist_id FROM spa_appointment_therapists WHERE appointment_id = ? ORDER BY therapist_id", [appt.id]).catch(() => [])) as any[]).map((r: any) => String(r.therapist_id));
+      const nextAssist: string[] = Array.isArray(b.assistant_ids)
+        ? Array.from(new Set((b.assistant_ids as any[]).map(String).filter((x: string) => x && x !== String(therapistId || '')))).sort()
+        : curAssist;
+      const assistChanged = nextAssist.join(',') !== curAssist.join(',');
+      if (Array.isArray(b.assistant_ids) && service) {
+        const needA = Number(service.requires_therapist ?? 1) === 1 ? Math.max(1, Math.min(4, Number(service.therapists_required || 1))) - 1 : 0;
+        if (nextAssist.length !== needA) {
+          return res.status(400).json({ error: needA ? `This treatment is given by ${needA + 1} therapists — choose ${needA} besides the lead.` : 'This treatment is given by one therapist.', code: 'THERAPIST_COUNT' });
+        }
+      }
+      if (nextAssist.includes(String(therapistId || ''))) return res.status(400).json({ error: 'The lead therapist cannot also be assisting.', code: 'THERAPIST_COUNT' });
+      for (const tid of nextAssist) {
+        const inactiveA = await spaInactiveProblem(db, tid, null);
+        if (inactiveA) return res.status(409).json(inactiveA);
+        if (await therapistConflict(db, tid, win.startAt, win.endAt, appt.id)) return res.status(409).json({ error: "An assisting therapist is already booked for an overlapping slot", code: 'ASSISTANT_BUSY', therapist_id: tid });
+        if (await blockConflict(db, 'THERAPIST', tid, win.startAt, win.endAt)) return res.status(409).json({ error: "An assisting therapist is blocked for this slot", code: 'ASSISTANT_BLOCKED', therapist_id: tid });
+      }
+      if ((assistChanged || movedRules) && service && nextAssist.length) {
+        const apptClientA: any = appt.client_id ? await db.get("SELECT gender FROM spa_clients WHERE id = ?", [appt.client_id]).catch(() => null) : null;
+        const guestA = spaGenderCode(b.client_gender) || spaGenderCode(appt.client_gender) || spaGenderCode(apptClientA?.gender);
+        for (const tid of nextAssist) {
+          for (const p of await spaAssignmentProblems(db, { service, therapistId: tid, resourceId: null, date: newDay, guestGender: guestA, preference: spaGenderCode(appt.therapist_gender_pref), excludeApptId: appt.id })) {
+            if (!reschedProblems.some((q: any) => q.code === p.code && q.message === p.message)) reschedProblems.push(p);
+          }
+        }
+        reschedOverride = String(b.override_reason || '').trim();
+        if (reschedProblems.length && reschedOverride.length < 5) {
+          return res.status(409).json({ error: reschedProblems.map((p: any) => p.message).join(' '), code: 'ASSIGNMENT_RULES', problems: reschedProblems, overridable: true });
+        }
+      }
       await db.run(
         "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
         [therapistId || null, resourceId || null, win.startAt, win.endAt, appt.id]
       );
+      if (assistChanged) {
+        await db.run("DELETE FROM spa_appointment_therapists WHERE appointment_id = ?", [appt.id]);
+        for (const tid of nextAssist) await db.run("INSERT INTO spa_appointment_therapists (id, appointment_id, therapist_id) VALUES (?, ?, ?)", [mkSpaId('SPAAST'), appt.id, tid]);
+      }
       if (await spaMustYield(db, appt.id)) {
         await db.run(
           "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
           [appt.therapist_id || null, appt.resource_id || null, appt.start_at, appt.end_at, appt.id]);
+        if (assistChanged) {
+          await db.run("DELETE FROM spa_appointment_therapists WHERE appointment_id = ?", [appt.id]).catch(() => {});
+          for (const tid of curAssist) await db.run("INSERT INTO spa_appointment_therapists (id, appointment_id, therapist_id) VALUES (?, ?, ?)", [mkSpaId('SPAAST'), appt.id, tid]).catch(() => {});
+        }
         return res.status(409).json({ error: "That slot was just booked by someone else. Pick another time.", code: 'SLOT_TAKEN' });
       }
       if (reschedProblems.length) {
@@ -34889,8 +34983,8 @@ ${data.tenant.name}`;
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'RESCHEDULED',
         summary: `Appointment "${appt.service_name || 'service'}" rescheduled${appt.start_at !== win.startAt ? ` — ${appt.start_at} → ${win.startAt}` : ''}`,
-        before: { therapist_id: appt.therapist_id, resource_id: appt.resource_id, start_at: appt.start_at, end_at: appt.end_at },
-        after: { therapist_id: therapistId || null, resource_id: resourceId || null, start_at: win.startAt, end_at: win.endAt },
+        before: { therapist_id: appt.therapist_id, assistant_ids: curAssist.length ? curAssist : undefined, resource_id: appt.resource_id, start_at: appt.start_at, end_at: appt.end_at },
+        after: { therapist_id: therapistId || null, assistant_ids: nextAssist.length ? nextAssist : undefined, resource_id: resourceId || null, start_at: win.startAt, end_at: win.endAt },
       }).catch(() => {});
       res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]));
     } catch (err: any) { res.status(500).json({ error: "Failed to reschedule" }); }
@@ -35766,7 +35860,7 @@ ${data.tenant.name}`;
                 COUNT(a.id) FILTER (WHERE a.status NOT IN ('CANCELLED','NO_SHOW')) AS appointments,
                 COALESCE(SUM(EXTRACT(EPOCH FROM (a.end_at - a.start_at))/60) FILTER (WHERE a.status NOT IN ('CANCELLED','NO_SHOW')), 0)::int AS booked_minutes
            FROM spa_therapists t
-           LEFT JOIN spa_appointments a ON a.therapist_id = t.id
+           LEFT JOIN spa_appointments a ON (a.therapist_id = t.id OR EXISTS (SELECT 1 FROM spa_appointment_therapists x WHERE x.appointment_id = a.id AND x.therapist_id = t.id))
              AND a.start_at >= NOW() - INTERVAL '30 days'
           GROUP BY t.id, t.display_name
           ORDER BY booked_minutes DESC`);
@@ -35803,9 +35897,11 @@ ${data.tenant.name}`;
         `SELECT t.id AS therapist_id, t.display_name,
                 COUNT(a.id) FILTER (WHERE a.status = 'COMPLETED') AS completed,
                 COUNT(a.id) FILTER (WHERE a.status = 'NO_SHOW') AS no_shows,
-                COALESCE(SUM(a.price_snapshot) FILTER (WHERE a.status = 'COMPLETED'), 0) AS service_value
+                COALESCE(SUM(a.price_snapshot) FILTER (WHERE a.status = 'COMPLETED' AND a.therapist_id = t.id), 0) AS service_value,
+                COUNT(a.id) FILTER (WHERE a.status = 'COMPLETED' AND a.therapist_id IS DISTINCT FROM t.id) AS assisted
            FROM spa_therapists t
-           LEFT JOIN spa_appointments a ON a.therapist_id = t.id AND a.start_at >= NOW() - INTERVAL '30 days'
+           LEFT JOIN spa_appointments a ON (a.therapist_id = t.id OR EXISTS (SELECT 1 FROM spa_appointment_therapists x WHERE x.appointment_id = a.id AND x.therapist_id = t.id))
+             AND a.start_at >= NOW() - INTERVAL '30 days'
           GROUP BY t.id, t.display_name
           ORDER BY service_value DESC`);
       res.json(rows);
@@ -36004,6 +36100,7 @@ ${data.tenant.name}`;
         }
         therapistId = therapistId || match.therapist_id;
         resourceId = resourceId || match.resource_id;
+        if (!Array.isArray(b.assistant_ids) && Array.isArray(match.assistant_ids)) b.assistant_ids = match.assistant_ids;
       }
       // The same checks as a staff booking, blocked time included.
       if (await spaWindowProblem(db, therapistId || null, resourceId || null, startAt, endAt)) {
@@ -36015,6 +36112,16 @@ ${data.tenant.name}`;
         return res.status(400).json({ error: "Please tell us your gender — this treatment is arranged by gender.", code: 'GUEST_GENDER_REQUIRED' });
       }
       if (pubProblems.length) return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+      // A treatment for more than one therapist: the others, checked the same way.
+      const pubNeedA = Number(service.requires_therapist ?? 1) === 1 ? Math.max(1, Math.min(4, Number(service.therapists_required || 1))) - 1 : 0;
+      const pubAssist: string[] = Array.from(new Set((Array.isArray(b.assistant_ids) ? b.assistant_ids : []).map(String).filter((x: string) => x && x !== String(therapistId || ''))));
+      if (pubAssist.length !== pubNeedA) return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+      for (const tid of pubAssist) {
+        if (await spaWindowProblem(db, tid, null, startAt, endAt)) return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+        if ((await spaAssignmentProblems(db, { service, therapistId: tid, resourceId: null, date: m[1], guestGender: pubGuest, preference: pubPref })).length) {
+          return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+        }
+      }
       // upsert client by phone
       let clientId: string;
       const existing: any = await db.get("SELECT id FROM spa_clients WHERE phone = ? LIMIT 1", [b.client_phone]);
@@ -36025,7 +36132,18 @@ ${data.tenant.name}`;
         `INSERT INTO spa_appointments (id, client_id, client_name, client_phone, client_email, service_id, service_name, addon_ids, therapist_id, resource_id, start_at, end_at, status, price_snapshot, gst_percent_snapshot, booking_source)
          VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, 'BOOKED', ?, ?, 'ONLINE')`,
         [id, clientId, b.client_name, b.client_phone, b.client_email || null, service.id, service.name, therapistId || null, resourceId || null, startAt, endAt, round2(service.price || 0), Number(service.gst_percent ?? 18)]);
+      if (pubAssist.length) {
+        try {
+          for (const tid of pubAssist) await db.run("INSERT INTO spa_appointment_therapists (id, appointment_id, therapist_id) VALUES (?, ?, ?)", [mkSpaId('SPAAST'), id, tid]);
+        } catch (e: any) {
+          console.error('[spa] online booking assisting therapists not saved:', id, e?.message || e);
+          await db.run("DELETE FROM spa_appointment_therapists WHERE appointment_id = ?", [id]).catch(() => {});
+          await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]).catch(() => {});
+          return res.status(500).json({ error: "Failed to book" });
+        }
+      }
       if (await spaMustYield(db, id)) {
+        await db.run("DELETE FROM spa_appointment_therapists WHERE appointment_id = ?", [id]).catch(() => {});
         await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]);
         return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
       }
@@ -60896,8 +61014,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-phase2a-booking-rules-search',
+    commit_marker: 'spa-phase2b-multi-therapist',
     code_features: [
+      'spa-phase2b-multi-therapist — Spa Phase 2b. A treatment can be given by 1 to 4 therapists (spa_services.therapists_required). The lead stays on the appointment and those assisting are rows in spa_appointment_therapists. Slots find the others free at the same time within their shifts, breaks and daily limits. Staff booking, reschedule and online booking take assistant_ids, check each is active, free, not blocked and meets the rules (staff can give a reason for an exception), save them before the double-booking guard and remove them if the booking gives way. Conflict checks, the double-booking guard, the daily limit and therapist search count a treatment a therapist assists on. Appointment lists, a single appointment and my-appointments carry assistant_ids and assistant_names (and my_role LEAD or ASSIST). Utilization counts time spent assisting; productivity counts assisted treatments separately and keeps treatment value with the lead. Screens: therapists needed on the treatment form, slots and bookings show those assisting, the calendar lists a treatment under each therapist on it, and the therapist dashboard marks Assisting. Also the Phase 2 booking screens: guest on file, gender and preference, therapist and cabin picked with reasons and an override reason, the gender rule on treatments, cabins kept for one gender, daily limits, and the online page asking for gender where needed.',
       'spa-phase2a-booking-rules-search — Spa Phase 2a. The slot engine reads the day\'s bookings and blocks once (it queried per therapist, cabin and slot) and applies the same-gender rule once the guest\'s gender is known, the guest\'s therapist preference, a cabin kept for one gender (open cabins chosen first) and the therapist\'s daily limit. spaAssignmentProblems holds those rules plus skills and cabin type for a therapist or cabin picked by hand: staff booking and reschedule return 409 ASSIGNMENT_RULES with the problems unless override_reason (5+ characters) is given, which is saved on the appointment and audited as RULES_OVERRIDDEN; online booking has no override (400 GUEST_GENDER_REQUIRED, else 409 SLOT_UNAVAILABLE). Appointments keep client_gender and therapist_gender_pref; availability returns needs_guest_gender. New GET /spa/therapist-search lists each active therapist with eligible, free and reasons. Skills & Cabin Types hides inactive entries behind Show inactive.',
       'spa-phase1-skills-cabins-rosters — Spa Phase 1 of the traceability plan. Skills master (spa_skills) and cabin types (spa_cabin_types); therapist skills at trainee/qualified/senior with certified-on and valid-until (spa_therapist_skills, PUT /spa/therapists/:tid/skills); what a treatment needs (spa_service_skills, services.cabin_type_id, services.gender_rule — GET/PUT /spa/services/:sid/requirements); therapist profile (gender, languages, phone, photo, daily limit, staff link via GET /spa/staff-options); cabin profile (type, equipment, gender designation, turnaround, status with reason); shifts with a break and checked effective dates. The slot engine now honours effective dates and breaks, offers only therapists holding every required skill at its level with an in-date certificate (a treatment naming no skills keeps the old therapist-to-service mapping), and only active cabins of the right type that are not under maintenance or out of order, clear of their turnaround; booking checks cabin status and turnaround too. POST /spa/setup/ayurveda-starter (13 skills, 7 cabin types, once, never overwriting) and POST /spa/import/therapists and /spa/import/cabins (preview by default). Master changes are audited. Screens: Therapists & Cabins gains cabin editing (type, equipment, turnaround, status with reason), therapist profiles with the staff link, skills with level and certificate dates, shifts with a break and dates, finding therapists by skill, level, gender and language, and a Skills & Cabin Types tab with the starter pack preview and CSV import preview; the treatment form names the skills, minimum level and cabin type it needs. The same-gender rule, cabin gender and the daily limit are stored but not yet applied — that is Phase 2.',
       'stock-reductions-draw-batches — only order consumption and spa treatment completion took stock out of stock_batches. Wastage, a manual adjustment down, a stock count below book, a hotel issue or adjustment down and a spa retail sale lowered ingredients.current_stock_qty and left the batches untouched, so batch lists and the batch-cost valuation kept stock that had gone. One helper, _drawFromBatches (soonest to expire, then oldest, as order consumption), now runs on all five. Stock added without a goods receipt still creates no batch, as before.',
