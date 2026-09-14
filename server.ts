@@ -33562,6 +33562,7 @@ ${data.tenant.name}`;
       );
       if (svcTherapists !== 1) await db.run("UPDATE spa_services SET therapists_required = ? WHERE id = ?", [svcTherapists, id]);
       const row = await db.get("SELECT * FROM spa_services WHERE id = ?", [id]);
+      writeObjectAudit(db, req, { objectType: 'SPA_SERVICE', objectId: id, action: 'CREATED', summary: `Treatment "${b.name}" added`, after: row }).catch(() => {});
       res.status(201).json(row);
     } catch (err: any) { res.status(500).json({ error: "Failed to create service" }); }
   });
@@ -33604,8 +33605,22 @@ ${data.tenant.name}`;
       }
       if (!fields.length) return res.status(400).json({ error: "No fields to update" });
       vals.push(req.params.sid);
+      const svcBefore: any = await db.get("SELECT * FROM spa_services WHERE id = ?", [req.params.sid]);
       await db.run(`UPDATE spa_services SET ${fields.join(', ')} WHERE id = ?`, vals);
-      const row = await db.get("SELECT * FROM spa_services WHERE id = ?", [req.params.sid]);
+      const row: any = await db.get("SELECT * FROM spa_services WHERE id = ?", [req.params.sid]);
+      // What changed, and only when something did.
+      if (svcBefore && row) {
+        const changedKeys = allow.filter(k => b[k] !== undefined && String(svcBefore[k] ?? '') !== String(row[k] ?? ''));
+        if (changedKeys.length) {
+          const pick = (o: any) => Object.fromEntries(changedKeys.map(k => [k, o[k] ?? null]));
+          const act = changedKeys.includes('is_active') ? (Number(row.is_active) === 1 ? 'REACTIVATED' : 'DEACTIVATED') : 'UPDATED';
+          writeObjectAudit(db, req, {
+            objectType: 'SPA_SERVICE', objectId: row.id, action: act,
+            summary: act === 'UPDATED' ? `Treatment "${row.name}" updated (${changedKeys.join(', ')})` : `Treatment "${row.name}" ${act.toLowerCase()}`,
+            before: pick(svcBefore), after: pick(row),
+          }).catch(() => {});
+        }
+      }
       res.json(row);
     } catch (err: any) { res.status(500).json({ error: "Failed to update service" }); }
   });
@@ -33955,11 +33970,16 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const serviceIds: string[] = Array.isArray(req.body?.service_ids) ? req.body.service_ids : [];
+      const svcBeforeIds: string[] = ((await db.query("SELECT service_id FROM spa_therapist_services WHERE therapist_id = ?", [req.params.tid]).catch(() => [])) as any[]).map((r: any) => String(r.service_id));
       // Replace the therapist's skill set
       await db.run("DELETE FROM spa_therapist_services WHERE therapist_id = ?", [req.params.tid]);
       for (const sid of serviceIds) {
         await db.run("INSERT INTO spa_therapist_services (id, therapist_id, service_id) VALUES (?, ?, ?) ON CONFLICT (therapist_id, service_id) DO NOTHING",
           [mkSpaId('SPATS'), req.params.tid, sid]);
+      }
+      const svcAfterIds = Array.from(new Set(serviceIds.map(String)));
+      if (svcAfterIds.slice().sort().join(',') !== svcBeforeIds.slice().sort().join(',')) {
+        writeObjectAudit(db, req, { objectType: 'SPA_THERAPIST', objectId: req.params.tid, action: 'SERVICES_SET', summary: `Treatments offered changed (${svcAfterIds.length})`, before: { service_ids: svcBeforeIds }, after: { service_ids: svcAfterIds } }).catch(() => {});
       }
       res.json({ success: true, count: serviceIds.length });
     } catch (err: any) { res.status(500).json({ error: "Failed to set skills" }); }
@@ -33972,10 +33992,15 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const serviceIds: string[] = Array.isArray(req.body?.service_ids) ? req.body.service_ids : [];
+      const svcBeforeIds: string[] = ((await db.query("SELECT service_id FROM spa_therapist_services WHERE therapist_id = ?", [req.params.tid]).catch(() => [])) as any[]).map((r: any) => String(r.service_id));
       await db.run("DELETE FROM spa_therapist_services WHERE therapist_id = ?", [req.params.tid]);
       for (const sid of serviceIds) {
         await db.run("INSERT INTO spa_therapist_services (id, therapist_id, service_id) VALUES (?, ?, ?) ON CONFLICT (therapist_id, service_id) DO NOTHING",
           [mkSpaId('SPATS'), req.params.tid, sid]);
+      }
+      const svcAfterIds = Array.from(new Set(serviceIds.map(String)));
+      if (svcAfterIds.slice().sort().join(',') !== svcBeforeIds.slice().sort().join(',')) {
+        writeObjectAudit(db, req, { objectType: 'SPA_THERAPIST', objectId: req.params.tid, action: 'SERVICES_SET', summary: `Treatments offered changed (${svcAfterIds.length})`, before: { service_ids: svcBeforeIds }, after: { service_ids: svcAfterIds } }).catch(() => {});
       }
       res.json({ success: true, count: serviceIds.length });
     } catch (err: any) { res.status(500).json({ error: "Failed to set skills" }); }
@@ -34030,7 +34055,12 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
+      const shift: any = await db.get("SELECT * FROM spa_therapist_schedules WHERE id = ?", [req.params.schedId]).catch(() => null);
       await db.run("DELETE FROM spa_therapist_schedules WHERE id = ?", [req.params.schedId]);
+      if (shift) {
+        const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][Number(shift.weekday)] || `day ${shift.weekday}`;
+        writeObjectAudit(db, req, { objectType: 'SPA_THERAPIST', objectId: shift.therapist_id, action: 'SHIFT_REMOVED', summary: `Shift removed — ${dayName} ${shift.start_time}–${shift.end_time}`, before: shift }).catch(() => {});
+      }
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to delete schedule" }); }
   });
@@ -36870,8 +36900,313 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load the timeline" }); }
   });
 
+  // ─── RECORD HISTORY (Phase 5) ────────────────────────────────────────────────
+  // Who changed the spa's own records — treatments, therapists, cabins, skills,
+  // cabin types and guests — and where each is used, for staff who can see the
+  // page the record belongs to.
+  const SPA_RECORD_TABS: Record<string, string> = {
+    SPA_SERVICE: 'SPA_CATALOG', SPA_THERAPIST: 'SPA_RESOURCES', SPA_CABIN: 'SPA_RESOURCES',
+    SPA_SKILL: 'SPA_RESOURCES', SPA_CABIN_TYPE: 'SPA_RESOURCES', SPA_CLIENT: 'SPA_CLIENTS',
+  };
+  // Entries about a guest's health are for clinical staff only.
+  const SPA_CLINICAL_AUDIT_ACTIONS = new Set(['ASSESSMENT_RECORDED', 'COURSE_PLAN_CREATED', 'COURSE_PLAN_UPDATED', 'CLINICAL_NOTE_ADDED', 'CLINICAL_NOTE_EDITED', 'CLINICAL_NOTE_LOCKED']);
+  const SPA_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const spaItem = (type: string, id: string, label: any, sublabel: any = '', linkType: string | null = null) =>
+    ({ type, id, label: label || id, sublabel: sublabel || '', link: linkType ? { objectType: linkType, objectId: id } : null });
+  const spaUpcoming = async (db: DbInterface, where: string, params: any[]): Promise<any[]> =>
+    ((await db.query(
+      `SELECT a.id, a.service_name, a.client_name, a.status, to_char(a.start_at, 'YYYY-MM-DD HH24:MI') AS at
+         FROM spa_appointments a
+        WHERE ${where} AND a.start_at >= CURRENT_TIMESTAMP - INTERVAL '1 day'
+          AND a.status IN ('BOOKED', 'CONFIRMED', 'CHECKED_IN', 'IN_PROGRESS')
+        ORDER BY a.start_at LIMIT 25`, params).catch(() => [])) as any[])
+      .map((a: any) => spaItem('Appointment', a.id, `${a.at} · ${a.service_name || ''}`, [a.client_name, a.status].filter(Boolean).join(' · '), 'SPA_APPOINTMENT'));
+  const spaWhereUsed = async (db: DbInterface, req: AuthRequest, type: string, id: string): Promise<any[] | null> => {
+    const groups: any[] = [];
+    const add = (group: string, items: any[]) => { if (items.length) groups.push({ group, items }); };
+    const q = async (sql: string, p: any[]): Promise<any[]> => ((await db.query(sql, p).catch(() => [])) as any[]);
+    const active = (v: any) => Number(v ?? 1) === 1;
+    if (type === 'SPA_SERVICE') {
+      const s: any = await db.get("SELECT id, cabin_type_id FROM spa_services WHERE id = ?", [id]).catch(() => null);
+      if (!s) return null;
+      add('Therapists who give it', (await q("SELECT t.id, t.display_name, t.is_active FROM spa_therapist_services x JOIN spa_therapists t ON t.id = x.therapist_id WHERE x.service_id = ? ORDER BY t.display_name", [id]))
+        .map((t: any) => spaItem('Therapist', t.id, t.display_name, active(t.is_active) ? '' : 'inactive', 'SPA_THERAPIST')));
+      add('Skills needed', (await q("SELECT k.id, k.name, x.min_level FROM spa_service_skills x JOIN spa_skills k ON k.id = x.skill_id WHERE x.service_id = ? ORDER BY k.name", [id]))
+        .map((k: any) => spaItem('Skill', k.id, k.name, `at least ${String(k.min_level || 'QUALIFIED').toLowerCase()}`, 'SPA_SKILL')));
+      if (s.cabin_type_id) add('Cabin type', (await q("SELECT id, name FROM spa_cabin_types WHERE id = ?", [s.cabin_type_id])).map((c: any) => spaItem('Cabin type', c.id, c.name, '', 'SPA_CABIN_TYPE')));
+      add('Add-ons', (await q("SELECT id, name, extra_price, extra_duration_min, is_active FROM spa_service_addons WHERE service_id = ? ORDER BY name", [id]))
+        .map((x: any) => spaItem('Add-on', x.id, x.name, `₹${Number(x.extra_price || 0)} · ${Number(x.extra_duration_min || 0)} min${active(x.is_active) ? '' : ' · inactive'}`)));
+      add('Items used', (await q("SELECT c.id, i.name, c.qty_per_service, c.unit FROM spa_service_consumables c LEFT JOIN ingredients i ON i.id = c.ingredient_id WHERE c.service_id = ? AND c.addon_id IS NULL ORDER BY i.name", [id]))
+        .map((x: any) => spaItem('Item', x.id, x.name, `${Number(x.qty_per_service)} ${x.unit || ''} per treatment`)));
+      add('Packages', (await q("SELECT id, name, total_sessions, is_active FROM spa_packages WHERE service_id = ? ORDER BY name", [id]))
+        .map((x: any) => spaItem('Package', x.id, x.name, `${x.total_sessions} sessions${active(x.is_active) ? '' : ' · inactive'}`)));
+      add('Upcoming appointments', await spaUpcoming(db, 'a.service_id = ?', [id]));
+    } else if (type === 'SPA_THERAPIST') {
+      const t: any = await db.get("SELECT id FROM spa_therapists WHERE id = ?", [id]).catch(() => null);
+      if (!t) return null;
+      add('Treatments offered', (await q("SELECT s.id, s.name, s.is_active FROM spa_therapist_services x JOIN spa_services s ON s.id = x.service_id WHERE x.therapist_id = ? ORDER BY s.name", [id]))
+        .map((s: any) => spaItem('Treatment', s.id, s.name, active(s.is_active) ? '' : 'inactive', 'SPA_SERVICE')));
+      add('Skills held', (await q("SELECT k.id, k.name, x.level, x.valid_until FROM spa_therapist_skills x JOIN spa_skills k ON k.id = x.skill_id WHERE x.therapist_id = ? ORDER BY k.name", [id]))
+        .map((k: any) => spaItem('Skill', k.id, k.name, [String(k.level || '').toLowerCase(), k.valid_until ? `valid until ${k.valid_until}` : ''].filter(Boolean).join(' · '), 'SPA_SKILL')));
+      add('Shifts', (await q("SELECT id, weekday, start_time, end_time, break_start, break_end, effective_from, effective_to FROM spa_therapist_schedules WHERE therapist_id = ? ORDER BY weekday, start_time", [id]))
+        .map((x: any) => spaItem('Shift', x.id, `${SPA_WEEKDAYS[Number(x.weekday)] || x.weekday} ${x.start_time}–${x.end_time}`,
+          [x.break_start && x.break_end ? `break ${x.break_start}–${x.break_end}` : '', x.effective_from ? `from ${x.effective_from}` : '', x.effective_to ? `to ${x.effective_to}` : ''].filter(Boolean).join(' · '))));
+      add('Upcoming appointments', await spaUpcoming(db, '(a.therapist_id = ? OR EXISTS (SELECT 1 FROM spa_appointment_therapists x WHERE x.appointment_id = a.id AND x.therapist_id = ?))', [id, id]));
+      add('Time blocked', (await q("SELECT id, reason, to_char(start_at, 'YYYY-MM-DD HH24:MI') AS s, to_char(end_at, 'YYYY-MM-DD HH24:MI') AS e FROM spa_resource_blocks WHERE scope = 'THERAPIST' AND scope_id = ? AND end_at >= CURRENT_TIMESTAMP ORDER BY start_at LIMIT 25", [id]))
+        .map((x: any) => spaItem('Block', x.id, `${x.s} to ${x.e}`, x.reason || '')));
+    } else if (type === 'SPA_CABIN') {
+      const c: any = await db.get("SELECT id, cabin_type_id FROM spa_resources WHERE id = ?", [id]).catch(() => null);
+      if (!c) return null;
+      if (c.cabin_type_id) add('Cabin type', (await q("SELECT id, name FROM spa_cabin_types WHERE id = ?", [c.cabin_type_id])).map((x: any) => spaItem('Cabin type', x.id, x.name, '', 'SPA_CABIN_TYPE')));
+      add('Upcoming appointments', await spaUpcoming(db, 'a.resource_id = ?', [id]));
+      add('Time blocked', (await q("SELECT id, reason, to_char(start_at, 'YYYY-MM-DD HH24:MI') AS s, to_char(end_at, 'YYYY-MM-DD HH24:MI') AS e FROM spa_resource_blocks WHERE scope = 'RESOURCE' AND scope_id = ? AND end_at >= CURRENT_TIMESTAMP ORDER BY start_at LIMIT 25", [id]))
+        .map((x: any) => spaItem('Block', x.id, `${x.s} to ${x.e}`, x.reason || '')));
+    } else if (type === 'SPA_SKILL') {
+      const k: any = await db.get("SELECT id FROM spa_skills WHERE id = ?", [id]).catch(() => null);
+      if (!k) return null;
+      add('Therapists who hold it', (await q("SELECT t.id, t.display_name, x.level FROM spa_therapist_skills x JOIN spa_therapists t ON t.id = x.therapist_id WHERE x.skill_id = ? ORDER BY t.display_name", [id]))
+        .map((t: any) => spaItem('Therapist', t.id, t.display_name, String(t.level || '').toLowerCase(), 'SPA_THERAPIST')));
+      add('Treatments that need it', (await q("SELECT s.id, s.name, x.min_level FROM spa_service_skills x JOIN spa_services s ON s.id = x.service_id WHERE x.skill_id = ? ORDER BY s.name", [id]))
+        .map((s: any) => spaItem('Treatment', s.id, s.name, `at least ${String(s.min_level || 'QUALIFIED').toLowerCase()}`, 'SPA_SERVICE')));
+    } else if (type === 'SPA_CABIN_TYPE') {
+      const ct: any = await db.get("SELECT id FROM spa_cabin_types WHERE id = ?", [id]).catch(() => null);
+      if (!ct) return null;
+      add('Cabins', (await q("SELECT id, name, is_active FROM spa_resources WHERE cabin_type_id = ? ORDER BY name", [id]))
+        .map((c: any) => spaItem('Cabin', c.id, c.name, active(c.is_active) ? '' : 'inactive', 'SPA_CABIN')));
+      add('Treatments that need it', (await q("SELECT id, name FROM spa_services WHERE cabin_type_id = ? ORDER BY name", [id]))
+        .map((s: any) => spaItem('Treatment', s.id, s.name, '', 'SPA_SERVICE')));
+    } else if (type === 'SPA_CLIENT') {
+      const cl: any = await db.get("SELECT id FROM spa_clients WHERE id = ?", [id]).catch(() => null);
+      if (!cl) return null;
+      add('Appointments', (await q("SELECT id, service_name, status, to_char(start_at, 'YYYY-MM-DD HH24:MI') AS at FROM spa_appointments WHERE client_id = ? ORDER BY start_at DESC LIMIT 25", [id]))
+        .map((a: any) => spaItem('Appointment', a.id, `${a.at} · ${a.service_name || ''}`, a.status, 'SPA_APPOINTMENT')));
+      add('Invoices', (await q(
+        `SELECT DISTINCT f.id, f.invoice_number, f.grand_total, f.status, f.created_at FROM folios f LEFT JOIN spa_appointments a ON a.id = f.appointment_id
+          WHERE f.folio_kind = 'SPA' AND (a.client_id = ? OR f.spa_client_id = ?) ORDER BY f.created_at DESC LIMIT 25`, [id, id]))
+        .map((f: any) => spaItem('Invoice', f.id, f.invoice_number || f.id, `${f.status || ''} · ₹${Number(f.grand_total || 0).toLocaleString('en-IN')}`, 'SPA_FOLIO')));
+      add('Packages', (await q("SELECT id, package_name, sessions_remaining, sessions_total, status FROM spa_client_packages WHERE client_id = ? ORDER BY created_at DESC", [id]))
+        .map((p: any) => spaItem('Package', p.id, p.package_name, `${p.sessions_remaining} of ${p.sessions_total} left · ${String(p.status || '').toLowerCase()}`)));
+      add('Memberships', (await q("SELECT id, plan_name, status FROM spa_client_memberships WHERE client_id = ? ORDER BY created_at DESC", [id]))
+        .map((m: any) => spaItem('Membership', m.id, m.plan_name, String(m.status || '').toLowerCase())));
+      if ((await spaClinicalLevel(req)) >= 1) {
+        add('Course plans', (await q("SELECT id, title, status FROM spa_course_plans WHERE client_id = ? ORDER BY created_at DESC", [id]))
+          .map((p: any) => spaItem('Course plan', p.id, p.title, String(p.status || '').toLowerCase())));
+      }
+    }
+    return groups;
+  };
+  for (const [recType, recTab] of Object.entries(SPA_RECORD_TABS)) {
+    app.get(`/api/restaurant/:id/spa/records/${recType}/:oid/audit`, authenticate, spaStaff, requireTabAccess(recTab), async (req: AuthRequest, res: Response) => {
+      const check = await ensureSpaEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      try {
+        const db = await getTenantDb(req.params.id);
+        let rows = await readObjectAudit(db, recType, req.params.oid);
+        if (recType === 'SPA_CLIENT' && (await spaClinicalLevel(req)) < 1) {
+          rows = rows.filter((r: any) => !SPA_CLINICAL_AUDIT_ACTIONS.has(String(r.action)) && !(String(r.action) === 'FORM_RECORDED' && /intake/i.test(String(r.summary || ''))));
+        }
+        res.json(rows);
+      } catch (err: any) { res.status(500).json({ error: "Failed to load the history" }); }
+    });
+    app.get(`/api/restaurant/:id/spa/records/${recType}/:oid/where-used`, authenticate, spaStaff, requireTabAccess(recTab), async (req: AuthRequest, res: Response) => {
+      const check = await ensureSpaEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      try {
+        const db = await getTenantDb(req.params.id);
+        const groups = await spaWhereUsed(db, req, recType, req.params.oid);
+        if (!groups) return res.status(404).json({ error: "Record not found" });
+        res.json({ groups });
+      } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
+    });
+  }
+
+  // ─── REPORTS FOR A DATE RANGE (Phase 5) ─────────────────────────────────────
+  const spaHm = (t: any): number | null => { const m = /^(\d{1,2}):(\d{2})/.exec(String(t || '')); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+  // A wall-clock 'YYYY-MM-DD HH:MM' as minutes, for overlap arithmetic only.
+  const spaWallMin = (s: string): number => Date.parse(`${String(s).slice(0, 10)}T${String(s).slice(11, 16)}:00Z`) / 60000;
+  const spaOverlap = (a1: number, a2: number, b1: number, b2: number) => Math.max(0, Math.min(a2, b2) - Math.max(a1, b1));
+  const spaRange = (req: AuthRequest): { from: string; to: string; days: number; error?: undefined } | { error: string; code: string } => {
+    const from = String(req.query.from || ''), to = String(req.query.to || '');
+    if (!spaYmdOk(from) || !spaYmdOk(to) || to < from) return { error: 'Choose a from and a to date, the to date on or after the from date.', code: 'RANGE_INVALID' };
+    const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000) + 1;
+    if (days > 366) return { error: 'Choose a range of a year or less.', code: 'RANGE_TOO_LONG' };
+    return { from, to, days };
+  };
+
+  // Therapists: rostered time from shifts (less breaks and blocked time) against
+  // booked time, no-shows, value, commission and tips. Cabins: minutes used,
+  // turned around and blocked. Consumables: standard against actual, per treatment.
+  app.get("/api/restaurant/:id/spa/reports/range", authenticate, spaStaff, requireTabAccess('SPA_REPORTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const rg = spaRange(req);
+    if (rg.error !== undefined) return res.status(400).json(rg);
+    const { from, to, days } = rg as { from: string; to: string; days: number };
+    try {
+      const db = await getTenantDb(req.params.id);
+      const fromTs = `${from} 00:00:00`, toTs = `${to} 23:59:59`;
+      const rangeStart = spaWallMin(`${from} 00:00`), rangeEnd = spaWallMin(`${to} 23:59`) + 1;
+      const therapists: any[] = await db.query("SELECT id, display_name, is_active, commission_pct_override FROM spa_therapists ORDER BY display_name");
+      const cabins: any[] = await db.query("SELECT id, name, is_active, COALESCE(turnaround_min, 0) AS turnaround_min FROM spa_resources ORDER BY name");
+      const shifts: any[] = await db.query("SELECT therapist_id, weekday, start_time, end_time, break_start, break_end, effective_from, effective_to FROM spa_therapist_schedules");
+      const blocks: any[] = await db.query(
+        `SELECT scope, scope_id, to_char(start_at, 'YYYY-MM-DD HH24:MI') AS s, to_char(end_at, 'YYYY-MM-DD HH24:MI') AS e
+           FROM spa_resource_blocks WHERE start_at <= ? AND end_at >= ?`, [toTs, fromTs]);
+      const appts: any[] = await db.query(
+        `SELECT a.id, a.therapist_id, a.resource_id, a.service_id, a.service_name, a.status, a.price_snapshot,
+                EXTRACT(EPOCH FROM (a.end_at - a.start_at)) / 60 AS minutes, s.commission_pct AS service_commission_pct
+           FROM spa_appointments a LEFT JOIN spa_services s ON s.id = a.service_id
+          WHERE a.start_at >= ? AND a.start_at <= ?`, [fromTs, toTs]);
+      await spaAttachAssistants(db, appts);
+      const tipRows: any[] = await db.query(
+        `SELECT ts.therapist_id, SUM(ts.amount) AS tips FROM spa_tip_splits ts
+           JOIN spa_appointments a ON a.id = ts.appointment_id
+           JOIN folios f ON f.id = ts.folio_id
+          WHERE a.start_at >= ? AND a.start_at <= ? AND LOWER(COALESCE(f.status, '')) NOT IN ('voided', 'cancelled')
+          GROUP BY ts.therapist_id`, [fromTs, toTs]).catch((e: any) => { console.error('[spa] tips for report:', e?.message || e); return []; });
+      const held = (st: any) => !['CANCELLED', 'NO_SHOW'].includes(String(st || '').toUpperCase());
+      const dates: string[] = [];
+      for (let i = 0; i < days; i++) dates.push(new Date(Date.parse(`${from}T00:00:00Z`) + i * 86400000).toISOString().slice(0, 10));
+
+      const therapistRows = therapists.map((t: any) => {
+        let rostered = 0, blocked = 0;
+        const mine = shifts.filter((s: any) => s.therapist_id === t.id);
+        const myBlocks = blocks.filter((b: any) => b.scope === 'THERAPIST' && b.scope_id === t.id);
+        for (const d of dates) {
+          const wd = new Date(`${d}T00:00:00Z`).getUTCDay();
+          const dayStart = spaWallMin(`${d} 00:00`);
+          for (const s of mine) {
+            if (Number(s.weekday) !== wd) continue;
+            if (s.effective_from && d < String(s.effective_from).slice(0, 10)) continue;
+            if (s.effective_to && d > String(s.effective_to).slice(0, 10)) continue;
+            const st = spaHm(s.start_time), en = spaHm(s.end_time);
+            if (st == null || en == null || en <= st) continue;
+            const bs = spaHm(s.break_start), be = spaHm(s.break_end);
+            rostered += en - st - (bs != null && be != null && be > bs ? spaOverlap(st, en, bs, be) : 0);
+            for (const b of myBlocks) blocked += spaOverlap(dayStart + st, dayStart + en, spaWallMin(b.s), spaWallMin(b.e));
+          }
+        }
+        const lead = appts.filter((a: any) => a.therapist_id === t.id);
+        const onIt = appts.filter((a: any) => a.therapist_id === t.id || (a.assistant_ids || []).includes(t.id));
+        const booked = Math.round(onIt.filter((a: any) => held(a.status)).reduce((x: number, a: any) => x + Number(a.minutes || 0), 0));
+        const completedLead = lead.filter((a: any) => a.status === 'COMPLETED');
+        const commission = round2(completedLead.reduce((x: number, a: any) => {
+          const rate = t.commission_pct_override != null ? Number(t.commission_pct_override) : Number(a.service_commission_pct || 0);
+          return x + Number(a.price_snapshot || 0) * rate / 100;
+        }, 0));
+        const noShows = lead.filter((a: any) => a.status === 'NO_SHOW').length;
+        const notCancelled = lead.filter((a: any) => a.status !== 'CANCELLED').length;
+        const available = Math.max(0, rostered - blocked);
+        return {
+          therapist_id: t.id, display_name: t.display_name, is_active: Number(t.is_active ?? 1),
+          rostered_minutes: rostered, blocked_minutes: Math.round(blocked), available_minutes: Math.round(available), booked_minutes: booked,
+          utilisation_pct: available > 0 ? Math.round(booked / available * 1000) / 10 : null,
+          treatments: onIt.filter((a: any) => held(a.status)).length,
+          completed: onIt.filter((a: any) => a.status === 'COMPLETED').length,
+          assisted: onIt.filter((a: any) => a.status === 'COMPLETED' && a.therapist_id !== t.id).length,
+          no_shows: noShows, no_show_rate_pct: notCancelled > 0 ? Math.round(noShows / notCancelled * 1000) / 10 : null,
+          service_value: round2(completedLead.reduce((x: number, a: any) => x + Number(a.price_snapshot || 0), 0)),
+          commission, commission_pct_override: t.commission_pct_override,
+          tips: round2(Number(tipRows.find((r: any) => r.therapist_id === t.id)?.tips || 0)),
+        };
+      }).filter((r: any) => r.is_active === 1 || r.rostered_minutes > 0 || r.treatments > 0 || r.no_shows > 0);
+
+      const cabinRows = cabins.map((c: any) => {
+        const mine = appts.filter((a: any) => a.resource_id === c.id && held(a.status));
+        const blockedC = blocks.filter((b: any) => b.scope === 'RESOURCE' && b.scope_id === c.id)
+          .reduce((x: number, b: any) => x + spaOverlap(rangeStart, rangeEnd, spaWallMin(b.s), spaWallMin(b.e)), 0);
+        return {
+          cabin_id: c.id, name: c.name, is_active: Number(c.is_active ?? 1), treatments: mine.length,
+          booked_minutes: Math.round(mine.reduce((x: number, a: any) => x + Number(a.minutes || 0), 0)),
+          turnaround_minutes: mine.length * Number(c.turnaround_min || 0), blocked_minutes: Math.round(blockedC),
+        };
+      }).filter((r: any) => r.is_active === 1 || r.treatments > 0);
+
+      const consumption = ((await db.query(
+        `SELECT a.service_id, a.service_name, sc.ingredient_id, i.name AS item, sc.unit,
+                COUNT(DISTINCT sc.appointment_id) AS treatments,
+                COALESCE(SUM(sc.standard_qty), 0) AS standard_qty, COALESCE(SUM(sc.actual_qty), 0) AS actual_qty,
+                COALESCE(SUM(sc.actual_qty * COALESCE(sc.unit_cost, 0)), 0) AS cost
+           FROM spa_session_consumables sc
+           JOIN spa_appointments a ON a.id = sc.appointment_id
+           LEFT JOIN ingredients i ON i.id = sc.ingredient_id
+          WHERE a.start_at >= ? AND a.start_at <= ?
+          GROUP BY a.service_id, a.service_name, sc.ingredient_id, i.name, sc.unit
+          ORDER BY a.service_name, i.name`, [fromTs, toTs])
+        .catch((e: any) => { console.error('[spa] consumption for report:', e?.message || e); return []; })) as any[]).map((r: any) => {
+        const std = Number(r.standard_qty || 0), act = Number(r.actual_qty || 0);
+        return {
+          service_id: r.service_id, service_name: r.service_name, ingredient_id: r.ingredient_id, item: r.item, unit: r.unit,
+          treatments: Number(r.treatments || 0), standard_qty: Math.round(std * 1000) / 1000, actual_qty: Math.round(act * 1000) / 1000,
+          variance: Math.round((act - std) * 1000) / 1000, variance_pct: std > 0 ? Math.round((act - std) / std * 1000) / 10 : null,
+          cost: round2(r.cost),
+        };
+      });
+
+      const cancelled = appts.filter((a: any) => a.status === 'CANCELLED').length;
+      const noShowsAll = appts.filter((a: any) => a.status === 'NO_SHOW').length;
+      const completedAll = appts.filter((a: any) => a.status === 'COMPLETED');
+      res.json({
+        from, to, days,
+        summary: {
+          appointments: appts.length, completed: completedAll.length, cancelled, no_shows: noShowsAll,
+          no_show_rate_pct: appts.length - cancelled > 0 ? Math.round(noShowsAll / (appts.length - cancelled) * 1000) / 10 : null,
+          service_value: round2(completedAll.reduce((x: number, a: any) => x + Number(a.price_snapshot || 0), 0)),
+          tips: round2(tipRows.reduce((x: number, r: any) => x + Number(r.tips || 0), 0)),
+        },
+        therapists: therapistRows, cabins: cabinRows, consumption,
+        notes: {
+          commission: 'Commission uses the therapist commission % where one is set, otherwise the treatment commission %, on completed treatments they led.',
+          cabins: 'No opening hours are recorded for cabins, so cabins show minutes rather than a percentage.',
+        },
+      });
+    } catch (err: any) { console.error('[spa] range report:', err?.message || err); res.status(500).json({ error: "Failed to compute the reports" }); }
+  });
+
+  // Every treatment in the range, as a spreadsheet: guest, treatment, who and
+  // where, status, price, invoice or room bill, outcome and follow-up. No health
+  // information.
+  app.get("/api/restaurant/:id/spa/reports/treatments.csv", authenticate, spaStaff, requireTabAccess('SPA_REPORTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const rg = spaRange(req);
+    if (rg.error !== undefined) return res.status(400).json(rg);
+    const { from, to } = rg as { from: string; to: string; days: number };
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT a.id, to_char(a.start_at, 'YYYY-MM-DD') AS d, to_char(a.start_at, 'HH24:MI') AS st, to_char(a.end_at, 'HH24:MI') AS en,
+                a.client_name, COALESCE(c.phone, a.client_phone) AS phone, a.service_name, t.display_name AS therapist, r.name AS cabin,
+                a.status, a.price_snapshot, f.invoice_number, a.room_folio_id, a.room_booking_id, s.outcome, s.follow_up
+           FROM spa_appointments a
+           LEFT JOIN spa_clients c ON c.id = a.client_id
+           LEFT JOIN spa_therapists t ON t.id = a.therapist_id
+           LEFT JOIN spa_resources r ON r.id = a.resource_id
+           LEFT JOIN folios f ON f.id = a.folio_id
+           LEFT JOIN spa_treatment_sessions s ON s.appointment_id = a.id
+          WHERE a.start_at >= ? AND a.start_at <= ?
+          ORDER BY a.start_at LIMIT 20000`, [`${from} 00:00:00`, `${to} 23:59:59`]);
+      await spaAttachAssistants(db, rows);
+      await spaAttachStays(db, rows);
+      // A cell starting with = + - @ would be read as a formula by a spreadsheet.
+      const cell = (v: any) => {
+        let s = v == null ? '' : String(v);
+        if (/^[=+\-@]/.test(s)) s = `'${s}`;
+        return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const lines = [['Date', 'Start', 'End', 'Guest', 'Phone', 'Treatment', 'Therapist', 'Assisting', 'Cabin', 'Status', 'Price', 'Invoice', 'Room bill', 'Outcome', 'Follow-up'].join(',')];
+      for (const x of rows) {
+        lines.push([x.d, x.st, x.en, x.client_name, x.phone, x.service_name, x.therapist, (x.assistant_names || []).join('; '), x.cabin, x.status,
+          Number(x.price_snapshot || 0).toFixed(2), x.invoice_number, x.room_folio_id ? `Room ${x.room_number || ''}`.trim() : '', x.outcome, x.follow_up].map(cell).join(','));
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="spa-treatments-${from}-to-${to}.csv"`);
+      res.send('﻿' + lines.join('\r\n'));
+    } catch (err: any) { console.error('[spa] treatments export:', err?.message || err); res.status(500).json({ error: "Failed to export the treatments" }); }
+  });
+
   // ─── REPORTS ─────────────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/reports/utilization", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/reports/utilization", authenticate, spaStaff, requireTabAccess('SPA_REPORTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36889,7 +37224,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute utilization" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/reports/revenue-per-treatment", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/reports/revenue-per-treatment", authenticate, spaStaff, requireTabAccess('SPA_REPORTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36914,7 +37249,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute revenue" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/reports/therapist-productivity", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/reports/therapist-productivity", authenticate, spaStaff, requireTabAccess('SPA_REPORTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36934,7 +37269,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute productivity" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/reports/rebooking-rate", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/reports/rebooking-rate", authenticate, spaStaff, requireTabAccess('SPA_REPORTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -62062,8 +62397,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-phase4b-charge-to-room',
+    commit_marker: 'spa-phase5-records-reports',
     code_features: [
+      'spa-phase5-records-reports — Spa Phase 5. GET /spa/records/:type/:oid/audit and /where-used for SPA_SERVICE (Service Menu), SPA_THERAPIST, SPA_CABIN, SPA_SKILL, SPA_CABIN_TYPE (Resources) and SPA_CLIENT (Clients), each behind the page it belongs to; a guest history hides health entries from staff without clinical access, and a guest where-used lists course plans only for them. Audit entries added for treatment create and edit (what changed; deactivated or reactivated), treatments offered by a therapist, and shift removal. GET /spa/reports/range?from&to (up to a year): therapists with rostered minutes from shifts less breaks and blocked time, booked minutes including assisting, utilisation, completed, no-shows and rate, value, commission (therapist override else treatment commission %) and tips; cabins with treatments, booked, turnaround and blocked minutes; consumption per treatment and item with standard, actual, variance and cost; a summary. GET /spa/reports/treatments.csv exports the treatments of a range (no health information; formula cells escaped). All spa report routes now need Spa Reports. The spa screens use in-app messages and dialogs instead of browser alerts, show load failures, have History buttons on treatments, therapists, cabins and guests, and draw the booking QR code in the app instead of fetching it from an outside site.',
       'spa-phase4b-charge-to-room — Spa Phase 4b. GET /spa/in-house-guests lists checked-in stays with an open room bill. A booking takes room_booking_id (must be in house, 400 STAY_NOT_IN_HOUSE), saved on spa_appointments; the appointment list carries room_number. Checkout with charge_to_room posts the treatment (net of membership or manual discount, at the spa GST rate, entry_type SPA_SERVICE, entry_subtype SPA_TREATMENT, account_head SPA_REVENUE, reference_number the appointment) and any tip (SPA_TIP, no GST) onto the open room folio, claims the appointment first (room_folio_id), undoes itself on failure, shares the tip among the therapists (spaRecordTipShares, now used by both checkouts), raises no spa invoice and takes no payment; 409 STAY_NOT_IN_HOUSE or ROOM_FOLIO_MISSING otherwise; a second call returns reused. On the hotel side: reapplyHotelGstRates leaves SPA_SERVICE and SPA_TIP at their own rate; _folioRevenueGlLines credits them to Spa Revenue 4040; the year-end accrual follows; the GST register gives SPA_REVENUE SAC 999722 and has no line for SPA_TIP; the e-invoice uses 999722; night audit, revenue by room type and hotel analytics leave them out of room revenue; reversing a spa line on the room bill removes its tip shares and, once nothing of the treatment is left, frees the appointment. The revenue-per-treatment report counts unreversed room-charged treatments. The hotel check-out window shows Spa and wellness apart from the room. Manual SPA lines typed on a room bill are unchanged.',
       'spa-phase4a-guest-health-record — Spa Phase 4a. New permission SPA_CLINICAL (in SPA_TAB_IDS; not granted to existing roles). Health information needs it at View (read) or Edit (write) via spaClinicalLevel, which refuses a role whose permissions were never saved; every read is logged to spa_clinical_access_log (full access sees the log). GET /spa/clients/:cid now returns forms only to clinical staff (others get forms_summary with consent and intake dates) and client reads need spa module access. POST forms: a consent (signer name, agreed, signed at the server time) at SPA_CLIENTS; a health intake (conditions from a fixed list) needs clinical Edit. Check-in is held when the treatment requires consent (spa_services.requires_consent) or the property requires it for all (spa_profile.require_intake_consent): 409 CLIENT_REQUIRED, CONSENT_REQUIRED, INTAKE_REQUIRED, or CONTRAINDICATED when the latest intake has a condition the treatment lists (spa_services.contraindications); a clinician passes with clinical_override_reason, kept on the appointment and audited; staff without clinical access are not told the condition. Treatment requirements PUT takes requires_consent and contraindications. Constitution assessments, course plans with items and progress (appointments carry course_plan_id; booking checks the plan is active and the guest\'s), clinical notes that lock. GET /spa/clients/:cid/timeline lists treatments with performers, cabin, actual times, consumables and batches, follow-up and invoice, plus packages, redemptions, memberships, retail purchases (folios.spa_client_id), consent and intake dates, and clinical entries for clinical staff. Client create and edit are audited. Nothing existing is linked, merged or backfilled.',
       'spa-phase3-treatment-record — Spa Phase 3. Finishing a treatment records what happened: spa_treatment_sessions (actual start from check-in/start, finish, cabin used, notes, outcome IMPROVED/NO_CHANGE/WORSE/NOT_ASSESSED, follow-up and date), spa_session_therapists (who performed it, lead and assisting). GET /spa/appointments/:aid/finish-plan pre-fills each consumable of the treatment and of its booked add-ons at its standard quantity with the batches it would draw from. POST /complete keeps working with no body (standard quantities, as before) and takes consumables [{ingredient_id, qty, batch_id}], performers, resource_id, notes, outcome, follow_up, follow_up_date; an item marked as varying (spa_service_consumables.is_variable) must be entered (409 VARIABLE_QTY_REQUIRED without a body, 400 with one). The chosen batch is drawn first, the rest oldest first; every draw is recorded in spa_consumption_batches and each item against its standard in spa_session_consumables. GET/PUT /spa/appointments/:aid/session reads and edits the record (not what it used). GET /spa/batch-trace lists an item batches with their use on treatments, or every treatment and guest a batch went into. Consumables can belong to an add-on (addon_id), are checked for unit and quantity, can be edited (PATCH /spa/consumables/:cid) and are audited; add-ons can be edited (PATCH /spa/addons/:adid). Checkout shares a tip among the therapists who performed the treatment (spa_tip_splits), equally or as split. Appointment where-used lists assisting therapists, performers and batches used. Tips still post to Spa Revenue 4040 as before. Also fixed: getFolioOutstanding filtered folio_entries on is_voided, a column that table never had, so every folio read with its balance (hotel check-out, spa invoice detail) listed no lines; totals were never affected.',

@@ -14,25 +14,32 @@ import {
 // map App.tsx mirrors into localStorage. These detached Spa views hide write
 // controls a role can't use; the backend remains the security boundary.
 import { canWriteTab, canDeleteTab } from './perm';
+import { useToast } from './components/Toast';
+import { useConfirm } from './components/ConfirmDialog';
+import { usePaymentDialog } from './components/PaymentDialog';
+import { QRCodeCanvas } from 'qrcode.react';
 
 // ── Spa History overlay — audit log (who changed what) for an appointment or
 // folio, via the reusable ObjectDetail shell. Opened by a "History" button. ──
+const SPA_RECORD_LABEL: Record<string, string> = { SPA_SERVICE: 'Treatment', SPA_THERAPIST: 'Therapist', SPA_CABIN: 'Cabin', SPA_SKILL: 'Skill', SPA_CABIN_TYPE: 'Cabin type', SPA_CLIENT: 'Guest' };
 function SpaHistoryOverlay({ kind, id, meta, onClose, restaurantId, token }: {
-  kind: 'SPA_APPOINTMENT' | 'SPA_FOLIO'; id: string; meta?: any; onClose: () => void; restaurantId: string; token: string;
+  kind: 'SPA_APPOINTMENT' | 'SPA_FOLIO' | 'SPA_SERVICE' | 'SPA_THERAPIST' | 'SPA_CABIN' | 'SPA_SKILL' | 'SPA_CABIN_TYPE' | 'SPA_CLIENT'; id: string; meta?: any; onClose: () => void; restaurantId: string; token: string;
 }) {
   const isAppt = kind === 'SPA_APPOINTMENT';
+  // The spa's own records share one history and where-used route.
+  const recordLabel = SPA_RECORD_LABEL[kind];
   return (
     <div className="fixed inset-0 z-[60] bg-black/40 overflow-y-auto p-4 sm:p-8" onClick={onClose}>
       <div className="max-w-3xl mx-auto bg-[#faf7f2] rounded-2xl shadow-2xl p-5" onClick={e => e.stopPropagation()}>
         <ObjectDetail
           token={token}
           title={meta?.title || id}
-          subtitle={meta?.subtitle || (isAppt ? 'Spa appointment' : 'Spa invoice')}
-          overviewLabel={isAppt ? 'Appointment' : 'Invoice'}
+          subtitle={meta?.subtitle || recordLabel || (isAppt ? 'Spa appointment' : 'Spa invoice')}
+          overviewLabel={recordLabel || (isAppt ? 'Appointment' : 'Invoice')}
           onBack={onClose}
           backLabel="Close"
-          auditUrl={`/api/restaurant/${restaurantId}/spa/${isAppt ? 'appointments' : 'folios'}/${id}/audit`}
-          whereUsedUrl={isAppt ? `/api/restaurant/${restaurantId}/spa/appointments/${id}/where-used` : undefined}
+          auditUrl={recordLabel ? `/api/restaurant/${restaurantId}/spa/records/${kind}/${id}/audit` : `/api/restaurant/${restaurantId}/spa/${isAppt ? 'appointments' : 'folios'}/${id}/audit`}
+          whereUsedUrl={recordLabel ? `/api/restaurant/${restaurantId}/spa/records/${kind}/${id}/where-used` : isAppt ? `/api/restaurant/${restaurantId}/spa/appointments/${id}/where-used` : undefined}
           resolveLink={buildObjectResolver(restaurantId, token)}
           overview={
             <div className="bg-white rounded-2xl border border-[#e8dccf] p-5">
@@ -41,7 +48,7 @@ function SpaHistoryOverlay({ kind, id, meta, onClose, restaurantId, token }: {
                   <div key={i}><span className="text-[#9c8e85]">{k}</span><div className="font-semibold text-[#14110c] break-words">{v == null || v === '' ? '—' : String(v)}</div></div>
                 ))}
               </div>
-              <p className="text-[11px] text-[#9c8e85] mt-3">Open the <b>Audit log</b> tab to see who changed this {isAppt ? 'appointment' : 'invoice'} and what changed (before → after) — so an accidental edit is easy to spot.</p>
+              <p className="text-[11px] text-[#9c8e85] mt-3">Open the <b>Audit log</b> tab to see who changed this {recordLabel ? recordLabel.toLowerCase() : isAppt ? 'appointment' : 'invoice'} and what changed (before → after) — so an accidental edit is easy to spot.</p>
             </div>
           }
         />
@@ -115,6 +122,9 @@ type Props = { restaurantId: string; token: string };
 // ════════════════════════════════════════════════════════════════════════
 function SpaCatalog({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const toast = useToast();
+  const confirmDlg = useConfirm();
+  const [history, setHistory] = useState<any>(null); // History window for a treatment
   const canEdit = canWriteTab('SPA_CATALOG');
   const canDel = canDeleteTab('SPA_CATALOG');
   const [services, setServices] = useState<any[]>([]);
@@ -152,11 +162,11 @@ function SpaCatalog({ restaurantId, token }: Props) {
     } catch { /* */ }
   };
 
-  const load = async () => { setLoading(true); try { setServices(await api('/spa/services')); } catch { /* */ } finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { setServices(await api('/spa/services')); } catch (e: any) { toast.error(`Could not load the treatments: ${e.message}`); } finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
 
   const save = async () => {
-    if (!canEdit) { alert('View-only access — you cannot change the service menu.'); return; }
+    if (!canEdit) { toast.error('View-only access — you cannot change the service menu.'); return; }
     if (!form.name) return;
     // Cabin type and gender rule belong to the requirements save below, not the treatment row.
     const { cabin_type_id: _cabinType, gender_rule: _genderRule, ...formFields } = form;
@@ -169,9 +179,9 @@ function SpaCatalog({ restaurantId, token }: Props) {
         await api(`/spa/services/${sid}/requirements`, { method: 'PUT', body: JSON.stringify({ ...req, skills: req.skills.filter(s => s.skill_id), cabin_type_id: req.cabin_type_id || null }) });
       }
       setShowForm(false); setEdit(null); setForm(blank); await load();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
   };
-  const remove = async (id: string) => { if (!canDel) { alert('View-only access — you cannot deactivate services.'); return; } if (!window.confirm('Deactivate this service?')) return; try { await api(`/spa/services/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  const remove = async (id: string) => { if (!canDel) { toast.error('View-only access — you cannot deactivate services.'); return; } if (!(await confirmDlg({ title: 'Deactivate this treatment?', body: 'It comes off the menu for new bookings. Past bookings and invoices keep it.', confirmLabel: 'Deactivate', danger: true }))) return; try { await api(`/spa/services/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { toast.error(e.message); } };
 
   return (
     <div>
@@ -194,6 +204,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
             { key: 'is_active', label: 'Status', render: (r: any) => r.is_active ? <span className="text-emerald-600 text-xs font-bold">Active</span> : <span className="text-gray-400 text-xs">Inactive</span> },
             { key: '_a', label: '', render: (r: any) => (
               <div className="flex gap-1.5">
+                <button className={BTN_GHOST} title="Who changed this treatment, and where it is used" onClick={() => setHistory({ id: r.id, meta: { title: r.name, facts: [['Duration', `${r.duration_min} min`], ['Price', money(r.price)], ['GST', `${r.gst_percent}%`], ['Status', r.is_active ? 'Active' : 'Inactive']] } })}><History size={12} /> History</button>
                 {canEdit && <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...blank, ...r, duration_min: String(r.duration_min), buffer_after_min: String(r.buffer_after_min), price: String(r.price), gst_percent: String(r.gst_percent), requires_room: !!r.requires_room, requires_therapist: !!r.requires_therapist, therapists_required: String(r.therapists_required ?? 1) }); openReq(r.id); setShowForm(true); }}>Edit</button>}
                 {canDel && <button className={`${BTN} bg-rose-50 text-rose-600 hover:bg-rose-100`} onClick={() => remove(r.id)}><Trash2 size={13} /></button>}
               </div>
@@ -294,6 +305,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
           </div>
         </div>
       )}
+      {history && <SpaHistoryOverlay kind="SPA_SERVICE" id={history.id} meta={history.meta} onClose={() => setHistory(null)} restaurantId={restaurantId} token={token} />}
     </div>
   );
 }
@@ -1023,6 +1035,9 @@ const skillLapsed = (s: any, today: string) =>
 
 function SpaResources({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const toast = useToast();
+  const confirmDlg = useConfirm();
+  const [history, setHistory] = useState<any>(null); // History window for a therapist or cabin
   const canEdit = canWriteTab('SPA_RESOURCES');
   const canDel = canDeleteTab('SPA_RESOURCES');
   const [tab, setTab] = useState<'CABINS' | 'THERAPISTS' | 'SETUP'>('CABINS');
@@ -1059,19 +1074,20 @@ function SpaResources({ restaurantId, token }: Props) {
   const isOn = (x: any) => Number(x?.is_active ?? 1) === 1;
   const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const today = istToday();
-  const viewOnly = (what: string) => { alert(`View-only access — you cannot ${what}.`); };
+  const viewOnly = (what: string) => { toast.error(`View-only access — you cannot ${what}.`); };
 
   const load = async () => {
-    try { setResources(await api('/spa/resources')); } catch { /* */ }
-    try { setTherapists(await api('/spa/therapists')); } catch { /* */ }
-    try { setServices(await api('/spa/services')); } catch { /* */ }
-    try { setSkillList(await api('/spa/skills')); } catch { /* */ }
-    try { setCabinTypes(await api('/spa/cabin-types')); } catch { /* */ }
+    const fail = (what: string, e: any) => toast.error(`Could not load ${what}: ${e?.message || 'error'}`);
+    try { setResources(await api('/spa/resources')); } catch (e: any) { fail('the cabins', e); }
+    try { setTherapists(await api('/spa/therapists')); } catch (e: any) { fail('the therapists', e); }
+    try { setServices(await api('/spa/services')); } catch (e: any) { fail('the treatments', e); }
+    try { setSkillList(await api('/spa/skills')); } catch (e: any) { fail('the skills', e); }
+    try { setCabinTypes(await api('/spa/cabin-types')); } catch (e: any) { fail('the cabin types', e); }
   };
   useEffect(() => { load(); }, []);
 
-  const addCabin = async () => { if (!canEdit) { viewOnly('add cabins'); return; } if (!newCabin) return; try { await api('/spa/resources', { method: 'POST', body: JSON.stringify({ name: newCabin }) }); setNewCabin(''); await load(); } catch (e: any) { alert(e.message); } };
-  const addTher = async () => { if (!canEdit) { viewOnly('add therapists'); return; } if (!newTher) return; try { await api('/spa/therapists', { method: 'POST', body: JSON.stringify({ display_name: newTher }) }); setNewTher(''); await load(); } catch (e: any) { alert(e.message); } };
+  const addCabin = async () => { if (!canEdit) { viewOnly('add cabins'); return; } if (!newCabin) return; try { await api('/spa/resources', { method: 'POST', body: JSON.stringify({ name: newCabin }) }); setNewCabin(''); await load(); } catch (e: any) { toast.error(e.message); } };
+  const addTher = async () => { if (!canEdit) { viewOnly('add therapists'); return; } if (!newTher) return; try { await api('/spa/therapists', { method: 'POST', body: JSON.stringify({ display_name: newTher }) }); setNewTher(''); await load(); } catch (e: any) { toast.error(e.message); } };
 
   const openSched = async (t: any) => {
     setSchedTher(t); setSched(blankShift); setNote('');
@@ -1090,18 +1106,18 @@ function SpaResources({ restaurantId, token }: Props) {
     try {
       await api(`/spa/therapists/${schedTher.id}/schedules`, { method: 'POST', body: JSON.stringify(body) });
       setSchedules(await api(`/spa/therapists/${schedTher.id}/schedules`));
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
   };
   const removeSched = async (id: string) => {
     if (!canDel) { viewOnly('remove shifts'); return; }
-    if (!window.confirm('Remove this shift?')) return;
-    try { await api(`/spa/schedules/${id}`, { method: 'DELETE' }); setSchedules(await api(`/spa/therapists/${schedTher.id}/schedules`)); } catch (e: any) { alert(e.message); }
+    if (!(await confirmDlg({ title: 'Remove this shift?', confirmLabel: 'Remove', danger: true }))) return;
+    try { await api(`/spa/schedules/${id}`, { method: 'DELETE' }); setSchedules(await api(`/spa/therapists/${schedTher.id}/schedules`)); } catch (e: any) { toast.error(e.message); }
   };
   const toggleSvc = async (sid: string) => {
     if (!canEdit) { viewOnly('change the treatments a therapist delivers'); return; }
     const next = svcSkills.includes(sid) ? svcSkills.filter(s => s !== sid) : [...svcSkills, sid];
     setSvcSkills(next);
-    try { await api(`/spa/therapists/${schedTher.id}/services`, { method: 'POST', body: JSON.stringify({ service_ids: next }) }); } catch (e: any) { alert(e.message); }
+    try { await api(`/spa/therapists/${schedTher.id}/services`, { method: 'POST', body: JSON.stringify({ service_ids: next }) }); } catch (e: any) { toast.error(e.message); }
   };
   const saveHeld = async () => {
     if (!canEdit) { viewOnly('change skills'); return; }
@@ -1110,7 +1126,7 @@ function SpaResources({ restaurantId, token }: Props) {
       await api(`/spa/therapists/${schedTher.id}/skills`, { method: 'PUT', body: JSON.stringify({ skills }) });
       setNote('Skills saved');
       await load();
-    } catch (e: any) { setNote(''); alert(e.message); }
+    } catch (e: any) { setNote(''); toast.error(e.message); }
   };
 
   const openProfile = async (t: any) => {
@@ -1119,12 +1135,12 @@ function SpaResources({ restaurantId, token }: Props) {
   };
   const saveProfile = async () => {
     if (!canEdit) { viewOnly('change therapist profiles'); return; }
-    if (!String(profile.display_name).trim()) { alert('Give the therapist a name.'); return; }
+    if (!String(profile.display_name).trim()) { toast.error('Give the therapist a name.'); return; }
     const { id, ...body } = profile;
     try {
       await api(`/spa/therapists/${id}`, { method: 'PATCH', body: JSON.stringify({ ...body, display_name: String(body.display_name).trim(), staff_id: body.staff_id || null, is_active: body.is_active ? 1 : 0 }) });
       setProfile(null); await load();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
   };
 
   const openCabin = (r: any) => setCabinEdit({
@@ -1133,7 +1149,7 @@ function SpaResources({ restaurantId, token }: Props) {
   });
   const saveCabin = async () => {
     if (!canEdit) { viewOnly('change cabins'); return; }
-    if (!String(cabinEdit.name).trim()) { alert('Give the cabin a name.'); return; }
+    if (!String(cabinEdit.name).trim()) { toast.error('Give the cabin a name.'); return; }
     const { id, ...body } = cabinEdit;
     try {
       await api(`/spa/resources/${id}`, { method: 'PATCH', body: JSON.stringify({
@@ -1141,31 +1157,31 @@ function SpaResources({ restaurantId, token }: Props) {
         status_reason: body.status === 'AVAILABLE' ? '' : body.status_reason, is_active: body.is_active ? 1 : 0,
       }) });
       setCabinEdit(null); await load();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
   };
 
-  const previewStarter = async () => { try { setStarter(await api('/spa/setup/ayurveda-starter', { method: 'POST', body: JSON.stringify({ dry_run: true }) })); } catch (e: any) { alert(e.message); } };
+  const previewStarter = async () => { try { setStarter(await api('/spa/setup/ayurveda-starter', { method: 'POST', body: JSON.stringify({ dry_run: true }) })); } catch (e: any) { toast.error(e.message); } };
   const applyStarter = async () => {
     if (!canEdit) { viewOnly('add the starter pack'); return; }
-    try { const r = await api('/spa/setup/ayurveda-starter', { method: 'POST', body: JSON.stringify({ dry_run: false }) }); setStarter(r); await load(); } catch (e: any) { alert(e.message); }
+    try { const r = await api('/spa/setup/ayurveda-starter', { method: 'POST', body: JSON.stringify({ dry_run: false }) }); setStarter(r); await load(); } catch (e: any) { toast.error(e.message); }
   };
   const addSkill = async () => {
     if (!canEdit) { viewOnly('add skills'); return; }
     if (newSkill.name.trim().length < 2) return;
-    try { await api('/spa/skills', { method: 'POST', body: JSON.stringify({ ...newSkill, name: newSkill.name.trim() }) }); setNewSkill({ name: '', requires_certification: false }); await load(); } catch (e: any) { alert(e.message); }
+    try { await api('/spa/skills', { method: 'POST', body: JSON.stringify({ ...newSkill, name: newSkill.name.trim() }) }); setNewSkill({ name: '', requires_certification: false }); await load(); } catch (e: any) { toast.error(e.message); }
   };
-  const patchSkill = async (id: string, body: any) => { if (!canEdit) { viewOnly('change skills'); return; } try { await api(`/spa/skills/${id}`, { method: 'PATCH', body: JSON.stringify(body) }); await load(); } catch (e: any) { alert(e.message); } };
+  const patchSkill = async (id: string, body: any) => { if (!canEdit) { viewOnly('change skills'); return; } try { await api(`/spa/skills/${id}`, { method: 'PATCH', body: JSON.stringify(body) }); await load(); } catch (e: any) { toast.error(e.message); } };
   const addType = async () => {
     if (!canEdit) { viewOnly('add cabin types'); return; }
     if (newType.name.trim().length < 2) return;
-    try { await api('/spa/cabin-types', { method: 'POST', body: JSON.stringify({ ...newType, name: newType.name.trim() }) }); setNewType({ name: '', description: '' }); await load(); } catch (e: any) { alert(e.message); }
+    try { await api('/spa/cabin-types', { method: 'POST', body: JSON.stringify({ ...newType, name: newType.name.trim() }) }); setNewType({ name: '', description: '' }); await load(); } catch (e: any) { toast.error(e.message); }
   };
-  const patchType = async (id: string, body: any) => { if (!canEdit) { viewOnly('change cabin types'); return; } try { await api(`/spa/cabin-types/${id}`, { method: 'PATCH', body: JSON.stringify(body) }); await load(); } catch (e: any) { alert(e.message); } };
+  const patchType = async (id: string, body: any) => { if (!canEdit) { viewOnly('change cabin types'); return; } try { await api(`/spa/cabin-types/${id}`, { method: 'PATCH', body: JSON.stringify(body) }); await load(); } catch (e: any) { toast.error(e.message); } };
   const runImport = async (dry: boolean) => {
     if (!canEdit) { viewOnly('import'); return; }
     const rows = parseSpaCsv(csv);
-    if (!rows.length) { alert('Paste a header row and at least one row below it.'); return; }
-    try { const r = await api(`/spa/import/${importKind}`, { method: 'POST', body: JSON.stringify({ rows, dry_run: dry }) }); setPreview(r); if (!dry) await load(); } catch (e: any) { alert(e.message); }
+    if (!rows.length) { toast.error('Paste a header row and at least one row below it.'); return; }
+    try { const r = await api(`/spa/import/${importKind}`, { method: 'POST', body: JSON.stringify({ rows, dry_run: dry }) }); setPreview(r); if (!dry) await load(); } catch (e: any) { toast.error(e.message); }
   };
 
   const shownTherapists = therapists.filter(t => showInactive || isOn(t)).filter(t => {
@@ -1221,7 +1237,7 @@ function SpaResources({ restaurantId, token }: Props) {
                 </div>
                 {isOn(r) && r.status_reason && String(r.status || 'AVAILABLE').toUpperCase() !== 'AVAILABLE' && <div className="text-[11px] text-[#6b5d52]">{r.status_reason}</div>}
                 {r.equipment && <div className="text-[11px] text-[#3d3128]">{r.equipment}</div>}
-                {canEdit && <div className="flex justify-end mt-auto"><button className={BTN_GHOST} onClick={() => openCabin(r)}>Edit</button></div>}
+                <div className="flex justify-end gap-2 mt-auto"><button className={BTN_GHOST} title="Who changed this cabin, and what is booked in it" onClick={() => setHistory({ kind: 'SPA_CABIN', id: r.id, meta: { title: r.name } })}><History size={13} /> History</button>{canEdit && <button className={BTN_GHOST} onClick={() => openCabin(r)}>Edit</button>}</div>
               </div>
             ))}
             {!resources.filter(r => showInactive || isOn(r)).length && <p className="text-sm text-[#6b5d52] col-span-full">No cabins yet.</p>}
@@ -1282,6 +1298,7 @@ function SpaResources({ restaurantId, token }: Props) {
                 <div className="flex gap-1.5 shrink-0">
                   <button className={BTN_GHOST} onClick={() => openProfile(t)}><User size={13} /> Profile</button>
                   <button className={BTN_GHOST} onClick={() => openSched(t)}><Clock size={13} /> Schedule & Skills</button>
+                  <button className={BTN_GHOST} title="Who changed this therapist, and where they are booked" onClick={() => setHistory({ kind: 'SPA_THERAPIST', id: t.id, meta: { title: t.display_name } })}><History size={13} /> History</button>
                 </div>
               </div>
             ))}
@@ -1563,6 +1580,7 @@ function SpaResources({ restaurantId, token }: Props) {
           </div>
         </div>
       )}
+      {history && <SpaHistoryOverlay kind={history.kind} id={history.id} meta={history.meta} onClose={() => setHistory(null)} restaurantId={restaurantId} token={token} />}
     </div>
   );
 }
@@ -1572,6 +1590,8 @@ function SpaResources({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?: boolean }) {
   const api = makeApi(restaurantId, token);
+  const toast = useToast();
+  const confirmDlg = useConfirm();
   const canEdit = canWriteTab('SPA_APPOINTMENTS');
   const [appts, setAppts] = useState<any[]>([]);
   const [services, setServices] = useState<any[]>([]);
@@ -1625,7 +1645,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
         const from = `${day} 00:00:00`, to = `${day} 23:59:59`;
         setAppts(await api(`/spa/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`));
       }
-    } catch { /* */ } finally { setLoading(false); }
+    } catch (e: any) { toast.error(`Could not load the appointments: ${e.message}`); } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, [day]);
   useEffect(() => { (async () => { try { setServices(await api('/spa/services')); } catch {} try { setTherapists(await api('/spa/therapists')); } catch {} if (calendar) { try { setCabins(await api('/spa/resources')); } catch {} } try { setInHouse((await api('/spa/in-house-guests')).guests || []); } catch {} })(); }, []);
@@ -1637,7 +1657,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     try {
       const r = await api(`/spa/availability?service_id=${bk.service_id}&date=${bk.date}${genderQs()}`);
       setSlots(r.slots || []); setNeedsGender(!!r.needs_guest_gender);
-    } catch (e: any) { alert(e.message); setSlots([]); } finally { setSlotLoading(false); }
+    } catch (e: any) { toast.error(e.message); setSlots([]); } finally { setSlotLoading(false); }
   };
   const findClients = async () => {
     const q = clientQ.trim();
@@ -1662,8 +1682,8 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     if (!cabins.length) { try { setCabins(await api('/spa/resources')); } catch { /* */ } }
   };
   const book = async (withReason: boolean) => {
-    if (!canEdit) { alert('View-only access — you cannot book appointments.'); return; }
-    if (!chosenSlot || !bk.client_name) { alert('Pick a slot and enter client name'); return; }
+    if (!canEdit) { toast.error('View-only access — you cannot book appointments.'); return; }
+    if (!chosenSlot || !bk.client_name) { toast.error('Pick a slot and enter client name'); return; }
     try {
       await api('/spa/appointments', { method: 'POST', body: JSON.stringify({
         service_id: bk.service_id, start_at: chosenSlot.start_at, therapist_id: pick.therapist_id || null,
@@ -1678,20 +1698,20 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     } catch (e: any) {
       // Outside the treatment's rules: show why, and let a reason be given.
       if (e?.status === 409 && e?.body?.code === 'ASSIGNMENT_RULES') { setRuleProblems(e.body.problems || []); return; }
-      alert(e.message);
+      toast.error(e.message);
     }
   };
   const transition = async (a: any, action: string) => {
-    if (!canEdit) { alert('View-only access — you cannot change appointment status.'); return; }
-    if (action === 'cancel' && !window.confirm(`Cancel ${a.client_name || 'this guest'}'s ${a.service_name || 'appointment'}?`)) return;
-    if (action === 'no-show' && !window.confirm(`Mark ${a.client_name || 'this guest'} as a no-show?`)) return;
+    if (!canEdit) { toast.error('View-only access — you cannot change appointment status.'); return; }
+    if (action === 'cancel' && !(await confirmDlg({ title: `Cancel ${a.client_name || 'this guest'}'s ${a.service_name || 'appointment'}?`, confirmLabel: 'Cancel appointment', cancelLabel: 'Keep it', danger: true }))) return;
+    if (action === 'no-show' && !(await confirmDlg({ title: `Mark ${a.client_name || 'this guest'} as a no-show?`, confirmLabel: 'Mark no-show', cancelLabel: 'Back', danger: true }))) return;
     try {
       if (action === 'cancel') await api(`/spa/appointments/${a.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: 'Cancelled by staff' }) });
       else await api(`/spa/appointments/${a.id}/${action}`, { method: 'POST' });
       await load();
     } catch (e: any) {
       if (action === 'check-in' && e?.status === 409 && e?.body?.code === 'CONTRAINDICATED' && e?.body?.overridable) { setOverrideText(''); setCheckinBlock({ appt: a, message: e.message }); return; }
-      alert(e.message);
+      toast.error(e.message);
     }
   };
   const checkInWithReason = async () => {
@@ -1699,7 +1719,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     try {
       await api(`/spa/appointments/${checkinBlock.appt.id}/check-in`, { method: 'POST', body: JSON.stringify({ clinical_override_reason: overrideText.trim() }) });
       setCheckinBlock(null); await load();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
   };
   const openCheckout = (r: any) => {
     const linked = r.room_booking_id && inHouse.some((g: any) => g.booking_id === r.room_booking_id) ? r.room_booking_id : '';
@@ -1708,10 +1728,10 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH', charge_to_room: !!stay, room_booking_id: stay });
   };
   const doCheckout = async () => {
-    if (!canEdit) { alert('View-only access — you cannot check out appointments.'); return; }
+    if (!canEdit) { toast.error('View-only access — you cannot check out appointments.'); return; }
     // Charged to the room: added to the room bill, paid at hotel check-out.
     if (coState.charge_to_room) {
-      if (!coState.room_booking_id) { alert('Choose the room to charge.'); return; }
+      if (!coState.room_booking_id) { toast.error('Choose the room to charge.'); return; }
       try {
         const r = await api(`/spa/appointments/${coAppt.id}/checkout`, { method: 'POST', body: JSON.stringify({
           charge_to_room: true, room_booking_id: coState.room_booking_id,
@@ -1720,7 +1740,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
         }) });
         setCoResult({ ...r, charged_to_room: true });
         await load();
-      } catch (e: any) { alert(e.message); }
+      } catch (e: any) { toast.error(e.message); }
       return;
     }
     try {
@@ -1734,7 +1754,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
       const promo = String(coState.promo_code || '').trim().toUpperCase();
       if (promo && folioId) {
         try { const pr = await api(`/spa/folios/${folioId}/apply-promo`, { method: 'POST', body: JSON.stringify({ code: promo }) }); outstanding = Number(pr.outstanding ?? outstanding); }
-        catch (e: any) { alert(`Invoice created, but the promo could not be applied: ${e.message}`); }
+        catch (e: any) { toast.error(`Invoice created, but the promo could not be applied: ${e.message}`); }
       }
       // collect payment for the (possibly discounted) outstanding
       if (folioId && outstanding > 0) {
@@ -1742,7 +1762,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
       }
       setCoResult({ ...r, outstanding, paid: true });
       await load();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
   };
 
   const fmtTime = (ts: string) => String(ts || '').slice(11, 16);
@@ -1774,12 +1794,12 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   // A treatment dragged to a new time, therapist or cabin. The server re-checks it
   // as a reschedule; a move outside the treatment's rules asks for a reason.
   const dropAppt = async (a: any, fromCol: string, toCol: string, startMin: number, reason?: string) => {
-    if (!canEdit) { alert('View-only access — you cannot reschedule appointments.'); return; }
+    if (!canEdit) { toast.error('View-only access — you cannot reschedule appointments.'); return; }
     const body: any = { start_at: `${day} ${hhmmOfMin(startMin)}` };
     if (toCol !== fromCol) {
       if (calView === 'THERAPIST') {
-        if (a.therapist_id !== fromCol) { alert("Drag the lead therapist's card to give this treatment to another therapist."); return; }
-        if ((a.assistant_ids || []).includes(toCol)) { alert('That therapist is already assisting on this treatment.'); return; }
+        if (a.therapist_id !== fromCol) { toast.error("Drag the lead therapist's card to give this treatment to another therapist."); return; }
+        if ((a.assistant_ids || []).includes(toCol)) { toast.error('That therapist is already assisting on this treatment.'); return; }
         body.therapist_id = toCol;
       } else {
         body.resource_id = toCol;
@@ -1794,7 +1814,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
       await load();
     } catch (e: any) {
       if (e?.status === 409 && e?.body?.code === 'ASSIGNMENT_RULES') { setMoveReason(''); setMoveRules({ appt: a, fromCol, toCol, startMin, problems: e.body.problems || [] }); return; }
-      alert(e.message);
+      toast.error(e.message);
     }
   };
   // A click on an empty time opens booking for that time; the matching slot is
@@ -1934,7 +1954,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                   {canEdit && r.status === 'COMPLETED' && !r.folio_id && !r.room_folio_id && <button className={BTN_PRIMARY} onClick={() => openCheckout(r)}>Checkout</button>}
                   {r.room_folio_id && <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200" title="On the room bill, paid at hotel check-out">Charged to room {r.room_number || ''}</span>}
                   {!r.room_folio_id && r.room_booking_id && r.room_number && <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-sky-50 text-sky-700" title="Staying with us">Room {r.room_number}</span>}
-                  {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={12} /> Invoice</button>}
+                  {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { toast.error(err.message); } }}><FileText size={12} /> Invoice</button>}
                   {r.status === 'COMPLETED' && <button className={BTN_GHOST} title="What happened in this treatment" onClick={() => setSessionAppt(r)}>Record</button>}
                   {canEdit && ['BOOKED', 'CONFIRMED', 'CHECKED_IN'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} title="Cancel appointment" onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
                   <button className={BTN_GHOST} title="Audit log — who changed this appointment" onClick={() => setHistory({ id: r.id, meta: { title: r.service_name || r.id, subtitle: [r.status, r.client_name].filter(Boolean).join(' · '), facts: [['Service', r.service_name], ['Status', r.status], ['Client', r.client_name], ['Time', `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}`], ['Therapist', r.therapist_name], ['Cabin', r.resource_name]] } })}><History size={12} /></button>
@@ -2137,7 +2157,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                     <p className="text-xs text-emerald-600 mb-4">Paid in full</p>
                   </>
                 )}
-                {!coResult.charged_to_room && (<button className={BTN_PRIMARY + ' inline-flex'} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${coResult.folio?.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${coResult.invoice_number || coResult.folio?.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={13} /> Download Invoice</button>)}
+                {!coResult.charged_to_room && (<button className={BTN_PRIMARY + ' inline-flex'} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${coResult.folio?.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${coResult.invoice_number || coResult.folio?.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { toast.error(err.message); } }}><FileText size={13} /> Download Invoice</button>)}
                 <div className="mt-3"><button className={BTN_GHOST + ' mx-auto'} onClick={() => setCoAppt(null)}>Close</button></div>
               </div>
             )}
@@ -2153,6 +2173,8 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
 // ════════════════════════════════════════════════════════════════════════
 function SpaClients({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const toast = useToast();
+  const [history, setHistory] = useState<any>(null); // History window for a guest
   const canEdit = canWriteTab('SPA_CLIENTS');
   const [clients, setClients] = useState<any[]>([]);
   const [search, setSearch] = useState('');
@@ -2162,11 +2184,11 @@ function SpaClients({ restaurantId, token }: Props) {
   const [packages, setPackages] = useState<any[]>([]);
   const [memberships, setMemberships] = useState<any[]>([]);
 
-  const load = async () => { try { setClients(await api(`/spa/clients${search ? `?search=${encodeURIComponent(search)}` : ''}`)); } catch {} };
+  const load = async () => { try { setClients(await api(`/spa/clients${search ? `?search=${encodeURIComponent(search)}` : ''}`)); } catch (e: any) { toast.error(`Could not load the guests: ${e.message}`); } };
   useEffect(() => { load(); }, []);
   useEffect(() => { (async () => { try { setPackages(await api('/spa/packages')); } catch {} try { setMemberships(await api('/spa/memberships')); } catch {} })(); }, []);
 
-  const addClient = async () => { if (!canEdit) { alert('View-only access — you cannot add clients.'); return; } if (!form.name) return; try { await api('/spa/clients', { method: 'POST', body: JSON.stringify(form) }); setShowForm(false); setForm({ name: '', phone: '', email: '' }); await load(); } catch (e: any) { alert(e.message); } };
+  const addClient = async () => { if (!canEdit) { toast.error('View-only access — you cannot add clients.'); return; } if (!form.name) return; try { await api('/spa/clients', { method: 'POST', body: JSON.stringify(form) }); setShowForm(false); setForm({ name: '', phone: '', email: '' }); await load(); } catch (e: any) { toast.error(e.message); } };
   // The guest record opens in its own window, which loads and edits the guest.
   const openProfile = (c: any) => setProfile({ id: c.id });
 
@@ -2185,7 +2207,12 @@ function SpaClients({ restaurantId, token }: Props) {
             { key: 'name', label: 'Name', render: (r: any) => <span className="font-semibold">{r.name}</span> },
             { key: 'phone', label: 'Phone' },
             { key: 'email', label: 'Email' },
-            { key: '_a', label: '', render: (r: any) => <button className={BTN_GHOST} onClick={() => openProfile(r)}>View</button> },
+            { key: '_a', label: '', render: (r: any) => (
+              <div className="flex gap-2 justify-end">
+                <button className={BTN_GHOST} onClick={() => openProfile(r)}>View</button>
+                <button className={BTN_GHOST} title="Who changed this guest record" onClick={() => setHistory({ id: r.id, meta: { title: r.name, facts: [['Phone', r.phone], ['Email', r.email]] } })}><History size={12} /> History</button>
+              </div>
+            ) },
           ]}
         />
       </div>
@@ -2205,6 +2232,7 @@ function SpaClients({ restaurantId, token }: Props) {
       )}
 
       {profile && <SpaClientRecord restaurantId={restaurantId} token={token} clientId={profile.id} packages={packages} memberships={memberships} onClose={() => { setProfile(null); load(); }} />}
+      {history && <SpaHistoryOverlay kind="SPA_CLIENT" id={history.id} meta={history.meta} onClose={() => setHistory(null)} restaurantId={restaurantId} token={token} />}
     </div>
   );
 }
@@ -2214,16 +2242,20 @@ function SpaClients({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaPackages({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const toast = useToast();
   const canEdit = canWriteTab('SPA_PACKAGES');
   const [packages, setPackages] = useState<any[]>([]);
   const [memberships, setMemberships] = useState<any[]>([]);
   const [pkgForm, setPkgForm] = useState({ name: '', total_sessions: '5', price: '', gst_percent: '18', validity_days: '180' });
   const [memForm, setMemForm] = useState({ name: '', monthly_fee: '', discount_pct: '10', gst_percent: '18' });
 
-  const load = async () => { try { setPackages(await api('/spa/packages')); } catch {} try { setMemberships(await api('/spa/memberships')); } catch {} };
+  const load = async () => {
+    try { setPackages(await api('/spa/packages')); } catch (e: any) { toast.error(`Could not load the packages: ${e.message}`); }
+    try { setMemberships(await api('/spa/memberships')); } catch (e: any) { toast.error(`Could not load the memberships: ${e.message}`); }
+  };
   useEffect(() => { load(); }, []);
-  const addPkg = async () => { if (!canEdit) { alert('View-only access — you cannot add packages.'); return; } if (!pkgForm.name) return; try { await api('/spa/packages', { method: 'POST', body: JSON.stringify({ ...pkgForm, total_sessions: Number(pkgForm.total_sessions), price: Number(pkgForm.price || 0), gst_percent: Number(pkgForm.gst_percent), validity_days: Number(pkgForm.validity_days) }) }); setPkgForm({ name: '', total_sessions: '5', price: '', gst_percent: '18', validity_days: '180' }); await load(); } catch (e: any) { alert(e.message); } };
-  const addMem = async () => { if (!canEdit) { alert('View-only access — you cannot add memberships.'); return; } if (!memForm.name) return; try { await api('/spa/memberships', { method: 'POST', body: JSON.stringify({ name: memForm.name, monthly_fee: Number(memForm.monthly_fee || 0), gst_percent: Number(memForm.gst_percent), benefits: { discount_pct: Number(memForm.discount_pct || 0) } }) }); setMemForm({ name: '', monthly_fee: '', discount_pct: '10', gst_percent: '18' }); await load(); } catch (e: any) { alert(e.message); } };
+  const addPkg = async () => { if (!canEdit) { toast.error('View-only access — you cannot add packages.'); return; } if (!pkgForm.name) return; try { await api('/spa/packages', { method: 'POST', body: JSON.stringify({ ...pkgForm, total_sessions: Number(pkgForm.total_sessions), price: Number(pkgForm.price || 0), gst_percent: Number(pkgForm.gst_percent), validity_days: Number(pkgForm.validity_days) }) }); setPkgForm({ name: '', total_sessions: '5', price: '', gst_percent: '18', validity_days: '180' }); await load(); } catch (e: any) { toast.error(e.message); } };
+  const addMem = async () => { if (!canEdit) { toast.error('View-only access — you cannot add memberships.'); return; } if (!memForm.name) return; try { await api('/spa/memberships', { method: 'POST', body: JSON.stringify({ name: memForm.name, monthly_fee: Number(memForm.monthly_fee || 0), gst_percent: Number(memForm.gst_percent), benefits: { discount_pct: Number(memForm.discount_pct || 0) } }) }); setMemForm({ name: '', monthly_fee: '', discount_pct: '10', gst_percent: '18' }); await load(); } catch (e: any) { toast.error(e.message); } };
 
   return (
     <div>
@@ -2266,43 +2298,107 @@ function SpaPackages({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaReports({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
-  const [util, setUtil] = useState<any[]>([]);
+  const toast = useToast();
+  const today = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  const daysBack = (n: number) => new Date(Date.parse(`${today}T00:00:00Z`) - n * 86400000).toISOString().slice(0, 10);
+  const [from, setFrom] = useState(daysBack(29));
+  const [to, setTo] = useState(today);
+  const [range, setRange] = useState<any>(null);
+  const [loadingR, setLoadingR] = useState(false);
   const [rev, setRev] = useState<any[]>([]);
-  const [prod, setProd] = useState<any[]>([]);
   const [rebook, setRebook] = useState<any>(null);
-  useEffect(() => { (async () => {
-    try { setUtil(await api('/spa/reports/utilization')); } catch {}
-    try { setRev(await api('/spa/reports/revenue-per-treatment')); } catch {}
-    try { setProd(await api('/spa/reports/therapist-productivity')); } catch {}
-    try { setRebook(await api('/spa/reports/rebooking-rate')); } catch {}
+  const loadRange = async () => {
+    setLoadingR(true);
+    try { setRange(await api(`/spa/reports/range?from=${from}&to=${to}`)); }
+    catch (e: any) { toast.error(`Could not load the reports: ${e.message}`); }
+    finally { setLoadingR(false); }
+  };
+  useEffect(() => { loadRange(); (async () => {
+    try { setRev(await api('/spa/reports/revenue-per-treatment')); } catch (e: any) { toast.error(`Could not load revenue per treatment: ${e.message}`); }
+    try { setRebook(await api('/spa/reports/rebooking-rate')); } catch (e: any) { toast.error(`Could not load the rebooking rate: ${e.message}`); }
   })(); }, []);
+  const exportCsv = async () => {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/spa/reports/treatments.csv?from=${from}&to=${to}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'The export failed.'); }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `spa-treatments-${from}-to-${to}.csv`;
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const pct = (v: any) => (v == null ? '—' : `${v}%`);
+  const s = range?.summary;
   return (
     <div>
-      <SectionHeader icon={<TrendingUp size={18} />} title="Spa Reports" sub="Last 30 days" />
-      <div className="grid sm:grid-cols-2 gap-4">
-        <div className={CARD}>
-          <h4 className="font-bold mb-3">Therapist Utilisation</h4>
-          <DataTable data={util} rowKey={(r: any) => r.therapist_id} columns={[
-            { key: 'display_name', label: 'Therapist' },
-            { key: 'appointments', label: 'Appts' },
-            { key: 'booked_minutes', label: 'Booked min' },
-          ]} />
+      <SectionHeader icon={<TrendingUp size={18} />} title="Spa Reports" sub={range ? `${range.from} to ${range.to}` : 'Choose the dates'} />
+      <div className={`${CARD} mb-4`}>
+        <div className="flex flex-wrap items-end gap-3">
+          <div><label className={LABEL}>From</label><input type="date" className={INPUT} value={from} max={to} onChange={e => setFrom(e.target.value)} /></div>
+          <div><label className={LABEL}>To</label><input type="date" className={INPUT} value={to} min={from} onChange={e => setTo(e.target.value)} /></div>
+          <button className={BTN_PRIMARY} onClick={loadRange} disabled={loadingR}>{loadingR ? 'Loading…' : 'Show'}</button>
+          <button className={BTN_GHOST} onClick={exportCsv}><FileText size={13} /> Export treatments (CSV)</button>
         </div>
+        {s && (
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 mt-4">
+            {([['Appointments', s.appointments], ['Completed', s.completed], ['Cancelled', s.cancelled], ['No-shows', `${s.no_shows}${s.no_show_rate_pct != null ? ` (${s.no_show_rate_pct}%)` : ''}`], ['Treatment value', money(s.service_value)], ['Tips', money(s.tips)]] as [string, any][]).map(([k, v]) => (
+              <div key={k}><div className="text-[11px] text-[#6b5d52]">{k}</div><div className="text-lg font-bold text-[#14110c] tabular-nums">{v}</div></div>
+            ))}
+          </div>
+        )}
+      </div>
+      {range && (
+        <div className="space-y-4">
+          <div className={CARD}>
+            <h4 className="font-bold mb-1">Therapists</h4>
+            <p className="text-[11px] text-[#6b5d52] mb-3">Available time is rostered shifts less breaks and blocked time. Booked time includes treatments a therapist assisted on. {range.notes?.commission}</p>
+            <DataTable data={range.therapists} rowKey={(r: any) => r.therapist_id} columns={[
+              { key: 'display_name', label: 'Therapist' },
+              { key: 'available_minutes', label: 'Available min' },
+              { key: 'booked_minutes', label: 'Booked min' },
+              { key: 'utilisation_pct', label: 'Utilisation', render: (r: any) => pct(r.utilisation_pct) },
+              { key: 'completed', label: 'Completed' },
+              { key: 'no_shows', label: 'No-shows', render: (r: any) => `${r.no_shows}${r.no_show_rate_pct != null ? ` (${r.no_show_rate_pct}%)` : ''}` },
+              { key: 'service_value', label: 'Value', render: (r: any) => money(r.service_value) },
+              { key: 'commission', label: 'Commission', render: (r: any) => money(r.commission) },
+              { key: 'tips', label: 'Tips', render: (r: any) => money(r.tips) },
+            ]} />
+          </div>
+          <div className={CARD}>
+            <h4 className="font-bold mb-1">Cabins</h4>
+            <p className="text-[11px] text-[#6b5d52] mb-3">{range.notes?.cabins}</p>
+            <DataTable data={range.cabins} rowKey={(r: any) => r.cabin_id} columns={[
+              { key: 'name', label: 'Cabin' },
+              { key: 'treatments', label: 'Treatments' },
+              { key: 'booked_minutes', label: 'Booked min' },
+              { key: 'turnaround_minutes', label: 'Turnaround min' },
+              { key: 'blocked_minutes', label: 'Blocked min' },
+            ]} />
+          </div>
+          <div className={CARD}>
+            <h4 className="font-bold mb-1">Consumables against standard</h4>
+            <p className="text-[11px] text-[#6b5d52] mb-3">From treatments finished through the Finish screen. A positive variance means more was used than the standard.</p>
+            <DataTable data={range.consumption} rowKey={(r: any) => `${r.service_id}-${r.ingredient_id}-${r.unit}`} columns={[
+              { key: 'service_name', label: 'Treatment' },
+              { key: 'item', label: 'Item' },
+              { key: 'treatments', label: 'Treatments' },
+              { key: 'standard_qty', label: 'Standard', render: (r: any) => `${r.standard_qty} ${r.unit || ''}` },
+              { key: 'actual_qty', label: 'Used', render: (r: any) => `${r.actual_qty} ${r.unit || ''}` },
+              { key: 'variance', label: 'Variance', render: (r: any) => <span className={Number(r.variance) > 0 ? 'text-rose-700 font-semibold' : Number(r.variance) < 0 ? 'text-emerald-700' : ''}>{Number(r.variance) > 0 ? '+' : ''}{r.variance} {r.unit || ''}{r.variance_pct != null ? ` (${r.variance_pct}%)` : ''}</span> },
+              { key: 'cost', label: 'Cost', render: (r: any) => money(r.cost) },
+            ]} />
+          </div>
+        </div>
+      )}
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
         <div className={CARD}>
-          <h4 className="font-bold mb-3">Revenue per Treatment</h4>
+          <h4 className="font-bold mb-3">Revenue per Treatment <span className="text-[11px] font-normal text-[#6b5d52]">all time</span></h4>
           <DataTable data={rev} rowKey={(r: any) => r.service_id || r.service_name} columns={[
             { key: 'service_name', label: 'Service' },
             { key: 'times_sold', label: 'Sold' },
             { key: 'revenue', label: 'Revenue', render: (r: any) => money(r.revenue) },
-          ]} />
-        </div>
-        <div className={CARD}>
-          <h4 className="font-bold mb-3">Therapist Productivity</h4>
-          <DataTable data={prod} rowKey={(r: any) => r.therapist_id} columns={[
-            { key: 'display_name', label: 'Therapist' },
-            { key: 'completed', label: 'Completed' },
-            { key: 'no_shows', label: 'No-shows' },
-            { key: 'service_value', label: 'Value', render: (r: any) => money(r.service_value) },
           ]} />
         </div>
         <div className={CARD}>
@@ -2349,6 +2445,7 @@ function SpaInventory({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaSettings({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const toast = useToast();
   const canEdit = canWriteTab('SPA_SETTINGS');
   const [profile, setProfile] = useState<any>({ hero_image_url: '', tagline: '', offers: [] });
   const [saving, setSaving] = useState(false);
@@ -2368,7 +2465,7 @@ function SpaSettings({ restaurantId, token }: Props) {
   })(); }, []);
 
   const save = async () => {
-    if (!canEdit) { alert('View-only access — you cannot change the public page.'); return; }
+    if (!canEdit) { toast.error('View-only access — you cannot change the public page.'); return; }
     setSaving(true); setSaved(false);
     try {
       await api('/spa/profile', { method: 'PUT', body: JSON.stringify({ ...profile, module_label: String(profile.module_label || '').trim() }) });
@@ -2376,7 +2473,7 @@ function SpaSettings({ restaurantId, token }: Props) {
       // The menu reads the name from the property record: have it reloaded.
       window.dispatchEvent(new Event('atithi:restaurant-changed'));
     }
-    catch (e: any) { alert(e.message); } finally { setSaving(false); }
+    catch (e: any) { toast.error(e.message); } finally { setSaving(false); }
   };
 
   const addOffer = () => setProfile((p: any) => ({ ...p, offers: [...(p.offers || []), { ...blankOffer }] }));
@@ -2389,7 +2486,14 @@ function SpaSettings({ restaurantId, token }: Props) {
 
   const slug = profile.booking_slug || restaurantId;
   const publicUrl = `${window.location.origin}/spa/${slug}`;
-  const qrImgUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(publicUrl)}&format=png`;
+  // The QR code is drawn in the app, so the booking link is not sent to another site.
+  const downloadQr = () => {
+    const c = document.getElementById('spa-booking-qr') as HTMLCanvasElement | null;
+    if (!c) { toast.error('The QR code is not ready yet.'); return; }
+    const a = document.createElement('a');
+    a.href = c.toDataURL('image/png'); a.download = 'spa-booking-qr.png';
+    document.body.appendChild(a); a.click(); a.remove();
+  };
 
   return (
     <div className="space-y-6">
@@ -2418,7 +2522,7 @@ function SpaSettings({ restaurantId, token }: Props) {
         <p className="text-xs font-semibold text-[#6b5d52] mb-1">Your public booking link</p>
         <div className="flex items-center gap-2">
           <a href={publicUrl} target="_blank" rel="noreferrer" className="flex-1 text-sm text-[#cc5a16] underline break-all">{publicUrl}</a>
-          <button className={BTN_GHOST} onClick={() => navigator.clipboard.writeText(publicUrl)}>Copy</button>
+          <button className={BTN_GHOST} onClick={() => navigator.clipboard.writeText(publicUrl).then(() => toast.success('Link copied'), () => toast.error('The link could not be copied.'))}>Copy</button>
         </div>
       </div>
 
@@ -2426,10 +2530,10 @@ function SpaSettings({ restaurantId, token }: Props) {
       <div className={CARD}>
         <p className="text-xs font-semibold text-[#6b5d52] mb-3">QR Code</p>
         <div className="flex items-start gap-4">
-          <img src={qrImgUrl} alt="Booking QR Code" className="w-32 h-32 rounded-xl border border-[#e8dccf] flex-shrink-0" />
+          <QRCodeCanvas id="spa-booking-qr" value={publicUrl} size={512} marginSize={2} title="Booking QR code" style={{ width: 128, height: 128 }} className="rounded-xl border border-[#e8dccf] flex-shrink-0 bg-white" />
           <div className="flex-1 space-y-2">
             <p className="text-xs text-[#9d8b7e]">Guests scan this with any mobile camera to open your online booking page. Print it on menus, tent cards, reception desk, or social media.</p>
-            <a href={qrImgUrl} download="spa-booking-qr.png" className={BTN_GHOST} style={{ display: 'inline-flex' }}>Download QR</a>
+            <button className={BTN_GHOST} onClick={downloadQr}>Download QR</button>
           </div>
         </div>
       </div>
@@ -2521,6 +2625,8 @@ function SpaSettings({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 function SpaFolios({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
+  const toast = useToast();
+  const promptDlg = usePaymentDialog();
   const canEdit = canWriteTab('SPA_BILLING');
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2534,19 +2640,25 @@ function SpaFolios({ restaurantId, token }: Props) {
 
   const load = async () => {
     setLoading(true);
-    try { setRows(await api('/spa/folios')); } catch { setRows([]); } finally { setLoading(false); }
+    try { setRows(await api('/spa/folios')); } catch (e: any) { setRows([]); toast.error(`Could not load the invoices: ${e.message}`); } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
 
   // Cancel an invoice — reverses the spa settlement in the GL (never deletes it).
   const cancelFolio = async (f: any) => {
-    if (!canEdit) { alert('View-only access — you cannot cancel invoices.'); return; }
-    const reason = window.prompt('Cancel this invoice?\n\nThis reverses it in the accounts (spa revenue, GST, cash). It is NOT deleted — a cancelled record is kept for audit.\n\nEnter a reason (required):');
-    if (reason === null) return;
-    if (reason.trim().length < 3) { alert('A cancellation reason is required.'); return; }
+    if (!canEdit) { toast.error('View-only access — you cannot cancel invoices.'); return; }
+    const got = await promptDlg({
+      title: 'Cancel this invoice?',
+      body: 'This reverses it in the accounts (spa revenue, GST and cash). It is not deleted: a cancelled invoice is kept for audit.',
+      fields: [{ name: 'reason', label: 'Reason', type: 'textarea', required: true, placeholder: 'Why is this invoice being cancelled?' }],
+      confirmLabel: 'Cancel invoice',
+    });
+    if (!got) return;
+    const reason = String(got.reason || '');
+    if (reason.trim().length < 3) { toast.error('A cancellation reason is required.'); return; }
     setBusy(true);
     try { await api(`/folios/${f.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }); await load(); }
-    catch (e: any) { alert('Cancel failed: ' + (e?.message || 'error')); }
+    catch (e: any) { toast.error('Cancel failed: ' + (e?.message || 'error')); }
     finally { setBusy(false); }
   };
   const canCancelSpa = ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase());
@@ -2568,25 +2680,25 @@ function SpaFolios({ restaurantId, token }: Props) {
       const blob = await r.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a');
       a.href = url; a.download = `SpaInvoice-${f.invoice_number || f.id}.pdf`; document.body.appendChild(a); a.click();
       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
   };
   const openPay = (f: any) => { setPayForm({ amount: String(outOf(f)), method: 'CASH' }); setPayFor(f); };
   const savePayment = async () => {
-    if (!canEdit) { alert('View-only access — you cannot record payments.'); return; }
+    if (!canEdit) { toast.error('View-only access — you cannot record payments.'); return; }
     const amount = Math.round(Number(payForm.amount || 0) * 100) / 100;
-    if (!(amount > 0)) { alert('Enter an amount greater than 0'); return; }
+    if (!(amount > 0)) { toast.error('Enter an amount greater than 0'); return; }
     setBusy(true);
     try { await api(`/spa/folios/${payFor.id}/payments`, { method: 'POST', body: JSON.stringify({ amount, payment_method: payForm.method, payment_type: 'FINAL' }) }); setPayFor(null); await load(); }
-    catch (e: any) { alert(e.message); } finally { setBusy(false); }
+    catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
   };
   const openPromo = (f: any) => { setPromoCode(''); setPromoFor(f); };
   const savePromo = async () => {
-    if (!canEdit) { alert('View-only access — you cannot apply promos.'); return; }
+    if (!canEdit) { toast.error('View-only access — you cannot apply promos.'); return; }
     const code = promoCode.trim();
-    if (!code) { alert('Enter a promo code'); return; }
+    if (!code) { toast.error('Enter a promo code'); return; }
     setBusy(true);
-    try { const r = await api(`/spa/folios/${promoFor.id}/apply-promo`, { method: 'POST', body: JSON.stringify({ code }) }); setPromoFor(null); await load(); alert(`Promo applied — ${money(r.discount)} off. New balance ${money(r.outstanding)}.`); }
-    catch (e: any) { alert(e.message); } finally { setBusy(false); }
+    try { const r = await api(`/spa/folios/${promoFor.id}/apply-promo`, { method: 'POST', body: JSON.stringify({ code }) }); setPromoFor(null); await load(); toast.success(`Promo applied — ${money(r.discount)} off. New balance ${money(r.outstanding)}.`); }
+    catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
   };
 
   const tile = (label: string, val: string, accent: string) => (

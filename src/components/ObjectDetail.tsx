@@ -326,6 +326,16 @@ export function buildObjectResolver(restaurantId: string, token: string) {
           auditUrl: `${base}/spa/folios/${objectId}/audit`,
           overview: facts('Spa invoice / folio', objectId),
         } as any);
+      // The spa's own records: one history and where-used route each.
+      case 'SPA_SERVICE': case 'SPA_THERAPIST': case 'SPA_CABIN': case 'SPA_SKILL': case 'SPA_CABIN_TYPE': case 'SPA_CLIENT': {
+        const label = ({ SPA_SERVICE: 'Treatment', SPA_THERAPIST: 'Therapist', SPA_CABIN: 'Cabin', SPA_SKILL: 'Skill', SPA_CABIN_TYPE: 'Cabin type', SPA_CLIENT: 'Guest' } as Record<string, string>)[objectType];
+        return mk({
+          title: hint?.label || objectId, subtitle: hint?.subtitle || label,
+          auditUrl: `${base}/spa/records/${objectType}/${objectId}/audit`,
+          whereUsedUrl: `${base}/spa/records/${objectType}/${objectId}/where-used`,
+          overview: facts(label, objectId),
+        });
+      }
       case 'INVOICE': {
         // Restaurant order-invoice (individual order incl. MAN- manual invoice).
         let o: any = {};
