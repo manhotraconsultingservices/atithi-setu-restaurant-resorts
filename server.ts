@@ -24,6 +24,7 @@ import {
   findAvailableSlots, serviceWindowMinutes, therapistConflict, resourceConflict, blockConflict,
   spaTransitionError, spaMustYield,
   tsFromDateMinutes, hhmmToMinutes, minutesToHHMM,
+  tsShift, spaLevelRank, spaGenderCode, spaSkillGaps, spaAssignmentProblems, spaNeedsGuestGender,
 } from "./spaService.ts";
 import {
   createEventTables, seedEventDefaults,
@@ -34409,11 +34410,14 @@ ${data.tenant.name}`;
       const serviceId = String(req.query.service_id || '');
       const date = String(req.query.date || '');
       if (!serviceId || !date) return res.status(400).json({ error: "service_id and date are required" });
+      // The guest's gender and therapist preference narrow the slots when given.
+      const guestGenderQ = spaGenderCode(req.query.guest_gender);
       const slots = await findAvailableSlots(db, {
         serviceId, date,
         therapistId: req.query.therapist_id ? String(req.query.therapist_id) : undefined,
+        guestGender: guestGenderQ, therapistGender: spaGenderCode(req.query.therapist_gender),
       });
-      res.json({ date, service_id: serviceId, slots });
+      res.json({ date, service_id: serviceId, slots, needs_guest_gender: !guestGenderQ && await spaNeedsGuestGender(db, serviceId, slots) });
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute availability" }); }
   });
 
@@ -34475,6 +34479,97 @@ ${data.tenant.name}`;
     if (!ids.length) return [];
     return db.query(`SELECT * FROM spa_service_addons WHERE id IN (${ids.map(() => '?').join(',')})`, ids).catch(() => []);
   };
+
+  // Therapist search (Phase 2): every active therapist, whether they can give a
+  // treatment — and at a time, when one is asked — and in words why not. Also
+  // finds therapists by name, skill (at a minimum level), gender and language.
+  app.get("/api/restaurant/:id/spa/therapist-search", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const q: any = req.query || {};
+      const serviceId = q.service_id ? String(q.service_id) : null;
+      const service: any = serviceId ? await db.get("SELECT * FROM spa_services WHERE id = ?", [serviceId]) : null;
+      if (serviceId && !service) return res.status(404).json({ error: 'Service not found' });
+      const startRaw = q.start_at ? String(q.start_at) : '';
+      const win = startRaw ? spaApptWindow(startRaw, service ? serviceWindowMinutes(service) : 60) : null;
+      if (startRaw && !win) return res.status(400).json({ error: "start_at must be 'YYYY-MM-DD HH:MM'" });
+      const date = win ? win.date : (spaYmd(q.date) || new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10));
+      const guest = spaGenderCode(q.guest_gender);
+      const pref = spaGenderCode(q.therapist_gender);
+      const wantGender = spaGenderCode(q.gender);
+      const lang = String(q.language || '').trim();
+      const nameQ = String(q.q || '').trim().toLowerCase();
+      const minLevel = String(q.min_level || '').toUpperCase();
+      const skillRow: any = q.skill_id ? await db.get("SELECT id, name FROM spa_skills WHERE id = ?", [String(q.skill_id)]) : null;
+      const therapists: any[] = await db.query("SELECT * FROM spa_therapists WHERE is_active = 1 ORDER BY display_name");
+      const heldAll: any[] = await db.query(
+        `SELECT ts.therapist_id, ts.skill_id, ts.level, ts.certified_on, ts.valid_until, sk.name, COALESCE(sk.requires_certification, 0) AS requires_certification
+           FROM spa_therapist_skills ts JOIN spa_skills sk ON sk.id = ts.skill_id
+          WHERE COALESCE(sk.is_active, 1) = 1 ORDER BY sk.name`).catch(() => []);
+      const mapped = service
+        ? new Set(((await db.query("SELECT therapist_id FROM spa_therapist_services WHERE service_id = ?", [service.id]).catch(() => [])) as any[]).map((m: any) => String(m.therapist_id)))
+        : null;
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const out: any[] = [];
+      for (const t of therapists) {
+        if (nameQ && !String(t.display_name || '').toLowerCase().includes(nameQ)) continue;
+        const reasons: string[] = [];
+        const skills = heldAll.filter((h: any) => h.therapist_id === t.id);
+        if (wantGender && spaGenderCode(t.gender) !== wantGender) reasons.push(`Not ${wantGender.toLowerCase()}`);
+        if (lang && !String(t.languages || '').toLowerCase().includes(lang.toLowerCase())) reasons.push(`Does not list ${lang}`);
+        if (skillRow) {
+          const h = skills.find((x: any) => x.skill_id === skillRow.id);
+          if (!h) reasons.push(`No ${skillRow.name}`);
+          else {
+            if (SPA_LEVELS.includes(minLevel) && spaLevelRank(h.level) < spaLevelRank(minLevel)) reasons.push(`${skillRow.name} at ${String(h.level || '').toLowerCase()} level — needs ${minLevel.toLowerCase()}`);
+            if (h.valid_until && String(h.valid_until).slice(0, 10) < date) reasons.push(`${skillRow.name} certificate expired ${String(h.valid_until).slice(0, 10)}`);
+            else if (Number(h.requires_certification) === 1 && !h.certified_on) reasons.push(`${skillRow.name} needs a certificate on file`);
+          }
+        }
+        if (service) {
+          const gaps = await spaSkillGaps(db, service.id, t.id, date);
+          if (gaps) reasons.push(...gaps);
+          else if (Number(service.requires_therapist ?? 1) === 1 && mapped && !mapped.has(String(t.id))) reasons.push(`Not set up for ${service.name}`);
+          if (String(service.gender_rule || 'ANY').toUpperCase() === 'SAME_GENDER' && guest && spaGenderCode(t.gender) !== guest) reasons.push(`${service.name} needs a ${guest.toLowerCase()} therapist`);
+        }
+        if (pref && spaGenderCode(t.gender) !== pref) reasons.push(`The guest asked for a ${pref.toLowerCase()} therapist`);
+        let free: boolean | null = null;
+        if (win) {
+          const weekday = new Date(`${win.date}T00:00:00Z`).getUTCDay();
+          const hm = String(win.startAt).slice(11, 16), hmEnd = String(win.endAt).slice(11, 16);
+          const shifts: any[] = await db.query(
+            `SELECT start_time, end_time, break_start, break_end FROM spa_therapist_schedules
+              WHERE therapist_id = ? AND weekday = ?
+                AND (effective_from IS NULL OR effective_from = '' OR effective_from <= ?)
+                AND (effective_to IS NULL OR effective_to = '' OR effective_to >= ?)`, [t.id, weekday, win.date, win.date]);
+          const shift = shifts.find((s: any) => String(s.start_time) <= hm && String(s.end_time) >= hmEnd);
+          if (!shift) reasons.push(`Not on shift ${dayNames[weekday]} ${hm}–${hmEnd}`);
+          else if (shift.break_start && shift.break_end && hm < String(shift.break_end) && hmEnd > String(shift.break_start)) reasons.push(`On a break ${shift.break_start}–${shift.break_end}`);
+          const busy: any = await therapistConflict(db, t.id, win.startAt, win.endAt);
+          if (busy) reasons.push(`Booked ${tsShift(busy.start_at, 0).slice(11, 16)}–${tsShift(busy.end_at, 0).slice(11, 16)}`);
+          const blocked: any = await blockConflict(db, 'THERAPIST', t.id, win.startAt, win.endAt);
+          if (blocked) reasons.push(`Blocked${blocked.reason ? `: ${blocked.reason}` : ''}`);
+          const cap = Number(t.max_treatments_per_day || 0);
+          if (cap > 0) {
+            const n: any = await db.get(
+              `SELECT COUNT(*) AS n FROM spa_appointments WHERE therapist_id = ? AND status NOT IN ('CANCELLED','NO_SHOW') AND start_at >= ? AND start_at < ?`,
+              [t.id, `${win.date} 00:00:00`, tsShift(`${win.date} 00:00:00`, 1440)]);
+            if (Number(n?.n || 0) >= cap) reasons.push(`Daily limit reached (${cap})`);
+          }
+          free = !!shift && !busy && !blocked;
+        }
+        out.push({
+          id: t.id, display_name: t.display_name, gender: t.gender || null, languages: t.languages || null, photo_url: t.photo_url || null,
+          skills: skills.map((s: any) => ({ skill_id: s.skill_id, name: s.name, level: s.level, valid_until: s.valid_until || null })),
+          eligible: reasons.length === 0, free, reasons,
+        });
+      }
+      out.sort((a, b) => Number(b.eligible) - Number(a.eligible) || String(a.display_name).localeCompare(String(b.display_name)));
+      res.json({ date, start_at: win ? win.startAt : null, end_at: win ? win.endAt : null, therapists: out });
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to search therapists" }); }
+  });
 
   app.get("/api/restaurant/:id/spa/appointments", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
@@ -34633,6 +34728,23 @@ ${data.tenant.name}`;
 
       const inactiveCreate = await spaInactiveProblem(db, b.therapist_id || null, b.resource_id || null);
       if (inactiveCreate) return res.status(409).json(inactiveCreate);
+      // The rules the slot engine applies — skills, the same-gender rule, the
+      // guest's preference, the daily limit, cabin type and a cabin kept for one
+      // gender — hold for a therapist or cabin picked by hand too. A booking
+      // outside them needs a reason, kept on the appointment and in its audit.
+      const knownClient: any = b.client_id
+        ? await db.get("SELECT gender FROM spa_clients WHERE id = ?", [b.client_id]).catch(() => null)
+        : (b.client_phone ? await db.get("SELECT gender FROM spa_clients WHERE phone = ? LIMIT 1", [b.client_phone]).catch(() => null) : null);
+      const createGuestGender = spaGenderCode(b.client_gender) || spaGenderCode(knownClient?.gender);
+      const createPref = spaGenderCode(b.therapist_gender_pref);
+      const createProblems = await spaAssignmentProblems(db, {
+        service, therapistId: b.therapist_id || null, resourceId: b.resource_id || null, date: win.date,
+        guestGender: createGuestGender, preference: createPref,
+      });
+      const createOverride = String(b.override_reason || '').trim();
+      if (createProblems.length && createOverride.length < 5) {
+        return res.status(409).json({ error: createProblems.map(p => p.message).join(' '), code: 'ASSIGNMENT_RULES', problems: createProblems, overridable: true });
+      }
       // Dual-resource conflict guard (check-then-insert, matching hotel booking convention)
       if (b.therapist_id) {
         const tc = await therapistConflict(db, b.therapist_id, win.startAt, win.endAt);
@@ -34688,6 +34800,22 @@ ${data.tenant.name}`;
         await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]);
         return res.status(409).json({ error: "That slot was just booked by someone else. Pick another time.", code: 'SLOT_TAKEN' });
       }
+      // What the guest told us, and why the booking stands outside the rules.
+      if (createGuestGender || createPref || createProblems.length) {
+        await db.run("UPDATE spa_appointments SET client_gender = ?, therapist_gender_pref = ?, assignment_override_reason = ? WHERE id = ?",
+          [createGuestGender, createPref, createProblems.length ? createOverride : null, id])
+          .catch((e: any) => console.error('[spa] booking gender/override not saved:', id, e?.message || e));
+      }
+      if (clientId && spaGenderCode(b.client_gender)) {
+        await db.run("UPDATE spa_clients SET gender = ? WHERE id = ? AND COALESCE(gender, '') = ''", [spaGenderCode(b.client_gender), clientId]).catch(() => {});
+      }
+      if (createProblems.length) {
+        writeObjectAudit(db, req, {
+          objectType: 'SPA_APPOINTMENT', objectId: id, action: 'RULES_OVERRIDDEN',
+          summary: `Booked outside the rules (${createProblems.map(p => p.code).join(', ')}): ${createOverride}`,
+          after: { problems: createProblems, reason: createOverride },
+        }).catch(() => {});
+      }
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: id, action: 'CREATED',
         summary: `Appointment booked — "${service.name}"${b.client_name ? ` · ${b.client_name}` : ''} @ ${win.startAt} (₹${price})`,
@@ -34721,6 +34849,24 @@ ${data.tenant.name}`;
       // skipped the blocks, so a therapist on leave could be moved into the gap.
       const problem = await spaWindowProblem(db, therapistId || null, resourceId || null, win.startAt, win.endAt, appt.id);
       if (problem) return res.status(409).json({ error: problem });
+      // A new therapist, cabin or day meets the same rules as a new booking.
+      const newDay = tsShift(win.startAt, 0).slice(0, 10);
+      const movedRules = (therapistId || null) !== (appt.therapist_id || null) || (resourceId || null) !== (appt.resource_id || null)
+        || newDay !== tsShift(appt.start_at, 0).slice(0, 10);
+      let reschedProblems: any[] = [];
+      let reschedOverride = '';
+      if (movedRules && service) {
+        const apptClient: any = appt.client_id ? await db.get("SELECT gender FROM spa_clients WHERE id = ?", [appt.client_id]).catch(() => null) : null;
+        reschedProblems = await spaAssignmentProblems(db, {
+          service, therapistId: therapistId || null, resourceId: resourceId || null, date: newDay,
+          guestGender: spaGenderCode(b.client_gender) || spaGenderCode(appt.client_gender) || spaGenderCode(apptClient?.gender),
+          preference: spaGenderCode(appt.therapist_gender_pref), excludeApptId: appt.id,
+        });
+        reschedOverride = String(b.override_reason || '').trim();
+        if (reschedProblems.length && reschedOverride.length < 5) {
+          return res.status(409).json({ error: reschedProblems.map(p => p.message).join(' '), code: 'ASSIGNMENT_RULES', problems: reschedProblems, overridable: true });
+        }
+      }
       await db.run(
         "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
         [therapistId || null, resourceId || null, win.startAt, win.endAt, appt.id]
@@ -34730,6 +34876,15 @@ ${data.tenant.name}`;
           "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
           [appt.therapist_id || null, appt.resource_id || null, appt.start_at, appt.end_at, appt.id]);
         return res.status(409).json({ error: "That slot was just booked by someone else. Pick another time.", code: 'SLOT_TAKEN' });
+      }
+      if (reschedProblems.length) {
+        await db.run("UPDATE spa_appointments SET assignment_override_reason = ? WHERE id = ?", [reschedOverride, appt.id])
+          .catch((e: any) => console.error('[spa] override reason not saved:', appt.id, e?.message || e));
+        writeObjectAudit(db, req, {
+          objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'RULES_OVERRIDDEN',
+          summary: `Moved outside the rules (${reschedProblems.map(p => p.code).join(', ')}): ${reschedOverride}`,
+          after: { problems: reschedProblems, reason: reschedOverride },
+        }).catch(() => {});
       }
       writeObjectAudit(db, req, {
         objectType: 'SPA_APPOINTMENT', objectId: appt.id, action: 'RESCHEDULED',
@@ -35811,8 +35966,9 @@ ${data.tenant.name}`;
       const serviceId = String(req.query.service_id || '');
       const date = String(req.query.date || '');
       if (!serviceId || !date) return res.status(400).json({ error: "service_id and date are required" });
-      const slots = await findAvailableSlots(db, { serviceId, date });
-      res.json({ date, service_id: serviceId, slots });
+      const guestGenderP = spaGenderCode(req.query.guest_gender);
+      const slots = await findAvailableSlots(db, { serviceId, date, guestGender: guestGenderP, therapistGender: spaGenderCode(req.query.therapist_gender) });
+      res.json({ date, service_id: serviceId, slots, needs_guest_gender: !guestGenderP && await spaNeedsGuestGender(db, serviceId, slots) });
     } catch (err: any) { res.status(500).json({ error: "Failed to compute availability" }); }
   });
 
@@ -35836,9 +35992,11 @@ ${data.tenant.name}`;
       // The requested therapist and cabin, else the ones free at exactly the chosen
       // time. It fell back to the first free slot of the day, so a guest whose time
       // had just gone was booked at a time they never chose.
+      const pubGuest = spaGenderCode(b.client_gender);
+      const pubPref = spaGenderCode(b.therapist_gender_pref);
       let therapistId = b.therapist_id, resourceId = b.resource_id;
       if (!therapistId || !resourceId) {
-        const slots = await findAvailableSlots(db, { serviceId: b.service_id, date: m[1], maxSlots: 200 });
+        const slots = await findAvailableSlots(db, { serviceId: b.service_id, date: m[1], maxSlots: 200, guestGender: pubGuest, therapistGender: pubPref });
         const match = slots.find(s => s.start_at === startAt && (!therapistId || s.therapist_id === therapistId));
         if (!match) {
           const alternatives = Array.from(new Set(slots.map(s => String(s.start_at).slice(11, 16)))).sort().slice(0, 6);
@@ -35851,6 +36009,12 @@ ${data.tenant.name}`;
       if (await spaWindowProblem(db, therapistId || null, resourceId || null, startAt, endAt)) {
         return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
       }
+      // The rules a staff booking meets, with no override online.
+      const pubProblems = await spaAssignmentProblems(db, { service, therapistId: therapistId || null, resourceId: resourceId || null, date: m[1], guestGender: pubGuest, preference: pubPref });
+      if (pubProblems.some(p => p.code === 'GUEST_GENDER_REQUIRED')) {
+        return res.status(400).json({ error: "Please tell us your gender — this treatment is arranged by gender.", code: 'GUEST_GENDER_REQUIRED' });
+      }
+      if (pubProblems.length) return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
       // upsert client by phone
       let clientId: string;
       const existing: any = await db.get("SELECT id FROM spa_clients WHERE phone = ? LIMIT 1", [b.client_phone]);
@@ -35864,6 +36028,10 @@ ${data.tenant.name}`;
       if (await spaMustYield(db, id)) {
         await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]);
         return res.status(409).json({ error: "That time is no longer available.", code: 'SLOT_UNAVAILABLE' });
+      }
+      if (pubGuest || pubPref) {
+        await db.run("UPDATE spa_appointments SET client_gender = ?, therapist_gender_pref = ? WHERE id = ?", [pubGuest, pubPref, id])
+          .catch((e: any) => console.error('[spa] online booking gender not saved:', id, e?.message || e));
       }
       res.status(201).json({ success: true, appointment_id: id, start_at: startAt, end_at: endAt });
     } catch (err: any) { console.error("public spa booking error:", err); res.status(500).json({ error: "Failed to book" }); }
@@ -60728,8 +60896,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-phase1-skills-cabins-rosters',
+    commit_marker: 'spa-phase2a-booking-rules-search',
     code_features: [
+      'spa-phase2a-booking-rules-search — Spa Phase 2a. The slot engine reads the day\'s bookings and blocks once (it queried per therapist, cabin and slot) and applies the same-gender rule once the guest\'s gender is known, the guest\'s therapist preference, a cabin kept for one gender (open cabins chosen first) and the therapist\'s daily limit. spaAssignmentProblems holds those rules plus skills and cabin type for a therapist or cabin picked by hand: staff booking and reschedule return 409 ASSIGNMENT_RULES with the problems unless override_reason (5+ characters) is given, which is saved on the appointment and audited as RULES_OVERRIDDEN; online booking has no override (400 GUEST_GENDER_REQUIRED, else 409 SLOT_UNAVAILABLE). Appointments keep client_gender and therapist_gender_pref; availability returns needs_guest_gender. New GET /spa/therapist-search lists each active therapist with eligible, free and reasons. Skills & Cabin Types hides inactive entries behind Show inactive.',
       'spa-phase1-skills-cabins-rosters — Spa Phase 1 of the traceability plan. Skills master (spa_skills) and cabin types (spa_cabin_types); therapist skills at trainee/qualified/senior with certified-on and valid-until (spa_therapist_skills, PUT /spa/therapists/:tid/skills); what a treatment needs (spa_service_skills, services.cabin_type_id, services.gender_rule — GET/PUT /spa/services/:sid/requirements); therapist profile (gender, languages, phone, photo, daily limit, staff link via GET /spa/staff-options); cabin profile (type, equipment, gender designation, turnaround, status with reason); shifts with a break and checked effective dates. The slot engine now honours effective dates and breaks, offers only therapists holding every required skill at its level with an in-date certificate (a treatment naming no skills keeps the old therapist-to-service mapping), and only active cabins of the right type that are not under maintenance or out of order, clear of their turnaround; booking checks cabin status and turnaround too. POST /spa/setup/ayurveda-starter (13 skills, 7 cabin types, once, never overwriting) and POST /spa/import/therapists and /spa/import/cabins (preview by default). Master changes are audited. Screens: Therapists & Cabins gains cabin editing (type, equipment, turnaround, status with reason), therapist profiles with the staff link, skills with level and certificate dates, shifts with a break and dates, finding therapists by skill, level, gender and language, and a Skills & Cabin Types tab with the starter pack preview and CSV import preview; the treatment form names the skills, minimum level and cabin type it needs. The same-gender rule, cabin gender and the daily limit are stored but not yet applied — that is Phase 2.',
       'stock-reductions-draw-batches — only order consumption and spa treatment completion took stock out of stock_batches. Wastage, a manual adjustment down, a stock count below book, a hotel issue or adjustment down and a spa retail sale lowered ingredients.current_stock_qty and left the batches untouched, so batch lists and the batch-cost valuation kept stock that had gone. One helper, _drawFromBatches (soonest to expire, then oldest, as order consumption), now runs on all five. Stock added without a goods receipt still creates no batch, as before.',
       'spa-inactive-off-booking-screens — the spa treatment, therapist and cabin lists return deactivated rows (the setup screens need them), and the booking screens did not filter them: a deactivated treatment was offered in New Appointment (and failed with Service not found), a deactivated therapist kept a calendar column, and the Therapists & Cabins page and skill chips listed them. Booking dropdown now offers active treatments only; the calendar shows active therapists plus any inactive one with appointments that day; Service Menu and Therapists & Cabins hide inactive rows behind a Show inactive toggle and mark them; skill chips show active treatments plus any already assigned. Server: spaInactiveProblem refuses a staff booking, reschedule or online booking on a deactivated therapist or cabin (409 THERAPIST_INACTIVE / CABIN_INACTIVE). Tests reuse one ZZ-UAT therapist, cabin and treatment across runs instead of creating new ones, and consume their whole test batch.',

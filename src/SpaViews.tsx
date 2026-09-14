@@ -470,6 +470,10 @@ function SpaResources({ restaurantId, token }: Props) {
     return true;
   });
   const statusOf = (r: any) => CABIN_STATUS[String(r.status || 'AVAILABLE').toUpperCase()] || CABIN_STATUS.AVAILABLE;
+  // What Show inactive counts and reveals on the tab in view.
+  const inactivePool: any[] = tab === 'CABINS' ? resources : tab === 'THERAPISTS' ? therapists : [...skillList, ...cabinTypes];
+  const shownSkills = skillList.filter(s => showInactive || isOn(s));
+  const shownTypes = cabinTypes.filter(c => showInactive || isOn(c));
 
   return (
     <div>
@@ -478,9 +482,9 @@ function SpaResources({ restaurantId, token }: Props) {
         {([['CABINS', 'Treatment Cabins'], ['THERAPISTS', 'Therapists'], ['SETUP', 'Skills & Cabin Types']] as const).map(([k, label]) => (
           <button key={k} className={tab === k ? BTN_PRIMARY : BTN_GHOST} onClick={() => setTab(k)}>{label}</button>
         ))}
-        {tab !== 'SETUP' && (tab === 'CABINS' ? resources : therapists).some(x => !isOn(x)) && (
+        {inactivePool.some(x => !isOn(x)) && (
           <button className={`${BTN_GHOST} ml-auto`} onClick={() => setShowInactive(v => !v)}>
-            {showInactive ? 'Hide inactive' : `Show inactive (${(tab === 'CABINS' ? resources : therapists).filter(x => !isOn(x)).length})`}
+            {showInactive ? 'Hide inactive' : `Show inactive (${inactivePool.filter(x => !isOn(x)).length})`}
           </button>
         )}
       </div>
@@ -612,7 +616,7 @@ function SpaResources({ restaurantId, token }: Props) {
                 </div>
               )}
               <div className="divide-y divide-[#f0e9df]">
-                {skillList.map(s => (
+                {shownSkills.map(s => (
                   <div key={s.id} className={`py-2 flex items-center justify-between gap-2 ${isOn(s) ? '' : 'opacity-60'}`}>
                     <div className="min-w-0">
                       <div className="text-sm font-semibold break-words">{s.name}</div>
@@ -626,7 +630,7 @@ function SpaResources({ restaurantId, token }: Props) {
                     )}
                   </div>
                 ))}
-                {!skillList.length && <p className="text-sm text-[#6b5d52] py-2">No skills yet — add the starter pack or your own.</p>}
+                {!shownSkills.length && <p className="text-sm text-[#6b5d52] py-2">No skills yet — add the starter pack or your own.</p>}
               </div>
             </div>
 
@@ -642,7 +646,7 @@ function SpaResources({ restaurantId, token }: Props) {
                 </div>
               )}
               <div className="divide-y divide-[#f0e9df]">
-                {cabinTypes.map(c => (
+                {shownTypes.map(c => (
                   <div key={c.id} className={`py-2 flex items-center justify-between gap-2 ${isOn(c) ? '' : 'opacity-60'}`}>
                     <div className="min-w-0">
                       <div className="text-sm font-semibold break-words">{c.name}</div>
@@ -651,7 +655,7 @@ function SpaResources({ restaurantId, token }: Props) {
                     {canEdit && <button className={`${BTN_GHOST} shrink-0`} onClick={() => patchType(c.id, { is_active: isOn(c) ? 0 : 1 })}>{isOn(c) ? 'Deactivate' : 'Activate'}</button>}
                   </div>
                 ))}
-                {!cabinTypes.length && <p className="text-sm text-[#6b5d52] py-2">No cabin types yet — add the starter pack or your own.</p>}
+                {!shownTypes.length && <p className="text-sm text-[#6b5d52] py-2">No cabin types yet — add the starter pack or your own.</p>}
               </div>
             </div>
           </div>
