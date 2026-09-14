@@ -47,6 +47,7 @@ import {
 import {
   HR_MASTER_KINDS, HR_MASTER_LINKS, EMPLOYMENT_TYPES, HR_SETTINGS_DEFAULTS, HR_FIELD_LABELS,
   normaliseMasterCode, wouldCreateManagerCycle, nextEmployeeCodeFrom, diffFields,
+  HR_ENCRYPTED_FIELDS, encryptSensitive, decryptSensitive, isEncryptedSensitive, hrDataKeySource,
   type HrMasterKind,
 } from "./hrService.ts";
 import { generatePayslipPdf, type PayslipData } from "./payslipService.ts";
@@ -17949,26 +17950,36 @@ async function startServer() {
     const s = String(v);
     return '•'.repeat(Math.max(4, s.length - 4)) + s.slice(-4);
   }
-  function _hrMaskRow(row: any): any {
+  // Stored values may be encrypted (HRMS-R1B): decrypt, then mask.
+  function _hrDecryptRow(row: any): any {
     if (!row) return row;
     const out: any = { ...row };
+    for (const k of HR_ENCRYPTED_FIELDS) if (out[k] != null && out[k] !== '') out[k] = decryptSensitive(out[k]);
+    return out;
+  }
+  function _hrMaskRow(row: any): any {
+    if (!row) return row;
+    const out: any = _hrDecryptRow(row);
     for (const k of HR_MASKED_FIELDS) if (out[k]) out[k] = _hrMaskValue(out[k]);
     delete out.password;
     return out;
   }
-  // HR & Payroll at Edit, mirroring requireTabAction('HR_PAYROLL', 'UPDATE').
-  async function _hrCanEdit(req: AuthRequest): Promise<boolean> {
+  // HR Sensitive Data permission (HRMS-R1B): View reveals full numbers, Edit
+  // changes them and exports them, Full reads the access log. Like clinical
+  // records, a role whose permissions were never saved has none.
+  async function _hrSensitiveLevel(req: AuthRequest): Promise<number> {
     const role = String(req.user?.role || '').toUpperCase();
-    if (role === 'OWNER' || role === 'SUPER_ADMIN' || role === 'CTO') return true;
+    if (role === 'OWNER' || role === 'SUPER_ADMIN' || role === 'CTO') return 3;
     try {
-      const perms: any = await getTabPermissionsForRole(req.params.id, role);
-      if (perms === null) return true;
-      if (!('HR_PAYROLL' in perms)) {
-        const opRoles = _moduleOperationalRolesForTab('HR_PAYROLL');
-        return !!(opRoles && opRoles.includes(role));
-      }
-      return Number(perms.HR_PAYROLL || 0) >= 2;
-    } catch { return false; }
+      const perms: any = await getTabPermissionsForRole((req.user as any)?.restaurantId || req.params.id, role);
+      return perms ? Number(perms.HR_SENSITIVE || 0) : 0;
+    } catch { return 0; }
+  }
+  function _hrLogSensitive(db: DbInterface, req: AuthRequest, staffId: string | null, action: string, detail: string) {
+    return db.run(
+      "INSERT INTO hr_sensitive_access_log (id, staff_id, action, detail, actor_id, actor_email, actor_role) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [randomUUID(), staffId, action, detail, req.user?.id || null, req.user?.email || null, req.user?.role || null]
+    ).catch((e: any) => console.error('[hr] sensitive access not logged:', e?.message || e));
   }
 
   // ── HR history, settings and employee codes (HRMS-R1A) ─────────────────
@@ -17997,6 +18008,70 @@ async function startServer() {
     }
     return null;
   }
+
+  // ── Sensitive HR data tools (HRMS-R1B) ─────────────────────────────────
+  app.get("/api/restaurant/:id/hr/sensitive/status", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      if ((await _hrSensitiveLevel(req)) < 3) return res.status(403).json({ error: 'This needs HR Sensitive Data at Full.', code: 'HR_SENSITIVE_REQUIRED' });
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query("SELECT pan, aadhaar, bank_account FROM attendance_staff");
+      let encrypted = 0, unencrypted = 0;
+      for (const r of rows) for (const k of HR_ENCRYPTED_FIELDS) {
+        if (r[k] == null || r[k] === '') continue;
+        if (isEncryptedSensitive(r[k])) encrypted++; else unencrypted++;
+      }
+      res.json({ encrypted_values: encrypted, unencrypted_values: unencrypted, key_source: hrDataKeySource() });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to read the status' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hr/sensitive/access-log", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      if ((await _hrSensitiveLevel(req)) < 3) return res.status(403).json({ error: 'The access log needs HR Sensitive Data at Full.', code: 'HR_SENSITIVE_REQUIRED' });
+      const db = await getTenantDb(req.params.id);
+      const staffId = req.query.staff_id ? String(req.query.staff_id) : null;
+      const rows: any[] = await db.query(
+        `SELECT l.*, s.name AS staff_name FROM hr_sensitive_access_log l
+           LEFT JOIN attendance_staff s ON s.id = l.staff_id
+          ${staffId ? 'WHERE l.staff_id = ?' : ''}
+          ORDER BY l.created_at DESC LIMIT 300`,
+        staffId ? [staffId] : []
+      );
+      res.json({ entries: rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load the access log' });
+    }
+  });
+
+  // Encrypt ID and bank numbers saved before encryption. Owner only: it rewrites
+  // stored values (decision D6), and each value still reads back the same.
+  app.post("/api/restaurant/:id/hr/sensitive/encrypt-existing", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const role = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN', 'CTO'].includes(role)) return res.status(403).json({ error: 'Only the owner can encrypt stored numbers.' });
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query("SELECT id, pan, aadhaar, bank_account FROM attendance_staff");
+      let values = 0, employees = 0;
+      for (const r of rows) {
+        const sets: string[] = []; const vals: any[] = [];
+        for (const k of HR_ENCRYPTED_FIELDS) {
+          if (r[k] == null || r[k] === '' || isEncryptedSensitive(r[k])) continue;
+          const enc = encryptSensitive(r[k]);
+          if (decryptSensitive(enc) !== String(r[k])) continue;   // never write a value that does not read back
+          sets.push(`${k} = ?`); vals.push(enc); values++;
+        }
+        if (sets.length) {
+          await db.run(`UPDATE attendance_staff SET ${sets.join(', ')} WHERE id = ?`, [...vals, r.id]);
+          employees++;
+        }
+      }
+      await _hrLogSensitive(db, req, null, 'ENCRYPTED_STORED', `Encrypted ${values} stored values for ${employees} employees`);
+      res.json({ ok: true, values, employees });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to encrypt stored numbers' });
+    }
+  });
 
   // ── HR record history (HRMS-R1A): who changed an employee, a payroll run, an
   // offer letter, an expense claim, an organisation list entry or HR settings.
@@ -18288,7 +18363,7 @@ async function startServer() {
         params.push(statusFilter);
       }
       sql += ` ORDER BY name`;
-      let rows: any[] = await db.query(sql, params).catch(() => []);
+      let rows: any[] = (await db.query(sql, params).catch(() => [])).map(_hrDecryptRow);
       // Q-search is client-side after fetch — keeps the SQL simple
       // and handles the multi-column "name OR phone OR email OR PAN"
       // pattern in one place. Reasonable for staff lists (< 500 rows).
@@ -18330,8 +18405,9 @@ async function startServer() {
            FROM payslips WHERE staff_id = ? ORDER BY pay_period_end DESC LIMIT 12`,
         [req.params.staffId]
       ).catch(() => []);
-      const reveal = String(req.query.reveal || '') === '1' && await _hrCanEdit(req);
+      const reveal = String(req.query.reveal || '') === '1' && (await _hrSensitiveLevel(req)) >= 1;
       if (reveal) {
+        await _hrLogSensitive(db, req, String(req.params.staffId), 'REVEALED', 'PAN, Aadhaar and bank account shown on the employee record');
         await writeObjectAudit(db, req, {
           objectType: 'EMPLOYEE', objectId: String(req.params.staffId), action: 'SENSITIVE_REVEALED',
           summary: `Full PAN, Aadhaar and bank account shown for ${staff.name || req.params.staffId}`,
@@ -18346,7 +18422,7 @@ async function startServer() {
       ).catch(() => []);
       const { password: _pw, ...employee } = staff;
       res.json({
-        employee: reveal ? employee : _hrMaskRow(employee),
+        employee: reveal ? _hrDecryptRow(employee) : _hrMaskRow(employee),
         revealed: reveal,
         reporting_manager: manager,
         direct_reports: directReports,
@@ -18367,8 +18443,9 @@ async function startServer() {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const staffId = String(req.params.staffId);
-      const before: any = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [staffId]);
-      if (!before) return res.status(404).json({ error: 'Employee not found' });
+      const beforeRaw: any = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [staffId]);
+      if (!beforeRaw) return res.status(404).json({ error: 'Employee not found' });
+      const before: any = _hrDecryptRow(beforeRaw);
       const ALLOWED: Record<string, true> = {
         name: true, phone: true, email: true,
         designation: true, department: true, joining_date: true, ctc: true,
@@ -18456,10 +18533,24 @@ async function startServer() {
         if (!Number(mRow.is_active)) return res.status(400).json({ error: `${mRow.name} is switched off. Pick a ${link.label} that is in use.` });
         if (link.textColumn) updates[link.textColumn] = mRow.name;
       }
+      // Changing PAN, Aadhaar or bank account needs HR Sensitive Data at Edit, and the
+      // values are stored encrypted (HRMS-R1B).
+      const sensitiveChanged = HR_ENCRYPTED_FIELDS.filter((k) => k in updates && String(updates[k] ?? '') !== String(before[k] ?? ''));
+      if (sensitiveChanged.length && (await _hrSensitiveLevel(req)) < 2) {
+        return res.status(403).json({ error: 'Changing PAN, Aadhaar or bank account needs HR Sensitive Data at Edit. Ask the owner to grant it in Staff Access.', code: 'HR_SENSITIVE_REQUIRED', required_tab: 'HR_SENSITIVE' });
+      }
+      for (const k of HR_ENCRYPTED_FIELDS) {
+        if (!(k in updates)) continue;
+        if (String(updates[k] ?? '') === String(before[k] ?? '')) { delete updates[k]; continue; }
+        updates[k] = encryptSensitive(updates[k]);
+      }
+      if (sensitiveChanged.length) {
+        await _hrLogSensitive(db, req, staffId, 'CHANGED', `Changed ${sensitiveChanged.map(k => HR_FIELD_LABELS[k] || k).join(', ')}`);
+      }
       const keys = Object.keys(updates);
       if (keys.length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
       await db.run(`UPDATE attendance_staff SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...keys.map(k => updates[k]), staffId]);
-      const updated: any = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [staffId]);
+      const updated: any = _hrDecryptRow(await db.get("SELECT * FROM attendance_staff WHERE id = ?", [staffId]));
       const chEmp = diffFields(before, updated, Object.keys(ALLOWED), _hrAuditMask);
       if (chEmp.keys.length) {
         await writeObjectAudit(db, req, {
@@ -18481,7 +18572,7 @@ async function startServer() {
   app.get("/api/restaurant/:id/hr/employees.csv", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      const rows: any[] = await db.query(
+      let rows: any[] = await db.query(
         `SELECT id, name, role, designation, department, hr_status,
                 joining_date, ctc, hourly_rate, payroll_id,
                 pan, aadhaar, uan, esic_number,
@@ -18501,8 +18592,10 @@ async function startServer() {
         return /[",\n\r]/.test(s) ? `"${s}"` : s;
       };
       // Full numbers only for HR & Payroll at Edit, and the export is noted (HRMS-R0B).
-      const fullNumbers = await _hrCanEdit(req);
+      const fullNumbers = (await _hrSensitiveLevel(req)) >= 2;
+      rows = rows.map(_hrDecryptRow);
       if (fullNumbers) {
+        await _hrLogSensitive(db, req, null, 'EXPORTED', `Employee CSV with full PAN, Aadhaar and bank account (${rows.length} employees)`);
         await writeObjectAudit(db, req, {
           objectType: 'EMPLOYEE', objectId: 'ALL', action: 'SENSITIVE_EXPORTED',
           summary: `Employee CSV exported with full PAN, Aadhaar and bank account (${rows.length} employees)`,
@@ -18847,7 +18940,7 @@ async function startServer() {
           ORDER BY s.name`,
         [req.params.runId]
       );
-      res.json({ run, payslips: payslips.map(_hrMaskRow) });
+      res.json({ run, payslips: payslips.map((p: any) => _hrMaskRow(p)) });
     } catch (err: any) {
       console.error('payroll/payslips list error:', err);
       res.status(500).json({ error: err?.message || 'List failed' });
@@ -19011,8 +19104,10 @@ async function startServer() {
 
         const staffSnapshot = JSON.stringify({
           id: emp.id, name: emp.name, designation: emp.designation, department: emp.department,
-          pan: emp.pan, uan: emp.uan, esic_number: emp.esic_number,
-          bank_account: emp.bank_account, bank_ifsc: emp.bank_ifsc, bank_name: emp.bank_name,
+          // Masked copies only: the snapshot is never read back, so it need not
+          // hold full ID or bank numbers (HRMS-R1B).
+          pan: _hrMaskValue(decryptSensitive(emp.pan)), uan: emp.uan, esic_number: emp.esic_number,
+          bank_account: _hrMaskValue(decryptSensitive(emp.bank_account)), bank_ifsc: emp.bank_ifsc, bank_name: emp.bank_name,
           joining_date: emp.joining_date, ctc: emp.ctc,
         });
         const structureSnapshot = JSON.stringify({
@@ -19270,10 +19365,10 @@ async function startServer() {
         designation: staff.designation || '',
         department: staff.department || '',
         joining_date: staff.joining_date || '',
-        pan: staff.pan || '',
+        pan: decryptSensitive(staff.pan) || '',
         uan: staff.uan || '',
         esic_number: staff.esic_number || '',
-        bank_account: staff.bank_account || '',
+        bank_account: decryptSensitive(staff.bank_account) || '',
         bank_ifsc: staff.bank_ifsc || '',
         bank_name: staff.bank_name || '',
       },
@@ -19328,8 +19423,8 @@ You can also view all your payslips in the employee portal.
   app.get("/api/restaurant/:id/payroll/runs/:runId/export.csv", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
       // The bank advice carries full account numbers (HRMS-R0B).
-      if (!(await _hrCanEdit(req))) {
-        return res.status(403).json({ error: 'The bank advice file carries full account numbers, so it needs HR & Payroll at Edit.' });
+      if ((await _hrSensitiveLevel(req)) < 2) {
+        return res.status(403).json({ error: 'The bank advice file carries full account numbers, so it needs HR Sensitive Data at Edit.', code: 'HR_SENSITIVE_REQUIRED', required_tab: 'HR_SENSITIVE' });
       }
       const db = await getTenantDb(req.params.id);
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
@@ -19348,17 +19443,18 @@ You can also view all your payslips in the employee portal.
         const period = `${run.period_start} to ${run.period_end}`;
         const cells = [
           p.staff_name || '',
-          p.bank_account || '',
+          decryptSensitive(p.bank_account) || '',
           p.bank_ifsc || '',
           p.bank_name || '',
           Number(p.net_pay || 0).toFixed(2),
-          p.pan || '',
+          decryptSensitive(p.pan) || '',
           p.uan || '',
           period,
         ].map((s) => /[",\n]/.test(String(s)) ? `"${String(s).replace(/"/g, '""')}"` : String(s));
         rows.push(cells.join(','));
       }
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      await _hrLogSensitive(db, req, null, 'EXPORTED', `Bank advice for payroll ${run.year}-${String(run.month).padStart(2, '0')} (${payslips.length} employees)`);
       res.setHeader('Content-Disposition', `attachment; filename="bank-advice-${run.year}-${String(run.month).padStart(2, '0')}.csv"`);
       res.send('﻿' + rows.join('\n'));
     } catch (err: any) {
@@ -19448,7 +19544,7 @@ You can also view all your payslips in the employee portal.
         period_end,
         deductees: rows.filter((r: any) => Number(r.tds_deducted) > 0).map((r: any) => ({
           employee_name: r.name,
-          pan: r.pan || 'PANNOTAVL',
+          pan: decryptSensitive(r.pan) || 'PANNOTAVL',
           section_code: '192',
           amount_paid: Number(r.amount_paid) || 0,
           tds_deducted: Number(r.tds_deducted) || 0,
@@ -19544,7 +19640,7 @@ You can also view all your payslips in the employee portal.
         },
         employee: {
           name: staff.name || '',
-          pan: staff.pan || '',
+          pan: decryptSensitive(staff.pan) || '',
           designation: staff.designation || '',
           department: staff.department || '',
           joining_date: staff.joining_date || '',
@@ -63261,8 +63357,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hrms-r1a-org-record-history',
+    commit_marker: 'hrms-r1b-sensitive-data',
     code_features: [
+      'hrms-r1b-sensitive-data — New permission HR_SENSITIVE (not granted to existing roles): View reveals full PAN, Aadhaar and bank account (?reveal=1) and each reveal is logged, Edit changes them and downloads the bank advice and full employee CSV, Full reads /hr/sensitive/access-log and /hr/sensitive/status. The three fields are stored AES-256-GCM encrypted in place (hr1: values, key HR_DATA_KEY or derived from JWT_SECRET); plaintext values still read; every reader decrypts (HR list/detail/PUT/CSV, run payslips, payroll compute snapshot now masked, payslip PDF, bank advice, 24Q, Form 16, self profile). Owner-only POST /hr/sensitive/encrypt-existing encrypts values saved before. hr_sensitive_access_log table.',
       'hrms-r1a-org-record-history — hrService.ts createHrTables at tenant init (staff_advances, staff_payroll, pay columns moved out of request handlers; ensurePayrollTables is a no-op); hr_masters (DEPARTMENT, DESIGNATION, GRADE, COST_CENTRE) with /hr/masters CRUD, from-existing, deactivate when in use, rename copied to staff text; attendance_staff employee_code (unique), employment_type, reporting_manager_id (loop check), master links, probation/confirmation/leaving dates, notice days; /hr/org-chart; /hr/employees/assign-codes and hr_settings.auto_employee_code (EMP-#### from the highest code, no counter); /hr/settings; /hr/records/:type/:oid/audit for EMPLOYEE, PAYROLL_RUN, OFFER_LETTER, EXPENSE_CLAIM, HR_MASTER, HR_SETTINGS with writes on staff create/bulk/edit/delete/password/pay settings, HR profile, salary structure, payroll run create/compute/approve/lock/paid/delete, offers, expense claims; payroll_runs and salary_structures in the statutory edit log.',
       'stockout-measured-to-now — GET /inventory/stockouts counted time up to the END of the last day of the report (toTs), and `to` defaults to today, so every span reached into hours that had not happened yet. An item still out was charged for the rest of today, and an item created minutes ago already had hours of history; between midnight and 05:30 IST that was more than a day, because toTs is 05:30 IST tomorrow, so the one-day guard published availability from seconds of data. TC-INV-STOCKOUT-NEEDS-A-DAY passed and then failed on the same build (b58b8f8) for exactly this reason: the failing run ended 00:42 IST and read tracked 1.2d, availability 100. Tracked, still-out and still-low spans now end at endTs = min(toTs, now). Unchanged: which movements fall in the window, the opening balance, events, currently_out and period.days. The portfolio rate still divides out time by tracked time over the same items, both now measured to endTs. The still-out and still-low spans are floored at zero, since a window that starts after today, or an item created after a past window ended, has startTs later than endTs and read as negative days out. Day boundaries stay at UTC midnight (05:30 IST) exactly as in the month-end close, whose SQL uses the same ::date cut; moving only this report to IST days would make its opening balance disagree with the close, so that is left for a deliberate decision. Smoke: TC-INV-STOCKOUT-MEASURED-TO-NOW takes the fixture out a third time and asserts, for items made seconds ago, days_tracked and days_out of at most 0.1 with 3 events and out now; the old code reads at least 0.2 day at every hour, so the test catches it whenever the suite runs.',
       'hrms-r0b-staff-data-attendance — PATCH /api/owner/staff/:id allow-list (name, role, login_id, phone, email, is_active; others ignored, 400 when none); POST /api/owner/staff/bulk (created_count, created[{row,id,name}], errors[{row,error}]); HR PAN/Aadhaar/bank_account masked in /hr/employees list/detail/PUT response/CSV, run payslips and /me/profile, ?reveal=1 needs HR_PAYROLL Edit and writes EMPLOYEE SENSITIVE_REVEALED, masked values skipped on PUT, password hash no longer returned; bank advice CSV needs HR_PAYROLL Edit; timesheet recompute counts only approved attendance; self-log on an APPROVED day 409 ATTENDANCE_APPROVED; expense claim HR approval posts EXP-<id> from its lines (Dr category accounts, Cr 2400); POST /hr/expenses/:claimId/cancel reverses it; hotel SERVICE_CHARGE credited to 4020 at settlement and in the year-end accrual; GET /timesheet returns status; staff-picker returns default_hours.',

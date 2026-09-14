@@ -12,6 +12,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { DbInterface } from './db.ts';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 
 export const HR_MASTER_KINDS = ['DEPARTMENT', 'DESIGNATION', 'GRADE', 'COST_CENTRE'] as const;
 export type HrMasterKind = typeof HR_MASTER_KINDS[number];
@@ -112,6 +113,21 @@ export async function createHrTables(db: DbInterface): Promise<void> {
   `).catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_hr_masters_kind ON hr_masters (kind, is_active)`).catch(() => {});
 
+  // ── Who saw or exported full ID and bank numbers (HRMS-R1B) ──
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS hr_sensitive_access_log (
+      id          TEXT PRIMARY KEY,
+      staff_id    TEXT,
+      action      TEXT NOT NULL,
+      detail      TEXT,
+      actor_id    TEXT,
+      actor_email TEXT,
+      actor_role  TEXT,
+      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_hr_sensitive_log ON hr_sensitive_access_log (staff_id, created_at)`).catch(() => {});
+
   // ── HR settings (one row per tenant, JSON) ──
   await db.exec(`
     CREATE TABLE IF NOT EXISTS hr_settings (
@@ -183,6 +199,63 @@ export function diffFields(before: any, after: any, keys: string[], mask?: (key:
     out.after[k] = mask ? mask(k, a) : a;
   }
   return out;
+}
+
+// ─────────────────────── sensitive numbers at rest (HRMS-R1B) ───────────────────────
+// PAN, Aadhaar and bank account are stored AES-256-GCM encrypted in their own
+// columns as "hr1:<iv>:<tag>:<data>". A value without the prefix is one saved
+// before encryption and is read as it is. The key is HR_DATA_KEY (base64, 32
+// bytes) when set, otherwise derived from JWT_SECRET; decryption tries both, so
+// setting HR_DATA_KEY later keeps older values readable. Changing JWT_SECRET
+// without HR_DATA_KEY makes values encrypted under the old secret unreadable.
+export const HR_ENCRYPTED_FIELDS = ['pan', 'aadhaar', 'bank_account'] as const;
+
+function _hrDataKeys(): Buffer[] {
+  const keys: Buffer[] = [];
+  const raw = process.env.HR_DATA_KEY;
+  if (raw) {
+    try { const b = Buffer.from(raw, 'base64'); if (b.length === 32) keys.push(b); } catch { /* ignore a malformed key */ }
+  }
+  keys.push(createHash('sha256').update(`atithi-hr-data-v1:${process.env.JWT_SECRET || 'atithi-setu-fallback'}`).digest());
+  return keys;
+}
+
+/** Which key new values are encrypted with. */
+export function hrDataKeySource(): 'HR_DATA_KEY' | 'JWT_SECRET' {
+  const raw = process.env.HR_DATA_KEY;
+  try { if (raw && Buffer.from(raw, 'base64').length === 32) return 'HR_DATA_KEY'; } catch { /* fall through */ }
+  return 'JWT_SECRET';
+}
+
+export function isEncryptedSensitive(v: any): boolean {
+  return typeof v === 'string' && v.startsWith('hr1:');
+}
+
+export function encryptSensitive(plain: any): string | null {
+  if (plain == null || plain === '') return null;
+  const s = String(plain);
+  if (isEncryptedSensitive(s)) return s;
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', _hrDataKeys()[0], iv);
+  const enc = Buffer.concat([c.update(s, 'utf8'), c.final()]);
+  return `hr1:${iv.toString('base64')}:${c.getAuthTag().toString('base64')}:${enc.toString('base64')}`;
+}
+
+/** The plain value; null when it cannot be decrypted with any key. */
+export function decryptSensitive(stored: any): string | null {
+  if (stored == null || stored === '') return null;
+  const v = String(stored);
+  if (!isEncryptedSensitive(v)) return v;
+  const parts = v.split(':');
+  if (parts.length !== 4) return null;
+  for (const key of _hrDataKeys()) {
+    try {
+      const d = createDecipheriv('aes-256-gcm', key, Buffer.from(parts[1], 'base64'));
+      d.setAuthTag(Buffer.from(parts[2], 'base64'));
+      return Buffer.concat([d.update(Buffer.from(parts[3], 'base64')), d.final()]).toString('utf8');
+    } catch { /* try the next key */ }
+  }
+  return null;
 }
 
 /** Plain labels for employee fields, used in history summaries. */

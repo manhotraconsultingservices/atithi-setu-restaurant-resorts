@@ -17,7 +17,7 @@ import { StatusBoard } from './StatusBoard';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
 import { EventsModule, EventBookingPage } from './EventViews';
-import { canWriteTab, canDeleteTab } from './perm';
+import { canWriteTab, canDeleteTab, tabLevel } from './perm';
 import { prettyRoleLabel } from './roleLabel';
 import { computeTabVisibility } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
@@ -29033,6 +29033,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'TIMESHEET',         label: 'Timesheet',               description: 'Planned vs actual hours, payroll prep, overtime variance.' },
               { id: 'ATTENDANCE',        label: 'Attendance',              description: 'Clock-in / clock-out records, daily attendance report.' },
               { id: 'HR_PAYROLL',        label: 'HR & Payroll',            description: 'Employee profile + salary structure + payslip + statutory (PF/ESI/TDS) + expenses + offer letters.' },
+              { id: 'HR_SENSITIVE',      label: 'HR Sensitive Data',       description: 'Full PAN, Aadhaar and bank account numbers. View shows them (every time is logged), Edit changes them and downloads the bank advice and full employee CSV, Full reads the access log. Needs HR & Payroll as well.' },
               { id: 'STAFF_PAYROLL',     label: 'Operational Payroll',     description: 'Attendance-driven wages + advances for hourly / full-time operational staff (separate from formal HR payroll).' },
               { id: 'ALL_REPORTS',       label: 'Reports & Analytics',    description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis — the unified reports hub.' },
               { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports',     description: 'F&B revenue, top dishes, peak-hour heatmap, delivery settlement, customer cohort — separate reporting hub.', restaurantOnly: true },
@@ -29135,7 +29136,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               LOYALTY: 'SALES', FEEDBACK: 'SALES', CHANNEL_MANAGER: 'SALES', PUBLIC_BOOKING_PAGE: 'SALES',
               INVENTORY: 'INVENTORY', HOTEL_INVENTORY: 'INVENTORY', SPA_INVENTORY: 'INVENTORY',
               ALL_REPORTS: 'REPORTS',
-              STAFF: 'WORKFORCE', ROSTER: 'WORKFORCE', TIMESHEET: 'WORKFORCE', ATTENDANCE: 'WORKFORCE', HR_PAYROLL: 'WORKFORCE', STAFF_PAYROLL: 'WORKFORCE',
+              STAFF: 'WORKFORCE', ROSTER: 'WORKFORCE', TIMESHEET: 'WORKFORCE', ATTENDANCE: 'WORKFORCE', HR_PAYROLL: 'WORKFORCE', HR_SENSITIVE: 'WORKFORCE', STAFF_PAYROLL: 'WORKFORCE',
               NOTIFICATIONS: 'ADMIN', SUBSCRIPTION: 'ADMIN', SETTINGS: 'ADMIN',
             };
             const moduleOf = (id: string) => TAB_MODULE[id] || 'OTHER';
@@ -55203,7 +55204,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // grant/deny the same set. Finance/HR tabs are both-module → they live here.
   const RESTAURANT_TABS = [
     'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'ALL_REPORTS', 'RESTAURANT_REPORTS', 'QR', 'BOOKINGS',
-    'LOYALTY', 'STAFF', 'ROSTER', 'TIMESHEET', 'ORDERS', 'INVOICES', 'ATTENDANCE', 'HR_PAYROLL',
+    'LOYALTY', 'STAFF', 'ROSTER', 'TIMESHEET', 'ORDERS', 'INVOICES', 'ATTENDANCE', 'HR_PAYROLL', 'HR_SENSITIVE',
     'STAFF_PAYROLL', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'RECEIVABLES',
     'ACCOUNTING', 'ACCOUNTS_PNL', 'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'CASH_DRAWER', 'CHECKLIST_BOARD',
     'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'SETTINGS'
@@ -69993,6 +69994,77 @@ function HrHistoryOverlay({ kind, id, title, subtitle, facts, restaurantId, toke
   );
 }
 
+// ─── Sensitive HR data: storage and access log (HRMS-R1B) ─────────
+function HrSensitiveDataCard({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const toast = useToast();
+  const showConfirm = useConfirm();
+  const level = tabLevel('HR_SENSITIVE');
+  const isOwner = ['OWNER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase());
+  const [status, setStatus] = useState<any | null>(null);
+  const [entries, setEntries] = useState<any[]>([]);
+  const base = `/api/restaurant/${restaurantId}/hr/sensitive`;
+  const load = useCallback(async () => {
+    if (level < 3) return;
+    const headers = { Authorization: `Bearer ${token}` };
+    try {
+      const [st, lg] = await Promise.all([
+        fetch(`${base}/status`, { headers }).then(r => r.ok ? r.json() : null),
+        fetch(`${base}/access-log`, { headers }).then(r => r.ok ? r.json() : { entries: [] }),
+      ]);
+      setStatus(st);
+      setEntries(lg?.entries || []);
+    } catch { /* the card stays empty */ }
+    // eslint-disable-next-line
+  }, [restaurantId, token, level]);
+  useEffect(() => { load(); }, [load]);
+  if (level < 3) return null;
+  const encryptNow = async () => {
+    if (!await showConfirm({ title: `Encrypt ${status?.unencrypted_values || 0} stored ID and bank numbers? They read back the same.` })) return;
+    try {
+      const res = await fetch(`${base}/encrypt-existing`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      toast.success(`Encrypted ${j.values} values for ${j.employees} employee${j.employees === 1 ? '' : 's'}`);
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  return (
+    <div className="bg-white rounded-3xl border border-[#e8dccf] p-5 space-y-3">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-lg font-bold text-[#1a1208]">Sensitive HR data</h3>
+          <p className="text-xs text-[#6b5d52] mt-0.5">PAN, Aadhaar and bank account are stored encrypted. Seeing or exporting full numbers needs the HR Sensitive Data permission, and each time is logged below.</p>
+        </div>
+        {isOwner && Number(status?.unencrypted_values) > 0 && (
+          <button onClick={encryptNow} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">Encrypt {status.unencrypted_values} stored number{Number(status.unencrypted_values) === 1 ? '' : 's'}</button>
+        )}
+      </div>
+      {status && (
+        <p className="text-xs text-[#3d3128]">
+          {status.encrypted_values} encrypted · {status.unencrypted_values} saved before encryption
+          {status.key_source === 'JWT_SECRET' && <span className="text-[#9c8e85]"> · key derived from the server secret (set HR_DATA_KEY to keep it separate)</span>}
+        </p>
+      )}
+      <div className="overflow-x-auto max-h-64 overflow-y-auto">
+        <table className="w-full text-xs">
+          <thead><tr className="text-left text-[#9c8e85] border-b border-[#e8dccf]"><th className="py-1 pr-2">When</th><th className="py-1 pr-2">Who</th><th className="py-1 pr-2">Employee</th><th className="py-1 pr-2">What</th></tr></thead>
+          <tbody>
+            {entries.length === 0 && <tr><td colSpan={4} className="py-4 text-center italic text-[#9c8e85]">No full numbers seen or exported yet.</td></tr>}
+            {entries.map((e: any) => (
+              <tr key={e.id} className="border-b border-[#f1ece3]">
+                <td className="py-1 pr-2 whitespace-nowrap">{String(e.created_at || '').slice(0, 16).replace('T', ' ')}</td>
+                <td className="py-1 pr-2">{e.actor_email || e.actor_id || '—'}<span className="text-[#9c8e85]"> {e.actor_role ? `· ${prettyRoleLabel(e.actor_role)}` : ''}</span></td>
+                <td className="py-1 pr-2">{e.staff_name || (e.staff_id ? e.staff_id : 'All employees')}</td>
+                <td className="py-1 pr-2">{e.detail || e.action}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ─── Organisation: lists, employee codes, reporting lines (HRMS-R1A) ───
 const HR_MASTER_KIND_LABEL: Record<string, { one: string; many: string }> = {
   DEPARTMENT: { one: 'department', many: 'Departments' },
@@ -70208,6 +70280,8 @@ function HrOrganisationView({ restaurantId, token }: { restaurantId: string; tok
           Give new staff a code automatically
         </label>
       </div>
+
+      <HrSensitiveDataCard restaurantId={restaurantId} token={token} />
 
       <div className="bg-white rounded-3xl border border-[#e8dccf] p-5 space-y-2">
         <h3 className="text-lg font-bold text-[#1a1208]">Reporting lines</h3>
@@ -71225,7 +71299,7 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
         { headers: { Authorization: `Bearer ${token}` } }
       );
       const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j.revealed) { toast.error(j.error || 'You need HR & Payroll at Edit to see full numbers.'); return; }
+      if (!res.ok || !j.revealed) { toast.error(j.error || 'Seeing full numbers needs the HR Sensitive Data permission.'); return; }
       setEmp({ ...emp, pan: j.employee?.pan ?? null, aadhaar: j.employee?.aadhaar ?? null, bank_account: j.employee?.bank_account ?? null });
       setRevealed(true);
     } catch (err: any) { toast.error(err?.message || 'Could not load the full numbers'); }
@@ -71352,8 +71426,8 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
           <section>
             <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
               <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Statutory identifiers</p>
-              {!revealed && canWriteTab('HR_PAYROLL') && (
-                <button type="button" onClick={revealNumbers} className="text-[11px] font-bold text-[#cc5a16] hover:underline">Show full numbers to edit</button>
+              {!revealed && tabLevel('HR_SENSITIVE') >= 1 && (
+                <button type="button" onClick={revealNumbers} className="text-[11px] font-bold text-[#cc5a16] hover:underline">{tabLevel('HR_SENSITIVE') >= 2 ? 'Show full numbers to edit' : 'Show full numbers'}</button>
               )}
             </div>
             {!revealed && (

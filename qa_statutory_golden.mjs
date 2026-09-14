@@ -610,6 +610,34 @@ eq('TDS NEW @ ₹25,00,000', applyTDSSlabs(2500000, TDS_NEW), statutoryRound(439
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 13. HRMS-R1B (Sep 2026) — sensitive numbers encrypted at rest
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const hr = await import('./hrService.ts');
+  const prevKey = process.env.HR_DATA_KEY;
+  delete process.env.HR_DATA_KEY;
+  const enc = hr.encryptSensitive('ABCDE1234F');
+  eq('encrypted value carries the hr1 prefix', String(enc).startsWith('hr1:'), true);
+  eq('encrypted value reads back', hr.decryptSensitive(enc), 'ABCDE1234F');
+  eq('two encryptions differ (random IV)', hr.encryptSensitive('ABCDE1234F') !== enc, true);
+  eq('a value saved before encryption reads as it is', hr.decryptSensitive('ABCDE1234F'), 'ABCDE1234F');
+  eq('an encrypted value is not encrypted twice', hr.encryptSensitive(enc), enc);
+  const parts = String(enc).split(':');
+  const flipped = parts[3][0] === 'A' ? 'B' + parts[3].slice(1) : 'A' + parts[3].slice(1);
+  eq('a tampered value does not read', hr.decryptSensitive([parts[0], parts[1], parts[2], flipped].join(':')), null);
+  eq('empty stays empty', hr.encryptSensitive(''), null);
+  eq('key source without HR_DATA_KEY', hr.hrDataKeySource(), 'JWT_SECRET');
+  process.env.HR_DATA_KEY = Buffer.alloc(32, 7).toString('base64');
+  eq('with HR_DATA_KEY set, older values still read', hr.decryptSensitive(enc), 'ABCDE1234F');
+  const enc2 = hr.encryptSensitive('999988887777');
+  eq('new values use HR_DATA_KEY', hr.hrDataKeySource(), 'HR_DATA_KEY');
+  eq('and read back', hr.decryptSensitive(enc2), '999988887777');
+  delete process.env.HR_DATA_KEY;
+  eq('without that key, a value encrypted with it does not read', hr.decryptSensitive(enc2), null);
+  if (prevKey !== undefined) process.env.HR_DATA_KEY = prevKey;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Summary
 // ═══════════════════════════════════════════════════════════════════════════
 const total = pass + fail;
