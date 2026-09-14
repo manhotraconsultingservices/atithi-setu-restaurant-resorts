@@ -933,7 +933,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     } catch { /* */ } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, [day]);
-  useEffect(() => { (async () => { try { setServices(await api('/spa/services')); } catch {} try { setTherapists(await api('/spa/therapists')); } catch {} })(); }, []);
+  useEffect(() => { (async () => { try { setServices(await api('/spa/services')); } catch {} try { setTherapists(await api('/spa/therapists')); } catch {} if (calendar) { try { setCabins(await api('/spa/resources')); } catch {} } })(); }, []);
 
   const genderQs = () => `${bk.client_gender ? `&guest_gender=${bk.client_gender}` : ''}${bk.therapist_gender_pref ? `&therapist_gender=${bk.therapist_gender_pref}` : ''}`;
   const searchSlots = async () => {
@@ -1026,6 +1026,65 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   const onAppt = (a: any, tid: string) => a.therapist_id === tid || (a.assistant_ids || []).includes(tid);
   const calTherapists = therapists.filter((t: any) => Number(t.is_active ?? 1) === 1 || appts.some((a: any) => onAppt(a, t.id)));
 
+  // ── The calendar as a time grid ─────────────────────────────────────────────
+  const [calView, setCalView] = useState<'THERAPIST' | 'CABIN'>('THERAPIST');
+  const [dragInfo, setDragInfo] = useState<{ id: string; fromCol: string; grabMin: number } | null>(null);
+  const [moveRules, setMoveRules] = useState<any>(null);
+  const [moveReason, setMoveReason] = useState('');
+  const PX = 1.2; // pixels per minute
+  const minsOfTs = (ts: any) => Number(String(ts || '').slice(11, 13)) * 60 + Number(String(ts || '').slice(14, 16));
+  // Cancelled and no-show treatments hold no time, so they stay off the grid.
+  const dayAppts = appts.filter((a: any) => !['CANCELLED', 'NO_SHOW'].includes(a.status));
+  const hiddenCount = appts.length - dayAppts.length;
+  const gridStart = Math.floor(Math.min(8 * 60, ...dayAppts.map((a: any) => minsOfTs(a.start_at))) / 60) * 60;
+  const gridEnd = Math.min(24 * 60, Math.ceil(Math.max(20 * 60, ...dayAppts.map((a: any) => minsOfTs(a.end_at))) / 60) * 60);
+  const gridHours = Array.from({ length: Math.floor((gridEnd - gridStart) / 60) + 1 }, (_, i) => Math.floor(gridStart / 60) + i);
+  const calCols: { id: string; name: string; inactive: boolean; items: any[] }[] = calView === 'THERAPIST'
+    ? calTherapists.map((t: any) => ({ id: t.id, name: t.display_name, inactive: Number(t.is_active ?? 1) !== 1, items: dayAppts.filter((a: any) => onAppt(a, t.id)) }))
+    : cabins.filter((c: any) => Number(c.is_active ?? 1) === 1 || dayAppts.some((a: any) => a.resource_id === c.id))
+        .map((c: any) => ({ id: c.id, name: c.name, inactive: Number(c.is_active ?? 1) !== 1, items: dayAppts.filter((a: any) => a.resource_id === c.id) }));
+  const hhmmOfMin = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  // A treatment dragged to a new time, therapist or cabin. The server re-checks it
+  // as a reschedule; a move outside the treatment's rules asks for a reason.
+  const dropAppt = async (a: any, fromCol: string, toCol: string, startMin: number, reason?: string) => {
+    if (!canEdit) { alert('View-only access — you cannot reschedule appointments.'); return; }
+    const body: any = { start_at: `${day} ${hhmmOfMin(startMin)}` };
+    if (toCol !== fromCol) {
+      if (calView === 'THERAPIST') {
+        if (a.therapist_id !== fromCol) { alert("Drag the lead therapist's card to give this treatment to another therapist."); return; }
+        if ((a.assistant_ids || []).includes(toCol)) { alert('That therapist is already assisting on this treatment.'); return; }
+        body.therapist_id = toCol;
+      } else {
+        body.resource_id = toCol;
+      }
+    } else if (hhmmOfMin(startMin) === fmtTime(a.start_at)) {
+      return;
+    }
+    if (reason) body.override_reason = reason;
+    try {
+      await api(`/spa/appointments/${a.id}`, { method: 'PUT', body: JSON.stringify(body) });
+      setMoveRules(null); setMoveReason('');
+      await load();
+    } catch (e: any) {
+      if (e?.status === 409 && e?.body?.code === 'ASSIGNMENT_RULES') { setMoveReason(''); setMoveRules({ appt: a, fromCol, toCol, startMin, problems: e.body.problems || [] }); return; }
+      alert(e.message);
+    }
+  };
+  // A click on an empty time opens booking for that time; the matching slot is
+  // picked once slots are found.
+  const [slotHint, setSlotHint] = useState<{ hhmm: string; therapistId: string | null } | null>(null);
+  const openBookingAt = (startMin: number, therapistId: string | null) => {
+    setBk({ ...blankBk, service_id: activeServices[0]?.id || '', date: day }); setSlots([]); setChosenSlot(null); setRuleProblems([]); setOverrideReason('');
+    setClientHits([]); setClientQ(''); setClientSearched(false); setNeedsGender(false);
+    setSlotHint({ hhmm: hhmmOfMin(startMin), therapistId }); setShowBook(true);
+  };
+  useEffect(() => {
+    if (!slotHint || !slots.length || chosenSlot) return;
+    const s = slots.find((x: any) => String(x.start_at).slice(11, 16) === slotHint.hhmm && (!slotHint.therapistId || x.therapist_id === slotHint.therapistId))
+      || slots.find((x: any) => String(x.start_at).slice(11, 16) === slotHint.hhmm);
+    if (s) chooseSlot(s);
+  }, [slots]);
+
   return (
     <div>
       <SectionHeader icon={<Calendar size={18} />} title={calendar ? 'Appointment Calendar' : 'Appointments'} sub="Dual-resource scheduling — therapist + cabin"
@@ -1036,27 +1095,93 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
             style={{ width: 180 }} />
           {!search.trim() && <input className={INPUT} type="date" value={day} onChange={e => setDay(e.target.value)} style={{ width: 'auto' }} />}
           <button className={BTN_GHOST} onClick={() => load(search)}><RefreshCw size={13} /></button>
-          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setBk({ ...blankBk, service_id: activeServices[0]?.id || '', date: day }); setSlots([]); setChosenSlot(null); setRuleProblems([]); setOverrideReason(''); setClientHits([]); setClientQ(''); setClientSearched(false); setNeedsGender(false); setShowBook(true); }}><Plus size={14} /> New Appointment</button>}
+          {canEdit && <button className={BTN_PRIMARY} onClick={() => { setBk({ ...blankBk, service_id: activeServices[0]?.id || '', date: day }); setSlots([]); setChosenSlot(null); setRuleProblems([]); setOverrideReason(''); setClientHits([]); setClientQ(''); setClientSearched(false); setNeedsGender(false); setSlotHint(null); setShowBook(true); }}><Plus size={14} /> New Appointment</button>}
         </div>} />
 
       {calendar ? (
-        <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.max(1, calTherapists.length)}, minmax(180px, 1fr))` }}>
-          {calTherapists.map(t => (
-            <div key={t.id} className={CARD}>
-              <h4 className="font-bold text-sm mb-2 flex items-center gap-1.5"><User size={13} className="text-[#cc5a16]" /> {t.display_name}{Number(t.is_active ?? 1) !== 1 && <span className="text-[10px] font-normal text-[#6b5d52]">(inactive)</span>}</h4>
-              <div className="space-y-1.5">
-                {appts.filter(a => onAppt(a, t.id)).sort((a, b) => a.start_at.localeCompare(b.start_at)).map(a => (
-                  <div key={a.id} className="rounded-lg border border-[#e8dccf] p-2 text-xs">
-                    <div className="font-semibold">{fmtTime(a.start_at)}–{fmtTime(a.end_at)}</div>
-                    <div className="text-[#6b5d52]">{a.service_name} · {a.client_name}{a.therapist_id !== t.id ? ' · assisting' : ''}</div>
-                    <Pill status={a.status} />
+        <div className={CARD}>
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            {(['THERAPIST', 'CABIN'] as const).map(v => (
+              <button key={v} className={calView === v ? BTN_PRIMARY : BTN_GHOST}
+                onClick={() => { setCalView(v); if (v === 'CABIN' && !cabins.length) api('/spa/resources').then(setCabins).catch(() => {}); }}>
+                {v === 'THERAPIST' ? 'By therapist' : 'By cabin'}
+              </button>
+            ))}
+            <span className="text-[11px] text-[#6b5d52] ml-auto">{canEdit ? 'Drag a treatment to move it · click an empty time to book' : 'View only'}</span>
+          </div>
+          {search.trim() ? (
+            <p className="text-sm text-[#6b5d52]">Clear the search to see the day as a grid.</p>
+          ) : !calCols.length ? (
+            <p className="text-sm text-[#6b5d52]">{calView === 'THERAPIST' ? 'Add therapists first (Therapists & Cabins).' : 'Add cabins first (Therapists & Cabins).'}</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <div className="flex min-w-max">
+                <div className="w-14 shrink-0">
+                  <div className="h-8" />
+                  <div className="relative" style={{ height: (gridEnd - gridStart) * PX }}>
+                    {gridHours.map(h => (
+                      <div key={h} className="absolute right-2 text-[10px] text-[#9c8e85] tabular-nums" style={{ top: Math.max(0, (h * 60 - gridStart) * PX - 6) }}>{String(h).padStart(2, '0')}:00</div>
+                    ))}
+                  </div>
+                </div>
+                {calCols.map(col => (
+                  <div key={col.id} className="w-44 shrink-0 border-l border-[#f0e9df]">
+                    <div className="h-8 px-2 flex items-center text-xs font-bold truncate" title={col.name}>{col.name}{col.inactive ? ' (inactive)' : ''}</div>
+                    <div className={`relative ${canEdit ? 'cursor-pointer' : ''}`}
+                      style={{ height: (gridEnd - gridStart) * PX, backgroundImage: `repeating-linear-gradient(to bottom, #f0e9df 0, #f0e9df 1px, transparent 1px, transparent ${30 * PX}px)` }}
+                      onDragOver={e => { if (dragInfo) e.preventDefault(); }}
+                      onDrop={e => {
+                        e.preventDefault();
+                        const info = dragInfo; setDragInfo(null);
+                        const a = info ? dayAppts.find((x: any) => x.id === info.id) : null;
+                        if (!info || !a) return;
+                        const y = e.clientY - e.currentTarget.getBoundingClientRect().top;
+                        const startMin = Math.max(gridStart, Math.round((gridStart + y / PX - info.grabMin) / 15) * 15);
+                        dropAppt(a, info.fromCol, col.id, startMin);
+                      }}
+                      onClick={e => {
+                        if (!canEdit || e.target !== e.currentTarget) return;
+                        const y = e.clientY - e.currentTarget.getBoundingClientRect().top;
+                        openBookingAt(Math.floor((gridStart + y / PX) / 30) * 30, calView === 'THERAPIST' ? col.id : null);
+                      }}>
+                      {col.items.map((a: any) => {
+                        const top = (minsOfTs(a.start_at) - gridStart) * PX;
+                        const height = Math.max(18, (minsOfTs(a.end_at) - minsOfTs(a.start_at)) * PX);
+                        const movable = canEdit && ['BOOKED', 'CONFIRMED', 'CHECKED_IN'].includes(a.status);
+                        const assisting = calView === 'THERAPIST' && a.therapist_id !== col.id;
+                        return (
+                          <div key={a.id} draggable={movable}
+                            onDragStart={e => { const r = e.currentTarget.getBoundingClientRect(); setDragInfo({ id: a.id, fromCol: col.id, grabMin: (e.clientY - r.top) / PX }); e.dataTransfer.effectAllowed = 'move'; }}
+                            onDragEnd={() => setDragInfo(null)}
+                            title={`${fmtTime(a.start_at)}–${fmtTime(a.end_at)} · ${a.service_name || ''} · ${a.client_name || 'Guest'}${assisting ? ' · assisting' : ''}`}
+                            className={`absolute left-1 right-1 rounded-lg border px-1.5 py-1 text-[10px] leading-tight overflow-hidden ${STATUS_COLOR[a.status] || 'bg-gray-50 text-gray-700 border-gray-200'} ${movable ? 'cursor-move' : 'cursor-default'} ${assisting ? 'border-dashed' : ''}`}
+                            style={{ top, height }}>
+                            <div className="font-bold tabular-nums">{fmtTime(a.start_at)}–{fmtTime(a.end_at)}</div>
+                            <div className="truncate">{a.client_name || 'Guest'}</div>
+                            <div className="truncate opacity-80">{a.service_name}{assisting ? ' · assisting' : ''}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 ))}
-                {!appts.filter(a => onAppt(a, t.id)).length && <p className="text-[11px] text-[#6b5d52]">No appointments.</p>}
               </div>
             </div>
-          ))}
-          {!calTherapists.length && <p className="text-sm text-[#6b5d52]">Add therapists first (Therapists & Cabins).</p>}
+          )}
+          {hiddenCount > 0 && !search.trim() && <p className="text-[11px] text-[#9c8e85] mt-2">{hiddenCount} cancelled or no-show appointment(s) are not on the grid; the Appointments list shows them.</p>}
+          {moveRules && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 mt-3">
+              <p className="text-xs font-bold text-amber-800 mb-1">Moving {moveRules.appt.client_name || 'this treatment'} breaks the treatment's rules</p>
+              <ul className="list-disc pl-4 text-[11px] text-amber-800 space-y-0.5 mb-2">{moveRules.problems.map((p: any, i: number) => <li key={i}>{p.message}</li>)}</ul>
+              <label className={LABEL}>Reason for moving it anyway <span className="font-normal text-[#9d8b7e]">(kept on the appointment and in its audit log)</span></label>
+              <textarea className={INPUT} rows={2} value={moveReason} onChange={e => setMoveReason(e.target.value)} />
+              <div className="flex justify-end gap-2 mt-2">
+                <button className={BTN_GHOST} onClick={() => { setMoveRules(null); setMoveReason(''); }}>Keep it where it was</button>
+                <button className={BTN_PRIMARY} disabled={moveReason.trim().length < 5}
+                  onClick={() => dropAppt(moveRules.appt, moveRules.fromCol, moveRules.toCol, moveRules.startMin, moveReason.trim())}>Move with this reason</button>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className={CARD}>
@@ -1134,6 +1259,9 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
               <div><label className={LABEL}>Date</label><input className={INPUT} type="date" value={bk.date} onChange={e => { setBk({ ...bk, date: e.target.value }); setSlots([]); setChosenSlot(null); }} /></div>
               <div className="flex items-end"><button className={BTN_PRIMARY} onClick={searchSlots} disabled={!bk.service_id}>{slotLoading ? 'Searching…' : 'Find Slots'}</button></div>
             </div>
+            {slotHint && (
+              <p className="text-[11px] text-[#3d3128] bg-[#faf7f2] border border-[#e8dccf] rounded-lg px-3 py-2 mb-3">From the calendar: {slotHint.hhmm}. Choose the treatment and find slots — that time is picked when it is free.</p>
+            )}
             {needsGender && !bk.client_gender && (
               <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">This treatment, or a cabin it can use, is arranged by gender. Choose the guest's gender and find slots again to see the right therapists and cabins.</p>
             )}
