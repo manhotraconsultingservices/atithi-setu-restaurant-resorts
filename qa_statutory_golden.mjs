@@ -591,6 +591,25 @@ eq('TDS NEW @ ₹25,00,000', applyTDSSlabs(2500000, TDS_NEW), statutoryRound(439
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 12. HRMS-R1A (Sep 2026) — HR helpers (hrService.ts)
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const hr = await import('./hrService.ts');
+  const chain = new Map([['a', 'b'], ['b', 'c'], ['c', null]]);
+  eq('manager loop: c reporting to a closes a loop', hr.wouldCreateManagerCycle('c', 'a', chain), true);
+  eq('manager loop: a reporting to c is fine', hr.wouldCreateManagerCycle('x', 'c', chain), false);
+  eq('manager loop: self', hr.wouldCreateManagerCycle('a', 'a', chain), true);
+  eq('manager loop: no manager', hr.wouldCreateManagerCycle('a', '', chain), false);
+  eq('next code after EMP-0009 and EMP-0012', hr.nextEmployeeCodeFrom(['EMP-0009', 'X-1', null, 'EMP-0012']), 'EMP-0013');
+  eq('first code', hr.nextEmployeeCodeFrom([]), 'EMP-0001');
+  eq('master code from a name', hr.normaliseMasterCode(' Front office & F&B '), 'FRONT-OFFICE-F-B');
+  eq('master code length', hr.normaliseMasterCode('A'.repeat(40)).length, 20);
+  const d = hr.diffFields({ a: 1, b: '2026-03-01T00:00:00.000Z', c: null, pan: 'ABCDE1234F' }, { a: 1, b: '2026-03-01', c: '', pan: 'ZZZZZ9999Z' }, ['a', 'b', 'c', 'pan'], (k, v) => k === 'pan' && v ? '••••' + String(v).slice(-4) : v);
+  eq('diff: only the PAN changed', d.keys.join(','), 'pan');
+  eq('diff: masked after value', d.after.pan, '••••999Z');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Summary
 // ═══════════════════════════════════════════════════════════════════════════
 const total = pass + fail;

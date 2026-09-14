@@ -1,5 +1,6 @@
 import { Pool, PoolClient, types as pgTypes } from "pg";
 import { TAX_YEAR_SEED } from "./statutoryRules.ts";
+import { createHrTables } from "./hrService.ts";
 
 // UAT F-A1 (Sep 2026) — money columns are NUMERIC(14,2) (gl_entries was REAL and
 // summed in float4: ₹607,577.20 read back as ₹607,577.25). node-postgres returns
@@ -69,6 +70,10 @@ export const BOOKS_OF_ACCOUNT_TABLES = new Set<string>([
   'receipt_vouchers',
   // Rule 51 — a refund of an advance is a statutory document too.
   'refund_vouchers',
+  // Payroll (HRMS-R1A, decision D8): a payroll run and a salary structure decide
+  // what is paid and filed. Payslips stay out: each carries a copy of the
+  // employee's ID and bank numbers; payslip events go to the object history.
+  'payroll_runs', 'salary_structures',
 ]);
 
 // The acting user, carried on the async context so the data layer can name an
@@ -3808,6 +3813,10 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       [kind, sac, description]
     ).catch(() => {});
   }
+
+  // HR module tables: payroll tables, employee record columns, organisation
+  // masters and HR settings (hrService.ts, HRMS-R1A).
+  await createHrTables(db);
 
   // Cache stores the init promise (set by getTenantDb above); we return
   // the resolved DbInterface here. No need to re-cache.

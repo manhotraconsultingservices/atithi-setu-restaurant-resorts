@@ -44,6 +44,11 @@ import {
   type PtSlab,
   type TdsSlab,
 } from "./statutoryRules.ts";
+import {
+  HR_MASTER_KINDS, HR_MASTER_LINKS, EMPLOYMENT_TYPES, HR_SETTINGS_DEFAULTS, HR_FIELD_LABELS,
+  normaliseMasterCode, wouldCreateManagerCycle, nextEmployeeCodeFrom, diffFields,
+  type HrMasterKind,
+} from "./hrService.ts";
 import { generatePayslipPdf, type PayslipData } from "./payslipService.ts";
 import {
   generateForm16Pdf,
@@ -17966,6 +17971,298 @@ async function startServer() {
     } catch { return false; }
   }
 
+  // ── HR history, settings and employee codes (HRMS-R1A) ─────────────────
+  const HR_AUDIT_TYPES = ['EMPLOYEE', 'PAYROLL_RUN', 'OFFER_LETTER', 'EXPENSE_CLAIM', 'HR_MASTER', 'HR_SETTINGS'];
+  const _hrAuditMask = (k: string, v: any) => (HR_MASKED_FIELDS.includes(k) ? _hrMaskValue(v) : v);
+  async function _hrSettings(db: DbInterface): Promise<Record<string, any>> {
+    const row: any = await db.get("SELECT settings FROM hr_settings WHERE id = 'SINGLETON'").catch(() => null);
+    let saved: any = {};
+    try { saved = JSON.parse(row?.settings || '{}') || {}; } catch { saved = {}; }
+    return { ...HR_SETTINGS_DEFAULTS, ...saved };
+  }
+  // The next EMP-#### after the highest code in use. No counter, so staff created
+  // and deleted leave no gaps; the unique index settles a race (retry).
+  async function _assignEmployeeCode(db: DbInterface, staffId: string): Promise<string | null> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const rows: any[] = await db.query("SELECT employee_code FROM attendance_staff WHERE employee_code LIKE 'EMP-%'").catch(() => []);
+      const code = nextEmployeeCodeFrom(rows.map((r: any) => r.employee_code));
+      try {
+        const r: any = await db.run("UPDATE attendance_staff SET employee_code = ? WHERE id = ? AND employee_code IS NULL", [code, staffId]);
+        if (r && r.changes === 0) {
+          const cur: any = await db.get("SELECT employee_code FROM attendance_staff WHERE id = ?", [staffId]).catch(() => null);
+          return cur?.employee_code || null;
+        }
+        return code;
+      } catch { /* taken meanwhile: try the next number */ }
+    }
+    return null;
+  }
+
+  // ── HR record history (HRMS-R1A): who changed an employee, a payroll run, an
+  // offer letter, an expense claim, an organisation list entry or HR settings.
+  app.get("/api/restaurant/:id/hr/records/:type/:oid/audit", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const type = String(req.params.type || '').toUpperCase();
+      if (!HR_AUDIT_TYPES.includes(type)) return res.status(400).json({ error: 'Unknown record type' });
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, type, String(req.params.oid)));
+    } catch (err: any) {
+      res.status(500).json({ error: 'Failed to load history' });
+    }
+  });
+
+  // ── HR settings (HRMS-R1A): one JSON row per tenant; a null value removes a key.
+  app.get("/api/restaurant/:id/hr/settings", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json({ settings: await _hrSettings(db) });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load HR settings' });
+    }
+  });
+
+  app.put("/api/restaurant/:id/hr/settings", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const incoming = req.body?.settings;
+      if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return res.status(400).json({ error: 'settings must be an object' });
+      const db = await getTenantDb(req.params.id);
+      const row: any = await db.get("SELECT settings FROM hr_settings WHERE id = 'SINGLETON'").catch(() => null);
+      let saved: any = {};
+      try { saved = JSON.parse(row?.settings || '{}') || {}; } catch { saved = {}; }
+      const beforeAll = { ...HR_SETTINGS_DEFAULTS, ...saved };
+      for (const [k, v] of Object.entries(incoming)) {
+        if (!/^[a-z][a-z0-9_]{0,60}$/.test(k)) return res.status(400).json({ error: `Setting names use lower case letters, digits and underscores (${k}).` });
+        if (v === null) delete saved[k]; else saved[k] = v;
+      }
+      const json = JSON.stringify(saved);
+      if (json.length > 20000) return res.status(400).json({ error: 'HR settings are too large.' });
+      await db.run(
+        `INSERT INTO hr_settings (id, settings, updated_by, updated_at) VALUES ('SINGLETON', ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET settings = EXCLUDED.settings, updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP`,
+        [json, req.user?.email || req.user?.id || null]
+      );
+      const afterAll = { ...HR_SETTINGS_DEFAULTS, ...saved };
+      const chSet = diffFields(beforeAll, afterAll, Array.from(new Set([...Object.keys(beforeAll), ...Object.keys(afterAll)])));
+      if (chSet.keys.length) {
+        await writeObjectAudit(db, req, { objectType: 'HR_SETTINGS', objectId: 'SINGLETON', action: 'UPDATED', summary: `Changed ${chSet.keys.join(', ')}`, before: chSet.before, after: chSet.after });
+      }
+      res.json({ settings: afterAll });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to save HR settings' });
+    }
+  });
+
+  // ── Organisation masters (HRMS-R1A): departments, designations, grades and cost
+  // centres. An entry in use is switched off rather than deleted, and a rename is
+  // copied to the employees' department / designation text.
+  const _masterKind = (v: any): HrMasterKind | null => {
+    const k = String(v || '').toUpperCase();
+    return (HR_MASTER_KINDS as readonly string[]).includes(k) ? (k as HrMasterKind) : null;
+  };
+  const _freeMasterCode = async (db: DbInterface, kind: HrMasterKind, wanted: string): Promise<string> => {
+    const base = normaliseMasterCode(wanted) || 'ITEM';
+    let code = base, n = 2;
+    while (await db.get("SELECT id FROM hr_masters WHERE kind = ? AND code = ?", [kind, code])) code = `${base.slice(0, 16)}-${n++}`;
+    return code;
+  };
+
+  app.get("/api/restaurant/:id/hr/masters", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const kind = req.query.kind ? _masterKind(req.query.kind) : null;
+      if (req.query.kind && !kind) return res.status(400).json({ error: 'kind must be DEPARTMENT, DESIGNATION, GRADE or COST_CENTRE' });
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(`SELECT * FROM hr_masters ${kind ? 'WHERE kind = ?' : ''} ORDER BY kind, sort_order, name`, kind ? [kind] : []);
+      const counts: Record<string, number> = {};
+      for (const k of HR_MASTER_KINDS) {
+        const col = HR_MASTER_LINKS[k].column;
+        const cs: any[] = await db.query(`SELECT ${col} AS mid, COUNT(*) AS n FROM attendance_staff WHERE ${col} IS NOT NULL GROUP BY ${col}`).catch(() => []);
+        for (const c of cs) counts[String(c.mid)] = Number(c.n) || 0;
+      }
+      res.json({ masters: rows.map((r: any) => ({ ...r, employee_count: counts[String(r.id)] || 0 })) });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load organisation lists' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/masters", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const kind = _masterKind(req.body?.kind);
+      if (!kind) return res.status(400).json({ error: 'kind must be DEPARTMENT, DESIGNATION, GRADE or COST_CENTRE' });
+      const link = HR_MASTER_LINKS[kind];
+      const name = String(req.body?.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'Name is required.' });
+      const db = await getTenantDb(req.params.id);
+      const parentId = req.body?.parent_id ? String(req.body.parent_id) : null;
+      if (parentId) {
+        const p: any = await db.get("SELECT id, kind FROM hr_masters WHERE id = ?", [parentId]);
+        if (!p || p.kind !== kind) return res.status(400).json({ error: `The parent must be another ${link.label}.` });
+      }
+      const clash: any = await db.get("SELECT id FROM hr_masters WHERE kind = ? AND LOWER(name) = LOWER(?)", [kind, name]);
+      if (clash) return res.status(409).json({ error: `A ${link.label} called ${name} already exists.`, code: 'NAME_TAKEN' });
+      let code: string;
+      if (req.body?.code) {
+        code = normaliseMasterCode(req.body.code);
+        if (!code) return res.status(400).json({ error: 'A code needs letters or digits.' });
+        const taken: any = await db.get("SELECT id FROM hr_masters WHERE kind = ? AND code = ?", [kind, code]);
+        if (taken) return res.status(409).json({ error: `The code ${code} is already used.`, code: 'CODE_TAKEN' });
+      } else {
+        code = await _freeMasterCode(db, kind, name);
+      }
+      const id = randomUUID();
+      await db.run(
+        `INSERT INTO hr_masters (id, kind, code, name, parent_id, is_active, sort_order) VALUES (?, ?, ?, ?, ?, 1, ?)`,
+        [id, kind, code, name, parentId, Number(req.body?.sort_order) || 0]
+      );
+      const row: any = await db.get("SELECT * FROM hr_masters WHERE id = ?", [id]);
+      await writeObjectAudit(db, req, { objectType: 'HR_MASTER', objectId: id, action: 'CREATED', summary: `Added ${link.label} ${name} (${code})`, after: row });
+      res.status(201).json({ master: { ...row, employee_count: 0 } });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to add' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/masters/from-existing", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const kind = _masterKind(req.body?.kind);
+      if (kind !== 'DEPARTMENT' && kind !== 'DESIGNATION') return res.status(400).json({ error: 'Only departments and designations can be built from employee records.' });
+      const link = HR_MASTER_LINKS[kind];
+      const textCol = link.textColumn as string;
+      const db = await getTenantDb(req.params.id);
+      const texts: any[] = await db.query(
+        `SELECT DISTINCT TRIM(${textCol}) AS v FROM attendance_staff
+          WHERE ${textCol} IS NOT NULL AND TRIM(${textCol}) <> '' AND ${link.column} IS NULL`
+      );
+      let created = 0, linked = 0;
+      for (const t of texts) {
+        const name = String(t.v);
+        let m: any = await db.get("SELECT id, name FROM hr_masters WHERE kind = ? AND LOWER(name) = LOWER(?)", [kind, name]);
+        if (!m) {
+          const id = randomUUID();
+          const code = await _freeMasterCode(db, kind, name);
+          await db.run(`INSERT INTO hr_masters (id, kind, code, name, is_active) VALUES (?, ?, ?, ?, 1)`, [id, kind, code, name]);
+          await writeObjectAudit(db, req, { objectType: 'HR_MASTER', objectId: id, action: 'CREATED', summary: `Added ${link.label} ${name} (${code}) from employee records` });
+          m = { id, name };
+          created++;
+        }
+        const r: any = await db.run(
+          `UPDATE attendance_staff SET ${link.column} = ?, ${textCol} = ? WHERE ${link.column} IS NULL AND LOWER(TRIM(${textCol})) = LOWER(?)`,
+          [m.id, m.name, name]
+        );
+        linked += Number(r?.changes || 0);
+      }
+      res.json({ ok: true, created, linked });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to build the list' });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/hr/masters/:mid", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const before: any = await db.get("SELECT * FROM hr_masters WHERE id = ?", [req.params.mid]);
+      if (!before) return res.status(404).json({ error: 'Not found' });
+      const kind = before.kind as HrMasterKind;
+      const link = HR_MASTER_LINKS[kind];
+      const b = req.body || {};
+      const sets: string[] = []; const vals: any[] = [];
+      if (b.name !== undefined) {
+        const name = String(b.name || '').trim();
+        if (!name) return res.status(400).json({ error: 'Name cannot be empty.' });
+        const clash: any = await db.get("SELECT id FROM hr_masters WHERE kind = ? AND LOWER(name) = LOWER(?) AND id <> ?", [kind, name, before.id]);
+        if (clash) return res.status(409).json({ error: `A ${link ? link.label : 'list entry'} called ${name} already exists.`, code: 'NAME_TAKEN' });
+        sets.push('name = ?'); vals.push(name);
+      }
+      if (b.code !== undefined) {
+        const code = normaliseMasterCode(b.code);
+        if (!code) return res.status(400).json({ error: 'A code needs letters or digits.' });
+        const taken: any = await db.get("SELECT id FROM hr_masters WHERE kind = ? AND code = ? AND id <> ?", [kind, code, before.id]);
+        if (taken) return res.status(409).json({ error: `The code ${code} is already used.`, code: 'CODE_TAKEN' });
+        sets.push('code = ?'); vals.push(code);
+      }
+      if (b.parent_id !== undefined) {
+        const pid = b.parent_id ? String(b.parent_id) : null;
+        if (pid) {
+          if (pid === before.id) return res.status(400).json({ error: 'An entry cannot be part of itself.' });
+          const p: any = await db.get("SELECT id, kind FROM hr_masters WHERE id = ?", [pid]);
+          if (!p || p.kind !== kind) return res.status(400).json({ error: 'The parent must be of the same kind.' });
+        }
+        sets.push('parent_id = ?'); vals.push(pid);
+      }
+      if (b.is_active !== undefined) { sets.push('is_active = ?'); vals.push(Number(b.is_active) ? 1 : 0); }
+      if (b.sort_order !== undefined) { sets.push('sort_order = ?'); vals.push(Number(b.sort_order) || 0); }
+      if (!sets.length) return res.status(400).json({ error: 'Nothing to change.' });
+      sets.push('updated_at = CURRENT_TIMESTAMP');
+      await db.run(`UPDATE hr_masters SET ${sets.join(', ')} WHERE id = ?`, [...vals, before.id]);
+      const after: any = await db.get("SELECT * FROM hr_masters WHERE id = ?", [before.id]);
+      if (link && link.textColumn && after.name !== before.name) {
+        await db.run(`UPDATE attendance_staff SET ${link.textColumn} = ? WHERE ${link.column} = ?`, [after.name, before.id]);
+      }
+      const chM = diffFields(before, after, ['name', 'code', 'parent_id', 'is_active', 'sort_order']);
+      if (chM.keys.length) {
+        await writeObjectAudit(db, req, { objectType: 'HR_MASTER', objectId: before.id, action: 'UPDATED', summary: `Changed ${chM.keys.join(', ')} of ${after.name}`, before: chM.before, after: chM.after });
+      }
+      res.json({ master: after });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to save' });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hr/masters/:mid", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const mRow: any = await db.get("SELECT * FROM hr_masters WHERE id = ?", [req.params.mid]);
+      if (!mRow) return res.status(404).json({ error: 'Not found' });
+      const link = HR_MASTER_LINKS[mRow.kind as HrMasterKind];
+      const used: any = link ? await db.get(`SELECT COUNT(*) AS n FROM attendance_staff WHERE ${link.column} = ?`, [mRow.id]) : { n: 0 };
+      const children: any = await db.get("SELECT COUNT(*) AS n FROM hr_masters WHERE parent_id = ?", [mRow.id]);
+      if (Number(used?.n) > 0 || Number(children?.n) > 0) {
+        await db.run("UPDATE hr_masters SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [mRow.id]);
+        await writeObjectAudit(db, req, { objectType: 'HR_MASTER', objectId: mRow.id, action: 'DEACTIVATED', summary: `${mRow.name} is in use (${Number(used?.n) || 0} employees, ${Number(children?.n) || 0} entries under it), so it was switched off rather than deleted` });
+        return res.json({ ok: true, deactivated: true, employee_count: Number(used?.n) || 0 });
+      }
+      await db.run("DELETE FROM hr_masters WHERE id = ?", [mRow.id]);
+      await writeObjectAudit(db, req, { objectType: 'HR_MASTER', objectId: mRow.id, action: 'DELETED', summary: `Deleted ${mRow.name} (${mRow.code})`, before: mRow });
+      res.json({ ok: true, deleted: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to delete' });
+    }
+  });
+
+  // Reporting lines for active employees (HRMS-R1A).
+  app.get("/api/restaurant/:id/hr/org-chart", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT id, name, employee_code, designation, department, role, reporting_manager_id
+           FROM attendance_staff
+          WHERE COALESCE(is_active, 1) = 1 AND (hr_status IS NULL OR hr_status = 'ACTIVE')
+          ORDER BY name`
+      );
+      res.json({ employees: rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load reporting lines' });
+    }
+  });
+
+  // Give EMP-#### codes to employees without one (HRMS-R1A).
+  app.post("/api/restaurant/:id/hr/employees/assign-codes", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query("SELECT id, name FROM attendance_staff WHERE employee_code IS NULL ORDER BY created_at, name");
+      let assigned = 0;
+      for (const r of rows) {
+        const code = await _assignEmployeeCode(db, String(r.id));
+        if (code) {
+          assigned++;
+          await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: String(r.id), action: 'CODE_ASSIGNED', summary: `Employee code ${code}` });
+        }
+      }
+      res.json({ ok: true, assigned });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to give codes' });
+    }
+  });
+
   // List all employees with HR field projection.
   app.get("/api/restaurant/:id/hr/employees", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
     try {
@@ -17979,6 +18276,9 @@ async function startServer() {
                         emergency_contact_name, emergency_contact_phone,
                         address, dob, gender, marital_status,
                         hr_status, is_active, hourly_rate, payroll_id,
+                        employee_code, employment_type, reporting_manager_id,
+                        department_id, designation_id, grade_id, cost_centre_id,
+                        probation_end_date, confirmation_date, notice_period_days, date_of_leaving,
                         joined_at, created_at
                    FROM attendance_staff
                   WHERE 1=1`;
@@ -17994,7 +18294,7 @@ async function startServer() {
       // pattern in one place. Reasonable for staff lists (< 500 rows).
       if (q) {
         rows = rows.filter((r: any) => {
-          const hay = `${r.name || ''} ${r.phone || ''} ${r.email || ''} ${r.pan || ''} ${r.payroll_id || ''} ${r.designation || ''} ${r.department || ''}`.toLowerCase();
+          const hay = `${r.name || ''} ${r.phone || ''} ${r.email || ''} ${r.pan || ''} ${r.payroll_id || ''} ${r.employee_code || ''} ${r.designation || ''} ${r.department || ''}`.toLowerCase();
           return hay.includes(q);
         });
       }
@@ -18037,10 +18337,19 @@ async function startServer() {
           summary: `Full PAN, Aadhaar and bank account shown for ${staff.name || req.params.staffId}`,
         });
       }
+      const manager: any = staff.reporting_manager_id
+        ? await db.get("SELECT id, name, designation FROM attendance_staff WHERE id = ?", [staff.reporting_manager_id]).catch(() => null)
+        : null;
+      const directReports: any[] = await db.query(
+        "SELECT id, name, designation, employee_code FROM attendance_staff WHERE reporting_manager_id = ? AND COALESCE(is_active, 1) = 1 ORDER BY name",
+        [req.params.staffId]
+      ).catch(() => []);
       const { password: _pw, ...employee } = staff;
       res.json({
         employee: reveal ? employee : _hrMaskRow(employee),
         revealed: reveal,
+        reporting_manager: manager,
+        direct_reports: directReports,
         salary_structures: structures,
         recent_payslips: recentPayslips,
       });
@@ -18057,6 +18366,9 @@ async function startServer() {
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
+      const staffId = String(req.params.staffId);
+      const before: any = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [staffId]);
+      if (!before) return res.status(404).json({ error: 'Employee not found' });
       const ALLOWED: Record<string, true> = {
         name: true, phone: true, email: true,
         designation: true, department: true, joining_date: true, ctc: true,
@@ -18065,36 +18377,97 @@ async function startServer() {
         emergency_contact_name: true, emergency_contact_phone: true,
         address: true, dob: true, gender: true, marital_status: true,
         hourly_rate: true, payroll_id: true, hr_status: true, notes: true,
+        // Employee record (HRMS-R1A)
+        employee_code: true, employment_type: true, reporting_manager_id: true,
+        department_id: true, designation_id: true, grade_id: true, cost_centre_id: true,
+        probation_end_date: true, confirmation_date: true, notice_period_days: true, date_of_leaving: true,
       };
-      const sets: string[] = [];
-      const params: any[] = [];
+      const updates: Record<string, any> = {};
       for (const [k, v] of Object.entries(b)) {
-        if (ALLOWED[k]) {
-          // A masked number sent back unchanged is kept as stored (HRMS-R0B).
-          if (HR_MASKED_FIELDS.includes(k) && typeof v === 'string' && v.includes('•')) continue;
-          // Light validation — PAN format (5 letters + 4 digits + 1 letter),
-          // Aadhaar 12 digits, IFSC 4 letters + 0 + 6 chars. Reject only
-          // when input is non-empty AND malformed — empty string clears.
-          if (k === 'pan' && v && !/^[A-Z]{5}[0-9]{4}[A-Z]$/i.test(String(v).trim())) {
-            return res.status(400).json({ error: 'PAN must be 10 chars: 5 letters + 4 digits + 1 letter (e.g. ABCDE1234F).' });
-          }
-          if (k === 'aadhaar' && v && !/^\d{12}$/.test(String(v).replace(/\s/g, ''))) {
-            return res.status(400).json({ error: 'Aadhaar must be 12 digits.' });
-          }
-          if (k === 'bank_ifsc' && v && !/^[A-Z]{4}0[A-Z0-9]{6}$/i.test(String(v).trim())) {
-            return res.status(400).json({ error: 'IFSC must be 11 chars: 4 letters + 0 + 6 alphanumeric (e.g. HDFC0001234).' });
-          }
-          if (k === 'hr_status' && v && !['ACTIVE','RESIGNED','TERMINATED','ON_HOLD'].includes(String(v))) {
-            return res.status(400).json({ error: 'hr_status must be ACTIVE / RESIGNED / TERMINATED / ON_HOLD.' });
-          }
-          sets.push(`${k} = ?`);
-          params.push(v === '' ? null : v);
+        if (!ALLOWED[k]) continue;
+        // A masked number sent back unchanged is kept as stored (HRMS-R0B).
+        if (HR_MASKED_FIELDS.includes(k) && typeof v === 'string' && v.includes('•')) continue;
+        // Light validation — PAN format (5 letters + 4 digits + 1 letter),
+        // Aadhaar 12 digits, IFSC 4 letters + 0 + 6 chars. Reject only
+        // when input is non-empty AND malformed — empty string clears.
+        if (k === 'pan' && v && !/^[A-Z]{5}[0-9]{4}[A-Z]$/i.test(String(v).trim())) {
+          return res.status(400).json({ error: 'PAN must be 10 chars: 5 letters + 4 digits + 1 letter (e.g. ABCDE1234F).' });
         }
+        if (k === 'aadhaar' && v && !/^\d{12}$/.test(String(v).replace(/\s/g, ''))) {
+          return res.status(400).json({ error: 'Aadhaar must be 12 digits.' });
+        }
+        if (k === 'bank_ifsc' && v && !/^[A-Z]{4}0[A-Z0-9]{6}$/i.test(String(v).trim())) {
+          return res.status(400).json({ error: 'IFSC must be 11 chars: 4 letters + 0 + 6 alphanumeric (e.g. HDFC0001234).' });
+        }
+        if (k === 'hr_status' && v && !['ACTIVE','RESIGNED','TERMINATED','ON_HOLD'].includes(String(v))) {
+          return res.status(400).json({ error: 'hr_status must be ACTIVE / RESIGNED / TERMINATED / ON_HOLD.' });
+        }
+        updates[k] = v === '' ? null : v;
       }
-      if (sets.length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
-      params.push(req.params.staffId);
-      await db.run(`UPDATE attendance_staff SET ${sets.join(', ')} WHERE id = ?`, params);
-      const updated = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [req.params.staffId]);
+      if (updates.employment_type != null) {
+        const t = String(updates.employment_type).toUpperCase();
+        if (!(EMPLOYMENT_TYPES as readonly string[]).includes(t)) {
+          return res.status(400).json({ error: 'Employment type must be permanent, probation, fixed term, casual, trainee or contractor.' });
+        }
+        updates.employment_type = t;
+      }
+      for (const dk of ['probation_end_date', 'confirmation_date', 'date_of_leaving']) {
+        if (updates[dk] == null) continue;
+        const d = String(updates[dk]).slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return res.status(400).json({ error: `The ${HR_FIELD_LABELS[dk]} must be a date (YYYY-MM-DD).` });
+        updates[dk] = d;
+      }
+      if (updates.notice_period_days != null) {
+        const n = Number(updates.notice_period_days);
+        if (!Number.isInteger(n) || n < 0 || n > 365) return res.status(400).json({ error: 'The notice period is a whole number of days from 0 to 365.' });
+        updates.notice_period_days = n;
+      }
+      if (updates.employee_code != null) {
+        const code = String(updates.employee_code).trim().toUpperCase();
+        if (!/^[A-Z0-9][A-Z0-9_\-\/]{0,23}$/.test(code)) {
+          return res.status(400).json({ error: 'An employee code uses letters, digits, - _ or / (up to 24 characters).' });
+        }
+        const dup: any = await db.get("SELECT id, name FROM attendance_staff WHERE employee_code = ? AND id <> ?", [code, staffId]);
+        if (dup) return res.status(409).json({ error: `Employee code ${code} is already used by ${dup.name}.`, code: 'EMPLOYEE_CODE_TAKEN' });
+        updates.employee_code = code;
+      }
+      if (updates.reporting_manager_id != null) {
+        const mid = String(updates.reporting_manager_id);
+        if (mid === staffId) return res.status(400).json({ error: 'An employee cannot report to themselves.', code: 'REPORTING_LOOP' });
+        const mgr: any = await db.get("SELECT id, name FROM attendance_staff WHERE id = ?", [mid]);
+        if (!mgr) return res.status(400).json({ error: 'That manager is not on the staff list.' });
+        const links: any[] = await db.query("SELECT id, reporting_manager_id FROM attendance_staff WHERE reporting_manager_id IS NOT NULL");
+        const managerOf = new Map<string, string | null>(links.map((r: any) => [String(r.id), r.reporting_manager_id ? String(r.reporting_manager_id) : null]));
+        if (wouldCreateManagerCycle(staffId, mid, managerOf)) {
+          return res.status(400).json({ error: `${mgr.name} already reports up to this employee, so this would make a reporting loop.`, code: 'REPORTING_LOOP' });
+        }
+        updates.reporting_manager_id = mid;
+      }
+      // A department or designation picked from the lists sets the matching text,
+      // which payslips and older screens read.
+      for (const kind of HR_MASTER_KINDS) {
+        const link = HR_MASTER_LINKS[kind];
+        if (!(link.column in updates)) continue;
+        const changed = String(updates[link.column] ?? '') !== String(before[link.column] ?? '');
+        if (!changed) continue;
+        if (updates[link.column] == null) { if (link.textColumn) updates[link.textColumn] = null; continue; }
+        const mRow: any = await db.get("SELECT id, kind, name, is_active FROM hr_masters WHERE id = ?", [String(updates[link.column])]);
+        if (!mRow || mRow.kind !== kind) return res.status(400).json({ error: `Pick a ${link.label} from the list.` });
+        if (!Number(mRow.is_active)) return res.status(400).json({ error: `${mRow.name} is switched off. Pick a ${link.label} that is in use.` });
+        if (link.textColumn) updates[link.textColumn] = mRow.name;
+      }
+      const keys = Object.keys(updates);
+      if (keys.length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+      await db.run(`UPDATE attendance_staff SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...keys.map(k => updates[k]), staffId]);
+      const updated: any = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [staffId]);
+      const chEmp = diffFields(before, updated, Object.keys(ALLOWED), _hrAuditMask);
+      if (chEmp.keys.length) {
+        await writeObjectAudit(db, req, {
+          objectType: 'EMPLOYEE', objectId: staffId, action: 'UPDATED',
+          summary: `Changed ${Array.from(new Set(chEmp.keys.map(k => HR_FIELD_LABELS[k] || k))).join(', ')}`,
+          before: chEmp.before, after: chEmp.after,
+        });
+      }
       res.json(_hrMaskRow(updated));
     } catch (err: any) {
       console.error('hr/employees update error:', err);
@@ -18401,6 +18774,11 @@ async function startServer() {
           [gross_monthly * 12, staff_id]
         );
       }
+      await writeObjectAudit(db, req, {
+        objectType: 'EMPLOYEE', objectId: staff_id, action: 'SALARY_STRUCTURE_ADDED',
+        summary: `Salary structure from ${effective_from}: gross ₹${gross_monthly}/month, basic ₹${basic}, ${tds_regime === 'OLD' ? 'old' : 'new'} tax regime`,
+        after: { effective_from, gross_monthly, basic, hra, special, conveyance, medical, other_allowances: other, tds_regime },
+      });
       const row = await db.get("SELECT * FROM salary_structures WHERE id = ?", [id]);
       res.json({ structure: row });
     } catch (err: any) {
@@ -18446,6 +18824,9 @@ async function startServer() {
         [id, year, month, period_start, period_end, req.user?.id || null]
       );
       const row = await db.get("SELECT * FROM payroll_runs WHERE year = ? AND month = ?", [year, month]);
+      if (row && row.id === id) {
+        await writeObjectAudit(db, req, { objectType: 'PAYROLL_RUN', objectId: id, action: 'CREATED', summary: `Draft run for ${year}-${String(month).padStart(2, '0')}` });
+      }
       res.json({ run: row });
     } catch (err: any) {
       console.error('payroll/runs create error:', err);
@@ -18708,6 +19089,10 @@ async function startServer() {
       );
 
       const updated = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      await writeObjectAudit(db, req, {
+        objectType: 'PAYROLL_RUN', objectId: String(req.params.runId), action: 'COMPUTED',
+        summary: `Computed ${employee_count} payslip${employee_count === 1 ? '' : 's'}: gross ₹${Math.round(total_gross)}, deductions ₹${Math.round(total_deductions)}, net ₹${Math.round(total_net)}`,
+      });
       res.json({
         run: updated,
         computed: employee_count,
@@ -18750,6 +19135,7 @@ async function startServer() {
       await db.run("DELETE FROM payslips WHERE payroll_run_id = ?", [req.params.runId]);
       const del: any = await db.run("DELETE FROM payroll_runs WHERE id = ? AND status = 'DRAFT'", [req.params.runId]);
       if (del && del.changes === 0) return res.status(409).json({ error: 'The run changed while deleting. Refresh and try again.' });
+      await writeObjectAudit(db, req, { objectType: 'PAYROLL_RUN', objectId: String(req.params.runId), action: 'DELETED', summary: `Draft run for ${run.year}-${String(run.month).padStart(2, '0')} deleted` });
       res.json({ ok: true });
     } catch (err: any) {
       console.error('payroll/runs delete error:', err);
@@ -18773,6 +19159,7 @@ async function startServer() {
       }
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
 
+      await writeObjectAudit(db, req, { objectType: 'PAYROLL_RUN', objectId: String(req.params.runId), action: 'APPROVED', summary: `Approved: net ₹${Math.round(Number((run as any)?.total_net || 0))} for ${(run as any)?.employee_count || 0} employees` });
       // Payroll reaches the accounts when the run is marked paid (_postPayrollRunGl).
       // Approval also used to write the gross to petty cash as a SALARY row, which
       // the P&L then counted a second time beside the run itself (HRMS-R0A).
@@ -18796,6 +19183,7 @@ async function startServer() {
         const fresh = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
         return res.status(409).json({ error: `Run is ${fresh?.status} — must be APPROVED to lock`, run: fresh });
       }
+      await writeObjectAudit(db, req, { objectType: 'PAYROLL_RUN', objectId: String(req.params.runId), action: 'LOCKED', summary: 'Locked' });
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
       res.json({ run });
     } catch (err: any) {
@@ -18826,6 +19214,7 @@ async function startServer() {
       // Phase 3.1 — post the payroll disbursement journal (salary + employer
       // contributions expensed; net pay + statutory dues booked as liabilities).
       await _postPayrollRunGl(db, req.params.id, req.params.runId, req.user?.email || req.user?.id || null);
+      await writeObjectAudit(db, req, { objectType: 'PAYROLL_RUN', objectId: String(req.params.runId), action: 'PAID', summary: 'Marked paid: payroll journal posted' });
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
       res.json({ run });
     } catch (err: any) {
@@ -19251,6 +19640,7 @@ You can also view all your payslips in the employee portal.
         );
       }
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [claim_id]);
+      await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: claim_id, action: 'CREATED', summary: `Claim ${claim_number}: ₹${total} across ${items.length} line${items.length === 1 ? '' : 's'}` });
       const claimItems = await db.query("SELECT * FROM expense_claim_items WHERE claim_id = ?", [claim_id]);
       res.json({ claim: { ...claim, items: claimItems } });
     } catch (err: any) {
@@ -19289,6 +19679,7 @@ You can also view all your payslips in the employee portal.
         const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
         return res.status(409).json({ error: `Claim is ${fresh?.status} — must be DRAFT to submit`, claim: fresh });
       }
+      await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: String(req.params.claimId), action: 'SUBMITTED', summary: 'Submitted for approval' });
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
       res.json({ claim });
     } catch (err: any) {
@@ -19326,6 +19717,7 @@ You can also view all your payslips in the employee portal.
         return res.status(409).json({ error: 'Approval race lost', claim: fresh });
       }
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: String(req.params.claimId), action: String((claim as any)?.status || 'APPROVED'), summary: (claim as any)?.status === 'HR_APPROVED' ? 'HR approval: booked to the accounts' : 'Manager approval' });
       // GL: Dr Expense account, Cr Salaries & Wages Payable (at final HR approval only)
       if (claim?.status === 'HR_APPROVED') {
         try {
@@ -19376,6 +19768,7 @@ You can also view all your payslips in the employee portal.
         const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
         return res.status(409).json({ error: 'Cannot reject from current state', claim: fresh });
       }
+      await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: String(req.params.claimId), action: 'REJECTED', summary: `Rejected: ${reason}` });
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
       res.json({ claim });
     } catch (err: any) {
@@ -19420,6 +19813,7 @@ You can also view all your payslips in the employee portal.
           reason, postedBy: req.user?.email || req.user?.id || null,
         });
       }
+      await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: String(req.params.claimId), action: 'CANCELLED', summary: `Cancelled: ${reason}${reversal?.ok ? ' (accounts entry reversed)' : ''}` });
       const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
       res.json({ claim: fresh, reversal });
     } catch (err: any) {
@@ -19445,6 +19839,7 @@ You can also view all your payslips in the employee portal.
         const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
         return res.status(409).json({ error: 'Claim must be HR_APPROVED and not already attached', claim: fresh });
       }
+      await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: String(req.params.claimId), action: 'ATTACHED_TO_RUN', summary: `To be reimbursed with payroll ${run.year}-${String(run.month).padStart(2, '0')}` });
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
       res.json({ claim });
     } catch (err: any) {
@@ -19556,7 +19951,8 @@ You can also view all your payslips in the employee portal.
           b.expires_at || null, req.user?.id || null,
         ]
       );
-      const row = await db.get("SELECT * FROM offer_letters WHERE id = ?", [id]);
+      const row: any = await db.get("SELECT * FROM offer_letters WHERE id = ?", [id]);
+      await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: id, action: 'CREATED', summary: `Offer ${row?.offer_number || ''} to ${row?.candidate_name || ''} for ${row?.designation || ''}, CTC ₹${row?.ctc || 0}` });
       res.json({ offer: row });
     } catch (err: any) {
       console.error('hr/offer-letters create error:', err);
@@ -19667,6 +20063,7 @@ ${data.tenant.name}`;
           WHERE id = ? AND status IN ('DRAFT', 'SENT')`,
         [stamp, stamp, req.params.offerId]
       );
+      await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: String(req.params.offerId), action: 'SENT', summary: `Sent to ${to}` });
       res.json({ ok: true, sent_to: to });
     } catch (err: any) {
       console.error('hr/offer-letters send error:', err);
@@ -19687,6 +20084,7 @@ ${data.tenant.name}`;
         const fresh = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
         return res.status(409).json({ error: `Cannot accept ${fresh?.status} offer`, offer: fresh });
       }
+      await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: String(req.params.offerId), action: 'ACCEPTED', summary: 'Marked accepted' });
       const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
       res.json({ offer });
     } catch (err: any) {
@@ -19708,6 +20106,7 @@ ${data.tenant.name}`;
         const fresh = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
         return res.status(409).json({ error: `Cannot decline ${fresh?.status} offer`, offer: fresh });
       }
+      await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: String(req.params.offerId), action: 'DECLINED', summary: 'Marked declined' });
       const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
       res.json({ offer });
     } catch (err: any) {
@@ -19723,6 +20122,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       await db.run("UPDATE offer_letters SET signed_pdf_url = ?, updated_at = ? WHERE id = ?",
         [url, new Date().toISOString(), req.params.offerId]);
+      await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: String(req.params.offerId), action: 'SIGNED_COPY_UPLOADED', summary: 'Signed copy uploaded' });
       const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
       res.json({ offer });
     } catch (err: any) {
@@ -19854,6 +20254,7 @@ ${data.tenant.name}`;
         );
       }
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [claim_id]);
+      await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: claim_id, action: 'SUBMITTED', summary: 'Submitted by the employee from self-service' });
       res.json({ claim });
     } catch (err: any) {
       console.error('me/expenses create error:', err);
@@ -32390,9 +32791,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      // pay_type is added by the payroll module; a tenant that never opened
-      // payroll won't have it yet, so ensure it before selecting (no-op if present).
-      await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS pay_type TEXT").catch(() => {});
+      // pay_type is created at start-up for every tenant (createHrTables, HRMS-R1A).
       let rows: any[];
       try {
         rows = await db.query("SELECT id, name, role, phone, COALESCE(pay_type,'') AS pay_type FROM attendance_staff WHERE is_active = 1 ORDER BY name ASC");
@@ -59897,7 +60296,10 @@ ${data.tenant.name}`;
           [id, name, role, phone || null, email || null, rate, payrollId, empType]
         );
       }
-      res.json({ success: true, id });
+      const hrSetNew = await _hrSettings(db).catch(() => HR_SETTINGS_DEFAULTS);
+      const employee_code = hrSetNew.auto_employee_code ? await _assignEmployeeCode(db, id) : null;
+      await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: id, action: 'CREATED', summary: `Added ${name} (${role || 'no role'})${employee_code ? `, code ${employee_code}` : ''}` });
+      res.json({ success: true, id, employee_code });
     } catch (err) {
       console.error("Create staff error:", err);
       res.status(500).json({ error: "Failed to create staff" });
@@ -59922,6 +60324,7 @@ ${data.tenant.name}`;
       const created: any[] = [];
       const errors: any[] = [];
       const seenLogins = new Set<string>();
+      const autoCode = !!(await _hrSettings(db).catch(() => HR_SETTINGS_DEFAULTS)).auto_employee_code;
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i] || {};
         const row = i + 1;
@@ -59954,7 +60357,9 @@ ${data.tenant.name}`;
               [id, name, role, phone, email]
             );
           }
-          created.push({ row, id, name });
+          const employee_code = autoCode ? await _assignEmployeeCode(db, id) : null;
+          created.push({ row, id, name, employee_code });
+          await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: id, action: 'CREATED', summary: `Added ${name} (${role}) with Bulk Add${employee_code ? `, code ${employee_code}` : ''}` });
         } catch (e: any) {
           console.error('Bulk create staff row error:', e);
           errors.push({ row, error: 'Could not be saved' });
@@ -59982,6 +60387,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(targetId);
       const hashedPassword = await bcrypt.hash(newPassword, 12);
       await db.run("UPDATE attendance_staff SET password = ? WHERE id = ?", [hashedPassword, req.params.id]);
+      await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: String(req.params.id), action: 'PASSWORD_RESET', summary: 'Login password reset' });
       res.json({ success: true });
     } catch (err) {
       console.error("Reset staff password error:", err);
@@ -60188,7 +60594,16 @@ ${data.tenant.name}`;
         const dup: any = await db.get("SELECT id FROM attendance_staff WHERE login_id = ? AND id <> ?", [values[li], req.params.id]);
         if (dup) return res.status(400).json({ error: 'A staff member with this Login ID already exists.' });
       }
+      const beforeStaff: any = await db.get("SELECT name, role, login_id, phone, email, is_active FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
       await db.run(`UPDATE attendance_staff SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...values, req.params.id]);
+      if (beforeStaff) {
+        const afterStaff: any = await db.get("SELECT name, role, login_id, phone, email, is_active FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
+        const chStaff = diffFields(beforeStaff, afterStaff, STAFF_PATCH_FIELDS);
+        if (chStaff.keys.length) {
+          const action = chStaff.keys.length === 1 && chStaff.keys[0] === 'is_active' ? (Number(afterStaff?.is_active) ? 'ACTIVATED' : 'DEACTIVATED') : 'UPDATED';
+          await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: String(req.params.id), action, summary: `Changed ${chStaff.keys.map(k => HR_FIELD_LABELS[k] || k).join(', ')}`, before: chStaff.before, after: chStaff.after });
+        }
+      }
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update staff" });
@@ -60203,7 +60618,9 @@ ${data.tenant.name}`;
         return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
       }
       const db = await getTenantDb(req.user!.restaurantId);
+      const gone: any = await db.get("SELECT name, role, employee_code FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
       await db.run("DELETE FROM attendance_staff WHERE id = ?", [req.params.id]);
+      if (gone) await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: String(req.params.id), action: 'DELETED', summary: `Removed ${gone.name} (${gone.role || 'no role'})`, before: gone });
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to delete staff" });
@@ -60261,9 +60678,8 @@ ${data.tenant.name}`;
       }
       const b = req.body || {};
       const db = await getTenantDb(req.user!.restaurantId);
-      await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8");
-      await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS pay_type TEXT DEFAULT 'HOURLY'").catch(() => {});
-      await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS monthly_wage DOUBLE PRECISION DEFAULT 0").catch(() => {});
+      // Pay columns are created at start-up (createHrTables, HRMS-R1A).
+      const beforePay: any = await db.get("SELECT default_hours, pay_type, monthly_wage, hourly_rate FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
       const fields: string[] = []; const vals: any[] = [];
       if (b.default_hours !== undefined) { fields.push("default_hours = ?"); vals.push(Number(b.default_hours) || 0); }
       if (b.pay_type !== undefined) { fields.push("pay_type = ?"); vals.push(String(b.pay_type).toUpperCase() === 'FULL_TIME' ? 'FULL_TIME' : 'HOURLY'); }
@@ -60272,6 +60688,13 @@ ${data.tenant.name}`;
       if (!fields.length) return res.status(400).json({ error: "No settings to update" });
       vals.push(req.params.id);
       await db.run(`UPDATE attendance_staff SET ${fields.join(', ')} WHERE id = ?`, vals);
+      if (beforePay) {
+        const afterPay: any = await db.get("SELECT default_hours, pay_type, monthly_wage, hourly_rate FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
+        const chPay = diffFields(beforePay, afterPay, ['default_hours', 'pay_type', 'monthly_wage', 'hourly_rate']);
+        if (chPay.keys.length) {
+          await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: String(req.params.id), action: 'PAY_SETTINGS_CHANGED', summary: `Changed ${chPay.keys.map(k => HR_FIELD_LABELS[k] || k).join(', ')}`, before: chPay.before, after: chPay.after });
+        }
+      }
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update staff settings" });
@@ -60285,50 +60708,10 @@ ${data.tenant.name}`;
   // are paid from the timesheet (timesheet_day.pay_amount = actual_hours × rate).
   // Advances are recorded against a staff member and recovered from the next run.
   // ═══════════════════════════════════════════════════════════════════════════
-  const ensurePayrollTables = async (db: any) => {
-    await db.exec(`ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS pay_type TEXT DEFAULT 'HOURLY'`).catch(() => {});
-    await db.exec(`ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS monthly_wage DOUBLE PRECISION DEFAULT 0`).catch(() => {});
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS staff_advances (
-        id           TEXT PRIMARY KEY,
-        staff_id     TEXT NOT NULL,
-        amount       DOUBLE PRECISION DEFAULT 0,
-        advance_date DATE,
-        note         TEXT,
-        recovered    DOUBLE PRECISION DEFAULT 0,
-        status       TEXT DEFAULT 'OPEN',        -- OPEN | RECOVERED
-        recorded_by  TEXT,
-        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `).catch(() => {});
-    await db.exec(`CREATE INDEX IF NOT EXISTS idx_staff_adv ON staff_advances(staff_id, status)`).catch(() => {});
-    // Payment mode of the advance payout (CASH → Cash in Hand, everything else →
-    // Bank). payment_reference holds a UPI/online txn ref when relevant.
-    await db.exec(`ALTER TABLE staff_advances ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'CASH'`).catch(() => {});
-    await db.exec(`ALTER TABLE staff_advances ADD COLUMN IF NOT EXISTS payment_reference TEXT`).catch(() => {});
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS staff_payroll (
-        id               TEXT PRIMARY KEY,
-        staff_id         TEXT NOT NULL,
-        period           TEXT NOT NULL,          -- YYYY-MM
-        pay_type         TEXT,
-        units            DOUBLE PRECISION DEFAULT 0,  -- hours (HOURLY) or 1 (FULL_TIME)
-        rate             DOUBLE PRECISION DEFAULT 0,
-        gross            DOUBLE PRECISION DEFAULT 0,
-        advance_deducted DOUBLE PRECISION DEFAULT 0,
-        net              DOUBLE PRECISION DEFAULT 0,
-        status           TEXT DEFAULT 'DRAFT',   -- DRAFT | PAID
-        paid_at          TIMESTAMP,
-        created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `).catch(() => {});
-    await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_payroll_period ON staff_payroll(staff_id, period)`).catch(() => {});
-    // Two-step accrual: a run is ACCRUED at finalize (expense booked in the earned
-    // month, Cr Salaries Payable) then PAID later (Dr Salaries Payable / Cr bank on
-    // the real payout date). pay_method/pay_reference capture how the payout was made.
-    await db.exec(`ALTER TABLE staff_payroll ADD COLUMN IF NOT EXISTS pay_method TEXT`).catch(() => {});
-    await db.exec(`ALTER TABLE staff_payroll ADD COLUMN IF NOT EXISTS pay_reference TEXT`).catch(() => {});
-  };
+  // Payroll tables and staff pay columns are created at start-up by createHrTables
+  // (hrService.ts); this ran their DDL on every payroll request. Kept as a no-op so
+  // its callers need no change (HRMS-R1A).
+  const ensurePayrollTables = async (_db: any) => {};
 
   const payrollGate = (req: AuthRequest) => STAFF_MGMT_ROLES.includes(req.user?.role ?? '');
   const monthRange = (m: string) => {
@@ -62878,8 +63261,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'stockout-measured-to-now',
+    commit_marker: 'hrms-r1a-org-record-history',
     code_features: [
+      'hrms-r1a-org-record-history — hrService.ts createHrTables at tenant init (staff_advances, staff_payroll, pay columns moved out of request handlers; ensurePayrollTables is a no-op); hr_masters (DEPARTMENT, DESIGNATION, GRADE, COST_CENTRE) with /hr/masters CRUD, from-existing, deactivate when in use, rename copied to staff text; attendance_staff employee_code (unique), employment_type, reporting_manager_id (loop check), master links, probation/confirmation/leaving dates, notice days; /hr/org-chart; /hr/employees/assign-codes and hr_settings.auto_employee_code (EMP-#### from the highest code, no counter); /hr/settings; /hr/records/:type/:oid/audit for EMPLOYEE, PAYROLL_RUN, OFFER_LETTER, EXPENSE_CLAIM, HR_MASTER, HR_SETTINGS with writes on staff create/bulk/edit/delete/password/pay settings, HR profile, salary structure, payroll run create/compute/approve/lock/paid/delete, offers, expense claims; payroll_runs and salary_structures in the statutory edit log.',
       'stockout-measured-to-now — GET /inventory/stockouts counted time up to the END of the last day of the report (toTs), and `to` defaults to today, so every span reached into hours that had not happened yet. An item still out was charged for the rest of today, and an item created minutes ago already had hours of history; between midnight and 05:30 IST that was more than a day, because toTs is 05:30 IST tomorrow, so the one-day guard published availability from seconds of data. TC-INV-STOCKOUT-NEEDS-A-DAY passed and then failed on the same build (b58b8f8) for exactly this reason: the failing run ended 00:42 IST and read tracked 1.2d, availability 100. Tracked, still-out and still-low spans now end at endTs = min(toTs, now). Unchanged: which movements fall in the window, the opening balance, events, currently_out and period.days. The portfolio rate still divides out time by tracked time over the same items, both now measured to endTs. The still-out and still-low spans are floored at zero, since a window that starts after today, or an item created after a past window ended, has startTs later than endTs and read as negative days out. Day boundaries stay at UTC midnight (05:30 IST) exactly as in the month-end close, whose SQL uses the same ::date cut; moving only this report to IST days would make its opening balance disagree with the close, so that is left for a deliberate decision. Smoke: TC-INV-STOCKOUT-MEASURED-TO-NOW takes the fixture out a third time and asserts, for items made seconds ago, days_tracked and days_out of at most 0.1 with 3 events and out now; the old code reads at least 0.2 day at every hour, so the test catches it whenever the suite runs.',
       'hrms-r0b-staff-data-attendance — PATCH /api/owner/staff/:id allow-list (name, role, login_id, phone, email, is_active; others ignored, 400 when none); POST /api/owner/staff/bulk (created_count, created[{row,id,name}], errors[{row,error}]); HR PAN/Aadhaar/bank_account masked in /hr/employees list/detail/PUT response/CSV, run payslips and /me/profile, ?reveal=1 needs HR_PAYROLL Edit and writes EMPLOYEE SENSITIVE_REVEALED, masked values skipped on PUT, password hash no longer returned; bank advice CSV needs HR_PAYROLL Edit; timesheet recompute counts only approved attendance; self-log on an APPROVED day 409 ATTENDANCE_APPROVED; expense claim HR approval posts EXP-<id> from its lines (Dr category accounts, Cr 2400); POST /hr/expenses/:claimId/cancel reverses it; hotel SERVICE_CHARGE credited to 4020 at settlement and in the year-end accrual; GET /timesheet returns status; staff-picker returns default_hours.',
       'hrms-r0a-payroll-engine — HR payroll compute reads approved attendance for unpaid days (ABSENT/LEAVE_WO_PAY 1, HALF_DAY 0.5); income tax per FY and regime from central_tax_years/central_tax_slabs with standard deduction, 87A rebate and marginal relief (FY 2025-26 seeded; a missing year returns 409 TAX_YEAR_MISSING); zero paid days pays zero; payslip paid/lop days NUMERIC; one structure per employee per run; stale payslips removed; failed compute resets PROCESSING; DELETE /payroll/runs/:runId for drafts; EPF ECR mapping via payslipToEcrRow (no s.basic); approve writes no petty-cash salary row; /reports/pnl payroll = approved payslips gross + employer PF/ESI; Form 16 standard deduction from the tax year; PT slabs by run period, seed only when empty.',

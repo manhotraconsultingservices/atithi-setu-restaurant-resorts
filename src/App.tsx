@@ -69899,10 +69899,11 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
 function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const toast = useToast();
   const showConfirm = useConfirm();
-  const [subTab, setSubTab] = useState<'EMPLOYEES' | 'SALARY' | 'PAYROLL' | 'EXPENSES' | 'OFFERS' | 'SETTINGS'>('EMPLOYEES');
+  const [subTab, setSubTab] = useState<'EMPLOYEES' | 'ORG' | 'SALARY' | 'PAYROLL' | 'EXPENSES' | 'OFFERS' | 'SETTINGS'>('EMPLOYEES');
   const [currencyWarning, setCurrencyWarning] = useState<string | null>(null);
   const SUB_TABS: Array<{ id: typeof subTab; label: string; emoji: string }> = [
     { id: 'EMPLOYEES', label: 'Employees',        emoji: '👥' },
+    { id: 'ORG',       label: 'Organisation',     emoji: '🏢' }, // HRMS-R1A
     { id: 'SALARY',    label: 'Salary Structure', emoji: '💰' },
     { id: 'PAYROLL',   label: 'Payroll Runs',     emoji: '📋' },
     { id: 'EXPENSES',  label: 'Expense Claims',   emoji: '🧾' },
@@ -69947,11 +69948,275 @@ function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: st
         ))}
       </div>
       {subTab === 'EMPLOYEES' && <EmployeeDirectory restaurantId={restaurantId} token={token} restaurant={restaurant} />}
+      {subTab === 'ORG'       && <HrOrganisationView restaurantId={restaurantId} token={token} restaurant={restaurant} />}
       {subTab === 'SALARY'    && <SalaryStructureEditor restaurantId={restaurantId} token={token} restaurant={restaurant} />}
       {subTab === 'PAYROLL'   && <PayrollRunsView restaurantId={restaurantId} token={token} restaurant={restaurant} />}
       {subTab === 'EXPENSES'  && <ExpenseClaimsInbox restaurantId={restaurantId} token={token} restaurant={restaurant} />}
       {subTab === 'OFFERS'    && <OfferLettersView restaurantId={restaurantId} token={token} restaurant={restaurant} />}
       {subTab === 'SETTINGS'  && <StatutoryConfigEditor restaurantId={restaurantId} token={token} />}
+    </div>
+  );
+}
+
+// ─── HR record history (HRMS-R1A) ──────────────────────────────────
+const HR_RECORD_LABEL: Record<string, string> = {
+  EMPLOYEE: 'Employee', PAYROLL_RUN: 'Payroll run', OFFER_LETTER: 'Offer letter',
+  EXPENSE_CLAIM: 'Expense claim', HR_MASTER: 'Organisation list entry', HR_SETTINGS: 'HR settings',
+};
+function HrHistoryOverlay({ kind, id, title, subtitle, facts, restaurantId, token, onClose }: {
+  kind: string; id: string; title: string; subtitle?: string; facts?: Array<[string, any]>;
+  restaurantId: string; token: string; onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[120] bg-black/40 overflow-y-auto p-4 sm:p-8" onClick={onClose}>
+      <div className="max-w-3xl mx-auto bg-[#faf7f2] rounded-2xl shadow-2xl p-5" onClick={e => e.stopPropagation()}>
+        <ObjectDetail
+          token={token}
+          title={title || id}
+          subtitle={subtitle || HR_RECORD_LABEL[kind] || kind}
+          overviewLabel={HR_RECORD_LABEL[kind] || 'Record'}
+          onBack={onClose}
+          backLabel="Close"
+          auditUrl={`/api/restaurant/${restaurantId}/hr/records/${kind}/${id}/audit`}
+          overview={
+            <div className="bg-white rounded-2xl border border-[#e8dccf] p-5">
+              <div className="grid grid-cols-2 gap-3 text-[12px]">
+                {(facts || []).map(([k, v], i) => (
+                  <div key={i}><span className="text-[#9c8e85]">{k}</span><div className="font-semibold text-[#14110c] break-words">{v == null || v === '' ? '—' : String(v)}</div></div>
+                ))}
+              </div>
+            </div>
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+// ─── Organisation: lists, employee codes, reporting lines (HRMS-R1A) ───
+const HR_MASTER_KIND_LABEL: Record<string, { one: string; many: string }> = {
+  DEPARTMENT: { one: 'department', many: 'Departments' },
+  DESIGNATION: { one: 'designation', many: 'Designations' },
+  GRADE: { one: 'grade', many: 'Grades' },
+  COST_CENTRE: { one: 'cost centre', many: 'Cost centres' },
+};
+function HrOrganisationView({ restaurantId, token }: { restaurantId: string; token: string; restaurant?: any }) {
+  const toast = useToast();
+  const showConfirm = useConfirm();
+  const canEdit = canWriteTab('HR_PAYROLL');
+  const canDelete = canDeleteTab('HR_PAYROLL');
+  const [kind, setKind] = useState<'DEPARTMENT' | 'DESIGNATION' | 'GRADE' | 'COST_CENTRE'>('DEPARTMENT');
+  const [masters, setMasters] = useState<any[]>([]);
+  const [form, setForm] = useState<{ name: string; code: string; parent_id: string }>({ name: '', code: '', parent_id: '' });
+  const [editing, setEditing] = useState<any | null>(null);
+  const [chart, setChart] = useState<any[]>([]);
+  const [settings, setSettings] = useState<any>({});
+  const [history, setHistory] = useState<any | null>(null);
+  const base = `/api/restaurant/${restaurantId}`;
+  const load = useCallback(async () => {
+    const headers = { Authorization: `Bearer ${token}` };
+    try {
+      const [m, c, st] = await Promise.all([
+        fetch(`${base}/hr/masters`, { headers }).then(r => r.ok ? r.json() : { masters: [] }),
+        fetch(`${base}/hr/org-chart`, { headers }).then(r => r.ok ? r.json() : { employees: [] }),
+        fetch(`${base}/hr/settings`, { headers }).then(r => r.ok ? r.json() : { settings: {} }),
+      ]);
+      setMasters(m.masters || []);
+      setChart(c.employees || []);
+      setSettings(st.settings || {});
+    } catch { toast.error('Could not load the organisation lists'); }
+    // eslint-disable-next-line
+  }, [restaurantId, token]);
+  useEffect(() => { load(); }, [load]);
+  const send = async (method: string, url: string, body?: any) => {
+    const res = await fetch(url, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    return j;
+  };
+  const list = masters.filter(m => m.kind === kind);
+  const label = HR_MASTER_KIND_LABEL[kind];
+  const add = async () => {
+    if (!form.name.trim()) { toast.error(`Give the ${label.one} a name.`); return; }
+    try {
+      await send('POST', `${base}/hr/masters`, { kind, name: form.name.trim(), code: form.code.trim() || undefined, parent_id: form.parent_id || undefined });
+      setForm({ name: '', code: '', parent_id: '' });
+      toast.success(`Added ${form.name.trim()}`);
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const saveEdit = async () => {
+    try {
+      await send('PATCH', `${base}/hr/masters/${editing.id}`, { name: editing.name, code: editing.code, parent_id: editing.parent_id || null, is_active: editing.is_active ? 1 : 0 });
+      setEditing(null);
+      toast.success('Saved');
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const remove = async (m: any) => {
+    const inUse = Number(m.employee_count) > 0;
+    if (!await showConfirm({ title: inUse ? `${m.name} is used by ${m.employee_count} employee${Number(m.employee_count) === 1 ? '' : 's'}. Switch it off?` : `Delete ${m.name}?`, danger: true })) return;
+    try {
+      const j = await send('DELETE', `${base}/hr/masters/${m.id}`);
+      toast.success(j.deactivated ? `${m.name} switched off` : `${m.name} deleted`);
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const fromExisting = async () => {
+    if (!await showConfirm({ title: `Create ${label.many.toLowerCase()} from the names typed on employee records, and link those employees?` })) return;
+    try {
+      const j = await send('POST', `${base}/hr/masters/from-existing`, { kind });
+      toast.success(`${j.created} added, ${j.linked} employee${j.linked === 1 ? '' : 's'} linked`);
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const assignCodes = async () => {
+    if (!await showConfirm({ title: 'Give an employee code (EMP-0001 and so on) to every employee without one?' })) return;
+    try {
+      const j = await send('POST', `${base}/hr/employees/assign-codes`);
+      toast.success(`${j.assigned} code${j.assigned === 1 ? '' : 's'} given`);
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  const toggleAutoCode = async (on: boolean) => {
+    try {
+      const j = await send('PUT', `${base}/hr/settings`, { settings: { auto_employee_code: on } });
+      setSettings(j.settings || {});
+      toast.success(on ? 'New staff will get a code automatically' : 'Automatic codes switched off');
+    } catch (e: any) { toast.error(e.message); }
+  };
+  // Reporting lines: employees whose manager is not in the active list sit at the top.
+  const ids = new Set(chart.map((e: any) => e.id));
+  const byManager = new Map<string, any[]>();
+  for (const e of chart) {
+    const k = e.reporting_manager_id && ids.has(e.reporting_manager_id) ? e.reporting_manager_id : '__top';
+    if (!byManager.has(k)) byManager.set(k, []);
+    byManager.get(k)!.push(e);
+  }
+  const renderNode = (e: any, depth: number, seen: Set<string>): React.ReactNode => {
+    if (seen.has(e.id)) return null;
+    const next = new Set(seen); next.add(e.id);
+    const kids = byManager.get(e.id) || [];
+    return (
+      <div key={e.id} className={depth ? 'ml-4 border-l border-[#e8dccf] pl-3' : ''}>
+        <div className="py-1 text-xs">
+          <span className="font-semibold text-[#1a1208]">{e.name}</span>
+          {e.employee_code && <span className="ml-2 font-mono text-[10px] text-[#9c8e85]">{e.employee_code}</span>}
+          {(e.designation || e.department) && <span className="ml-2 text-[#6b5d52]">{[e.designation, e.department].filter(Boolean).join(' · ')}</span>}
+        </div>
+        {kids.map((k: any) => renderNode(k, depth + 1, next))}
+      </div>
+    );
+  };
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-3xl border border-[#e8dccf] p-5 space-y-4">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <h3 className="text-lg font-bold text-[#1a1208]">Organisation lists</h3>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Departments, designations, grades and cost centres to pick on each employee record. An entry in use is switched off rather than deleted.</p>
+          </div>
+          {canEdit && (kind === 'DEPARTMENT' || kind === 'DESIGNATION') && (
+            <button onClick={fromExisting} className="px-3 py-1.5 rounded-xl border border-[#cc5a16]/30 text-[#cc5a16] text-xs font-bold">Create from employee records</button>
+          )}
+        </div>
+        <div className="flex gap-1 flex-wrap">
+          {(Object.keys(HR_MASTER_KIND_LABEL) as Array<'DEPARTMENT' | 'DESIGNATION' | 'GRADE' | 'COST_CENTRE'>).map(k => (
+            <button key={k} onClick={() => { setKind(k); setEditing(null); }} className={cn('px-3 py-1.5 rounded-xl text-xs font-bold', kind === k ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52]')}>
+              {HR_MASTER_KIND_LABEL[k].many} <span className="opacity-70">({masters.filter(m => m.kind === k && Number(m.is_active)).length})</span>
+            </button>
+          ))}
+        </div>
+        {canEdit && (
+          <div className="flex gap-2 flex-wrap items-end">
+            <label className="text-[11px] text-[#6b5d52]">Name
+              <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder={kind === 'DEPARTMENT' ? 'Front Office' : kind === 'DESIGNATION' ? 'Receptionist' : kind === 'GRADE' ? 'G3' : 'Rooms'} className="block mt-1 bg-[#faf7f2] rounded-xl px-3 py-2 text-sm outline-none w-48" />
+            </label>
+            <label className="text-[11px] text-[#6b5d52]">Code (optional)
+              <input value={form.code} onChange={e => setForm({ ...form, code: e.target.value })} placeholder="FO" className="block mt-1 bg-[#faf7f2] rounded-xl px-3 py-2 text-sm outline-none w-28 font-mono" />
+            </label>
+            {kind === 'DEPARTMENT' && (
+              <label className="text-[11px] text-[#6b5d52]">Part of
+                <select value={form.parent_id} onChange={e => setForm({ ...form, parent_id: e.target.value })} className="block mt-1 bg-[#faf7f2] rounded-xl px-3 py-2 text-sm outline-none w-44">
+                  <option value="">—</option>
+                  {list.filter(m => Number(m.is_active)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+              </label>
+            )}
+            <button onClick={add} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">Add {label.one}</button>
+          </div>
+        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-[#9c8e85] border-b border-[#e8dccf]">
+                <th className="py-2 pr-2">Code</th><th className="py-2 pr-2">Name</th>
+                {kind === 'DEPARTMENT' && <th className="py-2 pr-2">Part of</th>}
+                <th className="py-2 pr-2 text-right">Employees</th><th className="py-2 pr-2">Status</th><th className="py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.length === 0 && <tr><td colSpan={6} className="py-6 text-center italic text-[#9c8e85]">No {label.many.toLowerCase()} yet.</td></tr>}
+              {list.map(m => editing?.id === m.id ? (
+                <tr key={m.id} className="border-b border-[#f1ece3] bg-[#fff7e5]">
+                  <td className="py-2 pr-2"><input value={editing.code} onChange={e => setEditing({ ...editing, code: e.target.value })} className="w-24 bg-white rounded-lg px-2 py-1 font-mono" /></td>
+                  <td className="py-2 pr-2"><input value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} className="w-44 bg-white rounded-lg px-2 py-1" /></td>
+                  {kind === 'DEPARTMENT' && (
+                    <td className="py-2 pr-2">
+                      <select value={editing.parent_id || ''} onChange={e => setEditing({ ...editing, parent_id: e.target.value })} className="bg-white rounded-lg px-2 py-1">
+                        <option value="">—</option>
+                        {list.filter(x => x.id !== m.id && Number(x.is_active)).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+                      </select>
+                    </td>
+                  )}
+                  <td className="py-2 pr-2 text-right">{m.employee_count}</td>
+                  <td className="py-2 pr-2"><label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!editing.is_active} onChange={e => setEditing({ ...editing, is_active: e.target.checked })} />In use</label></td>
+                  <td className="py-2 text-right space-x-2 whitespace-nowrap">
+                    <button onClick={saveEdit} className="text-[#cc5a16] font-bold">Save</button>
+                    <button onClick={() => setEditing(null)} className="text-[#6b5d52]">Cancel</button>
+                  </td>
+                </tr>
+              ) : (
+                <tr key={m.id} className="border-b border-[#f1ece3]">
+                  <td className="py-2 pr-2 font-mono">{m.code}</td>
+                  <td className="py-2 pr-2 font-semibold text-[#1a1208]">{m.name}</td>
+                  {kind === 'DEPARTMENT' && <td className="py-2 pr-2 text-[#6b5d52]">{masters.find(x => x.id === m.parent_id)?.name || '—'}</td>}
+                  <td className="py-2 pr-2 text-right">{m.employee_count}</td>
+                  <td className="py-2 pr-2">{Number(m.is_active) ? <span className="text-emerald-700">In use</span> : <span className="text-[#9c8e85]">Switched off</span>}</td>
+                  <td className="py-2 text-right space-x-2 whitespace-nowrap">
+                    <button onClick={() => setHistory({ id: m.id, title: m.name, facts: [['Code', m.code], ['Employees', m.employee_count]] })} className="text-[#6b5d52] hover:underline">History</button>
+                    {canEdit && <button onClick={() => setEditing({ ...m, is_active: !!Number(m.is_active) })} className="text-[#cc5a16] hover:underline">Edit</button>}
+                    {canDelete && <button onClick={() => remove(m)} className="text-red-600 hover:underline">{Number(m.employee_count) > 0 ? 'Switch off' : 'Delete'}</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-3xl border border-[#e8dccf] p-5 space-y-3">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <h3 className="text-lg font-bold text-[#1a1208]">Employee codes</h3>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Codes follow EMP-0001. A code can also be typed on the employee record.</p>
+          </div>
+          {canEdit && <button onClick={assignCodes} className="px-3 py-1.5 rounded-xl border border-[#cc5a16]/30 text-[#cc5a16] text-xs font-bold">Give codes to employees without one</button>}
+        </div>
+        <label className="inline-flex items-center gap-2 text-xs text-[#3d3128]">
+          <input type="checkbox" disabled={!canEdit} checked={!!settings.auto_employee_code} onChange={e => toggleAutoCode(e.target.checked)} />
+          Give new staff a code automatically
+        </label>
+      </div>
+
+      <div className="bg-white rounded-3xl border border-[#e8dccf] p-5 space-y-2">
+        <h3 className="text-lg font-bold text-[#1a1208]">Reporting lines</h3>
+        <p className="text-xs text-[#6b5d52]">Active employees under the manager set on each record. Employees without a manager are at the top level.</p>
+        {chart.length === 0
+          ? <p className="text-xs italic text-[#9c8e85]">No active employees.</p>
+          : <div className="max-h-[420px] overflow-y-auto">{(byManager.get('__top') || []).map((e: any) => renderNode(e, 0, new Set()))}</div>}
+      </div>
+      {history && <HrHistoryOverlay kind="HR_MASTER" id={history.id} title={history.title} facts={history.facts} restaurantId={restaurantId} token={token} onClose={() => setHistory(null)} />}
     </div>
   );
 }
@@ -70130,6 +70395,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
 function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const toast = useToast();
   const showConfirm = useConfirm(); // HRMS-R0A: delete a draft run
+  const [runHistory, setRunHistory] = useState(false);
   const canEdit = canWriteTab('HR_PAYROLL');
   const [runs, setRuns] = useState<any[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -70300,6 +70566,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
               {canEdit && (run.status === 'APPROVED' || run.status === 'LOCKED') && <button onClick={() => runAction('mark-paid')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-green-600 text-white text-xs font-bold">Mark paid</button>}
               <a href={`/api/restaurant/${restaurantId}/payroll/runs/${run.id}/export.csv`} target="_blank" rel="noopener" className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">Bank advice CSV</a>
               <button onClick={() => downloadEpfEcr(run.id)} className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">EPF ECR</button>
+              <button onClick={() => setRunHistory(true)} className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">History</button>
             </div>
           </div>
           <div className="grid grid-cols-3 gap-3 text-xs mb-3">
@@ -70362,6 +70629,13 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
           )}
         </div>
       )}
+      {runHistory && run && (
+        <HrHistoryOverlay
+          kind="PAYROLL_RUN" id={run.id} title={`Payroll ${run.year}-${String(run.month).padStart(2, '0')}`}
+          facts={[['Status', run.status], ['Employees', run.employee_count], ['Net pay', cur(Number(run.total_net))]]}
+          restaurantId={restaurantId} token={token} onClose={() => setRunHistory(false)}
+        />
+      )}
     </div>
   );
 }
@@ -70370,6 +70644,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
 function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const canEdit = canWriteTab('HR_PAYROLL');
   const showConfirm = useConfirm(); // cancel an approved claim
+  const [claimHistory, setClaimHistory] = useState<any | null>(null);
   const [claims, setClaims] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('SUBMITTED');
   const [rejectingId, setRejectingId] = useState<string | null>(null);
@@ -70467,6 +70742,7 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
                       {c.status === 'CANCELLED' && <span className="text-[10px] text-gray-500">Cancelled</span>}
                       {c.status === 'REIMBURSED' && <span className="text-[10px] text-green-600">✓ Reimbursed</span>}
                       {c.status === 'REJECTED' && <span className="text-[10px] text-red-500">Rejected</span>}
+                      <button onClick={() => setClaimHistory(c)} className="ml-1 text-[10px] text-[#6b5d52] hover:underline">History</button>
                     </td>
                   </tr>
                   {rejectingId === c.id && (
@@ -70490,6 +70766,13 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
           </table>
         }
       </div>
+      {claimHistory && (
+        <HrHistoryOverlay
+          kind="EXPENSE_CLAIM" id={claimHistory.id} title={claimHistory.claim_number || 'Expense claim'}
+          facts={[['Employee', claimHistory.staff_name], ['Amount', cur(Number(claimHistory.total_amount))], ['Status', claimHistory.status]]}
+          restaurantId={restaurantId} token={token} onClose={() => setClaimHistory(null)}
+        />
+      )}
     </div>
   );
 }
@@ -70500,6 +70783,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
   const canEdit = canWriteTab('HR_PAYROLL');
   const [offers, setOffers] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
+  const [offerHistory, setOfferHistory] = useState<any | null>(null);
   const [form, setForm] = useState<any>({
     candidate_name: '', candidate_email: '', candidate_phone: '',
     designation: '', department: '', ctc: 0, joining_date: '', expires_at: '',
@@ -70575,6 +70859,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
                   <td className="p-3">{o.status}</td>
                   <td className="p-3 space-x-1">
                     <button onClick={() => openOfferLetterPdf(o.id)} className="text-[10px] text-[#cc5a16] hover:underline">PDF</button>
+                    <button onClick={() => setOfferHistory(o)} className="text-[10px] text-[#6b5d52] hover:underline">History</button>
                     {canEdit && (o.status === 'DRAFT' || o.status === 'SENT') && <button onClick={() => sendOffer(o.id)} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Send</button>}
                   </td>
                 </tr>
@@ -70605,6 +70890,14 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
           </div>
           </div>
         </div>
+      )}
+      {offerHistory && (
+        <HrHistoryOverlay
+          kind="OFFER_LETTER" id={offerHistory.id} title={offerHistory.offer_number || 'Offer letter'}
+          subtitle={offerHistory.candidate_name}
+          facts={[['Candidate', offerHistory.candidate_name], ['Designation', offerHistory.designation], ['CTC', cur(Number(offerHistory.ctc))], ['Status', offerHistory.status]]}
+          restaurantId={restaurantId} token={token} onClose={() => setOfferHistory(null)}
+        />
       )}
     </div>
   );
@@ -70772,7 +71065,7 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
             type="text"
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder="Search name, phone, email, PAN, payroll ID, designation, department…"
+            placeholder="Search name, code, phone, email, PAN, payroll ID, designation, department…"
             className="flex-1 min-w-[260px] bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none"
           />
         </div>
@@ -70788,6 +71081,7 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
             compact
             columns={[
               { key: 'name', label: 'Name', sortable: true, getValue: (e: any) => e.name, render: (e: any) => (<div><div className="font-semibold text-[#1a1208]">{e.name}</div><div className="text-[10px] text-[#9c8e85]">{e.phone || '—'}{e.email ? ` · ${e.email}` : ''}</div></div>), exportValue: (e: any) => e.name },
+              { key: 'employee_code', label: 'Code', sortable: true, render: (e: any) => e.employee_code ? <span className="font-mono text-[11px]">{e.employee_code}</span> : '—' },
               { key: 'designation', label: 'Designation', sortable: true, render: (e: any) => e.designation || '—' },
               { key: 'department', label: 'Department', sortable: true, render: (e: any) => e.department || '—' },
               { key: 'role', label: 'Role', sortable: true, getValue: (e: any) => prettyRoleLabel(e.role), render: (e: any) => <span className="text-[10px] uppercase tracking-widest">{prettyRoleLabel(e.role)}</span> },
@@ -70853,6 +71147,19 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
   const [payslips, setPayslips] = useState<any[]>([]);
   const [saving, setSaving] = useState(false);
   const [revealed, setRevealed] = useState(false); // PAN, Aadhaar and bank account arrive masked
+  const [masters, setMasters] = useState<any[]>([]);
+  const [staffOptions, setStaffOptions] = useState<any[]>([]);
+  const [manager, setManager] = useState<any | null>(null);
+  const [directReports, setDirectReports] = useState<any[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  useEffect(() => {
+    const h = { headers: { Authorization: `Bearer ${token}` } };
+    window.fetch(`/api/restaurant/${encodeURIComponent(restaurantId)}/hr/masters`, h)
+      .then(r => r.ok ? r.json() : { masters: [] }).then(d => setMasters(d.masters || [])).catch(() => {});
+    window.fetch(`/api/restaurant/${encodeURIComponent(restaurantId)}/staff-picker`, h)
+      .then(r => r.ok ? r.json() : []).then(d => setStaffOptions(Array.isArray(d) ? d : [])).catch(() => {});
+    // eslint-disable-next-line
+  }, [restaurantId]);
 
   useEffect(() => {
     (async () => {
@@ -70866,6 +71173,8 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
         setEmp(j.employee);
         setStructures(j.salary_structures || []);
         setPayslips(j.recent_payslips || []);
+        setManager(j.reporting_manager || null);
+        setDirectReports(j.direct_reports || []);
       } catch (err: any) { toast.error(err?.message || 'Failed to load'); onClose(); }
     })();
     // eslint-disable-next-line
@@ -70901,6 +71210,14 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
   };
 
   const setF = (k: string, v: any) => setEmp({ ...emp, [k]: v });
+  const mastersOf = (kind: string) => masters.filter((m: any) => m.kind === kind);
+  const masterOptions = (kind: string, currentId?: string | null, currentText?: string | null) => {
+    const opts = [{ value: '', label: currentText && !currentId ? `— (typed: ${currentText})` : '—' }];
+    for (const m of mastersOf(kind)) {
+      if (Number(m.is_active) || m.id === currentId) opts.push({ value: m.id, label: Number(m.is_active) ? m.name : `${m.name} (switched off)` });
+    }
+    return opts;
+  };
   const revealNumbers = async () => {
     try {
       const res = await window.fetch(
@@ -70922,7 +71239,10 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
             <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">HR profile</p>
             <h2 className="text-xl font-bold text-[#1a1208]">{emp.name}</h2>
           </div>
-          <button onClick={onClose} className="w-9 h-9 rounded-full bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#3d3128]">×</button>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setShowHistory(true)} className="px-3 py-1.5 rounded-xl border border-[#cc5a16]/20 text-[#6b5d52] text-xs font-bold hover:bg-[#cc5a16]/5">History</button>
+            <button onClick={onClose} className="w-9 h-9 rounded-full bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#3d3128]">×</button>
+          </div>
         </div>
         <div className="p-6 space-y-4">
           {/* ── Identity ─────────────────────────────────────────── */}
@@ -70930,13 +71250,44 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
             <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Identity</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Full name"            value={emp.name}            onChange={(v) => setF('name', v)} />
-              <Field label="Designation"          value={emp.designation || ''} onChange={(v) => setF('designation', v)} placeholder="e.g. Receptionist, Chef" />
-              <Field label="Department"           value={emp.department || ''}  onChange={(v) => setF('department', v)} placeholder="Front Office, F&B, Kitchen" />
+              {mastersOf('DESIGNATION').length > 0
+                ? <SelectField label="Designation" value={emp.designation_id || ''} onChange={(v) => setF('designation_id', v)} options={masterOptions('DESIGNATION', emp.designation_id, emp.designation)} />
+                : <Field label="Designation"      value={emp.designation || ''} onChange={(v) => setF('designation', v)} placeholder="e.g. Receptionist, Chef" />}
+              {mastersOf('DEPARTMENT').length > 0
+                ? <SelectField label="Department" value={emp.department_id || ''} onChange={(v) => setF('department_id', v)} options={masterOptions('DEPARTMENT', emp.department_id, emp.department)} />
+                : <Field label="Department"       value={emp.department || ''}  onChange={(v) => setF('department', v)} placeholder="Front Office, F&B, Kitchen" />}
+              <Field label="Employee code"        value={emp.employee_code || ''} onChange={(v) => setF('employee_code', String(v).toUpperCase())} placeholder="EMP-0001" />
               <Field label="Payroll ID"           value={emp.payroll_id || ''}  onChange={(v) => setF('payroll_id', v)} placeholder="EMP-001" />
+              <SelectField
+                label="Employment type"
+                value={emp.employment_type || ''}
+                onChange={(v) => setF('employment_type', v)}
+                options={[
+                  { value: '', label: '—' },
+                  { value: 'PERMANENT', label: 'Permanent' },
+                  { value: 'PROBATION', label: 'On probation' },
+                  { value: 'FIXED_TERM', label: 'Fixed term' },
+                  { value: 'CASUAL', label: 'Casual / daily' },
+                  { value: 'TRAINEE', label: 'Trainee' },
+                  { value: 'CONTRACTOR', label: 'Contractor' },
+                ]}
+              />
+              <SelectField
+                label="Reports to"
+                value={emp.reporting_manager_id || ''}
+                onChange={(v) => setF('reporting_manager_id', v)}
+                options={[
+                  { value: '', label: '—' },
+                  ...staffOptions.filter((o: any) => o.id !== emp.id).map((o: any) => ({ value: o.id, label: o.name })),
+                  ...(manager && !staffOptions.some((o: any) => o.id === manager.id) ? [{ value: manager.id, label: `${manager.name} (inactive)` }] : []),
+                ]}
+              />
+              {mastersOf('GRADE').length > 0 && <SelectField label="Grade" value={emp.grade_id || ''} onChange={(v) => setF('grade_id', v)} options={masterOptions('GRADE', emp.grade_id)} />}
+              {mastersOf('COST_CENTRE').length > 0 && <SelectField label="Cost centre" value={emp.cost_centre_id || ''} onChange={(v) => setF('cost_centre_id', v)} options={masterOptions('COST_CENTRE', emp.cost_centre_id)} />}
               <Field label="Phone"                value={emp.phone || ''}       onChange={(v) => setF('phone', v)} />
               <Field label="Email"                value={emp.email || ''}       onChange={(v) => setF('email', v)} type="email" />
-              <Field label="Joining date"         value={emp.joining_date || ''} onChange={(v) => setF('joining_date', v)} type="date" />
-              <Field label="Date of birth"        value={emp.dob || ''}         onChange={(v) => setF('dob', v)} type="date" />
+              <Field label="Joining date"         value={String(emp.joining_date || '').slice(0, 10)} onChange={(v) => setF('joining_date', v)} type="date" />
+              <Field label="Date of birth"        value={String(emp.dob || '').slice(0, 10)}         onChange={(v) => setF('dob', v)} type="date" />
               <SelectField
                 label="HR status"
                 value={emp.hr_status || 'ACTIVE'}
@@ -70981,6 +71332,20 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
               <Field label="CTC (annual ₹)"  value={emp.ctc || ''}         onChange={(v) => setF('ctc', v)} type="number" />
               <Field label="Hourly rate (₹/hr)" value={emp.hourly_rate || ''} onChange={(v) => setF('hourly_rate', v)} type="number" />
             </div>
+          </section>
+
+          {/* ── Employment (HRMS-R1A) ────────────────────────────── */}
+          <section>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Employment</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="Probation ends"       value={String(emp.probation_end_date || '').slice(0, 10)} onChange={(v) => setF('probation_end_date', v)} type="date" />
+              <Field label="Confirmed on"         value={String(emp.confirmation_date || '').slice(0, 10)} onChange={(v) => setF('confirmation_date', v)} type="date" />
+              <Field label="Notice period (days)" value={emp.notice_period_days ?? ''} onChange={(v) => setF('notice_period_days', v)} type="number" />
+              <Field label="Date of leaving"      value={String(emp.date_of_leaving || '').slice(0, 10)} onChange={(v) => setF('date_of_leaving', v)} type="date" />
+            </div>
+            {directReports.length > 0 && (
+              <p className="text-[11px] text-[#6b5d52] mt-2">Reporting to {emp.name}: {directReports.map((r: any) => r.name).join(', ')}</p>
+            )}
           </section>
 
           {/* ── Statutory IDs ────────────────────────────────────── */}
@@ -71074,6 +71439,14 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
           </button>}
         </div>
       </div>
+      {showHistory && (
+        <HrHistoryOverlay
+          kind="EMPLOYEE" id={staffId} title={emp.name}
+          subtitle={[emp.employee_code, emp.designation].filter(Boolean).join(' · ') || 'Employee'}
+          facts={[['Employee code', emp.employee_code], ['Designation', emp.designation], ['Department', emp.department], ['HR status', emp.hr_status]]}
+          restaurantId={restaurantId} token={token} onClose={() => setShowHistory(false)}
+        />
+      )}
     </div>
   );
 }

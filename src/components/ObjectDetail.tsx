@@ -351,6 +351,15 @@ export function buildObjectResolver(restaurantId: string, token: string) {
           ]),
         });
       }
+      // HR records (HRMS-R1A): history only.
+      case 'EMPLOYEE': case 'PAYROLL_RUN': case 'OFFER_LETTER': case 'EXPENSE_CLAIM': case 'HR_MASTER': {
+        const label = ({ EMPLOYEE: 'Employee', PAYROLL_RUN: 'Payroll run', OFFER_LETTER: 'Offer letter', EXPENSE_CLAIM: 'Expense claim', HR_MASTER: 'Organisation list entry' } as Record<string, string>)[objectType];
+        return mk({
+          title: hint?.label || objectId, subtitle: hint?.subtitle || label,
+          auditUrl: `${base}/hr/records/${objectType}/${objectId}/audit`,
+          overview: facts(label, objectId),
+        } as any);
+      }
       default:
         return null; // unknown types → shell falls back to onOpenObject
     }
