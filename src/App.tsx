@@ -70121,6 +70121,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
 // ─── Payroll Runs ──────────────────────────────────────────────────
 function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const toast = useToast();
+  const showConfirm = useConfirm(); // HRMS-R0A: delete a draft run
   const canEdit = canWriteTab('HR_PAYROLL');
   const [runs, setRuns] = useState<any[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -70180,6 +70181,27 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
     }
   }
   const run = runs.find(r => r.id === selectedRunId);
+
+  async function deleteDraftRun() {
+    if (!selectedRunId) return;
+    if (!canDeleteTab('HR_PAYROLL')) { setActionError('You need Full access to HR & Payroll to delete a draft run.'); return; }
+    if (!await showConfirm({ title: 'Delete this draft run and its payslips?', danger: true })) return;
+    setBusy(true); setActionError('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/payroll/runs/${selectedRunId}`, {
+        method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(err.error || 'Delete failed');
+      } else {
+        setSelectedRunId(null);
+        toast.success('Draft run deleted');
+      }
+    } catch { setActionError('Network error — delete failed'); }
+    setBusy(false);
+    refresh();
+  }
 
   async function openPayslipPdf(payslipId: string) {
     try {
@@ -70264,6 +70286,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
             <h3 className="font-bold text-[#1a1208]">Run {run.year}-{String(run.month).padStart(2, '0')} · {run.status}</h3>
             <div className="flex gap-2">
               {canEdit && run.status === 'DRAFT' && <button onClick={() => runAction('compute')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">Run compute</button>}
+              {canDeleteTab('HR_PAYROLL') && run.status === 'DRAFT' && <button onClick={deleteDraftRun} disabled={busy} className="px-3 py-1.5 rounded-xl border border-red-200 text-red-700 text-xs font-bold">Delete draft</button>}
               {canEdit && run.status === 'DRAFT' && payslips.length > 0 && <button onClick={() => runAction('approve')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-bold">Approve</button>}
               {canEdit && run.status === 'APPROVED' && <button onClick={() => runAction('lock')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-purple-600 text-white text-xs font-bold">Lock</button>}
               {canEdit && (run.status === 'APPROVED' || run.status === 'LOCKED') && <button onClick={() => runAction('mark-paid')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-green-600 text-white text-xs font-bold">Mark paid</button>}
@@ -70279,7 +70302,9 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
           {['APPROVED','LOCKED','PAID'].includes(run.status) && (
             <div className="text-[10px] text-green-700 bg-green-50 rounded-xl px-3 py-1.5 mb-3 flex items-center gap-1.5">
               <span>✓</span>
-              <span>Salary expense of {cur(Number(run.total_gross))} posted to accounts ledger on approval</span>
+              <span>{run.status === 'PAID'
+                ? `Salary expense of ${cur(Number(run.total_gross))} was posted to the accounts when the run was marked paid`
+                : `Salary expense of ${cur(Number(run.total_gross))} is posted to the accounts when the run is marked paid`}</span>
             </div>
           )}
           {payslips.length > 0 ? (

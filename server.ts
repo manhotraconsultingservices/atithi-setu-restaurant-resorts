@@ -37,6 +37,9 @@ import { generateBankRecStatementPdf, type BankRecStatementData } from "./bankRe
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
 import {
   computePayslip as computeStatutoryPayslip,
+  bandsToTdsSlabs,
+  payslipToEcrRow,
+  type TaxYear,
   type StatutoryInput,
   type PtSlab,
   type TdsSlab,
@@ -18133,11 +18136,13 @@ async function startServer() {
     return cfg || {};
   }
 
-  async function getCentralPtSlabs(state: string | null): Promise<PtSlab[]> {
+  // Slabs in force on `asOf` (the payroll period; today when not given). DISTINCT
+  // because the old seed added a copy of every row on each start (HRMS-R0A).
+  async function getCentralPtSlabs(state: string | null, asOf?: any): Promise<PtSlab[]> {
     if (!state) return [];
-    const today = new Date().toISOString().slice(0, 10);
+    const today = asOf || new Date().toISOString().slice(0, 10);
     const rows: any[] = await centralDb.query(
-      `SELECT state_code, min_gross, max_gross, amount, extra_month, extra_amount
+      `SELECT DISTINCT state_code, min_gross, max_gross, amount, extra_month, extra_amount
          FROM central_pt_slabs
         WHERE state_code = ?
           AND effective_from <= ?
@@ -18155,24 +18160,38 @@ async function startServer() {
     }));
   }
 
-  async function getCentralTdsSlabs(fy: string, regime: 'OLD' | 'NEW'): Promise<TdsSlab[]> {
-    const rows: any[] = await centralDb.query(
-      `SELECT fy, regime, min_income, max_income, rate_pct, base_tax, surcharge_pct, cess_pct
-         FROM central_tds_slabs
-        WHERE fy = ? AND regime = ?
-        ORDER BY min_income ASC`,
+  // Income-tax figures for one financial year and regime (central_tax_years +
+  // central_tax_slabs). null when the year is not loaded: callers must stop,
+  // never compute zero tax (HRMS-R0A).
+  async function getTaxYear(fy: string, regime: 'OLD' | 'NEW'): Promise<TaxYear | null> {
+    const head: any = await centralDb.get(
+      `SELECT fy, regime, standard_deduction, rebate_income_limit, rebate_max, marginal_relief, cess_pct, source
+         FROM central_tax_years WHERE fy = ? AND regime = ?`,
       [fy, regime]
     );
-    return rows.map((r) => ({
-      fy: r.fy,
-      regime: r.regime,
-      min_income: Number(r.min_income),
-      max_income: r.max_income == null ? null : Number(r.max_income),
-      rate_pct: Number(r.rate_pct),
-      base_tax: Number(r.base_tax) || 0,
-      surcharge_pct: Number(r.surcharge_pct) || 0,
-      cess_pct: Number(r.cess_pct) || 4,
-    }));
+    if (!head) return null;
+    const bands: any[] = await centralDb.query(
+      `SELECT min_income, max_income, rate_pct FROM central_tax_slabs
+        WHERE fy = ? AND regime = ? ORDER BY min_income ASC`,
+      [fy, regime]
+    );
+    if (!bands.length) return null;
+    const cess = Number.isFinite(Number(head.cess_pct)) ? Number(head.cess_pct) : 4;
+    return {
+      fy, regime, source: head.source || null,
+      params: {
+        standard_deduction: Number(head.standard_deduction) || 0,
+        rebate_income_limit: Number(head.rebate_income_limit) || 0,
+        rebate_max: Number(head.rebate_max) || 0,
+        marginal_relief: !!Number(head.marginal_relief),
+        cess_pct: cess,
+      },
+      slabs: bandsToTdsSlabs(fy, regime, bands.map((b) => ({
+        min_income: Number(b.min_income),
+        max_income: b.max_income == null ? null : Number(b.max_income),
+        rate_pct: Number(b.rate_pct),
+      })), cess),
+    };
   }
 
   // ── Salary Components master ───────────────────────────────────────────
@@ -18404,11 +18423,11 @@ async function startServer() {
 
       // Load statutory config + slabs once for this run
       const cfg = await getStatutoryConfig(db);
-      const ptSlabs = await getCentralPtSlabs(cfg.pt_state || null);
+      const ptSlabs = await getCentralPtSlabs(cfg.pt_state || null, run.period_start);
       // We'll resolve TDS slabs per-employee (regime may differ on structure)
 
       // Find every active employee with a current salary structure
-      const employees: any[] = await db.query(
+      const employeesAll: any[] = await db.query(
         `SELECT s.*, st.id AS structure_id, st.gross_monthly, st.basic, st.hra, st.special,
                 st.conveyance, st.medical, st.other_allowances, st.tds_regime,
                 st.section_80c_declared, st.hra_exemption_declared, st.employer_pf_included
@@ -18417,9 +18436,20 @@ async function startServer() {
             AND st.effective_from <= ?
             AND (st.effective_to IS NULL OR st.effective_to >= ?)
           WHERE (s.hr_status IS NULL OR s.hr_status = 'ACTIVE')
-            AND COALESCE(s.is_active, 1) = 1`,
+            AND COALESCE(s.is_active, 1) = 1
+          ORDER BY s.id, st.effective_from DESC`,
         [run.period_end, run.period_start]
       );
+      // One salary structure per employee per run. A revision inside the month
+      // matched two rows, adding the person to the totals twice; the latest
+      // structure applies until pay is split by days (HRMS-R0A).
+      const _seenStaff = new Set<string>();
+      const employees = employeesAll.filter((e: any) => {
+        const k = String(e.id);
+        if (_seenStaff.has(k)) return false;
+        _seenStaff.add(k);
+        return true;
+      });
 
       const fy = (() => {
         // FY runs Apr-Mar. month 1-3 → previous FY, 4-12 → current FY
@@ -18427,27 +18457,43 @@ async function startServer() {
         return run.month <= 3 ? `${y - 1}-${String(y).slice(2)}` : `${y}-${String(y + 1).slice(2)}`;
       })();
 
-      // Resolve TDS slabs ONCE per regime
-      const tdsCache: { OLD?: TdsSlab[]; NEW?: TdsSlab[] } = {};
-      const ensureTds = async (regime: 'OLD' | 'NEW') => {
-        if (!tdsCache[regime]) tdsCache[regime] = await getCentralTdsSlabs(fy, regime);
-        return tdsCache[regime]!;
+      // Income-tax figures for the run's financial year, once per regime. A year
+      // that is not loaded stops the run: computing it would deduct no tax.
+      const taxYearCache: Record<string, TaxYear | null> = {};
+      const ensureTaxYear = async (regime: 'OLD' | 'NEW'): Promise<TaxYear> => {
+        if (!(regime in taxYearCache)) taxYearCache[regime] = await getTaxYear(fy, regime);
+        const ty = taxYearCache[regime];
+        if (!ty) {
+          throw Object.assign(
+            new Error(`Income-tax figures for FY ${fy} (${regime === 'OLD' ? 'old' : 'new'} regime) are not loaded, so tax cannot be worked out. This month cannot be computed until they are added.`),
+            { code: 'TAX_YEAR_MISSING', fy, regime }
+          );
+        }
+        return ty;
       };
+      const regimeOf = (emp: any): 'OLD' | 'NEW' =>
+        (String(emp.tds_regime || cfg.tds_regime_default || 'NEW').toUpperCase() === 'OLD') ? 'OLD' : 'NEW';
+      // Check every regime in the run before any payslip is written.
+      for (const emp of employees) await ensureTaxYear(regimeOf(emp));
 
-      // Pull timesheet aggregates for the period — if no timesheets exist, fall
-      // back to "full month, no LOP". Phase 1 keeps this simple; Phase 2 will
-      // wire actual paid_days/lop_days from timesheet_day.
-      const tsRows: any[] = await db.query(
-        `SELECT staff_id,
-                SUM(CASE WHEN status = 'PRESENT' OR status IS NULL THEN 1 ELSE 0 END) AS work_days,
-                SUM(CASE WHEN status = 'LOP' OR status = 'ABSENT' THEN 1 ELSE 0 END) AS lop_days
-           FROM timesheet_day
-          WHERE work_date BETWEEN ? AND ?
-          GROUP BY staff_id`,
+      // Unpaid days come from approved attendance for the month: Absent and Leave
+      // without pay count as a whole unpaid day, Half day as half. Days with no
+      // mark are paid (owner decision D1, until the attendance register). This
+      // used to read columns timesheet_day does not have and swallow the error,
+      // so everyone was paid a full month. A read failure now stops the run.
+      const lopRows: any[] = await db.query(
+        `SELECT user_id AS staff_id,
+                SUM(CASE WHEN UPPER(COALESCE(type, '')) IN ('ABSENT', 'LEAVE_WO_PAY', 'LOP') THEN 1
+                         WHEN UPPER(COALESCE(type, '')) = 'HALF_DAY' THEN 0.5
+                         ELSE 0 END) AS lop_days
+           FROM attendance
+          WHERE date BETWEEN ? AND ?
+            AND (status IS NULL OR status = 'APPROVED')
+          GROUP BY user_id`,
         [run.period_start, run.period_end]
-      ).catch(() => []);
-      const tsMap = new Map<string, { work_days: number; lop_days: number }>();
-      for (const r of tsRows) tsMap.set(String(r.staff_id), { work_days: Number(r.work_days) || 0, lop_days: Number(r.lop_days) || 0 });
+      );
+      const lopMap = new Map<string, number>();
+      for (const r of lopRows) lopMap.set(String(r.staff_id), Number(r.lop_days) || 0);
 
       // Determine month days as default work_days
       const monthDays = new Date(run.year, run.month, 0).getDate();
@@ -18458,13 +18504,13 @@ async function startServer() {
       let employee_count = 0;
 
       for (const emp of employees) {
-        const ts = tsMap.get(String(emp.id));
-        const workDays = ts && ts.work_days > 0 ? ts.work_days + (ts.lop_days || 0) : monthDays;
-        const lopDays = ts ? ts.lop_days : 0;
+        const workDays = monthDays;
+        const lopDays = Math.min(workDays, lopMap.get(String(emp.id)) || 0);
         const paidDays = Math.max(0, workDays - lopDays);
 
-        const regime = (String(emp.tds_regime || cfg.tds_regime_default || 'NEW').toUpperCase() === 'OLD') ? 'OLD' : 'NEW';
-        const tdsSlabs = await ensureTds(regime);
+        const regime = regimeOf(emp);
+        const taxYear = await ensureTaxYear(regime);
+        const tdsSlabs = taxYear.slabs;
 
         const input: StatutoryInput = {
           basic: Number(emp.basic) || 0,
@@ -18481,6 +18527,7 @@ async function startServer() {
           pt_slabs: ptSlabs,
           tds_regime: regime,
           tds_slabs: tdsSlabs,
+          tax_params: taxYear.params,
           section_80c_declared: Number(emp.section_80c_declared) || 0,
           hra_exemption_declared: Number(emp.hra_exemption_declared) || 0,
           work_days: workDays,
@@ -18564,6 +18611,17 @@ async function startServer() {
         employee_count++;
       }
 
+      // Payslips of anyone no longer in the run (left, on hold, structure ended) go.
+      const _keep = employees.map((e: any) => String(e.id));
+      if (_keep.length) {
+        await db.run(
+          `DELETE FROM payslips WHERE payroll_run_id = ? AND staff_id NOT IN (${_keep.map(() => '?').join(', ')})`,
+          [req.params.runId, ..._keep]
+        );
+      } else {
+        await db.run(`DELETE FROM payslips WHERE payroll_run_id = ?`, [req.params.runId]);
+      }
+
       const stamp = new Date().toISOString();
       await db.run(
         `UPDATE payroll_runs
@@ -18576,10 +18634,52 @@ async function startServer() {
       );
 
       const updated = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
-      res.json({ run: updated, computed: employee_count });
+      res.json({
+        run: updated,
+        computed: employee_count,
+        tax_years: Object.entries(taxYearCache)
+          .filter(([, v]) => !!v)
+          .map(([regime, v]) => ({ fy, regime, source: (v as TaxYear).source })),
+      });
     } catch (err: any) {
+      // Never leave the run stuck in Processing.
+      try {
+        const dbx = await getTenantDb(req.params.id);
+        await dbx.run(
+          `UPDATE payroll_runs SET status = 'DRAFT', updated_at = ? WHERE id = ? AND status = 'PROCESSING'`,
+          [new Date().toISOString(), req.params.runId]
+        );
+      } catch { /* the error below is what the caller needs */ }
+      if (err?.code === 'TAX_YEAR_MISSING') {
+        return res.status(409).json({ error: err.message, code: 'TAX_YEAR_MISSING', fy: err.fy, regime: err.regime });
+      }
       console.error('payroll/runs compute error:', err);
       res.status(500).json({ error: err?.message || 'Compute failed' });
+    }
+  });
+
+  // Delete a draft run and its payslips (a run created by mistake, or a test run).
+  // Approved, locked and paid runs cannot be deleted (HRMS-R0A).
+  app.delete("/api/restaurant/:id/payroll/runs/:runId", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const run: any = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      if (!run) return res.status(404).json({ error: 'Run not found' });
+      if (run.status !== 'DRAFT') {
+        return res.status(409).json({ error: `Only a draft run can be deleted. This run is ${run.status}.` });
+      }
+      await db.run(
+        `UPDATE expense_claims SET reimburse_with_payroll_run_id = NULL
+          WHERE reimburse_with_payroll_run_id = ? AND status = 'HR_APPROVED'`,
+        [req.params.runId]
+      );
+      await db.run("DELETE FROM payslips WHERE payroll_run_id = ?", [req.params.runId]);
+      const del: any = await db.run("DELETE FROM payroll_runs WHERE id = ? AND status = 'DRAFT'", [req.params.runId]);
+      if (del && del.changes === 0) return res.status(409).json({ error: 'The run changed while deleting. Refresh and try again.' });
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error('payroll/runs delete error:', err);
+      res.status(500).json({ error: err?.message || 'Delete failed' });
     }
   });
 
@@ -18599,32 +18699,9 @@ async function startServer() {
       }
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
 
-      // ── Post salary expense to accounts ledger (petty_cash) ──────────────
-      // This makes payroll visible in the Expense Journal once HR finalises.
-      try {
-        await _ensurePettyCash(db);
-        await db.exec("ALTER TABLE petty_cash ADD COLUMN IF NOT EXISTS reference_id TEXT").catch(() => {});
-        const refKey = `PAYROLL-${req.params.runId}`;
-        const alreadyPosted = await db.get("SELECT id FROM petty_cash WHERE reference_id = ?", [refKey]);
-        if (!alreadyPosted && run && Number(run.total_gross) > 0) {
-          const monthPad = String(run.month).padStart(2, '0');
-          const pcId = `PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-          await db.run(
-            `INSERT INTO petty_cash (id, entry_date, direction, category, amount, notes, recorded_by, module, reference_id)
-             VALUES (?, ?, 'OUT', 'SALARY', ?, ?, ?, 'SHARED', ?)`,
-            [
-              pcId,
-              new Date().toISOString().slice(0, 10),
-              Math.round(Number(run.total_gross) * 100) / 100,
-              `Payroll ${run.year}-${monthPad}: ${run.employee_count || 0} employees | Net ${Math.round(Number(run.total_net))} | Deductions ${Math.round(Number(run.total_deductions))}`,
-              req.user?.email || req.user?.id || 'hr-system',
-              refKey,
-            ]
-          );
-        }
-      } catch (ledgerErr) {
-        console.error('payroll approve: ledger write failed (non-fatal):', ledgerErr);
-      }
+      // Payroll reaches the accounts when the run is marked paid (_postPayrollRunGl).
+      // Approval also used to write the gross to petty cash as a SALARY row, which
+      // the P&L then counted a second time beside the run itself (HRMS-R0A).
 
       res.json({ run });
     } catch (err: any) {
@@ -18834,7 +18911,7 @@ You can also view all your payslips in the employee portal.
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
       if (!run) return res.status(404).json({ error: 'Run not found' });
       const payslips: any[] = await db.query(
-        `SELECT p.*, s.name AS staff_name, s.uan, s.basic AS staff_basic
+        `SELECT p.*, s.name AS staff_name, s.uan
            FROM payslips p
            LEFT JOIN attendance_staff s ON s.id = p.staff_id
           WHERE p.payroll_run_id = ?`,
@@ -18844,31 +18921,7 @@ You can also view all your payslips in the employee portal.
       const ceiling = Number(cfg.pf_wage_ceiling) || 15000;
       const rows: EpfEcrRow[] = payslips
         .filter((p) => p.uan && (Number(p.pf_employee) > 0 || Number(p.pf_employer_eps) > 0))
-        .map((p) => {
-          // Get pro-rated basic from structure_snapshot OR fall back to staff_basic
-          let basicProRated = Number(p.staff_basic) || 0;
-          try {
-            const ss = JSON.parse(p.structure_snapshot || '{}');
-            basicProRated = Number(ss.basic) || basicProRated;
-          } catch { /* ignore */ }
-          // Pro-rate basic by paid_days / work_days
-          const paidFactor = (Number(p.paid_days) || 0) / Math.max(1, Number(p.work_days) || 30);
-          const proRatedBasic = Math.round(basicProRated * paidFactor);
-          const epfWages = Math.min(proRatedBasic, ceiling);
-          return {
-            uan: String(p.uan || ''),
-            member_name: String(p.staff_name || ''),
-            gross_wages: Math.round(Number(p.gross_earnings) || 0),
-            epf_wages: epfWages,
-            eps_wages: epfWages,
-            edli_wages: epfWages,
-            epf_contrib_remitted: Number(p.pf_employer_epf) || 0,
-            eps_contrib_remitted: Number(p.pf_employer_eps) || 0,
-            epf_eps_diff_remitted: (Number(p.pf_employer_epf) || 0) + (Number(p.pf_employer_eps) || 0) - (Number(p.pf_employer_eps) || 0),
-            ncp_days: Number(p.lop_days) || 0,
-            refund_of_advances: 0,
-          };
-        });
+        .map((p) => payslipToEcrRow(p, ceiling) as EpfEcrRow);
       const text = generateEpfEcr(rows);
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="ecr-${run.year}-${String(run.month).padStart(2, '0')}.txt"`);
@@ -19004,7 +19057,8 @@ You can also view all your payslips in the employee portal.
       const professional_tax_annual = payslips.reduce((s, p) => s + (Number(p.professional_tax) || 0), 0);
       const total_tax_deducted = payslips.reduce((s, p) => s + (Number(p.tds) || 0), 0);
       const exempt_allowances = 0; // Phase 1: no HRA exempt computation
-      const standard_deduction = 50000;
+      const _taxYear = await getTaxYear(fy, regime).catch(() => null);
+      const standard_deduction = _taxYear ? _taxYear.params.standard_deduction : 50000;
       const net_taxable_salary = Math.max(0, gross_salary - exempt_allowances - standard_deduction - professional_tax_annual);
       const pfEmpAnnual = payslips.reduce((s, p) => s + (Number(p.pf_employee) || 0), 0);
       const chapter_via_80c = regime === 'OLD' ? Math.min(150000, pfEmpAnnual) : 0;
@@ -44754,7 +44808,9 @@ ${data.tenant.name}`;
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(total_net), 0) AS val FROM payroll_runs WHERE status IN ('APPROVED','LOCKED','PAID') AND period_start >= ? AND period_end <= ?`, [f, t]).catch(() => ({ val: 0 })),
+        // Payroll cost = gross pay + employer PF and ESI on approved runs. It was net
+        // pay, and approval also wrote the gross to petty cash, so salary counted twice.
+        db.get(`SELECT COALESCE(SUM(p.gross_earnings + COALESCE(p.pf_employer_eps, 0) + COALESCE(p.pf_employer_epf, 0) + COALESCE(p.esi_employer, 0)), 0) AS val FROM payslips p JOIN payroll_runs r ON r.id = p.payroll_run_id WHERE r.status IN ('APPROVED','LOCKED','PAID') AND r.period_start >= ? AND r.period_end <= ?`, [f, t]).catch(() => ({ val: 0 })),
       ]);
 
       const round = (n: number) => Math.round(Number(n) * 100) / 100;
@@ -62583,8 +62639,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-wellness-charge-tips-shift',
+    commit_marker: 'hrms-r0a-payroll-engine',
     code_features: [
+      'hrms-r0a-payroll-engine — HR payroll compute reads approved attendance for unpaid days (ABSENT/LEAVE_WO_PAY 1, HALF_DAY 0.5); income tax per FY and regime from central_tax_years/central_tax_slabs with standard deduction, 87A rebate and marginal relief (FY 2025-26 seeded; a missing year returns 409 TAX_YEAR_MISSING); zero paid days pays zero; payslip paid/lop days NUMERIC; one structure per employee per run; stale payslips removed; failed compute resets PROCESSING; DELETE /payroll/runs/:runId for drafts; EPF ECR mapping via payslipToEcrRow (no s.basic); approve writes no petty-cash salary row; /reports/pnl payroll = approved payslips gross + employer PF/ESI; Form 16 standard deduction from the tax year; PT slabs by run period, seed only when empty.',
       'spa-wellness-charge-tips-shift — Owner decisions 14 Sep 2026. (1) POST /hotel/folios/:folioId/entries with entry_type WELLNESS (or SPA) on a spa-enabled property posts SPA_SERVICE, entry_subtype MANUAL, account_head SPA_REVENUE, cost_centre SPA, optional service_id (400 SERVICE_UNKNOWN): the GST rate entered is kept at check-out, credited to 4040, SAC 999722. Existing lines unchanged. The Add Manual Charge window offers the wellness option under the property module name (else Wellness session) with the wellness menu. (3) GET /spa/reports/tips and /spa/reports/tips.csv (SPA_REPORTS): each tip share with treatment, guest and bill; COLLECTED when the spa invoice is closed or the room bill settled, PENDING while open, REVERSED on a voided, cancelled or credit-noted bill; per-therapist collected, pending, reversed. (4) spaShiftProblem: staff booking (POST /spa/appointments) and moving (PUT /spa/appointments/:aid) outside a rostered therapist shift, on a day off or in a break returns 409 OUTSIDE_SHIFT (confirmable) unless confirm_outside_shift; then spa_appointments.shift_note is kept and audited OUTSIDE_SHIFT_CONFIRMED, shown as To be confirmed, and cleared on confirm or check-in or a move back inside the roster. Therapists with no roster are not checked; online booking is unchanged.',
       'spa-public-named-alternatives — POST /api/public/restaurant/:id/spa/booking: a refusal of a named therapist and cabin (the booking page always names them) now carries alternatives, the times still free that day, as a refusal with none named already did. The public booking page, on SLOT_UNAVAILABLE, returns the guest to the times, which reload, and names the free times. Found in UAT.',
       'spa-clinician-intake-gate — POST /spa/clients/:cid/forms: a health intake (INTAKE, MEDICAL_HISTORY) no longer also needs SPA_CLIENTS at Edit; it needs SPA_CLINICAL at Edit, as before. A consent still needs SPA_CLIENTS at Edit. Found in UAT: a clinician with view-only guest access was refused an intake, so check-in stayed held.',

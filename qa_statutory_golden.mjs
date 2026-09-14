@@ -25,6 +25,10 @@
 
 import {
   computePayslip,
+  computeTDS,
+  bandsToTdsSlabs,
+  payslipToEcrRow,
+  TAX_YEAR_SEED,
   computePF,
   computeESI,
   lookupPTSlab,
@@ -523,6 +527,67 @@ eq('TDS NEW @ ₹25,00,000', applyTDSSlabs(2500000, TDS_NEW), statutoryRound(439
   eq('J: Medical present', labels.includes('Medical Allowance'), true);
   eq('J: Special absent (0)', labels.includes('Special Allowance'), false);
   eq('J: PF (Employee) present', labels.includes('PF (Employee)'), true);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 11. HRMS-R0A (Sep 2026) — tax years, rebate, half days, zero paid days, ECR row
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const NEW25 = TAX_YEAR_SEED.find((t) => t.fy === '2025-26' && t.regime === 'NEW');
+  const OLD25 = TAX_YEAR_SEED.find((t) => t.fy === '2025-26' && t.regime === 'OLD');
+  const sN = bandsToTdsSlabs('2025-26', 'NEW', NEW25.bands, NEW25.params.cess_pct);
+  const sO = bandsToTdsSlabs('2025-26', 'OLD', OLD25.bands, OLD25.params.cess_pct);
+  eq('bands: NEW cumulative tax at 12L = 60,000', sN.find((x) => x.min_income === 1200000).base_tax, 60000);
+  eq('bands: NEW cumulative tax at 24L = 3,00,000', sN.find((x) => x.min_income === 2400000).base_tax, 300000);
+  eq('bands: OLD cumulative tax at 10L = 1,12,500', sO.find((x) => x.min_income === 1000000).base_tax, 112500);
+
+  const tN = (grossAnnual) => computeTDS({ grossAnnual, regime: 'NEW', slabs: sN, pfEmployeeAnnual: 0, section80cDeclared: 0, hraExemptionDeclared: 0, params: NEW25.params });
+  const tO = (grossAnnual, c80 = 0) => computeTDS({ grossAnnual, regime: 'OLD', slabs: sO, pfEmployeeAnnual: 0, section80cDeclared: c80, hraExemptionDeclared: 0, params: OLD25.params });
+  eq('FY25-26 NEW: taxable 12,00,000 → rebate → 0', tN(1275000), 0);
+  eq('FY25-26 NEW: taxable 12,50,000 → marginal relief ₹52,000/yr → 4,333/mo', tN(1325000), 4333);
+  eq('FY25-26 NEW: taxable 13,65,000 → ₹88,140/yr → 7,345/mo', tN(1440000), 7345);
+  eq('FY25-26 NEW: taxable 25,00,000 → ₹3,43,200/yr → 28,600/mo', tN(2575000), 28600);
+  eq('FY25-26 OLD: taxable 5,00,000 → rebate → 0', tO(550000), 0);
+  eq('FY25-26 OLD: taxable 6,00,000 → ₹33,800/yr → 2,817/mo', tO(650000), 2817);
+  eq('FY25-26 OLD: 80C 1.5L, taxable 6,00,000 → 2,817/mo', tO(800000, 150000), 2817);
+  eq('legacy computeTDS path unchanged without params',
+    computeTDS({ grossAnnual: 600000, regime: 'NEW', slabs: TDS_NEW, pfEmployeeAnnual: 0, section80cDeclared: 0, hraExemptionDeclared: 0 }),
+    statutoryRound(applyTDSSlabs(550000, TDS_NEW) / 12));
+
+  const base = {
+    basic: 62000, hra: 31000, special: 27000, conveyance: 0, medical: 0, other_allowances: 0,
+    pf_enabled: false, esi_enabled: false, pf_wage_ceiling: 15000, esi_wage_ceiling: 21000, pt_state: null, pt_slabs: [],
+    tds_regime: 'NEW', tds_slabs: sN, tax_params: NEW25.params, section_80c_declared: 0, hra_exemption_declared: 0,
+    work_days: 31, paid_days: 28.5, lop_days: 2.5, month: 3, voluntary_deductions: 0,
+  };
+  const half = computePayslip(base);
+  eq('K: 28.5 of 31 days → gross 1,10,323', half.gross_earnings, 110323);
+  eq('K: TDS 7,345 (projected on the full salary)', half.tds, 7345);
+  eq('K: net 1,02,978', half.net_pay, 102978);
+  const zero = computePayslip({ ...base, paid_days: 0, lop_days: 31 });
+  eq('L: zero paid days → gross 0 (was a full month)', zero.gross_earnings, 0);
+  eq('L: zero paid days → no TDS withheld', zero.tds, 0);
+  eq('L: zero paid days → net 0', zero.net_pay, 0);
+  const noDays = computePayslip({ ...base, paid_days: undefined });
+  eq('L: paid days not given → full month', noDays.gross_earnings, 120000);
+
+  const ecr = payslipToEcrRow({
+    uan: '100000000001', staff_name: 'Test', gross_earnings: 110323,
+    line_items: JSON.stringify(half.line_items), structure_snapshot: JSON.stringify({ basic: 62000 }),
+    paid_days: 28.5, work_days: 31, pf_employee: 1800, pf_employer_eps: 1250, pf_employer_epf: 550, lop_days: 2.5,
+  }, 15000);
+  eq('ECR: EPF wages = basic paid, capped at the ceiling', ecr.epf_wages, 15000);
+  eq('ECR: EPF contribution = member share', ecr.epf_contrib_remitted, 1800);
+  eq('ECR: EPS contribution = employer pension share', ecr.eps_contrib_remitted, 1250);
+  eq('ECR: EPF-EPS difference = employer EPF share', ecr.epf_eps_diff_remitted, 550);
+  eq('ECR: NCP days rounded', ecr.ncp_days, 3);
+  const ecrLow = payslipToEcrRow({
+    uan: '1', staff_name: 'T', gross_earnings: 9000, line_items: '[{"label":"Basic","type":"EARNING","amount":9000}]',
+    paid_days: 30, work_days: 30, pf_employee: 1080, pf_employer_eps: 750, pf_employer_epf: 330, lop_days: 0,
+  }, 15000);
+  eq('ECR: basic under the ceiling used as paid', ecrLow.epf_wages, 9000);
+  const ecrSnap = payslipToEcrRow({ uan: '1', staff_name: 'T', gross_earnings: 0, line_items: '[]', structure_snapshot: '{"basic":10000}', paid_days: 15, work_days: 30, lop_days: 15 }, 15000);
+  eq('ECR: no Basic line → structure basic × paid days', ecrSnap.epf_wages, 5000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

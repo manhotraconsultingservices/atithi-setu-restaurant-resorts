@@ -338,7 +338,8 @@ export async function generate24QPdf(data: Form24QData): Promise<Buffer> {
 // ═══════════════════════════════════════════════════════════════════════════
 // EPF ECR — Electronic Challan-cum-Return (EPFO Unified Portal upload)
 // ═══════════════════════════════════════════════════════════════════════════
-// Format: pipe-delimited text file with 11 fields per line.
+// Format: text file, 11 fields per line separated by #~# (HRMS-R0A: rows are
+// built by statutoryRules.payslipToEcrRow).
 //   UAN | MEMBER_NAME | GROSS_WAGES | EPF_WAGES | EPS_WAGES |
 //     EDLI_WAGES | EPF_CONTRIB_REMITTED | EPS_CONTRIB_REMITTED |
 //     EPF_EPS_DIFF_REMITTED | NCP_DAYS | REFUND_OF_ADVANCES
@@ -354,9 +355,9 @@ export type EpfEcrRow = {
   epf_wages: number;                   // min(basic, ceiling), pro-rated
   eps_wages: number;                   // same as EPF for wages ≤ ceiling
   edli_wages: number;                  // EDLI base — same as EPF wages
-  epf_contrib_remitted: number;        // employer EPF (12% basic - eps)
+  epf_contrib_remitted: number;        // the member's own 12% share
   eps_contrib_remitted: number;        // 8.33% capped
-  epf_eps_diff_remitted: number;       // employer 12% − eps
+  epf_eps_diff_remitted: number;       // employer EPF share (12% − EPS)
   ncp_days: number;                    // non-contributory period (LOP)
   refund_of_advances: number;
 };

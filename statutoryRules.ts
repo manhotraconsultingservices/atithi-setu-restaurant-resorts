@@ -19,8 +19,10 @@
 //     doesn't carry a separate DA, we treat `basic` AS the wage base.
 //     Tenants who want DA can bake it into `basic` or add it as a
 //     custom allowance line (excluded from PF base).
-//   • The "standard deduction" of ₹50,000 is the FY 2025-26 amount
-//     (Section 16(ia)) — applies to both OLD and NEW regimes.
+//   • Standard deduction, rebate and slabs come per financial year and
+//     regime (TaxYear, stored in central_tax_years / central_tax_slabs).
+//     Callers that pass no tax_params keep the legacy fixed ₹50,000 path.
+//     (HRMS-R0A, Sep 2026)
 //
 // References:
 //   • EPF & MP Act 1952, Sch I; EPFO circulars
@@ -49,6 +51,120 @@ export type TdsSlab = {
   cess_pct: number;
 };
 
+/** Income-tax figures for one financial year and regime. Everything a budget
+ *  changes lives here, so no code names a year. */
+export type TaxYearParams = {
+  standard_deduction: number;     // annual, from salary
+  rebate_income_limit: number;    // total income up to which the rebate applies
+  rebate_max: number;             // largest rebate
+  marginal_relief: boolean;       // above the limit, tax is capped at the income above it
+  cess_pct: number;               // health & education cess
+};
+
+export type TaxBand = { min_income: number; max_income: number | null; rate_pct: number };
+
+export type TaxYear = {
+  fy: string;
+  regime: 'OLD' | 'NEW';
+  source: string | null;
+  params: TaxYearParams;
+  slabs: TdsSlab[];
+};
+
+/** Seeded into central_tax_years / central_tax_slabs at start-up. A year missing
+ *  from those tables stops the payroll run rather than deducting no tax.
+ *  FY 2025-26 follows Finance Act 2025 and awaits the owner's adviser's
+ *  confirmation (decision D14). Add a year only once its figures are confirmed.
+ *  Age-based old-regime exemption limits (60+, 80+) are not modelled yet. */
+export const TAX_YEAR_SEED: Array<{ fy: string; regime: 'OLD' | 'NEW'; source: string; params: TaxYearParams; bands: TaxBand[] }> = [
+  {
+    fy: '2025-26', regime: 'NEW', source: 'Finance Act 2025 (pending adviser confirmation)',
+    params: { standard_deduction: 75000, rebate_income_limit: 1200000, rebate_max: 60000, marginal_relief: true, cess_pct: 4 },
+    bands: [
+      { min_income: 0,       max_income: 400000,  rate_pct: 0 },
+      { min_income: 400000,  max_income: 800000,  rate_pct: 5 },
+      { min_income: 800000,  max_income: 1200000, rate_pct: 10 },
+      { min_income: 1200000, max_income: 1600000, rate_pct: 15 },
+      { min_income: 1600000, max_income: 2000000, rate_pct: 20 },
+      { min_income: 2000000, max_income: 2400000, rate_pct: 25 },
+      { min_income: 2400000, max_income: null,    rate_pct: 30 },
+    ],
+  },
+  {
+    fy: '2025-26', regime: 'OLD', source: 'Finance Act 2025 (pending adviser confirmation)',
+    params: { standard_deduction: 50000, rebate_income_limit: 500000, rebate_max: 12500, marginal_relief: false, cess_pct: 4 },
+    bands: [
+      { min_income: 0,       max_income: 250000,  rate_pct: 0 },
+      { min_income: 250000,  max_income: 500000,  rate_pct: 5 },
+      { min_income: 500000,  max_income: 1000000, rate_pct: 20 },
+      { min_income: 1000000, max_income: null,    rate_pct: 30 },
+    ],
+  },
+];
+
+/** Plain bands → slab rows with cumulative base_tax. Bands run from 0 upward and
+ *  share boundaries (an income exactly on a boundary takes the lower band). */
+export function bandsToTdsSlabs(fy: string, regime: 'OLD' | 'NEW', bands: TaxBand[], cessPct: number): TdsSlab[] {
+  const sorted = [...bands].sort((a, b) => a.min_income - b.min_income);
+  let base = 0;
+  return sorted.map((b) => {
+    const row: TdsSlab = {
+      fy, regime, min_income: b.min_income, max_income: b.max_income,
+      rate_pct: b.rate_pct, base_tax: base, surcharge_pct: 0, cess_pct: cessPct,
+    };
+    if (b.max_income != null) base += (b.max_income - b.min_income) * (b.rate_pct / 100);
+    return row;
+  });
+}
+
+/** Tax on an annual taxable income before rebate and cess, unrounded. */
+export function slabTaxBeforeCess(taxableAnnual: number, slabs: TdsSlab[]): number {
+  if (taxableAnnual <= 0 || !slabs || slabs.length === 0) return 0;
+  const sorted = [...slabs].sort((a, b) => a.min_income - b.min_income);
+  for (const slab of sorted) {
+    const max = slab.max_income ?? Number.POSITIVE_INFINITY;
+    if (taxableAnnual >= slab.min_income && taxableAnnual <= max) {
+      return (slab.base_tax || 0) + (taxableAnnual - slab.min_income) * (slab.rate_pct / 100);
+    }
+  }
+  const top = sorted[sorted.length - 1];
+  return (top.base_tax || 0) + (taxableAnnual - top.min_income) * (top.rate_pct / 100);
+}
+
+/** One EPF ECR row from a stored payslip (EPFO ECR 2.0 field order). EPF, EPS and
+ *  EDLI wages = the basic actually paid this month (the payslip's Basic line),
+ *  capped at the PF wage ceiling. EPF contribution = the member's own 12% share;
+ *  EPS contribution = the employer's pension share; EPF-EPS difference = the
+ *  employer's EPF share. NCP days = unpaid days, rounded. */
+export function payslipToEcrRow(p: any, wageCeiling: number) {
+  let basicPaid = NaN;
+  try {
+    const items = Array.isArray(p.line_items) ? p.line_items : JSON.parse(p.line_items || '[]');
+    const b = (items || []).find((i: any) => i && i.type === 'EARNING' && i.label === 'Basic');
+    if (b) basicPaid = Number(b.amount) || 0;
+  } catch { /* fall back to the structure snapshot */ }
+  if (!Number.isFinite(basicPaid)) {
+    let basic = 0;
+    try { basic = Number(JSON.parse(p.structure_snapshot || '{}').basic) || 0; } catch { basic = 0; }
+    const factor = (Number(p.paid_days) || 0) / Math.max(1, Number(p.work_days) || 30);
+    basicPaid = Math.round(basic * factor);
+  }
+  const wages = Math.min(Math.round(basicPaid), Number(wageCeiling) || 15000);
+  return {
+    uan: String(p.uan || ''),
+    member_name: String(p.staff_name || ''),
+    gross_wages: Math.round(Number(p.gross_earnings) || 0),
+    epf_wages: wages,
+    eps_wages: wages,
+    edli_wages: wages,
+    epf_contrib_remitted: Math.round(Number(p.pf_employee) || 0),
+    eps_contrib_remitted: Math.round(Number(p.pf_employer_eps) || 0),
+    epf_eps_diff_remitted: Math.round(Number(p.pf_employer_epf) || 0),
+    ncp_days: Math.round(Number(p.lop_days) || 0),
+    refund_of_advances: 0,
+  };
+}
+
 export type StatutoryInput = {
   // Earnings (pre-proration, monthly)
   basic: number;
@@ -71,6 +187,7 @@ export type StatutoryInput = {
   tds_slabs: TdsSlab[];             // filtered to (fy, regime)
   section_80c_declared: number;     // annual, OLD only
   hra_exemption_declared: number;   // annual, OLD only
+  tax_params?: TaxYearParams | null; // the year's figures; absent = legacy fixed ₹50,000, no rebate
 
   // Attendance
   work_days: number;
@@ -226,7 +343,26 @@ export function computeTDS(args: {
   pfEmployeeAnnual: number;     // already × 12
   section80cDeclared: number;   // annual
   hraExemptionDeclared: number; // annual
+  params?: TaxYearParams | null;  // the year's figures; absent = legacy path below
 }): number {
+  if (args.params) {
+    const p = args.params;
+    let taxable = Math.max(0, args.grossAnnual - (p.standard_deduction || 0));
+    if (args.regime === 'OLD') {
+      const eighty_c_room = Math.max(0, Math.min(150000, args.section80cDeclared || 0));
+      taxable = Math.max(0, taxable - eighty_c_room - (args.hraExemptionDeclared || 0));
+    }
+    let tax = slabTaxBeforeCess(taxable, args.slabs);
+    const limit = p.rebate_income_limit || 0;
+    if (taxable <= limit) {
+      tax = Math.max(0, tax - (p.rebate_max || 0));
+    } else if (p.marginal_relief) {
+      tax = Math.min(tax, taxable - limit);
+    }
+    const cessPct = Number.isFinite(p.cess_pct) ? p.cess_pct : 4;
+    const annual = statutoryRound(tax * (1 + cessPct / 100));
+    return statutoryRound(annual / 12);
+  }
   const STANDARD_DEDUCTION = 50000;
   let taxable = Math.max(0, args.grossAnnual - STANDARD_DEDUCTION);
   if (args.regime === 'OLD') {
@@ -248,7 +384,8 @@ export function computeTDS(args: {
  *  ──────────────────────────────────────────────────────────────── */
 export function computePayslip(input: StatutoryInput): StatutoryOutput {
   const workDays = Math.max(1, input.work_days || 30);
-  const paidDays = Math.max(0, Math.min(workDays, input.paid_days || workDays));
+  // Zero paid days means zero, not a full month (HRMS-R0A); only a missing value means full.
+  const paidDays = Math.max(0, Math.min(workDays, input.paid_days == null ? workDays : input.paid_days));
   const factor = paidDays / workDays;
 
   // 1. Pro-rate every earning line
@@ -301,14 +438,16 @@ export function computePayslip(input: StatutoryInput): StatutoryOutput {
     !!input.pf_enabled,
     input.pf_wage_ceiling || 15000
   );
-  const tds = computeTDS({
+  // Nothing is withheld from a month with no pay.
+  const tds = gross_earnings > 0 ? computeTDS({
     grossAnnual: fullMonthlyGross * 12,
     regime: input.tds_regime,
     slabs: input.tds_slabs || [],
     pfEmployeeAnnual: fullPf.employee * 12,
     section80cDeclared: input.section_80c_declared || 0,
     hraExemptionDeclared: input.hra_exemption_declared || 0,
-  });
+    params: input.tax_params || null,
+  }) : 0;
 
   // 6. Aggregate
   const voluntary = statutoryRound(input.voluntary_deductions || 0);

@@ -1,4 +1,5 @@
 import { Pool, PoolClient, types as pgTypes } from "pg";
+import { TAX_YEAR_SEED } from "./statutoryRules.ts";
 
 // UAT F-A1 (Sep 2026) — money columns are NUMERIC(14,2) (gl_entries was REAL and
 // summed in float4: ₹607,577.20 read back as ₹607,577.25). node-postgres returns
@@ -1026,7 +1027,10 @@ export async function initDb() {
   //   ≤ 10,000   → ₹0; 10,001-15,000 → ₹110; 15,001-25,000 → ₹130;
   //   25,001-40,000 → ₹150; ≥ 40,001 → ₹200
   // Effective 1 Apr 2025 — current at time of writing.
-  await centralDb.exec(`
+  // HRMS-R0A — the table has no unique key, so ON CONFLICT never fired and every
+  // start added another copy of these rows. Seed only an empty table.
+  const _ptSeeded: any = await centralDb.get("SELECT COUNT(*) AS n FROM central_pt_slabs").catch(() => null);
+  if (!Number(_ptSeeded?.n)) await centralDb.exec(`
     INSERT INTO central_pt_slabs (state_code, min_gross, max_gross, amount, extra_month, extra_amount, effective_from, notes) VALUES
       ('MH',     0,   7500,   0,    NULL, 0,   '2025-04-01', 'Maharashtra zero band'),
       ('MH',  7501,  10000, 175,    NULL, 0,   '2025-04-01', 'Maharashtra mid band'),
@@ -1041,34 +1045,49 @@ export async function initDb() {
     ON CONFLICT DO NOTHING;
   `).catch(() => {});  // ON CONFLICT not strict (no UNIQUE) — but tolerant
 
-  // ── Seed TDS slabs for FY 2025-26 (current Indian tax year) ──────
-  // OLD regime (with exemptions / 80C etc):
-  //   ≤ 2.5 L    → 0%
-  //   2.5-5 L    → 5%
-  //   5-10 L     → 20%
-  //   > 10 L     → 30%
-  // NEW regime (default from FY 2023-24, no exemptions):
-  //   ≤ 3 L      → 0%
-  //   3-7 L      → 5%
-  //   7-10 L     → 10%
-  //   10-12 L    → 15%
-  //   12-15 L    → 20%
-  //   > 15 L     → 30%
-  // Cess 4% applies on all. Surcharge starts at 50L+ (handled in code).
+  // HRMS-R0A (Sep 2026) — income-tax figures per financial year and regime.
+  // Replaces central_tds_slabs, which had no unique key (every start added
+  // another copy) and held FY 2024-25 new-regime bands under the FY 2025-26
+  // label. That table is kept but no longer read or seeded. Bands are stored
+  // plain; cumulative tax is derived by statutoryRules.bandsToTdsSlabs. A year
+  // that is not here stops the payroll run instead of computing zero tax.
   await centralDb.exec(`
-    INSERT INTO central_tds_slabs (fy, regime, min_income, max_income, rate_pct, base_tax, cess_pct) VALUES
-      ('2025-26','OLD',       0,  250000,  0,        0, 4),
-      ('2025-26','OLD',  250001,  500000,  5,        0, 4),
-      ('2025-26','OLD',  500001, 1000000, 20,    12500, 4),
-      ('2025-26','OLD', 1000001,    NULL, 30,   112500, 4),
-      ('2025-26','NEW',       0,  300000,  0,        0, 4),
-      ('2025-26','NEW',  300001,  700000,  5,        0, 4),
-      ('2025-26','NEW',  700001, 1000000, 10,    20000, 4),
-      ('2025-26','NEW', 1000001, 1200000, 15,    50000, 4),
-      ('2025-26','NEW', 1200001, 1500000, 20,    80000, 4),
-      ('2025-26','NEW', 1500001,    NULL, 30,   140000, 4)
-    ON CONFLICT DO NOTHING;
-  `).catch(() => {});
+    CREATE TABLE IF NOT EXISTS central_tax_years (
+      fy                   TEXT NOT NULL,
+      regime               TEXT NOT NULL,
+      standard_deduction   NUMERIC NOT NULL DEFAULT 0,
+      rebate_income_limit  NUMERIC NOT NULL DEFAULT 0,
+      rebate_max           NUMERIC NOT NULL DEFAULT 0,
+      marginal_relief      INT NOT NULL DEFAULT 0,
+      cess_pct             NUMERIC NOT NULL DEFAULT 4,
+      source               TEXT,
+      created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (fy, regime)
+    );
+    CREATE TABLE IF NOT EXISTS central_tax_slabs (
+      fy          TEXT NOT NULL,
+      regime      TEXT NOT NULL,
+      min_income  NUMERIC NOT NULL,
+      max_income  NUMERIC,
+      rate_pct    NUMERIC NOT NULL,
+      PRIMARY KEY (fy, regime, min_income)
+    );
+  `);
+  for (const ty of TAX_YEAR_SEED) {
+    await centralDb.run(
+      `INSERT INTO central_tax_years (fy, regime, standard_deduction, rebate_income_limit, rebate_max, marginal_relief, cess_pct, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (fy, regime) DO NOTHING`,
+      [ty.fy, ty.regime, ty.params.standard_deduction, ty.params.rebate_income_limit, ty.params.rebate_max,
+       ty.params.marginal_relief ? 1 : 0, ty.params.cess_pct, ty.source]
+    ).catch(() => {});
+    for (const b of ty.bands) {
+      await centralDb.run(
+        `INSERT INTO central_tax_slabs (fy, regime, min_income, max_income, rate_pct)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT (fy, regime, min_income) DO NOTHING`,
+        [ty.fy, ty.regime, b.min_income, b.max_income, b.rate_pct]
+      ).catch(() => {});
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3058,6 +3077,19 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     );
     CREATE INDEX IF NOT EXISTS idx_payslips_staff ON payslips (staff_id, pay_period_end DESC);
   `).catch(() => {});
+  // HRMS-R0A — paid and unpaid days can include half days (Half day attendance).
+  // As INT, 28.5 would be stored as 29. INT → NUMERIC keeps every existing value;
+  // it runs only while the columns are still INT.
+  {
+    const dayCol: any = await db.get(
+      `SELECT data_type FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'payslips' AND column_name = 'paid_days'`
+    ).catch(() => null);
+    if (dayCol && String(dayCol.data_type).toLowerCase() === 'integer') {
+      await db.exec(`ALTER TABLE payslips ALTER COLUMN paid_days TYPE NUMERIC`).catch(() => {});
+      await db.exec(`ALTER TABLE payslips ALTER COLUMN lop_days TYPE NUMERIC`).catch(() => {});
+    }
+  }
 
   // Expense claim header + line items. Approval chain modelled as
   // discrete fields (manager_approved_by/at, hr_approved_by/at) so
