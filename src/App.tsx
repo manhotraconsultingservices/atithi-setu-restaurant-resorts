@@ -13268,6 +13268,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Which capability section of the Settings page is showing (sub-nav). Only
   // sections for modules the tenant actually has are offered.
   const [settingsSection, setSettingsSection] = useState<'BUSINESS' | 'HOTEL' | 'SPA' | 'EVENTS'>('BUSINESS');
+  // Restaurant settings sub-tab. Tabs hide blocks, never unmount the form's fields.
+  const [settingsTab, setSettingsTab] = useState<'BUSINESS' | 'INVOICES' | 'OPERATIONS' | 'PROFILE'>('BUSINESS');
+  // Literal class names so Tailwind generates them.
+  const SETTINGS_ORDER = ['order-1', 'order-2', 'order-3', 'order-4', 'order-5', 'order-6', 'order-7', 'order-8'];
+  const settingsBlock = (tab: string, order: number) => (settingsTab === tab ? SETTINGS_ORDER[order - 1] : 'hidden');
+  const settingsHint = (text: string) => (
+    <span title={text} aria-label={text} role="img" className="inline-flex align-middle ml-1.5 text-[#9c8e85] hover:text-[#6b5d52] cursor-help normal-case tracking-normal">
+      <Info size={13} />
+    </span>
+  );
   // ── Invoice Delete Modal State (admin-gated feature) ──────────────────────
   const [deleteInvoiceTarget, setDeleteInvoiceTarget] = useState<any|null>(null);
   const [deleteIdConfirm, setDeleteIdConfirm]         = useState('');
@@ -30048,10 +30058,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : activeTab === 'SETTINGS' ? (
         <div className="max-w-3xl space-y-6">
-          {/* ── App Language (tenant-wide default UI language) ── */}
-          {restaurantId && token && (
-            <LanguageSettings restaurantId={restaurantId} token={token} current={secondaryLanguage} onSaved={fetchRestaurant} />
-          )}
           {/* ── Property Type — READ-ONLY for Owners ─────────────────────
               Activation of the Hotel module is a billing-tier decision so
               the toggle has been moved to the SuperAdmin console
@@ -31000,13 +31006,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               for restaurant tenants) ═══ */}
           {settingsSection === 'BUSINESS' && (<>
 
+          {/* Sub-tabs keep this section short. They only hide blocks: every field of the
+              settings form stays mounted, so one Save still sends all of them. */}
+          <div className="flex gap-1 border-b border-[#e8e0d8] overflow-x-auto overflow-y-hidden" role="tablist">
+            {([['BUSINESS', 'settings.tab.business'], ['INVOICES', 'settings.tab.invoices'], ['OPERATIONS', 'settings.tab.operations'], ['PROFILE', 'settings.tab.profile']] as const).map(([id, key]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={settingsTab === id}
+                onClick={() => setSettingsTab(id)}
+                className={`px-5 py-2.5 text-sm font-semibold rounded-t-xl whitespace-nowrap ${settingsTab === id ? 'bg-white border border-b-white border-[#e8e0d8] text-[#cc5a16] -mb-px' : 'text-[#6b5d52] hover:text-[#1a1208] hover:bg-[#f5f0ea]'}`}
+              >{tr(key)}</button>
+            ))}
+          </div>
+          {settingsTab === 'BUSINESS' && restaurantId && token && (
+            <LanguageSettings restaurantId={restaurantId} token={token} current={secondaryLanguage} onSaved={fetchRestaurant} />
+          )}
+
           {/* ── Brand Logo (used on invoice PDF) ───────────────────── */}
-          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
-            <h3 className="text-2xl font-bold font-serif mb-1">Brand Logo</h3>
-            <p className="text-xs text-[#6b5d52] mb-5">
-              Upload a square or horizontal logo. Embedded on tax invoices, credit notes, and Form-C PDFs.
-              PNG or JPG recommended, ~200×200 px or larger. Max 2 MB.
-            </p>
+          <div className={`bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm ${settingsTab === 'BUSINESS' ? '' : 'hidden'}`}>
+            <h3 className="text-2xl font-bold font-serif mb-5">Brand Logo{settingsHint('PNG or JPG, about 200×200 px or larger, up to 2 MB. Printed on tax invoices, credit notes and Form-C.')}</h3>
             <div className="flex items-center gap-5">
               <div className="w-24 h-24 rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/10 flex items-center justify-center overflow-hidden shrink-0">
                 {(restaurant as any)?.logo_url ? (
@@ -31071,9 +31091,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
 
           {/* ── Owner Profile & Contact ───────────────────────────────── */}
-          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
-            <h3 className="text-2xl font-bold font-serif mb-1">My Profile</h3>
-            <p className="text-xs text-[#6b5d52] mb-6">Update your contact information used for notifications and account recovery.</p>
+          <div className={`bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm ${settingsTab === 'PROFILE' ? '' : 'hidden'}`}>
+            <h3 className="text-2xl font-bold font-serif mb-6">My Profile</h3>
             <form onSubmit={updateOwnerProfile} className="space-y-4">
               <div>
                 <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Full Name</label>
@@ -31122,10 +31141,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
 
           {/* ── Brand & Restaurant Settings ───────────────────────────── */}
-        <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
-          <h3 className="text-2xl font-bold font-serif mb-6">Brand & Restaurant Settings</h3>
-          <form onSubmit={updateRestaurant} className="space-y-6">
-            <div>
+        <div className={`bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm ${settingsTab === 'PROFILE' ? 'hidden' : ''}`}>
+          <form
+            onSubmit={updateRestaurant}
+            // A field on a hidden tab can fail the browser's own check (a blank Brand
+            // Name, say) where nobody can see it: open the tab it lives on.
+            onInvalidCapture={(e) => {
+              const owner = (e.target as HTMLElement).closest('[data-settings-tab]')?.getAttribute('data-settings-tab') as typeof settingsTab | null;
+              if (owner && owner !== settingsTab) { setSettingsTab(owner); toast.error(tr('settings.fixField')); }
+            }}
+            className="flex flex-col gap-6"
+          >
+            <div data-settings-tab="BUSINESS" className={settingsBlock('BUSINESS', 1)}>
               <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Brand Name</label>
               <input 
                 required
@@ -31138,12 +31165,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 One GST rate, set here. Every restaurant invoice prints exactly
                 this rate (staff cannot edit GST on a bill). The old duplicate
                 GST line inside "Currency & Non-India Tax" is gone. */}
-            <div className="pt-4 border-t border-[#f0ebe4]">
-              <h4 className="text-sm font-bold text-[#1a1a1a] mb-1">GST</h4>
-              <p className="text-[11px] text-[#6b5d52] mb-3 leading-relaxed">
-                The one place GST is configured — invoices always print this rate, non-editable by staff.
-                <b> No GST number ⇒ GST is not charged.</b> Updating the GST number resets the rate to 5% (standard restaurant GST).
-              </p>
+            <div data-settings-tab="BUSINESS" className={`pt-4 border-t border-[#f0ebe4] ${settingsBlock('BUSINESS', 2)}`}>
+              <h4 className="text-sm font-bold text-[#1a1a1a] mb-3">GST{settingsHint('The only place GST is set: every invoice prints this rate. No GST number means GST is not charged. Changing the GST number resets the rate to 5%.')}</h4>
               <div className="space-y-3">
                 <div>
                   <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">GST Number (GSTIN)</label>
@@ -31198,9 +31221,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
 
             {/* ── Business Profile — printed on PMS + Event invoices ────── */}
-            <div className="pt-4 border-t border-[#f0ebe4]">
+            <div data-settings-tab="BUSINESS" className={`pt-4 border-t border-[#f0ebe4] ${settingsBlock('BUSINESS', 3)}`}>
               <h4 className="text-sm font-bold text-[#1a1a1a] mb-1">Business Profile</h4>
-              <p className="text-[11px] text-[#6b5d52] mb-3">Appears on the header of every PMS and Event invoice &amp; quotation, alongside your logo (above) and GST number.</p>
               <div className="flex flex-wrap items-center gap-2 mb-4">
                 <button type="button" onClick={() => previewInvoice('hotel')} className="text-xs font-semibold px-3 py-2 rounded-xl bg-white border border-[#cc5a16]/30 text-[#cc5a16] hover:bg-[#cc5a16]/5 transition-colors">Preview PMS invoice</button>
                 <button type="button" onClick={() => previewInvoice('events')} className="text-xs font-semibold px-3 py-2 rounded-xl bg-white border border-[#7c3aed]/30 text-[#7c3aed] hover:bg-[#7c3aed]/5 transition-colors">Preview Event quotation</button>
@@ -31231,9 +31253,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
 
             {/* ── Invoice Policies — separate for PMS and Events ────────── */}
-            <div className="pt-4 border-t border-[#f0ebe4]">
+            <div data-settings-tab="INVOICES" className={`pt-4 border-t border-[#f0ebe4] ${settingsBlock('INVOICES', 3)}`}>
               <h4 className="text-sm font-bold text-[#1a1a1a] mb-1">Invoice Policies</h4>
-              <p className="text-[11px] text-[#6b5d52] mb-3">Printed at the bottom of every invoice (and Event quotation). Keep separate wording for Hotel / PMS and for Events.</p>
               <div className="grid md:grid-cols-2 gap-6">
                 {([
                   { mod: 'hotel', label: 'Hotel / PMS', color: '#cc5a16' },
@@ -31261,7 +31282,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 This panel is ONLY for tenants operating outside India —
                 foreign currency + non-GST tax lines. Collapsed by default so
                 the page stays uncluttered; the GST line was removed from it. */}
-            <details className="pt-4 border-t border-[#f0ebe4] group">
+            <details data-settings-tab="INVOICES" className={`pt-4 border-t border-[#f0ebe4] group ${settingsBlock('INVOICES', 4)}`}>
               <summary className="cursor-pointer list-none flex items-center justify-between gap-3">
                 <div>
                   <h4 className="text-sm font-bold text-[#1a1a1a]">Advanced — Currency &amp; Non-India Tax</h4>
@@ -31275,12 +31296,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </details>
 
             {/* ── Checkout Mode Toggle ─────────────────────────────────── */}
-            <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
+            <div data-settings-tab="OPERATIONS" className={`p-5 bg-[#faf7f2] rounded-2xl space-y-4 ${settingsBlock('OPERATIONS', 1)}`}>
               <div>
                 <p className="text-sm font-bold text-[#1a1a1a]">Checkout Mode</p>
-                <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest mt-0.5">
-                  How customers pay for their orders
-                </p>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <button
@@ -31329,12 +31347,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
 
             {/* ── Invoice Numbering ── */}
-            <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
+            <div data-settings-tab="INVOICES" className={`p-5 bg-[#faf7f2] rounded-2xl space-y-4 ${settingsBlock('INVOICES', 1)}`}>
               <div>
-                <p className="text-sm font-bold text-[#1a1a1a]">Invoice Numbering</p>
-                <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-snug">
-                  Tax invoices are numbered one after another (<span className="font-mono">INV-0001</span>, <span className="font-mono">INV-0002</span> …), because GST Rule 46 requires a consecutive serial number. Choose the prefix and whether the count restarts each year.
-                </p>
+                <p className="text-sm font-bold text-[#1a1a1a]">Invoice Numbering{settingsHint('Invoices are numbered one after another (INV-0001, INV-0002 …), as GST Rule 46 requires. A cancelled invoice can leave a gap; that is normal.')}</p>
               </div>
 
               {(() => {
@@ -31359,14 +31374,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         value={prefix}
                         onChange={e => setRestaurant(prev => prev ? ({ ...prev, invoice_number_prefix: e.target.value } as any) : null)}
                         placeholder="INV-"
+                        title="A-Z a-z 0-9 - _ / . (1 to 12 characters)"
                         className={cn(
                           "w-full bg-white border-2 rounded-xl px-4 py-3 text-sm font-mono outline-none transition-all",
                           prefixValid ? "border-[#cc5a16]/20 focus:ring-2 ring-[#cc5a16]/20" : "border-red-400 focus:ring-2 ring-red-200"
                         )}
                       />
-                      <p className="text-[11px] text-[#6b5d52] mt-1.5">
-                        Allowed: A-Z a-z 0-9 - _ / . — 1 to 12 characters.
-                      </p>
                       {!prefixValid && (
                         <p className="text-[11px] text-red-600 mt-1">
                           Invalid prefix. Use only letters, digits, dash, underscore, slash, or dot.
@@ -31405,9 +31418,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Sample next invoice</span>
                       <span className="font-mono font-bold text-[#cc5a16]">{sample}</span>
                     </div>
-                    <p className="text-[11px] text-[#9c8e85] leading-snug">
-                      Note: Cancelled invoices may leave gaps in the sequence — this is normal and audit-friendly.
-                    </p>
                   </div>
                 );
               })()}
@@ -31424,15 +31434,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 Server side: invoiceService.ts dispatches per-tenant via
                 restaurants.invoice_template. A bug in Boutique can NEVER
                 regress a Classic-rendered invoice — separate code paths. */}
-            <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
+            <div data-settings-tab="INVOICES" className={`p-5 bg-[#faf7f2] rounded-2xl space-y-4 ${settingsBlock('INVOICES', 2)}`}>
               <div>
                 <p className="text-sm font-bold text-[#1a1a1a]">Invoice Style</p>
-                <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest mt-0.5">
-                  PDF design used for every invoice you issue (hotel + restaurant)
-                </p>
-                <p className="text-[11px] text-[#9c8e85] mt-1 leading-snug">
-                  Switching takes effect on the very next invoice you generate. Historical invoices keep their original style — no retroactive change.
-                </p>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <button
@@ -31448,7 +31452,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <FileText size={18} className="mb-2 text-[#1a1208]" />
                   <p className="text-xs font-bold text-[#1a1a1a]">Classic</p>
                   <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">The original layout — title pill, monochrome header, flat line-items table. Familiar to your existing accountants and auditors.</p>
-                  <p className="text-[10px] text-[#9c8e85] mt-1 italic">Default. Every tenant in production today.</p>
                 </button>
                 <button
                   type="button"
@@ -31464,12 +31467,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <Sparkles size={18} className="mb-2 text-[#1a1208]" />
                   <p className="text-xs font-bold text-[#1a1a1a]">Boutique</p>
                   <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Premium redesign — logo lock-up, big PAID stamp, summary band with category totals, boxed grand total. Inspired by Taj / Oberoi invoices.</p>
-                  <p className="text-[10px] text-[#9c8e85] mt-1 italic">Same legal compliance — IRN, HSN, FSSAI, CGST/SGST all preserved.</p>
                 </button>
               </div>
             </div>
 
-            <div className="space-y-4">
+            <div data-settings-tab="OPERATIONS" className={`space-y-4 ${settingsBlock('OPERATIONS', 2)}`}>
               <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Menu Template</label>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 {['CLASSIC', 'MODERN', 'EDITORIAL'].map((t: any) => (
@@ -31490,12 +31492,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
 
             {/* ── Menu Display Style — chooses how the customer sees the menu ── */}
-            <div className="space-y-4">
+            <div data-settings-tab="OPERATIONS" className={`space-y-4 ${settingsBlock('OPERATIONS', 3)}`}>
               <div>
                 <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Menu Display Style</label>
-                <p className="text-[11px] text-[#9c8e85] mt-1">
-                  Pick how items appear when a customer scans the QR. Owners without photos should choose <strong>Magazine</strong> or <strong>Compact</strong> — the menu still looks rich and appetising with typography alone.
-                </p>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {([
@@ -31565,12 +31564,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
 
             {/* ── Audible + visual alerts toggle ───────────────────────────────── */}
-            <div className="space-y-3">
+            <div data-settings-tab="OPERATIONS" className={`space-y-3 ${settingsBlock('OPERATIONS', 4)}`}>
               <div>
-                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Alerts for Urgent Requests</label>
-                <p className="text-[11px] text-[#9c8e85] mt-1">
-                  When a guest requests service (waiter call, bill request, or hotel service) the app plays a gentle chime every 4 seconds and pulses the card until staff acknowledges. Stops automatically when the request is handled.
-                </p>
+                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Alerts for Urgent Requests{settingsHint('When a guest calls a waiter, asks for the bill or requests a hotel service, a chime plays and the card pulses until staff respond.')}</label>
               </div>
               <label className="flex items-center justify-between gap-4 bg-[#faf7f2] rounded-2xl px-4 py-3 cursor-pointer">
                 <div className="flex items-center gap-3">
@@ -31594,12 +31590,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
 
             {/* ── Shared-floor toggle — all waiters see every table ────────────── */}
-            <div className="space-y-3">
+            <div data-settings-tab="OPERATIONS" className={`space-y-3 ${settingsBlock('OPERATIONS', 5)}`}>
               <div>
-                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Waiter Floor Mode</label>
-                <p className="text-[11px] text-[#9c8e85] mt-1">
-                  Shared floor: every waiter sees ALL tables and all guest calls, so any waiter can serve any table. Turn off to restrict each waiter to only the tables assigned to them (assign waiters per table — or all tables at once — from the Command Centre).
-                </p>
+                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Waiter Floor Mode{settingsHint('On: every waiter sees all tables and calls. Off: each waiter sees only the tables assigned to them.')}</label>
               </div>
               <label className="flex items-center justify-between gap-4 bg-[#faf7f2] rounded-2xl px-4 py-3 cursor-pointer">
                 <div className="flex items-center gap-3">
@@ -31623,12 +31616,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
 
             {/* ── Cancel-with-password toggle (opt-in security gate) ──────────── */}
-            <div className="space-y-3">
+            <div data-settings-tab="OPERATIONS" className={`space-y-3 ${settingsBlock('OPERATIONS', 6)}`}>
               <div>
-                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Cancellation Security</label>
-                <p className="text-[11px] text-[#9c8e85] mt-1">
-                  Require staff to re-enter their OWN account password before cancelling a bill or an order/item — prevents unauthorised voids. Off by default.
-                </p>
+                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Cancellation Security{settingsHint('Staff re-enter their own password before cancelling a bill, an order or an item.')}</label>
               </div>
               <label className="flex items-center justify-between gap-4 bg-[#faf7f2] rounded-2xl px-4 py-3 cursor-pointer">
                 <div className="flex items-center gap-3">
@@ -31662,12 +31652,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
 
             {/* ── Turn-time thresholds (Command Centre map colour escalation) ── */}
-            <div className="space-y-3">
+            <div data-settings-tab="OPERATIONS" className={`space-y-3 ${settingsBlock('OPERATIONS', 7)}`}>
               <div>
-                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Table Turn-Time Alerts</label>
-                <p className="text-[11px] text-[#9c8e85] mt-1">
-                  On the Command Centre map a seated table turns <span className="text-amber-600 font-semibold">amber</span> after the first threshold and <span className="text-rose-600 font-semibold">red</span> after the second — so slow-turning tables stand out at a glance. Set 0 to disable a stage.
-                </p>
+                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] block">Table Turn-Time Alerts{settingsHint('On the Command Centre map a seated table turns amber after the first threshold and red after the second.')}</label>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
                 {([
@@ -31704,7 +31691,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
 
-            <div className="space-y-4">
+            <div data-settings-tab="OPERATIONS" className={`space-y-4 ${settingsBlock('OPERATIONS', 8)}`}>
               <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Menu Watermark</label>
               <div className="flex items-center gap-4">
                 {restaurant?.watermark_image && (
@@ -31742,6 +31729,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             {/* UPI details are no longer set here: online payments go through the
                 property's own gateway, under Administration → Payment Gateways. */}
 
+            {/* Save bar: pinned, shown on every form tab — all fields save together. */}
+            <div className="order-last sticky bottom-0 z-10 bg-white pt-3 pb-1 space-y-3">
             {/* Success banner — appears for 3 seconds after a successful save */}
             <AnimatePresence>
               {settingsSaveStatus === 'saved' && (
@@ -31790,6 +31779,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <>Save Settings</>
               )}
             </button>}
+            </div>
           </form>
         </div>
           </>)}

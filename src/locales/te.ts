@@ -408,4 +408,10 @@ export const te: Record<string, string> = {
   'pg.outcome.UNKNOWN_LINK': 'తెలియని లింక్',
   'pg.outcome.FAILED': 'విఫలం',
   'pg.outcome.BAD_SIGNATURE': 'తప్పు సంతకం',
+  // ── Settings sub-tabs (settings.*) ──
+  'settings.tab.business': 'వ్యాపారం',
+  'settings.tab.invoices': 'ఇన్‌వాయిస్‌లు',
+  'settings.tab.operations': 'కార్యకలాపాలు',
+  'settings.tab.profile': 'నా ప్రొఫైల్',
+  'settings.fixField': 'సేవ్ చేసే ముందు గుర్తించిన ఫీల్డ్‌ను నింపండి.',
 };

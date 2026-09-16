@@ -475,4 +475,10 @@ export const en: Record<string, string> = {
   'pg.outcome.UNKNOWN_LINK': 'Unknown link',
   'pg.outcome.FAILED': 'Failed',
   'pg.outcome.BAD_SIGNATURE': 'Bad signature',
+  // ── Settings sub-tabs (settings.*) ──
+  'settings.tab.business': 'Business',
+  'settings.tab.invoices': 'Invoices',
+  'settings.tab.operations': 'Operations',
+  'settings.tab.profile': 'My profile',
+  'settings.fixField': 'Please fill in the highlighted field before saving.',
 };

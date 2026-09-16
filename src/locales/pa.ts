@@ -472,4 +472,10 @@ export const pa: Record<string, string> = {
   'pg.outcome.UNKNOWN_LINK': 'ਅਣਜਾਣ ਲਿੰਕ',
   'pg.outcome.FAILED': 'ਅਸਫਲ',
   'pg.outcome.BAD_SIGNATURE': 'ਗਲਤ ਦਸਤਖਤ',
+  // ── Settings sub-tabs (settings.*) ──
+  'settings.tab.business': 'ਕਾਰੋਬਾਰ',
+  'settings.tab.invoices': 'ਇਨਵੌਇਸ',
+  'settings.tab.operations': 'ਸੰਚਾਲਨ',
+  'settings.tab.profile': 'ਮੇਰੀ ਪ੍ਰੋਫਾਈਲ',
+  'settings.fixField': 'ਸੇਵ ਕਰਨ ਤੋਂ ਪਹਿਲਾਂ ਨਿਸ਼ਾਨਬੱਧ ਖੇਤਰ ਭਰੋ।',
 };

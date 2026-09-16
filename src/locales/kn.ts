@@ -410,4 +410,10 @@ export const kn: Record<string, string> = {
   'pg.outcome.UNKNOWN_LINK': 'ಅಪರಿಚಿತ ಲಿಂಕ್',
   'pg.outcome.FAILED': 'ವಿಫಲ',
   'pg.outcome.BAD_SIGNATURE': 'ತಪ್ಪು ಸಹಿ',
+  // ── Settings sub-tabs (settings.*) ──
+  'settings.tab.business': 'ವ್ಯವಹಾರ',
+  'settings.tab.invoices': 'ಇನ್‌ವಾಯ್ಸ್‌ಗಳು',
+  'settings.tab.operations': 'ಕಾರ್ಯಾಚರಣೆ',
+  'settings.tab.profile': 'ನನ್ನ ಪ್ರೊಫೈಲ್',
+  'settings.fixField': 'ಉಳಿಸುವ ಮೊದಲು ಗುರುತಿಸಿದ ಕ್ಷೇತ್ರವನ್ನು ಭರ್ತಿ ಮಾಡಿ.',
 };

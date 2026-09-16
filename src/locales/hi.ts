@@ -511,4 +511,10 @@ export const hi: Record<string, string> = {
   'pg.outcome.UNKNOWN_LINK': 'अज्ञात लिंक',
   'pg.outcome.FAILED': 'विफल',
   'pg.outcome.BAD_SIGNATURE': 'गलत सिग्नेचर',
+  // ── Settings sub-tabs (settings.*) ──
+  'settings.tab.business': 'व्यवसाय',
+  'settings.tab.invoices': 'इनवॉइस',
+  'settings.tab.operations': 'संचालन',
+  'settings.tab.profile': 'मेरी प्रोफ़ाइल',
+  'settings.fixField': 'सहेजने से पहले चिह्नित फ़ील्ड भरें।',
 };

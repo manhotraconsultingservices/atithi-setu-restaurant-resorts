@@ -408,4 +408,10 @@ export const ta: Record<string, string> = {
   'pg.outcome.UNKNOWN_LINK': 'அறியாத இணைப்பு',
   'pg.outcome.FAILED': 'தோல்வி',
   'pg.outcome.BAD_SIGNATURE': 'தவறான கையொப்பம்',
+  // ── Settings sub-tabs (settings.*) ──
+  'settings.tab.business': 'வணிகம்',
+  'settings.tab.invoices': 'விலைப்பட்டியல்கள்',
+  'settings.tab.operations': 'செயல்பாடுகள்',
+  'settings.tab.profile': 'எனது சுயவிவரம்',
+  'settings.fixField': 'சேமிக்கும் முன் குறிக்கப்பட்ட புலத்தை நிரப்பவும்.',
 };
