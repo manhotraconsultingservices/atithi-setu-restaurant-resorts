@@ -17,6 +17,7 @@ import { StatusBoard } from './StatusBoard';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
 import { PaymentGatewaysPage, CollectOnlineDialog } from './PaymentLinks';
+import { PlatformWhatsApp } from './PlatformWhatsApp';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { canWriteTab, canDeleteTab, tabLevel } from './perm';
@@ -54574,7 +54575,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
-  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS' | 'PRINT_AGENTS'>('RESTAURANTS');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS' | 'WHATSAPP' | 'PRINT_AGENTS'>('RESTAURANTS');
   const [editTenant, setEditTenant] = useState<any | null>(null);
 
   // Subscription billing state (admin Billing tab)
@@ -55602,6 +55603,15 @@ function SuperAdminDashboard({ token }: { token: string }) {
             )}
           >
             <Bell size={16} /> Admin Alerts
+          </button>
+          <button
+            onClick={() => setViewMode('WHATSAPP')}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'WHATSAPP' ? "bg-emerald-600 text-white shadow-md" : "text-[#1a1208] hover:bg-[#cc5a16]/5"
+            )}
+          >
+            <MessageCircle size={16} /> WhatsApp
           </button>
           <button
             onClick={() => { setViewMode('PRINT_AGENTS'); fetchAgentRollout(); }}
@@ -57377,6 +57387,8 @@ function SuperAdminDashboard({ token }: { token: string }) {
           </div>
           <p className="text-[11px] text-[#9c8e85]">Version is reported by agents on v3.4.1+; older online agents show &quot;Online (old build)&quot; until they self-update. Online = checked in within {agentRollout?.online_window_seconds || 90}s (agents poll about once a second).</p>
         </div>
+      ) : viewMode === 'WHATSAPP' ? (
+        <PlatformWhatsApp token={token} events={NOTIFICATION_EVENTS} />
       ) : viewMode === 'ADMIN_ALERTS' ? (
         <div className="space-y-6">
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8 max-w-2xl">

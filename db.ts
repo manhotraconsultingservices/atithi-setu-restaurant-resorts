@@ -386,6 +386,23 @@ export async function initDb() {
       updated_by TEXT
     );
     INSERT INTO platform_notification_config (id) VALUES ('DEFAULT') ON CONFLICT (id) DO NOTHING;
+    -- Platform WhatsApp sender (Meta Cloud API), one row, set in /internal →
+    -- WhatsApp. Secrets are sealed (paymentSecrets.ts). No row = META_WA_* env.
+    CREATE TABLE IF NOT EXISTS platform_whatsapp_config (
+      id TEXT PRIMARY KEY,
+      phone_number_id TEXT,
+      business_account_id TEXT,
+      access_token_sealed TEXT,
+      app_secret_sealed TEXT,
+      verify_token_sealed TEXT,
+      display_phone_number TEXT,
+      verified_name TEXT,
+      last_test_at TIMESTAMP,
+      last_test_ok INT,
+      last_test_detail TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_by TEXT
+    );
     -- Phase 2 (Multi-currency + configurable tax). Defaults preserve the
     -- exact India / GST / ₹ behaviour for every pre-existing tenant.
     --   country         ISO-3166 alpha-2, selects the default tax preset.

@@ -88,6 +88,7 @@ import { getGateway, listGateways } from "./paymentGatewayRegistry.ts";
 import { keepWebhookRawBody } from "./webhookRawBody.ts";
 import { GatewayError, rupeesToPaise, type GatewayCredentials, type PaymentGateway } from "./paymentGateway.ts";
 import { sealSecret, openSecret, secretKeySource, needsReseal } from "./paymentSecrets.ts";
+import { setWhatsAppPlatformConfig, whatsAppCreds } from "./whatsappConfig.ts";
 import multer from "multer";
 import cron from "node-cron";
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
@@ -9069,6 +9070,17 @@ async function getPlatformNotifyConfig(): Promise<any> {
   return cfg;
 }
 function invalidatePlatformNotifyCache() { _platformNotifyCache = null; }
+// Load the saved platform WhatsApp sender into whatsappConfig.ts, which every
+// send and the Meta webhook read synchronously. A secret that no longer opens
+// (its key changed) is treated as unset, so the env value still applies.
+async function loadPlatformWhatsApp(): Promise<any> {
+  const row: any = await centralDb.get("SELECT * FROM platform_whatsapp_config WHERE id = 'DEFAULT'").catch(() => null);
+  setWhatsAppPlatformConfig(row ? {
+    phoneNumberId: row.phone_number_id, businessAccountId: row.business_account_id,
+    accessToken: openSecret(row.access_token_sealed), appSecret: openSecret(row.app_secret_sealed), verifyToken: openSecret(row.verify_token_sealed),
+  } : null);
+  return row;
+}
 // Defensively create the config table + seed the DEFAULT row at request time, so
 // the endpoints work even if the central-init migration hasn't applied it yet.
 async function ensurePlatformNotificationConfig(): Promise<void> {
@@ -9381,6 +9393,9 @@ async function startServer() {
     setTimeout(startServer, 5000);
     return;
   }
+  // Platform WhatsApp sender saved in /internal (env META_WA_* until one is saved).
+  await loadPlatformWhatsApp().catch((e: any) => console.error('[whatsapp] platform config load failed:', e?.message || e));
+  setInterval(() => { loadPlatformWhatsApp().catch(() => {}); }, 5 * 60 * 1000);
 
   // ── Bootstrap delivery-platform integration adapters ───────────────────
   // Phase 5: register all real adapters at boot. Switching platforms is
@@ -10114,10 +10129,9 @@ async function startServer() {
   // What Meta has approved on our sender.
   app.get("/api/admin/whatsapp/templates", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
     try {
-      const waba = process.env.META_WA_BUSINESS_ACCOUNT_ID;
-      const tok = process.env.META_WA_ACCESS_TOKEN;
+      const { businessAccountId: waba, accessToken: tok } = whatsAppCreds();
       if (!waba || !tok) {
-        return res.json({ templates: [], configured: false, reason: 'Set META_WA_BUSINESS_ACCOUNT_ID and META_WA_ACCESS_TOKEN to load the approved templates.' });
+        return res.json({ templates: [], configured: false, reason: 'Save the WhatsApp Business Account ID and access token under WhatsApp to load the approved templates.' });
       }
       const url = `https://graph.facebook.com/v21.0/${waba}/message_templates?limit=200&fields=name,status,language,category,components`;
       const r = await fetch(url, { headers: { Authorization: `Bearer ${tok}` } });
@@ -10166,6 +10180,139 @@ async function startServer() {
       );
       res.json({ success: true });
     } catch { res.status(500).json({ error: 'Failed to save the mapping' }); }
+  });
+
+  // ── The platform sender itself: phone number id, token, webhook secrets ──
+  // Secrets are write-only: saved sealed, never sent back, a blank field keeps
+  // what is saved. Removing the row returns to the META_WA_* env variables.
+  const _waConfigView = async (req: Request) => {
+    const row: any = await centralDb.get("SELECT * FROM platform_whatsapp_config WHERE id = 'DEFAULT'").catch(() => null);
+    const eff = whatsAppCreds();
+    const saved = (col: string) => !!(row && row[col]);
+    const unreadable = (col: string) => saved(col) && openSecret(row[col]) == null;
+    return {
+      saved: !!row,
+      phone_number_id: row?.phone_number_id || '',
+      business_account_id: row?.business_account_id || '',
+      access_token_saved: saved('access_token_sealed'),
+      app_secret_saved: saved('app_secret_sealed'),
+      verify_token_saved: saved('verify_token_sealed'),
+      unreadable: ['access_token_sealed', 'app_secret_sealed', 'verify_token_sealed'].filter(unreadable).map(c => c.replace('_sealed', '')),
+      display_phone_number: row?.display_phone_number || null,
+      verified_name: row?.verified_name || null,
+      last_test_at: row?.last_test_at || null, last_test_ok: row?.last_test_ok ?? null, last_test_detail: row?.last_test_detail || null,
+      updated_at: row?.updated_at || null, updated_by: row?.updated_by || null,
+      // What is actually in use right now, and where it came from.
+      effective: {
+        source: eff.source, phone_number_id: eff.phoneNumberId, business_account_id: eff.businessAccountId,
+        app_secret: !!eff.appSecret, verify_token: !!eff.verifyToken,
+      },
+      env: {
+        sender: !!(process.env.META_WA_PHONE_NUMBER_ID && process.env.META_WA_ACCESS_TOKEN),
+        business_account_id: !!process.env.META_WA_BUSINESS_ACCOUNT_ID,
+        app_secret: !!process.env.META_WA_APP_SECRET, verify_token: !!process.env.META_WA_VERIFY_TOKEN,
+      },
+      webhook_url: `${appOriginFromReq(req)}/api/webhooks/whatsapp`,
+      key_source: secretKeySource(),
+    };
+  };
+
+  app.get("/api/admin/whatsapp/config", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try { res.json(await _waConfigView(req)); }
+    catch (err: any) { res.status(500).json({ error: 'Could not load the WhatsApp settings.' }); }
+  });
+
+  app.put("/api/admin/whatsapp/config", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const phoneNumberId = String(b.phone_number_id ?? '').trim();
+      const wabaId = String(b.business_account_id ?? '').trim();
+      if (phoneNumberId && !/^\d{6,25}$/.test(phoneNumberId)) return res.status(400).json({ error: 'Phone number ID is the long number Meta shows under WhatsApp → API Setup, not the phone number.' });
+      if (wabaId && !/^\d{6,25}$/.test(wabaId)) return res.status(400).json({ error: 'WhatsApp Business Account ID must be digits only.' });
+      const row: any = await centralDb.get("SELECT * FROM platform_whatsapp_config WHERE id = 'DEFAULT'").catch(() => null);
+      const clear: string[] = Array.isArray(b.clear) ? b.clear.map((x: any) => String(x)) : [];
+      const secretCol = async (field: string, col: string): Promise<string | null> => {
+        const typed = String(b[field] ?? '').trim();
+        if (typed) {
+          if (/\s/.test(typed)) throw Object.assign(new Error(`${field.replace(/_/g, ' ')} cannot contain spaces.`), { status: 400 });
+          return sealSecret(typed);
+        }
+        if (clear.includes(field)) return null;
+        return row ? (row[col] || null) : null;
+      };
+      if (!secretKeySource()) return res.status(409).json({ error: 'The server has no encryption key (ATITHI_CREDENTIAL_KEY or JWT_SECRET), so secrets cannot be saved.' });
+      const accessToken = await secretCol('access_token', 'access_token_sealed');
+      const appSecret = await secretCol('app_secret', 'app_secret_sealed');
+      const verifyToken = await secretCol('verify_token', 'verify_token_sealed');
+      if (!!phoneNumberId !== !!accessToken) return res.status(400).json({ error: 'The phone number ID and the access token go together: enter both, or clear both to use the server environment.' });
+      const senderChanged = !row || row.phone_number_id !== (phoneNumberId || null) || String(b.access_token ?? '').trim() !== '';
+      const by = req.user?.email || req.user?.id || null;
+      await centralDb.run(
+        `INSERT INTO platform_whatsapp_config (id, phone_number_id, business_account_id, access_token_sealed, app_secret_sealed, verify_token_sealed, updated_at, updated_by)
+         VALUES ('DEFAULT', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+         ON CONFLICT (id) DO UPDATE SET phone_number_id = EXCLUDED.phone_number_id, business_account_id = EXCLUDED.business_account_id,
+           access_token_sealed = EXCLUDED.access_token_sealed, app_secret_sealed = EXCLUDED.app_secret_sealed, verify_token_sealed = EXCLUDED.verify_token_sealed,
+           updated_at = CURRENT_TIMESTAMP, updated_by = EXCLUDED.updated_by`,
+        [phoneNumberId || null, wabaId || null, accessToken, appSecret, verifyToken, by]);
+      // A new number or token has not been tested: drop the old result and the name it found.
+      if (senderChanged) {
+        await centralDb.run("UPDATE platform_whatsapp_config SET last_test_at = NULL, last_test_ok = NULL, last_test_detail = NULL, display_phone_number = NULL, verified_name = NULL WHERE id = 'DEFAULT'").catch(() => {});
+      }
+      await loadPlatformWhatsApp();
+      console.log(`[whatsapp] platform settings saved by ${by}; sender source now ${whatsAppCreds().source}`);
+      res.json(await _waConfigView(req));
+    } catch (err: any) {
+      if (err?.status === 400) return res.status(400).json({ error: err.message });
+      console.error('[whatsapp] platform settings save failed:', err?.message || err);
+      res.status(500).json({ error: 'Could not save the WhatsApp settings.' });
+    }
+  });
+
+  // Remove the saved settings: sends go back to the META_WA_* env variables.
+  app.delete("/api/admin/whatsapp/config", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      await centralDb.run("DELETE FROM platform_whatsapp_config WHERE id = 'DEFAULT'");
+      await loadPlatformWhatsApp();
+      console.log(`[whatsapp] platform settings removed by ${req.user?.email || req.user?.id}`);
+      res.json(await _waConfigView(req));
+    } catch (err: any) { res.status(500).json({ error: 'Could not remove the WhatsApp settings.' }); }
+  });
+
+  // Ask Meta about the number with the credentials in use. With { to }, also
+  // send Meta's stock hello_world template there (a plain message would be
+  // refused outside the 24-hour window).
+  app.post("/api/admin/whatsapp/config/test", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    const eff = whatsAppCreds();
+    if (!eff.phoneNumberId || !eff.accessToken) return res.status(409).json({ ok: false, detail: 'No WhatsApp sender is set: save a phone number ID and access token first.' });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    let ok = false, detail = '', display: string | null = null, name: string | null = null;
+    try {
+      const r = await fetch(`https://graph.facebook.com/v21.0/${eff.phoneNumberId}?fields=display_phone_number,verified_name,quality_rating`,
+        { headers: { Authorization: `Bearer ${eff.accessToken}` }, signal: controller.signal });
+      const body: any = await r.json().catch(() => ({}));
+      if (!r.ok || body?.error) {
+        detail = `Meta refused: ${body?.error?.message || `HTTP ${r.status}`}`;
+      } else {
+        ok = true; display = body.display_phone_number || null; name = body.verified_name || null;
+        detail = `Connected: ${name || 'number'} ${display || eff.phoneNumberId}${body.quality_rating ? ` (quality ${body.quality_rating})` : ''}`;
+      }
+    } catch (e: any) {
+      detail = e?.name === 'AbortError' ? 'Meta did not answer within 8 seconds.' : `Could not reach Meta: ${e?.message || e}`;
+    } finally { clearTimeout(timer); }
+    const to = String(req.body?.to || '').trim();
+    if (ok && to) {
+      const sent = await sendWhatsAppDetailed(to, 'Atithi-Setu WhatsApp test', { name: 'hello_world', languageCode: 'en_US', variables: [] } as any);
+      if (sent.ok) detail += ` · test template sent to ${to}`;
+      else { ok = false; detail += ` · test send to ${to} failed: ${sent.error}`; }
+    }
+    // Only a saved sender records its test; an env sender has no row to write to.
+    if (eff.source === 'PLATFORM') {
+      await centralDb.run(
+        "UPDATE platform_whatsapp_config SET last_test_at = CURRENT_TIMESTAMP, last_test_ok = ?, last_test_detail = ?, display_phone_number = COALESCE(?, display_phone_number), verified_name = COALESCE(?, verified_name) WHERE id = 'DEFAULT'",
+        [ok ? 1 : 0, detail.slice(0, 500), display, name]).catch(() => {});
+    }
+    res.json({ ok, detail, source: eff.source });
   });
 
   // Unit rates behind the cost estimate, so it tracks Meta's pricing changes.
@@ -12364,8 +12511,7 @@ async function startServer() {
   // one instead of typing a name that will be rejected at send time.
   app.get("/api/owner/whatsapp/templates", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const waba = process.env.META_WA_BUSINESS_ACCOUNT_ID;
-      const tokenEnv = process.env.META_WA_ACCESS_TOKEN;
+      const { businessAccountId: waba, accessToken: tokenEnv } = whatsAppCreds();
       if (!waba || !tokenEnv) {
         return res.json({ templates: [], configured: false, reason: 'WhatsApp is not connected yet. Once the Meta account is linked, your approved templates appear here.' });
       }
@@ -12962,7 +13108,8 @@ async function startServer() {
     const token     = req.query["hub.verify_token"];
     const challenge = req.query["hub.challenge"];
 
-    if (mode === "subscribe" && token === process.env.META_WA_VERIFY_TOKEN) {
+    const verifyToken = whatsAppCreds().verifyToken;
+    if (mode === "subscribe" && verifyToken && token === verifyToken) {
       console.log("[Meta Webhook] Verification successful.");
       res.status(200).send(challenge);
     } else {
@@ -13043,7 +13190,7 @@ async function startServer() {
     // The HMAC is over the raw bytes the global parser kept (webhookRawBody.ts).
     // Checked before answering: it takes microseconds, and a 401 shows in Meta's
     // delivery log, where a receipt dropped after a 200 shows nowhere.
-    const appSecret = process.env.META_WA_APP_SECRET;
+    const appSecret = whatsAppCreds().appSecret;
     if (appSecret) {
       const sig = String(req.headers['x-hub-signature-256'] || '');
       const rawBody: Buffer = (req as any).rawBody || Buffer.alloc(0);
@@ -65072,8 +65219,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-payment-links',
+    commit_marker: 'platform-whatsapp-settings',
     code_features: [
+      'platform-whatsapp-settings  Platform: /internal gets a WhatsApp view. The shared Meta sender (phone number ID, access token, business account ID, app secret, webhook verify token) is saved in central platform_whatsapp_config with secrets sealed (paymentSecrets.ts), write-only, a blank field keeps the saved value. whatsappConfig.ts holds the effective credentials: saved settings, else the META_WA_* env exactly as before (number + token as a pair; app secret, verify token and business account fall back per field). Loaded at startup, after every save and every 5 minutes; notificationService reads it at send time instead of module-load constants. Admin routes GET/PUT/DELETE /api/admin/whatsapp/config and POST /config/test (asks Meta about the number, optionally sends hello_world). The same view maps notification events to approved templates (existing template-map API). Webhook verification now needs a verify token to be set: a missing token used to match an unset env value.',
       'event-payment-links  Events: Send payment link on the booking payment panel (full balance or the next instalment, or any amount up to the balance) by WhatsApp, email or copy. EVENT_BOOKING is a payable: gates eventsStaff + EVENTS_BOOKINGS, events must be enabled, a link above the balance is refused. The event receipt route body moved verbatim into recordEventPayment(), which the route and the gateway recorder share, so a gateway payment gets the same guards, schedule, GL (Dr 1025 clearing) and receipt voucher. ONLINE receipts get no petty-cash row and no second event notification; staff cannot post ONLINE by hand (400). A payment refused by the booking (cancelled, over the balance) goes to NEEDS_REVIEW.',
       'ux-settings-subtabs  UX (client feedback: too much scrolling and commentary). Settings > Restaurant is split into sub-tabs Business, Invoices, Operations and My profile. Layout only: blocks are hidden with CSS, never unmounted, so the one settings form still saves every field together; a required field on a hidden tab opens its tab. Save bar pinned at the bottom. Explanatory paragraphs removed; the few facts worth keeping sit behind an info icon. Language card moved under Business. Keys settings.tab.* and settings.fixField in en, hi, ta, kn, te, pa. Frontend only.',
       'ux-payment-gateways-subtabs  UX (client feedback: too much commentary, too much scrolling). Payment Gateways page rebuilt as three sub-tabs: Gateways (default-gateway dropdown + a Razorpay/PhonePe/Paytm switcher showing one gateway card at a time), Payment links, Webhook log. Commentary removed: page intro, default-gateway explanation, test-mode banner (now a TEST badge), webhook-missed and phone-required notes, list subtitles, the encryption-key-source notice (a platform concern) and the folio dialog footer. Field help moved into an info-icon tooltip; webhook set-up steps into a collapsed Setup guide. Both lists moved to the shared DataTable (sort, per-column filters, column chooser, CSV export). Resolve-payment uses an in-page dialog instead of window.prompt. All page strings localised (pg.* keys in en, hi, ta, kn, te, pa). Frontend only: same API calls, same handlers, no server behaviour change.',

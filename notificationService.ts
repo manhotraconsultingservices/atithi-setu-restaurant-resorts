@@ -10,6 +10,7 @@
  * Required environment variables:
  *   META_WA_ACCESS_TOKEN     — Permanent / long-lived token from Meta Business Manager
  *   META_WA_PHONE_NUMBER_ID  — Phone Number ID (NOT the phone number itself)
+ *                              (both optional once saved in /internal → WhatsApp)
  *   TWILIO_ACCOUNT_SID       — Twilio account SID
  *   TWILIO_AUTH_TOKEN        — Twilio auth token
  *   TWILIO_PHONE_NUMBER      — Twilio SMS-capable number (e.g. +14155551234)
@@ -25,6 +26,7 @@
 
 import twilio from 'twilio';
 import nodemailer from 'nodemailer';
+import { whatsAppCreds } from './whatsappConfig.ts';
 
 // ── Twilio client (SMS only) ──────────────────────────────────────────────────
 const twilioClient =
@@ -46,8 +48,8 @@ const mailTransporter = process.env.SMTP_HOST
   : null;
 
 // ── Meta Cloud API config (WhatsApp) ─────────────────────────────────────────
-const META_WA_PHONE_NUMBER_ID = process.env.META_WA_PHONE_NUMBER_ID;
-const META_WA_ACCESS_TOKEN    = process.env.META_WA_ACCESS_TOKEN;
+// Credentials are read at send time from whatsappConfig.ts: the SuperAdmin's
+// saved platform settings, else the META_WA_* environment variables.
 const META_GRAPH_VERSION      = 'v20.0';
 
 // ── Telegram Bot API config ───────────────────────────────────────────────────
@@ -1873,6 +1875,7 @@ export async function sendWhatsAppDetailed(
   message: string,
   template?: WhatsAppTemplate | null,
 ): Promise<SendResult> {
+  const { accessToken: META_WA_ACCESS_TOKEN, phoneNumberId: META_WA_PHONE_NUMBER_ID } = whatsAppCreds();
   if (!META_WA_ACCESS_TOKEN || !META_WA_PHONE_NUMBER_ID) {
     return { ok: false, error: 'WhatsApp is not connected yet — add the Meta credentials in platform settings.', code: 'NOT_CONFIGURED' };
   }
@@ -1944,6 +1947,7 @@ export async function sendSMSDetailed(to: string, message: string): Promise<Send
 // Docs: https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages
 // ─────────────────────────────────────────────────────────────────────────────
 export async function sendWhatsApp(to: string, message: string): Promise<void> {
+  const { accessToken: META_WA_ACCESS_TOKEN, phoneNumberId: META_WA_PHONE_NUMBER_ID } = whatsAppCreds();
   if (!META_WA_ACCESS_TOKEN || !META_WA_PHONE_NUMBER_ID) {
     console.warn('[Notification] Meta WhatsApp API not configured — skipping WhatsApp.');
     return;
