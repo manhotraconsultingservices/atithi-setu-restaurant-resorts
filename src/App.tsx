@@ -16337,7 +16337,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           menu_display_mode: (restaurant as any).menu_display_mode || 'PHOTO',
           alerts_enabled: (restaurant as any).alerts_enabled !== 0 && (restaurant as any).alerts_enabled !== false,
           waiter_shared_floor: ((restaurant as any).waiter_shared_floor === 1 || (restaurant as any).waiter_shared_floor === true) ? 1 : 0,
-          invoice_numbering_mode: String((restaurant as any).invoice_numbering_mode || 'RANDOM').toUpperCase(),
+          // Always sequential: a tax invoice needs a consecutive serial (Rule 46(b)).
+          invoice_numbering_mode: 'SEQUENTIAL',
           invoice_number_prefix: String((restaurant as any).invoice_number_prefix || 'INV-').trim() || 'INV-',
           invoice_yearly_reset: (restaurant as any).invoice_yearly_reset ? 1 : 0,
           invoice_template: (restaurant as any).invoice_template || 'CLASSIC',
@@ -31331,43 +31332,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
               <div>
                 <p className="text-sm font-bold text-[#1a1a1a]">Invoice Numbering</p>
-                <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest mt-0.5">
-                  How invoice numbers are generated for this restaurant
+                <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-snug">
+                  Tax invoices are numbered one after another (<span className="font-mono">INV-0001</span>, <span className="font-mono">INV-0002</span> …), because GST Rule 46 requires a consecutive serial number. Choose the prefix and whether the count restarts each year.
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setRestaurant(prev => prev ? ({ ...prev, invoice_numbering_mode: 'RANDOM' } as any) : null)}
-                  className={cn(
-                    "p-4 rounded-2xl border-2 text-left transition-all",
-                    String((restaurant as any)?.invoice_numbering_mode || 'RANDOM').toUpperCase() === 'RANDOM'
-                      ? "border-[#cc5a16] bg-white shadow-sm"
-                      : "border-transparent bg-white/50"
-                  )}
-                >
-                  <Hash size={18} className="mb-2 text-[#1a1208]" />
-                  <p className="text-xs font-bold text-[#1a1a1a]">Random</p>
-                  <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Auto-generated like <span className="font-mono">#54B672AE</span>. Default.</p>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRestaurant(prev => prev ? ({ ...prev, invoice_numbering_mode: 'SEQUENTIAL' } as any) : null)}
-                  className={cn(
-                    "p-4 rounded-2xl border-2 text-left transition-all",
-                    String((restaurant as any)?.invoice_numbering_mode || 'RANDOM').toUpperCase() === 'SEQUENTIAL'
-                      ? "border-[#cc5a16] bg-white shadow-sm"
-                      : "border-transparent bg-white/50"
-                  )}
-                >
-                  <ListOrdered size={18} className="mb-2 text-[#1a1208]" />
-                  <p className="text-xs font-bold text-[#1a1a1a]">Sequential</p>
-                  <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Counter-based per tenant: <span className="font-mono">INV-0001</span>, <span className="font-mono">INV-0002</span> …</p>
-                </button>
-              </div>
 
-              {/* Sequential-only sub-controls */}
-              {String((restaurant as any)?.invoice_numbering_mode || 'RANDOM').toUpperCase() === 'SEQUENTIAL' && (() => {
+              {(() => {
                 const prefix = String((restaurant as any)?.invoice_number_prefix ?? 'INV-');
                 const yearlyReset = Number((restaurant as any)?.invoice_yearly_reset || 0) === 1;
                 const PREFIX_RE = /^[A-Za-z0-9_\-./]{1,12}$/;
@@ -31769,52 +31739,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
 
-            <div className="space-y-4 pt-4 border-t border-[#cc5a16]/10">
-              <h4 className="text-sm font-bold uppercase tracking-widest text-[#1a1208]">UPI Payment Settings</h4>
-              <div>
-                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">UPI ID (VPA)</label>
-                <input 
-                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                  placeholder="e.g. merchant@upi"
-                  value={restaurant?.upi_id || ''}
-                  onChange={e => setRestaurant(prev => prev ? { ...prev, upi_id: e.target.value } : null)}
-                />
-              </div>
-              <div>
-                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Static UPI QR Code</label>
-                <div className="flex items-center gap-4">
-                  {restaurant?.upi_qr_image && (
-                    <img src={restaurant.upi_qr_image} alt="UPI QR" className="w-12 h-12 object-contain border rounded-lg" referrerPolicy="no-referrer" />
-                  )}
-                  <input 
-                    type="file"
-                    accept="image/*"
-                    className="w-full text-sm text-[#6b5d52] file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-bold file:bg-[#cc5a16]/10 file:text-[#1a1208] hover:file:bg-[#cc5a16]/20"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        const formData = new FormData();
-                        formData.append('upi_qr', file);
-                        const res = await fetch(`/api/restaurant/${restaurantId}/upi-qr`, {
-                          method: 'POST',
-                          headers: { 'Authorization': `Bearer ${token}` },
-                          body: formData
-                        });
-                        if (res.ok) {
-                          const contentType = res.headers.get("content-type");
-                          if (contentType && contentType.indexOf("application/json") !== -1) {
-                            const data = await res.json();
-                            if (data.upi_qr_image) {
-                              setRestaurant(prev => prev ? { ...prev, upi_qr_image: data.upi_qr_image } : null);
-                            }
-                          }
-                        }
-                      }
-                    }}
-                  />
-                </div>
-              </div>
-            </div>
+            {/* UPI details are no longer set here: online payments go through the
+                property's own gateway, under Administration → Payment Gateways. */}
 
             {/* Success banner — appears for 3 seconds after a successful save */}
             <AnimatePresence>

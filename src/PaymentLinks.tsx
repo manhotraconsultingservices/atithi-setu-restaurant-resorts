@@ -220,21 +220,34 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
         </button>
       )}
 
+      {/* The one choice staff never make: which gateway new payment links use.
+          Always shown, listing every gateway; one not switched on cannot be picked. */}
       {(() => {
-        const on = (data.gateways || []).filter((g: Json) => g.is_enabled);
-        if (on.length === 0) return null;
-        if (on.length === 1) {
-          return <div className="text-sm text-[#3d3128] bg-white border border-[#e8dccf] rounded-2xl px-4 py-3">Payment links go through <strong>{on[0].label}</strong>{on[0].mode === 'TEST' ? ' (test mode)' : ''}.</div>;
-        }
+        const all: Json[] = data.gateways || [];
+        const on = all.filter((g: Json) => g.is_enabled);
         return (
-          <div className="bg-white border border-[#e8dccf] rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap">
-            <label className="text-sm font-semibold text-[#1a1208]" htmlFor="pg-default">Payment links go through</label>
-            <select id="pg-default" disabled={!canEdit || busy === 'default'} className={`${input} w-auto`} value={data.default_gateway || ''} onChange={e => e.target.value && chooseDefault(e.target.value)}>
-              {!data.default_gateway && <option value="">Choose a gateway…</option>}
-              {on.map((g: Json) => <option key={g.gateway} value={g.gateway}>{g.label}{g.mode === 'TEST' ? ' (test mode)' : ''}</option>)}
-            </select>
-            {!data.default_gateway && <span className="text-xs text-red-700">Staff cannot send payment links until you choose one.</span>}
-            <span className="text-[11px] text-[#9c8e85] w-full">Staff do not choose a gateway; every new link uses this one. Links already sent keep their gateway until paid or cancelled.</span>
+          <div className="bg-white border-2 border-[#cc5a16]/30 rounded-2xl px-5 py-4 space-y-2">
+            <div className="flex items-center gap-3 flex-wrap">
+              <label className="text-sm font-bold text-[#1a1208]" htmlFor="pg-default">Default payment gateway</label>
+              <select
+                id="pg-default"
+                disabled={!canEdit || busy === 'default' || on.length === 0}
+                className={`${input} w-auto min-w-[220px]`}
+                value={data.default_gateway || ''}
+                onChange={e => e.target.value && chooseDefault(e.target.value)}
+              >
+                {!data.default_gateway && <option value="">{on.length ? 'Choose a gateway…' : 'Switch on a gateway below first'}</option>}
+                {all.map((g: Json) => (
+                  <option key={g.gateway} value={g.gateway} disabled={!g.is_enabled}>
+                    {g.label}{g.is_enabled ? (g.mode === 'TEST' ? ' (test mode)' : '') : ' (not switched on)'}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {on.length > 1 && !data.default_gateway && <p className="text-xs text-red-700">More than one gateway is on. Staff cannot send payment links until you choose one here.</p>}
+            <p className="text-[11px] text-[#6b5d52] leading-snug">
+              Every new payment link staff send goes through this gateway; staff never choose. The first gateway you switch on becomes the default, and you can change it here at any time. Links already sent keep their gateway until they are paid or cancelled.
+            </p>
           </div>
         );
       })()}
