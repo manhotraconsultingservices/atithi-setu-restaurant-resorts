@@ -515,4 +515,6 @@ export const en: Record<string, string> = {
   'pg.collect.sending': 'Sending…',
   'pg.collect.nothingDue': 'Nothing is due on this bill',
   'pg.collect.sendLinkIcon': 'Send payment link (email, WhatsApp or both)',
+  // ── Payment link resend ──
+  'pg.collect.linkStillOpen': 'The link below is still open for this amount. Copy it, or send it again.',
 };

@@ -655,6 +655,14 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
   }, [open?.id]);
 
   const create = async (channel: 'NONE' | 'WHATSAPP' | 'EMAIL' | 'BOTH') => {
+    // An open link already asks for this amount: send that one again. Only a
+    // different amount needs a new link, which must cancel the old one first.
+    const wanted = payable?.fixedAmount ? Number(outstanding ?? 0) : Number(amount);
+    if (open && Math.abs(Number(open.amount) - wanted) < 0.01) {
+      if (channel === 'NONE') { setNotice({ tone: 'ok', text: t('pg.collect.linkStillOpen') }); return; }
+      await send(open, channel);
+      return;
+    }
     if (open) {
       const ok = await confirm({ title: 'Replace the open link?', body: `A link for ${money(open.amount)} is still waiting. It will be cancelled so the guest cannot pay twice.`, confirmLabel: 'Replace it' });
       if (!ok) return;
@@ -677,7 +685,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
     }
   };
 
-  const send = async (l: Json, channel: 'WHATSAPP' | 'EMAIL') => {
+  const send = async (l: Json, channel: 'WHATSAPP' | 'EMAIL' | 'BOTH') => {
     setBusy(`send:${channel}`);
     try {
       const out = await api(`/links/${l.id}/send`, { method: 'POST', body: JSON.stringify({ channel, customer_phone: phone, customer_email: email }) });

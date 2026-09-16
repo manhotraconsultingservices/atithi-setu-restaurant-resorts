@@ -450,4 +450,6 @@ export const kn: Record<string, string> = {
   'pg.collect.sending': 'ಕಳುಹಿಸಲಾಗುತ್ತಿದೆ…',
   'pg.collect.nothingDue': 'ಈ ಬಿಲ್‌ನಲ್ಲಿ ಬಾಕಿ ಇಲ್ಲ',
   'pg.collect.sendLinkIcon': 'ಪಾವತಿ ಲಿಂಕ್ ಕಳುಹಿಸಿ (ಇಮೇಲ್, WhatsApp ಅಥವಾ ಎರಡೂ)',
+  // ── Payment link resend ──
+  'pg.collect.linkStillOpen': 'ಈ ಮೊತ್ತದ ಕೆಳಗಿನ ಲಿಂಕ್ ಇನ್ನೂ ತೆರೆದಿದೆ. ನಕಲಿಸಿ ಅಥವಾ ಮತ್ತೆ ಕಳುಹಿಸಿ.',
 };

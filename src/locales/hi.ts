@@ -551,4 +551,6 @@ export const hi: Record<string, string> = {
   'pg.collect.sending': 'भेजा जा रहा है…',
   'pg.collect.nothingDue': 'इस बिल पर कुछ बकाया नहीं है',
   'pg.collect.sendLinkIcon': 'भुगतान लिंक भेजें (ईमेल, WhatsApp या दोनों)',
+  // ── Payment link resend ──
+  'pg.collect.linkStillOpen': 'इस राशि के लिए नीचे दिया लिंक अभी खुला है। इसे कॉपी करें या फिर से भेजें।',
 };

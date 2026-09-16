@@ -512,4 +512,6 @@ export const pa: Record<string, string> = {
   'pg.collect.sending': 'ਭੇਜਿਆ ਜਾ ਰਿਹਾ ਹੈ…',
   'pg.collect.nothingDue': 'ਇਸ ਬਿੱਲ \'ਤੇ ਕੁਝ ਬਕਾਇਆ ਨਹੀਂ',
   'pg.collect.sendLinkIcon': 'ਭੁਗਤਾਨ ਲਿੰਕ ਭੇਜੋ (ਈਮੇਲ, WhatsApp ਜਾਂ ਦੋਵੇਂ)',
+  // ── Payment link resend ──
+  'pg.collect.linkStillOpen': 'ਇਸ ਰਕਮ ਲਈ ਹੇਠਾਂ ਵਾਲਾ ਲਿੰਕ ਅਜੇ ਖੁੱਲ੍ਹਾ ਹੈ। ਇਸਨੂੰ ਕਾਪੀ ਕਰੋ ਜਾਂ ਮੁੜ ਭੇਜੋ।',
 };

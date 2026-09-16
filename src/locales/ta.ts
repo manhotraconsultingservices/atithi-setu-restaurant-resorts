@@ -448,4 +448,6 @@ export const ta: Record<string, string> = {
   'pg.collect.sending': 'அனுப்புகிறது…',
   'pg.collect.nothingDue': 'இந்த பில்லில் நிலுவை இல்லை',
   'pg.collect.sendLinkIcon': 'கட்டண இணைப்பை அனுப்பு (மின்னஞ்சல், WhatsApp அல்லது இரண்டும்)',
+  // ── Payment link resend ──
+  'pg.collect.linkStillOpen': 'இந்தத் தொகைக்கான கீழே உள்ள இணைப்பு இன்னும் திறந்துள்ளது. நகலெடுக்கவும் அல்லது மீண்டும் அனுப்பவும்.',
 };

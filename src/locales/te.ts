@@ -448,4 +448,6 @@ export const te: Record<string, string> = {
   'pg.collect.sending': 'పంపుతోంది…',
   'pg.collect.nothingDue': 'ఈ బిల్లుపై బకాయి లేదు',
   'pg.collect.sendLinkIcon': 'చెల్లింపు లింక్ పంపండి (ఇమెయిల్, WhatsApp లేదా రెండూ)',
+  // ── Payment link resend ──
+  'pg.collect.linkStillOpen': 'ఈ మొత్తానికి కింద ఉన్న లింక్ ఇంకా తెరిచే ఉంది. కాపీ చేయండి లేదా మళ్లీ పంపండి.',
 };
