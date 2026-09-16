@@ -52155,6 +52155,18 @@ ${data.tenant.name}`;
       // hotels are deliberate about T&Cs around messaging guests.
       (async () => {
         try {
+          // With a payment gateway on, the guest gets its link (email only, as before).
+          const gb: any = await tenantDb.get("SELECT guest_email FROM room_bookings WHERE id = ?", [req.params.bookingId]).catch(() => null);
+          if (gb?.guest_email) {
+            const viaGateway = await _hotelGatewayPayLink(req, req.params.id, req.params.bookingId, {
+              channel: 'EMAIL', by: { id: null, name: 'Check-in' },
+            }).catch((e: any) => {
+              // Nothing owed (e.g. paid in advance) is normal; anything else is logged.
+              if (!(e instanceof PaymentRequestError)) console.warn('[hotel-checkin] gateway payment link failed:', e?.message || e);
+              return { status: 0, body: null };
+            });
+            if (viaGateway) return;
+          }
           const payload = await buildHotelPaymentLinkPayload(req.params.id, req.params.bookingId);
           if (payload.ok && payload.amount > 0 && payload.guest_email) {
             const payUrl = buildUpiPayPageUrl(appOriginFromReq(req), payload);
@@ -52177,6 +52189,52 @@ ${data.tenant.name}`;
     }
   });
 
+  // A booking's payment link through the payment gateway. Returns null when no
+  // gateway is switched on, so the caller keeps the UPI link. Before arrival the
+  // folio is created on demand, as the advance-payment route already does. The
+  // link asks for what is still owed on the folio (or a smaller amount staff chose).
+  const _hotelGatewayPayLink = async (
+    req: AuthRequest, restaurantId: string, bookingId: string,
+    opts: { channel: string; overrideAmount?: number; email?: string; phone?: string; by?: { id: string | null; name: string | null } },
+  ): Promise<null | { status: number; body: any }> => {
+    const db = await getTenantDb(restaurantId);
+    const active = await _pgActiveGatewayId(db).catch(() => null);
+    if (!active) return null;
+    const b: any = await db.get("SELECT * FROM room_bookings WHERE id = ?", [bookingId]);
+    if (!b) return { status: 404, body: { error: 'Booking not found' } };
+    const bs = String(b.status || '').toUpperCase();
+    if (!['BOOKED', 'CHECKED_IN'].includes(bs)) {
+      const open: any = await db.get("SELECT id FROM folios WHERE booking_id = ? AND status = 'open' AND COALESCE(folio_kind, 'HOTEL') = 'HOTEL' LIMIT 1", [bookingId]);
+      if (!open) return { status: 409, body: { error: `This booking is ${bs.toLowerCase().replace(/_/g, ' ')} and has no open bill to pay.` } };
+    }
+    let folio: any = await db.get(
+      "SELECT id FROM folios WHERE booking_id = ? AND status = 'open' AND COALESCE(folio_kind, 'HOTEL') = 'HOTEL' ORDER BY created_at DESC LIMIT 1", [bookingId]);
+    if (!folio) {
+      const created = await createFolioWithRoomCharges(restaurantId, b);
+      if (!created?.id) return { status: 500, body: { error: 'Could not open a bill for this booking. Check its room assignment.' } };
+      folio = { id: created.id };
+    }
+    const out = await getFolioOutstanding(db, folio.id).catch(() => null);
+    const owed = Math.max(0, Number(out?.outstanding || 0));
+    const override = Number(opts.overrideAmount || 0);
+    const amount = override > 0 && (owed <= 0 || override < owed) ? Math.round(override * 100) / 100 : owed;
+    if (!(amount >= 1)) return { status: 400, body: { error: 'Booking has no amount due.' } };
+    const link = await _pgCreateLink(db, restaurantId, opts.by || _pgBy(req), {
+      objectType: 'HOTEL_FOLIO', objectId: folio.id, amount,
+      name: b.guest_name, phone: opts.phone || b.guest_phone, email: opts.email || b.guest_email,
+      webhookUrlFor: (gatewayId: string) => _pgWebhookUrl(req, restaurantId, gatewayId),
+    });
+    const delivery = await _pgSendLink(db, restaurantId, link, { channel: opts.channel, phone: opts.phone || b.guest_phone, email: opts.email || b.guest_email });
+    const view = _pgLinkView(link);
+    const body = {
+      ok: delivery.sent.length > 0, sent: delivery.sent, errors: delivery.errors.length ? delivery.errors : undefined,
+      amount: view.amount, pay_url: view.url, link_id: view.id, gateway: view.gateway, folio_id: folio.id,
+      guest_email: opts.email || b.guest_email || '', guest_phone: opts.phone || b.guest_phone || '',
+    };
+    if (!delivery.sent.length) return { status: 400, body: { ...body, error: `${delivery.errors.join(' ') || 'No delivery channel matched.'} The link was created: ${view.url}` } };
+    return { status: 200, body };
+  };
+
   // ════════════════════════════════════════════════════════════════════
   // ─── Send payment link to guest (manual + auto) ───────────────────
   // ════════════════════════════════════════════════════════════════════
@@ -52191,6 +52249,19 @@ ${data.tenant.name}`;
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
+      // A payment gateway is switched on: send its link, which records the payment itself.
+      try {
+        const viaGateway = await _hotelGatewayPayLink(req, req.params.id, req.params.bookingId, {
+          channel: String(req.body?.channel || 'EMAIL').toUpperCase(),
+          overrideAmount: Number(req.body?.override_amount || 0),
+          email: String(req.body?.override_email || '').trim() || undefined,
+          phone: String(req.body?.override_phone || '').trim() || undefined,
+        });
+        if (viaGateway) return res.status(viaGateway.status).json(viaGateway.body);
+      } catch (e: any) {
+        if (e instanceof PaymentRequestError) return res.status(e.status).json({ error: e.message });
+        throw e;
+      }
       const payload = await buildHotelPaymentLinkPayload(req.params.id, req.params.bookingId);
       if (!payload.ok) return res.status(404).json({ error: payload.reason || 'Booking not found' });
       if (payload.amount <= 0) return res.status(400).json({ error: 'Booking has no amount due.' });
@@ -65443,8 +65514,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'restaurant-payment-links',
+    commit_marker: 'hotel-paylink-via-gateway',
     code_features: [
+      'hotel-paylink-via-gateway  Hotel bookings Pay link (the email and WhatsApp buttons on the bookings list, and the automatic email at check-in) now sends a payment gateway link when a gateway is switched on, so the payment records itself on the folio. It asks for what is still owed on the folio (the UPI link asked for the full folio total even after part was paid), or a smaller override amount. Before arrival the folio is created on demand, as the advance-payment route already does. With no gateway switched on the UPI link is unchanged.',
       'restaurant-payment-links  Restaurant: Send payment link on the Invoices edit modal (table bills and manual/takeaway invoices) and a Link button on the Command Centre table bill (saves the discount and service charge first). Payables RESTAURANT_SESSION (object id = session token) and RESTAURANT_ORDER; gates restaurantStaff + INVOICES (Edit to send). Restaurant bills settle all at once, so a link is always the whole bill, worked out by the server (_restaurantSessionDue = the Invoices list total; orders = _orderNetRevenue gross, what the ledger posts). New GET /payments/payable shows that amount in the dialog. The session close route became settleRestaurantSession() and the order payment route markRestaurantOrderPaid(), shared with the gateway recorder: a paid link settles the bill as ONLINE (every order ONLINE, table freed, ledger to 1025). A customer Request Bill method preference no longer blocks a gateway settlement (staff behaviour unchanged). A payment that no longer matches the bill total, or arrives for a paid, cancelled or room-charged bill, goes to NEEDS_REVIEW. Staff cannot close a table bill as ONLINE (400). Order payment notifications can no longer fail the payment.',
       'spa-payment-links  Spa: Send link on each open spa invoice (Spa, Invoices and Payments) by WhatsApp, email or copy. SPA_FOLIO is a payable: gates spaStaff + SPA_APPOINTMENTS (the same as recording a spa payment), spa must be enabled, a closed or voided invoice is refused, a link above the balance is refused. The spa folio payment route body moved verbatim into recordSpaFolioPayment(), shared by the route and the gateway recorder, so a gateway payment closes the folio and posts spa revenue (4040) exactly as a hand-entered one. Staff cannot post ONLINE by hand (400). The spa invoice list now returns client_phone and client_email. WhatsApp test: clearer errors for a bad token (Meta 190), a wrong phone number id (100), a test recipient that is not a phone number, and a number outside the test allowed list (131030); a token in quotes or under 60 characters is refused on save.',
       'platform-whatsapp-settings  Platform: /internal gets a WhatsApp view. The shared Meta sender (phone number ID, access token, business account ID, app secret, webhook verify token) is saved in central platform_whatsapp_config with secrets sealed (paymentSecrets.ts), write-only, a blank field keeps the saved value. whatsappConfig.ts holds the effective credentials: saved settings, else the META_WA_* env exactly as before (number + token as a pair; app secret, verify token and business account fall back per field). Loaded at startup, after every save and every 5 minutes; notificationService reads it at send time instead of module-load constants. Admin routes GET/PUT/DELETE /api/admin/whatsapp/config and POST /config/test (asks Meta about the number, optionally sends hello_world). The same view maps notification events to approved templates (existing template-map API). Webhook verification now needs a verify token to be set: a missing token used to match an unset env value.',
