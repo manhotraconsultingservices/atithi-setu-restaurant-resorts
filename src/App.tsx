@@ -49065,8 +49065,10 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
           NO_USAGE: { label: 'Not moving', cls: 'bg-[#f0e8d8] text-[#6b5d52]' },
           NO_STOCK: { label: 'No stock', cls: 'bg-[#f0e8d8] text-[#9c8e85]' },
           NEGATIVE: { label: 'Negative — check count', cls: 'bg-rose-100 text-rose-700' },
+          LEDGER_MISMATCH: { label: 'Stock and history disagree', cls: 'bg-rose-100 text-rose-700' },
         };
-        const items = (turnsData.items || []).filter((i: any) => Number(i.on_hand_value || 0) > 0 || Number(i.consumed_qty || 0) > 0);
+        // A flagged item is listed whatever its value — it is the row that needs attention.
+        const items = (turnsData.items || []).filter((i: any) => i.ledger_mismatch || Number(i.on_hand_value || 0) > 0 || Number(i.consumed_qty || 0) > 0);
         return (
           <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
             <div className="flex items-start justify-between gap-3 flex-wrap mb-1">
@@ -49088,6 +49090,13 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
               <div className="bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2 text-xs text-amber-900 mb-3 flex gap-2">
                 <AlertTriangle size={14} className="shrink-0 mt-0.5" />
                 <span><strong>Not measurable for this period.</strong> {dq.reason}</span>
+              </div>
+            )}
+
+            {Number(dq.ledger_mismatches || 0) > 0 && (
+              <div className="bg-rose-50 border border-rose-200 rounded-2xl px-3 py-2 text-xs text-rose-900 mb-3 flex gap-2">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                <span><strong>{dq.ledger_mismatches} item{Number(dq.ledger_mismatches) === 1 ? '' : 's'}: the stock figure and the movement history disagree.</strong> The balance shown follows the movement history, as the month-end close does, and no cover or turns is given. A stock count does not clear this; the movement history needs correcting.</span>
               </div>
             )}
 
@@ -49126,7 +49135,10 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
                       return (
                         <tr key={i.ingredient_id} className="border-t border-[#f0e8d8]">
                           <td className="px-2 py-1.5 text-[#1a1208]">{i.ingredient_name}</td>
-                          <td className="px-2 py-1.5 text-right font-mono">{Number(i.on_hand_qty || 0)} {i.unit}</td>
+                          <td className="px-2 py-1.5 text-right font-mono">
+                            {Number(i.on_hand_qty || 0)} {i.unit}
+                            {i.ledger_mismatch && <span className="block text-[10px] font-sans text-rose-700">stock figure {i.stock_qty}</span>}
+                          </td>
                           <td className="px-2 py-1.5 text-right font-mono">Rs.{Number(i.on_hand_value || 0).toLocaleString('en-IN')}</td>
                           <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">{i.avg_daily_qty ? `${i.avg_daily_qty} ${i.unit}` : '—'}</td>
                           <td className="px-2 py-1.5 text-right font-mono">{i.days_of_cover == null ? '—' : i.days_of_cover}</td>
@@ -49148,7 +49160,8 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
         const t = stockoutData.totals || {};
         // Only items with something to say. A list of 58 rows all reading
         // "never ran out" buries the three that did.
-        const items = (stockoutData.items || []).filter((i: any) =>
+        // A flagged item is listed too: its figures are withheld, and that is the news.
+        const items = (stockoutData.items || []).filter((i: any) => i.ledger_mismatch ||
           Number(i.stockout_events || 0) > 0 || Number(i.days_out || 0) > 0 || i.currently_out);
         const pct = (v: any) => v == null ? '—' : `${v}%`;
         return (
@@ -49175,6 +49188,12 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
               ))}
             </div>
 
+            {Number(t.ledger_mismatches || 0) > 0 && (
+              <div className="bg-rose-50 border border-rose-200 rounded-2xl px-3 py-2 text-xs text-rose-900 mb-3 flex gap-2">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                <span><strong>{t.ledger_mismatches} item{Number(t.ledger_mismatches) === 1 ? '' : 's'} left out: the stock figure and the movement history disagree,</strong> so when {Number(t.ledger_mismatches) === 1 ? 'it was' : 'they were'} out cannot be worked out. A stock count does not clear this; the movement history needs correcting.</span>
+              </div>
+            )}
             {items.length === 0 ? (
               <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-2xl px-3 py-2">
                 Nothing ran out in this period.
@@ -49196,11 +49215,14 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
                   <tbody>
                     {items.slice(0, 50).map((i: any) => (
                       <tr key={i.ingredient_id} className="border-t border-[#f0e8d8]">
-                        <td className="px-2 py-1.5 text-[#1a1208]">{i.ingredient_name}</td>
-                        <td className="px-2 py-1.5 text-right font-mono">{i.stockout_events}</td>
-                        <td className="px-2 py-1.5 text-right font-mono">{i.days_out}</td>
+                        <td className="px-2 py-1.5 text-[#1a1208]">
+                          {i.ingredient_name}
+                          {i.ledger_mismatch && <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">Stock and history disagree</span>}
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono">{i.stockout_events ?? '—'}</td>
+                        <td className="px-2 py-1.5 text-right font-mono">{i.days_out ?? '—'}</td>
                         <td className="px-2 py-1.5 text-right font-mono">{pct(i.availability_pct)}</td>
-                        <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">{i.reorder_point > 0 ? i.days_below_reorder : '—'}</td>
+                        <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">{i.reorder_point > 0 && i.days_below_reorder != null ? i.days_below_reorder : '—'}</td>
                         <td className="px-2 py-1.5 text-[#6b5d52]">{i.last_stockout_at || '—'}</td>
                         <td className="px-2 py-1.5">
                           {i.currently_out

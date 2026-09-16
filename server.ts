@@ -21974,11 +21974,28 @@ ${data.tenant.name}`;
 
       const id = `ING-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
-      await db.run(
-        `INSERT INTO ingredients
-          (id, name, item_type, module, category, unit, current_stock_qty, reorder_point, par_level,
-           default_supplier_id, default_unit_price, gst_percent, sku, image_url, notes, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // The item and its opening stock line are written in ONE statement. They
+      // were two, and a failure of the second was swallowed, so an item could
+      // hold stock its ledger never received — and stockouts, stock turns and
+      // the month-end close, which all sum the ledger, disagreed with the shelf
+      // from then on. The INSERT inside the WITH is part of this statement: both
+      // rows are written or neither is.
+      //
+      // Any NON-ZERO opening is logged, not only a positive one: an item created
+      // below zero used to get a stock figure with no line behind it.
+      await db.query(
+        `WITH ing AS (
+           INSERT INTO ingredients
+             (id, name, item_type, module, category, unit, current_stock_qty, reorder_point, par_level,
+              default_supplier_id, default_unit_price, gst_percent, sku, image_url, notes, is_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           RETURNING id, unit, current_stock_qty
+         )
+         INSERT INTO stock_movements
+           (id, ingredient_id, qty_delta, unit, movement_type, balance_after, recorded_by_user_id, notes)
+         SELECT ?::text, ing.id, ing.current_stock_qty, ing.unit, 'MANUAL', ing.current_stock_qty, ?::text, 'Opening stock'
+           FROM ing
+          WHERE ing.current_stock_qty <> 0`,
         [
           id, String(name).trim(), safeType, safeModule, category || null, safeUnit,
           Number(current_stock_qty || 0),
@@ -21989,23 +22006,11 @@ ${data.tenant.name}`;
           Number(gst_percent || 0),
           sku || null, image_url || null, notes || null,
           is_active === 0 ? 0 : 1,
+          // the opening stock line
+          `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+          req.user!.id,
         ]
       );
-
-      // If the user passed an opening stock, log it as a MANUAL movement so
-      // the audit trail starts on the first day, not after the first GRN.
-      const openingStock = Number(current_stock_qty || 0);
-      if (openingStock > 0) {
-        await db.run(
-          `INSERT INTO stock_movements
-            (id, ingredient_id, qty_delta, unit, movement_type, balance_after, recorded_by_user_id, notes)
-           VALUES (?, ?, ?, ?, 'MANUAL', ?, ?, 'Opening stock')`,
-          [
-            `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
-            id, openingStock, safeUnit, openingStock, req.user!.id,
-          ]
-        ).catch(() => {});
-      }
 
       res.json({ success: true, id });
     } catch (err) {
@@ -23957,26 +23962,38 @@ ${data.tenant.name}`;
           console.warn(`[inventory] Unit mismatch deducting ${r.ingredient_name}: recipe=${r.recipe_unit} vs ingredient=${r.ingredient_unit}; skipping`);
           continue;
         }
-        // Atomic decrement; RETURNING gives the new balance for the audit row
-        const updated: any[] = await db.query(
-          `UPDATE ingredients
-              SET current_stock_qty = current_stock_qty - ?,
-                  updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-          RETURNING current_stock_qty, unit`,
-          [consumed, r.ingredient_id]
-        ).catch(() => [] as any[]);
-        if (!updated[0]) continue;
-        const balanceAfter = Number(updated[0].current_stock_qty);
-        const unit = String(updated[0].unit || r.ingredient_unit || 'unit');
-        // Append to audit log — store the converted (stock-unit) qty so the audit
-        // matches the ingredient's natural unit and reversal works correctly.
-        await db.run(
-          `INSERT INTO stock_movements
-            (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, recorded_by_user_id)
-           VALUES (?, ?, ?, ?, 'CONSUMPTION', 'order', ?, ?, ?)`,
-          [movId(), r.ingredient_id, -consumed, unit, orderId, balanceAfter, actorUserId]
-        ).catch(() => {});
+        // The stock figure and its ledger line in ONE statement. They were an
+        // UPDATE followed by an INSERT whose failure was swallowed, so a failed
+        // insert left the stock moved with no line behind it, and every report
+        // that sums the ledger (stockouts, stock turns, the month-end close)
+        // disagreed with the shelf from then on. The UPDATE inside the WITH is
+        // part of this statement: both happen or neither does. The converted
+        // (stock-unit) qty is stored, so the line matches the item's own unit
+        // and a reversal returns exactly what was taken.
+        let moved: any[] = [];
+        try {
+          moved = await db.query(
+            `WITH u AS (
+               UPDATE ingredients
+                  SET current_stock_qty = COALESCE(current_stock_qty, 0) - ?,
+                      updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+               RETURNING id, current_stock_qty, unit
+             )
+             INSERT INTO stock_movements
+               (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, recorded_by_user_id)
+             SELECT ?::text, u.id, ?::double precision, COALESCE(u.unit, ?::text, 'unit'), 'CONSUMPTION', 'order', ?::text, u.current_stock_qty, ?::text
+               FROM u
+             RETURNING balance_after`,
+            [consumed, r.ingredient_id, movId(), -consumed, r.ingredient_unit || null, orderId, actorUserId]
+          );
+        } catch (e: any) {
+          // Neither the stock nor the ledger moved. The order still stands —
+          // consumption never blocks a sale — but the miss is logged, not hidden.
+          console.error(`[inventory] consumption not recorded for order ${orderId}, ingredient ${r.ingredient_id}:`, e?.message || e);
+          continue;
+        }
+        if (!moved[0]) continue;
 
         // Tier-2: FIFO batch decrement — draw `consumed` qty from oldest
         // non-empty batches first. Expiring batches (≤7 days) jump the queue
@@ -24098,22 +24115,30 @@ ${data.tenant.name}`;
     for (const c of nets) {
       const qtyToReturn = -Number(c.net);  // net is negative while stock is still out
       if (!Number.isFinite(qtyToReturn) || qtyToReturn <= 0) continue;
-      const updated: any[] = await db.query(
-        `UPDATE ingredients
-            SET current_stock_qty = current_stock_qty + ?,
-                updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        RETURNING current_stock_qty`,
-        [qtyToReturn, c.ingredient_id]
-      ).catch(() => [] as any[]);
-      if (!updated[0]) continue;
-      const balanceAfter = Number(updated[0].current_stock_qty);
-      await db.run(
-        `INSERT INTO stock_movements
-          (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, notes, recorded_by_user_id)
-         VALUES (?, ?, ?, ?, 'REVERSAL', 'order', ?, ?, 'Order cancellation reversal', ?)`,
-        [movId(), c.ingredient_id, qtyToReturn, c.unit, orderId, balanceAfter, actorUserId]
-      ).catch(() => {});
+      // The stock back and its ledger line in ONE statement, for the same reason
+      // as deductIngredientsForOrder.
+      let moved: any[] = [];
+      try {
+        moved = await db.query(
+          `WITH u AS (
+             UPDATE ingredients
+                SET current_stock_qty = COALESCE(current_stock_qty, 0) + ?,
+                    updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+             RETURNING id, current_stock_qty, unit
+           )
+           INSERT INTO stock_movements
+             (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, notes, recorded_by_user_id)
+           SELECT ?::text, u.id, ?::double precision, COALESCE(?::text, u.unit, 'unit'), 'REVERSAL', 'order', ?::text, u.current_stock_qty, 'Order cancellation reversal', ?::text
+             FROM u
+           RETURNING balance_after`,
+          [qtyToReturn, c.ingredient_id, movId(), qtyToReturn, c.unit || null, orderId, actorUserId]
+        );
+      } catch (e: any) {
+        console.error(`[inventory] reversal not recorded for order ${orderId}, ingredient ${c.ingredient_id}:`, e?.message || e);
+        continue;
+      }
+      if (!moved[0]) continue;
       lines++;
     }
 
@@ -25779,12 +25804,6 @@ ${data.tenant.name}`;
     }
   });
 
-  // Admin cleanup: delete obviously-corrupted CONSUMPTION audit rows. Used
-  // after the unit-conversion bug was discovered — old rows logged qty_delta
-  // in raw recipe units (g/ml) instead of stock units (kg/l), producing
-  // dashboard food-cost-% > 2000 %. Requires owner auth + an explicit
-  // threshold so this can't be misused to silently rewrite history.
-  // Body: { ingredient_ids?: string[], before_date?: ISO, threshold?: number }
   // ─── Admin: seed synthetic consumption history ──────────────────────────
   // For demos / new tenants — generates backdated CONSUMPTION movements over
   // the last N days with weekday-aware variance and per-ingredient daily rates.
@@ -25916,51 +25935,12 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/inventory/admin/purge-corrupt-movements", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
-    try {
-      const db = await getTenantDb(req.params.id);
-      const threshold = Math.max(1, Number(req.body?.threshold || 100));  // |qty_delta| > 100 = absurd for any kg/l ingredient
-      const beforeDate: string | null = req.body?.before_date || null;
-      const ingredientIds: string[] = Array.isArray(req.body?.ingredient_ids) ? req.body.ingredient_ids : [];
-
-      const conditions: string[] = ["movement_type = 'CONSUMPTION'", "ABS(qty_delta) > ?"];
-      const params: any[] = [threshold];
-      if (beforeDate) {
-        conditions.push("recorded_at < ?");
-        params.push(beforeDate);
-      }
-      if (ingredientIds.length > 0) {
-        conditions.push(`ingredient_id = ANY(ARRAY[${ingredientIds.map(() => '?').join(',')}]::text[])`);
-        params.push(...ingredientIds);
-      }
-
-      // Preview first
-      const matched: any[] = await db.query(
-        `SELECT id, ingredient_id, qty_delta, unit, recorded_at
-           FROM stock_movements
-          WHERE ${conditions.join(' AND ')}
-          ORDER BY recorded_at DESC
-          LIMIT 50`,
-        params
-      );
-
-      if (req.body?.dry_run) {
-        return res.json({ would_delete: matched.length, sample: matched.slice(0, 10) });
-      }
-
-      const deleted: any[] = await db.query(
-        `DELETE FROM stock_movements
-          WHERE ${conditions.join(' AND ')}
-          RETURNING id`,
-        params
-      );
-      console.log(`[admin-purge] ${req.params.id} purged ${deleted.length} corrupt CONSUMPTION movements (threshold=${threshold}${beforeDate ? `, before=${beforeDate}` : ''})`);
-      res.json({ success: true, deleted: deleted.length });
-    } catch (err) {
-      console.error("Admin purge error:", err);
-      res.status(500).json({ error: "Failed to purge corrupt movements" });
-    }
-  });
+  // POST /inventory/admin/purge-corrupt-movements was REMOVED on 15 Sep 2026.
+  // A one-off cleanup after the May unit-conversion bug, it DELETED consumption
+  // lines from stock_movements and never touched the stock figure, so the 10
+  // items it was run against were left with a ledger that no longer added up to
+  // their stock (Chicken: 17.7 kg on the shelf, 417.7 kg in the ledger). A wrong
+  // ledger line is corrected by a line that reverses it, never by deleting it.
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Inventory Management — Phase 4: Forecasting + Dashboard ─────────────
@@ -26967,30 +26947,31 @@ ${data.tenant.name}`;
       // Keeps the HI- prefix so ids stay recognisable and any existing
       // hotel_stock_movements rows keep matching.
       const id = `HI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-      await db.run(
-        `INSERT INTO ingredients
-          (id, name, item_type, module, category, unit, current_stock_qty, par_level, reorder_point, default_unit_price, sku, notes)
-         VALUES (?, ?, 'PACKAGED', 'HOTEL', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // The item and its opening stock line in ONE statement, as on the kitchen
+      // create route — the hotel table never logged an opening at all, and the
+      // separate insert that replaced it swallowed its own failure. Any
+      // non-zero opening is logged.
+      await db.query(
+        `WITH ing AS (
+           INSERT INTO ingredients
+             (id, name, item_type, module, category, unit, current_stock_qty, par_level, reorder_point, default_unit_price, sku, notes)
+           VALUES (?, ?, 'PACKAGED', 'HOTEL', ?, ?, ?, ?, ?, ?, ?, ?)
+           RETURNING id, unit, current_stock_qty
+         )
+         INSERT INTO stock_movements
+           (id, ingredient_id, qty_delta, unit, movement_type, balance_after, recorded_by_user_id, notes)
+         SELECT ?::text, ing.id, ing.current_stock_qty, ing.unit, 'MANUAL', ing.current_stock_qty, ?::text, 'Opening stock'
+           FROM ing
+          WHERE ing.current_stock_qty <> 0`,
         [
           id, name, category || null, unit || 'unit',
           Number(current_stock_qty || 0), Number(par_level || 0), Number(reorder_point || 0),
           default_unit_price != null ? Number(default_unit_price) : null,
           sku || null, notes || null,
+          `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+          req.user?.id || null,
         ]
       );
-      // Opening stock is an auditable event, exactly as it is for a kitchen
-      // item — the hotel table never logged one, so a hotel item's ledger used
-      // to begin only at its first movement.
-      const openingQty = Number(current_stock_qty || 0);
-      if (openingQty > 0) {
-        await db.run(
-          `INSERT INTO stock_movements
-            (id, ingredient_id, qty_delta, unit, movement_type, balance_after, recorded_by_user_id, notes)
-           VALUES (?, ?, ?, ?, 'MANUAL', ?, ?, 'Opening stock')`,
-          [`MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
-           id, openingQty, unit || 'unit', openingQty, req.user?.id || null]
-        ).catch(() => {});
-      }
       res.json({ success: true, id });
     } catch (err) {
       console.error("Hotel inventory create error:", err);
@@ -27001,7 +26982,26 @@ ${data.tenant.name}`;
   app.patch("/api/restaurant/:id/hotel-inventory/:itemId", authenticate, restaurantStaff, requireTabAction('HOTEL_INVENTORY', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      const allowed = ['name', 'category', 'unit', 'current_stock_qty', 'par_level', 'reorder_point', 'default_unit_price', 'sku', 'notes'];
+      // Stock is NOT editable here. This route wrote current_stock_qty straight
+      // from the form with no ledger line, so an edit could change what is on the
+      // shelf with nothing in the movement history to say so. Quantities change
+      // through POST .../stock (receive, consume, adjust, return), which records
+      // the line. An edit form sends every field back, so the CURRENT figure
+      // echoed unchanged is accepted; a different figure is refused.
+      if ('current_stock_qty' in req.body) {
+        const held: any = await db.get("SELECT current_stock_qty FROM ingredients WHERE id = ?", [req.params.itemId]);
+        if (!held) return res.status(404).json({ error: "Item not found" });
+        const heldQty = Number(held.current_stock_qty || 0);
+        const sent = Number(req.body.current_stock_qty);
+        if (!Number.isFinite(sent) || Math.abs(sent - heldQty) > 1e-9) {
+          return res.status(400).json({
+            error: `Stock is not changed by editing the item. Record a stock movement instead (receive, consume or adjust), so the change is logged. Current stock is ${heldQty}.`,
+            code: 'STOCK_NEEDS_A_MOVEMENT',
+            current_stock_qty: heldQty,
+          });
+        }
+      }
+      const allowed = ['name', 'category', 'unit', 'par_level', 'reorder_point', 'default_unit_price', 'sku', 'notes'];
       const updates: string[] = [];
       const params: any[] = [];
       for (const k of allowed) {
@@ -28179,6 +28179,78 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Stock ledger integrity ────────────────────────────────────────────────
+  // An item's stock is held twice: ingredients.current_stock_qty, which the
+  // stock screens, counts and adjustments read, and the stock_movements ledger,
+  // which stockouts, stock turns and the month-end close sum. They must agree.
+  // On 15 Sep 2026 they did not for 19 items on 5 tenants — the spa demo seed
+  // and the hotel-item fold wrote stock with no opening line, and an admin purge
+  // deleted ledger lines without touching the stock — and nothing said so. A
+  // ledger that disagrees with the shelf does not make a report fail; it makes
+  // it print a confident wrong answer: a candle with 23 on the shelf read "0%
+  // available, 87 days out".
+  //
+  // Adjustments and counts take their difference FROM the stock figure, so they
+  // carry a disagreement forward and a count cannot clear it. It has to be seen
+  // to be fixed — hence this check, and the flag the ledger reports raise from it.
+  //
+  // `filter` is an _invModuleFilter-shaped { sql, params } on `i.module`.
+  const _INV_LEDGER_TOLERANCE = 0.0001;
+  const _inventoryLedgerGaps = async (
+    db: DbInterface, filter: { sql: string; params: any[] }, includeInactive = false,
+  ): Promise<any[]> => {
+    const r4 = (n: number) => Math.round(n * 10000) / 10000;
+    const rows: any[] = await db.query(
+      `SELECT * FROM (
+         SELECT i.id, i.name, COALESCE(i.module, 'RESTAURANT') AS module, i.unit, i.is_active,
+                COALESCE(i.current_stock_qty, 0) AS column_qty,
+                COALESCE((SELECT SUM(sm.qty_delta) FROM stock_movements sm WHERE sm.ingredient_id = i.id), 0) AS ledger_qty,
+                (SELECT COUNT(*) FROM stock_movements sm WHERE sm.ingredient_id = i.id) AS movement_count
+           FROM ingredients i
+          WHERE ${includeInactive ? 'TRUE' : 'i.is_active = 1'}${filter.sql}
+       ) g
+       WHERE ABS(g.column_qty - g.ledger_qty) > ${_INV_LEDGER_TOLERANCE}
+       ORDER BY ABS(g.column_qty - g.ledger_qty) DESC, g.name`,
+      filter.params
+    );
+    return rows.map((r: any) => ({
+      ingredient_id: r.id, ingredient_name: r.name, module: r.module, unit: r.unit,
+      is_active: Number(r.is_active) === 1,
+      stock_qty: r4(Number(r.column_qty)),
+      ledger_qty: r4(Number(r.ledger_qty)),
+      gap: r4(Number(r.column_qty) - Number(r.ledger_qty)),
+      movement_count: Number(r.movement_count || 0),
+    }));
+  };
+
+  // GET /inventory/ledger-integrity?module=&include_shared=1&include_inactive=1
+  // Read-only. The items whose stock figure and movement ledger disagree; an
+  // empty list is the healthy answer.
+  app.get("/api/restaurant/:id/inventory/ledger-integrity", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const f = _invModuleFilter(req, 'i.module');
+      const includeInactive = ['1', 'true', 'yes'].includes(String(req.query.include_inactive || '').toLowerCase());
+      const items = await _inventoryLedgerGaps(db, f, includeInactive);
+      const checked: any = await db.get(
+        `SELECT COUNT(*)::int AS n FROM ingredients i WHERE ${includeInactive ? 'TRUE' : 'i.is_active = 1'}${f.sql}`,
+        f.params
+      );
+      res.json({
+        module: f.module,
+        include_inactive: includeInactive,
+        tolerance: _INV_LEDGER_TOLERANCE,
+        method: 'Each item\'s stock figure (current_stock_qty) is compared with the sum of its stock movements. gap = stock figure minus ledger: a positive gap is stock with no line behind it, such as an opening balance never logged; a negative gap is ledger lines the stock figure never received.',
+        items_checked: Number(checked?.n || 0),
+        mismatched: items.length,
+        items,
+      });
+    } catch (err: any) {
+      console.error('/inventory/ledger-integrity error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to check the stock ledger' });
+    }
+  });
+
   // ── Stockout frequency ────────────────────────────────────────────────────
   // How often each item actually ran out, how long it stayed out, and what
   // share of the period it was available. Turns tells you how hard the stock is
@@ -28225,6 +28297,12 @@ ${data.tenant.name}`;
       // balance and period.days still follow from/to, as in the month-end close.
       const endTs = Math.min(toTs, Date.now());
       const dmf = _invModuleFilter(req, 'i.module');
+      // Items whose stock figure and ledger disagree are flagged rather than
+      // walked: the walk would replay a ledger the shelf contradicts.
+      const gapById = new Map<string, any>();
+      try {
+        for (const g of await _inventoryLedgerGaps(db, dmf)) gapById.set(String(g.ingredient_id), g);
+      } catch (e: any) { console.error('/inventory/stockouts ledger check failed:', e?.message || e); }
 
       // Opening balance per item: everything that happened before the window.
       const openingRows: any[] = await db.query(
@@ -28262,13 +28340,33 @@ ${data.tenant.name}`;
       }
 
       const DAY = 86400000;
-      let totalDaysOut = 0, totalDaysTracked = 0, totalEvents = 0, everOut = 0, nowOut = 0;
+      let totalDaysOut = 0, totalDaysTracked = 0, totalEvents = 0, everOut = 0, nowOut = 0, mismatched = 0;
       const items = openingRows.map((r: any) => {
         const created = r.created_at ? new Date(r.created_at).getTime() : fromTs;
         // An item cannot have been out of stock before it existed.
         const startTs = Math.max(fromTs, isNaN(created) ? fromTs : created);
         const trackedMs = Math.max(0, endTs - startTs);
         const reorder = Number(r.reorder_point || 0);
+
+        // Stock figure and ledger disagree: no ledger figure is published and the
+        // item is left out of every ledger-based total, so one broken item cannot
+        // move the headline — the candle alone added 87 phantom days out to SPA.
+        // currently_out still counts it: that is read from the stock figure.
+        const gap = gapById.get(String(r.id));
+        if (gap) {
+          mismatched++;
+          const outNow = Number(r.current_qty || 0) <= 0;
+          if (outNow) nowOut++;
+          return {
+            ingredient_id: r.id, ingredient_name: r.name, unit: r.unit,
+            current_qty: Number(r.current_qty || 0), reorder_point: reorder,
+            ledger_mismatch: true, ledger_qty: gap.ledger_qty, ledger_gap: gap.gap,
+            stockout_events: null, days_out: null,
+            days_tracked: Math.round((trackedMs / DAY) * 10) / 10,
+            availability_pct: null, days_below_reorder: null,
+            currently_out: outNow, last_stockout_at: null,
+          };
+        }
 
         let running = Number(r.opening_qty || 0);
         let out = running <= 0;
@@ -28331,6 +28429,7 @@ ${data.tenant.name}`;
         return {
           ingredient_id: r.id, ingredient_name: r.name, unit: r.unit,
           current_qty: Number(r.current_qty || 0), reorder_point: reorder,
+          ledger_mismatch: false,
           stockout_events: events,
           days_out: daysOut,
           days_tracked: daysTracked,
@@ -28344,7 +28443,7 @@ ${data.tenant.name}`;
       res.json({
         module: dmf.module,
         period: { from, to, days: spanDays },
-        method: 'Balances are reconstructed by summing the movement ledger — the same source the month-end close uses — not read from the denormalised balance_after column. An item already out when the window opens contributes days but not a new event. days_below_reorder is measured against today\'s reorder point, since the historical threshold is not stored. Time is counted up to the moment of the report, so today contributes only the hours that have passed.',
+        method: 'Balances are reconstructed by summing the movement ledger — the same source the month-end close uses — not read from the denormalised balance_after column. An item already out when the window opens contributes days but not a new event. days_below_reorder is measured against today\'s reorder point, since the historical threshold is not stored. Time is counted up to the moment of the report, so today contributes only the hours that have passed. An item whose stock figure and ledger disagree is flagged (ledger_mismatch), carries no ledger figures and is left out of the ledger-based totals, because its history cannot say when it was out.',
         totals: {
           items_tracked: items.length,
           items_that_ran_out: everOut,
@@ -28354,10 +28453,14 @@ ${data.tenant.name}`;
           availability_pct: totalDaysTracked > 0
             ? Math.round((1 - Math.min(1, totalDaysOut / totalDaysTracked)) * 1000) / 10
             : null,
+          ledger_mismatches: mismatched,
         },
-        // Worst first: most days out, then most events.
+        // Flagged items first — nothing else on the list means much until they
+        // are put right — then most days out, then most events.
         items: items.sort((a: any, b: any) =>
-          (b.days_out - a.days_out) || (b.stockout_events - a.stockout_events)),
+          (Number(!!b.ledger_mismatch) - Number(!!a.ledger_mismatch))
+          || (Number(b.days_out || 0) - Number(a.days_out || 0))
+          || (Number(b.stockout_events || 0) - Number(a.stockout_events || 0))),
       });
     } catch (err: any) {
       console.error('/inventory/stockouts error:', err);
@@ -28399,6 +28502,17 @@ ${data.tenant.name}`;
       ) + 1);
 
       const period = await _computeInventoryPeriod(req.params.id, mod, from, to);
+      // Items whose stock figure and ledger disagree (see _inventoryLedgerGaps)
+      // are banded LEDGER_MISMATCH with no cover or turns. Their close figures
+      // stay in the totals, which reconcile to the month-end close by
+      // construction. Inactive items are checked too, since the close carries them.
+      const gapById = new Map<string, any>();
+      try {
+        const gdb = await getTenantDb(req.params.id);
+        for (const g of await _inventoryLedgerGaps(gdb, { sql: ` AND COALESCE(i.module, 'RESTAURANT') = ?`, params: [mod] }, true)) {
+          gapById.set(String(g.ingredient_id), g);
+        }
+      } catch (e: any) { console.error('/inventory/turns ledger check failed:', e?.message || e); }
       const t = period?.totals || {};
       const r2 = (n: any) => Math.round(Number(n || 0) * 100) / 100;
       const opening = Number(t.opening_value || 0);
@@ -28430,16 +28544,20 @@ ${data.tenant.name}`;
         // next to real ones, and one of those on a dashboard costs the whole
         // screen its credibility. (Seen on the live Spa panel: -2 pcs of a
         // retail candle rendering as "-90 days cover".)
-        const cover = avgDaily > 0 && onHand > 0 ? Math.round((onHand / avgDaily) * 10) / 10 : null;
+        const gap = gapById.get(String(l.ingredient_id));
+        const cover = !gap && avgDaily > 0 && onHand > 0 ? Math.round((onHand / avgDaily) * 10) / 10 : null;
         const itemAvg = (Number(l.opening_value || 0) + Number(l.closing_value || 0)) / 2;
-        const itemTurns = safeTurns(Number(l.actual_consumption_value || 0), itemAvg);
+        const itemTurns = gap ? null : safeTurns(Number(l.actual_consumption_value || 0), itemAvg);
         // Bands describe the COVER, which is what a buyer acts on. Deliberately
         // NOT called "dead stock" — that screen means "no movement of any kind
         // in N days", a different question from "held but not being consumed".
         // NEGATIVE is its own band, not lumped in with "none left": a balance
         // below zero means more was consumed than was ever received, so it is a
         // counting error to go and fix, not a shelf to restock.
-        const band = onHand < 0 ? 'NEGATIVE'
+        // LEDGER_MISMATCH comes before all of them: when the stock figure and the
+        // ledger disagree the balance is in doubt, and so is any cover from it.
+        const band = gap ? 'LEDGER_MISMATCH'
+          : onHand < 0 ? 'NEGATIVE'
           : onHand === 0 ? 'NO_STOCK'
           : cover == null ? 'NO_USAGE'
           : cover > 90 ? 'OVERSTOCKED'
@@ -28454,6 +28572,8 @@ ${data.tenant.name}`;
           days_of_cover: cover,
           turns_annualised: itemTurns == null ? null : Math.round(itemTurns * (365 / spanDays) * 100) / 100,
           band,
+          ledger_mismatch: !!gap,
+          ...(gap ? { stock_qty: gap.stock_qty, ledger_gap: gap.gap } : {}),
         };
       });
 
@@ -28464,8 +28584,9 @@ ${data.tenant.name}`;
       // business result — the reader would conclude the kitchen sells nothing.
       // So an empty numerator is reported as UNMEASURABLE, with the reason.
       const withUsage = items.filter((i: any) => Number(i.consumed_qty) > 0).length;
+      const ledgerMismatches = items.filter((i: any) => i.ledger_mismatch).length;
       const dq = cogs > 0
-        ? { ok: true, reason: null, items_with_consumption: withUsage, items_total: items.length }
+        ? { ok: true, reason: null, items_with_consumption: withUsage, items_total: items.length, ledger_mismatches: ledgerMismatches }
         : {
             ok: false,
             reason: avgInventory <= 0
@@ -28473,6 +28594,7 @@ ${data.tenant.name}`;
               : 'No consumption was recorded in this period, so turnover cannot be measured — this is an absence of data, not a turnover of zero. Usual causes: dishes sold have no recipe attached, or the period predates 13 Sep 2026, when orders were being placed without a menu item id and no recipe could fire.',
             items_with_consumption: withUsage,
             items_total: items.length,
+            ledger_mismatches: ledgerMismatches,
           };
 
       res.json({
@@ -37694,15 +37816,24 @@ ${data.tenant.name}`;
       const unitPrice = Number(b.unit_price ?? item.default_unit_price ?? 0);
       const gstPct = Number(item.gst_percent ?? 18);
       const lineAmount = round2(unitPrice * qty);
-      // deduct stock
-      const upd: any[] = await db.query(
-        "UPDATE ingredients SET current_stock_qty = current_stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING current_stock_qty",
-        [qty, b.ingredient_id]);
-      const bal = Number(upd[0]?.current_stock_qty ?? 0);
-      await db.run(
-        `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
-         VALUES (?, ?, ?, ?, 'SPA_RETAIL_SALE', 'spa_retail', NULL, ?, ?, ?, 'Spa retail sale')`,
-        [mkSpaId('MOV'), b.ingredient_id, -qty, item.unit || 'unit', bal, item.default_unit_price || null, req.user?.id || null]).catch(() => {});
+      // Deduct the stock and write its ledger line in ONE statement. The insert
+      // used to follow with its failure swallowed, so a sale could take stock off
+      // the shelf with no line behind it. Nothing is sold, and no invoice raised,
+      // unless both are written.
+      const moved: any[] = await db.query(
+        `WITH u AS (
+           UPDATE ingredients
+              SET current_stock_qty = COALESCE(current_stock_qty, 0) - ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+           RETURNING id, current_stock_qty, unit
+         )
+         INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
+         SELECT ?::text, u.id, ?::double precision, COALESCE(u.unit, 'unit'), 'SPA_RETAIL_SALE', 'spa_retail', NULL, u.current_stock_qty, ?::double precision, ?::text, 'Spa retail sale'
+           FROM u
+         RETURNING balance_after`,
+        [qty, b.ingredient_id, mkSpaId('MOV'), -qty, item.default_unit_price || null, req.user?.id || null]);
+      if (!moved[0]) return res.status(404).json({ error: "Item not found" });
+      const bal = Number(moved[0].balance_after);
       // A product sold leaves its batch as well as the stock figure.
       await _drawFromBatches(db, b.ingredient_id, qty);
       const sale = await spaQuickSaleFolio(db, 'SPA_PRODUCT', `${item.name} × ${qty}`, lineAmount, gstPct, b.payment_method || 'CASH', req.user?.email || req.user?.id || null, item.id, req.params.id);
@@ -63872,8 +64003,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hrms-r1d-excel',
+    commit_marker: 'stock-ledger-one-statement',
     code_features: [
+      'stock-ledger-one-statement — ingredients.current_stock_qty and SUM(stock_movements.qty_delta) disagreed on 19 items across 5 tenants (15 Sep 2026). (1) Order consumption, order reversal, the spa retail sale and the opening stock on POST /inventory/ingredients and POST /hotel-inventory write the stock figure and its ledger line in ONE statement (a data-modifying WITH), so a failed insert can no longer leave stock moved with no line; a consumption or reversal that fails is logged and does not block the order; any non-zero opening is logged, negative included. (2) seedSpaDefaults seeds Spa Massage Oil and Aroma Candle at 0 stock. (3) The hotel item fold writes an opening line for each item it moves, in the same statement, and writes its marker only when the fold succeeds. (4) PATCH /hotel-inventory/:itemId no longer sets current_stock_qty: a changed figure is refused 400 STOCK_NEEDS_A_MOVEMENT, the current figure echoed back unchanged is accepted. (5) POST /inventory/admin/purge-corrupt-movements removed. (6) GET /inventory/ledger-integrity (module, include_shared, include_inactive) lists items whose stock figure and ledger disagree with stock_qty, ledger_qty and gap; /inventory/stockouts flags them (ledger_mismatch, ledger_qty, ledger_gap, ledger figures null, left out of the ledger totals, totals.ledger_mismatches, listed first) and /inventory/turns bands them LEDGER_MISMATCH with no cover or turns (data_quality.ledger_mismatches); both Analytics panels show them. Existing mismatched data is NOT corrected here (owner decision pending).',
       'hrms-r1d-excel — exceljs 4.4.0 dependency; hrExcel.ts buildWorkbook (bold frozen header, filter, real dates) and readSheet (header names in any order, dates as YYYY-MM-DD, SheetReadError for a non-xlsx file or over maxRows); GET /hr/employees.xlsx (CSV number rule: full PAN, Aadhaar and bank account only with HR_SENSITIVE Edit, logged EXPORTED); GET /hr/employees/import-template.xlsx (Employees sheet + How to fill sheet with this property roles); POST /hr/employees/import/preview (xlsx upload, validateImportRow per row: NEW, DUPLICATE by name with phone or email, INVALID with every problem; nothing saved) and /import/commit (every row checked again, OFFLINE employees with code, designation, department linked to hr_masters by name, employment type, joining date, date of birth, gender; audit CREATED from an Excel import); import needs HR_PAYROLL Edit and STAFF Full like Bulk Add; UI Export Excel and Import from Excel on the Employees directory; TC-HR-XLSX-ROUNDTRIP and static TC-HR-TAB-REGISTRIES.',
       'hrms-r1c-private-documents — hr_documents table (type, title, hr1: number, issuing country, issue and expiry dates, verified_by/at, storage + file_key, last_alert_stage) created in createHrTables; files AES-256-GCM encrypted (HRF1) by persistPrivateHrFile to R2 hr-private/ or disk uploads/hr-private (HR_PRIVATE_DIR), never a public URL; GET /hr/documents/:docId/file needs HR_SENSITIVE View and logs DOCUMENT_OPENED; a document number needs HR_SENSITIVE Edit; POST /hr/employees/:staffId/documents fixed at the same path (was a memory upload with an undefined file name overwriting notes; no tenant had entries) with 415, 400 and 404 guards; GET list, PATCH (a new expiry date clears last_alert_stage; verified), DELETE removes the file; GET /hr/documents/expiring; daily 09:15 IST _hrDocumentExpirySweep (D30, D7, EXPIRED once per stage; staff not RESIGNED or TERMINATED) fires HR_DOCUMENT_EXPIRING; POST /hr/documents/expiry-alerts/run (owner); HR_DOCUMENT history type; UI Documents section on the employee record and Documents due for renewal in Organisation.',
       'hrms-r1b-sensitive-data — New permission HR_SENSITIVE (not granted to existing roles): View reveals full PAN, Aadhaar and bank account (?reveal=1) and each reveal is logged, Edit changes them and downloads the bank advice and full employee CSV, Full reads /hr/sensitive/access-log and /hr/sensitive/status. The three fields are stored AES-256-GCM encrypted in place (hr1: values, key HR_DATA_KEY or derived from JWT_SECRET); plaintext values still read; every reader decrypts (HR list/detail/PUT/CSV, run payslips, payroll compute snapshot now masked, payslip PDF, bank advice, 24Q, Form 16, self profile). Owner-only POST /hr/sensitive/encrypt-existing encrypts values saved before. hr_sensitive_access_log table.',

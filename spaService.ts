@@ -1209,13 +1209,20 @@ export async function seedSpaDefaults(tenantDb: DbInterface): Promise<number> {
   // Supply-chain demo items as ingredients (item_type discriminator) — these
   // flow through the validated PO→GRN→supplier-invoice→payment chain. Only
   // seeded if not already present (name match) to stay idempotent.
+  //
+  // Seeded at ZERO stock. They were seeded with 10 l and 25 pcs that nobody
+  // bought, written straight into current_stock_qty with no line in the stock
+  // ledger — invented stock on a real property, and a stock figure the ledger
+  // could never agree with (the candle read 23 on the shelf and -2 in the
+  // month-end close on three tenants, found 15 Sep 2026). Stock arrives the
+  // way all stock does: a goods receipt or a recorded adjustment.
   const oil: any = await tenantDb.get("SELECT id FROM ingredients WHERE name = 'Spa Massage Oil' LIMIT 1");
   let oilId = oil?.id;
   if (!oilId) {
     oilId = genId("ING");
     await tenantDb.run(
       `INSERT INTO ingredients (id, name, item_type, category, unit, current_stock_qty, reorder_point, par_level, default_unit_price, gst_percent, is_active)
-       VALUES (?, 'Spa Massage Oil', 'SPA_PRODUCT', 'Spa Supplies', 'l', 10, 2, 20, 800, 18, 1)`,
+       VALUES (?, 'Spa Massage Oil', 'SPA_PRODUCT', 'Spa Supplies', 'l', 0, 2, 20, 800, 18, 1)`,
       [oilId]
     );
   }
@@ -1223,7 +1230,7 @@ export async function seedSpaDefaults(tenantDb: DbInterface): Promise<number> {
   if (!candle?.id) {
     await tenantDb.run(
       `INSERT INTO ingredients (id, name, item_type, category, unit, current_stock_qty, reorder_point, par_level, default_unit_price, gst_percent, is_active)
-       VALUES (?, 'Aroma Candle (Retail)', 'SPA_RETAIL', 'Spa Retail', 'pcs', 25, 5, 50, 450, 18, 1)`,
+       VALUES (?, 'Aroma Candle (Retail)', 'SPA_RETAIL', 'Spa Retail', 'pcs', 0, 5, 50, 450, 18, 1)`,
       [genId("ING")]
     );
   }

@@ -2373,16 +2373,44 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   if (!_hotelFolded) {
     // item_type PACKAGED: a hotel consumable is a bought-in finished good
     // (soap, linen, a water bottle), never a recipe component.
-    await db.exec(`INSERT INTO ingredients
-        (id, name, item_type, module, category, unit, current_stock_qty,
-         reorder_point, par_level, default_unit_price, sku, notes, is_active)
-      SELECT h.id, h.name, 'PACKAGED', 'HOTEL', h.category, COALESCE(h.unit, 'unit'),
-             COALESCE(h.current_stock_qty, 0), COALESCE(h.reorder_point, 0),
-             COALESCE(h.par_level, 0), h.default_unit_price, h.sku, h.notes,
-             COALESCE(h.is_active, 1)
-        FROM hotel_inventory_items h
-       WHERE NOT EXISTS (SELECT 1 FROM ingredients i WHERE i.id = h.id)`).catch(() => {});
-    await db.exec("INSERT INTO hotel_items_fold_backfill (id) VALUES ('once')").catch(() => {});
+    //
+    // Each item moves WITH an opening line in the stock ledger, in the same
+    // statement. The fold used to copy current_stock_qty and write no line, so
+    // a folded item's ledger summed to zero while its stock figure did not, and
+    // every report that sums the ledger (stockouts, stock turns, the month-end
+    // close) disagreed with the shelf — 3 items on 2 tenants, found 15 Sep 2026.
+    // The old table's movement log is not replayed: it stores absolute
+    // quantities plus a direction, and where checked it did not add up to the
+    // stock figure either, so the carried-over figure is the opening balance.
+    //
+    // No semicolons and no double-dash comments inside the SQL: exec() strips
+    // those comments and splits statements on semicolons.
+    let _hotelFoldOk = true;
+    await db.exec(`WITH moved AS (
+        INSERT INTO ingredients
+          (id, name, item_type, module, category, unit, current_stock_qty,
+           reorder_point, par_level, default_unit_price, sku, notes, is_active)
+        SELECT h.id, h.name, 'PACKAGED', 'HOTEL', h.category, COALESCE(h.unit, 'unit'),
+               COALESCE(h.current_stock_qty, 0), COALESCE(h.reorder_point, 0),
+               COALESCE(h.par_level, 0), h.default_unit_price, h.sku, h.notes,
+               COALESCE(h.is_active, 1)
+          FROM hotel_inventory_items h
+         WHERE NOT EXISTS (SELECT 1 FROM ingredients i WHERE i.id = h.id)
+        RETURNING id, unit, current_stock_qty
+      )
+      INSERT INTO stock_movements
+        (id, ingredient_id, qty_delta, unit, movement_type, reference_type, balance_after, notes)
+      SELECT 'MOV-FOLD-' || moved.id, moved.id, moved.current_stock_qty, moved.unit,
+             'MANUAL', 'hotel_fold', moved.current_stock_qty,
+             'Opening stock carried over from the hotel inventory table'
+        FROM moved
+       WHERE moved.current_stock_qty <> 0`).catch((e: any) => {
+      _hotelFoldOk = false;
+      console.error('[migration] hotel item fold failed, will retry on next start:', e?.message || e);
+    });
+    // The marker is written only when the fold went through. It used to be
+    // written regardless, so a fold that failed was never tried again.
+    if (_hotelFoldOk) await db.exec("INSERT INTO hotel_items_fold_backfill (id) VALUES ('once')").catch(() => {});
   }
 
   // ONE-SHOT backfill of the new column from the only module signal the old
