@@ -18991,6 +18991,31 @@ async function startServer() {
     }
   });
 
+  // Employee import template. Must stay ABOVE the /hr/employees/:staffId
+  // detail route: Express matches in registration order, and below it every
+  // download was answered as an employee called import-template.xlsx
+  // (404 Employee not found). Helpers are in the Employees in Excel block.
+  app.get("/api/restaurant/:id/hr/employees/import-template.xlsx", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const roles = await _hrImportRoles(db, req.params.id);
+      const buf = await buildWorkbook([
+        { name: 'Employees', columns: EMPLOYEE_IMPORT_COLUMNS.map((c) => (EMPLOYEE_IMPORT_REQUIRED.includes(c.key) ? { ...c, header: `${c.header} *` } : c)), rows: [] },
+        {
+          name: 'How to fill',
+          columns: [{ key: 'column', header: 'Column', width: 18 }, { key: 'enter', header: 'What to enter', width: 80 }, { key: 'example', header: 'Example', width: 24 }],
+          rows: importGuideRows(roles.map((r) => r.name)),
+        },
+      ]);
+      res.setHeader('Content-Type', XLSX_MIME);
+      res.setHeader('Content-Disposition', 'attachment; filename="employee-import-template.xlsx"');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.send(buf);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Could not build the template' });
+    }
+  });
+
   // Detail — staff row + salary structure history + recent payslips
   // + employment-doc list. Single round-trip for the detail modal.
   app.get("/api/restaurant/:id/hr/employees/:staffId", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
@@ -19334,26 +19359,8 @@ async function startServer() {
     }
   });
 
-  app.get("/api/restaurant/:id/hr/employees/import-template.xlsx", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
-    try {
-      const db = await getTenantDb(req.params.id);
-      const roles = await _hrImportRoles(db, req.params.id);
-      const buf = await buildWorkbook([
-        { name: 'Employees', columns: EMPLOYEE_IMPORT_COLUMNS.map((c) => (EMPLOYEE_IMPORT_REQUIRED.includes(c.key) ? { ...c, header: `${c.header} *` } : c)), rows: [] },
-        {
-          name: 'How to fill',
-          columns: [{ key: 'column', header: 'Column', width: 18 }, { key: 'enter', header: 'What to enter', width: 80 }, { key: 'example', header: 'Example', width: 24 }],
-          rows: importGuideRows(roles.map((r) => r.name)),
-        },
-      ]);
-      res.setHeader('Content-Type', XLSX_MIME);
-      res.setHeader('Content-Disposition', 'attachment; filename="employee-import-template.xlsx"');
-      res.setHeader('Cache-Control', 'private, no-store');
-      res.send(buf);
-    } catch (err: any) {
-      res.status(500).json({ error: err?.message || 'Could not build the template' });
-    }
-  });
+  // GET /hr/employees/import-template.xlsx is registered above the
+  // /hr/employees/:staffId detail route; it cannot live here.
 
   app.post("/api/restaurant/:id/hr/employees/import/preview", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), _hrSheetUploadOne, async (req: AuthRequest, res: Response) => {
     try {
@@ -65006,8 +65013,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'settings-no-upi-sequential-only',
+    commit_marker: 'hr-import-template-route-order',
     code_features: [
+      'hr-import-template-route-order - GET /hr/employees/import-template.xlsx had never downloaded: it was registered after GET /hr/employees/:staffId, Express matches in registration order, and every call was answered by the employee detail route as an employee called import-template.xlsx (404 Employee not found). Moved above that route; a scan of every app.get/post/put/patch/delete route for a literal path behind an earlier :param route found no other. Upload field, content type, preview and commit were already correct: TC-HR-XLSX-ROUNDTRIP failed at preview (400 SHEET_COLUMNS_MISSING) and commit (400 no rows) only because it builds its sheet from the template header.',
       'settings-no-upi-sequential-only  Settings page: the UPI Payment Settings section (UPI ID + static QR upload) is removed; online payments are configured under Administration > Payment Gateways. Stored upi_id / upi_qr_image are untouched and still echoed on save, so the guest table QR and self-pay screens keep working for tenants that already set them. Invoice numbering: the RANDOM option is removed from Settings and refused by PATCH /api/restaurant/:id (any value is stored as SEQUENTIAL), the allocator no longer honours a stored RANDOM, and start-up moves every non-SEQUENTIAL tenant to SEQUENTIAL on every boot (the old one-time platform_flags guard let a tenant re-select RANDOM)  a tax invoice needs a consecutive serial (Rule 46(b)); issued invoices keep their numbers. Payment Gateways: the default gateway selector is always shown and lists every gateway (ones not switched on are disabled). Test TC-SET-INVNUM-SEQUENTIAL-ONLY.',
       'payments-phonepe-paytm  FEATURE: PhonePe and Paytm payment links beside Razorpay, through the same contract, recording, sweep and screens. phonepeGateway.ts: OAuth client-credentials token (form-encoded, cached per credential set until 2 min before expires_at, refetched once on a 401), POST /paylinks/v1/pay (merchantOrderId = our link id, PAYLINK, phone mandatory, PhonePe SMS/email off, expireAt ms, notes as udf), GET /{merchantOrderId}/status?details=true (COMPLETED payments captured; no fee reported), POST /{merchantOrderId}/cancel, webhook Authorization = SHA256(username:password) with the pair set in the PhonePe dashboard, sandbox/production hosts from an Environment field. paytmGateway.ts: PaytmChecksum re-implemented from the official library (AES-128-CBC, IV @@@@&&&&####$$, sha256(str|salt)+salt) and unit-checked against a verbatim copy both ways; signed {body, head} envelope over the exact body string; /link/create (FIXED, rupees, description cut to 30, expiry dd/mm/yyyy hh:mm:ss IST, singleTransactionOnly, statusCallbackUrl = the property webhook URL per link), /link/fetch + /link/fetchTransaction for status and payments, /link/expire as cancel; form-encoded webhook verified by CHECKSUMHASH over all other fields and the MID; resultInfo codes mapped (5028 = wrong key). Contract changes: fetchLink/cancelLink take a LinkRef {gatewayLinkId, referenceId}; CreateLinkInput.webhookUrl; CredentialField.options (select); gateway setupSteps and requiresCustomerPhone shown on the settings page. DEFAULT GATEWAY (owner request): payment_gateway_configs.is_default; one gateway on = it is used, more than one = the owner picks in a dropdown on Payment Gateways (PUT /payments/default-gateway, audited); the first gateway switched on becomes default; staff never choose (GET /payments/active-gateway tells the folio dialog which one and whether a phone is required). PhonePe/Paytm report no per-payment fee, so their fee is not booked at capture and stays in 1025 clearing until payout matching. Tests: tsx phonepe_gateway_check, paytm_gateway_check, razorpay_gateway_check.',
       'webhook-raw-body-signatures — BUGFIX: the global JSON parser runs before every route and a route-level parser after it never runs, so the WhatsApp, OTA channel and delivery aggregator webhooks checked their HMAC over an empty body and rejected every genuine call (WhatsApp dropped delivery receipts, replies and STOP opt-outs silently whenever META_WA_APP_SECRET was set). webhookRawBody.ts now lists the signed webhook paths (payment gateways, /api/webhooks/whatsapp, /api/public/restaurant/:id/channel-webhook/:channel, /api/integrations/:channel/webhook/:restaurantId) and the global parser keeps req.rawBody (a Buffer) for those only; the dead route-level parsers are gone, and the OTA XML text parser keeps its bytes the same way. WhatsApp now answers 401 on a bad signature instead of 200-then-drop. OTA webhook decrypts api_secret and reads webhook_signing_secret before validating (it compared against the encrypted value, so no signature could ever match). Delivery webhook: replay lookup selects processed_at (a repeat always answered 202), and computeWebhookIdempotencyKey plus five external_id_hash sites used require(crypto), which throws under tsx ESM, so the webhook, settlement upload, channel P&L and mock seed crashed. Suite: TC-WEBHOOK-RAWBODY-SCOPE, -RAWBODY-KEPT, -WA/-OTA/-DELIVERY-SIG-LOCAL (in process, real verify callback and verifiers), -OTA-SIG-LIVE, -WA-BADSIG-LIVE, -WA-SIG-LIVE (needs META_WA_APP_SECRET in .env.local), -DELIVERY-SIG-LIVE and -DELIVERY-REPLAY-LIVE (need ATITHI_CREDENTIAL_KEY on the server).',
