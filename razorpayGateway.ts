@@ -24,7 +24,7 @@ import crypto from 'crypto';
 import {
   GatewayError, headerValue,
   type CreateLinkInput, type CredentialField, type FetchLike, type GatewayCredentials,
-  type GatewayMode, type GatewayPayment, type LinkSnapshot, type LinkStatus,
+  type GatewayMode, type GatewayPayment, type LinkRef, type LinkSnapshot, type LinkStatus,
   type PaymentGateway, type WebhookEvent,
 } from './paymentGateway.ts';
 
@@ -48,6 +48,13 @@ export class RazorpayGateway implements PaymentGateway {
     { key: 'key_secret', label: 'Key Secret', secret: true, required: true, help: 'Shown once when the key is generated.' },
     { key: 'webhook_secret', label: 'Webhook Secret', secret: true, required: true, help: 'The secret you type when adding the webhook URL below in Razorpay → Webhooks.' },
   ];
+  readonly setupSteps = [
+    'In the Razorpay Dashboard open Account & Settings → Webhooks → Add New Webhook (in Test Mode for test keys, Live Mode for live keys).',
+    'Paste this URL: {webhookUrl}',
+    'Type a secret of your choosing, and enter the same value as Webhook Secret here.',
+    'Tick payment_link.paid, payment_link.partially_paid, payment_link.expired and payment_link.cancelled, then save.',
+  ];
+  readonly requiresCustomerPhone = false;
 
   constructor(private readonly fetchImpl: FetchLike = (globalThis.fetch as unknown as FetchLike)) {}
 
@@ -99,9 +106,9 @@ export class RazorpayGateway implements PaymentGateway {
     return this.toSnapshot(link, []);
   }
 
-  async fetchLink(creds: GatewayCredentials, gatewayLinkId: string): Promise<LinkSnapshot> {
+  async fetchLink(creds: GatewayCredentials, ref: LinkRef): Promise<LinkSnapshot> {
     this.requireCreds(creds, ['key_id', 'key_secret']);
-    const link = await this.request(creds, 'GET', `/payment_links/${encodeURIComponent(gatewayLinkId)}`);
+    const link = await this.request(creds, 'GET', `/payment_links/${encodeURIComponent(ref.gatewayLinkId)}`);
     // The link's payments[] has no fee or payer detail. Read each captured payment
     // in full: the fee is what makes the MDR entry in the books right.
     const payments: GatewayPayment[] = [];
@@ -121,9 +128,9 @@ export class RazorpayGateway implements PaymentGateway {
     return this.toSnapshot(link, payments);
   }
 
-  async cancelLink(creds: GatewayCredentials, gatewayLinkId: string): Promise<LinkSnapshot> {
+  async cancelLink(creds: GatewayCredentials, ref: LinkRef): Promise<LinkSnapshot> {
     this.requireCreds(creds, ['key_id', 'key_secret']);
-    const link = await this.request(creds, 'POST', `/payment_links/${encodeURIComponent(gatewayLinkId)}/cancel`);
+    const link = await this.request(creds, 'POST', `/payment_links/${encodeURIComponent(ref.gatewayLinkId)}/cancel`);
     return this.toSnapshot(link, []);
   }
 

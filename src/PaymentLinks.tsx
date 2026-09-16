@@ -71,6 +71,8 @@ function linkMessage(l: Json, property?: string) {
   return `Dear ${l.customer_name || 'Guest'},\n\nPlease pay ${money(l.amount)}${property ? ` to ${property}` : ''} for ${l.description || 'your bill'} using this secure link:\n${l.url}\n\nYou can pay by UPI, card or net banking.`;
 }
 
+const BRAND: Record<string, string> = { RAZORPAY: '#0c2451', PHONEPE: '#5f259f', PAYTM: '#00baf2' };
+
 const input = 'w-full bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm text-[#1a1208] focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30';
 const label = 'block text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52] mb-1';
 const btn = 'inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50 disabled:cursor-not-allowed';
@@ -125,6 +127,15 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
       setBusy('');
       load();
     }
+  };
+
+  const chooseDefault = async (gateway: string) => {
+    setBusy('default');
+    try {
+      await api('/default-gateway', { method: 'PUT', body: JSON.stringify({ gateway }) });
+      toast.success(`Payment links now go through ${(data?.gateways || []).find((g: Json) => g.gateway === gateway)?.label || gateway}.`);
+    } catch (e: any) { toast.error(e.message); }
+    finally { setBusy(''); load(); }
   };
 
   const test = async (g: Json) => {
@@ -209,6 +220,25 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
         </button>
       )}
 
+      {(() => {
+        const on = (data.gateways || []).filter((g: Json) => g.is_enabled);
+        if (on.length === 0) return null;
+        if (on.length === 1) {
+          return <div className="text-sm text-[#3d3128] bg-white border border-[#e8dccf] rounded-2xl px-4 py-3">Payment links go through <strong>{on[0].label}</strong>{on[0].mode === 'TEST' ? ' (test mode)' : ''}.</div>;
+        }
+        return (
+          <div className="bg-white border border-[#e8dccf] rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap">
+            <label className="text-sm font-semibold text-[#1a1208]" htmlFor="pg-default">Payment links go through</label>
+            <select id="pg-default" disabled={!canEdit || busy === 'default'} className={`${input} w-auto`} value={data.default_gateway || ''} onChange={e => e.target.value && chooseDefault(e.target.value)}>
+              {!data.default_gateway && <option value="">Choose a gateway…</option>}
+              {on.map((g: Json) => <option key={g.gateway} value={g.gateway}>{g.label}{g.mode === 'TEST' ? ' (test mode)' : ''}</option>)}
+            </select>
+            {!data.default_gateway && <span className="text-xs text-red-700">Staff cannot send payment links until you choose one.</span>}
+            <span className="text-[11px] text-[#9c8e85] w-full">Staff do not choose a gateway; every new link uses this one. Links already sent keep their gateway until paid or cancelled.</span>
+          </div>
+        );
+      })()}
+
       {(data.gateways || []).map((g: Json) => {
         const draft = drafts[g.gateway] || {};
         const dirty = Object.values(draft).some(v => String(v).trim() !== '');
@@ -216,9 +246,9 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
           <div key={g.gateway} className="bg-white border border-[#e8dccf] rounded-3xl p-6 space-y-5">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-2xl bg-[#0c2451] text-white flex items-center justify-center"><CreditCard size={20} /></div>
+                <div className="w-11 h-11 rounded-2xl text-white flex items-center justify-center" style={{ background: BRAND[g.gateway] || '#1a1208' }}><CreditCard size={20} /></div>
                 <div>
-                  <div className="text-lg font-bold text-[#1a1208]">{g.label}</div>
+                  <div className="text-lg font-bold text-[#1a1208]">{g.label}{g.is_enabled && g.gateway === data.default_gateway && (data.gateways || []).filter((x: Json) => x.is_enabled).length > 1 && <span className="ml-2 align-middle text-[10px] font-bold uppercase tracking-wide bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">Used for links</span>}</div>
                   <div className="text-xs text-[#6b5d52]">
                     {g.is_enabled
                       ? <span className="text-emerald-700 font-semibold">On{g.mode ? ` · ${g.mode === 'LIVE' ? 'live payments' : 'test mode, no real money'}` : ''}</span>
@@ -244,7 +274,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
             )}
             {g.mode === 'TEST' && g.is_enabled && (
               <div className="text-xs bg-sky-50 border border-sky-200 text-sky-900 rounded-xl p-3">
-                Test keys: links work end to end but no real money moves. Replace them with live keys before sending links to guests.
+                Test credentials: links work end to end but no real money moves. Switch to live credentials before sending links to guests.
               </div>
             )}
 
@@ -252,6 +282,12 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
               {g.fields.map((f: Json) => (
                 <div key={f.key}>
                   <label className={label}>{f.label}{f.required ? ' *' : ''}</label>
+                  {f.options ? (
+                    <select disabled={!canEdit} className={input} value={draft[f.key] ?? (f.value || '')} onChange={e => setField(g.gateway, f.key, e.target.value)}>
+                      <option value="">Choose…</option>
+                      {f.options.map((o: Json) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  ) : (
                   <input
                     type={f.secret ? 'password' : 'text'}
                     autoComplete="off"
@@ -261,6 +297,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
                     placeholder={f.secret ? (f.saved ? (f.unreadable ? 'Saved but unreadable — enter again' : 'Saved — leave blank to keep') : 'Not saved') : ''}
                     onChange={e => setField(g.gateway, f.key, e.target.value)}
                   />
+                  )}
                   {f.help && <p className="text-[10px] text-[#9c8e85] mt-1 leading-snug">{f.help}</p>}
                 </div>
               ))}
@@ -272,13 +309,12 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
                 <code className="flex-1 min-w-0 truncate text-xs bg-white border border-[#e8dccf] rounded-lg px-2 py-1.5">{g.webhook_url}</code>
                 <button onClick={() => copyText(g.webhook_url, toast, 'Webhook URL')} className={`${btn} border border-[#e8dccf] bg-white`}><Copy size={13} /> Copy</button>
               </div>
-              {g.gateway === 'RAZORPAY' && (
-                <ol className="text-xs text-[#6b5d52] list-decimal pl-4 space-y-0.5">
-                  <li>In the Razorpay Dashboard open <strong>Account &amp; Settings → Webhooks → Add New Webhook</strong>.</li>
-                  <li>Paste the URL above. Type a secret of your choosing and enter the same value as <strong>Webhook Secret</strong> here.</li>
-                  <li>Tick the events <strong>payment_link.paid</strong>, <strong>payment_link.partially_paid</strong>, <strong>payment_link.expired</strong> and <strong>payment_link.cancelled</strong>, then save.</li>
+              {Array.isArray(g.setup_steps) && g.setup_steps.length > 0 && (
+                <ol className="text-xs text-[#6b5d52] list-decimal pl-4 space-y-0.5 break-words">
+                  {g.setup_steps.map((step: string, i: number) => <li key={i}>{step}</li>)}
                 </ol>
               )}
+              {g.requires_customer_phone && <p className="text-[10px] text-[#9c8e85]">{g.label} needs the guest's phone number on every link.</p>}
               <p className="text-[10px] text-[#9c8e85]">If a webhook is missed, open links are still checked with {g.label} every few minutes.</p>
             </div>
 
@@ -291,15 +327,6 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
           </div>
         );
       })}
-
-      <div className="grid md:grid-cols-2 gap-4">
-        {['PhonePe', 'Paytm'].map(n => (
-          <div key={n} className="bg-white/60 border border-dashed border-[#e8dccf] rounded-3xl p-5 text-sm text-[#6b5d52]">
-            <div className="font-bold text-[#3d3128]">{n}</div>
-            Coming next. It will plug into the same links, webhook and automatic recording.
-          </div>
-        ))}
-      </div>
 
       <div className="bg-white border border-[#e8dccf] rounded-3xl p-6 space-y-4">
         <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -407,6 +434,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
   const [links, setLinks] = useState<Json[]>([]);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
+  const [active, setActive] = useState<Json | null>(null);
 
   const loadLinks = useCallback(async () => {
     try {
@@ -427,8 +455,9 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
         }
       } catch { /* the amount field still works */ }
     })();
+    api('/active-gateway').then(setActive).catch(() => setActive({ gateway: null, reason: 'Could not check the payment gateway.' }));
     loadLinks();
-  }, [restaurantId, token, folio.id, loadLinks]);
+  }, [restaurantId, token, folio.id, loadLinks, api]);
 
   const open = useMemo(() => links.find(l => ['CREATED', 'PARTIALLY_PAID'].includes(l.status)) || null, [links]);
 
@@ -512,8 +541,12 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
         <div className="p-6 space-y-5">
           {notice && <div className={`border rounded-xl p-3 text-xs ${toneCls[notice.tone]}`}>{notice.text}</div>}
 
-          {canCollect && (
+          {canCollect && active && !active.gateway && (
+            <div className="border rounded-xl p-3 text-xs bg-amber-50 border-amber-200 text-amber-900">{active.reason || 'No payment gateway is switched on.'}</div>
+          )}
+          {canCollect && active?.gateway && (
             <div className="space-y-3">
+              <div className="text-[11px] text-[#6b5d52]">Link via <strong className="text-[#1a1208]">{active.label}</strong>{active.mode === 'TEST' ? <span className="ml-1 text-sky-700">(test mode, no real money)</span> : null}</div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={label}>Amount (₹)</label>
@@ -530,7 +563,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
                   </select>
                 </div>
                 <div>
-                  <label className={label}>Guest phone</label>
+                  <label className={label}>Guest phone{active?.requires_customer_phone ? ' *' : ''}</label>
                   <input className={input} value={phone} onChange={e => setPhone(e.target.value)} placeholder="+91…" />
                 </div>
                 <div>
@@ -540,8 +573,8 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
               </div>
               <div className="flex gap-2 flex-wrap">
                 <button disabled={!!busy || !phone} onClick={() => create('WHATSAPP')} className={`${btn} bg-[#128c7e] text-white hover:bg-[#0e6f64]`}><MessageCircle size={13} /> {busy === 'create:WHATSAPP' ? 'Sending…' : 'Send on WhatsApp'}</button>
-                <button disabled={!!busy || !email} onClick={() => create('EMAIL')} className={`${btn} bg-[#1e3a5f] text-white hover:bg-[#162c49]`}><Mail size={13} /> {busy === 'create:EMAIL' ? 'Sending…' : 'Send by email'}</button>
-                <button disabled={!!busy} onClick={() => create('NONE')} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><Link2 size={13} /> {busy === 'create:NONE' ? 'Creating…' : 'Create link only'}</button>
+                <button disabled={!!busy || !email || (active?.requires_customer_phone && !phone)} onClick={() => create('EMAIL')} className={`${btn} bg-[#1e3a5f] text-white hover:bg-[#162c49]`}><Mail size={13} /> {busy === 'create:EMAIL' ? 'Sending…' : 'Send by email'}</button>
+                <button disabled={!!busy || (active?.requires_customer_phone && !phone)} onClick={() => create('NONE')} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><Link2 size={13} /> {busy === 'create:NONE' ? 'Creating…' : 'Create link only'}</button>
               </div>
             </div>
           )}

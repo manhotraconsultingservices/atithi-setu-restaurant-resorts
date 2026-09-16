@@ -3827,13 +3827,16 @@ function _pgConfigView(cfg: _PgConfig, webhookUrl: string) {
     label: cfg.gateway.label,
     connected: !!cfg.row,
     is_enabled: Number(cfg.row?.is_enabled || 0) === 1,
+    is_default: Number(cfg.row?.is_default || 0) === 1,
     mode: cfg.row?.mode || null,
     verified_at: cfg.row?.verified_at || null,
     last_error: cfg.row?.last_error || null,
     updated_at: cfg.row?.updated_at || null,
     webhook_url: webhookUrl,
+    setup_steps: cfg.gateway.setupSteps.map(s => s.split('{webhookUrl}').join(webhookUrl)),
+    requires_customer_phone: cfg.gateway.requiresCustomerPhone,
     fields: cfg.gateway.credentialFields.map(f => ({
-      key: f.key, label: f.label, secret: f.secret, required: f.required, help: f.help || null,
+      key: f.key, label: f.label, secret: f.secret, required: f.required, help: f.help || null, options: f.options || null,
       value: f.secret ? null : String(pub[f.key] || ''),
       saved: f.secret ? !!sec[f.key] : !!pub[f.key],
       unreadable: cfg.unreadable.includes(f.key),
@@ -3964,7 +3967,7 @@ async function _pgReconcileLink(restaurantId: string, linkId: string, trigger: s
   if (!cfg || cfg.missing.length || cfg.unreadable.length) {
     throw new PaymentRequestError(`${cfg?.gateway.label || link.gateway} is not connected, so this link cannot be checked.`, 409);
   }
-  const snap = await cfg.gateway.fetchLink(cfg.creds, link.gateway_link_id);
+  const snap = await cfg.gateway.fetchLink(cfg.creds, { gatewayLinkId: link.gateway_link_id, referenceId: link.id });
   await db.run(
     `UPDATE payment_links
         SET status = ?, amount_paid_paise = ?, url = COALESCE(NULLIF(?, ''), url), last_error = NULL,
@@ -4051,22 +4054,41 @@ async function _pgNotifyPaid(restaurantId: string, link: any): Promise<void> {
   await triggerNotification(restaurantId, 'ONLINE_PAYMENT_RECEIVED', data);
 }
 
+// Which gateway payment links go through. One switched on: that one. More than
+// one: the one the owner chose on the Payment Gateways page  staff never pick.
+async function _pgActiveGatewayId(db: any, requested?: string): Promise<string> {
+  const enabled: any[] = await db.query("SELECT gateway, is_default FROM payment_gateway_configs WHERE is_enabled = 1");
+  if (!enabled.length) throw new PaymentRequestError('No payment gateway is switched on. Connect one under Payment Gateways first.', 409);
+  if (requested) {
+    const want = String(requested).toUpperCase();
+    if (!enabled.some(e => e.gateway === want)) throw new PaymentRequestError(`${want} is not switched on.`, 409);
+    return want;
+  }
+  if (enabled.length === 1) return enabled[0].gateway;
+  const chosen = enabled.find(e => Number(e.is_default) === 1);
+  if (!chosen) throw new PaymentRequestError('More than one payment gateway is switched on. The owner needs to choose which one payment links use, under Payment Gateways.', 409);
+  return chosen.gateway;
+}
+
 async function _pgCreateLink(
   db: any, restaurantId: string, by: { id: string | null; name: string | null },
-  input: { objectType: string; objectId: string; amount?: any; name?: string; phone?: string; email?: string; expiresInHours?: any; gateway?: string },
+  input: {
+    objectType: string; objectId: string; amount?: any; name?: string; phone?: string; email?: string; expiresInHours?: any; gateway?: string;
+    webhookUrlFor?: (gatewayId: string) => Promise<string>;
+  },
 ): Promise<any> {
   const first = await _pgDescribePayable(db, restaurantId, input.objectType, input.objectId);
   if (!first) throw new PaymentRequestError('That bill was not found.', 404);
   if (!first.open) throw new PaymentRequestError(`${first.closedReason} A payment link can only be sent for an open bill.`, 409);
 
-  const enabled: any[] = await db.query("SELECT gateway FROM payment_gateway_configs WHERE is_enabled = 1 ORDER BY updated_at DESC");
-  const gatewayId = input.gateway ? String(input.gateway).toUpperCase() : enabled[0]?.gateway;
-  if (!gatewayId || !enabled.some(e => e.gateway === gatewayId)) {
-    throw new PaymentRequestError('No payment gateway is switched on. Connect one under Payment Gateways first.', 409);
-  }
+  const gatewayId = await _pgActiveGatewayId(db, input.gateway);
   const cfg = await _pgConfig(db, gatewayId);
   if (!cfg || cfg.missing.length || cfg.unreadable.length) {
     throw new PaymentRequestError(`${cfg?.gateway.label || gatewayId} settings are incomplete. Re-enter them under Payment Gateways.`, 409);
+  }
+  // Refuse before touching any older link, so a refusal changes nothing.
+  if (cfg.gateway.requiresCustomerPhone && !_pgPhone(input.phone || first.customer.phone)) {
+    throw new PaymentRequestError(`${cfg.gateway.label} needs the guest's phone number to create a payment link.`, 400);
   }
 
   // One live link per bill. An older link still open is cancelled at the gateway
@@ -4079,7 +4101,7 @@ async function _pgCreateLink(
   for (const o of older) {
     try {
       const ocfg = o.gateway === cfg.gateway.id ? cfg : await _pgConfig(db, o.gateway);
-      if (ocfg && !ocfg.missing.length && o.gateway_link_id) await ocfg.gateway.cancelLink(ocfg.creds, o.gateway_link_id);
+      if (ocfg && !ocfg.missing.length && o.gateway_link_id) await ocfg.gateway.cancelLink(ocfg.creds, { gatewayLinkId: o.gateway_link_id, referenceId: o.id });
       await db.run("UPDATE payment_links SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_error = 'Replaced by a newer link.' WHERE id = ?", [o.id]);
       await _pgIndex(restaurantId, { ...o, status: 'CANCELLED' });
     } catch {
@@ -4117,6 +4139,7 @@ async function _pgCreateLink(
       referenceId: id, amountPaise, description: payable.purpose,
       customer: { name: customer.name || undefined, phone: customer.phone || undefined, email: customer.email || undefined },
       expiresAt,
+      webhookUrl: input.webhookUrlFor ? await input.webhookUrlFor(cfg.gateway.id) : undefined,
       notes: { atithi_link: id, bill: `${input.objectType}:${input.objectId}` },
     });
     await db.run(
@@ -55494,7 +55517,8 @@ ${data.tenant.name}`;
         if (cfg) gateways.push(_pgConfigView(cfg, await _pgWebhookUrl(req, req.params.id, gw.id)));
       }
       const review: any = await db.get("SELECT COUNT(*) AS n FROM payment_link_payments WHERE record_status = 'NEEDS_REVIEW'");
-      res.json({ gateways, key_source: secretKeySource(), needs_review: Number(review?.n || 0) });
+      const active = await _pgActiveGatewayId(db).catch(() => null);
+      res.json({ gateways, default_gateway: active, key_source: secretKeySource(), needs_review: Number(review?.n || 0) });
     } catch (err: any) {
       console.error('[payments] gateways read failed:', err);
       res.status(500).json({ error: 'Could not load payment gateways.' });
@@ -55564,6 +55588,12 @@ ${data.tenant.name}`;
            secret_fields = EXCLUDED.secret_fields, verified_at = EXCLUDED.verified_at, last_error = EXCLUDED.last_error,
            updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP`,
         [gw.id, enabled ? 1 : 0, mode, JSON.stringify(pub), JSON.stringify(sec), verifiedAt, lastError, _pgBy(req).name]);
+      // The first gateway switched on becomes the one payment links use; with more
+      // than one on, the owner changes it with the dropdown on the page.
+      if (enabled) {
+        const hasDefault: any = await db.get("SELECT gateway FROM payment_gateway_configs WHERE is_enabled = 1 AND is_default = 1 LIMIT 1");
+        if (!hasDefault) await db.run("UPDATE payment_gateway_configs SET is_default = CASE WHEN gateway = ? THEN 1 ELSE 0 END", [gw.id]);
+      }
       await writeObjectAudit(db, req, {
         objectType: 'PAYMENT_GATEWAY', objectId: gw.id, action: 'UPDATED',
         summary: `${gw.label} ${enabled ? 'on' : 'off'}${mode ? ` (${mode.toLowerCase()} keys)` : ''}${changed.length ? `; changed ${changed.join(', ')}` : ''}`,
@@ -55577,6 +55607,42 @@ ${data.tenant.name}`;
     } catch (err: any) {
       console.error('[payments] gateway save failed:', err);
       res.status(500).json({ error: 'Could not save the payment gateway.' });
+    }
+  });
+
+  // The gateway payment links use when more than one is switched on.
+  app.put("/api/restaurant/:id/payments/default-gateway", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 2))) return res.status(403).json({ error: 'You do not have permission to change Payment Gateways.' });
+      const gw = getGateway(req.body?.gateway);
+      if (!gw) return res.status(400).json({ error: 'Choose a payment gateway.' });
+      const db = await getTenantDb(req.params.id);
+      const row: any = await db.get("SELECT is_enabled, is_default FROM payment_gateway_configs WHERE gateway = ?", [gw.id]);
+      if (!row || Number(row.is_enabled) !== 1) return res.status(409).json({ error: `${gw.label} is not switched on, so it cannot take payment links.` });
+      const before: any = await db.get("SELECT gateway FROM payment_gateway_configs WHERE is_default = 1 LIMIT 1");
+      await db.run("UPDATE payment_gateway_configs SET is_default = CASE WHEN gateway = ? THEN 1 ELSE 0 END", [gw.id]);
+      await writeObjectAudit(db, req, { objectType: 'PAYMENT_GATEWAY', objectId: gw.id, action: 'DEFAULT_CHANGED', summary: `Payment links now go through ${gw.label}`, before: { default_gateway: before?.gateway || null }, after: { default_gateway: gw.id } }).catch(() => {});
+      res.json({ default_gateway: gw.id });
+    } catch (err: any) {
+      console.error('[payments] default gateway change failed:', err);
+      res.status(500).json({ error: 'Could not change the payment gateway.' });
+    }
+  });
+
+  // For staff screens: which gateway a new link would use. Carries no keys.
+  app.get("/api/restaurant/:id/payments/active-gateway", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      let id: string | null = null;
+      let reason: string | null = null;
+      try { id = await _pgActiveGatewayId(db); } catch (e: any) { reason = e?.message || String(e); }
+      const gw = id ? getGateway(id) : null;
+      const row: any = gw ? await db.get("SELECT mode FROM payment_gateway_configs WHERE gateway = ?", [gw.id]) : null;
+      res.json(gw
+        ? { gateway: gw.id, label: gw.label, mode: row?.mode || null, requires_customer_phone: gw.requiresCustomerPhone }
+        : { gateway: null, reason });
+    } catch (err: any) {
+      res.status(500).json({ error: 'Could not read the payment gateway.' });
     }
   });
 
@@ -55674,6 +55740,7 @@ ${data.tenant.name}`;
         objectType, objectId: String(b.object_id || ''), amount: b.amount,
         name: b.customer_name, phone: b.customer_phone, email: b.customer_email,
         expiresInHours: b.expires_in_hours, gateway: b.gateway,
+        webhookUrlFor: (gatewayId: string) => _pgWebhookUrl(req, req.params.id, gatewayId),
       });
       const delivery = await _pgSendLink(db, req.params.id, link, { channel, phone: b.customer_phone, email: b.customer_email });
       await writeObjectAudit(db, req, {
@@ -55728,7 +55795,7 @@ ${data.tenant.name}`;
       const cfg = await _pgConfig(g.db, g.link.gateway);
       if (!cfg || cfg.missing.length || cfg.unreadable.length) return res.status(409).json({ error: `${cfg?.gateway.label || g.link.gateway} is not connected, so the link cannot be cancelled there.` });
       try {
-        await cfg.gateway.cancelLink(cfg.creds, g.link.gateway_link_id);
+        await cfg.gateway.cancelLink(cfg.creds, { gatewayLinkId: g.link.gateway_link_id, referenceId: g.link.id });
       } catch (e: any) {
         // Most often: it was paid a moment ago. Read it back so that payment is recorded.
         const r = await _pgReconcileLink(req.params.id, g.link.id, 'CANCEL').catch(() => null);
@@ -55790,7 +55857,7 @@ ${data.tenant.name}`;
         // One row a minute at most, so a flood of forged calls cannot fill the table.
         const recent: any = await db.get(
           "SELECT id FROM payment_webhook_events WHERE gateway = ? AND outcome = 'BAD_SIGNATURE' AND received_at > CURRENT_TIMESTAMP - INTERVAL '1 minute' LIMIT 1", [gw.id]).catch(() => null);
-        if (!recent) await log(_pgNewId('PWE'), 'BAD_SIGNATURE', cfg.creds.webhook_secret ? 'Signature did not match the saved webhook secret.' : 'No webhook secret is saved.').catch(() => {});
+        if (!recent) await log(_pgNewId('PWE'), 'BAD_SIGNATURE', `The call did not match the ${gw.label} webhook credentials saved here.`).catch(() => {});
         return res.status(401).json({ error: 'Invalid signature' });
       }
       let ev;
@@ -64954,8 +65021,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'webhook-raw-body-signatures',
+    commit_marker: 'payments-phonepe-paytm',
     code_features: [
+      'payments-phonepe-paytm  FEATURE: PhonePe and Paytm payment links beside Razorpay, through the same contract, recording, sweep and screens. phonepeGateway.ts: OAuth client-credentials token (form-encoded, cached per credential set until 2 min before expires_at, refetched once on a 401), POST /paylinks/v1/pay (merchantOrderId = our link id, PAYLINK, phone mandatory, PhonePe SMS/email off, expireAt ms, notes as udf), GET /{merchantOrderId}/status?details=true (COMPLETED payments captured; no fee reported), POST /{merchantOrderId}/cancel, webhook Authorization = SHA256(username:password) with the pair set in the PhonePe dashboard, sandbox/production hosts from an Environment field. paytmGateway.ts: PaytmChecksum re-implemented from the official library (AES-128-CBC, IV @@@@&&&&####$$, sha256(str|salt)+salt) and unit-checked against a verbatim copy both ways; signed {body, head} envelope over the exact body string; /link/create (FIXED, rupees, description cut to 30, expiry dd/mm/yyyy hh:mm:ss IST, singleTransactionOnly, statusCallbackUrl = the property webhook URL per link), /link/fetch + /link/fetchTransaction for status and payments, /link/expire as cancel; form-encoded webhook verified by CHECKSUMHASH over all other fields and the MID; resultInfo codes mapped (5028 = wrong key). Contract changes: fetchLink/cancelLink take a LinkRef {gatewayLinkId, referenceId}; CreateLinkInput.webhookUrl; CredentialField.options (select); gateway setupSteps and requiresCustomerPhone shown on the settings page. DEFAULT GATEWAY (owner request): payment_gateway_configs.is_default; one gateway on = it is used, more than one = the owner picks in a dropdown on Payment Gateways (PUT /payments/default-gateway, audited); the first gateway switched on becomes default; staff never choose (GET /payments/active-gateway tells the folio dialog which one and whether a phone is required). PhonePe/Paytm report no per-payment fee, so their fee is not booked at capture and stays in 1025 clearing until payout matching. Tests: tsx phonepe_gateway_check, paytm_gateway_check, razorpay_gateway_check.',
       'webhook-raw-body-signatures — BUGFIX: the global JSON parser runs before every route and a route-level parser after it never runs, so the WhatsApp, OTA channel and delivery aggregator webhooks checked their HMAC over an empty body and rejected every genuine call (WhatsApp dropped delivery receipts, replies and STOP opt-outs silently whenever META_WA_APP_SECRET was set). webhookRawBody.ts now lists the signed webhook paths (payment gateways, /api/webhooks/whatsapp, /api/public/restaurant/:id/channel-webhook/:channel, /api/integrations/:channel/webhook/:restaurantId) and the global parser keeps req.rawBody (a Buffer) for those only; the dead route-level parsers are gone, and the OTA XML text parser keeps its bytes the same way. WhatsApp now answers 401 on a bad signature instead of 200-then-drop. OTA webhook decrypts api_secret and reads webhook_signing_secret before validating (it compared against the encrypted value, so no signature could ever match). Delivery webhook: replay lookup selects processed_at (a repeat always answered 202), and computeWebhookIdempotencyKey plus five external_id_hash sites used require(crypto), which throws under tsx ESM, so the webhook, settlement upload, channel P&L and mock seed crashed. Suite: TC-WEBHOOK-RAWBODY-SCOPE, -RAWBODY-KEPT, -WA/-OTA/-DELIVERY-SIG-LOCAL (in process, real verify callback and verifiers), -OTA-SIG-LIVE, -WA-BADSIG-LIVE, -WA-SIG-LIVE (needs META_WA_APP_SECRET in .env.local), -DELIVERY-SIG-LIVE and -DELIVERY-REPLAY-LIVE (need ATITHI_CREDENTIAL_KEY on the server).',
       'payments-razorpay-links — FEATURE: online payments through the property OWN gateway account, Razorpay first. Gateway-agnostic contract paymentGateway.ts (integer paise, webhook is a trigger never the truth, idempotent on gateway payment id) + registry paymentGatewayRegistry.ts + razorpayGateway.ts (Payment Links API: create/fetch with per-payment fee and tax/cancel, HMAC-SHA256 webhook over raw body, key mode from rzp_test_/rzp_live_). Secrets sealed AES-256-GCM by paymentSecrets.ts (ATITHI_CREDENTIAL_KEY, else a JWT_SECRET-derived payments-only key; each value names its key and re-seals on save) and never returned to a browser. Tenant tables payment_gateway_configs, payment_links (created locally as CREATING before the gateway call), payment_link_payments (UNIQUE gateway+payment id = the idempotency guarantee; NEEDS_REVIEW when the bill can no longer take the money), payment_webhook_events; central payment_link_index for the sweep. Global JSON parser keeps rawBody for /api/public/payments/webhook/ (the route-level parser never ran, which also breaks the WhatsApp/OTA/aggregator signatures). Recording: _pgReconcileLink re-reads the link from the gateway and records each captured payment once via recordFolioPayment (ADVANCE before check-in with its GST and Rule 50 voucher, INTERIM during the stay), method ONLINE → new COA 1025 Payment Gateway Clearing, and books the gateway ACTUAL fee as PGFEE-<payment>: Dr 5510 + Dr 1330 GST, Cr 1025, so clearing holds exactly the payout. Routes /payments/gateways (GET, PUT save + live test before switching on, POST test, DELETE refused while links open), /payments/links (GET, POST create+send, send, refresh, cancel), /payments/link-payments/:id/resolve, /payments/webhook-events, public POST /api/public/payments/webhook/:gateway/:publicToken (verify, log once per event id, answer, then reconcile). One live link per bill (older one cancelled, or reconciled if it was just paid). Sweep every 5 minutes reads open links back so a lost webhook never loses a payment. Link gates mirror manual folio payments (hotelStaff + FOLIOS); gateway settings need PAYMENT_GATEWAYS (owner or explicit grant, not implied by MANAGER). Notifications PAYMENT_LINK_SENT, ONLINE_PAYMENT_RECEIPT, ONLINE_PAYMENT_RECEIVED. UI src/PaymentLinks.tsx: Payment Gateways page (Administration) with keys, webhook set-up steps, link register, needs-review resolution, webhook log; folio Collect online dialog (amount defaults to balance due, WhatsApp/email/copy/share, live status). Tests: tsx razorpay_gateway_check (40), payment_secrets_check (17); suite TC-PAY-GW-READ, -WEBHOOK-UNCONFIGURED, -ENABLE-NEEDS-VALID-KEYS, -SECRET-WRITE-ONLY, -WEBHOOK-SIGNATURE, -LINK-GUARDS, -RAZORPAY-ROUNDTRIP (needs RAZORPAY_TEST_KEY_*), -DISCONNECT. NOT YET: PhonePe, Paytm, gateway refunds, payout matching of 1025 to the bank, events/spa/restaurant bills.',
       'reset-link-platform-host — BUGFIX: owners tapping the password-reset link saw Restaurant Not Found. Reset emails link to FRONTEND_URL, which is dev-erp.atithi-setu.com (same backend as erp.*), and dev-erp was not a reserved subdomain, so getTenantSlug read it as a tenant slug, /api/tenant/by-slug/dev-erp answered 404 and the reset token was never used. New tenantHost.ts (pure, shared by server and SPA like upiLink.ts) holds RESERVED_SUBDOMAINS (old list plus dev-erp and prod-erp) and tenantSlugFromHost; server RESERVED_SLUGS and the SPA parser both import it, so the two copies can no longer drift and no tenant can claim a platform label. SECOND FAULT on the same path: a reset link opened on a real tenant subdomain stripped the token and rendered the tenant login page, which has no reset form; the tenant-login gate now steps aside while ownerAuthStep is reset, and Sign In Now hands back to it. test-scripts/tenant_host_check.ts (16 checks) and suite TC-AUTH-RESET-HOST (dev-erp/prod-erp by-slug 404 + deployed bundle reserves dev-erp).',

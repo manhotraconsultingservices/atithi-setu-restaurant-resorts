@@ -29025,7 +29025,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports',     description: 'F&B revenue, top dishes, peak-hour heatmap, delivery settlement, customer cohort — separate reporting hub.', restaurantOnly: true },
               { id: 'FEEDBACK',           label: 'Feedback / Reviews',     description: 'Customer feedback responses, NPS, public review page.' },
               { id: 'NOTIFICATIONS',     label: 'Notifications',           description: 'WhatsApp / SMS / email template config, delivery logs.' },
-              { id: 'PAYMENT_GATEWAYS',  label: 'Payment Gateways',        description: 'Connect Razorpay (and later PhonePe, Paytm) with API keys, see every payment link and resolve online payments that need review. View shows the page; Edit changes keys and switches gateways on; Full can disconnect. Sending a link from a folio needs Folios Edit, not this.' },
+              { id: 'PAYMENT_GATEWAYS',  label: 'Payment Gateways',        description: 'Connect Razorpay, PhonePe or Paytm with API keys, choose which one payment links use, see every payment link and resolve online payments that need review. View shows the page; Edit changes keys and switches gateways on; Full can disconnect. Sending a link from a folio needs Folios Edit, not this.' },
               { id: 'SUBSCRIPTION',      label: 'Subscription / Billing',  description: 'Plan tier, invoices for the AtithiSetu subscription itself, payment.' },
               { id: 'SETTINGS',          label: 'Settings',                description: 'GST setup, business profile, hotel settings, channel credentials.' },
               // Hotel-only tabs
@@ -38069,7 +38069,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   && String(viewFolio.folio_kind || 'HOTEL').toUpperCase() === 'HOTEL' && (
                   <button
                     onClick={() => setCollectOnlineFolio(viewFolio)}
-                    title="Send the guest a Razorpay payment link on WhatsApp or email. The payment is added to this folio when they pay."
+                    title="Send the guest a payment link (UPI, card, net banking) on WhatsApp or email. The payment is added to this folio when they pay."
                     className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-emerald-600/25 text-emerald-700 text-xs font-bold hover:bg-emerald-50"
                   ><CreditCard size={13}/> Collect online</button>
                 )}

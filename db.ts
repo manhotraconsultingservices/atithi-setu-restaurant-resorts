@@ -4045,6 +4045,8 @@ export async function createPaymentGatewayTables(db: DbInterface): Promise<void>
       updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `).catch(() => {});
+  // When more than one gateway is on, the one the owner chose for payment links.
+  await db.exec(`ALTER TABLE payment_gateway_configs ADD COLUMN IF NOT EXISTS is_default INT NOT NULL DEFAULT 0`).catch(() => {});
 
   // A link is created locally first (status CREATING) so a gateway call that
   // times out still leaves a row to reconcile, rather than an orphan link on

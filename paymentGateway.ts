@@ -38,6 +38,7 @@ export interface CredentialField {
   secret: boolean;
   required: boolean;
   help?: string;
+  options?: { value: string; label: string }[];  // renders as a choice, e.g. sandbox / production
 }
 
 export interface CreateLinkInput {
@@ -47,7 +48,15 @@ export interface CreateLinkInput {
   customer: { name?: string; email?: string; phone?: string };
   expiresAt?: Date;
   callbackUrl?: string;           // where the customer lands after paying
+  webhookUrl?: string;            // for gateways that take the status URL per link (Paytm)
   notes?: Record<string, string>; // echoed back by the gateway; never put secrets here
+}
+
+// How a gateway addresses an existing link. Some use their own id (Razorpay,
+// Paytm), some the merchant's reference (PhonePe); adapters take what they need.
+export interface LinkRef {
+  gatewayLinkId: string;
+  referenceId: string;
 }
 
 export interface GatewayPayment {
@@ -97,13 +106,18 @@ export interface PaymentGateway {
   readonly id: GatewayId;
   readonly label: string;
   readonly credentialFields: CredentialField[];
+  // What the owner does in the gateway's own dashboard so webhooks reach us.
+  // {webhookUrl} is replaced with the property's URL on the settings page.
+  readonly setupSteps: string[];
+  // Phone number the gateway insists on before it will create a link.
+  readonly requiresCustomerPhone: boolean;
   // TEST or LIVE, when the credentials themselves say so; null when they cannot.
   modeOf(creds: GatewayCredentials): GatewayMode | null;
   // Resolves when the gateway accepts the credentials; throws GatewayError otherwise.
   testConnection(creds: GatewayCredentials): Promise<{ mode: GatewayMode | null; detail: string }>;
   createLink(creds: GatewayCredentials, input: CreateLinkInput): Promise<LinkSnapshot>;
-  fetchLink(creds: GatewayCredentials, gatewayLinkId: string): Promise<LinkSnapshot>;
-  cancelLink(creds: GatewayCredentials, gatewayLinkId: string): Promise<LinkSnapshot>;
+  fetchLink(creds: GatewayCredentials, ref: LinkRef): Promise<LinkSnapshot>;
+  cancelLink(creds: GatewayCredentials, ref: LinkRef): Promise<LinkSnapshot>;
   // rawBody must be the exact bytes received — a re-serialised JSON body fails.
   verifyWebhook(creds: GatewayCredentials, rawBody: Buffer, headers: Record<string, string | string[] | undefined>): boolean;
   parseWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): WebhookEvent;

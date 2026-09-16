@@ -2,9 +2,13 @@
 // a line here; the settings page, link creation and webhooks all read this list.
 import type { GatewayId, PaymentGateway } from './paymentGateway.ts';
 import { RazorpayGateway } from './razorpayGateway.ts';
+import { PhonePeGateway } from './phonepeGateway.ts';
+import { PaytmGateway } from './paytmGateway.ts';
 
 const GATEWAYS: Partial<Record<GatewayId, PaymentGateway>> = {
   RAZORPAY: new RazorpayGateway(),
+  PHONEPE: new PhonePeGateway(),
+  PAYTM: new PaytmGateway(),
 };
 
 export function getGateway(id: string): PaymentGateway | null {
