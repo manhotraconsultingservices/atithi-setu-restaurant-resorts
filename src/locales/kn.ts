@@ -479,4 +479,10 @@ export const kn: Record<string, string> = {
   'gst.saveFailed': 'GST ವಿವರ ಉಳಿಸಲಾಗಲಿಲ್ಲ.',
   'gst.saved': 'GSTIN {gstin} ಉಳಿಸಲಾಗಿದೆ. ಸೇರಿಸಲು ಇನ್‌ವಾಯ್ಸ್ ಮತ್ತೆ ಮುದ್ರಿಸಿ.',
   'gst.cleared': 'GST ವಿವರ ತೆಗೆದುಹಾಕಲಾಗಿದೆ.',
+  // ── Hotel bookings pay link ──
+  'pg.collect.viaEmail': 'ಇಮೇಲ್',
+  'pg.collect.viaWhatsApp': 'WhatsApp',
+  'pg.collect.sendOn': 'ಎಲ್ಲಿ ಕಳುಹಿಸಬೇಕು',
+  'pg.collect.send': 'ಕಳುಹಿಸಿ',
+  'pg.collect.noContact': 'ಈ ಬುಕಿಂಗ್‌ನಲ್ಲಿ ಇಮೇಲ್ ಅಥವಾ ಫೋನ್ ಇಲ್ಲ. ಪಾವತಿ ಲಿಂಕ್ ಕಳುಹಿಸಲು ಒಂದನ್ನು ಸೇರಿಸಿ.',
 };

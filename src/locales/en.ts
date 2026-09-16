@@ -544,4 +544,10 @@ export const en: Record<string, string> = {
   'gst.saveFailed': 'Could not save the GST details.',
   'gst.saved': 'GSTIN {gstin} saved. Reprint the invoice to include it.',
   'gst.cleared': 'GST details cleared.',
+  // ── Hotel bookings pay link ──
+  'pg.collect.viaEmail': 'Email',
+  'pg.collect.viaWhatsApp': 'WhatsApp',
+  'pg.collect.sendOn': 'Send on',
+  'pg.collect.send': 'Send',
+  'pg.collect.noContact': 'No email or phone on this booking. Add one to send a payment link.',
 };

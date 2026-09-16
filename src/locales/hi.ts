@@ -580,4 +580,10 @@ export const hi: Record<string, string> = {
   'gst.saveFailed': 'GST विवरण सहेजे नहीं जा सके।',
   'gst.saved': 'GSTIN {gstin} सहेजा गया। इसे शामिल करने के लिए इनवॉइस फिर से प्रिंट करें।',
   'gst.cleared': 'GST विवरण हटा दिए गए।',
+  // ── Hotel bookings pay link ──
+  'pg.collect.viaEmail': 'ईमेल',
+  'pg.collect.viaWhatsApp': 'WhatsApp',
+  'pg.collect.sendOn': 'कहाँ भेजें',
+  'pg.collect.send': 'भेजें',
+  'pg.collect.noContact': 'इस बुकिंग पर ईमेल या फ़ोन नहीं है। भुगतान लिंक भेजने के लिए कोई एक जोड़ें।',
 };

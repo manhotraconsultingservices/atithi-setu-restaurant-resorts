@@ -541,4 +541,10 @@ export const pa: Record<string, string> = {
   'gst.saveFailed': 'GST ਵੇਰਵੇ ਸੇਵ ਨਹੀਂ ਹੋ ਸਕੇ।',
   'gst.saved': 'GSTIN {gstin} ਸੇਵ ਹੋਇਆ। ਸ਼ਾਮਲ ਕਰਨ ਲਈ ਇਨਵੌਇਸ ਮੁੜ ਪ੍ਰਿੰਟ ਕਰੋ।',
   'gst.cleared': 'GST ਵੇਰਵੇ ਹਟਾਏ ਗਏ।',
+  // ── Hotel bookings pay link ──
+  'pg.collect.viaEmail': 'ਈਮੇਲ',
+  'pg.collect.viaWhatsApp': 'WhatsApp',
+  'pg.collect.sendOn': 'ਕਿੱਥੇ ਭੇਜੋ',
+  'pg.collect.send': 'ਭੇਜੋ',
+  'pg.collect.noContact': 'ਇਸ ਬੁਕਿੰਗ ਉੱਤੇ ਈਮੇਲ ਜਾਂ ਫ਼ੋਨ ਨਹੀਂ ਹੈ। ਭੁਗਤਾਨ ਲਿੰਕ ਭੇਜਣ ਲਈ ਇੱਕ ਜੋੜੋ।',
 };

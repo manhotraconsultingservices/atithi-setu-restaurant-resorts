@@ -109,6 +109,7 @@ import {
   BedDouble,
   Link2 as LinkIcon2,
   BadgePercent,
+  LogIn, ClipboardList, ArrowLeftRight, ArrowUpCircle,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -445,7 +446,6 @@ const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
   { key: 'advance',   label: 'Advance',   def: false },
   { key: 'source',    label: 'Source',    def: true  },
   { key: 'created',   label: 'Created',   def: false },
-  { key: 'paylink',   label: 'Pay link',  def: false },
 ];
 
 // Location label for an order. Room-service orders store their location as
@@ -16192,7 +16192,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // older "fire-and-forget" pattern that left them guessing). Uses
   // ephemeral state so the chip in the row can flash a green tick.
   const [paylinkBusy, setPaylinkBusy] = useState<string | null>(null);
-  const sendPayLink = async (bookingId: string, channel: 'EMAIL' | 'WHATSAPP') => {
+  // Ask how to send, offering only the channels this booking and plan allow.
+  const chooseAndSendPayLink = async (b: any) => {
+    const opts: { value: string; label: string }[] = [];
+    const waOk = moduleOn('whatsapp') && !!b.guest_phone;
+    if (b.guest_email) opts.push({ value: 'EMAIL', label: `${tr('pg.collect.viaEmail')} (${b.guest_email})` });
+    if (waOk) opts.push({ value: 'WHATSAPP', label: `${tr('pg.collect.viaWhatsApp')} (${b.guest_phone})` });
+    if (b.guest_email && waOk) opts.push({ value: 'BOTH', label: tr('pg.collect.sendBoth') });
+    if (!opts.length) { toast.error(tr('pg.collect.noContact')); return; }
+    const r = await promptPayment({
+      title: tr('actions.sendLink'), body: `${b.guest_name || ''}`.trim() || undefined,
+      fields: [{ name: 'channel', label: tr('pg.collect.sendOn'), type: 'select', required: true, options: opts, defaultValue: opts[opts.length - 1].value }],
+      confirmLabel: tr('pg.collect.send'),
+    });
+    if (!r) return;
+    await sendPayLink(b.id, r.channel as 'EMAIL' | 'WHATSAPP' | 'BOTH');
+  };
+  const sendPayLink = async (bookingId: string, channel: 'EMAIL' | 'WHATSAPP' | 'BOTH') => {
     setPaylinkBusy(`${bookingId}|${channel}`);
     try {
       const r: any = await hotelApi(
@@ -16200,8 +16216,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         { method: 'POST', body: JSON.stringify({ channel }) }
       );
       const sym = (restaurant as any)?.currency_symbol || '₹';
-      const target = channel === 'EMAIL' ? r.guest_email : r.guest_phone;
-      toast.success(`Payment link sent via ${channel} to ${target}. Amount: ${sym}${Number(r.amount || 0).toLocaleString('en-IN')}`);
+      const target = channel === 'EMAIL' ? r.guest_email : channel === 'WHATSAPP' ? r.guest_phone : [r.guest_email, r.guest_phone].filter(Boolean).join(' and ');
+      toast.success(`Payment link sent via ${(r.sent || [channel]).join(' and ')} to ${target}. Amount: ${sym}${Number(r.amount || 0).toLocaleString('en-IN')}`);
     } catch (e: any) {
       toast.error(e?.message || 'Failed to send payment link');
     } finally { setPaylinkBusy(null); }
@@ -25046,7 +25062,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     {colOn('advance')   && <th className="text-right px-4 py-3" title="Advance payments already collected" style={{ position: 'relative', width: colWidths['advance'] ? colWidths['advance']+'px' : undefined }}>{tr('Advance')}<div onMouseDown={e => startColResize('advance', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
                     {colOn('source')    && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['source'] ? colWidths['source']+'px' : undefined }}>{tr('Source')}<div onMouseDown={e => startColResize('source', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
                     {colOn('created')   && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['created'] ? colWidths['created']+'px' : undefined }}>{tr('Created')}<div onMouseDown={e => startColResize('created', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
-                    {colOn('paylink')   && <th className="text-center px-4 py-3" style={{ position: 'relative', width: colWidths['paylink'] ? colWidths['paylink']+'px' : undefined }}>{tr('Pay link')}<div onMouseDown={e => startColResize('paylink', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
                     {/* Actions — pinned right so staff never scroll to reach them */}
                     <th className="text-right px-4 py-3 sticky right-0 z-[2] bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.12)]">{tr('Actions')}</th>
                   </tr>
@@ -25186,238 +25201,89 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         )}
                         {colOn('source') && <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap">{b.booking_source || '—'}</td>}
                         {colOn('created') && <td className="px-4 py-3 text-xs text-[#9c8e85] whitespace-nowrap">{b.created_at ? formatDateForTenant(b.created_at, restaurant?.date_format) : '—'}</td>}
-                        {colOn('paylink') && (
-                        <td className="px-4 py-3 text-center">
-                          {/* Pay-link send buttons — only on bookings
-                              that aren't fully settled. Each button
-                              hits the new send-payment-link endpoint
-                              which builds the folio breakup + UPI
-                              deep link and emails / WhatsApps it
-                              with the amount pre-filled. */}
-                          {moduleOn('online_payments') && b.status !== 'CANCELLED' && Number(b.total_amount || 0) > 0 ? (
-                            <div className="inline-flex items-center gap-1">
-                              <button
-                                type="button"
-                                disabled={paylinkBusy === `${b.id}|EMAIL` || !b.guest_email}
-                                onClick={() => sendPayLink(b.id, 'EMAIL')}
-                                title={b.guest_email ? `Email payment link to ${b.guest_email}` : 'No email on file — add email to booking first'}
-                                className="p-1.5 rounded-lg border-2 border-[#cc5a16] text-[#cc5a16] bg-white hover:bg-[#cc5a16]/10 text-base leading-none transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-[#cc5a16]/30 disabled:text-[#cc5a16]/50"
-                              >
-                                {paylinkBusy === `${b.id}|EMAIL` ? '…' : '📧'}
-                              </button>
-                              {moduleOn('whatsapp') && <button
-                                type="button"
-                                disabled={paylinkBusy === `${b.id}|WHATSAPP` || !b.guest_phone}
-                                onClick={() => sendPayLink(b.id, 'WHATSAPP')}
-                                title={b.guest_phone ? `WhatsApp payment link to ${b.guest_phone}` : 'No phone on file — add phone to booking first'}
-                                className="p-1.5 rounded-lg border-2 border-emerald-600 text-emerald-700 bg-white hover:bg-emerald-50 text-base leading-none transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-emerald-300 disabled:text-emerald-400"
-                              >
-                                {paylinkBusy === `${b.id}|WHATSAPP` ? '…' : '💬'}
-                              </button>}
-                            </div>
-                          ) : (
-                            <span className="text-[10px] text-[#9c8e85]">—</span>
-                          )}
-                        </td>
-                        )}
                         <td className="px-4 py-3 text-right sticky right-0 z-[2] bg-white group-hover:bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.08)]">
-                          <div className="flex items-center justify-end gap-1.5" data-booking-action-menu>
-                            {/* Primary CTA — the one thing staff must do for this row */}
-                            {b.status === 'BOOKED' && canWriteTab('HOTEL_BOOKINGS') && (
-                              <button
-                                onClick={() => confirmAndCheckIn(b)}
-                                className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600 whitespace-nowrap"
-                              >{tr('Check In')}</button>
-                            )}
-                            {b.status === 'CHECKED_IN' && canWriteTab('HOTEL_BOOKINGS') && (
-                              <button
-                                onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }}
-                                className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608] whitespace-nowrap"
-                              >{tr('Check Out')}</button>
-                            )}
-                            {/* Group settle — primary group CTA, stays outside overflow */}
-                            {b.group_id && b.status === 'CHECKED_IN' && canWriteTab('HOTEL_BOOKINGS') && (
-                              <button
-                                onClick={async () => {
-                                  const r = await promptPayment({
-                                    title: `Settle group "${b.group_name || 'group'}"`,
-                                    body: 'Every CHECKED_IN room will be checked out and billed as one consolidated invoice.',
-                                    fields: [
-                                      { name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'},{value:'BANK_TRANSFER',label:'Bank Transfer'}], defaultValue: 'CASH' },
-                                      { name: 'discount', label: 'Group discount (₹)', type: 'number', placeholder: '0', defaultValue: '0' },
-                                    ],
-                                    confirmLabel: 'Settle & Checkout',
-                                  });
-                                  if (!r) return;
-                                  const groupDiscount = Math.max(0, Number(r.discount) || 0);
-                                  try {
-                                    const res = await fetch(
-                                      `/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/checkout`,
-                                      {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                        body: JSON.stringify({ payment_method: r.method.toUpperCase(), discount: groupDiscount }),
-                                      }
-                                    );
-                                    const data = await res.json();
-                                    if (!res.ok) throw new Error(data?.error || `Settle failed (${res.status})`);
-                                    toast.success('Group settled. Invoice: ' + data.invoice_number);
-                                    fetchHotelBookings();
-                                  } catch (err: any) { toast.error(err.message); }
-                                }}
-                                title="Settle every CHECKED_IN room in this group under one invoice"
-                                className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-[11px] font-bold hover:bg-violet-700 whitespace-nowrap"
-                              >{tr('Settle Group')}</button>
-                            )}
-                            {/* ··· overflow menu */}
-                            <div className="relative" data-booking-action-menu>
-                              {canWriteTab('HOTEL_BOOKINGS') && <button
-                                type="button"
-                                onClick={(e) => {
-                                  if (openActionMenu === b.id) {
-                                    setOpenActionMenu(null);
-                                    setActionMenuPos(null);
-                                  } else {
-                                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                                    setOpenActionMenu(b.id);
-                                    setActionMenuPos({ top: rect.bottom + 4, left: Math.max(8, rect.right - 240) });
-                                  }
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[13px] font-bold hover:bg-[#faf7f2] leading-none select-none"
-                                title="More actions"
-                                data-booking-action-menu
-                              >···</button>}
-                              {openActionMenu === b.id && (() => {
-                                const docCount = Number(b.document_count || 0);
-                                const needsDocs = hotelSettings.require_id_at_checkin !== false && b.status === 'BOOKED' && docCount === 0;
-                                const isOta = b.booking_source && !['DIRECT','WALKIN','WALK_IN',''].includes(String(b.booking_source).toUpperCase());
-                                const menuItemCls = "w-full px-4 py-2 text-left text-[12px] text-[#1a1208] hover:bg-[#faf7f2] flex items-center gap-2 whitespace-nowrap";
-                                const menuItemDestructCls = "w-full px-4 py-2 text-left text-[12px] text-red-600 hover:bg-red-50 flex items-center gap-2 whitespace-nowrap";
-                                const sep = <div className="my-1 border-t border-[#cc5a16]/10" />;
-                                return createPortal(
-                                  <div
-                                    style={{ position: 'fixed', top: actionMenuPos?.top ?? 0, left: actionMenuPos?.left ?? 0, zIndex: 99999 }}
-                                    className="bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 w-60 text-left"
-                                    data-booking-action-menu
-                                  >
-                                    {/* Edit — BOOKED only */}
-                                    {b.status === 'BOOKED' && (
-                                      <button className={menuItemCls} onClick={() => { setEditingBooking({ ...b }); setShowBookingModal(true); setOpenActionMenu(null); }}>
-                                        ✏️ {tr('Edit booking')}
-                                      </button>
-                                    )}
-                                    {/* Documents */}
-                                    {b.status !== 'CANCELLED' && (
-                                      <button
-                                        className={cn(menuItemCls, needsDocs ? "text-amber-800 bg-amber-50 hover:bg-amber-100" : "")}
-                                        onClick={() => { setDocsTargetBooking({ ...b }); setOpenActionMenu(null); }}
-                                      >
-                                        📄 {tr('Documents')}{docCount > 0 ? ` (${docCount})` : ''}{needsDocs ? ' ⚠' : ''}
-                                      </button>
-                                    )}
-                                    {/* Add room — active bookings only (BOOKED / ASSIGNED /
-                                        CHECKED_IN, not no-show). Opens the booking detail with
-                                        the Add-Room form pre-expanded. A standalone booking is
-                                        converted to a group on the server. */}
-                                    {['BOOKED', 'ASSIGNED', 'CHECKED_IN'].includes(String(b.status || '').toUpperCase()) && Number(b.no_show) !== 1 && (
-                                      <button className={menuItemCls} onClick={async () => {
-                                        setOpenActionMenu(null);
-                                        setBookingDetailTarget(b);
-                                        setIndivAddRoom({ open: true, typeId: '', qty: '1', rate: '', busy: false, types: [] });
-                                        try {
-                                          const rr = await fetch(`/api/restaurant/${restaurantId}/hotel/room-types`, { headers: { Authorization: `Bearer ${token}` } });
-                                          if (rr.ok) { const tps = await rr.json(); setIndivAddRoom(s => ({ ...s, types: Array.isArray(tps) ? tps : [] })); }
-                                        } catch { /* */ }
-                                      }}>
-                                        ➕ {tr('Add room')}{b.group_name ? ' ' + tr('to group') : ''}
-                                      </button>
-                                    )}
-                                    {/* Advance payment */}
-                                    {(b.status === 'BOOKED' || b.status === 'CHECKED_IN') && (
-                                      <button className={menuItemCls} onClick={() => { setAdvancePayTarget(b); setAdvanceDraft({ amount: '', method: 'CASH', reference: '' }); setOpenActionMenu(null); }}>
-                                        💰 {tr('Record advance')}
-                                      </button>
-                                    )}
-                                    {/* Folio — CHECKED_IN with open folio */}
-                                    {b.status === 'CHECKED_IN' && b.open_folio_id && (
-                                      <button className={menuItemCls} onClick={async () => { setOpenActionMenu(null); try { await loadFolio(b.open_folio_id); } catch (err: any) { toast.error(err?.message || 'Failed to load folio'); } }}>
-                                        📋 {tr('Open folio')}
-                                      </button>
-                                    )}
-                                    {/* Room operations — CHECKED_IN */}
-                                    {b.status === 'CHECKED_IN' && sep}
-                                    {b.status === 'CHECKED_IN' && (
-                                      <button className={menuItemCls} onClick={() => { openMoveRoom(b); setOpenActionMenu(null); }}>
-                                        🔄 {tr('Move room')}
-                                      </button>
-                                    )}
-                                    {b.status === 'CHECKED_IN' && (
-                                      <button className={menuItemCls} onClick={() => { openUpgradeRoom(b); setOpenActionMenu(null); }}>
-                                        ⬆ {tr('Upgrade room')}
-                                      </button>
-                                    )}
-                                    {b.status === 'CHECKED_IN' && (
-                                      <button className={menuItemCls} onClick={() => {
-                                        setAmendStay({ booking: b, newDate: String(b.check_out_date || '').slice(0, 10), saving: false });
-                                        setOpenActionMenu(null);
-                                      }}>
-                                        📅 {tr('Amend checkout date')}
-                                      </button>
-                                    )}
-                                    {/* Group document actions */}
-                                    {b.group_id && sep}
-                                    {b.group_id && (
-                                      <button className={menuItemCls} onClick={async () => {
-                                        setOpenActionMenu(null);
-                                        try {
-                                          const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
-                                          if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || `Download failed (${res.status})`); }
-                                          const blob = await res.blob();
-                                          const url = URL.createObjectURL(blob);
-                                          const a = document.createElement('a');
-                                          a.href = url; a.download = `GroupInvoice-${b.group_id}-${(b.group_name || 'group').replace(/[^a-z0-9_-]+/gi, '-')}.pdf`;
-                                          document.body.appendChild(a); a.click();
-                                          setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-                                        } catch (err: any) { toast.error(err.message); }
-                                      }}>
-                                        📑 {tr('Group invoice PDF')}
-                                      </button>
-                                    )}
-                                    {b.group_id && (
-                                      <button className={menuItemCls} onClick={async () => {
-                                        setOpenActionMenu(null);
-                                        const r = await promptPayment({ title: `Email group invoice for "${b.group_name || 'group'}"`, fields: [{ name: 'to', label: 'Email address', type: 'text', required: true, defaultValue: b.guest_email || '' }], confirmLabel: 'Send' });
-                                        if (!r) return;
-                                        try {
-                                          const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/email-invoice`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ to: r.to.trim() }) });
-                                          const data = await res.json();
-                                          if (!res.ok) throw new Error(data?.error || `Email failed (${res.status})`);
-                                          toast.success(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.`);
-                                        } catch (err: any) { toast.error(err.message); }
-                                      }}>
-                                        📧 {tr('Email group invoice')}
-                                      </button>
-                                    )}
-                                    {/* OTA re-sync */}
-                                    {isOta && sep}
-                                    {isOta && (
-                                      <button className={menuItemCls} onClick={() => { resyncBookingToChannel(b); setOpenActionMenu(null); }}>
-                                        🔁 {tr('Re-sync to channel')}
-                                      </button>
-                                    )}
-                                    {/* Destructive — Cancel */}
-                                    {b.status === 'BOOKED' && sep}
-                                    {b.status === 'BOOKED' && (
-                                      <button className={menuItemDestructCls} onClick={() => { cancelBooking(b.id); setOpenActionMenu(null); }}>
-                                        ✕ {tr('Cancel booking')}
-                                      </button>
-                                    )}
-                                  </div>,
-                                  document.body
-                                );
-                              })()}
-                            </div>
-                          </div>
+                          <RowActions moreLabel={tr('actions.more')} actions={(() => {
+                            const st = String(b.status || '').toUpperCase();
+                            const canBk = canWriteTab('HOTEL_BOOKINGS');
+                            const docCount = Number(b.document_count || 0);
+                            const needsDocs = hotelSettings.require_id_at_checkin !== false && st === 'BOOKED' && docCount === 0;
+                            const isOta = b.booking_source && !['DIRECT', 'WALKIN', 'WALK_IN', ''].includes(String(b.booking_source).toUpperCase());
+                            const active = st === 'BOOKED' || st === 'CHECKED_IN';
+                            const settleGroup = async () => {
+                              const r = await promptPayment({
+                                title: `Settle group "${b.group_name || 'group'}"`,
+                                body: 'Every CHECKED_IN room will be checked out and billed as one consolidated invoice.',
+                                fields: [
+                                  { name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'},{value:'BANK_TRANSFER',label:'Bank Transfer'}], defaultValue: 'CASH' },
+                                  { name: 'discount', label: 'Group discount (₹)', type: 'number', placeholder: '0', defaultValue: '0' },
+                                ],
+                                confirmLabel: 'Settle & Checkout',
+                              });
+                              if (!r) return;
+                              const groupDiscount = Math.max(0, Number(r.discount) || 0);
+                              try {
+                                const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/checkout`, {
+                                  method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                  body: JSON.stringify({ payment_method: r.method.toUpperCase(), discount: groupDiscount }),
+                                });
+                                const data = await res.json();
+                                if (!res.ok) throw new Error(data?.error || `Settle failed (${res.status})`);
+                                toast.success('Group settled. Invoice: ' + data.invoice_number);
+                                fetchHotelBookings();
+                              } catch (err: any) { toast.error(err.message); }
+                            };
+                            const groupPdf = async () => {
+                              try {
+                                const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
+                                if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || `Download failed (${res.status})`); }
+                                const blob = await res.blob();
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url; a.download = `GroupInvoice-${b.group_id}-${(b.group_name || 'group').replace(/[^a-z0-9_-]+/gi, '-')}.pdf`;
+                                document.body.appendChild(a); a.click();
+                                setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+                              } catch (err: any) { toast.error(err.message); }
+                            };
+                            const groupEmail = async () => {
+                              const r = await promptPayment({ title: `Email group invoice for "${b.group_name || 'group'}"`, fields: [{ name: 'to', label: 'Email address', type: 'text', required: true, defaultValue: b.guest_email || '' }], confirmLabel: 'Send' });
+                              if (!r) return;
+                              try {
+                                const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/email-invoice`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ to: r.to.trim() }) });
+                                const data = await res.json();
+                                if (!res.ok) throw new Error(data?.error || `Email failed (${res.status})`);
+                                toast.success(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.`);
+                              } catch (err: any) { toast.error(err.message); }
+                            };
+                            const addRoom = async () => {
+                              setBookingDetailTarget(b);
+                              setIndivAddRoom({ open: true, typeId: '', qty: '1', rate: '', busy: false, types: [] });
+                              try {
+                                const rr = await fetch(`/api/restaurant/${restaurantId}/hotel/room-types`, { headers: { Authorization: `Bearer ${token}` } });
+                                if (rr.ok) { const tps = await rr.json(); setIndivAddRoom(s => ({ ...s, types: Array.isArray(tps) ? tps : [] })); }
+                              } catch { /* the form still opens */ }
+                            };
+                            return [
+                              // Primary step for the row, inline first.
+                              { key: 'checkin', label: tr('Check In'), icon: LogIn, inline: true, tone: 'success' as const, hidden: st !== 'BOOKED' || !canBk, onClick: () => confirmAndCheckIn(b) },
+                              { key: 'checkout', label: tr('Check Out'), icon: LogOut, inline: true, tone: 'primary' as const, hidden: st !== 'CHECKED_IN' || !canBk, onClick: () => { setCheckoutBooking(b); setShowCheckoutModal(true); } },
+                              { key: 'settle', label: tr('Settle Group'), icon: Users, inline: true, tone: 'primary' as const, hidden: !b.group_id || st !== 'CHECKED_IN' || !canBk, onClick: settleGroup },
+                              { key: 'link', label: tr('actions.sendLink'), icon: Send, inline: true, tone: 'primary' as const, hidden: !canBk || !moduleOn('online_payments'), disabled: st === 'CANCELLED' || !(Number(b.total_amount || 0) > 0) || (!b.guest_email && !b.guest_phone) || !!paylinkBusy, reason: (!b.guest_email && !b.guest_phone) ? tr('pg.collect.noContact') : tr('pg.collect.nothingDue'), onClick: () => chooseAndSendPayLink(b) },
+                              { key: 'folio', label: tr('Open folio'), icon: ClipboardList, inline: true, hidden: st !== 'CHECKED_IN' || !b.open_folio_id, onClick: async () => { try { await loadFolio(b.open_folio_id); } catch (err: any) { toast.error(err?.message || 'Failed to load folio'); } } },
+                              { key: 'edit', label: tr('Edit booking'), icon: Edit3, inline: st === 'BOOKED', hidden: st !== 'BOOKED' || !canBk, onClick: () => { setEditingBooking({ ...b }); setShowBookingModal(true); } },
+                              // Everything else in the "…" menu.
+                              { key: 'docs', label: `${tr('Documents')}${docCount > 0 ? ` (${docCount})` : ''}${needsDocs ? ' ⚠' : ''}`, icon: FileText, marked: docCount > 0, hidden: st === 'CANCELLED' || !canBk, onClick: () => setDocsTargetBooking({ ...b }) },
+                              { key: 'gst', label: (b.guest_gstin) ? tr('actions.gstEdit') : tr('actions.gstAdd'), icon: BadgePercent, marked: !!b.guest_gstin, hidden: !canWriteTab('FOLIOS') || !b.open_folio_id, onClick: () => editBuyerGst({ id: b.open_folio_id, customer_gstin: b.guest_gstin }, 'HOTEL', () => fetchHotelBookings()) },
+                              { key: 'addroom', label: `${tr('Add room')}${b.group_name ? ' ' + tr('to group') : ''}`, icon: BedDouble, hidden: !canBk || !['BOOKED', 'ASSIGNED', 'CHECKED_IN'].includes(st) || Number(b.no_show) === 1, onClick: addRoom },
+                              { key: 'advance', label: tr('Record advance'), icon: IndianRupee, hidden: !canBk || !active, onClick: () => { setAdvancePayTarget(b); setAdvanceDraft({ amount: '', method: 'CASH', reference: '' }); } },
+                              { key: 'move', label: tr('Move room'), icon: ArrowLeftRight, hidden: !canBk || st !== 'CHECKED_IN', onClick: () => openMoveRoom(b) },
+                              { key: 'upgrade', label: tr('Upgrade room'), icon: ArrowUpCircle, hidden: !canBk || st !== 'CHECKED_IN', onClick: () => openUpgradeRoom(b) },
+                              { key: 'amend', label: tr('Amend checkout date'), icon: CalendarClock, hidden: !canBk || st !== 'CHECKED_IN', onClick: () => setAmendStay({ booking: b, newDate: String(b.check_out_date || '').slice(0, 10), saving: false }) },
+                              { key: 'grouppdf', label: tr('Group invoice PDF'), icon: FileText, hidden: !b.group_id, onClick: groupPdf },
+                              { key: 'groupemail', label: tr('Email group invoice'), icon: Mail, hidden: !b.group_id || !canBk, onClick: groupEmail },
+                              { key: 'resync', label: tr('Re-sync to channel'), icon: RefreshCw, hidden: !isOta || !canBk, onClick: () => resyncBookingToChannel(b) },
+                              { key: 'cancel', label: tr('Cancel booking'), icon: Ban, tone: 'danger' as const, hidden: st !== 'BOOKED' || !canBk, onClick: () => cancelBooking(b.id) },
+                            ];
+                          })()} />
                         </td>
                       </tr>
                     );

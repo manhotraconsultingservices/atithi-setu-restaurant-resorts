@@ -477,4 +477,10 @@ export const ta: Record<string, string> = {
   'gst.saveFailed': 'GST விவரங்களைச் சேமிக்க முடியவில்லை.',
   'gst.saved': 'GSTIN {gstin} சேமிக்கப்பட்டது. சேர்க்க விலைப்பட்டியலை மீண்டும் அச்சிடவும்.',
   'gst.cleared': 'GST விவரங்கள் நீக்கப்பட்டன.',
+  // ── Hotel bookings pay link ──
+  'pg.collect.viaEmail': 'மின்னஞ்சல்',
+  'pg.collect.viaWhatsApp': 'WhatsApp',
+  'pg.collect.sendOn': 'எதில் அனுப்ப',
+  'pg.collect.send': 'அனுப்பு',
+  'pg.collect.noContact': 'இந்த முன்பதிவில் மின்னஞ்சல் அல்லது தொலைபேசி இல்லை. கட்டண இணைப்பு அனுப்ப ஒன்றைச் சேர்க்கவும்.',
 };

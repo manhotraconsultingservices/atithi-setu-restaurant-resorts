@@ -477,4 +477,10 @@ export const te: Record<string, string> = {
   'gst.saveFailed': 'GST వివరాలు సేవ్ కాలేదు.',
   'gst.saved': 'GSTIN {gstin} సేవ్ అయింది. చేర్చడానికి ఇన్‌వాయిస్ మళ్లీ ముద్రించండి.',
   'gst.cleared': 'GST వివరాలు తొలగించబడ్డాయి.',
+  // ── Hotel bookings pay link ──
+  'pg.collect.viaEmail': 'ఇమెయిల్',
+  'pg.collect.viaWhatsApp': 'WhatsApp',
+  'pg.collect.sendOn': 'ఎక్కడ పంపాలి',
+  'pg.collect.send': 'పంపండి',
+  'pg.collect.noContact': 'ఈ బుకింగ్‌లో ఇమెయిల్ లేదా ఫోన్ లేదు. చెల్లింపు లింక్ పంపడానికి ఒకటి జోడించండి.',
 };
