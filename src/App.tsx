@@ -16,6 +16,7 @@ import { FloorPlanMap } from './FloorPlanMap';
 import { StatusBoard } from './StatusBoard';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
+import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { canWriteTab, canDeleteTab, tabLevel } from './perm';
 import { prettyRoleLabel } from './roleLabel';
@@ -568,38 +569,11 @@ function PaginationBar({ page, totalPages, setPage, total, pageSize = PAGE_SIZE 
 }
 
 // ─── Per-tenant subdomain helpers ────────────────────────────────────────────
-// Reserved subdomains that should NOT resolve to a tenant (they map to apex).
-const RESERVED_TENANT_SUBS = new Set([
-  'www', 'api', 'admin', 'app', 'demo', 'internal', 'support',
-  'mail', 'ftp', 'blog', 'cdn', 'static', 'help', 'docs', 'auth',
-  'login', 'signup', 'register', 'test', 'staging', 'dev', 'erp'
-]);
-
-// Returns the tenant slug from the current URL, or null for apex / localhost.
-// Supports multiple environment layouts:
-//   atithi-setu.com                       → apex (null)
-//   erp.atithi-setu.com                   → "erp" is reserved → apex (null)
-//   demo.atithi-setu.com                  → "demo" is reserved → apex (null)
-//   manhotra-kitchen.atithi-setu.com      → tenant "manhotra-kitchen"
-//   manhotra-kitchen.demo.atithi-setu.com → tenant "manhotra-kitchen" (demo env)
-// Localhost dev supports ?tenant=<slug> query param for testing without DNS.
+// Returns the tenant slug from the current URL, or null for a platform host.
+// The rules and the reserved list live in tenantHost.ts, shared with the server.
 function getTenantSlug(): string | null {
   try {
-    const host = window.location.hostname;
-
-    if (host === 'localhost' || host === '127.0.0.1' || /^\d+\.\d+\.\d+\.\d+$/.test(host)) {
-      const params = new URLSearchParams(window.location.search);
-      const qp = params.get('tenant');
-      return qp && !RESERVED_TENANT_SUBS.has(qp.toLowerCase()) ? qp.toLowerCase() : null;
-    }
-
-    const parts = host.split('.');
-    if (parts.length < 3) return null;               // apex or single-label
-
-    const first = parts[0].toLowerCase();
-    // Reserved first segment (erp, demo, www, api, etc.) → treat as apex
-    if (RESERVED_TENANT_SUBS.has(first)) return null;
-    return first;
+    return tenantSlugFromHost(window.location.hostname, new URLSearchParams(window.location.search).get('tenant'));
   } catch {
     return null;
   }
@@ -1573,6 +1547,12 @@ export default function App() {
   //  • ?r=<id>, ?table=<id>, ?room=<id>, ?orderId=<id> → customer/guest flow.
   //    These printed QR codes predate tenant subdomains; whenever present
   //    the user is a guest and must NOT see a login prompt.
+  //  • ?reset=<token> → the Set New Password form. The tenant login page has
+  //    no reset form of its own, and the ?reset= effect strips the token from
+  //    the URL, so without this exception a reset link opened on a tenant
+  //    subdomain silently became a plain login page. Reset tokens are not
+  //    tenant-scoped; "Sign In Now" returns the step to 'login' and this
+  //    branch takes over again.
   const onInternalPath = (window.location.pathname || '').toLowerCase().replace(/\/$/, '') === '/internal';
   const guestQueryParams = (() => {
     try {
@@ -1601,7 +1581,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant?.id]);
 
-  if (tenantSlug && !token && !onInternalPath && !guestQueryParams) {
+  if (tenantSlug && !token && !onInternalPath && !guestQueryParams && ownerAuthStep !== 'reset') {
     // Still loading tenant info
     if (tenantLoading) {
       return (

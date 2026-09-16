@@ -83,6 +83,7 @@ import {
   type AiosellReservation, type AiosellInventoryUpdate, type AiosellRateUpdate,
 } from "./aiosellClient.ts";
 import { buildUpiUri } from "./upiLink.ts";
+import { RESERVED_SUBDOMAINS } from "./tenantHost.ts";
 import multer from "multer";
 import cron from "node-cron";
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
@@ -472,11 +473,9 @@ function maskResetUrl(raw: any): string {
 }
 
 // ====== Tenant slug helpers (per-tenant subdomain login) ======
-const RESERVED_SLUGS = new Set([
-  'www', 'api', 'admin', 'app', 'demo', 'internal', 'support',
-  'mail', 'ftp', 'blog', 'cdn', 'static', 'help', 'docs', 'auth',
-  'login', 'signup', 'register', 'test', 'staging', 'dev', 'erp'
-]);
+// Shared with the SPA's host parser (tenantHost.ts), so a slug refused here is
+// exactly a host the SPA treats as the platform rather than a tenant.
+const RESERVED_SLUGS = RESERVED_SUBDOMAINS;
 
 function slugify(name: string): string {
   return (name || '').toLowerCase()
@@ -64003,8 +64002,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'stock-ledger-one-statement',
+    commit_marker: 'reset-link-platform-host',
     code_features: [
+      'reset-link-platform-host — BUGFIX: owners tapping the password-reset link saw Restaurant Not Found. Reset emails link to FRONTEND_URL, which is dev-erp.atithi-setu.com (same backend as erp.*), and dev-erp was not a reserved subdomain, so getTenantSlug read it as a tenant slug, /api/tenant/by-slug/dev-erp answered 404 and the reset token was never used. New tenantHost.ts (pure, shared by server and SPA like upiLink.ts) holds RESERVED_SUBDOMAINS (old list plus dev-erp and prod-erp) and tenantSlugFromHost; server RESERVED_SLUGS and the SPA parser both import it, so the two copies can no longer drift and no tenant can claim a platform label. SECOND FAULT on the same path: a reset link opened on a real tenant subdomain stripped the token and rendered the tenant login page, which has no reset form; the tenant-login gate now steps aside while ownerAuthStep is reset, and Sign In Now hands back to it. test-scripts/tenant_host_check.ts (16 checks) and suite TC-AUTH-RESET-HOST (dev-erp/prod-erp by-slug 404 + deployed bundle reserves dev-erp).',
       'stock-ledger-one-statement — ingredients.current_stock_qty and SUM(stock_movements.qty_delta) disagreed on 19 items across 5 tenants (15 Sep 2026). (1) Order consumption, order reversal, the spa retail sale and the opening stock on POST /inventory/ingredients and POST /hotel-inventory write the stock figure and its ledger line in ONE statement (a data-modifying WITH), so a failed insert can no longer leave stock moved with no line; a consumption or reversal that fails is logged and does not block the order; any non-zero opening is logged, negative included. (2) seedSpaDefaults seeds Spa Massage Oil and Aroma Candle at 0 stock. (3) The hotel item fold writes an opening line for each item it moves, in the same statement, and writes its marker only when the fold succeeds. (4) PATCH /hotel-inventory/:itemId no longer sets current_stock_qty: a changed figure is refused 400 STOCK_NEEDS_A_MOVEMENT, the current figure echoed back unchanged is accepted. (5) POST /inventory/admin/purge-corrupt-movements removed. (6) GET /inventory/ledger-integrity (module, include_shared, include_inactive) lists items whose stock figure and ledger disagree with stock_qty, ledger_qty and gap; /inventory/stockouts flags them (ledger_mismatch, ledger_qty, ledger_gap, ledger figures null, left out of the ledger totals, totals.ledger_mismatches, listed first) and /inventory/turns bands them LEDGER_MISMATCH with no cover or turns (data_quality.ledger_mismatches); both Analytics panels show them. Existing mismatched data is NOT corrected here (owner decision pending).',
       'hrms-r1d-excel — exceljs 4.4.0 dependency; hrExcel.ts buildWorkbook (bold frozen header, filter, real dates) and readSheet (header names in any order, dates as YYYY-MM-DD, SheetReadError for a non-xlsx file or over maxRows); GET /hr/employees.xlsx (CSV number rule: full PAN, Aadhaar and bank account only with HR_SENSITIVE Edit, logged EXPORTED); GET /hr/employees/import-template.xlsx (Employees sheet + How to fill sheet with this property roles); POST /hr/employees/import/preview (xlsx upload, validateImportRow per row: NEW, DUPLICATE by name with phone or email, INVALID with every problem; nothing saved) and /import/commit (every row checked again, OFFLINE employees with code, designation, department linked to hr_masters by name, employment type, joining date, date of birth, gender; audit CREATED from an Excel import); import needs HR_PAYROLL Edit and STAFF Full like Bulk Add; UI Export Excel and Import from Excel on the Employees directory; TC-HR-XLSX-ROUNDTRIP and static TC-HR-TAB-REGISTRIES.',
       'hrms-r1c-private-documents — hr_documents table (type, title, hr1: number, issuing country, issue and expiry dates, verified_by/at, storage + file_key, last_alert_stage) created in createHrTables; files AES-256-GCM encrypted (HRF1) by persistPrivateHrFile to R2 hr-private/ or disk uploads/hr-private (HR_PRIVATE_DIR), never a public URL; GET /hr/documents/:docId/file needs HR_SENSITIVE View and logs DOCUMENT_OPENED; a document number needs HR_SENSITIVE Edit; POST /hr/employees/:staffId/documents fixed at the same path (was a memory upload with an undefined file name overwriting notes; no tenant had entries) with 415, 400 and 404 guards; GET list, PATCH (a new expiry date clears last_alert_stage; verified), DELETE removes the file; GET /hr/documents/expiring; daily 09:15 IST _hrDocumentExpirySweep (D30, D7, EXPIRED once per stage; staff not RESIGNED or TERMINATED) fires HR_DOCUMENT_EXPIRING; POST /hr/documents/expiry-alerts/run (owner); HR_DOCUMENT history type; UI Documents section on the employee record and Documents due for renewal in Organisation.',
