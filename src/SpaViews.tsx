@@ -8,7 +8,7 @@ import { DataTable } from './components/DataTable';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import {
   Calendar, Clock, Plus, Trash2, Check, X, User, Package, Award,
-  TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText, History, Link2,
+  TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText, History, Link2, Send, Ban, BadgePercent,
 } from 'lucide-react';
 // RBAC — shared frontend gates (View=1, Edit=2, Full=3) reading the tab_perms
 // map App.tsx mirrors into localStorage. These detached Spa views hide write
@@ -20,6 +20,8 @@ import { usePaymentDialog } from './components/PaymentDialog';
 import { QRCodeCanvas } from 'qrcode.react';
 import { CollectOnlineDialog } from './PaymentLinks';
 import { moduleOn } from './tenantModules';
+import { RowActions } from './components/RowActions';
+import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { useT } from './i18n';
 
 // ── Spa History overlay — audit log (who changed what) for an appointment or
@@ -2687,6 +2689,7 @@ function SpaFolios({ restaurantId, token }: Props) {
   const [promoCode, setPromoCode] = useState('');
   const [history, setHistory] = useState<any>(null); // folio History (audit log) overlay
   const [linkFor, setLinkFor] = useState<any>(null); // send a gateway payment link
+  const editGst = useBuyerGstEditor(restaurantId, token);
   const { t } = useT();
   // Recording a spa payment needs Edit on Spa Appointments (the server's gate).
   const canSendLink = canWriteTab('SPA_APPOINTMENTS');
@@ -2810,16 +2813,15 @@ function SpaFolios({ restaurantId, token }: Props) {
                     <td className="px-3 py-2 text-right tabular-nums font-bold text-rose-600">{open ? money(outOf(f)) : '—'}</td>
                     <td className="px-3 py-2 text-center"><span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${stColor(st)}`}>{st}</span></td>
                     <td className="px-3 py-2">
-                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                        {open && canEdit && <button className={BTN_PRIMARY} onClick={() => openPay(f)}><IndianRupee size={12} /> Payment</button>}
-                        {open && canSendLink && moduleOn('online_payments') && <button className={BTN_GHOST} title={t('spa.pay.sendLinkHint')} onClick={() => setLinkFor(f)}><Link2 size={12} /> {t('spa.pay.sendLink')}</button>}
-                        {open && canEdit && <button className={BTN_GHOST} onClick={() => openPromo(f)}><Tag size={12} /> Promo</button>}
-                        <button className={BTN_GHOST} onClick={() => downloadPdf(f)}><FileText size={12} /> Invoice</button>
-                        <button className={BTN_GHOST} title="Audit log — who changed this invoice" onClick={() => setHistory({ id: f.id, meta: { title: f.invoice_number || f.id, subtitle: [statusOf(f), f.client_name].filter(Boolean).join(' · '), facts: [['Invoice #', f.invoice_number], ['Client', f.client_name], ['Service', f.service_name], ['Total', money(f.grand_total)], ['Paid', money(f.paid_amount)], ['Outstanding', open ? money(outOf(f)) : '—']] } })}><History size={12} /></button>
-                        {canCancelSpa && canEdit && !['voided', 'cancelled'].includes(String(f.status || '').toLowerCase()) && (
-                          <button className={`${BTN_GHOST} !text-rose-700 !border-rose-200 hover:!bg-rose-50`} title="Cancel this invoice — reverses it in the accounts (never deletes it)" disabled={busy} onClick={() => cancelFolio(f)}>Cancel</button>
-                        )}
-                      </div>
+                      <RowActions moreLabel={t('actions.more')} actions={[
+                        { key: 'pay', label: t('actions.recordPayment'), icon: IndianRupee, inline: true, tone: 'success', hidden: !open || !canEdit, onClick: () => openPay(f) },
+                        { key: 'link', label: t('actions.sendLink'), icon: Send, inline: true, tone: 'primary', hidden: !open || !canSendLink || !moduleOn('online_payments'), onClick: () => setLinkFor(f) },
+                        { key: 'pdf', label: t('actions.invoicePdf'), icon: FileText, inline: true, onClick: () => downloadPdf(f) },
+                        { key: 'promo', label: t('actions.applyPromo'), icon: Tag, hidden: !open || !canEdit, onClick: () => openPromo(f) },
+                        { key: 'gst', label: f.customer_gstin ? t('actions.gstEdit') : t('actions.gstAdd'), icon: BadgePercent, marked: !!f.customer_gstin, hidden: !canEdit || ['voided', 'cancelled'].includes(String(f.status || '').toLowerCase()), onClick: () => editGst({ kind: 'SPA_FOLIO', id: f.id }, { gstin: f.customer_gstin, address: f.customer_address }, () => load()) },
+                        { key: 'history', label: t('actions.history'), icon: History, onClick: () => setHistory({ id: f.id, meta: { title: f.invoice_number || f.id, subtitle: [statusOf(f), f.client_name].filter(Boolean).join(' · '), facts: [['Invoice #', f.invoice_number], ['Client', f.client_name], ['Service', f.service_name], ['Total', money(f.grand_total)], ['Paid', money(f.paid_amount)], ['Outstanding', open ? money(outOf(f)) : '—']] } }) },
+                        { key: 'cancel', label: t('actions.cancelInvoice'), icon: Ban, tone: 'danger', disabled: busy, hidden: !canCancelSpa || !canEdit || ['voided', 'cancelled'].includes(String(f.status || '').toLowerCase()), onClick: () => cancelFolio(f) },
+                      ]} />
                     </td>
                   </tr>
                 );

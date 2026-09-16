@@ -38618,6 +38618,44 @@ ${data.tenant.name}`;
     } catch (err: any) { console.error("Spa invoice PDF error:", err); res.status(500).json({ error: "Failed to generate invoice PDF" }); }
   });
 
+  // Buyer GST details on a hotel guest bill, for a guest claiming input tax
+  // credit. Saved on the bill (with its address) and on the booking, which the
+  // check-out GST register, the e-invoice and GSTR-1 already read. Same rules as
+  // every other bill; see _readBuyerGstDetails.
+  app.put("/api/restaurant/:id/hotel/folios/:fid/gst-details", authenticate, hotelStaff, requireTabAction('FOLIOS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const f: any = await db.get(
+        "SELECT f.id, f.status, f.invoice_number, f.booking_id, f.customer_gstin, f.customer_address, b.guest_gstin FROM folios f LEFT JOIN room_bookings b ON b.id = f.booking_id WHERE f.id = ? AND COALESCE(f.folio_kind, 'HOTEL') = 'HOTEL'",
+        [req.params.fid]);
+      if (!f) return res.status(404).json({ error: 'Guest bill not found' });
+      if (['voided', 'cancelled'].includes(String(f.status || '').toLowerCase())) {
+        return res.status(409).json({ error: 'This bill is voided — there is no invoice to put GST details on.', code: 'BILL_CANCELLED' });
+      }
+      const current = { customer_gstin: f.customer_gstin || f.guest_gstin || null, customer_address: f.customer_address || null };
+      const v = _readBuyerGstDetails(req.body, current);
+      if (v.fail) return res.status(v.fail.status).json({ error: v.fail.error, code: v.fail.code });
+      if (v.gstin !== undefined) {
+        await db.run("UPDATE folios SET customer_gstin = ? WHERE id = ?", [v.gstin || null, f.id]);
+        if (f.booking_id) await db.run("UPDATE room_bookings SET guest_gstin = ? WHERE id = ?", [v.gstin || null, f.booking_id]);
+      }
+      if (v.address !== undefined) await db.run("UPDATE folios SET customer_address = ? WHERE id = ?", [v.address || null, f.id]);
+      const row: any = await db.get("SELECT id, invoice_number, customer_gstin, customer_address FROM folios WHERE id = ?", [f.id]);
+      await writeObjectAudit(db, req, {
+        objectType: 'FOLIO', objectId: String(f.id), action: 'GST_DETAILS_UPDATED',
+        summary: row.customer_gstin ? `Buyer GST details set on ${row.invoice_number || f.id} — GSTIN ${row.customer_gstin}` : `Buyer GST details cleared on ${row.invoice_number || f.id}`,
+        before: current,
+        after: { customer_gstin: row.customer_gstin, customer_address: row.customer_address },
+      }).catch(() => {});
+      res.json({ success: true, ...row, prints_on_invoice: !!row.customer_gstin });
+    } catch (err: any) {
+      console.error('hotel gst-details error:', err);
+      res.status(500).json({ error: 'Failed to save GST details' });
+    }
+  });
+
   // Buyer GST details on a spa bill (M-3). A spa folio has no booking to carry a
   // GSTIN the way a hotel or event folio does, so it lives on the folio. Same
   // rules as every other bill; see _readBuyerGstDetails.
@@ -54419,6 +54457,7 @@ ${data.tenant.name}`;
                 COALESCE(f.gst_amount,0)  AS gst_amount,
                 COALESCE(f.grand_total,0) AS grand_total,
                 f.payment_method, f.settled_at, f.invoice_number, f.created_at,
+                f.customer_gstin, f.customer_address, b.guest_gstin, b.guest_phone, b.guest_email,
                 b.guest_name, b.check_in_date, b.check_out_date,
                 b.actual_checkin_at, b.actual_checkout_at,
                 r.name AS room_name, r.room_number,
@@ -55711,7 +55750,9 @@ ${data.tenant.name}`;
           email:        folio.guest_email,
           nationality:  folio.guest_nationality,
           state:        folio.guest_state,
-          gstin:        folio.guest_gstin || null,   // CHK-3: B2B ITC line
+          // Buyer details set from Guest Bills live on the bill; older ones on the booking.
+          gstin:        folio.customer_gstin || folio.guest_gstin || null,   // CHK-3: B2B ITC line
+          address:      folio.customer_address || undefined,
         },
         stay: {
           roomName:          folio.room_name || folio.room_id,
@@ -55861,7 +55902,7 @@ ${data.tenant.name}`;
       const pdf = await generateInvoicePdf({
         hotel: _invoiceSeller(hotel),
         policies: _invoicePolicies(hotel, 'hotel'),
-        guest: { name: folio.guest_name || 'Guest', phone: folio.guest_phone, email: folio.guest_email, nationality: folio.guest_nationality, state: folio.guest_state },
+        guest: { name: folio.guest_name || 'Guest', phone: folio.guest_phone, email: folio.guest_email, nationality: folio.guest_nationality, state: folio.guest_state, gstin: folio.customer_gstin || folio.guest_gstin || undefined, address: folio.customer_address || undefined },
         stay:  {
           roomName: folio.room_name || folio.room_id,
           bookingId: folio.booking_id,
@@ -65600,8 +65641,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'paylink-resend-open-link',
+    commit_marker: 'row-actions-consistent-gst',
     code_features: [
+      'row-actions-consistent-gst  UX (owner: make the Actions column consistent across modules, fold extra commands under a menu, add GST). One shared src/components/RowActions.tsx now renders the Actions column of Restaurant Invoices, PMS Guest Bills, Event bookings and Wellness invoices: the most-used actions inline as same-size icon buttons with tooltips and aria-labels, the rest in a ... menu as icon plus label with Cancel and Delete last in red, a disabled action shows its reason as the tooltip, and a dot marks a bill that already has GST details. The same icon means the same action everywhere (Send = payment link, BadgePercent = GST, FileText = invoice PDF, IndianRupee = payment). NEW: a GST action on Event bookings, Guest Bills and Wellness invoices through one translated editor (src/components/BuyerGstEditor.ts) that Restaurant invoices now use too; new route PUT /hotel/folios/:fid/gst-details (hotelStaff + FOLIOS UPDATE, _readBuyerGstDetails rules, audited) saves the GSTIN on the bill and on the booking, so the check-out GST register, e-invoice and GSTR-1 see it, and the address on the bill; both hotel invoice PDFs now print the buyer GSTIN and address from the bill. The Guest Bills list returns customer_gstin, customer_address, guest_gstin, guest_phone and guest_email. Labels in en, hi, ta, kn, te, pa.',
       'paylink-resend-open-link  BUGFIX (owner: every Send by email asked Replace the open link?). ROOT CAUSE: each Send button in the payment link dialog always created a NEW link, so once a link existed (sent on WhatsApp, or Create link only) the next send tried to replace it. Now an open link for the same amount is sent again on the chosen channel (email, WhatsApp or both) and Create link only points to it; the replace question is asked only when staff change the amount. Frontend only.',
       'paid-modules-hidden-when-off  BUGFIX (owner: Online Payments and WhatsApp off for Ankur-cafe, yet the owner still saw Payment Gateways). A paid module the platform has not switched on is now not shown to any role, rather than greyed out: Payment Gateways leaves the menu (navVisibility isOnlinePaymentsEnabled, which also drives the content guard) and the Staff Access matrix; every send-link button and row icon, the hotel folio Collect online, the bookings Pay link column, and every WhatsApp control (dialog WhatsApp and Both buttons, bookings WhatsApp Pay link, notification WhatsApp channel toggles, WhatsApp card, compose channel) are hidden. The send-link icon still greys out when nothing is due. WhatsApp test: a 131005 / 10 / 200 permission refusal now explains the System User token permissions and asset assignment.',
       'paylink-row-icons  UI: a Send payment link icon under Actions on Events bookings, Restaurant Invoices and PMS Guest Bills; it opens the same dialog as Spa invoices, which now also has Send on both (WhatsApp and email). The icon is greyed out, with the reason as its tooltip, when nothing is due (paid, cancelled, settled, voided, zero total, group bill) or Online Payments is off. Frontend only.',

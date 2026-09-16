@@ -18,6 +18,8 @@ import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
 import { PaymentGatewaysPage, CollectOnlineDialog } from './PaymentLinks';
 import { PlatformWhatsApp } from './PlatformWhatsApp';
+import { RowActions } from './components/RowActions';
+import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, setTenantModules } from './tenantModules';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
@@ -106,6 +108,7 @@ import {
   Store,
   BedDouble,
   Link2 as LinkIcon2,
+  BadgePercent,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -11682,6 +11685,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const toast = useToast();
   const showConfirm = useConfirm();
   const promptPayment = usePaymentDialog();
+  // Buyer GST details, the same editor for every bill in every module.
+  const editBuyerGstFor = useBuyerGstEditor(restaurantId, token);
 
   // FRONT-OFFICE-REPORTS (client request 7 Jun 2026): four classic
   // front-office reports (Arrival / Departure / Room Status / Night
@@ -14391,33 +14396,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // its number on the session; a takeaway / delivery / manual bill is one order.
   // The details go on whichever is the invoice. They carry no money, so they can
   // be added after the bill is paid and the invoice simply reprinted.
-  const editBuyerGst = async (inv: any, kind: 'SESSION' | 'ORDER' | 'SPA', onDone: () => void) => {
-    const r = await promptPayment({
-      title: inv.customer_gstin ? 'Edit buyer GST details' : 'Add buyer GST details',
-      body: 'For a customer claiming input tax credit. The invoice then prints their GSTIN and address and is reported as a B2B supply. Clear the GSTIN to turn it back into an ordinary bill.',
-      fields: [
-        { name: 'gstin', label: 'Customer GSTIN', type: 'text', placeholder: '27AAPFU0939F1ZV', defaultValue: inv.customer_gstin || '' },
-        { name: 'address', label: 'Registered address', type: 'textarea', placeholder: 'Address as on the GST registration', defaultValue: inv.customer_address || '' },
-      ],
-      confirmLabel: 'Save GST details',
-    });
-    if (!r) return;
-    const url = kind === 'SPA'
-      ? `/api/restaurant/${restaurantId}/spa/folios/${inv.id}/gst-details`
-      : kind === 'SESSION'
-        ? `/api/restaurant/${restaurantId}/invoices/session/${inv.session_token || inv.id}/gst-details`
-        : `/api/restaurant/${restaurantId}/invoices/order/${inv.id}/gst-details`;
-    try {
-      const res = await fetch(url, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ customer_gstin: String(r.gstin || '').trim().toUpperCase(), customer_address: String(r.address || '').trim() }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(d?.error || 'Could not save GST details');
-      toast.success(d.customer_gstin ? `GSTIN ${d.customer_gstin} saved — reprint the invoice to include it` : 'GST details cleared');
-      onDone();
-    } catch (err: any) { toast.error(err.message); }
-  };
+  const editBuyerGst = (inv: any, kind: 'SESSION' | 'ORDER' | 'SPA' | 'HOTEL', onDone: () => void) => editBuyerGstFor(
+    kind === 'SESSION' ? { kind: 'RESTAURANT_SESSION', token: inv.session_token || inv.id }
+      : kind === 'ORDER' ? { kind: 'RESTAURANT_ORDER', id: inv.id }
+      : kind === 'SPA' ? { kind: 'SPA_FOLIO', id: inv.id }
+      : { kind: 'HOTEL_FOLIO', id: inv.id },
+    { gstin: inv.customer_gstin, address: inv.customer_address },
+    onDone,
+  );
 
   // ── Invoice Edit helpers ──────────────────────────────────────────────────
 
@@ -22709,104 +22695,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </td>
                           {/* Actions */}
                           <td className="px-5 py-4">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              {/* Preview */}
-                              <button
-                                onClick={() => setPrintPreviewHtml(buildInvoiceHTML(inv, invoiceTemplate))}
-                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#0d0a07]/10 transition-all whitespace-nowrap flex items-center gap-1"
-                                title={isSession ? `Preview consolidated invoice (${inv.round_count} rounds)` : 'Preview invoice'}
-                              >
-                                <Eye size={11} /> Preview
-                              </button>
-                              {/* Send payment link — the whole bill, by email, WhatsApp or both */}
-                              {canWriteTab('INVOICES') && moduleOn('online_payments') && (() => {
-                                const cancelled = String(inv.status || '').toUpperCase() === 'CANCELLED' || String(inv.invoice_status || '').toUpperCase() === 'CANCELLED';
-                                const can = !isPaid && !cancelled && Number(inv.totalAmount || 0) > 0;
-                                const why = (isPaid || cancelled || !(Number(inv.totalAmount || 0) > 0)) ? tr('pg.collect.nothingDue') : tr('pg.collect.sendLinkIcon');
-                                return (
-                                  <button onClick={() => setInvLinkFor(inv)} disabled={!can} title={why} aria-label={why}
-                                    className="px-2 py-1 rounded-lg text-[11px] font-bold bg-[#128c7e]/10 text-[#128c7e] hover:bg-[#128c7e]/20 transition-all flex items-center disabled:opacity-40 disabled:cursor-not-allowed">
-                                    <LinkIcon2 size={12} />
-                                  </button>
-                                );
-                              })()}
-                              {/* Edit */}
-                              {!isPaid && canWriteTab('INVOICES') && (
-                                <button
-                                  onClick={() => openInvoiceEdit(inv)}
-                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#1a1208] transition-all whitespace-nowrap flex items-center gap-1"
-                                  title="Edit invoice adjustments"
-                                >
-                                  <Edit3 size={11} /> Edit
-                                </button>
-                              )}
-                              {/* Print — to the thermal printer via the agent (falls
-                                  back to the browser print when no printer is set up) */}
-                              {canWriteTab('INVOICES') && <button
-                                onClick={() => printInvoiceThermal(inv)}
-                                title="Print the bill on your thermal printer (falls back to the browser if none is set up)"
-                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#cc5a16]/10 text-[#cc5a16] hover:bg-[#cc5a16]/20 transition-all whitespace-nowrap flex items-center gap-1"
-                              >
-                                <Printer size={11} /> Print
-                              </button>}
-                              {/* Buyer GST — turns the bill into a B2B tax invoice. */}
-                              {canWriteTab('INVOICES')
-                                && String(inv.status || '').toUpperCase() !== 'CANCELLED'
-                                && String(inv.invoice_status || '').toUpperCase() !== 'CANCELLED' && (
-                                <button
-                                  onClick={() => editBuyerGst(inv, isSession ? 'SESSION' : 'ORDER', fetchInvoices)}
-                                  className={cn("px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap flex items-center gap-1",
-                                    inv.customer_gstin ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#1a1208]")}
-                                  title={inv.customer_gstin ? `B2B invoice to GSTIN ${inv.customer_gstin}` : 'Add the customer\u2019s GSTIN for a B2B tax invoice'}
-                                >
-                                  {inv.customer_gstin ? <Check size={11} /> : null} GST
-                                </button>
-                              )}
-                              {/* History — audit log (who changed this invoice), available
-                                  straight from the list without opening Edit; works for
-                                  paid + unpaid invoices. Opens the same ObjectDetail overlay. */}
-                              <button
-                                onClick={() => setInvoiceTree(inv)}
-                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#1a1208] transition-all whitespace-nowrap flex items-center gap-1"
-                                title="Audit log — who created/edited this invoice and what changed"
-                              >
-                                <History size={11} /> History
-                              </button>
-                              {/* Mark Paid */}
-                              {!isPaid && canWriteTab('INVOICES') && (
-                                <button
-                                  onClick={() => openInvoiceEdit(inv)}
-                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-all whitespace-nowrap"
-                                  title="Open to mark as paid"
-                                >
-                                  ₹ Paid
-                                </button>
-                              )}
-                              {/* Cancel (GL-reversing + audited; never deletes) — owner/manager, not already cancelled */}
-                              {['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase())
-                                && String(inv.status || '').toUpperCase() !== 'CANCELLED'
-                                && String(inv.invoice_status || '').toUpperCase() !== 'CANCELLED' && (
-                                <button
-                                  onClick={() => cancelInvoice(inv)}
-                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-50 text-amber-700 hover:bg-amber-100 transition-all whitespace-nowrap flex items-center gap-1"
-                                  title="Cancel this invoice — reverses it in the accounts (never deletes it)"
-                                >
-                                  <Ban size={11} /> Cancel
-                                </button>
-                              )}
-                              {/* Delete (admin-gated, per-tenant flag) — restaurant
-                                  state is loaded from GET /api/restaurant/:id which
-                                  returns SELECT *, so it includes invoice_delete_enabled */}
-                              {Number((restaurant as any)?.invoice_delete_enabled || 0) === 1 && isInvoiceDeletable(inv) && (
-                                <button
-                                  onClick={() => openDeleteInvoiceModal(inv)}
-                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-red-50 text-red-700 hover:bg-red-100 transition-all whitespace-nowrap flex items-center gap-1"
-                                  title="Permanently delete this invoice"
-                                >
-                                  <Trash2 size={11} /> Delete
-                                </button>
-                              )}
-                            </div>
+                            {/* Four actions show; the rest fold into "…". */}
+                            <RowActions align="start" moreLabel={tr('actions.more')} actions={(() => {
+                              const cancelled = String(inv.status || '').toUpperCase() === 'CANCELLED' || String(inv.invoice_status || '').toUpperCase() === 'CANCELLED';
+                              const canInv = canWriteTab('INVOICES');
+                              const nothingDue = isPaid || cancelled || !(Number(inv.totalAmount || 0) > 0);
+                              const isManager = ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase());
+                              return [
+                                { key: 'edit', label: tr('actions.edit'), icon: Edit3, inline: true, hidden: isPaid || !canInv, onClick: () => openInvoiceEdit(inv) },
+                                { key: 'paid', label: tr('actions.markPaid'), icon: IndianRupee, inline: true, tone: 'success' as const, hidden: isPaid || !canInv, onClick: () => openInvoiceEdit(inv) },
+                                { key: 'link', label: tr('actions.sendLink'), icon: Send, inline: true, tone: 'primary' as const, hidden: !canInv || !moduleOn('online_payments'), disabled: nothingDue, reason: tr('pg.collect.nothingDue'), onClick: () => setInvLinkFor(inv) },
+                                { key: 'print', label: tr('actions.print'), icon: Printer, inline: true, hidden: !canInv, onClick: () => printInvoiceThermal(inv) },
+                                { key: 'preview', label: tr('actions.preview'), icon: Eye, onClick: () => setPrintPreviewHtml(buildInvoiceHTML(inv, invoiceTemplate)) },
+                                { key: 'gst', label: inv.customer_gstin ? tr('actions.gstEdit') : tr('actions.gstAdd'), icon: BadgePercent, marked: !!inv.customer_gstin, hidden: !canInv || cancelled, onClick: () => editBuyerGst(inv, isSession ? 'SESSION' : 'ORDER', fetchInvoices) },
+                                { key: 'history', label: tr('actions.history'), icon: History, onClick: () => setInvoiceTree(inv) },
+                                { key: 'cancel', label: tr('actions.cancelInvoice'), icon: Ban, tone: 'danger' as const, hidden: !isManager || cancelled, onClick: () => cancelInvoice(inv) },
+                                { key: 'delete', label: tr('actions.delete'), icon: Trash2, tone: 'danger' as const, hidden: !(Number((restaurant as any)?.invoice_delete_enabled || 0) === 1 && isInvoiceDeletable(inv)), onClick: () => openDeleteInvoiceModal(inv) },
+                              ];
+                            })()} />
                           </td>
                         </tr>
                       );
@@ -28845,30 +28751,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-3 py-3 text-xs text-[#6b5d52]">{f.payment_method || '—'}</td>
                             <td className="px-3 py-3 text-xs text-[#9c8e85] whitespace-nowrap">{f.settled_at ? String(f.settled_at).slice(0,16).replace('T',' ') : '—'}</td>
                             <td className="px-3 py-3 text-right">
-                              <div className="flex items-center gap-1 justify-end">
-                                {canWriteTab('FOLIOS') && moduleOn('online_payments') && (() => {
-                                  // A single guest's open bill; group bills are settled from the group.
-                                  const open = !f.is_group && !['settled', 'voided', 'closed', 'cancelled'].includes(String(f.status || '').toLowerCase()) && Number(f.grand_total || 0) > 0;
-                                  const can = open;
-                                  const why = !open ? tr('pg.collect.nothingDue') : tr('pg.collect.sendLinkIcon');
-                                  return (
-                                    <button onClick={() => setCollectOnlineFolio(f)} disabled={!can} title={why} aria-label={why}
-                                      className="px-2 py-1 rounded-lg bg-[#128c7e]/10 text-[#128c7e] hover:bg-[#128c7e]/20 flex items-center disabled:opacity-40 disabled:cursor-not-allowed">
-                                      <LinkIcon2 size={12} />
-                                    </button>
-                                  );
-                                })()}
-                                <button
-                                  onClick={() => f.is_group ? loadGroupDetail(f.group_id) : loadFolio(f.id)}
-                                  className="px-2.5 py-1 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[10px] font-bold hover:bg-[#cc5a16]/10">View</button>
-                                {f.status !== 'voided' && (
-                                  <button
-                                    onClick={() => f.is_group ? openGroupPdf(f.group_id) : openFolioPdf(f.id)}
-                                    className="px-2.5 py-1 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[10px] font-bold hover:bg-[#faf7f2] flex items-center gap-1">
-                                    <Eye size={11} /> PDF
-                                  </button>
-                                )}
-                              </div>
+                              <RowActions moreLabel={tr('actions.more')} actions={(() => {
+                                // A single guest's open bill; a group bill is settled from the group.
+                                const st = String(f.status || '').toLowerCase();
+                                const open = !f.is_group && !['settled', 'voided', 'closed', 'cancelled'].includes(st) && Number(f.grand_total || 0) > 0;
+                                return [
+                                  { key: 'view', label: tr('actions.view'), icon: Eye, inline: true, onClick: () => f.is_group ? loadGroupDetail(f.group_id) : loadFolio(f.id) },
+                                  { key: 'link', label: tr('actions.sendLink'), icon: Send, inline: true, tone: 'primary' as const, hidden: !canWriteTab('FOLIOS') || !moduleOn('online_payments'), disabled: !open, reason: tr('pg.collect.nothingDue'), onClick: () => setCollectOnlineFolio(f) },
+                                  { key: 'pdf', label: tr('actions.invoicePdf'), icon: FileText, inline: true, hidden: st === 'voided', onClick: () => f.is_group ? openGroupPdf(f.group_id) : openFolioPdf(f.id) },
+                                  { key: 'gst', label: (f.customer_gstin || f.guest_gstin) ? tr('actions.gstEdit') : tr('actions.gstAdd'), icon: BadgePercent, marked: !!(f.customer_gstin || f.guest_gstin), hidden: !canWriteTab('FOLIOS') || !!f.is_group || st === 'voided', onClick: () => editBuyerGst({ ...f, customer_gstin: f.customer_gstin || f.guest_gstin }, 'HOTEL', () => fetchHotelFolios()) },
+                                ];
+                              })()} />
                             </td>
                           </tr>
                         ))}

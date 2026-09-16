@@ -11,10 +11,12 @@ import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { prettyRoleLabel } from './roleLabel';
 import { CollectOnlineDialog } from './PaymentLinks';
 import { moduleOn } from './tenantModules';
+import { RowActions } from './components/RowActions';
+import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
-  AlertTriangle, Mail, Phone, Upload, Image as ImageIcon, Play, Link2,
+  AlertTriangle, Mail, Phone, Upload, Image as ImageIcon, Play, Link2, Pencil, BadgePercent,
 } from 'lucide-react';
 
 // Cancelling an event invoice is a high-privilege action. Mirrors the backend gate
@@ -692,6 +694,7 @@ function EventBookings({ restaurantId, token }: Props) {
   const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
   const [showNew, setShowNew] = useState(false);
   const [linkRow, setLinkRow] = useState<any>(null); // booking a payment link is being sent for
+  const editGst = useBuyerGstEditor(restaurantId, token);
   const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', half_day_slot: 'AM', venue_rate: '', guest_count: '', special_requests: '' };
   const [form, setForm] = useState<any>(blank);
   const [avail, setAvail] = useState<{ available: boolean; reason: string; rate: number } | null>(null);
@@ -885,14 +888,13 @@ function EventBookings({ restaurantId, token }: Props) {
           { key: 'status', label: t('common.status'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.status, render: (r: any) => <Pill status={r.status} /> },
           { key: '_a', label: t('common.actions'), noExport: true, render: (r: any) => {
             const due = Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0));
-            const showLink = evCanEdit('EVENTS_BOOKINGS') && moduleOn('online_payments');
-            const can = r.status !== 'CANCELLED' && due > 0.01;
-            const why = can ? t('pg.collect.sendLinkIcon') : t('pg.collect.nothingDue');
+            const cancelled = r.status === 'CANCELLED';
             return (
-              <div className="flex items-center gap-1.5 justify-end">
-                {showLink && <button className={`${BTN_GHOST} !px-2 disabled:opacity-40 disabled:cursor-not-allowed`} disabled={!can} title={why} aria-label={why} onClick={() => setLinkRow(r)}><Link2 size={13} /></button>}
-                <button className={BTN_GHOST} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{t('common.edit')}</button>
-              </div>
+              <RowActions moreLabel={t('actions.more')} actions={[
+                { key: 'open', label: t('actions.openBooking'), icon: Pencil, inline: true, onClick: () => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }]) },
+                { key: 'link', label: t('actions.sendLink'), icon: Send, inline: true, tone: 'primary', hidden: !evCanEdit('EVENTS_BOOKINGS') || !moduleOn('online_payments'), disabled: cancelled || due <= 0.01, reason: t('pg.collect.nothingDue'), onClick: () => setLinkRow(r) },
+                { key: 'gst', label: r.customer_gstin ? t('actions.gstEdit') : t('actions.gstAdd'), icon: BadgePercent, inline: true, marked: !!r.customer_gstin, hidden: !evCanEdit('EVENTS_BOOKINGS') || cancelled, onClick: () => editGst({ kind: 'EVENT_BOOKING', id: r.id }, { gstin: r.customer_gstin, address: r.customer_address }, () => load()) },
+              ]} />
             );
           } },
         ]}
