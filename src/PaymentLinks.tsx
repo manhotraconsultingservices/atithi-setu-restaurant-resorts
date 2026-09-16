@@ -6,10 +6,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle, CheckCircle2, Copy, CreditCard, ExternalLink, Link2, Mail,
-  MessageCircle, RefreshCw, ShieldCheck, X,
+  AlertTriangle, CheckCircle2, Copy, CreditCard, ExternalLink, Info, Link2, Mail,
+  MessageCircle, RefreshCw, X,
 } from 'lucide-react';
 import { useToast } from './components/Toast';
+import { DataTable, type ColDef } from './components/DataTable';
+import { useT } from './i18n';
 import { useConfirm } from './components/ConfirmDialog';
 import { canWriteTab, canDeleteTab } from './perm';
 
@@ -35,30 +37,67 @@ function useApi(restaurantId: string, token: string) {
   }, [restaurantId, token]);
 }
 
-const LINK_STATUS: Record<string, { label: string; cls: string }> = {
-  CREATING:       { label: 'Creating',             cls: 'bg-slate-100 text-slate-600' },
-  CREATED:        { label: 'Waiting for payment',  cls: 'bg-amber-100 text-amber-800' },
-  PARTIALLY_PAID: { label: 'Part paid',            cls: 'bg-sky-100 text-sky-800' },
-  PAID:           { label: 'Paid',                 cls: 'bg-emerald-100 text-emerald-800' },
-  EXPIRED:        { label: 'Expired',              cls: 'bg-slate-100 text-slate-600' },
-  CANCELLED:      { label: 'Cancelled',            cls: 'bg-slate-100 text-slate-600' },
-  FAILED:         { label: 'Failed',               cls: 'bg-red-100 text-red-700' },
+const LINK_STATUS_CLS: Record<string, string> = {
+  CREATING:       'bg-slate-100 text-slate-600',
+  CREATED:        'bg-amber-100 text-amber-800',
+  PARTIALLY_PAID: 'bg-sky-100 text-sky-800',
+  PAID:           'bg-emerald-100 text-emerald-800',
+  EXPIRED:        'bg-slate-100 text-slate-600',
+  CANCELLED:      'bg-slate-100 text-slate-600',
+  FAILED:         'bg-red-100 text-red-700',
 };
-const RECORD_STATUS: Record<string, { label: string; cls: string }> = {
-  RECORDED:     { label: 'Recorded',     cls: 'text-emerald-700' },
-  PENDING:      { label: 'Recording…',   cls: 'text-amber-700' },
-  NEEDS_REVIEW: { label: 'Needs review', cls: 'text-red-700 font-bold' },
-  RESOLVED:     { label: 'Resolved',     cls: 'text-slate-600' },
+const RECORD_STATUS_CLS: Record<string, string> = {
+  RECORDED:     'text-emerald-700',
+  PENDING:      'text-amber-700',
+  NEEDS_REVIEW: 'text-red-700 font-bold',
+  RESOLVED:     'text-slate-600',
 };
+const OUTCOME_CLS: Record<string, string> = {
+  PROCESSED: 'text-emerald-700',
+  BAD_SIGNATURE: 'text-red-700',
+  FAILED: 'text-red-700',
+};
+const GATEWAY_LABEL: Record<string, string> = { RAZORPAY: 'Razorpay', PHONEPE: 'PhonePe', PAYTM: 'Paytm' };
 
-function StatusPill({ status }: { status: string }) {
-  const s = LINK_STATUS[status] || { label: status, cls: 'bg-slate-100 text-slate-600' };
-  return <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${s.cls}`}>{s.label}</span>;
+// A status word from the dictionary, or the raw code when a new one appears.
+function statusWord(t: (k: string) => string, prefix: string, code: string): string {
+  const key = `${prefix}.${code}`;
+  const word = t(key);
+  return word === key ? String(code || '').replace(/_/g, ' ').toLowerCase() : word;
 }
 
-async function copyText(text: string, toast: any, what = 'Link') {
-  try { await navigator.clipboard.writeText(text); toast.success(`${what} copied`); }
-  catch { toast.error('Could not copy — select and copy it by hand.'); }
+function StatusPill({ status }: { status: string }) {
+  const { t } = useT();
+  return (
+    <span className={`inline-block whitespace-nowrap px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${LINK_STATUS_CLS[status] || 'bg-slate-100 text-slate-600'}`}>
+      {statusWord(t, 'pg.linkStatus', status)}
+    </span>
+  );
+}
+
+function ModeBadge({ mode }: { mode: string | null | undefined }) {
+  const { t } = useT();
+  if (!mode) return null;
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider ${mode === 'LIVE' ? 'bg-emerald-100 text-emerald-800' : 'bg-sky-100 text-sky-800'}`}>
+      {t(`pg.mode.${mode}`)}
+    </span>
+  );
+}
+
+// Help text lives behind an icon, not in the page.
+function Hint({ text }: { text?: string | null }) {
+  if (!text) return null;
+  return (
+    <span title={text} aria-label={text} role="img" className="inline-flex align-middle ml-1 text-[#9c8e85] hover:text-[#6b5d52] cursor-help">
+      <Info size={12} />
+    </span>
+  );
+}
+
+async function copyText(text: string, toast: any, message: string, failMessage: string) {
+  try { await navigator.clipboard.writeText(text); toast.success(message); }
+  catch { toast.error(failMessage); }
 }
 
 function waShareUrl(phone: string | null | undefined, text: string) {
@@ -78,21 +117,30 @@ const label = 'block text-[11px] font-semibold uppercase tracking-wide text-[#6b
 const btn = 'inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50 disabled:cursor-not-allowed';
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Payment Gateways page
+// Payment Gateways page — three sub-tabs: Gateways · Payment links · Webhook log
 // ═════════════════════════════════════════════════════════════════════════════
+type PgTab = 'GATEWAYS' | 'LINKS' | 'WEBHOOKS';
+type LinkFilter = 'ALL' | 'OPEN' | 'PAID' | 'NEEDS_REVIEW';
+
 export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: string; token: string }) {
   const api = useApi(restaurantId, token);
   const toast = useToast();
   const confirm = useConfirm();
+  const { t } = useT();
   const canEdit = canWriteTab('PAYMENT_GATEWAYS');
   const canDisconnect = canDeleteTab('PAYMENT_GATEWAYS');
+  const [tab, setTab] = useState<PgTab>('GATEWAYS');
   const [data, setData] = useState<Json | null>(null);
   const [loadError, setLoadError] = useState('');
+  const [selected, setSelected] = useState<string>('');
   const [links, setLinks] = useState<Json[]>([]);
-  const [filter, setFilter] = useState<'ALL' | 'OPEN' | 'PAID' | 'NEEDS_REVIEW'>('ALL');
+  const [linksLoading, setLinksLoading] = useState(false);
+  const [filter, setFilter] = useState<LinkFilter>('ALL');
   const [events, setEvents] = useState<Json[] | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>({});
   const [busy, setBusy] = useState<string>('');
+  const [resolving, setResolving] = useState<Json | null>(null);
+  const [resolveNote, setResolveNote] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -101,14 +149,29 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
     } catch (e: any) { setLoadError(e.message); }
   }, [api]);
   const loadLinks = useCallback(async () => {
+    setLinksLoading(true);
     try {
       const q = filter === 'ALL' ? '' : `&status=${filter}`;
-      setLinks((await api(`/links?limit=200${q}`)).links || []);
+      setLinks((await api(`/links?limit=500${q}`)).links || []);
     } catch (e: any) { toast.error(e.message); }
+    finally { setLinksLoading(false); }
   }, [api, filter, toast]);
+  const loadEvents = useCallback(async () => {
+    try { setEvents((await api('/webhook-events')).events || []); }
+    catch (e: any) { toast.error(e.message); }
+  }, [api, toast]);
 
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { loadLinks(); }, [loadLinks]);
+  useEffect(() => { if (tab === 'LINKS') loadLinks(); }, [tab, loadLinks]);
+  useEffect(() => { if (tab === 'WEBHOOKS') loadEvents(); }, [tab, loadEvents]);
+
+  // Open on the gateway in use, else the first connected one, else the first.
+  useEffect(() => {
+    const all: Json[] = data?.gateways || [];
+    if (!all.length || all.some(g => g.gateway === selected)) return;
+    const pick = all.find(g => g.gateway === data?.default_gateway) || all.find(g => g.connected) || all[0];
+    setSelected(pick.gateway);
+  }, [data, selected]);
 
   const setField = (gw: string, key: string, v: string) => setDrafts(d => ({ ...d, [gw]: { ...(d[gw] || {}), [key]: v } }));
 
@@ -117,9 +180,9 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
     try {
       const body: Json = { fields: drafts[g.gateway] || {} };
       if (enable !== undefined) body.is_enabled = enable;
-      const out = await api(`/gateways/${g.gateway}`, { method: 'PUT', body: JSON.stringify(body) });
+      await api(`/gateways/${g.gateway}`, { method: 'PUT', body: JSON.stringify(body) });
       setDrafts(d => ({ ...d, [g.gateway]: {} }));
-      toast.success(enable === true ? `${g.label} is on. ${out.detail || ''}` : enable === false ? `${g.label} is off.` : `${g.label} settings saved.`);
+      toast.success(t(enable === true ? 'pg.toast.on' : enable === false ? 'pg.toast.off' : 'pg.toast.saved', { name: g.label }));
     } catch (e: any) {
       toast.error(e.message);
       if (e.body?.gateway) setDrafts(d => ({ ...d, [g.gateway]: {} }));
@@ -133,23 +196,23 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
     setBusy('default');
     try {
       await api('/default-gateway', { method: 'PUT', body: JSON.stringify({ gateway }) });
-      toast.success(`Payment links now go through ${(data?.gateways || []).find((g: Json) => g.gateway === gateway)?.label || gateway}.`);
+      toast.success(t('pg.default.changed', { name: GATEWAY_LABEL[gateway] || gateway }));
     } catch (e: any) { toast.error(e.message); }
     finally { setBusy(''); load(); }
   };
 
   const test = async (g: Json) => {
     setBusy(`${g.gateway}:test`);
-    try { const out = await api(`/gateways/${g.gateway}/test`, { method: 'POST' }); toast.success(out.detail || 'Connection works.'); }
+    try { const out = await api(`/gateways/${g.gateway}/test`, { method: 'POST' }); toast.success(out.detail || t('pg.toast.connectionOk')); }
     catch (e: any) { toast.error(e.message); }
     finally { setBusy(''); load(); }
   };
 
   const disconnect = async (g: Json) => {
-    const ok = await confirm({ title: `Disconnect ${g.label}?`, body: 'The saved keys are deleted. Links already paid stay recorded; you cannot send new links until you connect again.', confirmLabel: 'Disconnect', danger: true });
+    const ok = await confirm({ title: t('pg.disconnect.title', { name: g.label }), body: t('pg.disconnect.body'), confirmLabel: t('pg.disconnect'), danger: true });
     if (!ok) return;
     setBusy(`${g.gateway}:delete`);
-    try { await api(`/gateways/${g.gateway}`, { method: 'DELETE' }); toast.success(`${g.label} disconnected.`); }
+    try { await api(`/gateways/${g.gateway}`, { method: 'DELETE' }); toast.success(t('pg.toast.disconnected', { name: g.label })); }
     catch (e: any) { toast.error(e.message); }
     finally { setBusy(''); load(); }
   };
@@ -158,268 +221,331 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
     setBusy(`link:${l.id}`);
     try {
       const out = await api(`/links/${l.id}/refresh`, { method: 'POST' });
-      if (out.recorded) toast.success(`${out.recorded} payment(s) recorded.`);
-      else toast.info(`Status:${(LINK_STATUS[out.link.status]?.label || out.link.status).toLowerCase()}.`);
+      if (out.recorded) toast.success(t('pg.toast.recorded', { n: out.recorded }));
+      else toast.info(t('pg.toast.status', { status: statusWord(t, 'pg.linkStatus', out.link.status) }));
     } catch (e: any) { toast.error(e.message); }
     finally { setBusy(''); loadLinks(); load(); }
   };
 
   const cancelLink = async (l: Json) => {
-    const ok = await confirm({ title: 'Cancel this payment link?', body: `${money(l.amount)} for ${l.description || l.object_id}. The customer will no longer be able to pay with it.`, confirmLabel: 'Cancel link', danger: true });
+    const ok = await confirm({ title: t('pg.cancel.title'), body: `${money(l.amount)} · ${l.description || l.object_id}`, confirmLabel: t('pg.action.cancel'), danger: true });
     if (!ok) return;
     setBusy(`link:${l.id}`);
-    try { await api(`/links/${l.id}/cancel`, { method: 'POST' }); toast.success('Link cancelled.'); }
+    try { await api(`/links/${l.id}/cancel`, { method: 'POST' }); toast.success(t('pg.toast.cancelled')); }
     catch (e: any) { toast.error(e.message); }
     finally { setBusy(''); loadLinks(); }
   };
 
-  const resolve = async (p: Json) => {
-    const note = window.prompt('What was done with this money? (e.g. "Refunded in Razorpay on 18 Sep" or "Applied to booking B-102")');
-    if (!note) return;
-    try { await api(`/link-payments/${p.id}/resolve`, { method: 'POST', body: JSON.stringify({ note }) }); toast.success('Marked as resolved.'); }
-    catch (e: any) { toast.error(e.message); }
-    finally { loadLinks(); load(); }
+  const submitResolve = async () => {
+    if (!resolving) return;
+    setBusy('resolve');
+    try {
+      await api(`/link-payments/${resolving.id}/resolve`, { method: 'POST', body: JSON.stringify({ note: resolveNote }) });
+      toast.success(t('pg.toast.resolved'));
+      setResolving(null);
+      setResolveNote('');
+    } catch (e: any) { toast.error(e.message); }
+    finally { setBusy(''); loadLinks(); load(); }
   };
 
-  const loadEvents = async () => {
-    try { setEvents((await api('/webhook-events')).events || []); }
-    catch (e: any) { toast.error(e.message); }
-  };
+  const linkColumns = useMemo<ColDef<Json>[]>(() => [
+    {
+      key: 'created_at', label: t('pg.col.created'), sortable: true,
+      getValue: (l) => l.created_at ? new Date(l.created_at).getTime() : 0,
+      exportValue: (l) => when(l.created_at),
+      render: (l) => <div className="whitespace-nowrap">{when(l.created_at)}<div className="text-[10px] text-[#9c8e85]">{l.created_by_name || ''}</div></div>,
+    },
+    {
+      key: 'customer_name', label: t('pg.col.customer'), sortable: true, searchable: true,
+      render: (l) => <div><div className="font-semibold text-[#1a1208]">{l.customer_name || '—'}</div><div className="text-[10px] text-[#9c8e85] max-w-[220px] truncate">{l.description || ''}</div></div>,
+    },
+    { key: 'object_id', label: t('pg.col.bill'), searchable: true, render: (l) => <span className="font-mono text-[11px] whitespace-nowrap">{l.object_id}</span> },
+    { key: 'id', label: t('pg.col.link'), searchable: true, defaultHidden: true, render: (l) => <span className="font-mono text-[11px] whitespace-nowrap">{l.id}</span> },
+    {
+      key: 'gateway', label: t('pg.col.gateway'), sortable: true, filterable: true, filterType: 'select', defaultHidden: true,
+      exportValue: (l) => GATEWAY_LABEL[l.gateway] || l.gateway,
+      render: (l) => <span className="whitespace-nowrap">{GATEWAY_LABEL[l.gateway] || l.gateway} <ModeBadge mode={l.mode === 'TEST' ? 'TEST' : null} /></span>,
+    },
+    {
+      key: 'amount', label: t('pg.col.amount'), sortable: true, align: 'right',
+      getValue: (l) => Number(l.amount || 0), exportValue: (l) => String(l.amount),
+      render: (l) => <div className="whitespace-nowrap">{money(l.amount)}{Number(l.amount_paid) > 0 && <div className="text-[10px] text-emerald-700">{t('pg.paidAmount', { amount: money(l.amount_paid) })}</div>}</div>,
+    },
+    {
+      key: 'status', label: t('pg.col.status'), sortable: true, filterable: true, filterType: 'select',
+      exportValue: (l) => l.status,
+      render: (l) => <div><StatusPill status={l.status} />{l.mode === 'TEST' && <span className="ml-1"><ModeBadge mode="TEST" /></span>}{l.last_error && <div className="text-[10px] text-red-700 mt-0.5 max-w-[180px]">{l.last_error}</div>}</div>,
+    },
+    {
+      key: 'payments', label: t('pg.col.payments'),
+      exportValue: (l) => (l.payments || []).map((p: Json) => `${p.amount} ${p.method || ''} ${p.record_status}`).join('; '),
+      render: (l) => (
+        <div className="space-y-1 min-w-[200px]">
+          {(l.payments || []).map((p: Json) => (
+            <div key={p.id} className="text-[11px]">
+              {money(p.amount)}{p.method ? ` · ${p.method}` : ''}{p.fee != null ? ` · ${t('pg.fee', { amount: money(p.fee) })}` : ''}
+              <span className={`ml-1 ${RECORD_STATUS_CLS[p.record_status] || ''}`}>{statusWord(t, 'pg.recordStatus', p.record_status)}</span>
+              {p.record_error && <div className="text-[10px] text-red-700 max-w-[220px]">{p.record_error}</div>}
+              {p.resolution_note && <div className="text-[10px] text-[#6b5d52] max-w-[220px]">“{p.resolution_note}”</div>}
+              {p.record_status === 'NEEDS_REVIEW' && canEdit && (
+                <button onClick={() => { setResolving(p); setResolveNote(''); }} className="text-[10px] font-bold text-[#cc5a16] underline">{t('pg.action.resolve')}</button>
+              )}
+            </div>
+          ))}
+        </div>
+      ),
+    },
+    {
+      key: 'actions', label: '', noExport: true, hideable: false, align: 'right',
+      render: (l) => (
+        <div className="whitespace-nowrap space-x-1">
+          {l.url && <button title={t('pg.action.copy')} aria-label={t('pg.action.copy')} onClick={() => copyText(l.url, toast, t('pg.toast.copied'), t('pg.toast.copyFailed'))} className="p-1.5 rounded-lg hover:bg-[#faf7f2]"><Copy size={13} /></button>}
+          {l.status !== 'FAILED' && <button title={t('pg.action.check')} aria-label={t('pg.action.check')} disabled={busy === `link:${l.id}`} onClick={() => refreshLink(l)} className="p-1.5 rounded-lg hover:bg-[#faf7f2]"><RefreshCw size={13} className={busy === `link:${l.id}` ? 'animate-spin' : ''} /></button>}
+          {canEdit && ['CREATED', 'PARTIALLY_PAID'].includes(l.status) && <button title={t('pg.action.cancel')} aria-label={t('pg.action.cancel')} onClick={() => cancelLink(l)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-700"><X size={13} /></button>}
+        </div>
+      ),
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [t, busy, canEdit, toast]);
+
+  const eventColumns = useMemo<ColDef<Json>[]>(() => [
+    {
+      key: 'received_at', label: t('pg.col.received'), sortable: true,
+      getValue: (e) => e.received_at ? new Date(e.received_at).getTime() : 0,
+      exportValue: (e) => when(e.received_at),
+      render: (e) => <span className="whitespace-nowrap">{when(e.received_at)}</span>,
+    },
+    { key: 'gateway', label: t('pg.col.gateway'), sortable: true, filterable: true, filterType: 'select', render: (e) => GATEWAY_LABEL[e.gateway] || e.gateway },
+    { key: 'event_type', label: t('pg.col.event'), searchable: true, render: (e) => e.event_type || '—' },
+    {
+      key: 'outcome', label: t('pg.col.outcome'), sortable: true, filterable: true, filterType: 'select',
+      render: (e) => <span className={`font-semibold ${OUTCOME_CLS[e.outcome] || 'text-[#6b5d52]'}`}>{statusWord(t, 'pg.outcome', e.outcome)}</span>,
+    },
+    { key: 'detail', label: t('pg.col.detail'), searchable: true, render: (e) => <span className="text-[#6b5d52]">{e.detail || ''}</span> },
+  ], [t]);
 
   if (loadError) {
     return <div className="bg-white border border-red-200 rounded-3xl p-6 text-sm text-red-700">{loadError}</div>;
   }
-  if (!data) return <div className="text-sm text-[#6b5d52] p-6">Loading payment gateways…</div>;
+  if (!data) return <div className="text-sm text-[#6b5d52] p-6">{t('common.loading')}</div>;
+
+  const gateways: Json[] = data.gateways || [];
+  const enabled = gateways.filter(g => g.is_enabled);
+  const g = gateways.find(x => x.gateway === selected) || gateways[0];
+  const needsReview = Number(data.needs_review) || 0;
+
+  const tabBtn = (id: PgTab, text: string, badge?: number) => (
+    <button
+      key={id}
+      onClick={() => setTab(id)}
+      className={`px-5 py-2.5 text-sm font-semibold rounded-t-xl whitespace-nowrap ${tab === id ? 'bg-white border border-b-white border-[#e8e0d8] text-[#cc5a16] -mb-px' : 'text-[#6b5d52] hover:text-[#1a1208] hover:bg-[#f5f0ea]'}`}
+    >
+      {text}
+      {badge ? <span className="ml-2 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold">{badge}</span> : null}
+    </button>
+  );
 
   return (
-    <div className="space-y-6 max-w-5xl">
-      <div>
-        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Payment Gateways</h2>
-        <p className="text-sm text-[#6b5d52] mt-1 max-w-3xl">
-          Connect your own gateway account. Guests pay by UPI, card or net banking through a link your staff send on WhatsApp or email,
-          and each payment is recorded against the bill automatically. Money settles from the gateway straight to your bank.
-        </p>
-      </div>
+    <div className="space-y-4 max-w-5xl">
+      <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{t('pg.title')}</h2>
 
       {data.key_source === null && (
-        <div className="flex gap-2 items-start bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">
-          <AlertTriangle size={16} className="mt-0.5 flex-none" />
-          The server has no encryption key, so gateway secrets cannot be saved. Ask your administrator to set ATITHI_CREDENTIAL_KEY.
+        <div className="flex gap-2 items-center bg-red-50 border border-red-200 rounded-2xl px-4 py-3 text-sm text-red-800">
+          <AlertTriangle size={16} className="flex-none" /> {t('pg.noKey')}
         </div>
-      )}
-      {data.key_source === 'JWT_DERIVED' && (
-        <div className="flex gap-2 items-start bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-900">
-          <ShieldCheck size={15} className="mt-0.5 flex-none" />
-          Secrets are stored encrypted with a key derived from the server's sign-in secret. For stronger separation, your administrator can set a dedicated ATITHI_CREDENTIAL_KEY; saved secrets move to it the next time you save.
-        </div>
-      )}
-      {Number(data.needs_review) > 0 && (
-        <button onClick={() => setFilter('NEEDS_REVIEW')} className="w-full text-left flex gap-2 items-start bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800 hover:bg-red-100">
-          <AlertTriangle size={16} className="mt-0.5 flex-none" />
-          <span><strong>{data.needs_review} online payment(s) need review.</strong> The money was received but could not be applied automatically (for example, paid after checkout). Open the list below to resolve them.</span>
-        </button>
       )}
 
-      {/* The one choice staff never make: which gateway new payment links use.
-          Always shown, listing every gateway; one not switched on cannot be picked. */}
-      {(() => {
-        const all: Json[] = data.gateways || [];
-        const on = all.filter((g: Json) => g.is_enabled);
-        return (
-          <div className="bg-white border-2 border-[#cc5a16]/30 rounded-2xl px-5 py-4 space-y-2">
-            <div className="flex items-center gap-3 flex-wrap">
-              <label className="text-sm font-bold text-[#1a1208]" htmlFor="pg-default">Default payment gateway</label>
-              <select
-                id="pg-default"
-                disabled={!canEdit || busy === 'default' || on.length === 0}
-                className={`${input} w-auto min-w-[220px]`}
-                value={data.default_gateway || ''}
-                onChange={e => e.target.value && chooseDefault(e.target.value)}
-              >
-                {!data.default_gateway && <option value="">{on.length ? 'Choose a gateway…' : 'Switch on a gateway below first'}</option>}
-                {all.map((g: Json) => (
-                  <option key={g.gateway} value={g.gateway} disabled={!g.is_enabled}>
-                    {g.label}{g.is_enabled ? (g.mode === 'TEST' ? ' (test mode)' : '') : ' (not switched on)'}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {on.length > 1 && !data.default_gateway && <p className="text-xs text-red-700">More than one gateway is on. Staff cannot send payment links until you choose one here.</p>}
-            <p className="text-[11px] text-[#6b5d52] leading-snug">
-              Every new payment link staff send goes through this gateway; staff never choose. The first gateway you switch on becomes the default, and you can change it here at any time. Links already sent keep their gateway until they are paid or cancelled.
-            </p>
+      <div className="flex gap-1 border-b border-[#e8e0d8] overflow-x-auto overflow-y-hidden">
+        {tabBtn('GATEWAYS', t('pg.tab.gateways'))}
+        {tabBtn('LINKS', t('pg.tab.links'), needsReview)}
+        {tabBtn('WEBHOOKS', t('pg.tab.webhooks'))}
+      </div>
+
+      {tab === 'GATEWAYS' && (
+        <div className="space-y-4">
+          <div className="bg-white border border-[#e8dccf] rounded-2xl px-5 py-3 flex items-center gap-3 flex-wrap">
+            <label className="text-sm font-bold text-[#1a1208]" htmlFor="pg-default">{t('pg.default')}</label>
+            <select
+              id="pg-default"
+              disabled={!canEdit || busy === 'default' || enabled.length === 0}
+              className="bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm text-[#1a1208] focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30 min-w-[240px] disabled:opacity-60"
+              value={data.default_gateway || ''}
+              onChange={e => e.target.value && chooseDefault(e.target.value)}
+            >
+              {!data.default_gateway && <option value="">{enabled.length ? t('pg.default.choose') : t('pg.default.switchOnFirst')}</option>}
+              {gateways.map((x: Json) => (
+                <option key={x.gateway} value={x.gateway} disabled={!x.is_enabled}>
+                  {x.label}{x.is_enabled ? (x.mode === 'TEST' ? ` (${t('pg.mode.TEST')})` : '') : ` (${t('pg.status.off')})`}
+                </option>
+              ))}
+            </select>
+            {enabled.length > 1 && !data.default_gateway && <span className="text-xs text-red-700 font-semibold">{t('pg.default.required')}</span>}
           </div>
-        );
-      })()}
 
-      {(data.gateways || []).map((g: Json) => {
-        const draft = drafts[g.gateway] || {};
-        const dirty = Object.values(draft).some(v => String(v).trim() !== '');
-        return (
-          <div key={g.gateway} className="bg-white border border-[#e8dccf] rounded-3xl p-6 space-y-5">
-            <div className="flex items-start justify-between gap-4 flex-wrap">
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-2xl text-white flex items-center justify-center" style={{ background: BRAND[g.gateway] || '#1a1208' }}><CreditCard size={20} /></div>
-                <div>
-                  <div className="text-lg font-bold text-[#1a1208]">{g.label}{g.is_enabled && g.gateway === data.default_gateway && (data.gateways || []).filter((x: Json) => x.is_enabled).length > 1 && <span className="ml-2 align-middle text-[10px] font-bold uppercase tracking-wide bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">Used for links</span>}</div>
-                  <div className="text-xs text-[#6b5d52]">
-                    {g.is_enabled
-                      ? <span className="text-emerald-700 font-semibold">On{g.mode ? ` · ${g.mode === 'LIVE' ? 'live payments' : 'test mode, no real money'}` : ''}</span>
-                      : g.connected ? 'Off' : 'Not connected'}
-                    {g.verified_at && <span> · keys checked {when(g.verified_at)}</span>}
+          <div className="inline-flex flex-wrap bg-white rounded-2xl p-1 border border-[#e8dccf]" role="tablist">
+            {gateways.map((x: Json) => {
+              const dot = x.is_enabled ? 'bg-emerald-500' : x.connected ? 'bg-amber-400' : 'bg-slate-300';
+              const active = g && x.gateway === g.gateway;
+              return (
+                <button
+                  key={x.gateway}
+                  role="tab"
+                  aria-selected={!!active}
+                  onClick={() => setSelected(x.gateway)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold ${active ? 'bg-[#1a1208] text-white' : 'text-[#3d3128] hover:bg-[#faf7f2]'}`}
+                >
+                  <span className={`w-2 h-2 rounded-full ${dot}`} />
+                  {x.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {g && (() => {
+            const draft = drafts[g.gateway] || {};
+            const dirty = Object.values(draft).some(v => String(v).trim() !== '');
+            const statusText = g.is_enabled ? t('pg.status.on') : g.connected ? t('pg.status.off') : t('pg.status.notConnected');
+            return (
+              <div className="bg-white border border-[#e8dccf] rounded-3xl p-6 space-y-5">
+                <div className="flex items-center justify-between gap-4 flex-wrap">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl text-white flex items-center justify-center" style={{ background: BRAND[g.gateway] || '#1a1208' }}><CreditCard size={18} /></div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-lg font-bold text-[#1a1208]">{g.label}</span>
+                      <span
+                        title={g.verified_at ? t('pg.keysChecked', { when: when(g.verified_at) }) : undefined}
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${g.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'}`}
+                      >{statusText}</span>
+                      {g.is_enabled && <ModeBadge mode={g.mode} />}
+                    </div>
                   </div>
-                </div>
-              </div>
-              {canEdit && (
-                <div className="flex gap-2 flex-wrap">
-                  {g.connected && <button disabled={!!busy} onClick={() => test(g)} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><RefreshCw size={13} /> Test connection</button>}
-                  {g.is_enabled
-                    ? <button disabled={!!busy} onClick={() => save(g, false)} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}>Switch off</button>
-                    : <button disabled={!!busy} onClick={() => save(g, true)} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}>{busy === `${g.gateway}:save` ? 'Checking keys…' : 'Save & switch on'}</button>}
-                </div>
-              )}
-            </div>
-
-            {g.last_error && (
-              <div className="flex gap-2 items-start bg-red-50 border border-red-200 rounded-xl p-3 text-xs text-red-800">
-                <AlertTriangle size={14} className="mt-0.5 flex-none" /> {g.last_error}
-              </div>
-            )}
-            {g.mode === 'TEST' && g.is_enabled && (
-              <div className="text-xs bg-sky-50 border border-sky-200 text-sky-900 rounded-xl p-3">
-                Test credentials: links work end to end but no real money moves. Switch to live credentials before sending links to guests.
-              </div>
-            )}
-
-            <div className="grid md:grid-cols-3 gap-4">
-              {g.fields.map((f: Json) => (
-                <div key={f.key}>
-                  <label className={label}>{f.label}{f.required ? ' *' : ''}</label>
-                  {f.options ? (
-                    <select disabled={!canEdit} className={input} value={draft[f.key] ?? (f.value || '')} onChange={e => setField(g.gateway, f.key, e.target.value)}>
-                      <option value="">Choose…</option>
-                      {f.options.map((o: Json) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  ) : (
-                  <input
-                    type={f.secret ? 'password' : 'text'}
-                    autoComplete="off"
-                    disabled={!canEdit}
-                    className={input}
-                    value={draft[f.key] ?? (f.secret ? '' : f.value || '')}
-                    placeholder={f.secret ? (f.saved ? (f.unreadable ? 'Saved but unreadable — enter again' : 'Saved — leave blank to keep') : 'Not saved') : ''}
-                    onChange={e => setField(g.gateway, f.key, e.target.value)}
-                  />
+                  {canEdit && (
+                    <div className="flex gap-2 flex-wrap">
+                      {g.connected && <button disabled={!!busy} onClick={() => test(g)} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><RefreshCw size={13} className={busy === `${g.gateway}:test` ? 'animate-spin' : ''} /> {t('pg.test')}</button>}
+                      {g.is_enabled
+                        ? <button disabled={!!busy} onClick={() => save(g, false)} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}>{t('pg.switchOff')}</button>
+                        : <button disabled={!!busy} onClick={() => save(g, true)} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}>{busy === `${g.gateway}:save` ? t('pg.switchingOn') : t('pg.switchOn')}</button>}
+                    </div>
                   )}
-                  {f.help && <p className="text-[10px] text-[#9c8e85] mt-1 leading-snug">{f.help}</p>}
                 </div>
+
+                {g.last_error && (
+                  <div className="flex gap-2 items-start bg-red-50 border border-red-200 rounded-xl p-3 text-xs text-red-800">
+                    <AlertTriangle size={14} className="mt-0.5 flex-none" /> {g.last_error}
+                  </div>
+                )}
+
+                <div className="grid md:grid-cols-3 gap-4">
+                  {g.fields.map((f: Json) => (
+                    <div key={f.key}>
+                      <label className={label} htmlFor={`pg-${g.gateway}-${f.key}`}>{f.label}{f.required ? ' *' : ''}<Hint text={f.help} /></label>
+                      {f.options ? (
+                        <select id={`pg-${g.gateway}-${f.key}`} disabled={!canEdit} className={input} value={draft[f.key] ?? (f.value || '')} onChange={e => setField(g.gateway, f.key, e.target.value)}>
+                          <option value="">{t('pg.field.choose')}</option>
+                          {f.options.map((o: Json) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      ) : (
+                        <input
+                          id={`pg-${g.gateway}-${f.key}`}
+                          type={f.secret ? 'password' : 'text'}
+                          autoComplete="off"
+                          disabled={!canEdit}
+                          className={input}
+                          value={draft[f.key] ?? (f.secret ? '' : f.value || '')}
+                          placeholder={f.secret ? (f.saved ? (f.unreadable ? t('pg.field.unreadable') : t('pg.field.saved')) : t('pg.field.notSaved')) : ''}
+                          onChange={e => setField(g.gateway, f.key, e.target.value)}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-2">
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52] whitespace-nowrap">{t('pg.webhookUrl')}</span>
+                    <code className="flex-1 min-w-0 truncate text-xs bg-white border border-[#e8dccf] rounded-lg px-2 py-1.5" title={g.webhook_url}>{g.webhook_url}</code>
+                    <button onClick={() => copyText(g.webhook_url, toast, t('pg.toast.copied'), t('pg.toast.copyFailed'))} className={`${btn} border border-[#e8dccf] bg-white`}><Copy size={13} /> {t('pg.copy')}</button>
+                  </div>
+                  {Array.isArray(g.setup_steps) && g.setup_steps.length > 0 && (
+                    <details className="text-xs text-[#6b5d52]">
+                      <summary className="cursor-pointer font-semibold text-[#3d3128] select-none">{t('pg.setupGuide')}</summary>
+                      <ol className="list-decimal pl-4 space-y-0.5 mt-2 break-words">
+                        {g.setup_steps.map((step: string, i: number) => <li key={i}>{step}</li>)}
+                      </ol>
+                    </details>
+                  )}
+                </div>
+
+                {canEdit && (
+                  <div className="flex gap-2 flex-wrap justify-between">
+                    <button disabled={!dirty || !!busy} onClick={() => save(g)} className={`${btn} bg-[#1a1208] text-white hover:bg-black`}>{t('pg.saveChanges')}</button>
+                    {g.connected && canDisconnect && <button disabled={!!busy} onClick={() => disconnect(g)} className={`${btn} text-red-700 hover:bg-red-50`}>{t('pg.disconnect')}</button>}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {tab === 'LINKS' && (
+        <DataTable
+          data={links}
+          columns={linkColumns}
+          rowKey={(l) => l.id}
+          loading={linksLoading}
+          emptyMessage={t('pg.links.empty')}
+          exportFilename="payment-links"
+          columnChooser
+          columnFilters
+          tableId="payment-links"
+          toolbarLeft={
+            <div className="flex gap-1.5 flex-wrap">
+              {(['ALL', 'OPEN', 'PAID', 'NEEDS_REVIEW'] as LinkFilter[]).map(f => (
+                <button key={f} onClick={() => setFilter(f)} className={`px-3 py-1.5 rounded-full text-xs font-bold ${filter === f ? 'bg-[#1a1208] text-white' : 'bg-[#faf7f2] text-[#3d3128]'}`}>
+                  {t(`pg.links.filter.${f}`)}{f === 'NEEDS_REVIEW' && needsReview ? ` (${needsReview})` : ''}
+                </button>
               ))}
             </div>
+          }
+          toolbarRight={<button onClick={loadLinks} className={`${btn} border border-[#e8dccf] bg-white`}><RefreshCw size={13} /> {t('pg.refresh')}</button>}
+        />
+      )}
 
-            <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-2">
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52]">Webhook — so payments record themselves</div>
-              <div className="flex gap-2 items-center">
-                <code className="flex-1 min-w-0 truncate text-xs bg-white border border-[#e8dccf] rounded-lg px-2 py-1.5">{g.webhook_url}</code>
-                <button onClick={() => copyText(g.webhook_url, toast, 'Webhook URL')} className={`${btn} border border-[#e8dccf] bg-white`}><Copy size={13} /> Copy</button>
-              </div>
-              {Array.isArray(g.setup_steps) && g.setup_steps.length > 0 && (
-                <ol className="text-xs text-[#6b5d52] list-decimal pl-4 space-y-0.5 break-words">
-                  {g.setup_steps.map((step: string, i: number) => <li key={i}>{step}</li>)}
-                </ol>
-              )}
-              {g.requires_customer_phone && <p className="text-[10px] text-[#9c8e85]">{g.label} needs the guest's phone number on every link.</p>}
-              <p className="text-[10px] text-[#9c8e85]">If a webhook is missed, open links are still checked with {g.label} every few minutes.</p>
+      {tab === 'WEBHOOKS' && (
+        <DataTable
+          data={events || []}
+          columns={eventColumns}
+          rowKey={(e) => e.id}
+          loading={events === null}
+          emptyMessage={t('pg.events.empty')}
+          exportFilename="payment-webhook-log"
+          columnChooser
+          columnFilters
+          tableId="payment-webhook-log"
+          toolbarRight={<button onClick={loadEvents} className={`${btn} border border-[#e8dccf] bg-white`}><RefreshCw size={13} /> {t('pg.refresh')}</button>}
+        />
+      )}
+
+      {resolving && (
+        <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 p-4" onClick={() => setResolving(null)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="pg-resolve-title" className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between">
+              <h3 id="pg-resolve-title" className="text-lg font-bold text-[#1a1208]">{t('pg.resolve.title')}</h3>
+              <button onClick={() => setResolving(null)} aria-label={t('common.close')} className="p-1.5 rounded-xl hover:bg-[#faf7f2] text-[#9c8e85]"><X size={16} /></button>
             </div>
-
-            {canEdit && (
-              <div className="flex gap-2 flex-wrap justify-between">
-                <button disabled={!dirty || !!busy} onClick={() => save(g)} className={`${btn} bg-[#1a1208] text-white hover:bg-black`}>Save changes</button>
-                {g.connected && canDisconnect && <button disabled={!!busy} onClick={() => disconnect(g)} className={`${btn} text-red-700 hover:bg-red-50`}>Disconnect</button>}
-              </div>
-            )}
-          </div>
-        );
-      })}
-
-      <div className="bg-white border border-[#e8dccf] rounded-3xl p-6 space-y-4">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <h3 className="text-lg font-bold text-[#1a1208]">Payment links</h3>
-            <p className="text-xs text-[#6b5d52]">Every link sent from a bill, what the customer paid, and how it was recorded.</p>
-          </div>
-          <div className="flex gap-1.5">
-            {(['ALL', 'OPEN', 'PAID', 'NEEDS_REVIEW'] as const).map(f => (
-              <button key={f} onClick={() => setFilter(f)} className={`px-3 py-1.5 rounded-full text-xs font-bold ${filter === f ? 'bg-[#1a1208] text-white' : 'bg-[#faf7f2] text-[#3d3128]'}`}>
-                {f === 'ALL' ? 'All' : f === 'OPEN' ? 'Open' : f === 'PAID' ? 'Paid' : 'Needs review'}
-              </button>
-            ))}
+            <div className="text-sm text-[#3d3128]">{money(resolving.amount)}{resolving.method ? ` · ${resolving.method}` : ''} · <span className="font-mono text-xs">{resolving.gateway_payment_id}</span></div>
+            <div>
+              <label className={label} htmlFor="pg-resolve-note">{t('pg.resolve.note')}</label>
+              <textarea id="pg-resolve-note" rows={3} className={input} value={resolveNote} placeholder={t('pg.resolve.placeholder')} onChange={e => setResolveNote(e.target.value)} />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setResolving(null)} className={`${btn} border border-[#e8dccf]`}>{t('common.cancel')}</button>
+              <button disabled={resolveNote.trim().length < 5 || busy === 'resolve'} onClick={submitResolve} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}>{t('pg.action.resolve')}</button>
+            </div>
           </div>
         </div>
-        {links.length === 0 ? (
-          <p className="text-sm text-[#9c8e85] py-6 text-center">No payment links{filter !== 'ALL' ? ' in this view' : ' yet. Send one from a guest folio with "Collect online"'}.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left text-[10px] uppercase tracking-wide text-[#9c8e85] border-b border-[#e8dccf]">
-                  <th className="py-2 pr-3">Created</th><th className="pr-3">Customer / bill</th><th className="pr-3 text-right">Amount</th>
-                  <th className="pr-3">Status</th><th className="pr-3">Payments</th><th className="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {links.map(l => (
-                  <tr key={l.id} className="border-b border-[#f3ece0] align-top">
-                    <td className="py-2.5 pr-3 whitespace-nowrap">{when(l.created_at)}<div className="text-[10px] text-[#9c8e85]">{l.created_by_name || ''}</div></td>
-                    <td className="pr-3"><div className="font-semibold text-[#1a1208]">{l.customer_name || '—'}</div><div className="text-[10px] text-[#9c8e85]">{l.object_id} · {l.id}</div></td>
-                    <td className="pr-3 text-right whitespace-nowrap">{money(l.amount)}{Number(l.amount_paid) > 0 && <div className="text-[10px] text-emerald-700">paid {money(l.amount_paid)}</div>}</td>
-                    <td className="pr-3"><StatusPill status={l.status} />{l.mode === 'TEST' && <div className="text-[10px] text-sky-700 mt-0.5">test</div>}{l.last_error && <div className="text-[10px] text-red-700 mt-0.5 max-w-[180px]">{l.last_error}</div>}</td>
-                    <td className="pr-3">
-                      {(l.payments || []).map((p: Json) => (
-                        <div key={p.id} className="mb-1">
-                          {money(p.amount)} {p.method ? `· ${p.method}` : ''}{p.fee != null ? ` · fee ${money(p.fee)}` : ''}
-                          <span className={`ml-1 ${RECORD_STATUS[p.record_status]?.cls || ''}`}>{RECORD_STATUS[p.record_status]?.label || p.record_status}</span>
-                          {p.record_error && <div className="text-[10px] text-red-700 max-w-[220px]">{p.record_error}</div>}
-                          {p.resolution_note && <div className="text-[10px] text-[#6b5d52] max-w-[220px]">“{p.resolution_note}”</div>}
-                          {p.record_status === 'NEEDS_REVIEW' && canEdit && <button onClick={() => resolve(p)} className="text-[10px] font-bold text-[#cc5a16] underline">Resolve</button>}
-                        </div>
-                      ))}
-                    </td>
-                    <td className="text-right whitespace-nowrap space-x-1">
-                      {l.url && <button title="Copy link" onClick={() => copyText(l.url, toast)} className="p-1.5 rounded-lg hover:bg-[#faf7f2]"><Copy size={13} /></button>}
-                      {l.status !== 'FAILED' && <button title="Check status" disabled={busy === `link:${l.id}`} onClick={() => refreshLink(l)} className="p-1.5 rounded-lg hover:bg-[#faf7f2]"><RefreshCw size={13} className={busy === `link:${l.id}` ? 'animate-spin' : ''} /></button>}
-                      {['CREATED', 'PARTIALLY_PAID'].includes(l.status) && <button title="Cancel link" onClick={() => cancelLink(l)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-700"><X size={13} /></button>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      <div className="bg-white border border-[#e8dccf] rounded-3xl p-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-sm font-bold text-[#1a1208]">Recent webhook calls</h3>
-            <p className="text-xs text-[#6b5d52]">What the gateway sent. A run of “bad signature” means the webhook secret here does not match the gateway's.</p>
-          </div>
-          <button onClick={loadEvents} className={`${btn} border border-[#e8dccf]`}><RefreshCw size={13} /> {events ? 'Refresh' : 'Show'}</button>
-        </div>
-        {events && (events.length === 0
-          ? <p className="text-xs text-[#9c8e85] mt-3">No calls received yet.</p>
-          : <table className="w-full text-xs mt-3">
-              <tbody>
-                {events.map(e => (
-                  <tr key={e.id} className="border-b border-[#f3ece0]">
-                    <td className="py-1.5 pr-3 whitespace-nowrap">{when(e.received_at)}</td>
-                    <td className="pr-3">{e.event_type || '—'}</td>
-                    <td className={`pr-3 font-semibold ${e.outcome === 'PROCESSED' ? 'text-emerald-700' : e.outcome === 'BAD_SIGNATURE' || e.outcome === 'FAILED' ? 'text-red-700' : 'text-[#6b5d52]'}`}>{String(e.outcome).replace(/_/g, ' ').toLowerCase()}</td>
-                    <td className="text-[#6b5d52]">{e.detail || ''}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>)}
-      </div>
+      )}
     </div>
   );
 }
@@ -437,6 +563,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
 }) {
   const api = useApi(restaurantId, token);
   const toast = useToast();
+  const { t } = useT();
   const confirm = useConfirm();
   const canCollect = canWriteTab('FOLIOS');
   const [outstanding, setOutstanding] = useState<number | null>(null);
@@ -604,7 +731,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
                 {l.url && ['CREATED', 'PARTIALLY_PAID'].includes(l.status) && (
                   <div className="flex gap-1.5 flex-wrap items-center">
                     <a href={l.url} target="_blank" rel="noreferrer" className="text-xs text-[#1e3a5f] underline truncate max-w-[220px] inline-flex items-center gap-1">{l.url} <ExternalLink size={11} /></a>
-                    <button onClick={() => copyText(l.url, toast)} className={`${btn} py-1 border border-[#e8dccf] bg-white`}><Copy size={12} /> Copy</button>
+                    <button onClick={() => copyText(l.url, toast, t('pg.toast.copied'), t('pg.toast.copyFailed'))} className={`${btn} py-1 border border-[#e8dccf] bg-white`}><Copy size={12} /> Copy</button>
                     <a href={waShareUrl(phone || l.customer_phone, linkMessage(l, propertyName))} target="_blank" rel="noreferrer" className={`${btn} py-1 border border-[#128c7e]/30 text-[#128c7e] bg-white`}><MessageCircle size={12} /> Share on WhatsApp</a>
                     {canCollect && <button disabled={!!busy || !email} onClick={() => send(l, 'EMAIL')} className={`${btn} py-1 border border-[#e8dccf] bg-white`}><Mail size={12} /> Email again</button>}
                   </div>
@@ -612,7 +739,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
                 {(l.payments || []).map((p: Json) => (
                   <div key={p.id} className="text-xs text-[#3d3128] flex items-center gap-1">
                     <CheckCircle2 size={12} className="text-emerald-600" /> {money(p.amount)} {p.method ? `by ${p.method}` : ''} · {when(p.paid_at)}
-                    <span className={`ml-1 ${RECORD_STATUS[p.record_status]?.cls || ''}`}>{RECORD_STATUS[p.record_status]?.label || p.record_status}</span>
+                    <span className={`ml-1 ${RECORD_STATUS_CLS[p.record_status] || ''}`}>{statusWord(t, 'pg.recordStatus', p.record_status)}</span>
                   </div>
                 ))}
                 {l.last_error && l.status === 'FAILED' && <div className="text-[11px] text-red-700">{l.last_error}</div>}
@@ -623,9 +750,6 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
               </div>
             ))}
           </div>
-          <p className="text-[10px] text-[#9c8e85] leading-snug">
-            When the guest pays, the payment is added to this folio automatically — as an advance before check-in (with its GST receipt voucher) or an interim payment during the stay — and the gateway's fee is booked to Card &amp; UPI Charges.
-          </p>
         </div>
       </div>
     </div>
