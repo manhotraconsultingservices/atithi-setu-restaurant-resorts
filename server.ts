@@ -85,6 +85,7 @@ import {
 import { buildUpiUri } from "./upiLink.ts";
 import { RESERVED_SUBDOMAINS } from "./tenantHost.ts";
 import { getGateway, listGateways } from "./paymentGatewayRegistry.ts";
+import { keepWebhookRawBody } from "./webhookRawBody.ts";
 import { GatewayError, rupeesToPaise, type GatewayCredentials, type PaymentGateway } from "./paymentGateway.ts";
 import { sealSecret, openSecret, secretKeySource, needsReseal } from "./paymentSecrets.ts";
 import multer from "multer";
@@ -9884,15 +9885,14 @@ async function startServer() {
     runWithBooksActor({ id: null, name: null, role: 'ANONYMOUS', request_id: randomUUID() }, () => next());
   });
 
-  // Payment gateways sign the EXACT bytes they send. This parser runs before
+  // Webhook senders sign the EXACT bytes they send. This parser runs before
   // every route and a later route-level parser is skipped for a body already
   // read, so the raw body has to be kept here or the signature can never be
-  // checked. Kept only for the payment webhook paths, not for every request.
-  const _keepRawBody = (req: any, _res: any, buf: Buffer) => {
-    if (String(req.originalUrl || req.url || '').startsWith('/api/public/payments/webhook/')) req.rawBody = Buffer.from(buf);
-  };
-  app.use(express.json({ limit: '2mb', verify: _keepRawBody }));
-  app.use(express.urlencoded({ extended: true, limit: '2mb', verify: _keepRawBody }));
+  // checked. Kept (as req.rawBody) only for the signed webhook paths listed in
+  // webhookRawBody.ts — payment gateways, WhatsApp, OTA channels, delivery
+  // aggregators — not for every request.
+  app.use(express.json({ limit: '2mb', verify: keepWebhookRawBody }));
+  app.use(express.urlencoded({ extended: true, limit: '2mb', verify: keepWebhookRawBody }));
 
   // ─────────────────────────────────────────────────────────────────────
   // T1-S8 — JWT cookie support (BCG audit, Tier 1 follow-up)
@@ -12988,24 +12988,27 @@ async function startServer() {
     }
   };
 
-  app.post("/api/webhooks/whatsapp", express.json({ verify: (req: any, _res, buf: Buffer) => { req.rawBody = buf?.length ? buf.toString('utf8') : ''; }, limit: '512kb' }), (req: Request, res: Response) => {
-    // Meta wants a 200 within 20 s and retries otherwise, so acknowledge first
-    // and do the work afterwards.
-    res.status(200).json({ status: 'ok' });
-
+  app.post("/api/webhooks/whatsapp", (req: Request, res: Response) => {
     // Verify the payload really came from Meta when an app secret is configured.
     // Without one we still process (nothing here is destructive) but say so.
+    // The HMAC is over the raw bytes the global parser kept (webhookRawBody.ts).
+    // Checked before answering: it takes microseconds, and a 401 shows in Meta's
+    // delivery log, where a receipt dropped after a 200 shows nowhere.
     const appSecret = process.env.META_WA_APP_SECRET;
     if (appSecret) {
       const sig = String(req.headers['x-hub-signature-256'] || '');
-      const rawBody: string = (req as any).rawBody || '';
-      const expected = 'sha256=' + createHmac('sha256', appSecret).update(rawBody, 'utf8').digest('hex');
+      const rawBody: Buffer = (req as any).rawBody || Buffer.alloc(0);
+      const expected = 'sha256=' + createHmac('sha256', appSecret).update(rawBody).digest('hex');
       const a = Buffer.from(sig), b = Buffer.from(expected);
       if (a.length !== b.length || !timingSafeEqual(a, b)) {
         console.warn('[Meta Webhook] Rejected — signature mismatch.');
-        return;
+        return res.status(401).json({ error: 'Invalid signature' });
       }
     }
+
+    // Meta wants a 200 within 20 s and retries otherwise, so acknowledge first
+    // and do the work afterwards.
+    res.status(200).json({ status: 'ok' });
 
     (async () => {
       try {
@@ -21725,8 +21728,7 @@ ${data.tenant.name}`;
         for (const row of rows) {
           const externalOrderId = String(row[orderIdCol] || '').trim();
           if (!externalOrderId) continue;
-          const externalIdHash = require('crypto')
-            .createHash('sha256')
+          const externalIdHash = createHash('sha256')
             .update(`${channel}:${externalOrderId}`)
             .digest('hex');
           const localOrder: any = await db.get(
@@ -21970,8 +21972,7 @@ ${data.tenant.name}`;
             ).catch(() => [] as any[]);
             let nowMatched = 0;
             for (const line of missingLines) {
-              const externalIdHash = require('crypto')
-                .createHash('sha256')
+              const externalIdHash = createHash('sha256')
                 .update(`${s.channel}:${line.external_order_id}`)
                 .digest('hex');
               const localOrder: any = await db.get(
@@ -22220,8 +22221,7 @@ ${data.tenant.name}`;
           const placedAt = new Date(placedTs);
           const dateStr = placedAt.toISOString().slice(0, 10).replace(/-/g, '');
           const externalOrderId = `MOCK-${channel}-${dateStr}-${String(i).padStart(3, '0')}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-          const externalIdHash = require('crypto')
-            .createHash('sha256')
+          const externalIdHash = createHash('sha256')
             .update(`${channel}:${externalOrderId}`)
             .digest('hex');
 
@@ -47510,14 +47510,12 @@ ${data.tenant.name}`;
   //   OTAs can't carry our JWT. Signature validation in the adapter is
   //   how this endpoint authenticates the caller — using the api_secret
   //   the tenant entered into channel_credentials.
-  // OTA hardening — capture the raw body alongside the parsed JSON so the
-  // adapter can verify HMAC signatures over the EXACT bytes that the OTA
-  // signed. Express's default JSON parser discards the raw bytes after
-  // parsing, so we register a verify-callback that stashes them on req.
-  // ALSO accept text/xml + application/xml (Booking.com BDC sends XML).
-  const captureRawBody = (req: Request, _res: Response, buf: Buffer) => {
-    (req as any).rawBody = buf?.length ? buf.toString('utf8') : '';
-  };
+  // OTA hardening — the adapter verifies HMAC signatures over the EXACT bytes
+  // the OTA signed. A JSON (or form) body is parsed by the global parser, which
+  // keeps those bytes as req.rawBody for this path (webhookRawBody.ts); a
+  // route-level JSON parser here would never run. text/xml + application/xml
+  // (Booking.com BDC sends XML) are read by the route's text parser, whose
+  // verify callback keeps the bytes the same way.
   // Gap 9 — IP allowlist middleware. Env-driven so ops can rotate
   // OTA IP ranges without a DB migration (BDC, MMT, Agoda publish CIDR
   // blocks that occasionally change). When the env var is empty, we
@@ -47555,8 +47553,7 @@ ${data.tenant.name}`;
 
   app.post("/api/public/restaurant/:id/channel-webhook/:channel",
     channelIpAllowlistMiddleware,
-    express.json({ verify: captureRawBody, limit: '512kb' }),
-    express.text({ type: ['text/xml', 'application/xml'], limit: '512kb' }),
+    express.text({ type: ['text/xml', 'application/xml'], limit: '512kb', verify: keepWebhookRawBody }),
     async (req: Request, res: Response) => {
     const restaurantId = req.params.id;
     const channelKey = String(req.params.channel || '').toUpperCase().trim();
@@ -47601,7 +47598,7 @@ ${data.tenant.name}`;
     let cred: ChannelCredentials | null = null;
     try {
       cred = await tenantDb.get(
-        "SELECT channel, api_key, api_secret, property_id, is_enabled FROM channel_credentials WHERE channel = ?",
+        "SELECT channel, api_key, api_secret, webhook_signing_secret, property_id, is_enabled FROM channel_credentials WHERE channel = ?",
         [channelKey]
       );
     } catch { /* fall through — cred=null */ }
@@ -47609,17 +47606,17 @@ ${data.tenant.name}`;
       await audit(null, null, 'rejected', null, `No credentials configured for ${channelKey}`);
       return res.status(401).json({ error: `No credentials configured for ${channelKey}` });
     }
+    // Both secrets are stored encrypted (encryptSecret). The adapter signs with
+    // the plain value; a secret that no longer decrypts reads as not configured.
+    cred.api_secret = decryptSecret(cred.api_secret);
+    cred.webhook_signing_secret = decryptSecret(cred.webhook_signing_secret);
 
     // 3. Validate — HMAC signature + timestamp + replay protection.
     //    Adapter is responsible for the per-channel signature algorithm;
-    //    the raw body (captured via captureRawBody verify-callback above)
-    //    is what we sign, NOT the parsed JSON.
-    const rawBody: string = (req as any).rawBody || '';
-    if (typeof req.body === 'string' && !rawBody) {
-      // text/xml path — Express stored it as req.body directly.
-      (req as any).rawBody = req.body;
-    }
-    const v = adapter.validateWebhook(cred, req.headers, (req as any).rawBody || '', req.body);
+    //    the raw body kept by the body parser (webhookRawBody.ts) is what
+    //    we sign, NOT the parsed JSON.
+    const rawBody: Buffer | undefined = (req as any).rawBody;
+    const v = adapter.validateWebhook(cred, req.headers, rawBody ? rawBody.toString('utf8') : '', req.body);
     if (!v.ok) {
       await audit(null, null, 'rejected', null, v.reason || 'signature validation failed');
       return res.status(401).json({ error: v.reason || 'signature validation failed' });
@@ -60314,20 +60311,21 @@ ${data.tenant.name}`;
   //
   // POST /api/integrations/:channel/webhook/:restaurantId
   //   Headers: X-Signature (or platform-specific name normalised by adapter)
-  //   Body:    raw JSON (kept as Buffer for HMAC verification — DO NOT JSON.parse before verifying)
+  //   Body:    JSON. The global parser keeps the raw bytes as req.rawBody for
+  //            this path (webhookRawBody.ts); the HMAC is verified over those
+  //            and the payload is parsed from them, never from req.body.
   //   Query:   ?event=order|status|cancel  (default: order)
   //
   // Always responds 200 on successful processing — platforms retry on non-2xx.
   // 401 on signature failure, 422 on price-validation failure, 4xx on schema errors.
   app.post(
     "/api/integrations/:channel/webhook/:restaurantId",
-    express.raw({ type: 'application/json', limit: '2mb' }),
     async (req: Request, res: Response) => {
       const tStart = Date.now();
       const channel = String(req.params.channel || '').toUpperCase();
       const restaurantId = String(req.params.restaurantId || '');
       const eventHint = String(req.query.event || 'order').toLowerCase();
-      const rawBody: Buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
+      const rawBody: Buffer = (req as any).rawBody || Buffer.alloc(0);
 
       // Helper: write the final processing result to webhook_inbox before responding
       const finishInbox = async (db: DbInterface, idemKey: string, status: number, body: any, err?: string) => {
@@ -60393,7 +60391,7 @@ ${data.tenant.name}`;
         if (insertedRows.length === 0) {
           // Already processed — return cached response
           const cached: any = await db.get(
-            "SELECT result_status, result_body FROM webhook_inbox WHERE idempotency_key = ?",
+            "SELECT processed_at, result_status, result_body FROM webhook_inbox WHERE idempotency_key = ?",
             [idempotencyKey]
           );
           if (cached?.processed_at) {
@@ -60501,8 +60499,7 @@ ${data.tenant.name}`;
           }
 
           // 10. Compute external_id_hash (canonical key for dedup index)
-          const externalIdHash = require('crypto')
-            .createHash('sha256')
+          const externalIdHash = createHash('sha256')
             .update(`${channel}:${normalised.externalOrderId}`)
             .digest('hex');
 
@@ -60583,8 +60580,7 @@ ${data.tenant.name}`;
         if (eventHint === 'status' || eventHint === 'cancel') {
           // ─── STATUS_UPDATE / RIDER_ASSIGNED / ORDER_CANCELLED ──────────
           const upd = await adapter.parseInboundStatus(payload, ctx);
-          const externalIdHash = require('crypto')
-            .createHash('sha256')
+          const externalIdHash = createHash('sha256')
             .update(`${channel}:${upd.externalOrderId}`)
             .digest('hex');
 
@@ -64958,8 +64954,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'payments-razorpay-links',
+    commit_marker: 'webhook-raw-body-signatures',
     code_features: [
+      'webhook-raw-body-signatures — BUGFIX: the global JSON parser runs before every route and a route-level parser after it never runs, so the WhatsApp, OTA channel and delivery aggregator webhooks checked their HMAC over an empty body and rejected every genuine call (WhatsApp dropped delivery receipts, replies and STOP opt-outs silently whenever META_WA_APP_SECRET was set). webhookRawBody.ts now lists the signed webhook paths (payment gateways, /api/webhooks/whatsapp, /api/public/restaurant/:id/channel-webhook/:channel, /api/integrations/:channel/webhook/:restaurantId) and the global parser keeps req.rawBody (a Buffer) for those only; the dead route-level parsers are gone, and the OTA XML text parser keeps its bytes the same way. WhatsApp now answers 401 on a bad signature instead of 200-then-drop. OTA webhook decrypts api_secret and reads webhook_signing_secret before validating (it compared against the encrypted value, so no signature could ever match). Delivery webhook: replay lookup selects processed_at (a repeat always answered 202), and computeWebhookIdempotencyKey plus five external_id_hash sites used require(crypto), which throws under tsx ESM, so the webhook, settlement upload, channel P&L and mock seed crashed. Suite: TC-WEBHOOK-RAWBODY-SCOPE, -RAWBODY-KEPT, -WA/-OTA/-DELIVERY-SIG-LOCAL (in process, real verify callback and verifiers), -OTA-SIG-LIVE, -WA-BADSIG-LIVE, -WA-SIG-LIVE (needs META_WA_APP_SECRET in .env.local), -DELIVERY-SIG-LIVE and -DELIVERY-REPLAY-LIVE (need ATITHI_CREDENTIAL_KEY on the server).',
       'payments-razorpay-links — FEATURE: online payments through the property OWN gateway account, Razorpay first. Gateway-agnostic contract paymentGateway.ts (integer paise, webhook is a trigger never the truth, idempotent on gateway payment id) + registry paymentGatewayRegistry.ts + razorpayGateway.ts (Payment Links API: create/fetch with per-payment fee and tax/cancel, HMAC-SHA256 webhook over raw body, key mode from rzp_test_/rzp_live_). Secrets sealed AES-256-GCM by paymentSecrets.ts (ATITHI_CREDENTIAL_KEY, else a JWT_SECRET-derived payments-only key; each value names its key and re-seals on save) and never returned to a browser. Tenant tables payment_gateway_configs, payment_links (created locally as CREATING before the gateway call), payment_link_payments (UNIQUE gateway+payment id = the idempotency guarantee; NEEDS_REVIEW when the bill can no longer take the money), payment_webhook_events; central payment_link_index for the sweep. Global JSON parser keeps rawBody for /api/public/payments/webhook/ (the route-level parser never ran, which also breaks the WhatsApp/OTA/aggregator signatures). Recording: _pgReconcileLink re-reads the link from the gateway and records each captured payment once via recordFolioPayment (ADVANCE before check-in with its GST and Rule 50 voucher, INTERIM during the stay), method ONLINE → new COA 1025 Payment Gateway Clearing, and books the gateway ACTUAL fee as PGFEE-<payment>: Dr 5510 + Dr 1330 GST, Cr 1025, so clearing holds exactly the payout. Routes /payments/gateways (GET, PUT save + live test before switching on, POST test, DELETE refused while links open), /payments/links (GET, POST create+send, send, refresh, cancel), /payments/link-payments/:id/resolve, /payments/webhook-events, public POST /api/public/payments/webhook/:gateway/:publicToken (verify, log once per event id, answer, then reconcile). One live link per bill (older one cancelled, or reconciled if it was just paid). Sweep every 5 minutes reads open links back so a lost webhook never loses a payment. Link gates mirror manual folio payments (hotelStaff + FOLIOS); gateway settings need PAYMENT_GATEWAYS (owner or explicit grant, not implied by MANAGER). Notifications PAYMENT_LINK_SENT, ONLINE_PAYMENT_RECEIPT, ONLINE_PAYMENT_RECEIVED. UI src/PaymentLinks.tsx: Payment Gateways page (Administration) with keys, webhook set-up steps, link register, needs-review resolution, webhook log; folio Collect online dialog (amount defaults to balance due, WhatsApp/email/copy/share, live status). Tests: tsx razorpay_gateway_check (40), payment_secrets_check (17); suite TC-PAY-GW-READ, -WEBHOOK-UNCONFIGURED, -ENABLE-NEEDS-VALID-KEYS, -SECRET-WRITE-ONLY, -WEBHOOK-SIGNATURE, -LINK-GUARDS, -RAZORPAY-ROUNDTRIP (needs RAZORPAY_TEST_KEY_*), -DISCONNECT. NOT YET: PhonePe, Paytm, gateway refunds, payout matching of 1025 to the bank, events/spa/restaurant bills.',
       'reset-link-platform-host — BUGFIX: owners tapping the password-reset link saw Restaurant Not Found. Reset emails link to FRONTEND_URL, which is dev-erp.atithi-setu.com (same backend as erp.*), and dev-erp was not a reserved subdomain, so getTenantSlug read it as a tenant slug, /api/tenant/by-slug/dev-erp answered 404 and the reset token was never used. New tenantHost.ts (pure, shared by server and SPA like upiLink.ts) holds RESERVED_SUBDOMAINS (old list plus dev-erp and prod-erp) and tenantSlugFromHost; server RESERVED_SLUGS and the SPA parser both import it, so the two copies can no longer drift and no tenant can claim a platform label. SECOND FAULT on the same path: a reset link opened on a real tenant subdomain stripped the token and rendered the tenant login page, which has no reset form; the tenant-login gate now steps aside while ownerAuthStep is reset, and Sign In Now hands back to it. test-scripts/tenant_host_check.ts (16 checks) and suite TC-AUTH-RESET-HOST (dev-erp/prod-erp by-slug 404 + deployed bundle reserves dev-erp).',
       'stock-ledger-one-statement — ingredients.current_stock_qty and SUM(stock_movements.qty_delta) disagreed on 19 items across 5 tenants (15 Sep 2026). (1) Order consumption, order reversal, the spa retail sale and the opening stock on POST /inventory/ingredients and POST /hotel-inventory write the stock figure and its ledger line in ONE statement (a data-modifying WITH), so a failed insert can no longer leave stock moved with no line; a consumption or reversal that fails is logged and does not block the order; any non-zero opening is logged, negative included. (2) seedSpaDefaults seeds Spa Massage Oil and Aroma Candle at 0 stock. (3) The hotel item fold writes an opening line for each item it moves, in the same statement, and writes its marker only when the fold succeeds. (4) PATCH /hotel-inventory/:itemId no longer sets current_stock_qty: a changed figure is refused 400 STOCK_NEEDS_A_MOVEMENT, the current figure echoed back unchanged is accepted. (5) POST /inventory/admin/purge-corrupt-movements removed. (6) GET /inventory/ledger-integrity (module, include_shared, include_inactive) lists items whose stock figure and ledger disagree with stock_qty, ledger_qty and gap; /inventory/stockouts flags them (ledger_mismatch, ledger_qty, ledger_gap, ledger figures null, left out of the ledger totals, totals.ledger_mismatches, listed first) and /inventory/turns bands them LEDGER_MISMATCH with no cover or turns (data_quality.ledger_mismatches); both Analytics panels show them. Existing mismatched data is NOT corrected here (owner decision pending).',

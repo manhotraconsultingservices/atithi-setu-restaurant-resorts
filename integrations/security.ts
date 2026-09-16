@@ -13,6 +13,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHash,
   createHmac,
   randomBytes,
   timingSafeEqual,
@@ -172,8 +173,7 @@ export function computeWebhookIdempotencyKey(
   channel: string,
   signatureHeader: string,
 ): string {
-  return require('crypto')
-    .createHash('sha256')
+  return createHash('sha256')
     .update(`${channel}:${signatureHeader}`)
     .digest('hex');
 }
