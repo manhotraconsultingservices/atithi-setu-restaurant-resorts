@@ -33,6 +33,10 @@ export interface NavVisibilityCtx {
   isSpaEnabled: boolean;
   /** Online Payments paid module (platform switch). Off hides Payment Gateways for every role. Omitted = on. */
   isOnlinePaymentsEnabled?: boolean;
+  /** Accounts paid module (books, reports, statutory). Omitted = on. */
+  isAccountsEnabled?: boolean;
+  /** People paid module (attendance, roster, timesheet, payroll, HR). Omitted = on. */
+  isPeopleEnabled?: boolean;
   /** true when the role holds ANY EVENTS_* tab grant (drives the Events group). */
   hasEventsGrant: boolean;
   /**
@@ -63,6 +67,14 @@ export const FINANCE_TABS = [
   'CUSTOMER_ACCOUNTS',
 ] as const;
 
+/** Finance tabs sold as the Accounts module. Cash Drawer, Expenses, Purchasing and
+ *  Customers & Credit are day-to-day operations and stay outside it. */
+export const ACCOUNTS_MODULE_TABS = [
+  'ACCOUNTING', 'ACCOUNTS_PNL', 'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_MSME_43B', 'ACCOUNTS_VENDOR_AGING', 'RECEIVABLES',
+] as const;
+/** Workforce tabs sold as the People module. Staff Directory stays outside it. */
+export const PEOPLE_MODULE_TABS = ['ATTENDANCE', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL', 'HR_PAYROLL'] as const;
+
 /** Built-in ops roles that keep Status Board without an explicit grant. */
 const STATUS_BOARD_OPS_ROLES = ['FRONT_DESK', 'HOUSEKEEPING', 'CONCIERGE', 'MAINTENANCE', 'EVENTS_MANAGER'];
 
@@ -81,6 +93,9 @@ export function computeTabVisibility(id: string, ctx: NavVisibilityCtx): boolean
   // Owner-only, HARD-gated (never fall through to a fail-open null list). Staff
   // Access was previously only kept safe by being dropped from the nav array for
   // non-owners; gate it here too so the decision is single-source and layered.
+  // A paid module the platform has not switched on is not shown to anyone.
+  if (ctx.isAccountsEnabled === false && (ACCOUNTS_MODULE_TABS as readonly string[]).includes(id)) return false;
+  if (ctx.isPeopleEnabled === false && (PEOPLE_MODULE_TABS as readonly string[]).includes(id)) return false;
   if (id === 'STAFF_ACCESS') return isOwnerOrAdmin;
   if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
   if (id === 'KITCHEN_PRINTERS') return isOwnerOrAdmin;

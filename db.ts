@@ -392,6 +392,11 @@ export async function initDb() {
     -- for a tenant that already has a gateway connected.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS online_payments_enabled INT DEFAULT 0;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS whatsapp_enabled INT DEFAULT 0;
+    -- Accounts (books, reports, statutory) and People (attendance, roster, timesheet,
+    -- payroll, HR, staff self-service). Default off for new tenants; the one-time
+    -- startup backfill switches both on for every tenant that existed before.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS accounts_enabled INT DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS people_enabled INT DEFAULT 0;
     CREATE TABLE IF NOT EXISTS module_flag_backfill (name TEXT PRIMARY KEY, done_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
     -- Platform WhatsApp sender (Meta Cloud API), one row, set in /internal →
     -- WhatsApp. Secrets are sealed (paymentSecrets.ts). No row = META_WA_* env.

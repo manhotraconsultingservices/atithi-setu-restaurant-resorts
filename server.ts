@@ -9240,17 +9240,59 @@ function invalidatePlatformNotifyCache() { _platformNotifyCache = null; }
 // ── Paid modules per tenant (Online Payments, WhatsApp) ─────────────────────
 // Switched by a platform admin in /internal. Cached briefly; the admin toggle
 // clears the cache so a change applies at once.
-const _moduleCache = new Map<string, { at: number; onlinePayments: boolean; whatsapp: boolean }>();
-async function tenantModules(restaurantId: string): Promise<{ onlinePayments: boolean; whatsapp: boolean }> {
+const _moduleCache = new Map<string, { at: number; onlinePayments: boolean; whatsapp: boolean; accounts: boolean; people: boolean }>();
+async function tenantModules(restaurantId: string): Promise<{ onlinePayments: boolean; whatsapp: boolean; accounts: boolean; people: boolean }> {
   const hit = _moduleCache.get(restaurantId);
   if (hit && Date.now() - hit.at < 30000) return hit;
-  const r: any = await centralDb.get("SELECT online_payments_enabled, whatsapp_enabled FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
-  const v = { at: Date.now(), onlinePayments: Number(r?.online_payments_enabled) === 1, whatsapp: Number(r?.whatsapp_enabled) === 1 };
+  const r: any = await centralDb.get("SELECT online_payments_enabled, whatsapp_enabled, accounts_enabled, people_enabled FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+  const v = { at: Date.now(), onlinePayments: Number(r?.online_payments_enabled) === 1, whatsapp: Number(r?.whatsapp_enabled) === 1, accounts: Number(r?.accounts_enabled) === 1, people: Number(r?.people_enabled) === 1 };
   _moduleCache.set(restaurantId, v);
   return v;
 }
 const MODULE_OFF_PAYMENTS = 'Online Payments is not enabled for this property. Contact Atithi-Setu to add it to your plan.';
 const MODULE_OFF_WHATSAPP = 'WhatsApp messaging is not enabled for this property. Contact Atithi-Setu to add it to your plan.';
+const MODULE_OFF_ACCOUNTS = 'Accounts is not enabled for this property. Contact Atithi-Setu to add it to your plan.';
+const MODULE_OFF_PEOPLE = 'People (attendance, roster, payroll and HR) is not enabled for this property. Contact Atithi-Setu to add it to your plan.';
+
+// Once: every tenant that exists when Accounts and People became paid keeps both,
+// so nobody loses screens they already use. Tenants registered later start off.
+// Which paid module an API path belongs to, or null. Only the screens' routes are
+// gated: ledger posting is in-process and never passes through here. Paths the
+// free screens depend on are listed as exceptions (Cash Drawer, the events
+// roster, the staff picker, vouchers, Customers & Credit on /accounts).
+function _paidModuleForPath(method: string, path: string): { module: 'accounts' | 'people'; tenant: string | null } | null {
+  const p = String(path || '').replace(/\/+$/, '');
+  const m = p.match(/^\/api\/restaurant\/([^/]+)\/(.+)$/i);
+  if (m) {
+    const tenant = decodeURIComponent(m[1]);
+    const rest = m[2].toLowerCase();
+    if (/^accounting\//.test(rest)) {
+      // Cash Drawer (free) lives under accounting/.
+      if (/^accounting\/(cash-drawers|cash-handovers|day-close|cash-count)(\/|$)/.test(rest)) return null;
+      if (/^accounting\/chart-of-accounts$/.test(rest) && String(method).toUpperCase() === 'GET') return null;
+      return { module: 'accounts', tenant };
+    }
+    if (/^reports\/(pnl|cash-flow|gst-ledger|vendor-aging)$/.test(rest)) return { module: 'accounts', tenant };
+    if (/^(hr|payroll|me)\//.test(rest) || /^(hr|payroll)$/.test(rest)) return { module: 'people', tenant };
+    if (/^(roster|timesheet|timesheet-config|shift-templates)(\/|$)/.test(rest)) return { module: 'people', tenant };
+    if (/^attendance\/(staff|bulk)(\/|$)/.test(rest)) return { module: 'people', tenant };
+    return null;
+  }
+  // Routes whose tenant comes from the login token.
+  if (/^\/api\/attendance(\/|$)/i.test(p) || /^\/api\/owner\/(attendance\/stats|payroll|staff-advances)(\/|$)/i.test(p)) {
+    return { module: 'people', tenant: null };
+  }
+  return null;
+}
+(globalThis as any).__paidModuleForPath = _paidModuleForPath;
+
+async function backfillAccountsPeopleModules(): Promise<void> {
+  const done: any = await centralDb.get("SELECT name FROM module_flag_backfill WHERE name = 'accounts_people'").catch(() => null);
+  if (done) return;
+  const r: any = await centralDb.run("UPDATE restaurants SET accounts_enabled = 1, people_enabled = 1");
+  await centralDb.run("INSERT INTO module_flag_backfill (name) VALUES ('accounts_people') ON CONFLICT (name) DO NOTHING");
+  console.log(`[modules] Accounts and People switched on for ${Number(r?.changes || 0)} existing tenant(s)`);
+}
 
 // Once: switch Online Payments on for tenants that already connected a gateway,
 // so nothing already in use stops working when the module becomes paid.
@@ -9599,6 +9641,8 @@ async function startServer() {
   setInterval(() => { loadPlatformWhatsApp().catch(() => {}); }, 5 * 60 * 1000);
   // Background: opening every tenant must not hold up the server start.
   backfillOnlinePaymentsModule().catch((e: any) => console.error('[modules] backfill failed:', e?.message || e));
+  // Awaited: a request must never see an existing tenant with these still off.
+  await backfillAccountsPeopleModules().catch((e: any) => console.error('[modules] accounts/people backfill failed:', e?.message || e));
 
   // ── Bootstrap delivery-platform integration adapters ───────────────────
   // Phase 5: register all real adapters at boot. Switching platforms is
@@ -10319,6 +10363,34 @@ async function startServer() {
       console.error("[tenant-guard] check failed:", err);
     }
     next();
+  });
+
+  // ── Paid modules: Accounts and People ─────────────────────────────────────
+  // A tenant without the module gets 403 on its screens' routes, whatever the
+  // role. Platform admins pass, so support can still look. An unauthenticated
+  // call passes through to the route's own authenticate, which refuses it.
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const hit = _paidModuleForPath(req.method, req.path);
+      if (!hit) return next();
+      let tenant = hit.tenant;
+      let role = '';
+      const authHeader = req.headers.authorization;
+      const token = (authHeader ? authHeader.split(' ')[1] : null) || (req as any).cookies?.[JWT_COOKIE_NAME] || null;
+      if (token) {
+        try { const d: any = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }); role = String(d?.role || '').toUpperCase(); tenant = tenant || d?.restaurantId || null; }
+        catch { return next(); }
+      } else return next();
+      if (role === 'SUPER_ADMIN' || role === 'CTO' || !tenant) return next();
+      const mods = await tenantModules(String(tenant));
+      if (hit.module === 'accounts' && !mods.accounts) return res.status(403).json({ error: MODULE_OFF_ACCOUNTS, code: 'MODULE_NOT_ENABLED', module: 'accounts' });
+      if (hit.module === 'people' && !mods.people) return res.status(403).json({ error: MODULE_OFF_PEOPLE, code: 'MODULE_NOT_ENABLED', module: 'people' });
+      next();
+    } catch (err) {
+      // A lookup failure must not take the whole API down: fail open, log.
+      console.error('[paid-modules] check failed:', err);
+      next();
+    }
   });
 
   // Admin: Get Users
@@ -35777,9 +35849,11 @@ ${data.tenant.name}`;
       const MODULES: Record<string, { col: string; label: string }> = {
         'online-payments': { col: 'online_payments_enabled', label: 'Online Payments' },
         whatsapp: { col: 'whatsapp_enabled', label: 'WhatsApp' },
+        accounts: { col: 'accounts_enabled', label: 'Accounts' },
+        people: { col: 'people_enabled', label: 'People' },
       };
       const m = MODULES[String(req.params.module || '').toLowerCase()];
-      if (!m) return res.status(400).json({ error: 'module must be online-payments or whatsapp.' });
+      if (!m) return res.status(400).json({ error: 'module must be online-payments, whatsapp, accounts or people.' });
       const enabled = req.body?.enabled !== false;
       const current: any = await centralDb.get(`SELECT ${m.col} AS v FROM restaurants WHERE id = ?`, [req.params.id]);
       if (!current) return res.status(404).json({ error: 'Restaurant not found' });

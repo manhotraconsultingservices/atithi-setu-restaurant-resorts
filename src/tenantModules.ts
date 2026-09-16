@@ -4,7 +4,7 @@
 // without prop-drilling — the same pattern as perm.ts. The server enforces the
 // same switches; this only keeps staff from pressing a button that will refuse.
 
-export type PaidModule = 'online_payments' | 'whatsapp';
+export type PaidModule = 'online_payments' | 'whatsapp' | 'accounts' | 'people';
 
 const KEY = 'tenant_modules';
 
@@ -14,6 +14,8 @@ export function setTenantModules(restaurant: any): void {
     localStorage.setItem(KEY, JSON.stringify({
       online_payments: Number(restaurant.online_payments_enabled) === 1,
       whatsapp: Number(restaurant.whatsapp_enabled) === 1,
+      accounts: Number(restaurant.accounts_enabled) === 1,
+      people: Number(restaurant.people_enabled) === 1,
     }));
   } catch { /* storage blocked: controls stay greyed, the server still decides */ }
 }
