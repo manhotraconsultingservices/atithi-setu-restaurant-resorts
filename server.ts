@@ -4373,7 +4373,15 @@ async function _pgSendLink(
       }, { onlyChannels: ['WHATSAPP'] });
       if (tally.sent) sent.push('WHATSAPP');
       else if (tally.skipped) errors.push('This customer asked not to receive WhatsApp messages.');
-      else errors.push('WhatsApp did not go out. Switch on "Payment link" for WhatsApp in Notifications, or use Share on WhatsApp.');
+      else {
+        // A send that was attempted and refused (e.g. Meta 131005) is in the
+        // delivery log with the provider's reason: show that, not the setting hint.
+        const row: any = tally.failed > 0 ? await db.get(
+          "SELECT error FROM notification_deliveries WHERE event_name = 'PAYMENT_LINK_SENT' AND channel = 'WHATSAPP' AND status = 'FAILED' AND created_at > CURRENT_TIMESTAMP - INTERVAL '2 minutes' ORDER BY created_at DESC LIMIT 1").catch(() => null) : null;
+        errors.push(row?.error
+          ? `WhatsApp refused the message: ${row.error}`
+          : 'WhatsApp did not go out. Switch on "Payment link" for WhatsApp in Notifications, or use Share on WhatsApp.');
+      }
     }
   }
   if (sent.length) {
@@ -65641,8 +65649,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'row-actions-consistent-gst',
+    commit_marker: 'paylink-whatsapp-real-reason',
     code_features: [
+      'paylink-whatsapp-real-reason  BUGFIX (owner test): when WhatsApp refused a payment link (Meta 131005 Access denied), staff were told to switch on Payment link in Notifications, which was already on. A send that was attempted and refused now shows the provider reason from the delivery log; the settings hint remains only when nothing was attempted.',
       'row-actions-consistent-gst  UX (owner: make the Actions column consistent across modules, fold extra commands under a menu, add GST). One shared src/components/RowActions.tsx now renders the Actions column of Restaurant Invoices, PMS Guest Bills, Event bookings and Wellness invoices: the most-used actions inline as same-size icon buttons with tooltips and aria-labels, the rest in a ... menu as icon plus label with Cancel and Delete last in red, a disabled action shows its reason as the tooltip, and a dot marks a bill that already has GST details. The same icon means the same action everywhere (Send = payment link, BadgePercent = GST, FileText = invoice PDF, IndianRupee = payment). NEW: a GST action on Event bookings, Guest Bills and Wellness invoices through one translated editor (src/components/BuyerGstEditor.ts) that Restaurant invoices now use too; new route PUT /hotel/folios/:fid/gst-details (hotelStaff + FOLIOS UPDATE, _readBuyerGstDetails rules, audited) saves the GSTIN on the bill and on the booking, so the check-out GST register, e-invoice and GSTR-1 see it, and the address on the bill; both hotel invoice PDFs now print the buyer GSTIN and address from the bill. The Guest Bills list returns customer_gstin, customer_address, guest_gstin, guest_phone and guest_email. Labels in en, hi, ta, kn, te, pa.',
       'paylink-resend-open-link  BUGFIX (owner: every Send by email asked Replace the open link?). ROOT CAUSE: each Send button in the payment link dialog always created a NEW link, so once a link existed (sent on WhatsApp, or Create link only) the next send tried to replace it. Now an open link for the same amount is sent again on the chosen channel (email, WhatsApp or both) and Create link only points to it; the replace question is asked only when staff change the amount. Frontend only.',
       'paid-modules-hidden-when-off  BUGFIX (owner: Online Payments and WhatsApp off for Ankur-cafe, yet the owner still saw Payment Gateways). A paid module the platform has not switched on is now not shown to any role, rather than greyed out: Payment Gateways leaves the menu (navVisibility isOnlinePaymentsEnabled, which also drives the content guard) and the Staff Access matrix; every send-link button and row icon, the hotel folio Collect online, the bookings Pay link column, and every WhatsApp control (dialog WhatsApp and Both buttons, bookings WhatsApp Pay link, notification WhatsApp channel toggles, WhatsApp card, compose channel) are hidden. The send-link icon still greys out when nothing is due. WhatsApp test: a 131005 / 10 / 200 permission refusal now explains the System User token permissions and asset assignment.',
