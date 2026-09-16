@@ -416,4 +416,13 @@ export const kn: Record<string, string> = {
   'settings.tab.operations': 'ಕಾರ್ಯಾಚರಣೆ',
   'settings.tab.profile': 'ನನ್ನ ಪ್ರೊಫೈಲ್',
   'settings.fixField': 'ಉಳಿಸುವ ಮೊದಲು ಗುರುತಿಸಿದ ಕ್ಷೇತ್ರವನ್ನು ಭರ್ತಿ ಮಾಡಿ.',
+  // ── Event payment links ──
+  'events.pay.sendLink': 'ಪಾವತಿ ಲಿಂಕ್ ಕಳುಹಿಸಿ',
+  'events.pay.linkFull': 'ಪೂರ್ಣ ಬಾಕಿ',
+  'events.pay.linkInstalment': 'ಮುಂದಿನ ಕಂತು',
+  'events.pay.linkSubtitle': 'ಈವೆಂಟ್ ಬುಕಿಂಗ್ {id}',
+  'pg.collect.balanceDue': 'ಬಾಕಿ {amount}',
+  'pg.collect.recordedBooking': '{amount} ಆನ್‌ಲೈನ್‌ನಲ್ಲಿ ಸ್ವೀಕರಿಸಿ ಬುಕಿಂಗ್‌ನಲ್ಲಿ ದಾಖಲಿಸಲಾಗಿದೆ.',
+  'pg.collect.reviewBooking': 'ಪಾವತಿ ಬಂದಿದೆ, ಆದರೆ ಈ ಬುಕಿಂಗ್‌ಗೆ ಅನ್ವಯಿಸಲಾಗಲಿಲ್ಲ. Payment Gateways → ಪಾವತಿ ಲಿಂಕ್‌ಗಳನ್ನು ನೋಡಿ.',
+  'pg.collect.linksBooking': 'ಈ ಬುಕಿಂಗ್‌ನ ಲಿಂಕ್‌ಗಳು',
 };

@@ -517,4 +517,13 @@ export const hi: Record<string, string> = {
   'settings.tab.operations': 'संचालन',
   'settings.tab.profile': 'मेरी प्रोफ़ाइल',
   'settings.fixField': 'सहेजने से पहले चिह्नित फ़ील्ड भरें।',
+  // ── Event payment links ──
+  'events.pay.sendLink': 'भुगतान लिंक भेजें',
+  'events.pay.linkFull': 'पूरी बकाया राशि',
+  'events.pay.linkInstalment': 'अगली किस्त',
+  'events.pay.linkSubtitle': 'इवेंट बुकिंग {id}',
+  'pg.collect.balanceDue': 'बकाया {amount}',
+  'pg.collect.recordedBooking': '{amount} ऑनलाइन प्राप्त हुआ और बुकिंग पर दर्ज किया गया।',
+  'pg.collect.reviewBooking': 'भुगतान आया, पर इस बुकिंग पर लागू नहीं हो सका। Payment Gateways → भुगतान लिंक देखें।',
+  'pg.collect.linksBooking': 'इस बुकिंग के लिंक',
 };

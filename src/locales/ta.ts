@@ -414,4 +414,13 @@ export const ta: Record<string, string> = {
   'settings.tab.operations': 'செயல்பாடுகள்',
   'settings.tab.profile': 'எனது சுயவிவரம்',
   'settings.fixField': 'சேமிக்கும் முன் குறிக்கப்பட்ட புலத்தை நிரப்பவும்.',
+  // ── Event payment links ──
+  'events.pay.sendLink': 'கட்டண இணைப்பை அனுப்பு',
+  'events.pay.linkFull': 'முழு நிலுவை',
+  'events.pay.linkInstalment': 'அடுத்த தவணை',
+  'events.pay.linkSubtitle': 'நிகழ்வு முன்பதிவு {id}',
+  'pg.collect.balanceDue': 'நிலுவை {amount}',
+  'pg.collect.recordedBooking': '{amount} ஆன்லைனில் பெறப்பட்டு முன்பதிவில் பதிவு செய்யப்பட்டது.',
+  'pg.collect.reviewBooking': 'கட்டணம் வந்தது, ஆனால் இந்த முன்பதிவில் சேர்க்க முடியவில்லை. Payment Gateways → கட்டண இணைப்புகள் பார்க்கவும்.',
+  'pg.collect.linksBooking': 'இந்த முன்பதிவுக்கான இணைப்புகள்',
 };

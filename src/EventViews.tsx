@@ -9,10 +9,11 @@ import { DataTable } from './components/DataTable';
 import { ObjectDetail } from './components/ObjectDetail';
 import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { prettyRoleLabel } from './roleLabel';
+import { CollectOnlineDialog } from './PaymentLinks';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
-  AlertTriangle, Mail, Phone, Upload, Image as ImageIcon, Play,
+  AlertTriangle, Mail, Phone, Upload, Image as ImageIcon, Play, Link2,
 } from 'lucide-react';
 
 // Cancelling an event invoice is a high-privilege action. Mirrors the backend gate
@@ -919,6 +920,7 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
   const [form, setForm] = useState<{ open: boolean; schedule_id: string | null; amount: string; method: string; paid_at: string; reference: string }>({ open: false, schedule_id: null, amount: '', method: 'UPI', paid_at: new Date().toISOString().slice(0, 10), reference: '' });
   const today = new Date().toISOString().slice(0, 10);
   const dOnly = (v: any) => String(v || '').slice(0, 10);
+  const [linkOpen, setLinkOpen] = useState(false);
 
   const load = async () => {
     try { setSched(await api(`/events/bookings/${bid}/schedule`)); } catch { setSched([]); }
@@ -971,9 +973,27 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
         <div className="flex items-center gap-3 text-xs">
           <span className="text-[#6b5d52]">{t('events.pay.paid')} <b className="text-emerald-700 tabular-nums">{money(pay.paid)}</b></span>
           <span className="text-[#6b5d52]">{t('events.pay.balance')} <b className="text-rose-600 tabular-nums">{money(pay.balance)}</b></span>
+          {canRecord && Number(pay.balance) > 0.01 && <button className={BTN_GHOST} onClick={() => setLinkOpen(true)}><Link2 size={12} />{t('events.pay.sendLink')}</button>}
           {canRecord && <button className={BTN_PRIMARY} onClick={() => openPay()}><Plus size={12} />{t('events.pay.record')}</button>}
         </div>
       </div>
+      {linkOpen && (() => {
+        // Full balance, or the next unpaid instalment as the partial amount.
+        const balance = Math.max(0, Number(pay.balance || 0));
+        const next = sched.find((s: any) => s.status !== 'PAID');
+        const nextDue = next ? Math.min(balance, Math.max(0, Number(next.amount || 0) - Number(next.paid_amount || 0))) : 0;
+        const presets = [{ label: t('events.pay.linkFull'), amount: balance }];
+        if (nextDue > 0.01 && Math.abs(nextDue - balance) > 0.01) presets.push({ label: next.label || t('events.pay.linkInstalment'), amount: nextDue });
+        return (
+          <CollectOnlineDialog
+            restaurantId={restaurantId} token={token}
+            folio={{ id: bid, guest_name: booking.customer_name, guest_phone: booking.customer_phone, guest_email: booking.customer_email }}
+            payable={{ objectType: 'EVENT_BOOKING', objectId: bid, outstanding: balance, subtitle: t('events.pay.linkSubtitle', { id: bid }), presets }}
+            onClose={() => setLinkOpen(false)}
+            onRecorded={() => { load(); onChanged(); }}
+          />
+        );
+      })()}
       {!editable && canRecord && Number(pay.balance) > 0.01 && (
         <p className="text-[11px] text-[#9d8b7e] -mt-1 mb-2">{t('events.pay.afterEvent')}</p>
       )}

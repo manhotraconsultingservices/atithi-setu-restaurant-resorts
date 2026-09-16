@@ -414,4 +414,13 @@ export const te: Record<string, string> = {
   'settings.tab.operations': 'కార్యకలాపాలు',
   'settings.tab.profile': 'నా ప్రొఫైల్',
   'settings.fixField': 'సేవ్ చేసే ముందు గుర్తించిన ఫీల్డ్‌ను నింపండి.',
+  // ── Event payment links ──
+  'events.pay.sendLink': 'చెల్లింపు లింక్ పంపండి',
+  'events.pay.linkFull': 'పూర్తి బకాయి',
+  'events.pay.linkInstalment': 'తదుపరి వాయిదా',
+  'events.pay.linkSubtitle': 'ఈవెంట్ బుకింగ్ {id}',
+  'pg.collect.balanceDue': 'బకాయి {amount}',
+  'pg.collect.recordedBooking': '{amount} ఆన్‌లైన్‌లో అందింది, బుకింగ్‌లో నమోదు చేయబడింది.',
+  'pg.collect.reviewBooking': 'చెల్లింపు వచ్చింది, కానీ ఈ బుకింగ్‌కు వర్తింపజేయలేకపోయాం. Payment Gateways → చెల్లింపు లింక్‌లు చూడండి.',
+  'pg.collect.linksBooking': 'ఈ బుకింగ్ లింక్‌లు',
 };

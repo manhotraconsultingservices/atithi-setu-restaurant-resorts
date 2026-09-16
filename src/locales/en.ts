@@ -481,4 +481,13 @@ export const en: Record<string, string> = {
   'settings.tab.operations': 'Operations',
   'settings.tab.profile': 'My profile',
   'settings.fixField': 'Please fill in the highlighted field before saving.',
+  // ── Event payment links ──
+  'events.pay.sendLink': 'Send payment link',
+  'events.pay.linkFull': 'Full balance',
+  'events.pay.linkInstalment': 'Next instalment',
+  'events.pay.linkSubtitle': 'Event booking {id}',
+  'pg.collect.balanceDue': 'balance due {amount}',
+  'pg.collect.recordedBooking': '{amount} received online and recorded on the booking.',
+  'pg.collect.reviewBooking': 'A payment arrived but could not be applied to this booking. See Payment Gateways → Payment links.',
+  'pg.collect.linksBooking': 'Links for this booking',
 };

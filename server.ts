@@ -3880,6 +3880,23 @@ async function _pgDescribePayable(db: any, restaurantId: string, objectType: str
       bookingId: f.booking_id || null,
     };
   }
+  if (objectType === 'EVENT_BOOKING') {
+    const bk: any = await db.get(
+      'SELECT id, status, customer_name, customer_phone, customer_email, total_amount, advance_amount FROM event_bookings WHERE id = ?',
+      [objectId]).catch(() => null);
+    if (!bk) return null;
+    const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+    // Same rule as a receipt entered by hand: anything but a cancelled booking.
+    const open = String(bk.status || '').toUpperCase() !== 'CANCELLED';
+    return {
+      objectType, objectId, open,
+      closedReason: open ? null : 'This event booking is cancelled.',
+      outstandingPaise: Math.max(0, rupeesToPaise(Math.max(0, Number(bk.total_amount || 0) - Number(bk.advance_amount || 0)))),
+      purpose: `${prop?.name || 'Your event'} — event booking ${bk.id}`,
+      customer: { name: bk.customer_name || null, phone: bk.customer_phone || null, email: bk.customer_email || null },
+      bookingId: bk.id,
+    };
+  }
   return null;
 }
 
@@ -3912,6 +3929,23 @@ async function _pgRecordToPayable(db: any, restaurantId: string, link: any, p: a
       notes: `Payment link ${link.id}${p.method ? ` · ${p.method}` : ''}`,
     });
     return row.id;
+  }
+  if (link.object_type === 'EVENT_BOOKING') {
+    const bk: any = await db.get('SELECT id FROM event_bookings WHERE id = ?', [link.object_id]).catch(() => null);
+    if (!bk) throw new PaymentNeedsReview('The event booking this link was sent for no longer exists.');
+    const prior: any = await db.get('SELECT id FROM event_payments WHERE booking_id = ? AND reference = ? LIMIT 1', [bk.id, reference]).catch(() => null);
+    if (prior) return prior.id;
+    const record = (globalThis as any).__recordEventPayment;
+    // Not registered yet (server still starting): leave it PENDING for the sweep.
+    if (typeof record !== 'function') throw new Error('Event payments are not ready yet.');
+    const out = await record(restaurantId, bk.id, {
+      amount: Number(p.amount_paise) / 100, method: 'ONLINE', reference, paid_at: _glPostDate(p.paid_at),
+      note: `Payment link ${link.id}${p.method ? ` · ${p.method}` : ''}`,
+    }, { user: { id: null, email: `${gatewayLabel} payment link`, role: 'SYSTEM' } });
+    if (out.status === 201 && out.body?.payment_id) return out.body.payment_id;
+    if (out.status >= 500) throw new Error(out.body?.error || 'Recording the event payment failed.');
+    // Refused by the booking's own rules (cancelled, or more than is owed).
+    throw new PaymentNeedsReview(`${out.body?.error || 'The booking refused this payment.'} The money is in the ${gatewayLabel} account: refund it there, or record it on the booking by hand.`);
   }
   throw new PaymentNeedsReview(`Payments for ${link.object_type} are not recorded automatically yet.`);
 }
@@ -4115,6 +4149,11 @@ async function _pgCreateLink(
   const amountPaise = typed ? rupeesToPaise(input.amount) : payable.outstandingPaise;
   if (!Number.isInteger(amountPaise) || amountPaise < 100) {
     throw new PaymentRequestError(typed ? 'Amount must be at least ₹1.' : 'Nothing is outstanding on this bill. Enter the amount to collect.', 400);
+  }
+  // The event receipt route refuses a payment above the balance, so a link for
+  // more could only end in NEEDS_REVIEW. Refuse it now instead.
+  if (input.objectType === 'EVENT_BOOKING' && payable.outstandingPaise > 0 && amountPaise > payable.outstandingPaise) {
+    throw new PaymentRequestError(`The balance due on this booking is ₹${(payable.outstandingPaise / 100).toFixed(2)}. A link cannot ask for more.`, 400);
   }
   const hours = Math.min(24 * 30, Math.max(1, Number(input.expiresInHours) || 72));
   const expiresAt = new Date(Date.now() + hours * 3600 * 1000);
@@ -33762,18 +33801,19 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load payments" }); }
   });
 
-  app.post("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
-    const check = await ensureEventsEnabled(req.params.id);
-    if (!check.ok) return res.status(check.status).json({ error: check.error });
-    try {
-      const db = await getTenantDb(req.params.id);
-      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
-      if (!bk) return res.status(404).json({ error: "Booking not found" });
-      const b = req.body || {};
+  // Record one receipt against an event booking. The staff route below and the
+  // payment-link recorder (method ONLINE) both come through here, so a gateway
+  // payment gets exactly the guards, schedule, GL and voucher of a hand-entered one.
+  const _evPayOut = (status: number, body: any) => ({ status, body });
+  const recordEventPayment = async (restaurantId: string, bid: string, b: any, actorReq: AuthRequest | null): Promise<{ status: number; body: any }> => {
+      const db = await getTenantDb(restaurantId);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [bid]);
+      if (!bk) return _evPayOut(404, { error: "Booking not found" });
+      const isOnline = String(b.method || '').toUpperCase() === 'ONLINE';
       const amount = round2(Number(b.amount || 0));
-      if (!(amount > 0)) return res.status(400).json({ error: "Amount must be greater than 0" });
+      if (!(amount > 0)) return _evPayOut(400, { error: "Amount must be greater than 0" });
       // Cannot record a payment against a cancelled booking.
-      if (bk.status === 'CANCELLED') return res.status(409).json({ error: "Cannot record a payment on a cancelled booking." });
+      if (bk.status === 'CANCELLED') return _evPayOut(409, { error: "Cannot record a payment on a cancelled booking." });
       // Overpayment guard — a receipt may not push total paid past the Grand Total
       // (blocks the duplicate-payment / negative-balance bugs). advance_amount is
       // kept in sync = SUM(event_payments.amount); outstanding = grand − paid.
@@ -33781,7 +33821,7 @@ ${data.tenant.name}`;
       const alreadyPaid = round2(Number(bk.advance_amount || 0));
       const outstanding = round2(Math.max(0, grandDue - alreadyPaid));
       if (grandDue > 0 && amount > outstanding + 0.01) {
-        return res.status(409).json({
+        return _evPayOut(409, {
           error: outstanding <= 0.01
             ? `This booking is already fully paid (₹${grandDue.toFixed(2)}). No further payment is due.`
             : `Payment ₹${amount.toFixed(2)} exceeds the outstanding balance of ₹${outstanding.toFixed(2)}. Record at most the balance due.`,
@@ -33791,21 +33831,23 @@ ${data.tenant.name}`;
       const pid = mkEventId('EPY');
       await db.run(
         `INSERT INTO event_payments (id, booking_id, schedule_id, amount, method, reference, paid_at, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [pid, req.params.bid, b.schedule_id || null, amount, b.method || 'CASH', b.reference || null, b.paid_at || new Date().toISOString().slice(0, 10), b.note || null, req.user?.email || null]
+        [pid, bid, b.schedule_id || null, amount, b.method || 'CASH', b.reference || null, b.paid_at || new Date().toISOString().slice(0, 10), b.note || null, actorReq?.user?.email || null]
       );
-      const paid = await recomputeEventPaid(db, req.params.bid);
+      const paid = await recomputeEventPaid(db, bid);
       // Money in against an event reduces what its company owes. Without this
       // the statement would keep showing the full amount after it was paid.
-      await _syncAccountInvoiceForEvent(db, req.params.bid);
+      await _syncAccountInvoiceForEvent(db, bid);
       // Re-project the whole schedule from total receipts (oldest instalment first).
       // Single source of truth for instalment status — a full payment marks every
       // instalment PAID regardless of whether a specific one was chosen, so the
       // schedule never leaves a "Pay" button on a fully-settled booking.
-      await reconcileEventSchedule(db, req.params.bid);
+      await reconcileEventSchedule(db, bid);
       // ── Events ↔ Accounts: post the receipt to the cash ledger (petty_cash) ──
       // Idempotent via reference_id, so it surfaces in the Expense Journal /
       // accounts reports without ever double-counting. Mirrors the HR payroll bridge.
-      try {
+      // A gateway receipt is held by the gateway until payout, not cash in the
+      // till, so it gets no cash-ledger row; the GL posts it to clearing (1025).
+      if (!isOnline) try {
         await _ensurePettyCash(db);
         await db.exec("ALTER TABLE petty_cash ADD COLUMN IF NOT EXISTS reference_id TEXT").catch(() => {});
         const refKey = `EVENT-PAY-${pid}`;
@@ -33816,7 +33858,7 @@ ${data.tenant.name}`;
              VALUES (?, ?, 'IN', 'EVENT_PAYMENT', ?, ?, ?, 'SHARED', ?)`,
             [`PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`, (b.paid_at || new Date().toISOString().slice(0, 10)),
               amount, `Event payment — ${bk.customer_name || ''} via ${b.method || 'CASH'}${b.reference ? ' (' + b.reference + ')' : ''}`,
-              req.user?.email || null, refKey]
+              actorReq?.user?.email || null, refKey]
           );
         }
       } catch (e) { console.warn('[events] accounts bridge (post) failed:', e); }
@@ -33839,7 +33881,7 @@ ${data.tenant.name}`;
           // stayed owed and the money also sat as an advance: both overstated.
           const liveInv = await _liveEventInvoice(db, bk);
           const isAdvance = !liveInv;
-          const reg = isAdvance ? await _tenantGstRegistration(req.params.id) : { gstin: null, state: null };
+          const reg = isAdvance ? await _tenantGstRegistration(restaurantId) : { gstin: null, state: null };
           const rate = isAdvance && reg.gstin ? await resolveEventGstRate(db) : 0;
           const split = _advanceTaxSplit(amount, rate);
           if (split.tax > 0) await _ensureAdvanceGstAccounts(db);
@@ -33853,12 +33895,12 @@ ${data.tenant.name}`;
           } else {
             evLines = [
               { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Event advance ${bk.customer_name || ''}`.trim() },
-              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: split.taxable, narration: `Event advance ${req.params.bid}` },
+              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: split.taxable, narration: `Event advance ${bid}` },
             ];
-            if (split.cgst > 0) evLines.push({ account_code: '2201', account_name: 'GST on Advances — CGST', dr_amount: 0, cr_amount: split.cgst, narration: `CGST on event advance ${req.params.bid}` });
-            if (split.sgst > 0) evLines.push({ account_code: '2211', account_name: 'GST on Advances — SGST', dr_amount: 0, cr_amount: split.sgst, narration: `SGST on event advance ${req.params.bid}` });
+            if (split.cgst > 0) evLines.push({ account_code: '2201', account_name: 'GST on Advances — CGST', dr_amount: 0, cr_amount: split.cgst, narration: `CGST on event advance ${bid}` });
+            if (split.sgst > 0) evLines.push({ account_code: '2211', account_name: 'GST on Advances — SGST', dr_amount: 0, cr_amount: split.sgst, narration: `SGST on event advance ${bid}` });
           }
-          await _postGlEntries(db, req.params.id, evRef, payDate, liveInv ? 'EVENT_RECEIPT' : 'EVENT_ADVANCE', pid, evLines, req.user?.email || null);
+          await _postGlEntries(db, restaurantId, evRef, payDate, liveInv ? 'EVENT_RECEIPT' : 'EVENT_ADVANCE', pid, evLines, actorReq?.user?.email || null);
           if (isAdvance) {
             receiptVoucher = await _issueReceiptVoucher(db, {
               module: 'EVENTS', receiptDate: payDate, amount, rate,
@@ -33868,22 +33910,34 @@ ${data.tenant.name}`;
               method: b.method || null, reference: b.reference || null,
               bookingId: bk.id, eventBookingId: bk.id, folioId: null,
               paymentId: pid, paymentSource: 'event_payments', journalRef: evRef,
-              placeOfSupply: reg.state, issuedBy: req.user?.email || req.user?.id || null,
+              placeOfSupply: reg.state, issuedBy: actorReq?.user?.email || actorReq?.user?.id || null,
             });
             await db.run("UPDATE event_payments SET receipt_voucher_id = ? WHERE id = ?", [receiptVoucher.id, pid]).catch(() => {});
           }
         }
       } catch (glErr) { console.error('[GL] event-payment capture failed:', glErr); }
-      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'PAYMENT_RECORDED', summary: `Payment ${amount} via ${b.method || 'CASH'} (total paid ${paid})` });
-      notifyEvent(req.params.id, 'EVENT_PAYMENT_RECEIVED', bk, {
+      await writeObjectAudit(db, actorReq, { objectType: 'EVENT_BOOKING', objectId: bid, action: 'PAYMENT_RECORDED', summary: `Payment ${amount} via ${b.method || 'CASH'} (total paid ${paid})` });
+      // A gateway receipt is announced by the payment-link notifications instead.
+      if (!isOnline) notifyEvent(restaurantId, 'EVENT_PAYMENT_RECEIVED', bk, {
         amount, method: b.method || 'CASH',
         grand_total: Number(bk.total_amount || 0), paid,
         balance: round2(Math.max(0, Number(bk.total_amount || 0) - paid)),
       });
-      res.status(201).json({
+      return _evPayOut(201, {
         success: true, payment_id: pid, paid, balance: round2(Number(bk.total_amount || 0) - paid),
         receipt_voucher: receiptVoucher ? { id: receiptVoucher.id, rv_number: receiptVoucher.rv_number, gst: round2(Number(receiptVoucher.cgst || 0) + Number(receiptVoucher.sgst || 0) + Number(receiptVoucher.igst || 0)) } : null,
       });
+  };
+  (globalThis as any).__recordEventPayment = recordEventPayment;
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    // ONLINE means the payment gateway confirmed the money; only the gateway sets it.
+    if (String(req.body?.method || '').toUpperCase() === 'ONLINE') return res.status(400).json({ error: 'Online payments are recorded by the payment gateway.' });
+    try {
+      const out = await recordEventPayment(req.params.id, req.params.bid, req.body || {}, req);
+      res.status(out.status).json(out.body);
     } catch (err: any) { res.status(500).json({ error: "Failed to record payment" }); }
   });
 
@@ -55479,6 +55533,7 @@ ${data.tenant.name}`;
   // a card payment on a folio can also send a link for it, and nobody else.
   const PAYABLE_OBJECT_GATES: Record<string, { read: any[]; write: any[] }> = {
     HOTEL_FOLIO: { read: [hotelStaff, requireTabAction('FOLIOS', 'READ')], write: [hotelStaff, requireTabAction('FOLIOS', 'CREATE')] },
+    EVENT_BOOKING: { read: [eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'READ')], write: [eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE')] },
   };
   // Runs route middleware inside a handler. A middleware that refuses has
   // already answered the request; false tells the handler to stop.
@@ -55720,10 +55775,14 @@ ${data.tenant.name}`;
     const b = req.body || {};
     const objectType = String(b.object_type || '').toUpperCase();
     const gates = PAYABLE_OBJECT_GATES[objectType];
-    if (!gates) return res.status(400).json({ error: 'object_type must be HOTEL_FOLIO.' });
+    if (!gates) return res.status(400).json({ error: 'object_type must be HOTEL_FOLIO or EVENT_BOOKING.' });
     if (!(await _pgPassGates(gates.write, req, res))) return;
     if (objectType === 'HOTEL_FOLIO') {
       const chk = await ensureHotelEnabled(req.params.id);
+      if (!chk.ok) return res.status(chk.status).json({ error: chk.error });
+    }
+    if (objectType === 'EVENT_BOOKING') {
+      const chk = await ensureEventsEnabled(req.params.id);
       if (!chk.ok) return res.status(chk.status).json({ error: chk.error });
     }
     const channel = String(b.channel || 'NONE').toUpperCase();
@@ -65013,8 +65072,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ux-settings-subtabs',
+    commit_marker: 'event-payment-links',
     code_features: [
+      'event-payment-links  Events: Send payment link on the booking payment panel (full balance or the next instalment, or any amount up to the balance) by WhatsApp, email or copy. EVENT_BOOKING is a payable: gates eventsStaff + EVENTS_BOOKINGS, events must be enabled, a link above the balance is refused. The event receipt route body moved verbatim into recordEventPayment(), which the route and the gateway recorder share, so a gateway payment gets the same guards, schedule, GL (Dr 1025 clearing) and receipt voucher. ONLINE receipts get no petty-cash row and no second event notification; staff cannot post ONLINE by hand (400). A payment refused by the booking (cancelled, over the balance) goes to NEEDS_REVIEW.',
       'ux-settings-subtabs  UX (client feedback: too much scrolling and commentary). Settings > Restaurant is split into sub-tabs Business, Invoices, Operations and My profile. Layout only: blocks are hidden with CSS, never unmounted, so the one settings form still saves every field together; a required field on a hidden tab opens its tab. Save bar pinned at the bottom. Explanatory paragraphs removed; the few facts worth keeping sit behind an info icon. Language card moved under Business. Keys settings.tab.* and settings.fixField in en, hi, ta, kn, te, pa. Frontend only.',
       'ux-payment-gateways-subtabs  UX (client feedback: too much commentary, too much scrolling). Payment Gateways page rebuilt as three sub-tabs: Gateways (default-gateway dropdown + a Razorpay/PhonePe/Paytm switcher showing one gateway card at a time), Payment links, Webhook log. Commentary removed: page intro, default-gateway explanation, test-mode banner (now a TEST badge), webhook-missed and phone-required notes, list subtitles, the encryption-key-source notice (a platform concern) and the folio dialog footer. Field help moved into an info-icon tooltip; webhook set-up steps into a collapsed Setup guide. Both lists moved to the shared DataTable (sort, per-column filters, column chooser, CSV export). Resolve-payment uses an in-page dialog instead of window.prompt. All page strings localised (pg.* keys in en, hi, ta, kn, te, pa). Frontend only: same API calls, same handlers, no server behaviour change.',
       'hr-import-template-route-order - GET /hr/employees/import-template.xlsx had never downloaded: it was registered after GET /hr/employees/:staffId, Express matches in registration order, and every call was answered by the employee detail route as an employee called import-template.xlsx (404 Employee not found). Moved above that route; a scan of every app.get/post/put/patch/delete route for a literal path behind an earlier :param route found no other. Upload field, content type, preview and commit were already correct: TC-HR-XLSX-ROUNDTRIP failed at preview (400 SHEET_COLUMNS_MISSING) and commit (400 no rows) only because it builds its sheet from the template header.',

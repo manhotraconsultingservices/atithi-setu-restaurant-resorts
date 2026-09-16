@@ -551,12 +551,21 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Collect online — from a guest folio
+// Collect online — from a guest folio, or (with `payable`) from an event booking
 // ═════════════════════════════════════════════════════════════════════════════
-export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, onClose, onRecorded }: {
+export interface OnlinePayable {
+  objectType: 'EVENT_BOOKING';
+  objectId: string;
+  outstanding: number;
+  subtitle: string;
+  presets?: { label: string; amount: number }[];
+}
+
+export function CollectOnlineDialog({ restaurantId, token, folio, payable, propertyName, onClose, onRecorded }: {
   restaurantId: string;
   token: string;
   folio: Json;
+  payable?: OnlinePayable;
   propertyName?: string;
   onClose: () => void;
   onRecorded: () => void;
@@ -565,7 +574,9 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
   const toast = useToast();
   const { t } = useT();
   const confirm = useConfirm();
-  const canCollect = canWriteTab('FOLIOS');
+  const objectType = payable?.objectType || 'HOTEL_FOLIO';
+  const objectId = payable?.objectId || folio.id;
+  const canCollect = canWriteTab(payable ? 'EVENTS_BOOKINGS' : 'FOLIOS');
   const [outstanding, setOutstanding] = useState<number | null>(null);
   const [amount, setAmount] = useState('');
   const [phone, setPhone] = useState(folio.guest_phone || '');
@@ -578,13 +589,19 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
 
   const loadLinks = useCallback(async () => {
     try {
-      const out = await api(`/links?object_type=HOTEL_FOLIO&object_id=${encodeURIComponent(folio.id)}&limit=20`);
+      const out = await api(`/links?object_type=${objectType}&object_id=${encodeURIComponent(objectId)}&limit=20`);
       setLinks(out.links || []);
     } catch (e: any) { setNotice({ tone: 'error', text: e.message }); }
-  }, [api, folio.id]);
+  }, [api, objectType, objectId]);
 
   useEffect(() => {
     (async () => {
+      if (payable) {
+        // The event panel already holds the balance; no folio to ask.
+        setOutstanding(payable.outstanding);
+        if (payable.outstanding > 0) setAmount(payable.outstanding.toFixed(2));
+        return;
+      }
       try {
         const r = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${folio.id}/outstanding`, { headers: { Authorization: `Bearer ${token}` } });
         const b = await r.json().catch(() => ({}));
@@ -597,6 +614,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
     })();
     api('/active-gateway').then(setActive).catch(() => setActive({ gateway: null, reason: 'Could not check the payment gateway.' }));
     loadLinks();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restaurantId, token, folio.id, loadLinks, api]);
 
   const open = useMemo(() => links.find(l => ['CREATED', 'PARTIALLY_PAID'].includes(l.status)) || null, [links]);
@@ -620,7 +638,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
     try {
       const out = await api('/links', {
         method: 'POST',
-        body: JSON.stringify({ object_type: 'HOTEL_FOLIO', object_id: folio.id, amount, customer_phone: phone, customer_email: email, customer_name: folio.guest_name, expires_in_hours: Number(hours), channel }),
+        body: JSON.stringify({ object_type: objectType, object_id: objectId, amount, customer_phone: phone, customer_email: email, customer_name: folio.guest_name, expires_in_hours: Number(hours), channel }),
       });
       if (channel === 'NONE') setNotice({ tone: 'ok', text: 'Link created. Copy it or share it on WhatsApp below.' });
       else if (out.sent?.length) setNotice({ tone: out.errors ? 'warn' : 'ok', text: `Sent on ${out.sent.join(' and ').toLowerCase()}.${out.errors ? ` ${out.errors.join(' ')}` : ''}` });
@@ -647,10 +665,12 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
     try {
       const out = await api(`/links/${l.id}/refresh`, { method: 'POST' });
       if (out.recorded > 0) {
-        toast.success(`${money(out.link.amount_paid)} received online and recorded on the folio.`);
+        toast.success(payable
+          ? t('pg.collect.recordedBooking', { amount: money(out.link.amount_paid) })
+          : `${money(out.link.amount_paid)} received online and recorded on the folio.`);
         onRecorded();
       }
-      if (out.needs_review > 0) setNotice({ tone: 'warn', text: 'A payment arrived but could not be applied to this folio. See Payment Gateways → Needs review.' });
+      if (out.needs_review > 0) setNotice({ tone: 'warn', text: payable ? t('pg.collect.reviewBooking') : 'A payment arrived but could not be applied to this folio. See Payment Gateways → Needs review.' });
     } catch (e: any) { if (!quiet) setNotice({ tone: 'error', text: e.message }); }
     finally { if (!quiet) setBusy(''); loadLinks(); }
   };
@@ -673,7 +693,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
           <div>
             <div className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">Collect online</div>
             <h3 className="text-lg font-bold font-serif text-[#1a1208]">{folio.guest_name || 'Guest'}</h3>
-            <p className="text-xs text-[#6b5d52]">Folio {folio.id}{outstanding != null ? ` · balance due ${money(outstanding)}` : ''}</p>
+            <p className="text-xs text-[#6b5d52]">{payable ? payable.subtitle : `Folio ${folio.id}`}{outstanding != null ? ` · ${payable ? t('pg.collect.balanceDue', { amount: money(outstanding) }) : `balance due ${money(outstanding)}`}` : ''}</p>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-xl hover:bg-[#faf7f2] text-[#9c8e85]"><X size={18} /></button>
         </div>
@@ -692,6 +712,16 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
                   <label className={label}>Amount (₹)</label>
                   <input className={input} inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder={outstanding ? outstanding.toFixed(2) : 'e.g. 5000'} />
                   {outstanding === 0 && <p className="text-[10px] text-[#9c8e85] mt-1">Nothing charged yet — enter the advance to collect.</p>}
+                  {!!payable?.presets?.length && (
+                    <div className="flex gap-1.5 flex-wrap mt-1.5">
+                      {payable.presets.map(p => (
+                        <button key={p.label} type="button" onClick={() => setAmount(p.amount.toFixed(2))}
+                          className={`text-[10px] font-semibold px-2 py-1 rounded-lg border ${Math.abs(Number(amount) - p.amount) < 0.005 ? 'border-[#cc5a16] bg-[#cc5a16]/10 text-[#cc5a16]' : 'border-[#e8dccf] text-[#6b5d52] hover:bg-[#faf7f2]'}`}>
+                          {p.label} · {money(p.amount)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className={label}>Link valid for</label>
@@ -720,7 +750,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, propertyName, 
           )}
 
           <div className="space-y-2">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52]">Links for this folio</div>
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52]">{payable ? t('pg.collect.linksBooking') : 'Links for this folio'}</div>
             {links.length === 0 && <p className="text-xs text-[#9c8e85]">None yet.</p>}
             {links.map(l => (
               <div key={l.id} className={`rounded-2xl border p-3 space-y-2 ${['CREATED', 'PARTIALLY_PAID'].includes(l.status) ? 'border-amber-200 bg-amber-50/40' : 'border-[#e8dccf]'}`}>

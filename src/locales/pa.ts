@@ -478,4 +478,13 @@ export const pa: Record<string, string> = {
   'settings.tab.operations': 'ਸੰਚਾਲਨ',
   'settings.tab.profile': 'ਮੇਰੀ ਪ੍ਰੋਫਾਈਲ',
   'settings.fixField': 'ਸੇਵ ਕਰਨ ਤੋਂ ਪਹਿਲਾਂ ਨਿਸ਼ਾਨਬੱਧ ਖੇਤਰ ਭਰੋ।',
+  // ── Event payment links ──
+  'events.pay.sendLink': 'ਭੁਗਤਾਨ ਲਿੰਕ ਭੇਜੋ',
+  'events.pay.linkFull': 'ਪੂਰਾ ਬਕਾਇਆ',
+  'events.pay.linkInstalment': 'ਅਗਲੀ ਕਿਸ਼ਤ',
+  'events.pay.linkSubtitle': 'ਇਵੈਂਟ ਬੁਕਿੰਗ {id}',
+  'pg.collect.balanceDue': 'ਬਕਾਇਆ {amount}',
+  'pg.collect.recordedBooking': '{amount} ਔਨਲਾਈਨ ਮਿਲਿਆ ਅਤੇ ਬੁਕਿੰਗ \'ਤੇ ਦਰਜ ਕੀਤਾ ਗਿਆ।',
+  'pg.collect.reviewBooking': 'ਭੁਗਤਾਨ ਆਇਆ, ਪਰ ਇਸ ਬੁਕਿੰਗ \'ਤੇ ਲਾਗੂ ਨਹੀਂ ਹੋ ਸਕਿਆ। Payment Gateways → ਭੁਗਤਾਨ ਲਿੰਕ ਵੇਖੋ।',
+  'pg.collect.linksBooking': 'ਇਸ ਬੁਕਿੰਗ ਦੇ ਲਿੰਕ',
 };
