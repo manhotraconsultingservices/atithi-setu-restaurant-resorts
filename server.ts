@@ -84,6 +84,9 @@ import {
 } from "./aiosellClient.ts";
 import { buildUpiUri } from "./upiLink.ts";
 import { RESERVED_SUBDOMAINS } from "./tenantHost.ts";
+import { getGateway, listGateways } from "./paymentGatewayRegistry.ts";
+import { GatewayError, rupeesToPaise, type GatewayCredentials, type PaymentGateway } from "./paymentGateway.ts";
+import { sealSecret, openSecret, secretKeySource, needsReseal } from "./paymentSecrets.ts";
 import multer from "multer";
 import cron from "node-cron";
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
@@ -3726,6 +3729,487 @@ async function recordFolioPayment(
   return tenantDb.get("SELECT * FROM folio_payments WHERE id = ?", [id]);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ONLINE PAYMENTS — the tenant's own gateway, payment links, auto-recording.
+//
+// The loop: staff create a link for what a customer owes → it goes out on
+// WhatsApp or email → the customer pays on the gateway's page → the gateway's
+// webhook (or the reconciliation sweep, for a webhook that never arrives) makes
+// us re-read the link from the gateway's API → each captured payment is
+// recorded ONCE against the bill it was for, with the gateway's actual fee
+// booked out of Payment Gateway Clearing.
+//
+// Gateway adapters live in paymentGateway*.ts and know nothing of tenants or
+// bills; everything here is gateway-agnostic.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// The money arrived but the bill can no longer take it (settled, voided,
+// deleted). Retrying will not help, so it is kept for a person to resolve.
+class PaymentNeedsReview extends Error {}
+
+// A refusal a staff member can act on, carrying the HTTP status to send.
+class PaymentRequestError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
+function _pgJson(v: any): Record<string, any> {
+  if (!v) return {};
+  if (typeof v === 'object') return v;
+  try { return JSON.parse(String(v)); } catch { return {}; }
+}
+
+function _pgPhone(v: any): string | null {
+  const digits = String(v || '').replace(/[^\d]/g, '');
+  if (!digits) return null;
+  if (digits.length === 10) return `+91${digits}`;
+  return `+${digits}`;
+}
+
+function _pgNewId(prefix: string): string {
+  const d = new Date().toISOString().slice(2, 10).replace(/-/g, '');
+  return `${prefix}-${d}-${randomBytes(5).toString('hex').toUpperCase()}`;
+}
+
+// Map an adapter failure to what a staff screen should get. Never 502: the CDN
+// replaces a 502 with its own page and the message is lost.
+function _pgHttpStatus(e: any): number {
+  if (e instanceof PaymentRequestError) return e.status;
+  if (e instanceof GatewayError) {
+    if (e.code === 'BAD_REQUEST') return 400;
+    if (e.code === 'NOT_FOUND') return 404;
+    if (e.code === 'AUTH_FAILED' || e.code === 'CONFIG') return 409;
+    return 503;
+  }
+  return 500;
+}
+
+interface _PgConfig {
+  gateway: PaymentGateway;
+  row: any | null;
+  creds: GatewayCredentials;
+  missing: string[];      // required fields with no value
+  unreadable: string[];   // sealed secrets this server can no longer open
+}
+
+async function _pgConfig(db: any, gatewayId: string): Promise<_PgConfig | null> {
+  const gateway = getGateway(gatewayId);
+  if (!gateway) return null;
+  const row: any = await db.get("SELECT * FROM payment_gateway_configs WHERE gateway = ?", [gateway.id]).catch(() => null);
+  const pub = _pgJson(row?.public_fields);
+  const sec = _pgJson(row?.secret_fields);
+  const creds: GatewayCredentials = {};
+  const missing: string[] = [];
+  const unreadable: string[] = [];
+  for (const f of gateway.credentialFields) {
+    let v = '';
+    if (f.secret) {
+      if (sec[f.key]) {
+        const opened = openSecret(sec[f.key]);
+        if (opened == null) unreadable.push(f.key); else v = opened;
+      }
+    } else {
+      v = String(pub[f.key] || '');
+    }
+    if (v) creds[f.key] = v;
+    else if (f.required) missing.push(f.key);
+  }
+  return { gateway, row, creds, missing, unreadable };
+}
+
+// What the settings page may see: public values, and for secrets only whether
+// one is saved. A secret never travels back to a browser.
+function _pgConfigView(cfg: _PgConfig, webhookUrl: string) {
+  const pub = _pgJson(cfg.row?.public_fields);
+  const sec = _pgJson(cfg.row?.secret_fields);
+  return {
+    gateway: cfg.gateway.id,
+    label: cfg.gateway.label,
+    connected: !!cfg.row,
+    is_enabled: Number(cfg.row?.is_enabled || 0) === 1,
+    mode: cfg.row?.mode || null,
+    verified_at: cfg.row?.verified_at || null,
+    last_error: cfg.row?.last_error || null,
+    updated_at: cfg.row?.updated_at || null,
+    webhook_url: webhookUrl,
+    fields: cfg.gateway.credentialFields.map(f => ({
+      key: f.key, label: f.label, secret: f.secret, required: f.required, help: f.help || null,
+      value: f.secret ? null : String(pub[f.key] || ''),
+      saved: f.secret ? !!sec[f.key] : !!pub[f.key],
+      unreadable: cfg.unreadable.includes(f.key),
+    })),
+    missing: cfg.missing,
+    needs_reseal: Object.values(sec).some(v => needsReseal(v)),
+  };
+}
+
+interface _Payable {
+  objectType: string;
+  objectId: string;
+  open: boolean;
+  closedReason: string | null;
+  outstandingPaise: number;
+  purpose: string;   // shown to the customer on the gateway's page
+  customer: { name: string | null; phone: string | null; email: string | null };
+  bookingId: string | null;
+}
+
+// The bills a link can be sent for. Adding one = a branch here and in
+// _pgRecordToPayable, plus its permission gates in PAYABLE_OBJECT_GATES.
+async function _pgDescribePayable(db: any, restaurantId: string, objectType: string, objectId: string): Promise<_Payable | null> {
+  if (objectType === 'HOTEL_FOLIO') {
+    const f: any = await db.get(
+      `SELECT f.id, f.status, f.folio_kind, f.booking_id, b.guest_name, b.guest_phone, b.guest_email
+         FROM folios f LEFT JOIN room_bookings b ON b.id = f.booking_id
+        WHERE f.id = ?`, [objectId]).catch(() => null);
+    // Spa and event folios record payments through their own modules' rules.
+    if (!f || String(f.folio_kind || 'HOTEL').toUpperCase() !== 'HOTEL') return null;
+    const out = await getFolioOutstanding(db, objectId).catch(() => null);
+    const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+    const st = String(f.status || '').toLowerCase();
+    const open = st !== 'settled' && st !== 'voided';
+    return {
+      objectType, objectId, open,
+      closedReason: open ? null : `This folio is ${st}.`,
+      outstandingPaise: out ? Math.max(0, rupeesToPaise(out.outstanding)) : 0,
+      purpose: `${prop?.name || 'Your stay'}${f.booking_id ? ` — booking ${f.booking_id}` : ''}`,
+      customer: { name: f.guest_name || null, phone: f.guest_phone || null, email: f.guest_email || null },
+      bookingId: f.booking_id || null,
+    };
+  }
+  return null;
+}
+
+// Record one captured gateway payment against its bill. Safe to call twice for
+// the same payment: a crash between recording and marking the claim leaves a
+// PENDING row that the sweep retries, and the retry finds the first recording.
+async function _pgRecordToPayable(db: any, restaurantId: string, link: any, p: any, gatewayLabel: string): Promise<string> {
+  const reference = `${link.gateway} ${p.gateway_payment_id}`;
+  if (link.object_type === 'HOTEL_FOLIO') {
+    const f: any = await db.get(
+      `SELECT f.id, f.status, b.status AS booking_status
+         FROM folios f LEFT JOIN room_bookings b ON b.id = f.booking_id
+        WHERE f.id = ?`, [link.object_id]).catch(() => null);
+    if (!f) throw new PaymentNeedsReview('The folio this link was sent for no longer exists.');
+    const prior: any = await db.get(
+      "SELECT id FROM folio_payments WHERE folio_id = ? AND reference_number = ? AND COALESCE(is_voided, 0) = 0 LIMIT 1",
+      [f.id, reference]).catch(() => null);
+    if (prior) return prior.id;
+    const st = String(f.status || '').toLowerCase();
+    if (st === 'settled' || st === 'voided') {
+      throw new PaymentNeedsReview(`Paid after the folio was ${st}. The money is in the ${gatewayLabel} account: refund it there, or apply it to the guest by hand.`);
+    }
+    // Before arrival it is an advance (GST on receipt, Rule 50 voucher);
+    // once the guest is in, it is an interim payment against the stay.
+    const bs = String(f.booking_status || '').toUpperCase();
+    const type = (bs === 'CHECKED_IN' || bs === 'CHECKED_OUT') ? 'INTERIM' : 'ADVANCE';
+    const row = await recordFolioPayment(db, {
+      restaurantId, folioId: f.id, amount: Number(p.amount_paise) / 100, method: 'ONLINE', type,
+      reference, recordedBy: `${gatewayLabel} payment link`,
+      notes: `Payment link ${link.id}${p.method ? ` · ${p.method}` : ''}`,
+    });
+    return row.id;
+  }
+  throw new PaymentNeedsReview(`Payments for ${link.object_type} are not recorded automatically yet.`);
+}
+
+// The gateway's actual charge, out of clearing: Dr fee (ex-GST) to Card & UPI
+// Charges, Dr its GST to ITC, Cr clearing. What stays in clearing is exactly
+// what the gateway will pay out to the bank.
+async function _pgPostFeeJournal(db: any, restaurantId: string, link: any, p: any, gatewayLabel: string): Promise<string | null> {
+  const fee = p.fee_paise == null ? null : Number(p.fee_paise);
+  if (fee == null || !(fee > 0)) return null;
+  const ref = `PGFEE-${p.gateway_payment_id}`;
+  const exists = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ? LIMIT 1", [ref]).catch(() => null);
+  if (exists) return ref;
+  await db.run(`INSERT INTO chart_of_accounts (code, name, type, display_order) VALUES ('1025', 'Payment Gateway Clearing', 'ASSET', 25) ON CONFLICT (code) DO NOTHING`).catch(() => {});
+  const tax = Math.min(fee, Math.max(0, Number(p.tax_paise || 0)));
+  const narr = `${gatewayLabel} fee on ${p.gateway_payment_id} (link ${link.id})`;
+  const lines: GlLine[] = [
+    { account_code: '5510', account_name: 'Card & UPI Charges', dr_amount: (fee - tax) / 100, cr_amount: 0, narration: narr },
+  ];
+  if (tax > 0) lines.push({ account_code: '1330', account_name: 'ITC — Payment Gateway GST', dr_amount: tax / 100, cr_amount: 0, narration: `GST on ${narr}` });
+  lines.push({ account_code: '1025', account_name: 'Payment Gateway Clearing', dr_amount: 0, cr_amount: fee / 100, narration: narr });
+  const r = await _postGlEntries(db, restaurantId, ref, new Date().toISOString().slice(0, 10), 'GATEWAY_FEE', p.id, lines, `${gatewayLabel} payment link`);
+  return r.ok && r.posted > 0 ? ref : null;
+}
+
+// Central index of open links, so the sweep visits only tenants that have one.
+async function _pgIndex(restaurantId: string, link: any, pendingRecordings = 0): Promise<void> {
+  const status = pendingRecordings > 0 ? 'RECORDING' : String(link.status);
+  await centralDb.run(
+    `INSERT INTO payment_link_index (restaurant_id, link_id, gateway, status, expires_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT (restaurant_id, link_id) DO UPDATE SET status = EXCLUDED.status, expires_at = EXCLUDED.expires_at, updated_at = CURRENT_TIMESTAMP`,
+    [restaurantId, link.id, link.gateway, status, link.expires_at || null]
+  ).catch((e: any) => console.error('[payments] index update failed:', e?.message || e));
+}
+
+// Re-read a link from its gateway and record every captured payment not yet
+// recorded. The ONLY path by which gateway money enters the books.
+async function _pgReconcileLink(restaurantId: string, linkId: string, trigger: string): Promise<{ link: any; recorded: number; needsReview: number }> {
+  const db = await getTenantDb(restaurantId);
+  const link: any = await db.get("SELECT * FROM payment_links WHERE id = ?", [linkId]);
+  if (!link) throw new PaymentRequestError('Payment link not found.', 404);
+  if (!link.gateway_link_id) {
+    // The gateway never confirmed creating it, so no customer ever received it
+    // (we only send a link the gateway returned). Close it after a grace period.
+    if (link.status === 'CREATING' && Date.now() - new Date(link.created_at).getTime() > 15 * 60 * 1000) {
+      await db.run("UPDATE payment_links SET status = 'FAILED', last_error = COALESCE(last_error, 'The gateway did not confirm the link.'), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'CREATING'", [link.id]);
+      await _pgIndex(restaurantId, { ...link, status: 'FAILED' });
+    }
+    return { link: await db.get("SELECT * FROM payment_links WHERE id = ?", [linkId]), recorded: 0, needsReview: 0 };
+  }
+  const cfg = await _pgConfig(db, link.gateway);
+  if (!cfg || cfg.missing.length || cfg.unreadable.length) {
+    throw new PaymentRequestError(`${cfg?.gateway.label || link.gateway} is not connected, so this link cannot be checked.`, 409);
+  }
+  const snap = await cfg.gateway.fetchLink(cfg.creds, link.gateway_link_id);
+  await db.run(
+    `UPDATE payment_links
+        SET status = ?, amount_paid_paise = ?, url = COALESCE(NULLIF(?, ''), url), last_error = NULL,
+            last_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+            paid_at = CASE WHEN ? = 'PAID' AND paid_at IS NULL THEN CURRENT_TIMESTAMP ELSE paid_at END
+      WHERE id = ?`,
+    [snap.status, snap.amountPaidPaise, snap.url, snap.status, link.id]);
+
+  let recorded = 0;
+  let needsReview = 0;
+  for (const p of snap.payments) {
+    if (p.status !== 'CAPTURED') continue;
+    const rowId = _pgNewId('PLP');
+    const claim = await db.run(
+      `INSERT INTO payment_link_payments
+         (id, link_id, gateway, gateway_payment_id, amount_paise, fee_paise, tax_paise, method, payer_vpa, payer_email, payer_phone, paid_at, record_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+       ON CONFLICT (gateway, gateway_payment_id) DO NOTHING`,
+      [rowId, link.id, link.gateway, p.gatewayPaymentId, p.amountPaise, p.feePaise, p.taxPaise, p.method || null,
+       p.payerVpa || null, p.payerEmail || null, p.payerPhone || null, p.paidAt.toISOString()]);
+    let row: any;
+    if (claim.changes === 1) {
+      row = await db.get("SELECT * FROM payment_link_payments WHERE id = ?", [rowId]);
+    } else {
+      // Another caller holds this payment. Take it over only when it has sat
+      // PENDING long enough that its recorder cannot still be running.
+      const took = await db.run(
+        `UPDATE payment_link_payments SET updated_at = CURRENT_TIMESTAMP
+          WHERE gateway = ? AND gateway_payment_id = ? AND record_status = 'PENDING'
+            AND updated_at < CURRENT_TIMESTAMP - INTERVAL '10 minutes'`,
+        [link.gateway, p.gatewayPaymentId]);
+      if (took.changes !== 1) continue;
+      row = await db.get("SELECT * FROM payment_link_payments WHERE gateway = ? AND gateway_payment_id = ?", [link.gateway, p.gatewayPaymentId]);
+    }
+    if (!row) continue;
+    try {
+      const ref = await _pgRecordToPayable(db, restaurantId, link, row, cfg.gateway.label);
+      await db.run("UPDATE payment_link_payments SET record_status = 'RECORDED', recorded_ref = ?, record_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [ref, row.id]);
+      recorded++;
+      try {
+        const feeRef = await _pgPostFeeJournal(db, restaurantId, link, row, cfg.gateway.label);
+        if (feeRef) await db.run("UPDATE payment_link_payments SET fee_journal_ref = ? WHERE id = ?", [feeRef, row.id]);
+      } catch (e: any) {
+        await db.run("UPDATE payment_link_payments SET record_error = ? WHERE id = ?", [`Payment recorded; fee not booked: ${e?.message || e}`, row.id]).catch(() => {});
+      }
+    } catch (e: any) {
+      const review = e instanceof PaymentNeedsReview;
+      await db.run(
+        "UPDATE payment_link_payments SET record_status = ?, record_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [review ? 'NEEDS_REVIEW' : 'PENDING', String(e?.message || e).slice(0, 500), row.id]);
+      if (review) needsReview++;
+      else console.error(`[payments] ${trigger}: payment ${p.gatewayPaymentId} on link ${link.id} not recorded, will retry:`, e?.message || e);
+    }
+  }
+
+  const fresh: any = await db.get("SELECT * FROM payment_links WHERE id = ?", [link.id]);
+  const pending: any = await db.get("SELECT COUNT(*) AS n FROM payment_link_payments WHERE link_id = ? AND record_status = 'PENDING'", [link.id]);
+  await _pgIndex(restaurantId, fresh, Number(pending?.n || 0));
+  if (recorded > 0) _pgNotifyPaid(restaurantId, fresh).catch(() => {});
+  return { link: fresh, recorded, needsReview };
+}
+
+async function _pgMoneyText(restaurantId: string, paise: number): Promise<{ amount: string; property: string }> {
+  const r: any = await centralDb.get("SELECT name, currency_symbol, locale FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+  const amount = `${r?.currency_symbol || '₹'}${(Number(paise) / 100).toLocaleString(r?.locale || 'en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return { amount, property: r?.name || 'Atithi-Setu' };
+}
+
+function _pgExpiryText(v: any): string {
+  if (!v) return '';
+  return new Date(v).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+async function _pgNotifyPaid(restaurantId: string, link: any): Promise<void> {
+  const { amount } = await _pgMoneyText(restaurantId, Number(link.amount_paid_paise || link.amount_paise));
+  const data = {
+    customerName: link.customer_name || 'Guest', guestName: link.customer_name || 'Guest',
+    customerPhone: link.customer_phone || undefined, customerEmail: link.customer_email || undefined,
+    amount, purpose: link.description || '', linkId: link.id,
+  };
+  // Two events so each audience gets its own words: a receipt to the payer, an
+  // alert to the team. Each is switched on or off in Notifications.
+  await triggerNotification(restaurantId, 'ONLINE_PAYMENT_RECEIPT', data);
+  await triggerNotification(restaurantId, 'ONLINE_PAYMENT_RECEIVED', data);
+}
+
+async function _pgCreateLink(
+  db: any, restaurantId: string, by: { id: string | null; name: string | null },
+  input: { objectType: string; objectId: string; amount?: any; name?: string; phone?: string; email?: string; expiresInHours?: any; gateway?: string },
+): Promise<any> {
+  const first = await _pgDescribePayable(db, restaurantId, input.objectType, input.objectId);
+  if (!first) throw new PaymentRequestError('That bill was not found.', 404);
+  if (!first.open) throw new PaymentRequestError(`${first.closedReason} A payment link can only be sent for an open bill.`, 409);
+
+  const enabled: any[] = await db.query("SELECT gateway FROM payment_gateway_configs WHERE is_enabled = 1 ORDER BY updated_at DESC");
+  const gatewayId = input.gateway ? String(input.gateway).toUpperCase() : enabled[0]?.gateway;
+  if (!gatewayId || !enabled.some(e => e.gateway === gatewayId)) {
+    throw new PaymentRequestError('No payment gateway is switched on. Connect one under Payment Gateways first.', 409);
+  }
+  const cfg = await _pgConfig(db, gatewayId);
+  if (!cfg || cfg.missing.length || cfg.unreadable.length) {
+    throw new PaymentRequestError(`${cfg?.gateway.label || gatewayId} settings are incomplete. Re-enter them under Payment Gateways.`, 409);
+  }
+
+  // One live link per bill. An older link still open is cancelled at the gateway
+  // first, so a customer holding it cannot pay the same amount twice. If it
+  // cannot be cancelled it may just have been paid: reconcile it, so that
+  // payment is recorded and the new link is for what is still owed.
+  const older: any[] = await db.query(
+    "SELECT * FROM payment_links WHERE object_type = ? AND object_id = ? AND status IN ('CREATED', 'PARTIALLY_PAID')",
+    [input.objectType, input.objectId]);
+  for (const o of older) {
+    try {
+      const ocfg = o.gateway === cfg.gateway.id ? cfg : await _pgConfig(db, o.gateway);
+      if (ocfg && !ocfg.missing.length && o.gateway_link_id) await ocfg.gateway.cancelLink(ocfg.creds, o.gateway_link_id);
+      await db.run("UPDATE payment_links SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_error = 'Replaced by a newer link.' WHERE id = ?", [o.id]);
+      await _pgIndex(restaurantId, { ...o, status: 'CANCELLED' });
+    } catch {
+      await _pgReconcileLink(restaurantId, o.id, 'SUPERSEDE').catch(() => {});
+    }
+  }
+
+  const payable = (await _pgDescribePayable(db, restaurantId, input.objectType, input.objectId)) || first;
+  if (!payable.open) throw new PaymentRequestError(`${payable.closedReason} A payment link can only be sent for an open bill.`, 409);
+  const typed = input.amount != null && String(input.amount).trim() !== '';
+  const amountPaise = typed ? rupeesToPaise(input.amount) : payable.outstandingPaise;
+  if (!Number.isInteger(amountPaise) || amountPaise < 100) {
+    throw new PaymentRequestError(typed ? 'Amount must be at least ₹1.' : 'Nothing is outstanding on this bill. Enter the amount to collect.', 400);
+  }
+  const hours = Math.min(24 * 30, Math.max(1, Number(input.expiresInHours) || 72));
+  const expiresAt = new Date(Date.now() + hours * 3600 * 1000);
+  const customer = {
+    name: String(input.name || payable.customer.name || '').trim() || null,
+    phone: _pgPhone(input.phone || payable.customer.phone),
+    email: String(input.email || payable.customer.email || '').trim() || null,
+  };
+
+  const id = _pgNewId('PL');
+  await db.run(
+    `INSERT INTO payment_links
+       (id, gateway, mode, object_type, object_id, amount_paise, currency, status, description,
+        customer_name, customer_phone, customer_email, expires_at, created_by, created_by_name)
+     VALUES (?, ?, ?, ?, ?, ?, 'INR', 'CREATING', ?, ?, ?, ?, ?, ?, ?)`,
+    [id, cfg.gateway.id, cfg.row?.mode || null, input.objectType, input.objectId, amountPaise, payable.purpose,
+     customer.name, customer.phone, customer.email, expiresAt.toISOString(), by.id, by.name]);
+  await _pgIndex(restaurantId, { id, gateway: cfg.gateway.id, status: 'CREATING', expires_at: expiresAt.toISOString() });
+
+  try {
+    const snap = await cfg.gateway.createLink(cfg.creds, {
+      referenceId: id, amountPaise, description: payable.purpose,
+      customer: { name: customer.name || undefined, phone: customer.phone || undefined, email: customer.email || undefined },
+      expiresAt,
+      notes: { atithi_link: id, bill: `${input.objectType}:${input.objectId}` },
+    });
+    await db.run(
+      `UPDATE payment_links SET status = ?, gateway_link_id = ?, url = ?, expires_at = COALESCE(?, expires_at), updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [snap.status, snap.gatewayLinkId, snap.url, snap.expiresAt ? snap.expiresAt.toISOString() : null, id]);
+  } catch (e: any) {
+    await db.run("UPDATE payment_links SET status = 'FAILED', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [String(e?.message || e).slice(0, 500), id]);
+    await _pgIndex(restaurantId, { id, gateway: cfg.gateway.id, status: 'FAILED', expires_at: expiresAt.toISOString() });
+    throw e;
+  }
+  const link: any = await db.get("SELECT * FROM payment_links WHERE id = ?", [id]);
+  await _pgIndex(restaurantId, link);
+  return link;
+}
+
+// Send (or re-send) a link. Email goes from the property's own mail account;
+// WhatsApp goes through the notification dispatcher, so opt-outs, the 24-hour
+// window, the approved template and the delivery log all apply.
+async function _pgSendLink(
+  db: any, restaurantId: string, link: any,
+  opts: { channel: string; phone?: string | null; email?: string | null },
+): Promise<{ sent: string[]; errors: string[]; message: string }> {
+  const channel = String(opts.channel || 'NONE').toUpperCase();
+  const wantEmail = channel === 'EMAIL' || channel === 'BOTH';
+  const wantWa = channel === 'WHATSAPP' || channel === 'BOTH';
+  const { amount, property } = await _pgMoneyText(restaurantId, Number(link.amount_paise));
+  const name = link.customer_name || 'Guest';
+  const expires = _pgExpiryText(link.expires_at);
+  const message =
+    `Dear ${name},\n\nPlease pay ${amount} to ${property} for ${link.description || 'your bill'} using this secure link:\n${link.url}\n\n` +
+    `${expires ? `The link is valid until ${expires}. ` : ''}You can pay by UPI, card or net banking.\n\n${property}`;
+  const sent: string[] = [];
+  const errors: string[] = [];
+  if (!link.url || !['CREATED', 'PARTIALLY_PAID'].includes(String(link.status))) {
+    return { sent, errors: [`This link is ${String(link.status).toLowerCase()} and cannot be sent.`], message };
+  }
+
+  if (wantEmail) {
+    const to = String(opts.email || link.customer_email || '').trim();
+    if (!to) errors.push('No email address for this customer.');
+    else {
+      const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+      const html =
+        `<div style="font-family:Inter,Arial,sans-serif;max-width:520px;margin:auto;padding:24px;background:#faf7f2;border-radius:16px">` +
+        `<h2 style="color:#cc5a16;margin:0 0 12px">Payment request</h2>` +
+        `<p style="color:#333">Dear ${esc(name)},</p>` +
+        `<p style="color:#333">Please pay <strong>${esc(amount)}</strong> to <strong>${esc(property)}</strong> for ${esc(link.description || 'your bill')}.</p>` +
+        `<a href="${esc(link.url)}" style="display:inline-block;margin:16px 0;padding:14px 28px;background:#cc5a16;color:#fff;text-decoration:none;border-radius:12px;font-weight:bold">Pay ${esc(amount)}</a>` +
+        `<p style="color:#6b5d52;font-size:13px">${expires ? `Valid until ${esc(expires)}. ` : ''}UPI, card and net banking accepted. The payment page is run by our payment gateway.</p>` +
+        `</div>`;
+      const r: any = await sendTenantEmail(restaurantId, to, `Payment request from ${property} — ${amount}`, message, html, 'GUEST');
+      if (r?.ok) sent.push('EMAIL'); else errors.push(r?.error || 'Email did not go out.');
+    }
+  }
+  if (wantWa) {
+    const phone = _pgPhone(opts.phone || link.customer_phone);
+    if (!phone) errors.push('No phone number for this customer.');
+    else {
+      const tally = await triggerNotification(restaurantId, 'PAYMENT_LINK_SENT', {
+        customerPhone: phone, customerName: name, guestName: name,
+        amount, payUrl: link.url, purpose: link.description || '', expiresAt: expires, linkId: link.id,
+      }, { onlyChannels: ['WHATSAPP'] });
+      if (tally.sent) sent.push('WHATSAPP');
+      else if (tally.skipped) errors.push('This customer asked not to receive WhatsApp messages.');
+      else errors.push('WhatsApp did not go out. Switch on "Payment link" for WhatsApp in Notifications, or use Share on WhatsApp.');
+    }
+  }
+  if (sent.length) {
+    const channels = Array.from(new Set([...String(link.sent_channels || '').split(',').filter(Boolean), ...sent])).join(',');
+    await db.run("UPDATE payment_links SET sent_channels = ?, last_sent_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [channels, link.id]);
+  }
+  return { sent, errors, message };
+}
+
+// Paise → rupees for screens; BIGINT columns arrive from pg as strings.
+function _pgLinkView(l: any, payments: any[] = []) {
+  return {
+    id: l.id, gateway: l.gateway, mode: l.mode, status: l.status, url: l.url,
+    object_type: l.object_type, object_id: l.object_id, description: l.description,
+    amount: Number(l.amount_paise || 0) / 100, amount_paid: Number(l.amount_paid_paise || 0) / 100, currency: l.currency,
+    customer_name: l.customer_name, customer_phone: l.customer_phone, customer_email: l.customer_email,
+    expires_at: l.expires_at, sent_channels: l.sent_channels ? String(l.sent_channels).split(',') : [], last_sent_at: l.last_sent_at,
+    last_checked_at: l.last_checked_at, last_error: l.last_error, created_by_name: l.created_by_name,
+    created_at: l.created_at, paid_at: l.paid_at, cancelled_at: l.cancelled_at,
+    payments: payments.map(p => ({
+      id: p.id, gateway_payment_id: p.gateway_payment_id, amount: Number(p.amount_paise || 0) / 100,
+      fee: p.fee_paise == null ? null : Number(p.fee_paise) / 100, tax: p.tax_paise == null ? null : Number(p.tax_paise) / 100,
+      method: p.method, payer_vpa: p.payer_vpa, paid_at: p.paid_at, record_status: p.record_status,
+      recorded_ref: p.recorded_ref, fee_journal_ref: p.fee_journal_ref, record_error: p.record_error,
+      resolved_at: p.resolved_at, resolution_note: p.resolution_note,
+    })),
+  };
+}
+
 /**
  * Sprint 2 BCG — Write GST output register rows for every taxable
  * folio_entry on a just-settled folio. Called at checkout (individual
@@ -5699,9 +6183,12 @@ function _istNowParts(): { date: string; hour: number; minute: number; minutes: 
 }
 
 function _glAccountForPaymentMethod(method: string): { code: string; name: string } {
-  return String(method || '').toUpperCase() === 'CASH'
-    ? { code: '1000', name: 'Cash in Hand' }
-    : { code: '1010', name: 'Bank — Main Account' };
+  const m = String(method || '').toUpperCase();
+  if (m === 'CASH') return { code: '1000', name: 'Cash in Hand' };
+  // ONLINE is set only by a payment gateway, never offered to staff: the money
+  // is with the gateway until its payout, so it sits in clearing, not the bank.
+  if (m === 'ONLINE') return { code: '1025', name: 'Payment Gateway Clearing' };
+  return { code: '1010', name: 'Bank — Main Account' };
 }
 
 // Per-tenant card/UPI commission (MDR) config, from the restaurants row.
@@ -5722,6 +6209,9 @@ function _tenderGlLines(mdr: { cardPct: number; upiPct: number; gstPct: number }
   const m = String(method || '').toUpperCase();
   const g = Math.round(Number(gross || 0) * 100) / 100;
   if (m === 'CASH') return [{ account_code: '1000', account_name: 'Cash in Hand', dr_amount: g, cr_amount: 0, narration }];
+  // A gateway reports its ACTUAL fee per payment, and that fee is booked by its
+  // own journal (PGFEE-) when the payment is recorded — so no flat MDR here.
+  if (m === 'ONLINE') return [{ account_code: '1025', account_name: 'Payment Gateway Clearing', dr_amount: g, cr_amount: 0, narration }];
   // MDR split applies ONLY to explicit card/UPI tenders. Everything else — an
   // unknown/blank method, BANK_TRANSFER, CHEQUE — books the full amount to the
   // bank (the original default), so nothing is ever split by accident.
@@ -8933,6 +9423,26 @@ async function startServer() {
     console.error("[public-token-migration] Warning:", err);
   }
 
+  // ====== Online payments: central index of open payment links ======
+  // Tenant data lives in tenant schemas; this lets the reconciliation sweep find
+  // the few tenants with a link still waiting for payment without opening all.
+  try {
+    await centralDb.run(`CREATE TABLE IF NOT EXISTS payment_link_index (
+      restaurant_id TEXT NOT NULL,
+      link_id       TEXT NOT NULL,
+      gateway       TEXT NOT NULL,
+      status        TEXT NOT NULL,
+      expires_at    TIMESTAMP,
+      checked_at    TIMESTAMP,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (restaurant_id, link_id)
+    )`);
+    await centralDb.run(`CREATE INDEX IF NOT EXISTS idx_payment_link_index_open ON payment_link_index (status, checked_at)`);
+  } catch (err) {
+    console.error("[payments] payment_link_index setup failed:", err);
+  }
+
   // ====== Print-agent token: authenticates the on-prem thermal print agent ======
   // The agent polls the print-job queue + acks jobs using this per-tenant token
   // (header X-Print-Agent-Token) — it is NOT a user/JWT. Backfilled for all tenants.
@@ -9374,8 +9884,15 @@ async function startServer() {
     runWithBooksActor({ id: null, name: null, role: 'ANONYMOUS', request_id: randomUUID() }, () => next());
   });
 
-  app.use(express.json({ limit: '2mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+  // Payment gateways sign the EXACT bytes they send. This parser runs before
+  // every route and a later route-level parser is skipped for a body already
+  // read, so the raw body has to be kept here or the signature can never be
+  // checked. Kept only for the payment webhook paths, not for every request.
+  const _keepRawBody = (req: any, _res: any, buf: Buffer) => {
+    if (String(req.originalUrl || req.url || '').startsWith('/api/public/payments/webhook/')) req.rawBody = Buffer.from(buf);
+  };
+  app.use(express.json({ limit: '2mb', verify: _keepRawBody }));
+  app.use(express.urlencoded({ extended: true, limit: '2mb', verify: _keepRawBody }));
 
   // ─────────────────────────────────────────────────────────────────────
   // T1-S8 — JWT cookie support (BCG audit, Tier 1 follow-up)
@@ -54925,6 +55442,404 @@ ${data.tenant.name}`;
     }
   });
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ONLINE PAYMENTS — gateway settings, payment links, the gateway webhook.
+  // Service functions (_pgCreateLink, _pgReconcileLink, …) are defined beside
+  // recordFolioPayment. Gates are checked in the handler with _roleHasTab,
+  // which denies when no grant exists, rather than failing open.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const _pgWebhookUrl = async (req: Request, restaurantId: string, gatewayId: string) => {
+    const r: any = await centralDb.get("SELECT public_token FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+    return `${appOriginFromReq(req)}/api/public/payments/webhook/${gatewayId.toLowerCase()}/${r?.public_token || restaurantId}`;
+  };
+  const _pgBy = (req: AuthRequest) => ({ id: req.user?.id ? String(req.user.id) : null, name: (req.user as any)?.name || req.user?.email || null });
+  const _pgLinksWithPayments = async (db: any, links: any[]) => {
+    if (!links.length) return [];
+    const ids = links.map(l => l.id);
+    const pays: any[] = await db.query(
+      `SELECT * FROM payment_link_payments WHERE link_id IN (${ids.map(() => '?').join(',')}) ORDER BY paid_at`, ids).catch(() => []);
+    return links.map(l => _pgLinkView(l, pays.filter(p => p.link_id === l.id)));
+  };
+  // Acting on a link for a bill needs exactly what recording a payment on that
+  // bill by hand needs — the same middleware, so a front-desk role that can take
+  // a card payment on a folio can also send a link for it, and nobody else.
+  const PAYABLE_OBJECT_GATES: Record<string, { read: any[]; write: any[] }> = {
+    HOTEL_FOLIO: { read: [hotelStaff, requireTabAction('FOLIOS', 'READ')], write: [hotelStaff, requireTabAction('FOLIOS', 'CREATE')] },
+  };
+  // Runs route middleware inside a handler. A middleware that refuses has
+  // already answered the request; false tells the handler to stop.
+  const _pgPassGates = async (gates: any[], req: AuthRequest, res: Response): Promise<boolean> => {
+    for (const gate of gates) {
+      let passed = false;
+      await gate(req, res, () => { passed = true; });
+      if (!passed) return false;
+    }
+    return true;
+  };
+  // The bill a link belongs to decides who may act on it.
+  const _pgLinkGate = async (req: AuthRequest, res: Response, level: 'read' | 'write'): Promise<{ db: any; link: any } | null> => {
+    const db = await getTenantDb(req.params.id);
+    const link: any = await db.get("SELECT * FROM payment_links WHERE id = ?", [req.params.linkId]);
+    if (!link) { res.status(404).json({ error: 'Payment link not found.' }); return null; }
+    const gates = PAYABLE_OBJECT_GATES[link.object_type];
+    if (!gates) { res.status(403).json({ error: 'You do not have access to this payment link.' }); return null; }
+    if (!(await _pgPassGates(gates[level], req, res))) return null;
+    return { db, link };
+  };
+
+  app.get("/api/restaurant/:id/payments/gateways", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 1))) return res.status(403).json({ error: 'You do not have access to Payment Gateways.' });
+      const db = await getTenantDb(req.params.id);
+      const gateways = [];
+      for (const gw of listGateways()) {
+        const cfg = await _pgConfig(db, gw.id);
+        if (cfg) gateways.push(_pgConfigView(cfg, await _pgWebhookUrl(req, req.params.id, gw.id)));
+      }
+      const review: any = await db.get("SELECT COUNT(*) AS n FROM payment_link_payments WHERE record_status = 'NEEDS_REVIEW'");
+      res.json({ gateways, key_source: secretKeySource(), needs_review: Number(review?.n || 0) });
+    } catch (err: any) {
+      console.error('[payments] gateways read failed:', err);
+      res.status(500).json({ error: 'Could not load payment gateways.' });
+    }
+  });
+
+  // Save credentials and/or switch a gateway on or off. Switching on runs a live
+  // test first; a gateway is never left enabled with keys the gateway refused.
+  app.put("/api/restaurant/:id/payments/gateways/:gateway", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 2))) return res.status(403).json({ error: 'You do not have permission to change Payment Gateways.' });
+      const db = await getTenantDb(req.params.id);
+      const before = await _pgConfig(db, req.params.gateway);
+      if (!before) return res.status(404).json({ error: 'Unknown payment gateway.' });
+      if (!secretKeySource()) return res.status(503).json({ error: 'The server has no encryption key, so gateway secrets cannot be stored safely. Ask your administrator to set ATITHI_CREDENTIAL_KEY.' });
+      const gw = before.gateway;
+      const incoming = (req.body && typeof req.body.fields === 'object' && req.body.fields) || {};
+      const pub = { ..._pgJson(before.row?.public_fields) };
+      const sec = { ..._pgJson(before.row?.secret_fields) };
+      const changed: string[] = [];
+      for (const f of gw.credentialFields) {
+        if (!(f.key in incoming)) continue;
+        const v = String(incoming[f.key] ?? '').trim();
+        if (v.length > 512) return res.status(400).json({ error: `${f.label} is too long.` });
+        if (f.secret) {
+          if (!v) continue; // blank keeps the saved secret
+          sec[f.key] = sealSecret(v);
+          changed.push(f.key);
+        } else if (v !== String(pub[f.key] || '')) {
+          pub[f.key] = v;
+          changed.push(f.key);
+        }
+      }
+      for (const k of Object.keys(sec)) {
+        if (needsReseal(sec[k])) { const plain = openSecret(sec[k]); if (plain) sec[k] = sealSecret(plain); }
+      }
+      const creds: GatewayCredentials = { ...pub };
+      for (const [k, v] of Object.entries(sec)) { const plain = openSecret(v); if (plain) creds[k] = plain; }
+      const missing = gw.credentialFields.filter(f => f.required && !creds[f.key]);
+      const wasEnabled = Number(before.row?.is_enabled || 0) === 1;
+      const wantEnabled = req.body?.is_enabled === undefined ? wasEnabled : !!req.body.is_enabled;
+      let enabled = wantEnabled;
+      let verifiedAt: any = changed.length ? null : (before.row?.verified_at || null);
+      let lastError: string | null = changed.length ? null : (before.row?.last_error || null);
+      let detail: string | null = null;
+      if (wantEnabled) {
+        if (missing.length) {
+          enabled = false;
+          lastError = `Enter ${missing.map(f => f.label).join(', ')} before switching ${gw.label} on.`;
+        } else if (changed.length || !wasEnabled || !verifiedAt) {
+          try {
+            detail = (await gw.testConnection(creds)).detail;
+            verifiedAt = new Date().toISOString();
+            lastError = null;
+          } catch (e: any) {
+            enabled = false;
+            lastError = e?.message || String(e);
+          }
+        }
+      }
+      const mode = gw.modeOf(creds);
+      await db.run(
+        `INSERT INTO payment_gateway_configs (gateway, is_enabled, mode, public_fields, secret_fields, verified_at, last_error, updated_by, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (gateway) DO UPDATE SET
+           is_enabled = EXCLUDED.is_enabled, mode = EXCLUDED.mode, public_fields = EXCLUDED.public_fields,
+           secret_fields = EXCLUDED.secret_fields, verified_at = EXCLUDED.verified_at, last_error = EXCLUDED.last_error,
+           updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP`,
+        [gw.id, enabled ? 1 : 0, mode, JSON.stringify(pub), JSON.stringify(sec), verifiedAt, lastError, _pgBy(req).name]);
+      await writeObjectAudit(db, req, {
+        objectType: 'PAYMENT_GATEWAY', objectId: gw.id, action: 'UPDATED',
+        summary: `${gw.label} ${enabled ? 'on' : 'off'}${mode ? ` (${mode.toLowerCase()} keys)` : ''}${changed.length ? `; changed ${changed.join(', ')}` : ''}`,
+        // Names of what changed, never values: a secret must not reach the audit log.
+        before: { is_enabled: wasEnabled, mode: before.row?.mode || null, key_id: before.row ? _pgJson(before.row.public_fields).key_id || null : null },
+        after: { is_enabled: enabled, mode, key_id: pub.key_id || null, changed },
+      }).catch(() => {});
+      const view = _pgConfigView((await _pgConfig(db, gw.id)) as _PgConfig, await _pgWebhookUrl(req, req.params.id, gw.id));
+      if (wantEnabled && !enabled) return res.status(400).json({ error: lastError, gateway: view });
+      res.json({ gateway: view, detail });
+    } catch (err: any) {
+      console.error('[payments] gateway save failed:', err);
+      res.status(500).json({ error: 'Could not save the payment gateway.' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payments/gateways/:gateway/test", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 2))) return res.status(403).json({ error: 'You do not have permission to test Payment Gateways.' });
+      const db = await getTenantDb(req.params.id);
+      const cfg = await _pgConfig(db, req.params.gateway);
+      if (!cfg) return res.status(404).json({ error: 'Unknown payment gateway.' });
+      if (cfg.unreadable.length) return res.status(409).json({ ok: false, error: 'The saved secrets can no longer be read on this server. Enter them again.' });
+      if (cfg.missing.length) {
+        const labels = cfg.gateway.credentialFields.filter(f => cfg.missing.includes(f.key)).map(f => f.label);
+        return res.status(400).json({ ok: false, error: `Enter ${labels.join(', ')} first.` });
+      }
+      try {
+        const t = await cfg.gateway.testConnection(cfg.creds);
+        await db.run("UPDATE payment_gateway_configs SET verified_at = CURRENT_TIMESTAMP, last_error = NULL, mode = ? WHERE gateway = ?", [t.mode, cfg.gateway.id]);
+        res.json({ ok: true, mode: t.mode, detail: t.detail });
+      } catch (e: any) {
+        await db.run("UPDATE payment_gateway_configs SET last_error = ? WHERE gateway = ?", [String(e?.message || e).slice(0, 500), cfg.gateway.id]).catch(() => {});
+        res.status(_pgHttpStatus(e) === 503 ? 503 : 400).json({ ok: false, error: e?.message || 'The gateway did not accept the keys.' });
+      }
+    } catch (err: any) {
+      console.error('[payments] gateway test failed:', err);
+      res.status(500).json({ error: 'Could not test the payment gateway.' });
+    }
+  });
+
+  // Disconnect: forget the keys. Refused while links are open, because a link
+  // paid after its keys are gone could never be read back and recorded.
+  app.delete("/api/restaurant/:id/payments/gateways/:gateway", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 3))) return res.status(403).json({ error: 'You do not have permission to disconnect Payment Gateways.' });
+      const gw = getGateway(req.params.gateway);
+      if (!gw) return res.status(404).json({ error: 'Unknown payment gateway.' });
+      const db = await getTenantDb(req.params.id);
+      const open: any = await db.get("SELECT COUNT(*) AS n FROM payment_links WHERE gateway = ? AND status IN ('CREATING', 'CREATED', 'PARTIALLY_PAID')", [gw.id]);
+      if (Number(open?.n || 0) > 0) {
+        return res.status(409).json({ error: `Cancel the ${open.n} open payment link(s) first. Without the keys a paid link could not be recorded.` });
+      }
+      await db.run("DELETE FROM payment_gateway_configs WHERE gateway = ?", [gw.id]);
+      await writeObjectAudit(db, req, { objectType: 'PAYMENT_GATEWAY', objectId: gw.id, action: 'DELETED', summary: `${gw.label} disconnected; keys removed` }).catch(() => {});
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error('[payments] gateway disconnect failed:', err);
+      res.status(500).json({ error: 'Could not disconnect the payment gateway.' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/payments/links", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const objectType = String(req.query.object_type || '').toUpperCase();
+      const objectId = String(req.query.object_id || '');
+      if (objectType) {
+        const gates = PAYABLE_OBJECT_GATES[objectType];
+        if (!gates) return res.status(400).json({ error: 'Unknown object_type.' });
+        if (!(await _pgPassGates(gates.read, req, res))) return;
+      } else if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 1))) {
+        return res.status(403).json({ error: 'You do not have access to Payment Gateways.' });
+      }
+      const db = await getTenantDb(req.params.id);
+      const where: string[] = [];
+      const params: any[] = [];
+      if (objectType) { where.push('object_type = ?'); params.push(objectType); }
+      if (objectId) { where.push('object_id = ?'); params.push(objectId); }
+      const status = String(req.query.status || '').toUpperCase();
+      if (status === 'NEEDS_REVIEW') where.push("id IN (SELECT link_id FROM payment_link_payments WHERE record_status = 'NEEDS_REVIEW')");
+      else if (status === 'OPEN') where.push("status IN ('CREATING', 'CREATED', 'PARTIALLY_PAID')");
+      else if (status) { where.push('status = ?'); params.push(status); }
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+      const links: any[] = await db.query(
+        `SELECT * FROM payment_links ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT ${limit}`, params);
+      res.json({ links: await _pgLinksWithPayments(db, links) });
+    } catch (err: any) {
+      console.error('[payments] links read failed:', err);
+      res.status(500).json({ error: 'Could not load payment links.' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payments/links", authenticate, async (req: AuthRequest, res: Response) => {
+    const b = req.body || {};
+    const objectType = String(b.object_type || '').toUpperCase();
+    const gates = PAYABLE_OBJECT_GATES[objectType];
+    if (!gates) return res.status(400).json({ error: 'object_type must be HOTEL_FOLIO.' });
+    if (!(await _pgPassGates(gates.write, req, res))) return;
+    if (objectType === 'HOTEL_FOLIO') {
+      const chk = await ensureHotelEnabled(req.params.id);
+      if (!chk.ok) return res.status(chk.status).json({ error: chk.error });
+    }
+    const channel = String(b.channel || 'NONE').toUpperCase();
+    if (!['NONE', 'EMAIL', 'WHATSAPP', 'BOTH'].includes(channel)) return res.status(400).json({ error: 'channel must be NONE, EMAIL, WHATSAPP or BOTH.' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const link = await _pgCreateLink(db, req.params.id, _pgBy(req), {
+        objectType, objectId: String(b.object_id || ''), amount: b.amount,
+        name: b.customer_name, phone: b.customer_phone, email: b.customer_email,
+        expiresInHours: b.expires_in_hours, gateway: b.gateway,
+      });
+      const delivery = await _pgSendLink(db, req.params.id, link, { channel, phone: b.customer_phone, email: b.customer_email });
+      await writeObjectAudit(db, req, {
+        objectType: 'FOLIO', objectId: link.object_id, action: 'PAYMENT_LINK',
+        summary: `Payment link ${link.id} for ₹${(Number(link.amount_paise) / 100).toLocaleString('en-IN')} via ${link.gateway}${delivery.sent.length ? `, sent on ${delivery.sent.join(' and ')}` : ''}`,
+        after: { link_id: link.id, amount: Number(link.amount_paise) / 100, gateway: link.gateway, sent: delivery.sent },
+      }).catch(() => {});
+      const fresh: any = await db.get("SELECT * FROM payment_links WHERE id = ?", [link.id]);
+      res.status(201).json({ link: _pgLinkView(fresh), sent: delivery.sent, errors: delivery.errors.length ? delivery.errors : undefined, message: delivery.message });
+    } catch (e: any) {
+      if (_pgHttpStatus(e) === 500) console.error('[payments] link create failed:', e);
+      res.status(_pgHttpStatus(e)).json({ error: e?.message || 'Could not create the payment link.' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payments/links/:linkId/send", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const g = await _pgLinkGate(req, res, 'write');
+      if (!g) return;
+      const channel = String(req.body?.channel || '').toUpperCase();
+      if (!['EMAIL', 'WHATSAPP', 'BOTH'].includes(channel)) return res.status(400).json({ error: 'channel must be EMAIL, WHATSAPP or BOTH.' });
+      const out = await _pgSendLink(g.db, req.params.id, g.link, { channel, phone: req.body?.customer_phone, email: req.body?.customer_email });
+      if (!out.sent.length) return res.status(400).json({ error: out.errors.join(' ') || 'Nothing was sent.', message: out.message });
+      res.json({ sent: out.sent, errors: out.errors.length ? out.errors : undefined, message: out.message });
+    } catch (e: any) {
+      console.error('[payments] link send failed:', e);
+      res.status(_pgHttpStatus(e)).json({ error: e?.message || 'Could not send the payment link.' });
+    }
+  });
+
+  // "Check status": read the link back from the gateway now, recording anything paid.
+  app.post("/api/restaurant/:id/payments/links/:linkId/refresh", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const g = await _pgLinkGate(req, res, 'read');
+      if (!g) return;
+      const r = await _pgReconcileLink(req.params.id, g.link.id, 'STAFF');
+      const [view] = await _pgLinksWithPayments(g.db, [r.link]);
+      res.json({ link: view, recorded: r.recorded, needs_review: r.needsReview });
+    } catch (e: any) {
+      if (_pgHttpStatus(e) === 500) console.error('[payments] link refresh failed:', e);
+      res.status(_pgHttpStatus(e)).json({ error: e?.message || 'Could not check the payment link.' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payments/links/:linkId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const g = await _pgLinkGate(req, res, 'write');
+      if (!g) return;
+      if (!['CREATED', 'PARTIALLY_PAID'].includes(String(g.link.status))) {
+        return res.status(409).json({ error: `This link is ${String(g.link.status).toLowerCase()} and cannot be cancelled.` });
+      }
+      const cfg = await _pgConfig(g.db, g.link.gateway);
+      if (!cfg || cfg.missing.length || cfg.unreadable.length) return res.status(409).json({ error: `${cfg?.gateway.label || g.link.gateway} is not connected, so the link cannot be cancelled there.` });
+      try {
+        await cfg.gateway.cancelLink(cfg.creds, g.link.gateway_link_id);
+      } catch (e: any) {
+        // Most often: it was paid a moment ago. Read it back so that payment is recorded.
+        const r = await _pgReconcileLink(req.params.id, g.link.id, 'CANCEL').catch(() => null);
+        const [view] = r ? await _pgLinksWithPayments(g.db, [r.link]) : [null];
+        return res.status(409).json({ error: `${cfg.gateway.label} did not cancel it: ${e?.message || e}. Its status has been refreshed.`, link: view });
+      }
+      await g.db.run("UPDATE payment_links SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [g.link.id]);
+      const fresh: any = await g.db.get("SELECT * FROM payment_links WHERE id = ?", [g.link.id]);
+      await _pgIndex(req.params.id, fresh);
+      await writeObjectAudit(g.db, req, { objectType: 'FOLIO', objectId: g.link.object_id, action: 'PAYMENT_LINK_CANCELLED', summary: `Payment link ${g.link.id} cancelled` }).catch(() => {});
+      const [view] = await _pgLinksWithPayments(g.db, [fresh]);
+      res.json({ link: view });
+    } catch (e: any) {
+      console.error('[payments] link cancel failed:', e);
+      res.status(_pgHttpStatus(e)).json({ error: e?.message || 'Could not cancel the payment link.' });
+    }
+  });
+
+  // A payment the system could not apply (e.g. paid after checkout) is closed by
+  // a person saying what they did with the money.
+  app.post("/api/restaurant/:id/payments/link-payments/:paymentId/resolve", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 2))) return res.status(403).json({ error: 'You do not have permission to resolve payments.' });
+      const note = String(req.body?.note || '').trim();
+      if (note.length < 5) return res.status(400).json({ error: 'Say what was done with this money (at least 5 characters).' });
+      const db = await getTenantDb(req.params.id);
+      const r = await db.run(
+        "UPDATE payment_link_payments SET record_status = 'RESOLVED', resolved_by = ?, resolved_at = CURRENT_TIMESTAMP, resolution_note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND record_status = 'NEEDS_REVIEW'",
+        [_pgBy(req).name, note.slice(0, 500), req.params.paymentId]);
+      if (r.changes !== 1) return res.status(409).json({ error: 'That payment is not waiting for review.' });
+      await writeObjectAudit(db, req, { objectType: 'PAYMENT_GATEWAY', objectId: req.params.paymentId, action: 'PAYMENT_RESOLVED', summary: note.slice(0, 200) }).catch(() => {});
+      res.json({ ok: true });
+    } catch (e: any) {
+      console.error('[payments] resolve failed:', e);
+      res.status(500).json({ error: 'Could not resolve the payment.' });
+    }
+  });
+
+  // The gateway calls this. Verify, log once per event, answer at once, and only
+  // then read the link back (an outbound call) and record what it says.
+  app.post("/api/public/payments/webhook/:gateway/:tenant", async (req: any, res: Response) => {
+    const gw = getGateway(req.params.gateway);
+    if (!gw) return res.status(404).json({ error: 'Unknown gateway' });
+    const restaurantId = await resolvePublicRestaurantId(req.params.tenant);
+    if (!restaurantId) return res.status(404).json({ error: 'Unknown property' });
+    const raw: Buffer | undefined = req.rawBody;
+    if (!raw || !raw.length) return res.status(400).json({ error: 'Empty body' });
+    let db: any;
+    try { db = await getTenantDb(restaurantId); } catch { return res.status(503).json({ error: 'Temporarily unavailable' }); }
+    const log = (id: string, outcome: string, detail: string | null, ev?: { eventId?: string | null; eventType?: string; gatewayLinkId?: string | null; referenceId?: string | null }) =>
+      db.run(
+        `INSERT INTO payment_webhook_events (id, gateway, event_id, event_type, gateway_link_id, reference_id, outcome, detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+        [id, gw.id, ev?.eventId || null, ev?.eventType || null, ev?.gatewayLinkId || null, ev?.referenceId || null, outcome, detail]);
+    try {
+      const cfg = await _pgConfig(db, gw.id);
+      if (!cfg?.row) return res.status(404).json({ error: 'Not configured' });
+      if (!gw.verifyWebhook(cfg.creds, raw, req.headers)) {
+        // One row a minute at most, so a flood of forged calls cannot fill the table.
+        const recent: any = await db.get(
+          "SELECT id FROM payment_webhook_events WHERE gateway = ? AND outcome = 'BAD_SIGNATURE' AND received_at > CURRENT_TIMESTAMP - INTERVAL '1 minute' LIMIT 1", [gw.id]).catch(() => null);
+        if (!recent) await log(_pgNewId('PWE'), 'BAD_SIGNATURE', cfg.creds.webhook_secret ? 'Signature did not match the saved webhook secret.' : 'No webhook secret is saved.').catch(() => {});
+        return res.status(401).json({ error: 'Invalid signature' });
+      }
+      let ev;
+      try { ev = gw.parseWebhook(raw, req.headers); }
+      catch { return res.status(400).json({ error: 'Unreadable body' }); }
+      const rowId = _pgNewId('PWE');
+      const ins = await log(rowId, 'RECEIVED', null, ev);
+      if (ins.changes === 0) return res.json({ ok: true, duplicate: true });
+      res.json({ ok: true });
+
+      setImmediate(async () => {
+        let outcome = 'IGNORED';
+        let detail: string | null = null;
+        try {
+          let link: any = null;
+          if (ev.gatewayLinkId) link = await db.get("SELECT id FROM payment_links WHERE gateway = ? AND gateway_link_id = ?", [gw.id, ev.gatewayLinkId]);
+          if (!link && ev.referenceId) link = await db.get("SELECT id FROM payment_links WHERE gateway = ? AND id = ?", [gw.id, ev.referenceId]);
+          if (!link) outcome = ev.gatewayLinkId || ev.referenceId ? 'UNKNOWN_LINK' : 'IGNORED';
+          else {
+            const r = await _pgReconcileLink(restaurantId, link.id, 'WEBHOOK');
+            outcome = 'PROCESSED';
+            detail = `Link ${r.link.status.toLowerCase()}; recorded ${r.recorded}${r.needsReview ? `; ${r.needsReview} need review` : ''}.`;
+          }
+        } catch (e: any) {
+          outcome = 'FAILED';
+          detail = String(e?.message || e).slice(0, 500);
+        }
+        await db.run("UPDATE payment_webhook_events SET outcome = ?, detail = ? WHERE id = ?", [outcome, detail, rowId]).catch(() => {});
+      });
+    } catch (e: any) {
+      console.error('[payments] webhook failed:', e);
+      if (!res.headersSent) res.status(500).json({ error: 'Webhook processing failed' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/payments/webhook-events", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 1))) return res.status(403).json({ error: 'You do not have access to Payment Gateways.' });
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM payment_webhook_events ORDER BY received_at DESC LIMIT 50");
+      res.json({ events: rows });
+    } catch (e: any) {
+      res.status(500).json({ error: 'Could not load webhook events.' });
+    }
+  });
+
   // ─── CREDIT NOTE (Phase 5) ────────────────────────────────────────────────
   // POST /hotel/folios/:folioId/credit-note
   // body: { reason?: string, partial?: { [entryId]: amount } }
@@ -63030,6 +63945,47 @@ ${data.tenant.name}`;
   // ARI only when that interval has elapsed since its last scheduled run — so every
   // property keeps its chosen freshness (15/30/60/120 min) without per-tenant timers.
   // The push is an idempotent absolute upsert; aiosellSyncTenant self-guards the rest.
+  // Payment link RECONCILIATION sweep. A webhook can be lost (gateway outage, our
+  // restart, a wrong webhook secret) and a gateway does not retry one we answered.
+  // Every open link is read back from its gateway at most every ~10 minutes, so a
+  // payment is recorded even if its webhook never arrives. Uses the central index
+  // to touch only tenants that have an open link.
+  if (!(globalThis as any).__paymentLinkSweepStarted) {
+    (globalThis as any).__paymentLinkSweepStarted = true;
+    let sweeping = false;
+    const runPaymentLinkSweep = async () => {
+      if (sweeping) return;
+      sweeping = true;
+      try {
+        const rows: any[] = await centralDb.query(
+          `SELECT restaurant_id, link_id FROM payment_link_index
+            WHERE status IN ('CREATING', 'CREATED', 'PARTIALLY_PAID', 'RECORDING')
+              AND created_at > CURRENT_TIMESTAMP - INTERVAL '45 days'
+              AND (checked_at IS NULL OR checked_at < CURRENT_TIMESTAMP - INTERVAL '9 minutes')
+            ORDER BY checked_at NULLS FIRST
+            LIMIT 200`).catch(() => []);
+        for (const r of rows) {
+          await centralDb.run("UPDATE payment_link_index SET checked_at = CURRENT_TIMESTAMP WHERE restaurant_id = ? AND link_id = ?", [r.restaurant_id, r.link_id]).catch(() => {});
+          try {
+            await _pgReconcileLink(r.restaurant_id, r.link_id, 'SWEEP');
+          } catch (e: any) {
+            if (e instanceof PaymentRequestError && e.status === 404) {
+              await centralDb.run("UPDATE payment_link_index SET status = 'MISSING' WHERE restaurant_id = ? AND link_id = ?", [r.restaurant_id, r.link_id]).catch(() => {});
+            } else {
+              console.warn(`[payment-link-sweep] ${r.restaurant_id}/${r.link_id}:`, e?.message || e);
+            }
+          }
+        }
+      } catch (e: any) {
+        console.error('[payment-link-sweep] failed:', e?.message || e);
+      } finally {
+        sweeping = false;
+      }
+    };
+    setInterval(runPaymentLinkSweep, 5 * 60 * 1000);
+    console.log('[payment-link-sweep] started (5-min tick, each open link read back every ~10 minutes)');
+  }
+
   if (!(globalThis as any).__aiosellReconcileStarted) {
     (globalThis as any).__aiosellReconcileStarted = true;
     const runAiosellScheduled = async () => {
@@ -64002,8 +64958,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'reset-link-platform-host',
+    commit_marker: 'payments-razorpay-links',
     code_features: [
+      'payments-razorpay-links — FEATURE: online payments through the property OWN gateway account, Razorpay first. Gateway-agnostic contract paymentGateway.ts (integer paise, webhook is a trigger never the truth, idempotent on gateway payment id) + registry paymentGatewayRegistry.ts + razorpayGateway.ts (Payment Links API: create/fetch with per-payment fee and tax/cancel, HMAC-SHA256 webhook over raw body, key mode from rzp_test_/rzp_live_). Secrets sealed AES-256-GCM by paymentSecrets.ts (ATITHI_CREDENTIAL_KEY, else a JWT_SECRET-derived payments-only key; each value names its key and re-seals on save) and never returned to a browser. Tenant tables payment_gateway_configs, payment_links (created locally as CREATING before the gateway call), payment_link_payments (UNIQUE gateway+payment id = the idempotency guarantee; NEEDS_REVIEW when the bill can no longer take the money), payment_webhook_events; central payment_link_index for the sweep. Global JSON parser keeps rawBody for /api/public/payments/webhook/ (the route-level parser never ran, which also breaks the WhatsApp/OTA/aggregator signatures). Recording: _pgReconcileLink re-reads the link from the gateway and records each captured payment once via recordFolioPayment (ADVANCE before check-in with its GST and Rule 50 voucher, INTERIM during the stay), method ONLINE → new COA 1025 Payment Gateway Clearing, and books the gateway ACTUAL fee as PGFEE-<payment>: Dr 5510 + Dr 1330 GST, Cr 1025, so clearing holds exactly the payout. Routes /payments/gateways (GET, PUT save + live test before switching on, POST test, DELETE refused while links open), /payments/links (GET, POST create+send, send, refresh, cancel), /payments/link-payments/:id/resolve, /payments/webhook-events, public POST /api/public/payments/webhook/:gateway/:publicToken (verify, log once per event id, answer, then reconcile). One live link per bill (older one cancelled, or reconciled if it was just paid). Sweep every 5 minutes reads open links back so a lost webhook never loses a payment. Link gates mirror manual folio payments (hotelStaff + FOLIOS); gateway settings need PAYMENT_GATEWAYS (owner or explicit grant, not implied by MANAGER). Notifications PAYMENT_LINK_SENT, ONLINE_PAYMENT_RECEIPT, ONLINE_PAYMENT_RECEIVED. UI src/PaymentLinks.tsx: Payment Gateways page (Administration) with keys, webhook set-up steps, link register, needs-review resolution, webhook log; folio Collect online dialog (amount defaults to balance due, WhatsApp/email/copy/share, live status). Tests: tsx razorpay_gateway_check (40), payment_secrets_check (17); suite TC-PAY-GW-READ, -WEBHOOK-UNCONFIGURED, -ENABLE-NEEDS-VALID-KEYS, -SECRET-WRITE-ONLY, -WEBHOOK-SIGNATURE, -LINK-GUARDS, -RAZORPAY-ROUNDTRIP (needs RAZORPAY_TEST_KEY_*), -DISCONNECT. NOT YET: PhonePe, Paytm, gateway refunds, payout matching of 1025 to the bank, events/spa/restaurant bills.',
       'reset-link-platform-host — BUGFIX: owners tapping the password-reset link saw Restaurant Not Found. Reset emails link to FRONTEND_URL, which is dev-erp.atithi-setu.com (same backend as erp.*), and dev-erp was not a reserved subdomain, so getTenantSlug read it as a tenant slug, /api/tenant/by-slug/dev-erp answered 404 and the reset token was never used. New tenantHost.ts (pure, shared by server and SPA like upiLink.ts) holds RESERVED_SUBDOMAINS (old list plus dev-erp and prod-erp) and tenantSlugFromHost; server RESERVED_SLUGS and the SPA parser both import it, so the two copies can no longer drift and no tenant can claim a platform label. SECOND FAULT on the same path: a reset link opened on a real tenant subdomain stripped the token and rendered the tenant login page, which has no reset form; the tenant-login gate now steps aside while ownerAuthStep is reset, and Sign In Now hands back to it. test-scripts/tenant_host_check.ts (16 checks) and suite TC-AUTH-RESET-HOST (dev-erp/prod-erp by-slug 404 + deployed bundle reserves dev-erp).',
       'stock-ledger-one-statement — ingredients.current_stock_qty and SUM(stock_movements.qty_delta) disagreed on 19 items across 5 tenants (15 Sep 2026). (1) Order consumption, order reversal, the spa retail sale and the opening stock on POST /inventory/ingredients and POST /hotel-inventory write the stock figure and its ledger line in ONE statement (a data-modifying WITH), so a failed insert can no longer leave stock moved with no line; a consumption or reversal that fails is logged and does not block the order; any non-zero opening is logged, negative included. (2) seedSpaDefaults seeds Spa Massage Oil and Aroma Candle at 0 stock. (3) The hotel item fold writes an opening line for each item it moves, in the same statement, and writes its marker only when the fold succeeds. (4) PATCH /hotel-inventory/:itemId no longer sets current_stock_qty: a changed figure is refused 400 STOCK_NEEDS_A_MOVEMENT, the current figure echoed back unchanged is accepted. (5) POST /inventory/admin/purge-corrupt-movements removed. (6) GET /inventory/ledger-integrity (module, include_shared, include_inactive) lists items whose stock figure and ledger disagree with stock_qty, ledger_qty and gap; /inventory/stockouts flags them (ledger_mismatch, ledger_qty, ledger_gap, ledger figures null, left out of the ledger totals, totals.ledger_mismatches, listed first) and /inventory/turns bands them LEDGER_MISMATCH with no cover or turns (data_quality.ledger_mismatches); both Analytics panels show them. Existing mismatched data is NOT corrected here (owner decision pending).',
       'hrms-r1d-excel — exceljs 4.4.0 dependency; hrExcel.ts buildWorkbook (bold frozen header, filter, real dates) and readSheet (header names in any order, dates as YYYY-MM-DD, SheetReadError for a non-xlsx file or over maxRows); GET /hr/employees.xlsx (CSV number rule: full PAN, Aadhaar and bank account only with HR_SENSITIVE Edit, logged EXPORTED); GET /hr/employees/import-template.xlsx (Employees sheet + How to fill sheet with this property roles); POST /hr/employees/import/preview (xlsx upload, validateImportRow per row: NEW, DUPLICATE by name with phone or email, INVALID with every problem; nothing saved) and /import/commit (every row checked again, OFFLINE employees with code, designation, department linked to hr_masters by name, employment type, joining date, date of birth, gender; audit CREATED from an Excel import); import needs HR_PAYROLL Edit and STAFF Full like Bulk Add; UI Export Excel and Import from Excel on the Employees directory; TC-HR-XLSX-ROUNDTRIP and static TC-HR-TAB-REGISTRIES.',

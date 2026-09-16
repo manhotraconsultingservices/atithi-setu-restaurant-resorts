@@ -356,7 +356,7 @@ export const hi: Record<string, string> = {
   'Sales & Distribution': 'बिक्री और वितरण', 'Channel Manager': 'चैनल मैनेजर', 'Direct Booking Page': 'डायरेक्ट बुकिंग पेज', 'Loyalty': 'लॉयल्टी', 'Guest Feedback': 'अतिथि फीडबैक',
   'Reports': 'रिपोर्ट्स', 'All Reports': 'सभी रिपोर्ट',
   'Workforce': 'कर्मचारी', 'Staff Directory': 'स्टाफ डायरेक्टरी', 'Attendance': 'उपस्थिति', 'Roster': 'रोस्टर', 'Timesheet': 'टाइमशीट', 'Staff Payroll': 'स्टाफ पेरोल', 'HR & Payroll': 'HR और पेरोल',
-  'Administration': 'प्रशासन', 'Brand & Settings': 'ब्रांड और सेटिंग्स', 'Staff Access': 'स्टाफ एक्सेस', 'Notifications': 'सूचनाएं', 'Subscription': 'सदस्यता',
+  'Administration': 'प्रशासन', 'Brand & Settings': 'ब्रांड और सेटिंग्स', 'Staff Access': 'स्टाफ एक्सेस', 'Notifications': 'सूचनाएं', 'Payment Gateways': 'पेमेंट गेटवे', 'Subscription': 'सदस्यता',
 
   // ── Home dashboard (Phase 2 Wave 2) ─────────────────────────────────────────
   'Good morning': 'सुप्रभात', 'Good afternoon': 'शुभ दोपहर', 'Good evening': 'शुभ संध्या',

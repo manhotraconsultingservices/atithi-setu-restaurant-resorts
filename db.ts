@@ -3708,6 +3708,12 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ['1005','Cash in Transit','ASSET',5],
     ['1010','Bank — Main Account','ASSET',10],
     ['1020','Bank — OTA Receivable','ASSET',20],
+    // Money a payment gateway has captured but not yet paid out. A link payment
+    // debits it gross; the gateway's fee is booked out of it at capture; the
+    // payout moves the rest to the bank. It should hold roughly two days of
+    // online takings — a balance that keeps growing means payouts are not being
+    // matched.
+    ['1025','Payment Gateway Clearing','ASSET',25],
     ['1100','Accounts Receivable — Guests','ASSET',30],
     ['1110','Accounts Receivable — OTA Channels','ASSET',40],
     // Revenue earned before the cut-off and billed after it — the debit side of
@@ -3845,6 +3851,10 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // HR module tables: payroll tables, employee record columns, organisation
   // masters and HR settings (hrService.ts, HRMS-R1A).
   await createHrTables(db);
+
+  // Online payments: the tenant's own gateway accounts and the payment links
+  // sent from folios, bookings and bills.
+  await createPaymentGatewayTables(db);
 
   // Cache stores the init promise (set by getTenantDb above); we return
   // the resolved DbInterface here. No need to re-cache.
@@ -4011,4 +4021,118 @@ export async function createAccountTables(db: DbInterface): Promise<void> {
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_account_interactions_account ON account_interactions (account_id, occurred_at DESC)`).catch(() => {});
   // Answers "who do I owe a call back this week" across every account at once.
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_account_interactions_followup ON account_interactions (follow_up_date) WHERE follow_up_date IS NOT NULL`).catch(() => {});
+}
+
+// ─── Online payments (payment gateways + payment links) ─────────────────────
+// A tenant connects its OWN gateway account; staff send a link for what a
+// customer owes; the gateway's webhook (or the reconciliation sweep) records the
+// payment against the folio or bill. One statement per exec: the tenant exec
+// splits on semicolons.
+export async function createPaymentGatewayTables(db: DbInterface): Promise<void> {
+  // One row per gateway. Secrets are sealed (paymentSecrets.ts) and never leave
+  // the server; public_fields holds what is safe to show (e.g. the key id).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_gateway_configs (
+      gateway        TEXT PRIMARY KEY,
+      is_enabled     INT NOT NULL DEFAULT 0,
+      mode           TEXT,
+      public_fields  JSONB NOT NULL DEFAULT '{}'::jsonb,
+      secret_fields  JSONB NOT NULL DEFAULT '{}'::jsonb,
+      verified_at    TIMESTAMP,
+      last_error     TEXT,
+      updated_by     TEXT,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+
+  // A link is created locally first (status CREATING) so a gateway call that
+  // times out still leaves a row to reconcile, rather than an orphan link on
+  // the gateway that nobody here knows about. Amounts are integer paise.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_links (
+      id                 TEXT PRIMARY KEY,
+      gateway            TEXT NOT NULL,
+      mode               TEXT,
+      gateway_link_id    TEXT,
+      url                TEXT,
+      object_type        TEXT NOT NULL,
+      object_id          TEXT NOT NULL,
+      amount_paise       BIGINT NOT NULL,
+      amount_paid_paise  BIGINT NOT NULL DEFAULT 0,
+      currency           TEXT NOT NULL DEFAULT 'INR',
+      status             TEXT NOT NULL DEFAULT 'CREATING',
+      description        TEXT,
+      customer_name      TEXT,
+      customer_phone     TEXT,
+      customer_email     TEXT,
+      expires_at         TIMESTAMP,
+      sent_channels      TEXT,
+      last_sent_at       TIMESTAMP,
+      last_checked_at    TIMESTAMP,
+      last_error         TEXT,
+      created_by         TEXT,
+      created_by_name    TEXT,
+      created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      paid_at            TIMESTAMP,
+      cancelled_at       TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_links_gateway_link ON payment_links (gateway, gateway_link_id) WHERE gateway_link_id IS NOT NULL`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_payment_links_object ON payment_links (object_type, object_id, created_at DESC)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_payment_links_status ON payment_links (status, created_at DESC)`).catch(() => {});
+
+  // Every captured payment, once. The unique (gateway, gateway_payment_id) is
+  // the idempotency guarantee: a webhook delivered twice, a webhook racing the
+  // sweep, or a staff "check status" all try to insert the same row and only
+  // one of them goes on to record money. A payment that cannot be recorded
+  // (the folio was settled meanwhile) is kept as NEEDS_REVIEW, never dropped.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_link_payments (
+      id                  TEXT PRIMARY KEY,
+      link_id             TEXT NOT NULL,
+      gateway             TEXT NOT NULL,
+      gateway_payment_id  TEXT NOT NULL,
+      amount_paise        BIGINT NOT NULL,
+      fee_paise           BIGINT,
+      tax_paise           BIGINT,
+      method              TEXT,
+      payer_vpa           TEXT,
+      payer_email         TEXT,
+      payer_phone         TEXT,
+      paid_at             TIMESTAMP,
+      record_status       TEXT NOT NULL DEFAULT 'PENDING',
+      recorded_ref        TEXT,
+      fee_journal_ref     TEXT,
+      record_error        TEXT,
+      resolved_by         TEXT,
+      resolved_at         TIMESTAMP,
+      resolution_note     TEXT,
+      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (gateway, gateway_payment_id)
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_payment_link_payments_link ON payment_link_payments (link_id)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_payment_link_payments_status ON payment_link_payments (record_status)`).catch(() => {});
+
+  // What the gateway told us, including calls that failed the signature check —
+  // a wrong webhook secret shows up here as a run of BAD_SIGNATURE rows instead
+  // of as silence. Holds identifiers only, never the payer's details.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_webhook_events (
+      id               TEXT PRIMARY KEY,
+      gateway          TEXT NOT NULL,
+      event_id         TEXT,
+      event_type       TEXT,
+      gateway_link_id  TEXT,
+      reference_id     TEXT,
+      outcome          TEXT NOT NULL,
+      detail           TEXT,
+      received_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_webhook_event ON payment_webhook_events (gateway, event_id) WHERE event_id IS NOT NULL`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_payment_webhook_events_received ON payment_webhook_events (received_at DESC)`).catch(() => {});
 }

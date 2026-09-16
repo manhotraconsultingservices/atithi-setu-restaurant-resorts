@@ -83,6 +83,9 @@ export function computeTabVisibility(id: string, ctx: NavVisibilityCtx): boolean
   if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
   if (id === 'KITCHEN_PRINTERS') return isOwnerOrAdmin;
   if (id === 'PRINT_TEMPLATES') return isOwnerOrAdmin;
+  // Gateway keys can move the property's money: owner, or a role the owner
+  // explicitly granted. Not implied by MANAGER, and never under a null list.
+  if (id === 'PAYMENT_GATEWAYS') return isOwnerOrAdmin || strictGranted(id);
 
   // Checklist Templates: owner/admin always, plus any role granted it.
   if (id === 'CHECKLISTS') return isOwnerOrAdmin || baseTabVisible(id);

@@ -359,6 +359,48 @@ export function buildNotificationContent(
           `<p style="color:#475569;font-size:14px">The full breakdown is in your email.</p>`,
       };
 
+    /* Online payments (payment links through the property's own gateway) */
+
+    case 'PAYMENT_LINK_SENT':
+      return {
+        subject: `Payment request from ${r} — ${data.amount || ''}`,
+        text:
+          `Dear ${data.customerName || 'Guest'}, please pay ${data.amount || ''} to ${r}` +
+          `${data.purpose ? ` for ${data.purpose}` : ''} using this secure link:\n${data.payUrl || ''}\n\n` +
+          `${data.expiresAt ? `The link is valid until ${data.expiresAt}. ` : ''}UPI, card and net banking accepted.`,
+        html:
+          `<h2 style="color:#cc5a16">Payment request</h2>` +
+          `<p>Dear ${data.customerName || 'Guest'}, please pay <strong>${data.amount || ''}</strong> to <strong>${r}</strong>` +
+          `${data.purpose ? ` for ${data.purpose}` : ''}.</p>` +
+          `<p><a href="${data.payUrl || '#'}" style="display:inline-block;padding:12px 24px;background:#cc5a16;color:#fff;border-radius:10px;text-decoration:none;font-weight:bold">Pay ${data.amount || ''}</a></p>` +
+          `<p style="color:#6b5d52;font-size:13px">${data.expiresAt ? `Valid until ${data.expiresAt}. ` : ''}UPI, card and net banking accepted.</p>`,
+      };
+
+    case 'ONLINE_PAYMENT_RECEIPT':
+      return {
+        subject: `Payment received — ${data.amount || ''} to ${r}`,
+        text:
+          `Thank you ${data.customerName || 'there'}. ${r} has received your payment of ${data.amount || ''}` +
+          `${data.purpose ? ` for ${data.purpose}` : ''}.`,
+        html:
+          `<h2 style="color:#15803d">Payment received</h2>` +
+          `<p>Thank you <strong>${data.customerName || 'there'}</strong>. <strong>${r}</strong> has received your payment of ` +
+          `<strong>${data.amount || ''}</strong>${data.purpose ? ` for ${data.purpose}` : ''}.</p>`,
+      };
+
+    case 'ONLINE_PAYMENT_RECEIVED':
+      return {
+        subject: `Online payment received: ${data.amount || ''} from ${data.customerName || 'a guest'}`,
+        text:
+          `${data.amount || ''} was paid online by ${data.customerName || 'a guest'}` +
+          `${data.purpose ? ` for ${data.purpose}` : ''} and has been recorded (payment link ${data.linkId || ''}).`,
+        html:
+          `<h2 style="color:#15803d">Online payment received</h2>` +
+          `<p><strong>${data.amount || ''}</strong> was paid online by <strong>${data.customerName || 'a guest'}</strong>` +
+          `${data.purpose ? ` for ${data.purpose}` : ''} and has been recorded.</p>` +
+          `<p style="color:#6b5d52;font-size:13px">Payment link ${data.linkId || ''}</p>`,
+      };
+
     case 'SPA_APPOINTMENT_CONFIRMED':
       return {
         subject: `Your appointment at ${r} is confirmed`,

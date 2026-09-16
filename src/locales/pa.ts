@@ -317,7 +317,7 @@ export const pa: Record<string, string> = {
   'Sales & Distribution': 'ਵਿਕਰੀ ਤੇ ਵੰਡ', 'Channel Manager': 'ਚੈਨਲ ਮੈਨੇਜਰ', 'Direct Booking Page': 'ਸਿੱਧੀ ਬੁਕਿੰਗ ਪੰਨਾ', 'Loyalty': 'ਵਫ਼ਾਦਾਰੀ', 'Guest Feedback': 'ਮਹਿਮਾਨ ਫੀਡਬੈਕ',
   'Reports': 'ਰਿਪੋਰਟਾਂ', 'All Reports': 'ਸਾਰੀਆਂ ਰਿਪੋਰਟਾਂ',
   'Workforce': 'ਸਟਾਫ਼', 'Staff Directory': 'ਸਟਾਫ਼ ਡਾਇਰੈਕਟਰੀ', 'Attendance': 'ਹਾਜ਼ਰੀ', 'Roster': 'ਰੋਸਟਰ', 'Timesheet': 'ਟਾਈਮਸ਼ੀਟ', 'Staff Payroll': 'ਸਟਾਫ਼ ਤਨਖਾਹ', 'HR & Payroll': 'HR ਤੇ ਤਨਖਾਹ',
-  'Administration': 'ਪ੍ਰਬੰਧ', 'Brand & Settings': 'ਬ੍ਰਾਂਡ ਤੇ ਸੈਟਿੰਗਾਂ', 'Staff Access': 'ਸਟਾਫ਼ ਪਹੁੰਚ', 'Notifications': 'ਸੂਚਨਾਵਾਂ', 'Subscription': 'ਗਾਹਕੀ',
+  'Administration': 'ਪ੍ਰਬੰਧ', 'Brand & Settings': 'ਬ੍ਰਾਂਡ ਤੇ ਸੈਟਿੰਗਾਂ', 'Staff Access': 'ਸਟਾਫ਼ ਪਹੁੰਚ', 'Notifications': 'ਸੂਚਨਾਵਾਂ', 'Payment Gateways': 'ਪੇਮੈਂਟ ਗੇਟਵੇ', 'Subscription': 'ਗਾਹਕੀ',
 
   // ── Home dashboard (Phase 2 Wave 2) ─────────────────────────────────────────
   'Good morning': 'ਸ਼ੁਭ ਸਵੇਰ', 'Good afternoon': 'ਸ਼ੁਭ ਦੁਪਹਿਰ', 'Good evening': 'ਸ਼ੁਭ ਸ਼ਾਮ',

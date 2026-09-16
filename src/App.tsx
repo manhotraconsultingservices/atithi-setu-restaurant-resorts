@@ -16,6 +16,7 @@ import { FloorPlanMap } from './FloorPlanMap';
 import { StatusBoard } from './StatusBoard';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
+import { PaymentGatewaysPage, CollectOnlineDialog } from './PaymentLinks';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { canWriteTab, canDeleteTab, tabLevel } from './perm';
@@ -11114,7 +11115,7 @@ const StatementScopeNote = ({ scope }: { scope: any }) => {
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
   const [activeTab, setActiveTab] = useState<
     | 'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'STAFF_ACCESS' | 'SETTINGS'
-    | 'ORDERS' | 'INVOICES' | 'ATTENDANCE' | 'NOTIFICATIONS'
+    | 'ORDERS' | 'INVOICES' | 'ATTENDANCE' | 'NOTIFICATIONS' | 'PAYMENT_GATEWAYS'
     | 'FEEDBACK' | 'SUBSCRIPTION' | 'BOOKINGS' | 'MONITOR'
     | 'INVENTORY'                                 // inventory module
     | 'DELIVERY'                                  // multi-platform delivery integration
@@ -12066,6 +12067,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [folioSlideBooking, setFolioSlideBooking] = useState<any>(null);
   // Sprint RS — F&B charge modal state (phone-in room service, minibar, banquet)
   const [fnbChargeFolio, setFnbChargeFolio] = useState<any>(null);
+  // Online payments — the folio a "Collect online" payment link is being sent for.
+  const [collectOnlineFolio, setCollectOnlineFolio] = useState<any>(null);
   // RS-FIX — unbilled room-service orders (folio_post_status='PENDING_MANUAL')
   // awaiting front-desk reconciliation onto a folio.
   const [pendingFolioOrders, setPendingFolioOrders] = useState<any[]>([]);
@@ -17130,6 +17133,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // pass + the content-branch Access-Denied panel below.
               ...(isOwnerOrAdmin ? [{ id: 'STAFF_ACCESS', label: 'Staff Access' } as NavTab] : []),
               { id: 'NOTIFICATIONS', label: 'Notifications' },
+              { id: 'PAYMENT_GATEWAYS', label: 'Payment Gateways' },
               { id: 'SUBSCRIPTION',  label: 'Subscription' },
             ],
           },
@@ -22165,6 +22169,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : activeTab === 'NOTIFICATIONS' ? (
         <NotificationSettings restaurantId={restaurantId} token={token} restaurantName={restaurant?.name || ''} isHotelEnabled={isHotelEnabled} isRestaurantEnabled={isRestaurantEnabled} isSpaEnabled={isSpaEnabled} isEventsEnabled={isEventsEnabled} />
+      ) : activeTab === 'PAYMENT_GATEWAYS' ? (
+        <PaymentGatewaysPage restaurantId={restaurantId} token={token} />
       ) : activeTab === 'FEEDBACK' ? (
         <div className="space-y-8">
           <div className="flex justify-between items-center">
@@ -29019,6 +29025,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports',     description: 'F&B revenue, top dishes, peak-hour heatmap, delivery settlement, customer cohort — separate reporting hub.', restaurantOnly: true },
               { id: 'FEEDBACK',           label: 'Feedback / Reviews',     description: 'Customer feedback responses, NPS, public review page.' },
               { id: 'NOTIFICATIONS',     label: 'Notifications',           description: 'WhatsApp / SMS / email template config, delivery logs.' },
+              { id: 'PAYMENT_GATEWAYS',  label: 'Payment Gateways',        description: 'Connect Razorpay (and later PhonePe, Paytm) with API keys, see every payment link and resolve online payments that need review. View shows the page; Edit changes keys and switches gateways on; Full can disconnect. Sending a link from a folio needs Folios Edit, not this.' },
               { id: 'SUBSCRIPTION',      label: 'Subscription / Billing',  description: 'Plan tier, invoices for the AtithiSetu subscription itself, payment.' },
               { id: 'SETTINGS',          label: 'Settings',                description: 'GST setup, business profile, hotel settings, channel credentials.' },
               // Hotel-only tabs
@@ -29117,7 +29124,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               INVENTORY: 'INVENTORY', HOTEL_INVENTORY: 'INVENTORY', SPA_INVENTORY: 'INVENTORY',
               ALL_REPORTS: 'REPORTS',
               STAFF: 'WORKFORCE', ROSTER: 'WORKFORCE', TIMESHEET: 'WORKFORCE', ATTENDANCE: 'WORKFORCE', HR_PAYROLL: 'WORKFORCE', HR_SENSITIVE: 'WORKFORCE', STAFF_PAYROLL: 'WORKFORCE',
-              NOTIFICATIONS: 'ADMIN', SUBSCRIPTION: 'ADMIN', SETTINGS: 'ADMIN',
+              NOTIFICATIONS: 'ADMIN', PAYMENT_GATEWAYS: 'ADMIN', SUBSCRIPTION: 'ADMIN', SETTINGS: 'ADMIN',
             };
             const moduleOf = (id: string) => TAB_MODULE[id] || 'OTHER';
 
@@ -38058,6 +38065,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   }}
                   className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-[#1e3a5f]/20 text-[#1e3a5f] text-xs font-bold hover:bg-[#1e3a5f]/5"
                 ><Mail size={13}/> Email</button>
+                {canWriteTab('FOLIOS') && viewFolio.status !== 'settled' && viewFolio.status !== 'voided'
+                  && String(viewFolio.folio_kind || 'HOTEL').toUpperCase() === 'HOTEL' && (
+                  <button
+                    onClick={() => setCollectOnlineFolio(viewFolio)}
+                    title="Send the guest a Razorpay payment link on WhatsApp or email. The payment is added to this folio when they pay."
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-emerald-600/25 text-emerald-700 text-xs font-bold hover:bg-emerald-50"
+                  ><CreditCard size={13}/> Collect online</button>
+                )}
                 <button
                   onClick={async () => {
                     try {
@@ -38463,6 +38478,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </>)}
           </div>
         </div>
+      )}
+
+      {collectOnlineFolio && (
+        <CollectOnlineDialog
+          restaurantId={restaurantId}
+          token={token}
+          folio={collectOnlineFolio}
+          propertyName={restaurant?.name}
+          onClose={() => setCollectOnlineFolio(null)}
+          onRecorded={async () => {
+            await fetchHotelFolios();
+            try {
+              const r = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${collectOnlineFolio.id}`, { headers: { Authorization: `Bearer ${token}` } });
+              if (r.ok) setViewFolio(await r.json());
+            } catch { /* the list refresh above still shows the payment */ }
+          }}
+        />
       )}
 
       {/* Sprint RS — F&B charge entry modal (RS-3) */}
@@ -55209,7 +55241,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
     'LOYALTY', 'STAFF', 'ROSTER', 'TIMESHEET', 'ORDERS', 'INVOICES', 'ATTENDANCE', 'HR_PAYROLL', 'HR_SENSITIVE',
     'STAFF_PAYROLL', 'EXPENSE_JOURNAL', 'PROCUREMENT', 'RECEIVABLES',
     'ACCOUNTING', 'ACCOUNTS_PNL', 'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'CASH_DRAWER', 'CHECKLIST_BOARD',
-    'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'SETTINGS'
+    'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'PAYMENT_GATEWAYS', 'SETTINGS'
   ];
   // Hotel-only tabs (shown only when the selected restaurant has property_type IN ('HOTEL','BOTH'))
   const HOTEL_TABS = [
@@ -74220,6 +74252,9 @@ const NOTIFICATION_EVENTS: {
   { id: 'CUSTOMER_INVOICE',           label: 'Invoice to Customer',           roles: ['CUSTOMER'],           group: 'Orders',              description: 'Invoice sent to the customer after payment' },
   // Payments
   { id: 'PAYMENT_RECEIVED',           label: 'Payment Received',              roles: ['OWNER'],              group: 'Payments',            description: 'Fired when a payment is marked as paid' },
+  { id: 'PAYMENT_LINK_SENT',          label: 'Payment link',                  roles: ['CUSTOMER'],           group: 'Payments',            description: 'The payment link a staff member sends from a folio. On WhatsApp this needs an approved template that carries a link.' },
+  { id: 'ONLINE_PAYMENT_RECEIPT',     label: 'Online payment receipt',        roles: ['CUSTOMER'],           group: 'Payments',            description: 'Thanks the customer when a payment link is paid' },
+  { id: 'ONLINE_PAYMENT_RECEIVED',    label: 'Online payment received',       roles: ['OWNER', 'MANAGER'],   group: 'Payments',            description: 'Tells the team a payment link was paid and recorded against the bill' },
   // Bookings
   { id: 'TABLE_BOOKING',              label: 'New Booking Request',           roles: ['OWNER', 'CUSTOMER'], group: 'Bookings',            description: 'Fired when a customer makes a reservation' },
   { id: 'BOOKING_CONFIRMED',          label: 'Booking Confirmed',             roles: ['CUSTOMER'],           group: 'Bookings',            description: 'Sent to customer when owner confirms the booking' },
