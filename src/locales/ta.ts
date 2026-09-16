@@ -483,4 +483,7 @@ export const ta: Record<string, string> = {
   'pg.collect.sendOn': 'எதில் அனுப்ப',
   'pg.collect.send': 'அனுப்பு',
   'pg.collect.noContact': 'இந்த முன்பதிவில் மின்னஞ்சல் அல்லது தொலைபேசி இல்லை. கட்டண இணைப்பு அனுப்ப ஒன்றைச் சேர்க்கவும்.',
+  // ── Paid modules: Accounts, People ──
+  'modules.accountsLocked': 'கணக்குகள் உங்கள் திட்டத்தில் இல்லை. கணக்கேடுகள், அறிக்கைகள், GST இயக்க Atithi-Setu-வை தொடர்பு கொள்ளவும்.',
+  'modules.peopleLocked': 'பணியாளர் பிரிவு உங்கள் திட்டத்தில் இல்லை. வருகை, பணி அட்டவணை, நேரத்தாள், ஊதியம் இயக்க Atithi-Setu-வை தொடர்பு கொள்ளவும்.',
 };

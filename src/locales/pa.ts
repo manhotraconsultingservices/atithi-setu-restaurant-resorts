@@ -547,4 +547,7 @@ export const pa: Record<string, string> = {
   'pg.collect.sendOn': 'ਕਿੱਥੇ ਭੇਜੋ',
   'pg.collect.send': 'ਭੇਜੋ',
   'pg.collect.noContact': 'ਇਸ ਬੁਕਿੰਗ ਉੱਤੇ ਈਮੇਲ ਜਾਂ ਫ਼ੋਨ ਨਹੀਂ ਹੈ। ਭੁਗਤਾਨ ਲਿੰਕ ਭੇਜਣ ਲਈ ਇੱਕ ਜੋੜੋ।',
+  // ── Paid modules: Accounts, People ──
+  'modules.accountsLocked': 'ਖਾਤੇ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹਨ। ਬਹੀ-ਖਾਤੇ, ਰਿਪੋਰਟਾਂ ਅਤੇ GST ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
+  'modules.peopleLocked': 'ਸਟਾਫ਼ ਵਿਭਾਗ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹੈ। ਹਾਜ਼ਰੀ, ਰੋਸਟਰ, ਟਾਈਮਸ਼ੀਟ ਅਤੇ ਤਨਖਾਹ ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
 };

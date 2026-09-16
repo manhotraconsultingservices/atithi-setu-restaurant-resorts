@@ -485,4 +485,7 @@ export const kn: Record<string, string> = {
   'pg.collect.sendOn': 'ಎಲ್ಲಿ ಕಳುಹಿಸಬೇಕು',
   'pg.collect.send': 'ಕಳುಹಿಸಿ',
   'pg.collect.noContact': 'ಈ ಬುಕಿಂಗ್‌ನಲ್ಲಿ ಇಮೇಲ್ ಅಥವಾ ಫೋನ್ ಇಲ್ಲ. ಪಾವತಿ ಲಿಂಕ್ ಕಳುಹಿಸಲು ಒಂದನ್ನು ಸೇರಿಸಿ.',
+  // ── Paid modules: Accounts, People ──
+  'modules.accountsLocked': 'ಖಾತೆಗಳು ನಿಮ್ಮ ಯೋಜನೆಯಲ್ಲಿ ಇಲ್ಲ. ಪುಸ್ತಕಗಳು, ವರದಿಗಳು ಮತ್ತು GST ಗಾಗಿ Atithi-Setu ಸಂಪರ್ಕಿಸಿ.',
+  'modules.peopleLocked': 'ಸಿಬ್ಬಂದಿ ವಿಭಾಗ ನಿಮ್ಮ ಯೋಜನೆಯಲ್ಲಿ ಇಲ್ಲ. ಹಾಜರಾತಿ, ರೋಸ್ಟರ್, ಟೈಮ್‌ಶೀಟ್ ಮತ್ತು ವೇತನಕ್ಕಾಗಿ Atithi-Setu ಸಂಪರ್ಕಿಸಿ.',
 };

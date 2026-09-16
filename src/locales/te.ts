@@ -483,4 +483,7 @@ export const te: Record<string, string> = {
   'pg.collect.sendOn': 'ఎక్కడ పంపాలి',
   'pg.collect.send': 'పంపండి',
   'pg.collect.noContact': 'ఈ బుకింగ్‌లో ఇమెయిల్ లేదా ఫోన్ లేదు. చెల్లింపు లింక్ పంపడానికి ఒకటి జోడించండి.',
+  // ── Paid modules: Accounts, People ──
+  'modules.accountsLocked': 'ఖాతాలు మీ ప్లాన్‌లో లేవు. పుస్తకాలు, నివేదికలు, GST కోసం Atithi-Setu ని సంప్రదించండి.',
+  'modules.peopleLocked': 'సిబ్బంది విభాగం మీ ప్లాన్‌లో లేదు. హాజరు, రోస్టర్, టైమ్‌షీట్, జీతాల కోసం Atithi-Setu ని సంప్రదించండి.',
 };

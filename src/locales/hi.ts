@@ -586,4 +586,7 @@ export const hi: Record<string, string> = {
   'pg.collect.sendOn': 'कहाँ भेजें',
   'pg.collect.send': 'भेजें',
   'pg.collect.noContact': 'इस बुकिंग पर ईमेल या फ़ोन नहीं है। भुगतान लिंक भेजने के लिए कोई एक जोड़ें।',
+  // ── Paid modules: Accounts, People ──
+  'modules.accountsLocked': 'अकाउंट्स आपके प्लान में नहीं है। बहीखाते, रिपोर्ट और GST चालू करने के लिए Atithi-Setu से संपर्क करें।',
+  'modules.peopleLocked': 'पीपल आपके प्लान में नहीं है। उपस्थिति, रोस्टर, टाइमशीट और पेरोल चालू करने के लिए Atithi-Setu से संपर्क करें।',
 };

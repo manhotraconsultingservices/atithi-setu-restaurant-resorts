@@ -20,6 +20,15 @@ export function setTenantModules(restaurant: any): void {
   } catch { /* storage blocked: controls stay greyed, the server still decides */ }
 }
 
+// True only when the property record said the module is off. Screens that may
+// render before the record loads (chef, waiter) hide on this, not on !moduleOn.
+export function moduleOff(m: PaidModule): boolean {
+  try {
+    const v = JSON.parse(localStorage.getItem(KEY) || '{}');
+    return v[m] === false;
+  } catch { return false; }
+}
+
 export function moduleOn(m: PaidModule): boolean {
   try {
     const v = JSON.parse(localStorage.getItem(KEY) || '{}');

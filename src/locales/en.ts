@@ -550,4 +550,7 @@ export const en: Record<string, string> = {
   'pg.collect.sendOn': 'Send on',
   'pg.collect.send': 'Send',
   'pg.collect.noContact': 'No email or phone on this booking. Add one to send a payment link.',
+  // ── Paid modules: Accounts, People ──
+  'modules.accountsLocked': 'Accounts is not on your plan. Contact Atithi-Setu to enable books, reports and GST.',
+  'modules.peopleLocked': 'People is not on your plan. Contact Atithi-Setu to enable attendance, roster, timesheet and payroll.',
 };

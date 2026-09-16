@@ -20,12 +20,12 @@ import { PaymentGatewaysPage, CollectOnlineDialog } from './PaymentLinks';
 import { PlatformWhatsApp } from './PlatformWhatsApp';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
-import { moduleOn, setTenantModules } from './tenantModules';
+import { moduleOn, moduleOff, setTenantModules } from './tenantModules';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { canWriteTab, canDeleteTab, tabLevel } from './perm';
 import { prettyRoleLabel } from './roleLabel';
-import { computeTabVisibility } from './navVisibility';
+import { computeTabVisibility, ACCOUNTS_MODULE_TABS, PEOPLE_MODULE_TABS } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, LANGUAGE_SHORT, SECONDARY_LANGUAGE_OPTIONS, setSecondaryLanguage } from './i18n';
 import { motion, AnimatePresence } from 'motion/react';
@@ -17189,6 +17189,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           isEventsEnabled,
           isSpaEnabled,
           isOnlinePaymentsEnabled: Number((restaurant as any)?.online_payments_enabled) === 1,
+          isAccountsEnabled: Number((restaurant as any)?.accounts_enabled) === 1,
+          isPeopleEnabled: Number((restaurant as any)?.people_enabled) === 1,
           hasEventsGrant: Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.some(t => String(t).startsWith('EVENTS_')),
           baseTabVisible: (tid: string) => isTabVisible(tid, effectiveAllowedTabs),
           strictGranted: (tid: string) => Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(tid),
@@ -17361,7 +17363,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       {/* One bad row must never blank the whole app: a render error inside the
           active tab is contained here (resets when the user switches tabs). */}
       <TabErrorBoundary resetKey={activeTab}>
-      {!isContentAccessible(activeTab, allowedTabs) ? (
+      {restaurant && (((ACCOUNTS_MODULE_TABS as readonly string[]).includes(activeTab) && Number((restaurant as any).accounts_enabled) !== 1)
+        || ((PEOPLE_MODULE_TABS as readonly string[]).includes(activeTab) && Number((restaurant as any).people_enabled) !== 1)) ? (
+        <div className="flex flex-col items-center justify-center py-24 gap-4">
+          <div className="w-16 h-16 rounded-full bg-amber-50 flex items-center justify-center">
+            <Lock size={28} className="text-amber-500" />
+          </div>
+          <p className="text-sm text-[#6b5d52] text-center max-w-sm">
+            {tr((ACCOUNTS_MODULE_TABS as readonly string[]).includes(activeTab) ? 'modules.accountsLocked' : 'modules.peopleLocked')}
+          </p>
+        </div>
+      ) : !isContentAccessible(activeTab, allowedTabs) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center">
             <Lock size={28} className="text-red-400" />
@@ -28898,7 +28910,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               (!t.restaurantOnly || isRestaurantEnabled) &&
               (!t.eventsOnly     || isEventsEnabled) &&
               (!t.spaOnly        || isSpaEnabled) &&
-              (t.id !== 'PAYMENT_GATEWAYS' || Number((restaurant as any)?.online_payments_enabled) === 1)
+              (t.id !== 'PAYMENT_GATEWAYS' || Number((restaurant as any)?.online_payments_enabled) === 1) &&
+              (!(ACCOUNTS_MODULE_TABS as readonly string[]).includes(t.id) || Number((restaurant as any)?.accounts_enabled) === 1) &&
+              (!(PEOPLE_MODULE_TABS as readonly string[]).includes(t.id) || Number((restaurant as any)?.people_enabled) === 1)
             );
 
             // ── RBAC-7 (2026-08-17) — module-scoped Staff Access ─────────
@@ -50029,7 +50043,7 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
     <div className="space-y-8">
       {/* ── Tabs ── */}
       <div className="flex border-b border-[#cc5a16]/15 mb-8 gap-8">
-        {(['QUEUE', 'ATTENDANCE'] as const).map(tab => (
+        {(['QUEUE', 'ATTENDANCE'] as const).filter(tab => tab !== 'ATTENDANCE' || !moduleOff('people')).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -55847,6 +55861,8 @@ function SuperAdminDashboard({ token }: { token: string }) {
                   {([
                     { key: 'online-payments', col: 'online_payments_enabled', label: 'Online Payments', note: 'Payment links through the property\'s gateway, sent by email or WhatsApp.' },
                     { key: 'whatsapp', col: 'whatsapp_enabled', label: 'WhatsApp', note: 'Business messages to guests and staff on the shared WhatsApp sender. Login codes are not affected.' },
+                    { key: 'accounts', col: 'accounts_enabled', label: 'Accounts', note: 'Ledger & Books, P&L, Cash Flow, GST Summary, MSME 43B(h), Payables Ageing and OTA & Agent Receivables. Cash Drawer, Expenses, Purchasing and Customers & Credit stay available, and ledger entries keep posting.' },
+                    { key: 'people', col: 'people_enabled', label: 'People', note: 'Attendance, Roster, Timesheet, Staff Payroll, HR & Payroll and staff self-service. Staff Directory stays available.' },
                   ] as const).map(mod => {
                     const on = Number((r as any)[mod.col]) === 1;
                     return (
@@ -62669,7 +62685,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
         >
           Waiter Dashboard
         </button>
-        <button 
+        {!moduleOff('people') && <button 
           onClick={() => setActiveTab('ATTENDANCE')}
           className={cn(
             "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
@@ -62677,7 +62693,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
           )}
         >
           Attendance
-        </button>
+        </button>}
       </div>
 
       {activeTab === 'DASHBOARD' ? (
