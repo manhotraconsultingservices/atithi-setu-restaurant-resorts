@@ -691,6 +691,7 @@ function EventBookings({ restaurantId, token }: Props) {
   const [venues, setVenues] = useState<any[]>([]);
   const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
   const [showNew, setShowNew] = useState(false);
+  const [linkRow, setLinkRow] = useState<any>(null); // booking a payment link is being sent for
   const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', half_day_slot: 'AM', venue_rate: '', guest_count: '', special_requests: '' };
   const [form, setForm] = useState<any>(blank);
   const [avail, setAvail] = useState<{ available: boolean; reason: string; rate: number } | null>(null);
@@ -882,9 +883,28 @@ function EventBookings({ restaurantId, token }: Props) {
           { key: 'outstanding', label: t('events.dash.outstanding'), sortable: true, align: 'right', getValue: (r: any) => Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0)), render: (r: any) => money(Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0))), exportValue: (r: any) => String(Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0))) },
           { key: 'pay_status', label: t('events.bookings.payment'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => evPayLabel(t, r.total_amount, r.advance_amount), render: (r: any) => <PaymentPill total={r.total_amount} paid={r.advance_amount} />, exportValue: (r: any) => evPayLabel(t, r.total_amount, r.advance_amount) },
           { key: 'status', label: t('common.status'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.status, render: (r: any) => <Pill status={r.status} /> },
-          { key: '_a', label: t('common.actions'), noExport: true, render: (r: any) => <button className={BTN_GHOST} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{t('common.edit')}</button> },
+          { key: '_a', label: t('common.actions'), noExport: true, render: (r: any) => {
+            const due = Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0));
+            const can = evCanEdit('EVENTS_BOOKINGS') && moduleOn('online_payments') && r.status !== 'CANCELLED' && due > 0.01;
+            const why = !moduleOn('online_payments') ? t('modules.paymentsLocked') : r.status === 'CANCELLED' || due <= 0.01 ? t('pg.collect.nothingDue') : t('pg.collect.sendLinkIcon');
+            return (
+              <div className="flex items-center gap-1.5 justify-end">
+                <button className={`${BTN_GHOST} !px-2 disabled:opacity-40 disabled:cursor-not-allowed`} disabled={!can} title={why} aria-label={why} onClick={() => setLinkRow(r)}><Link2 size={13} /></button>
+                <button className={BTN_GHOST} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{t('common.edit')}</button>
+              </div>
+            );
+          } },
         ]}
       />
+      {linkRow && (
+        <CollectOnlineDialog
+          restaurantId={restaurantId} token={token}
+          folio={{ id: linkRow.id, guest_name: linkRow.customer_name, guest_phone: linkRow.customer_phone, guest_email: linkRow.customer_email }}
+          payable={{ objectType: 'EVENT_BOOKING', permTab: 'EVENTS_BOOKINGS', objectId: linkRow.id, outstanding: Math.max(0, Number(linkRow.total_amount || 0) - Number(linkRow.advance_amount || 0)), subtitle: t('events.pay.linkSubtitle', { id: linkRow.id }), presets: [{ label: t('events.pay.linkFull'), amount: Math.max(0, Number(linkRow.total_amount || 0) - Number(linkRow.advance_amount || 0)) }] }}
+          onClose={() => setLinkRow(null)}
+          onRecorded={() => { load(); }}
+        />
+      )}
     </div>
   );
 }

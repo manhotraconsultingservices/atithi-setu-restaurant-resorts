@@ -442,4 +442,10 @@ export const ta: Record<string, string> = {
   'modules.paymentsLocked': 'ஆன்லைன் கட்டணம் உங்கள் திட்டத்தில் இல்லை. கட்டண இணைப்புகளை இயக்க Atithi-Setu-வை தொடர்பு கொள்ளவும்.',
   'modules.whatsappLocked': 'WhatsApp செய்தி உங்கள் திட்டத்தில் இல்லை. இயக்க Atithi-Setu-வை தொடர்பு கொள்ளவும்.',
   'modules.whatsappLockedNotifications': 'WhatsApp செய்தி உங்கள் திட்டத்தில் இல்லை, எனவே WhatsApp அறிவிப்புகள் அனுப்பப்படாது. மின்னஞ்சல், SMS தொடரும். WhatsApp இயக்க Atithi-Setu-வை தொடர்பு கொள்ளவும்.',
+  // ── Payment link row icon ──
+  'pg.collect.sendBoth': 'இரண்டிலும் அனுப்பு',
+  'pg.collect.sendBothHint': 'இணைப்பை WhatsApp மற்றும் மின்னஞ்சலில் அனுப்பவும்',
+  'pg.collect.sending': 'அனுப்புகிறது…',
+  'pg.collect.nothingDue': 'இந்த பில்லில் நிலுவை இல்லை',
+  'pg.collect.sendLinkIcon': 'கட்டண இணைப்பை அனுப்பு (மின்னஞ்சல், WhatsApp அல்லது இரண்டும்)',
 };

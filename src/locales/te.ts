@@ -442,4 +442,10 @@ export const te: Record<string, string> = {
   'modules.paymentsLocked': 'ఆన్‌లైన్ చెల్లింపులు మీ ప్లాన్‌లో లేవు. చెల్లింపు లింక్‌ల కోసం Atithi-Setu ని సంప్రదించండి.',
   'modules.whatsappLocked': 'WhatsApp సందేశాలు మీ ప్లాన్‌లో లేవు. ప్రారంభించడానికి Atithi-Setu ని సంప్రదించండి.',
   'modules.whatsappLockedNotifications': 'WhatsApp సందేశాలు మీ ప్లాన్‌లో లేవు, కాబట్టి WhatsApp నోటిఫికేషన్‌లు పంపబడవు. ఇమెయిల్, SMS పనిచేస్తాయి. WhatsApp కోసం Atithi-Setu ని సంప్రదించండి.',
+  // ── Payment link row icon ──
+  'pg.collect.sendBoth': 'రెండింటిలో పంపండి',
+  'pg.collect.sendBothHint': 'లింక్‌ను WhatsApp మరియు ఇమెయిల్‌లో పంపండి',
+  'pg.collect.sending': 'పంపుతోంది…',
+  'pg.collect.nothingDue': 'ఈ బిల్లుపై బకాయి లేదు',
+  'pg.collect.sendLinkIcon': 'చెల్లింపు లింక్ పంపండి (ఇమెయిల్, WhatsApp లేదా రెండూ)',
 };

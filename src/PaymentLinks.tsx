@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, CheckCircle2, Copy, CreditCard, ExternalLink, Info, Link2, Mail,
-  MessageCircle, RefreshCw, X,
+  MessageCircle, RefreshCw, Send, X,
 } from 'lucide-react';
 import { useToast } from './components/Toast';
 import { DataTable, type ColDef } from './components/DataTable';
@@ -654,7 +654,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open?.id]);
 
-  const create = async (channel: 'NONE' | 'WHATSAPP' | 'EMAIL') => {
+  const create = async (channel: 'NONE' | 'WHATSAPP' | 'EMAIL' | 'BOTH') => {
     if (open) {
       const ok = await confirm({ title: 'Replace the open link?', body: `A link for ${money(open.amount)} is still waiting. It will be cancelled so the guest cannot pay twice.`, confirmLabel: 'Replace it' });
       if (!ok) return;
@@ -770,6 +770,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
               </div>
               <div className="flex gap-2 flex-wrap">
                 <button disabled={!!busy || !phone || !waOn} title={waOn ? undefined : t('modules.whatsappLocked')} onClick={() => create('WHATSAPP')} className={`${btn} bg-[#128c7e] text-white hover:bg-[#0e6f64]`}><MessageCircle size={13} /> {busy === 'create:WHATSAPP' ? 'Sending…' : 'Send on WhatsApp'}</button>
+                <button disabled={!!busy || !phone || !email || !waOn} title={waOn ? t('pg.collect.sendBothHint') : t('modules.whatsappLocked')} onClick={() => create('BOTH')} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}><Send size={13} /> {busy === 'create:BOTH' ? t('pg.collect.sending') : t('pg.collect.sendBoth')}</button>
                 <button disabled={!!busy || !email || (active?.requires_customer_phone && !phone)} onClick={() => create('EMAIL')} className={`${btn} bg-[#1e3a5f] text-white hover:bg-[#162c49]`}><Mail size={13} /> {busy === 'create:EMAIL' ? 'Sending…' : 'Send by email'}</button>
                 <button disabled={!!busy || (active?.requires_customer_phone && !phone)} onClick={() => create('NONE')} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><Link2 size={13} /> {busy === 'create:NONE' ? 'Creating…' : 'Create link only'}</button>
               </div>

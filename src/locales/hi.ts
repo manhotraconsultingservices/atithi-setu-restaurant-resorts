@@ -545,4 +545,10 @@ export const hi: Record<string, string> = {
   'modules.paymentsLocked': 'ऑनलाइन भुगतान आपके प्लान में नहीं है। भुगतान लिंक चालू करने के लिए Atithi-Setu से संपर्क करें।',
   'modules.whatsappLocked': 'WhatsApp संदेश आपके प्लान में नहीं है। इसे चालू करने के लिए Atithi-Setu से संपर्क करें।',
   'modules.whatsappLockedNotifications': 'WhatsApp संदेश आपके प्लान में नहीं है, इसलिए WhatsApp सूचनाएँ नहीं भेजी जातीं। ईमेल और SMS चलते रहेंगे। WhatsApp चालू करने के लिए Atithi-Setu से संपर्क करें।',
+  // ── Payment link row icon ──
+  'pg.collect.sendBoth': 'दोनों पर भेजें',
+  'pg.collect.sendBothHint': 'लिंक WhatsApp और ईमेल दोनों पर भेजें',
+  'pg.collect.sending': 'भेजा जा रहा है…',
+  'pg.collect.nothingDue': 'इस बिल पर कुछ बकाया नहीं है',
+  'pg.collect.sendLinkIcon': 'भुगतान लिंक भेजें (ईमेल, WhatsApp या दोनों)',
 };

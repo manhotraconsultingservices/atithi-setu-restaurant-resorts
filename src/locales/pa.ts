@@ -506,4 +506,10 @@ export const pa: Record<string, string> = {
   'modules.paymentsLocked': 'ਔਨਲਾਈਨ ਭੁਗਤਾਨ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹੈ। ਭੁਗਤਾਨ ਲਿੰਕ ਚਾਲੂ ਕਰਨ ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
   'modules.whatsappLocked': 'WhatsApp ਸੁਨੇਹੇ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹਨ। ਚਾਲੂ ਕਰਨ ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
   'modules.whatsappLockedNotifications': 'WhatsApp ਸੁਨੇਹੇ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹਨ, ਇਸ ਲਈ WhatsApp ਸੂਚਨਾਵਾਂ ਨਹੀਂ ਜਾਂਦੀਆਂ। ਈਮੇਲ ਅਤੇ SMS ਚੱਲਦੇ ਰਹਿਣਗੇ। WhatsApp ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
+  // ── Payment link row icon ──
+  'pg.collect.sendBoth': 'ਦੋਵਾਂ \'ਤੇ ਭੇਜੋ',
+  'pg.collect.sendBothHint': 'ਲਿੰਕ WhatsApp ਅਤੇ ਈਮੇਲ ਦੋਵਾਂ \'ਤੇ ਭੇਜੋ',
+  'pg.collect.sending': 'ਭੇਜਿਆ ਜਾ ਰਿਹਾ ਹੈ…',
+  'pg.collect.nothingDue': 'ਇਸ ਬਿੱਲ \'ਤੇ ਕੁਝ ਬਕਾਇਆ ਨਹੀਂ',
+  'pg.collect.sendLinkIcon': 'ਭੁਗਤਾਨ ਲਿੰਕ ਭੇਜੋ (ਈਮੇਲ, WhatsApp ਜਾਂ ਦੋਵੇਂ)',
 };

@@ -509,4 +509,10 @@ export const en: Record<string, string> = {
   'modules.paymentsLocked': 'Online Payments is not on your plan. Contact Atithi-Setu to enable payment links.',
   'modules.whatsappLocked': 'WhatsApp messaging is not on your plan. Contact Atithi-Setu to enable it.',
   'modules.whatsappLockedNotifications': 'WhatsApp messaging is not on your plan, so WhatsApp notifications are not sent. Email and SMS still work. Contact Atithi-Setu to enable WhatsApp.',
+  // ── Payment link row icon ──
+  'pg.collect.sendBoth': 'Send on both',
+  'pg.collect.sendBothHint': 'Send the link on WhatsApp and by email',
+  'pg.collect.sending': 'Sending…',
+  'pg.collect.nothingDue': 'Nothing is due on this bill',
+  'pg.collect.sendLinkIcon': 'Send payment link (email, WhatsApp or both)',
 };

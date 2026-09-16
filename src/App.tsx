@@ -22717,6 +22717,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               >
                                 <Eye size={11} /> Preview
                               </button>
+                              {/* Send payment link — the whole bill, by email, WhatsApp or both */}
+                              {canWriteTab('INVOICES') && (() => {
+                                const cancelled = String(inv.status || '').toUpperCase() === 'CANCELLED' || String(inv.invoice_status || '').toUpperCase() === 'CANCELLED';
+                                const can = moduleOn('online_payments') && !isPaid && !cancelled && Number(inv.totalAmount || 0) > 0;
+                                const why = !moduleOn('online_payments') ? tr('modules.paymentsLocked') : (isPaid || cancelled || !(Number(inv.totalAmount || 0) > 0)) ? tr('pg.collect.nothingDue') : tr('pg.collect.sendLinkIcon');
+                                return (
+                                  <button onClick={() => setInvLinkFor(inv)} disabled={!can} title={why} aria-label={why}
+                                    className="px-2 py-1 rounded-lg text-[11px] font-bold bg-[#128c7e]/10 text-[#128c7e] hover:bg-[#128c7e]/20 transition-all flex items-center disabled:opacity-40 disabled:cursor-not-allowed">
+                                    <LinkIcon2 size={12} />
+                                  </button>
+                                );
+                              })()}
                               {/* Edit */}
                               {!isPaid && canWriteTab('INVOICES') && (
                                 <button
@@ -28833,6 +28845,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-3 py-3 text-xs text-[#9c8e85] whitespace-nowrap">{f.settled_at ? String(f.settled_at).slice(0,16).replace('T',' ') : '—'}</td>
                             <td className="px-3 py-3 text-right">
                               <div className="flex items-center gap-1 justify-end">
+                                {canWriteTab('FOLIOS') && (() => {
+                                  // A single guest's open bill; group bills are settled from the group.
+                                  const open = !f.is_group && !['settled', 'voided', 'closed', 'cancelled'].includes(String(f.status || '').toLowerCase()) && Number(f.grand_total || 0) > 0;
+                                  const can = moduleOn('online_payments') && open;
+                                  const why = !moduleOn('online_payments') ? tr('modules.paymentsLocked') : !open ? tr('pg.collect.nothingDue') : tr('pg.collect.sendLinkIcon');
+                                  return (
+                                    <button onClick={() => setCollectOnlineFolio(f)} disabled={!can} title={why} aria-label={why}
+                                      className="px-2 py-1 rounded-lg bg-[#128c7e]/10 text-[#128c7e] hover:bg-[#128c7e]/20 flex items-center disabled:opacity-40 disabled:cursor-not-allowed">
+                                      <LinkIcon2 size={12} />
+                                    </button>
+                                  );
+                                })()}
                                 <button
                                   onClick={() => f.is_group ? loadGroupDetail(f.group_id) : loadFolio(f.id)}
                                   className="px-2.5 py-1 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[10px] font-bold hover:bg-[#cc5a16]/10">View</button>
