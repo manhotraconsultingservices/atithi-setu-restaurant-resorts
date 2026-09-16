@@ -3881,6 +3881,25 @@ async function _pgDescribePayable(db: any, restaurantId: string, objectType: str
       bookingId: f.booking_id || null,
     };
   }
+  if (objectType === 'SPA_FOLIO') {
+    const f: any = await db.get(
+      `SELECT f.id, f.status, f.folio_kind, f.invoice_number, a.client_name, a.client_phone, a.client_email
+         FROM folios f LEFT JOIN spa_appointments a ON a.id = f.appointment_id
+        WHERE f.id = ?`, [objectId]).catch(() => null);
+    if (!f || String(f.folio_kind || '').toUpperCase() !== 'SPA') return null;
+    const out = await getFolioOutstanding(db, objectId).catch(() => null);
+    const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+    const st = String(f.status || '').toLowerCase();
+    const open = !['closed', 'settled', 'voided', 'cancelled'].includes(st);
+    return {
+      objectType, objectId, open,
+      closedReason: open ? null : (st === 'closed' || st === 'settled' ? 'This spa invoice is already paid.' : `This spa invoice is ${st}.`),
+      outstandingPaise: out ? Math.max(0, rupeesToPaise(out.outstanding)) : 0,
+      purpose: `${prop?.name || 'Your spa visit'} — spa invoice ${f.invoice_number || f.id}`,
+      customer: { name: f.client_name || null, phone: f.client_phone || null, email: f.client_email || null },
+      bookingId: null,
+    };
+  }
   if (objectType === 'EVENT_BOOKING') {
     const bk: any = await db.get(
       'SELECT id, status, customer_name, customer_phone, customer_email, total_amount, advance_amount FROM event_bookings WHERE id = ?',
@@ -3930,6 +3949,29 @@ async function _pgRecordToPayable(db: any, restaurantId: string, link: any, p: a
       notes: `Payment link ${link.id}${p.method ? ` · ${p.method}` : ''}`,
     });
     return row.id;
+  }
+  if (link.object_type === 'SPA_FOLIO') {
+    const f: any = await db.get("SELECT id FROM folios WHERE id = ? AND folio_kind = 'SPA'", [link.object_id]).catch(() => null);
+    if (!f) throw new PaymentNeedsReview('The spa invoice this link was sent for no longer exists.');
+    const prior: any = await db.get(
+      "SELECT id FROM folio_payments WHERE folio_id = ? AND reference_number = ? AND COALESCE(is_voided, 0) = 0 LIMIT 1",
+      [f.id, reference]).catch(() => null);
+    if (prior) return prior.id;
+    const record = (globalThis as any).__recordSpaFolioPayment;
+    // Not registered yet (server still starting): leave it PENDING for the sweep.
+    if (typeof record !== 'function') throw new Error('Spa payments are not ready yet.');
+    const out = await record(restaurantId, f.id, {
+      amount: Number(p.amount_paise) / 100, payment_method: 'ONLINE', payment_type: 'FINAL', reference,
+      notes: `Payment link ${link.id}${p.method ? ` · ${p.method}` : ''}`,
+    }, { user: { id: null, email: `${gatewayLabel} payment link`, role: 'SYSTEM' } });
+    if (out.status === 201) {
+      const row: any = out.body?.payment_id ? { id: out.body.payment_id } : await db.get(
+        "SELECT id FROM folio_payments WHERE folio_id = ? AND reference_number = ? AND COALESCE(is_voided, 0) = 0 LIMIT 1", [f.id, reference]);
+      if (row?.id) return row.id;
+    }
+    if (out.status >= 500) throw new Error(out.body?.error || 'Recording the spa payment failed.');
+    // Refused by the invoice's own rules (more than is owed).
+    throw new PaymentNeedsReview(`${out.body?.error || 'The spa invoice refused this payment.'} The money is in the ${gatewayLabel} account: refund it there, or record it on the invoice by hand.`);
   }
   if (link.object_type === 'EVENT_BOOKING') {
     const bk: any = await db.get('SELECT id FROM event_bookings WHERE id = ?', [link.object_id]).catch(() => null);
@@ -4153,6 +4195,9 @@ async function _pgCreateLink(
   }
   // The event receipt route refuses a payment above the balance, so a link for
   // more could only end in NEEDS_REVIEW. Refuse it now instead.
+  if (input.objectType === 'SPA_FOLIO' && amountPaise > payable.outstandingPaise) {
+    throw new PaymentRequestError(`The balance due on this invoice is ₹${(payable.outstandingPaise / 100).toFixed(2)}. A link cannot ask for more.`, 400);
+  }
   if (input.objectType === 'EVENT_BOOKING' && payable.outstandingPaise > 0 && amountPaise > payable.outstandingPaise) {
     throw new PaymentRequestError(`The balance due on this booking is ₹${(payable.outstandingPaise / 100).toFixed(2)}. A link cannot ask for more.`, 400);
   }
@@ -10235,6 +10280,8 @@ async function startServer() {
         const typed = String(b[field] ?? '').trim();
         if (typed) {
           if (/\s/.test(typed)) throw Object.assign(new Error(`${field.replace(/_/g, ' ')} cannot contain spaces.`), { status: 400 });
+          if (field === 'access_token' && /^["']|["']$/.test(typed)) throw Object.assign(new Error('Paste the access token without quotes.'), { status: 400 });
+          if (field === 'access_token' && typed.length < 60) throw Object.assign(new Error('That is too short to be a Meta access token. Paste the whole System User token (it starts with EAA).'), { status: 400 });
           return sealSecret(typed);
         }
         if (clear.includes(field)) return null;
@@ -10293,6 +10340,9 @@ async function startServer() {
       const body: any = await r.json().catch(() => ({}));
       if (!r.ok || body?.error) {
         detail = `Meta refused: ${body?.error?.message || `HTTP ${r.status}`}`;
+        // 190 = the token itself is wrong. Say what that usually means.
+        if (Number(body?.error?.code) === 190) detail += '. Check the access token: paste the whole permanent System User token (one line, starts with EAA), not the app ID, app secret or a temporary 24-hour token.';
+        else if (Number(body?.error?.code) === 100) detail += '. Check the phone number ID (WhatsApp, API Setup) and that the token was generated for this app.';
       } else {
         ok = true; display = body.display_phone_number || null; name = body.verified_name || null;
         detail = `Connected: ${name || 'number'} ${display || eff.phoneNumberId}${body.quality_rating ? ` (quality ${body.quality_rating})` : ''}`;
@@ -10301,10 +10351,17 @@ async function startServer() {
       detail = e?.name === 'AbortError' ? 'Meta did not answer within 8 seconds.' : `Could not reach Meta: ${e?.message || e}`;
     } finally { clearTimeout(timer); }
     const to = String(req.body?.to || '').trim();
+    if (to && String(to).replace(/[^0-9]/g, '').length < 10) {
+      return res.status(400).json({ ok: false, detail: `${to} is not a phone number. Enter the number to send the test to, with country code, e.g. +919810012345.` });
+    }
     if (ok && to) {
       const sent = await sendWhatsAppDetailed(to, 'Atithi-Setu WhatsApp test', { name: 'hello_world', languageCode: 'en_US', variables: [] } as any);
       if (sent.ok) detail += ` · test template sent to ${to}`;
-      else { ok = false; detail += ` · test send to ${to} failed: ${sent.error}`; }
+      else {
+        ok = false; detail += ` · test send to ${to} failed: ${sent.error}`;
+        // Meta's test number only reaches numbers added to its allowed list.
+        if (sent.code === '131030') detail += '. Add this number under WhatsApp, API Setup, To, Manage phone number list, or send from your own business number.';
+      }
     }
     // Only a saved sender records its test; an env sender has no row to write to.
     if (eff.source === 'PLATFORM') {
@@ -38128,7 +38185,7 @@ ${data.tenant.name}`;
       // an N+1. paid nets refunds and ignores voided payments; outstanding is what
       // the client still owes on the invoice.
       const rows = await db.query(
-        `SELECT f.*, a.client_name, a.service_name, a.start_at AS appt_start,
+        `SELECT f.*, a.client_name, a.client_phone, a.client_email, a.service_name, a.start_at AS appt_start,
                 COALESCE(p.paid, 0)::float AS paid_amount,
                 ROUND((COALESCE(f.grand_total,0) - COALESCE(p.paid, 0))::numeric, 2)::float AS outstanding
            FROM folios f
@@ -38154,21 +38211,20 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch folio" }); }
   });
 
-  // Record a payment on a spa folio (FINAL by default). Closes folio when paid.
-  app.post("/api/restaurant/:id/spa/folios/:fid/payments", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
-    const check = await ensureSpaEnabled(req.params.id);
-    if (!check.ok) return res.status(check.status).json({ error: check.error });
-    try {
-      const db = await getTenantDb(req.params.id);
-      const out0 = await getFolioOutstanding(db, req.params.fid);
-      if (!out0) return res.status(404).json({ error: "Folio not found" });
-      const b = req.body || {};
+  // Record one receipt on a spa folio. The staff route below and the payment-link
+  // recorder (method ONLINE) both come through here, so a gateway payment closes
+  // the folio and posts spa revenue exactly as a hand-entered one does.
+  const _spaPayOut = (status: number, body: any) => ({ status, body });
+  const recordSpaFolioPayment = async (restaurantId: string, fid: string, b: any, actorReq: AuthRequest | null): Promise<{ status: number; body: any }> => {
+      const db = await getTenantDb(restaurantId);
+      const out0 = await getFolioOutstanding(db, fid);
+      if (!out0) return _spaPayOut(404, { error: "Folio not found" });
       const amount = round2(b.amount);
-      if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be > 0" });
+      if (!amount || amount <= 0) return _spaPayOut(400, { error: "amount must be > 0" });
       const method = b.payment_method || 'CASH';
       const reqType = String(b.payment_type || 'FINAL').toUpperCase();
       if (amount > out0.outstanding + 0.01 && reqType !== 'REFUND') {
-        return res.status(400).json({ error: `Payment ₹${amount} exceeds outstanding ₹${out0.outstanding}` });
+        return _spaPayOut(400, { error: `Payment ₹${amount} exceeds outstanding ₹${out0.outstanding}` });
       }
       // Same-day cash visibility (parity with the hotel folio path): a receipt that
       // does NOT clear the folio is cash in the drawer NOW, not at final settlement.
@@ -38178,28 +38234,40 @@ ${data.tenant.name}`;
       // GL sub-block stays balanced. A receipt that fully clears the bill stays FINAL.
       const settlesNow = reqType !== 'REFUND' && amount >= out0.outstanding - 0.01;
       const recordType: 'INTERIM' | 'FINAL' | 'REFUND' = reqType === 'REFUND' ? 'REFUND' : (settlesNow ? 'FINAL' : 'INTERIM');
-      const payment = await recordFolioPayment(db, { restaurantId: req.params.id,
-        folioId: req.params.fid, amount, method,
+      const payment = await recordFolioPayment(db, { restaurantId: restaurantId,
+        folioId: fid, amount, method,
         type: recordType, reference: b.reference || null,
-        recordedBy: req.user?.email || req.user?.id || null, notes: b.notes || null,
+        recordedBy: actorReq?.user?.email || actorReq?.user?.id || null, notes: b.notes || null,
       });
       // An INTERIM receipt is posted by recordFolioPayment (same ref, same source).
-      const out = await getFolioOutstanding(db, req.params.fid);
+      const out = await getFolioOutstanding(db, fid);
       if (out && out.is_fully_paid) {
         await db.run("UPDATE folios SET status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
-          [method, req.params.fid]);
+          [method, fid]);
         // Phase 3.1 — capture spa appointment revenue to the GL on full settlement.
-        await _postFolioGl(db, req.params.id, req.params.fid, {
+        await _postFolioGl(db, restaurantId, fid, {
           revenueCode: '4040', revenueName: 'Spa Revenue',
-          sourceType: 'SPA_SETTLEMENT', postedBy: req.user?.email || req.user?.id || null,
+          sourceType: 'SPA_SETTLEMENT', postedBy: actorReq?.user?.email || actorReq?.user?.id || null,
         });
       }
-      writeObjectAudit(db, req, {
-        objectType: 'SPA_FOLIO', objectId: req.params.fid, action: 'PAYMENT',
+      writeObjectAudit(db, actorReq, {
+        objectType: 'SPA_FOLIO', objectId: fid, action: 'PAYMENT',
         summary: `Payment ₹${amount.toFixed(2)} via ${method} (${recordType})${out?.is_fully_paid ? ' — settled' : ''}`,
         after: { amount, method, payment_type: recordType, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid },
       }).catch(() => {});
-      res.status(201).json({ success: true, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid });
+      return _spaPayOut(201, { success: true, payment_id: payment?.id || null, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid });
+  };
+  (globalThis as any).__recordSpaFolioPayment = recordSpaFolioPayment;
+
+  // Record a payment on a spa folio (FINAL by default). Closes folio when paid.
+  app.post("/api/restaurant/:id/spa/folios/:fid/payments", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    // ONLINE means the payment gateway confirmed the money; only the gateway sets it.
+    if (String(req.body?.payment_method || '').toUpperCase() === 'ONLINE') return res.status(400).json({ error: 'Online payments are recorded by the payment gateway.' });
+    try {
+      const out = await recordSpaFolioPayment(req.params.id, req.params.fid, req.body || {}, req);
+      res.status(out.status).json(out.body);
     } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to record payment" }); }
   });
 
@@ -55681,6 +55749,7 @@ ${data.tenant.name}`;
   const PAYABLE_OBJECT_GATES: Record<string, { read: any[]; write: any[] }> = {
     HOTEL_FOLIO: { read: [hotelStaff, requireTabAction('FOLIOS', 'READ')], write: [hotelStaff, requireTabAction('FOLIOS', 'CREATE')] },
     EVENT_BOOKING: { read: [eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'READ')], write: [eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE')] },
+    SPA_FOLIO: { read: [spaStaff, requireTabAction('SPA_APPOINTMENTS', 'READ')], write: [spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE')] },
   };
   // Runs route middleware inside a handler. A middleware that refuses has
   // already answered the request; false tells the handler to stop.
@@ -55922,7 +55991,7 @@ ${data.tenant.name}`;
     const b = req.body || {};
     const objectType = String(b.object_type || '').toUpperCase();
     const gates = PAYABLE_OBJECT_GATES[objectType];
-    if (!gates) return res.status(400).json({ error: 'object_type must be HOTEL_FOLIO or EVENT_BOOKING.' });
+    if (!gates) return res.status(400).json({ error: 'object_type must be HOTEL_FOLIO, EVENT_BOOKING or SPA_FOLIO.' });
     if (!(await _pgPassGates(gates.write, req, res))) return;
     if (objectType === 'HOTEL_FOLIO') {
       const chk = await ensureHotelEnabled(req.params.id);
@@ -55930,6 +55999,10 @@ ${data.tenant.name}`;
     }
     if (objectType === 'EVENT_BOOKING') {
       const chk = await ensureEventsEnabled(req.params.id);
+      if (!chk.ok) return res.status(chk.status).json({ error: chk.error });
+    }
+    if (objectType === 'SPA_FOLIO') {
+      const chk = await ensureSpaEnabled(req.params.id);
       if (!chk.ok) return res.status(chk.status).json({ error: chk.error });
     }
     const channel = String(b.channel || 'NONE').toUpperCase();
@@ -65219,8 +65292,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'platform-whatsapp-settings',
+    commit_marker: 'spa-payment-links',
     code_features: [
+      'spa-payment-links  Spa: Send link on each open spa invoice (Spa, Invoices and Payments) by WhatsApp, email or copy. SPA_FOLIO is a payable: gates spaStaff + SPA_APPOINTMENTS (the same as recording a spa payment), spa must be enabled, a closed or voided invoice is refused, a link above the balance is refused. The spa folio payment route body moved verbatim into recordSpaFolioPayment(), shared by the route and the gateway recorder, so a gateway payment closes the folio and posts spa revenue (4040) exactly as a hand-entered one. Staff cannot post ONLINE by hand (400). The spa invoice list now returns client_phone and client_email. WhatsApp test: clearer errors for a bad token (Meta 190), a wrong phone number id (100), a test recipient that is not a phone number, and a number outside the test allowed list (131030); a token in quotes or under 60 characters is refused on save.',
       'platform-whatsapp-settings  Platform: /internal gets a WhatsApp view. The shared Meta sender (phone number ID, access token, business account ID, app secret, webhook verify token) is saved in central platform_whatsapp_config with secrets sealed (paymentSecrets.ts), write-only, a blank field keeps the saved value. whatsappConfig.ts holds the effective credentials: saved settings, else the META_WA_* env exactly as before (number + token as a pair; app secret, verify token and business account fall back per field). Loaded at startup, after every save and every 5 minutes; notificationService reads it at send time instead of module-load constants. Admin routes GET/PUT/DELETE /api/admin/whatsapp/config and POST /config/test (asks Meta about the number, optionally sends hello_world). The same view maps notification events to approved templates (existing template-map API). Webhook verification now needs a verify token to be set: a missing token used to match an unset env value.',
       'event-payment-links  Events: Send payment link on the booking payment panel (full balance or the next instalment, or any amount up to the balance) by WhatsApp, email or copy. EVENT_BOOKING is a payable: gates eventsStaff + EVENTS_BOOKINGS, events must be enabled, a link above the balance is refused. The event receipt route body moved verbatim into recordEventPayment(), which the route and the gateway recorder share, so a gateway payment gets the same guards, schedule, GL (Dr 1025 clearing) and receipt voucher. ONLINE receipts get no petty-cash row and no second event notification; staff cannot post ONLINE by hand (400). A payment refused by the booking (cancelled, over the balance) goes to NEEDS_REVIEW.',
       'ux-settings-subtabs  UX (client feedback: too much scrolling and commentary). Settings > Restaurant is split into sub-tabs Business, Invoices, Operations and My profile. Layout only: blocks are hidden with CSS, never unmounted, so the one settings form still saves every field together; a required field on a hidden tab opens its tab. Save bar pinned at the bottom. Explanatory paragraphs removed; the few facts worth keeping sit behind an info icon. Language card moved under Business. Keys settings.tab.* and settings.fixField in en, hi, ta, kn, te, pa. Frontend only.',

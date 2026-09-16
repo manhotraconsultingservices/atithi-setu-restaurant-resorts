@@ -487,4 +487,12 @@ export const pa: Record<string, string> = {
   'pg.collect.recordedBooking': '{amount} ਔਨਲਾਈਨ ਮਿਲਿਆ ਅਤੇ ਬੁਕਿੰਗ \'ਤੇ ਦਰਜ ਕੀਤਾ ਗਿਆ।',
   'pg.collect.reviewBooking': 'ਭੁਗਤਾਨ ਆਇਆ, ਪਰ ਇਸ ਬੁਕਿੰਗ \'ਤੇ ਲਾਗੂ ਨਹੀਂ ਹੋ ਸਕਿਆ। Payment Gateways → ਭੁਗਤਾਨ ਲਿੰਕ ਵੇਖੋ।',
   'pg.collect.linksBooking': 'ਇਸ ਬੁਕਿੰਗ ਦੇ ਲਿੰਕ',
+  // ── Spa payment links ──
+  'spa.pay.sendLink': 'ਲਿੰਕ ਭੇਜੋ',
+  'spa.pay.sendLinkHint': 'WhatsApp ਜਾਂ ਈਮੇਲ ਰਾਹੀਂ ਭੁਗਤਾਨ ਲਿੰਕ ਭੇਜੋ; ਭੁਗਤਾਨ ਆਪਣੇ ਆਪ ਦਰਜ ਹੋਵੇਗਾ',
+  'spa.pay.linkSubtitle': 'ਸਪਾ ਇਨਵੌਇਸ {id}',
+  'pg.collect.linksBill': 'ਇਸ ਬਿੱਲ ਦੇ ਲਿੰਕ',
+  // ── Payment link bills ──
+  'pg.collect.recordedBill': '{amount} ਔਨਲਾਈਨ ਮਿਲਿਆ ਅਤੇ ਬਿੱਲ \'ਤੇ ਦਰਜ ਕੀਤਾ ਗਿਆ।',
+  'pg.collect.reviewBill': 'ਭੁਗਤਾਨ ਆਇਆ, ਪਰ ਇਸ ਬਿੱਲ \'ਤੇ ਲਾਗੂ ਨਹੀਂ ਹੋ ਸਕਿਆ। Payment Gateways → ਭੁਗਤਾਨ ਲਿੰਕ ਵੇਖੋ।',
 };

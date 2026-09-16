@@ -526,4 +526,12 @@ export const hi: Record<string, string> = {
   'pg.collect.recordedBooking': '{amount} ऑनलाइन प्राप्त हुआ और बुकिंग पर दर्ज किया गया।',
   'pg.collect.reviewBooking': 'भुगतान आया, पर इस बुकिंग पर लागू नहीं हो सका। Payment Gateways → भुगतान लिंक देखें।',
   'pg.collect.linksBooking': 'इस बुकिंग के लिंक',
+  // ── Spa payment links ──
+  'spa.pay.sendLink': 'लिंक भेजें',
+  'spa.pay.sendLinkHint': 'WhatsApp या ईमेल से भुगतान लिंक भेजें; भुगतान अपने आप दर्ज होगा',
+  'spa.pay.linkSubtitle': 'स्पा इनवॉइस {id}',
+  'pg.collect.linksBill': 'इस बिल के लिंक',
+  // ── Payment link bills ──
+  'pg.collect.recordedBill': '{amount} ऑनलाइन प्राप्त हुआ और बिल पर दर्ज किया गया।',
+  'pg.collect.reviewBill': 'भुगतान आया, पर इस बिल पर लागू नहीं हो सका। Payment Gateways → भुगतान लिंक देखें।',
 };

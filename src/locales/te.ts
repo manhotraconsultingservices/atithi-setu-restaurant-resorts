@@ -423,4 +423,12 @@ export const te: Record<string, string> = {
   'pg.collect.recordedBooking': '{amount} ఆన్‌లైన్‌లో అందింది, బుకింగ్‌లో నమోదు చేయబడింది.',
   'pg.collect.reviewBooking': 'చెల్లింపు వచ్చింది, కానీ ఈ బుకింగ్‌కు వర్తింపజేయలేకపోయాం. Payment Gateways → చెల్లింపు లింక్‌లు చూడండి.',
   'pg.collect.linksBooking': 'ఈ బుకింగ్ లింక్‌లు',
+  // ── Spa payment links ──
+  'spa.pay.sendLink': 'లింక్ పంపండి',
+  'spa.pay.sendLinkHint': 'WhatsApp లేదా ఇమెయిల్ ద్వారా చెల్లింపు లింక్ పంపండి; చెల్లింపు స్వయంగా నమోదవుతుంది',
+  'spa.pay.linkSubtitle': 'స్పా ఇన్‌వాయిస్ {id}',
+  'pg.collect.linksBill': 'ఈ బిల్లు లింక్‌లు',
+  // ── Payment link bills ──
+  'pg.collect.recordedBill': '{amount} ఆన్‌లైన్‌లో అందింది, బిల్లులో నమోదు చేయబడింది.',
+  'pg.collect.reviewBill': 'చెల్లింపు వచ్చింది, కానీ ఈ బిల్లుకు వర్తింపజేయలేకపోయాం. Payment Gateways → చెల్లింపు లింక్‌లు చూడండి.',
 };

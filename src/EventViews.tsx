@@ -988,7 +988,7 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
           <CollectOnlineDialog
             restaurantId={restaurantId} token={token}
             folio={{ id: bid, guest_name: booking.customer_name, guest_phone: booking.customer_phone, guest_email: booking.customer_email }}
-            payable={{ objectType: 'EVENT_BOOKING', objectId: bid, outstanding: balance, subtitle: t('events.pay.linkSubtitle', { id: bid }), presets }}
+            payable={{ objectType: 'EVENT_BOOKING', permTab: 'EVENTS_BOOKINGS', objectId: bid, outstanding: balance, subtitle: t('events.pay.linkSubtitle', { id: bid }), presets }}
             onClose={() => setLinkOpen(false)}
             onRecorded={() => { load(); onChanged(); }}
           />

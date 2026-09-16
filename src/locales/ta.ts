@@ -423,4 +423,12 @@ export const ta: Record<string, string> = {
   'pg.collect.recordedBooking': '{amount} ஆன்லைனில் பெறப்பட்டு முன்பதிவில் பதிவு செய்யப்பட்டது.',
   'pg.collect.reviewBooking': 'கட்டணம் வந்தது, ஆனால் இந்த முன்பதிவில் சேர்க்க முடியவில்லை. Payment Gateways → கட்டண இணைப்புகள் பார்க்கவும்.',
   'pg.collect.linksBooking': 'இந்த முன்பதிவுக்கான இணைப்புகள்',
+  // ── Spa payment links ──
+  'spa.pay.sendLink': 'இணைப்பை அனுப்பு',
+  'spa.pay.sendLinkHint': 'WhatsApp அல்லது மின்னஞ்சல் மூலம் கட்டண இணைப்பை அனுப்பவும்; கட்டணம் தானாக பதிவாகும்',
+  'spa.pay.linkSubtitle': 'ஸ்பா விலைப்பட்டியல் {id}',
+  'pg.collect.linksBill': 'இந்த பில்லுக்கான இணைப்புகள்',
+  // ── Payment link bills ──
+  'pg.collect.recordedBill': '{amount} ஆன்லைனில் பெறப்பட்டு பில்லில் பதிவு செய்யப்பட்டது.',
+  'pg.collect.reviewBill': 'கட்டணம் வந்தது, ஆனால் இந்த பில்லில் சேர்க்க முடியவில்லை. Payment Gateways → கட்டண இணைப்புகள் பார்க்கவும்.',
 };

@@ -490,4 +490,12 @@ export const en: Record<string, string> = {
   'pg.collect.recordedBooking': '{amount} received online and recorded on the booking.',
   'pg.collect.reviewBooking': 'A payment arrived but could not be applied to this booking. See Payment Gateways → Payment links.',
   'pg.collect.linksBooking': 'Links for this booking',
+  // ── Spa payment links ──
+  'spa.pay.sendLink': 'Send link',
+  'spa.pay.sendLinkHint': 'Send a payment link by WhatsApp or email; the payment records itself',
+  'spa.pay.linkSubtitle': 'Spa invoice {id}',
+  'pg.collect.linksBill': 'Links for this bill',
+  // ── Payment link bills ──
+  'pg.collect.recordedBill': '{amount} received online and recorded on the bill.',
+  'pg.collect.reviewBill': 'A payment arrived but could not be applied to this bill. See Payment Gateways → Payment links.',
 };

@@ -425,4 +425,12 @@ export const kn: Record<string, string> = {
   'pg.collect.recordedBooking': '{amount} ಆನ್‌ಲೈನ್‌ನಲ್ಲಿ ಸ್ವೀಕರಿಸಿ ಬುಕಿಂಗ್‌ನಲ್ಲಿ ದಾಖಲಿಸಲಾಗಿದೆ.',
   'pg.collect.reviewBooking': 'ಪಾವತಿ ಬಂದಿದೆ, ಆದರೆ ಈ ಬುಕಿಂಗ್‌ಗೆ ಅನ್ವಯಿಸಲಾಗಲಿಲ್ಲ. Payment Gateways → ಪಾವತಿ ಲಿಂಕ್‌ಗಳನ್ನು ನೋಡಿ.',
   'pg.collect.linksBooking': 'ಈ ಬುಕಿಂಗ್‌ನ ಲಿಂಕ್‌ಗಳು',
+  // ── Spa payment links ──
+  'spa.pay.sendLink': 'ಲಿಂಕ್ ಕಳುಹಿಸಿ',
+  'spa.pay.sendLinkHint': 'WhatsApp ಅಥವಾ ಇಮೇಲ್ ಮೂಲಕ ಪಾವತಿ ಲಿಂಕ್ ಕಳುಹಿಸಿ; ಪಾವತಿ ತಾನಾಗಿ ದಾಖಲಾಗುತ್ತದೆ',
+  'spa.pay.linkSubtitle': 'ಸ್ಪಾ ಇನ್‌ವಾಯ್ಸ್ {id}',
+  'pg.collect.linksBill': 'ಈ ಬಿಲ್‌ನ ಲಿಂಕ್‌ಗಳು',
+  // ── Payment link bills ──
+  'pg.collect.recordedBill': '{amount} ಆನ್‌ಲೈನ್‌ನಲ್ಲಿ ಸ್ವೀಕರಿಸಿ ಬಿಲ್‌ನಲ್ಲಿ ದಾಖಲಿಸಲಾಗಿದೆ.',
+  'pg.collect.reviewBill': 'ಪಾವತಿ ಬಂದಿದೆ, ಆದರೆ ಈ ಬಿಲ್‌ಗೆ ಅನ್ವಯಿಸಲಾಗಲಿಲ್ಲ. Payment Gateways → ಪಾವತಿ ಲಿಂಕ್‌ಗಳನ್ನು ನೋಡಿ.',
 };

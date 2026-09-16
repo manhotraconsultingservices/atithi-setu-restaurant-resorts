@@ -554,7 +554,9 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
 // Collect online — from a guest folio, or (with `payable`) from an event booking
 // ═════════════════════════════════════════════════════════════════════════════
 export interface OnlinePayable {
-  objectType: 'EVENT_BOOKING';
+  objectType: 'EVENT_BOOKING' | 'SPA_FOLIO' | 'RESTAURANT_BILL';
+  // The tab whose write access recording a payment on this bill needs.
+  permTab: string;
   objectId: string;
   outstanding: number;
   subtitle: string;
@@ -576,7 +578,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
   const confirm = useConfirm();
   const objectType = payable?.objectType || 'HOTEL_FOLIO';
   const objectId = payable?.objectId || folio.id;
-  const canCollect = canWriteTab(payable ? 'EVENTS_BOOKINGS' : 'FOLIOS');
+  const canCollect = canWriteTab(payable ? payable.permTab : 'FOLIOS');
   const [outstanding, setOutstanding] = useState<number | null>(null);
   const [amount, setAmount] = useState('');
   const [phone, setPhone] = useState(folio.guest_phone || '');
@@ -666,11 +668,11 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
       const out = await api(`/links/${l.id}/refresh`, { method: 'POST' });
       if (out.recorded > 0) {
         toast.success(payable
-          ? t('pg.collect.recordedBooking', { amount: money(out.link.amount_paid) })
+          ? t(payable.objectType === 'EVENT_BOOKING' ? 'pg.collect.recordedBooking' : 'pg.collect.recordedBill', { amount: money(out.link.amount_paid) })
           : `${money(out.link.amount_paid)} received online and recorded on the folio.`);
         onRecorded();
       }
-      if (out.needs_review > 0) setNotice({ tone: 'warn', text: payable ? t('pg.collect.reviewBooking') : 'A payment arrived but could not be applied to this folio. See Payment Gateways → Needs review.' });
+      if (out.needs_review > 0) setNotice({ tone: 'warn', text: payable ? t(payable.objectType === 'EVENT_BOOKING' ? 'pg.collect.reviewBooking' : 'pg.collect.reviewBill') : 'A payment arrived but could not be applied to this folio. See Payment Gateways → Needs review.' });
     } catch (e: any) { if (!quiet) setNotice({ tone: 'error', text: e.message }); }
     finally { if (!quiet) setBusy(''); loadLinks(); }
   };
@@ -750,7 +752,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
           )}
 
           <div className="space-y-2">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52]">{payable ? t('pg.collect.linksBooking') : 'Links for this folio'}</div>
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52]">{payable ? t(payable.objectType === 'EVENT_BOOKING' ? 'pg.collect.linksBooking' : 'pg.collect.linksBill') : 'Links for this folio'}</div>
             {links.length === 0 && <p className="text-xs text-[#9c8e85]">None yet.</p>}
             {links.map(l => (
               <div key={l.id} className={`rounded-2xl border p-3 space-y-2 ${['CREATED', 'PARTIALLY_PAID'].includes(l.status) ? 'border-amber-200 bg-amber-50/40' : 'border-[#e8dccf]'}`}>

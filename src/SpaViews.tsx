@@ -8,7 +8,7 @@ import { DataTable } from './components/DataTable';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import {
   Calendar, Clock, Plus, Trash2, Check, X, User, Package, Award,
-  TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText, History,
+  TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText, History, Link2,
 } from 'lucide-react';
 // RBAC — shared frontend gates (View=1, Edit=2, Full=3) reading the tab_perms
 // map App.tsx mirrors into localStorage. These detached Spa views hide write
@@ -18,6 +18,8 @@ import { useToast } from './components/Toast';
 import { useConfirm } from './components/ConfirmDialog';
 import { usePaymentDialog } from './components/PaymentDialog';
 import { QRCodeCanvas } from 'qrcode.react';
+import { CollectOnlineDialog } from './PaymentLinks';
+import { useT } from './i18n';
 
 // ── Spa History overlay — audit log (who changed what) for an appointment or
 // folio, via the reusable ObjectDetail shell. Opened by a "History" button. ──
@@ -2683,6 +2685,10 @@ function SpaFolios({ restaurantId, token }: Props) {
   const [payForm, setPayForm] = useState({ amount: '', method: 'CASH' });
   const [promoCode, setPromoCode] = useState('');
   const [history, setHistory] = useState<any>(null); // folio History (audit log) overlay
+  const [linkFor, setLinkFor] = useState<any>(null); // send a gateway payment link
+  const { t } = useT();
+  // Recording a spa payment needs Edit on Spa Appointments (the server's gate).
+  const canSendLink = canWriteTab('SPA_APPOINTMENTS');
 
   const load = async () => {
     setLoading(true);
@@ -2805,6 +2811,7 @@ function SpaFolios({ restaurantId, token }: Props) {
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
                         {open && canEdit && <button className={BTN_PRIMARY} onClick={() => openPay(f)}><IndianRupee size={12} /> Payment</button>}
+                        {open && canSendLink && <button className={BTN_GHOST} title={t('spa.pay.sendLinkHint')} onClick={() => setLinkFor(f)}><Link2 size={12} /> {t('spa.pay.sendLink')}</button>}
                         {open && canEdit && <button className={BTN_GHOST} onClick={() => openPromo(f)}><Tag size={12} /> Promo</button>}
                         <button className={BTN_GHOST} onClick={() => downloadPdf(f)}><FileText size={12} /> Invoice</button>
                         <button className={BTN_GHOST} title="Audit log — who changed this invoice" onClick={() => setHistory({ id: f.id, meta: { title: f.invoice_number || f.id, subtitle: [statusOf(f), f.client_name].filter(Boolean).join(' · '), facts: [['Invoice #', f.invoice_number], ['Client', f.client_name], ['Service', f.service_name], ['Total', money(f.grand_total)], ['Paid', money(f.paid_amount)], ['Outstanding', open ? money(outOf(f)) : '—']] } })}><History size={12} /></button>
@@ -2820,6 +2827,16 @@ function SpaFolios({ restaurantId, token }: Props) {
           </table>
         )}
       </div>
+
+      {linkFor && (
+        <CollectOnlineDialog
+          restaurantId={restaurantId} token={token}
+          folio={{ id: linkFor.id, guest_name: linkFor.client_name, guest_phone: linkFor.client_phone, guest_email: linkFor.client_email }}
+          payable={{ objectType: 'SPA_FOLIO', permTab: 'SPA_APPOINTMENTS', objectId: linkFor.id, outstanding: outOf(linkFor), subtitle: t('spa.pay.linkSubtitle', { id: linkFor.invoice_number || linkFor.id }), presets: [{ label: t('events.pay.linkFull'), amount: outOf(linkFor) }] }}
+          onClose={() => { setLinkFor(null); load(); }}
+          onRecorded={() => load()}
+        />
+      )}
 
       {history && <SpaHistoryOverlay kind="SPA_FOLIO" id={history.id} meta={history.meta} onClose={() => setHistory(null)} restaurantId={restaurantId} token={token} />}
 
