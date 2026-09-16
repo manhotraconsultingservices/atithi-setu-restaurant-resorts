@@ -14,6 +14,7 @@ import { DataTable, type ColDef } from './components/DataTable';
 import { useT } from './i18n';
 import { useConfirm } from './components/ConfirmDialog';
 import { canWriteTab, canDeleteTab } from './perm';
+import { moduleOn } from './tenantModules';
 
 type Json = Record<string, any>;
 
@@ -329,6 +330,8 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
   }
   if (!data) return <div className="text-sm text-[#6b5d52] p-6">{t('common.loading')}</div>;
 
+  // Online Payments not on this property's plan: settings are read-only.
+  const canConfigure = canEdit && data.module_enabled !== false;
   const gateways: Json[] = data.gateways || [];
   const enabled = gateways.filter(g => g.is_enabled);
   const g = gateways.find(x => x.gateway === selected) || gateways[0];
@@ -349,6 +352,12 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
     <div className="space-y-4 max-w-5xl">
       <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{t('pg.title')}</h2>
 
+      {data.module_enabled === false && (
+        <div className="flex gap-2 items-center bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-sm text-amber-900">
+          <AlertTriangle size={16} className="flex-none" /> {t('modules.paymentsLocked')}
+        </div>
+      )}
+
       {data.key_source === null && (
         <div className="flex gap-2 items-center bg-red-50 border border-red-200 rounded-2xl px-4 py-3 text-sm text-red-800">
           <AlertTriangle size={16} className="flex-none" /> {t('pg.noKey')}
@@ -367,7 +376,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
             <label className="text-sm font-bold text-[#1a1208]" htmlFor="pg-default">{t('pg.default')}</label>
             <select
               id="pg-default"
-              disabled={!canEdit || busy === 'default' || enabled.length === 0}
+              disabled={!canConfigure || busy === 'default' || enabled.length === 0}
               className="bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm text-[#1a1208] focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30 min-w-[240px] disabled:opacity-60"
               value={data.default_gateway || ''}
               onChange={e => e.target.value && chooseDefault(e.target.value)}
@@ -419,7 +428,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
                       {g.is_enabled && <ModeBadge mode={g.mode} />}
                     </div>
                   </div>
-                  {canEdit && (
+                  {canConfigure && (
                     <div className="flex gap-2 flex-wrap">
                       {g.connected && <button disabled={!!busy} onClick={() => test(g)} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><RefreshCw size={13} className={busy === `${g.gateway}:test` ? 'animate-spin' : ''} /> {t('pg.test')}</button>}
                       {g.is_enabled
@@ -440,7 +449,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
                     <div key={f.key}>
                       <label className={label} htmlFor={`pg-${g.gateway}-${f.key}`}>{f.label}{f.required ? ' *' : ''}<Hint text={f.help} /></label>
                       {f.options ? (
-                        <select id={`pg-${g.gateway}-${f.key}`} disabled={!canEdit} className={input} value={draft[f.key] ?? (f.value || '')} onChange={e => setField(g.gateway, f.key, e.target.value)}>
+                        <select id={`pg-${g.gateway}-${f.key}`} disabled={!canConfigure} className={input} value={draft[f.key] ?? (f.value || '')} onChange={e => setField(g.gateway, f.key, e.target.value)}>
                           <option value="">{t('pg.field.choose')}</option>
                           {f.options.map((o: Json) => <option key={o.value} value={o.value}>{o.label}</option>)}
                         </select>
@@ -449,7 +458,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
                           id={`pg-${g.gateway}-${f.key}`}
                           type={f.secret ? 'password' : 'text'}
                           autoComplete="off"
-                          disabled={!canEdit}
+                          disabled={!canConfigure}
                           className={input}
                           value={draft[f.key] ?? (f.secret ? '' : f.value || '')}
                           placeholder={f.secret ? (f.saved ? (f.unreadable ? t('pg.field.unreadable') : t('pg.field.saved')) : t('pg.field.notSaved')) : ''}
@@ -476,7 +485,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
                   )}
                 </div>
 
-                {canEdit && (
+                {canConfigure && (
                   <div className="flex gap-2 flex-wrap justify-between">
                     <button disabled={!dirty || !!busy} onClick={() => save(g)} className={`${btn} bg-[#1a1208] text-white hover:bg-black`}>{t('pg.saveChanges')}</button>
                     {g.connected && canDisconnect && <button disabled={!!busy} onClick={() => disconnect(g)} className={`${btn} text-red-700 hover:bg-red-50`}>{t('pg.disconnect')}</button>}
@@ -580,7 +589,8 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
   const confirm = useConfirm();
   const objectType = payable?.objectType || 'HOTEL_FOLIO';
   const objectId = payable?.objectId || folio.id;
-  const canCollect = canWriteTab(payable ? payable.permTab : 'FOLIOS');
+  const canCollect = canWriteTab(payable ? payable.permTab : 'FOLIOS') && moduleOn('online_payments');
+  const waOn = moduleOn('whatsapp');
   const [outstanding, setOutstanding] = useState<number | null>(null);
   const [amount, setAmount] = useState('');
   const [phone, setPhone] = useState(folio.guest_phone || '');
@@ -759,7 +769,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
                 </div>
               </div>
               <div className="flex gap-2 flex-wrap">
-                <button disabled={!!busy || !phone} onClick={() => create('WHATSAPP')} className={`${btn} bg-[#128c7e] text-white hover:bg-[#0e6f64]`}><MessageCircle size={13} /> {busy === 'create:WHATSAPP' ? 'Sending…' : 'Send on WhatsApp'}</button>
+                <button disabled={!!busy || !phone || !waOn} title={waOn ? undefined : t('modules.whatsappLocked')} onClick={() => create('WHATSAPP')} className={`${btn} bg-[#128c7e] text-white hover:bg-[#0e6f64]`}><MessageCircle size={13} /> {busy === 'create:WHATSAPP' ? 'Sending…' : 'Send on WhatsApp'}</button>
                 <button disabled={!!busy || !email || (active?.requires_customer_phone && !phone)} onClick={() => create('EMAIL')} className={`${btn} bg-[#1e3a5f] text-white hover:bg-[#162c49]`}><Mail size={13} /> {busy === 'create:EMAIL' ? 'Sending…' : 'Send by email'}</button>
                 <button disabled={!!busy || (active?.requires_customer_phone && !phone)} onClick={() => create('NONE')} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><Link2 size={13} /> {busy === 'create:NONE' ? 'Creating…' : 'Create link only'}</button>
               </div>

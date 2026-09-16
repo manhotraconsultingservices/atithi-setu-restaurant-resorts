@@ -4230,6 +4230,7 @@ async function _pgCreateLink(
     webhookUrlFor?: (gatewayId: string) => Promise<string>;
   },
 ): Promise<any> {
+  if (!(await tenantModules(restaurantId)).onlinePayments) throw new PaymentRequestError(MODULE_OFF_PAYMENTS, 403);
   const first = await _pgDescribePayable(db, restaurantId, input.objectType, input.objectId);
   if (!first) throw new PaymentRequestError('That bill was not found.', 404);
   if (!first.open) throw new PaymentRequestError(`${first.closedReason} A payment link can only be sent for an open bill.`, 409);
@@ -4338,6 +4339,8 @@ async function _pgSendLink(
     `${expires ? `The link is valid until ${expires}. ` : ''}You can pay by UPI, card or net banking.\n\n${property}`;
   const sent: string[] = [];
   const errors: string[] = [];
+  const mods = await tenantModules(restaurantId);
+  if (!mods.onlinePayments) return { sent, errors: [MODULE_OFF_PAYMENTS], message };
   if (!link.url || !['CREATED', 'PARTIALLY_PAID'].includes(String(link.status))) {
     return { sent, errors: [`This link is ${String(link.status).toLowerCase()} and cannot be sent.`], message };
   }
@@ -4361,7 +4364,8 @@ async function _pgSendLink(
   }
   if (wantWa) {
     const phone = _pgPhone(opts.phone || link.customer_phone);
-    if (!phone) errors.push('No phone number for this customer.');
+    if (!mods.whatsapp) errors.push(MODULE_OFF_WHATSAPP);
+    else if (!phone) errors.push('No phone number for this customer.');
     else {
       const tally = await triggerNotification(restaurantId, 'PAYMENT_LINK_SENT', {
         customerPhone: phone, customerName: name, guestName: name,
@@ -9225,6 +9229,39 @@ function invalidatePlatformNotifyCache() { _platformNotifyCache = null; }
 // Load the saved platform WhatsApp sender into whatsappConfig.ts, which every
 // send and the Meta webhook read synchronously. A secret that no longer opens
 // (its key changed) is treated as unset, so the env value still applies.
+// ── Paid modules per tenant (Online Payments, WhatsApp) ─────────────────────
+// Switched by a platform admin in /internal. Cached briefly; the admin toggle
+// clears the cache so a change applies at once.
+const _moduleCache = new Map<string, { at: number; onlinePayments: boolean; whatsapp: boolean }>();
+async function tenantModules(restaurantId: string): Promise<{ onlinePayments: boolean; whatsapp: boolean }> {
+  const hit = _moduleCache.get(restaurantId);
+  if (hit && Date.now() - hit.at < 30000) return hit;
+  const r: any = await centralDb.get("SELECT online_payments_enabled, whatsapp_enabled FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+  const v = { at: Date.now(), onlinePayments: Number(r?.online_payments_enabled) === 1, whatsapp: Number(r?.whatsapp_enabled) === 1 };
+  _moduleCache.set(restaurantId, v);
+  return v;
+}
+const MODULE_OFF_PAYMENTS = 'Online Payments is not enabled for this property. Contact Atithi-Setu to add it to your plan.';
+const MODULE_OFF_WHATSAPP = 'WhatsApp messaging is not enabled for this property. Contact Atithi-Setu to add it to your plan.';
+
+// Once: switch Online Payments on for tenants that already connected a gateway,
+// so nothing already in use stops working when the module becomes paid.
+async function backfillOnlinePaymentsModule(): Promise<void> {
+  const done: any = await centralDb.get("SELECT name FROM module_flag_backfill WHERE name = 'online_payments'").catch(() => null);
+  if (done) return;
+  const tenants: any[] = await centralDb.query("SELECT id FROM restaurants").catch(() => []);
+  let switched = 0;
+  for (const t of tenants) {
+    try {
+      const db = await getTenantDb(t.id);
+      const gw: any = await db.get("SELECT gateway FROM payment_gateway_configs LIMIT 1").catch(() => null);
+      if (gw) { await centralDb.run("UPDATE restaurants SET online_payments_enabled = 1 WHERE id = ?", [t.id]); switched++; }
+    } catch { /* a tenant that will not open is left off */ }
+  }
+  await centralDb.run("INSERT INTO module_flag_backfill (name) VALUES ('online_payments') ON CONFLICT (name) DO NOTHING");
+  console.log(`[modules] Online Payments switched on for ${switched} tenant(s) that already had a gateway`);
+}
+
 async function loadPlatformWhatsApp(): Promise<any> {
   const row: any = await centralDb.get("SELECT * FROM platform_whatsapp_config WHERE id = 'DEFAULT'").catch(() => null);
   setWhatsAppPlatformConfig(row ? {
@@ -9518,7 +9555,11 @@ async function triggerNotification(restaurantId: string, eventName: string, data
             // at its category rate, which is what the cost report attributes.
             _logAndSendCategory = useTemplate ? metaCategory : 'SERVICE';
             _logAndSendTemplate = useTemplate ? useTemplate.name : null;
-            record(await logAndSend(db, eventName, 'WHATSAPP', recipient, waText, () => sendWhatsAppDetailed(recipient, waText, useTemplate), audienceTag), 'WHATSAPP');
+            record(await logAndSend(db, eventName, 'WHATSAPP', recipient, waText, async () => {
+              // Not on this property's plan: logged as not sent, with the reason.
+              if (!(await tenantModules(restaurantId)).whatsapp) return { ok: false, error: MODULE_OFF_WHATSAPP, code: 'MODULE_NOT_ENABLED' };
+              return sendWhatsAppDetailed(recipient, waText, useTemplate);
+            }, audienceTag), 'WHATSAPP');
             _logAndSendCategory = null; _logAndSendTemplate = null;
           }
         }
@@ -9548,6 +9589,8 @@ async function startServer() {
   // Platform WhatsApp sender saved in /internal (env META_WA_* until one is saved).
   await loadPlatformWhatsApp().catch((e: any) => console.error('[whatsapp] platform config load failed:', e?.message || e));
   setInterval(() => { loadPlatformWhatsApp().catch(() => {}); }, 5 * 60 * 1000);
+  // Background: opening every tenant must not hold up the server start.
+  backfillOnlinePaymentsModule().catch((e: any) => console.error('[modules] backfill failed:', e?.message || e));
 
   // ── Bootstrap delivery-platform integration adapters ───────────────────
   // Phase 5: register all real adapters at boot. Switching platforms is
@@ -12752,6 +12795,7 @@ async function startServer() {
       // that window is invisible to whoever is composing, so the same button
       // would behave differently from one recipient to the next.
       if (channel === 'WHATSAPP' && !templateName) return res.status(400).json({ error: 'Pick an approved template. WhatsApp messages must use wording Meta has approved.' });
+      if (channel === 'WHATSAPP' && !(await tenantModules(rid)).whatsapp) return res.status(403).json({ error: MODULE_OFF_WHATSAPP, code: 'MODULE_NOT_ENABLED' });
 
       const rRow: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [rid]).catch(() => null);
       const propertyName = String(rRow?.name || 'Atithi-Setu');
@@ -13203,7 +13247,7 @@ async function startServer() {
       const senders: Record<string, () => Promise<any>> = {
         EMAIL:    () => sendEmail(to, 'Atithi-Setu — test notification', msg, `<p>${msg}</p>`),
         SMS:      () => sendSMSDetailed(to, msg),
-        WHATSAPP: () => sendWhatsAppDetailed(to, msg, null),
+        WHATSAPP: async () => ((await tenantModules(String((req.user as any)?.restaurantId || ''))).whatsapp ? sendWhatsAppDetailed(to, msg, null) : { ok: false, error: MODULE_OFF_WHATSAPP, code: 'MODULE_NOT_ENABLED' }),
         TELEGRAM: () => sendTelegramDetailed(to || null, msg),
       };
       if (!senders[channel]) return res.status(400).json({ error: 'channel must be EMAIL, SMS, WHATSAPP or TELEGRAM' });
@@ -35714,6 +35758,36 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
   });
 
+  // ─── Paid modules: Online Payments / WhatsApp (SUPER_ADMIN / CTO only) ────────
+  app.post("/api/restaurant/:id/modules/:module/enable", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+        return res.status(403).json({ error: 'This action is restricted to platform administrators. Contact sales to add this module to your subscription.' });
+      }
+      const MODULES: Record<string, { col: string; label: string }> = {
+        'online-payments': { col: 'online_payments_enabled', label: 'Online Payments' },
+        whatsapp: { col: 'whatsapp_enabled', label: 'WhatsApp' },
+      };
+      const m = MODULES[String(req.params.module || '').toLowerCase()];
+      if (!m) return res.status(400).json({ error: 'module must be online-payments or whatsapp.' });
+      const enabled = req.body?.enabled !== false;
+      const current: any = await centralDb.get(`SELECT ${m.col} AS v FROM restaurants WHERE id = ?`, [req.params.id]);
+      if (!current) return res.status(404).json({ error: 'Restaurant not found' });
+      await centralDb.run(`UPDATE restaurants SET ${m.col} = ? WHERE id = ?`, [enabled ? 1 : 0, req.params.id]);
+      _moduleCache.delete(req.params.id);
+      try {
+        const key = String(req.params.module).toLowerCase();
+        await centralDb.run(
+          `INSERT INTO property_type_audit (restaurant_id, changed_by_email, changed_by_role, from_type, to_type, ip, changed_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [req.params.id, req.user?.email || 'unknown', req.user?.role || 'unknown',
+           `${key}:${Number(current.v) === 1 ? 'ON' : 'OFF'}`, `${key}:${enabled ? 'ON' : 'OFF'}`,
+           String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()]);
+      } catch (auditErr: any) { console.error('[modules/enable] audit write failed:', auditErr?.message); }
+      res.json({ success: true, enabled, message: `${m.label} ${enabled ? 'enabled' : 'disabled'}.` });
+    } catch (err: any) { res.status(500).json({ error: 'Could not change the module.' }); }
+  });
+
   // ─── Enable / disable the spa module (SUPER_ADMIN / CTO only) ──────────────
   app.post("/api/restaurant/:id/spa/enable", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -52155,6 +52229,7 @@ ${data.tenant.name}`;
       // hotels are deliberate about T&Cs around messaging guests.
       (async () => {
         try {
+          if (!(await tenantModules(req.params.id)).onlinePayments) return;
           // With a payment gateway on, the guest gets its link (email only, as before).
           const gb: any = await tenantDb.get("SELECT guest_email FROM room_bookings WHERE id = ?", [req.params.bookingId]).catch(() => null);
           if (gb?.guest_email) {
@@ -52248,6 +52323,10 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/hotel/bookings/:bookingId/send-payment-link", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
+    // Every payment link, the plain UPI one included, is part of Online Payments.
+    const mods = await tenantModules(req.params.id);
+    if (!mods.onlinePayments) return res.status(403).json({ error: MODULE_OFF_PAYMENTS, code: 'MODULE_NOT_ENABLED' });
+    if (String(req.body?.channel || '').toUpperCase() === 'WHATSAPP' && !mods.whatsapp) return res.status(403).json({ error: MODULE_OFF_WHATSAPP, code: 'MODULE_NOT_ENABLED' });
     try {
       // A payment gateway is switched on: send its link, which records the payment itself.
       try {
@@ -52300,7 +52379,8 @@ ${data.tenant.name}`;
         if (!targetPhone) {
           errors.push('No phone on file for this guest.');
         } else {
-          try { await sendWhatsApp(targetPhone, msg.wa); sent.push('WHATSAPP'); }
+          if (!mods.whatsapp) errors.push(MODULE_OFF_WHATSAPP);
+          else try { await sendWhatsApp(targetPhone, msg.wa); sent.push('WHATSAPP'); }
           catch (e: any) { errors.push(`WhatsApp send failed: ${e?.message || ''}`); }
         }
       }
@@ -52901,7 +52981,7 @@ ${data.tenant.name}`;
                 ? `The full PDF invoice has been sent to your email (${b.guest_email}).`
                 : `Reply to this message for a copy of the PDF invoice.`) +
               `\n\nWe hope to host you again soon! — ${hotel.name}`;
-            try { await sendWhatsApp(b.guest_phone, waMsg); }
+            try { if ((await tenantModules(req.params.id)).whatsapp) await sendWhatsApp(b.guest_phone, waMsg); }
             catch (e) { console.warn('[hotel-checkout] WhatsApp invoice failed:', e); }
           }
         } catch (e) {
@@ -55964,7 +56044,8 @@ ${data.tenant.name}`;
       }
       const review: any = await db.get("SELECT COUNT(*) AS n FROM payment_link_payments WHERE record_status = 'NEEDS_REVIEW'");
       const active = await _pgActiveGatewayId(db).catch(() => null);
-      res.json({ gateways, default_gateway: active, key_source: secretKeySource(), needs_review: Number(review?.n || 0) });
+      const mods = await tenantModules(req.params.id);
+      res.json({ gateways, default_gateway: active, key_source: secretKeySource(), needs_review: Number(review?.n || 0), module_enabled: mods.onlinePayments, whatsapp_enabled: mods.whatsapp });
     } catch (err: any) {
       console.error('[payments] gateways read failed:', err);
       res.status(500).json({ error: 'Could not load payment gateways.' });
@@ -55976,6 +56057,7 @@ ${data.tenant.name}`;
   app.put("/api/restaurant/:id/payments/gateways/:gateway", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 2))) return res.status(403).json({ error: 'You do not have permission to change Payment Gateways.' });
+      if (!(await tenantModules(req.params.id)).onlinePayments) return res.status(403).json({ error: MODULE_OFF_PAYMENTS, code: 'MODULE_NOT_ENABLED' });
       const db = await getTenantDb(req.params.id);
       const before = await _pgConfig(db, req.params.gateway);
       if (!before) return res.status(404).json({ error: 'Unknown payment gateway.' });
@@ -56060,6 +56142,7 @@ ${data.tenant.name}`;
   app.put("/api/restaurant/:id/payments/default-gateway", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 2))) return res.status(403).json({ error: 'You do not have permission to change Payment Gateways.' });
+      if (!(await tenantModules(req.params.id)).onlinePayments) return res.status(403).json({ error: MODULE_OFF_PAYMENTS, code: 'MODULE_NOT_ENABLED' });
       const gw = getGateway(req.body?.gateway);
       if (!gw) return res.status(400).json({ error: 'Choose a payment gateway.' });
       const db = await getTenantDb(req.params.id);
@@ -56095,6 +56178,7 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/payments/gateways/:gateway/test", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       if (!(await _roleHasTab(req, 'PAYMENT_GATEWAYS', 2))) return res.status(403).json({ error: 'You do not have permission to test Payment Gateways.' });
+      if (!(await tenantModules(req.params.id)).onlinePayments) return res.status(403).json({ error: MODULE_OFF_PAYMENTS, code: 'MODULE_NOT_ENABLED' });
       const db = await getTenantDb(req.params.id);
       const cfg = await _pgConfig(db, req.params.gateway);
       if (!cfg) return res.status(404).json({ error: 'Unknown payment gateway.' });
@@ -65514,8 +65598,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-paylink-via-gateway',
+    commit_marker: 'paid-modules-payments-whatsapp',
     code_features: [
+      'paid-modules-payments-whatsapp  Monetisation: Online Payments and WhatsApp are paid modules a platform admin switches per tenant in /internal (restaurants.online_payments_enabled, whatsapp_enabled; POST /api/restaurant/:id/modules/:module/enable, SUPER_ADMIN/CTO only, audited in property_type_audit). Online Payments off: creating or sending any payment link (hotel folio, hotel bookings Pay link including the plain UPI link and the automatic check-in email, events, spa, restaurant), saving or testing gateway settings and choosing the default gateway are refused with MODULE_NOT_ENABLED; checking, cancelling and resolving existing links, the webhook and the sweep keep working so money already on its way is still recorded. WhatsApp off: every WhatsApp notification is logged FAILED with the reason, owner on-demand WhatsApp and the channel test are refused, the check-out invoice summary is not sent; login OTP and platform billing notices are not affected. Screens: send-link controls greyed out with a tooltip, gateway settings read-only with a notice, WhatsApp buttons and the WhatsApp compose channel greyed, a notice on Notifications; src/tenantModules.ts mirrors the switches like perm.ts. Starting state: all off, except a one-time backfill switches Online Payments on for tenants that already had a gateway connected.',
       'hotel-paylink-via-gateway  Hotel bookings Pay link (the email and WhatsApp buttons on the bookings list, and the automatic email at check-in) now sends a payment gateway link when a gateway is switched on, so the payment records itself on the folio. It asks for what is still owed on the folio (the UPI link asked for the full folio total even after part was paid), or a smaller override amount. Before arrival the folio is created on demand, as the advance-payment route already does. With no gateway switched on the UPI link is unchanged.',
       'restaurant-payment-links  Restaurant: Send payment link on the Invoices edit modal (table bills and manual/takeaway invoices) and a Link button on the Command Centre table bill (saves the discount and service charge first). Payables RESTAURANT_SESSION (object id = session token) and RESTAURANT_ORDER; gates restaurantStaff + INVOICES (Edit to send). Restaurant bills settle all at once, so a link is always the whole bill, worked out by the server (_restaurantSessionDue = the Invoices list total; orders = _orderNetRevenue gross, what the ledger posts). New GET /payments/payable shows that amount in the dialog. The session close route became settleRestaurantSession() and the order payment route markRestaurantOrderPaid(), shared with the gateway recorder: a paid link settles the bill as ONLINE (every order ONLINE, table freed, ledger to 1025). A customer Request Bill method preference no longer blocks a gateway settlement (staff behaviour unchanged). A payment that no longer matches the bill total, or arrives for a paid, cancelled or room-charged bill, goes to NEEDS_REVIEW. Staff cannot close a table bill as ONLINE (400). Order payment notifications can no longer fail the payment.',
       'spa-payment-links  Spa: Send link on each open spa invoice (Spa, Invoices and Payments) by WhatsApp, email or copy. SPA_FOLIO is a payable: gates spaStaff + SPA_APPOINTMENTS (the same as recording a spa payment), spa must be enabled, a closed or voided invoice is refused, a link above the balance is refused. The spa folio payment route body moved verbatim into recordSpaFolioPayment(), shared by the route and the gateway recorder, so a gateway payment closes the folio and posts spa revenue (4040) exactly as a hand-entered one. Staff cannot post ONLINE by hand (400). The spa invoice list now returns client_phone and client_email. WhatsApp test: clearer errors for a bad token (Meta 190), a wrong phone number id (100), a test recipient that is not a phone number, and a number outside the test allowed list (131030); a token in quotes or under 60 characters is refused on save.',

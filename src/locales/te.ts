@@ -438,4 +438,8 @@ export const te: Record<string, string> = {
   'rest.pay.linkSubtitle': 'ఇన్‌వాయిస్ {id}',
   'rest.pay.tableSubtitle': 'టేబుల్ {table}',
   'pg.collect.wholeBill': 'మొత్తం బిల్లు, చివరిగా సేవ్ చేసినట్లు.',
+  // ── Paid modules ──
+  'modules.paymentsLocked': 'ఆన్‌లైన్ చెల్లింపులు మీ ప్లాన్‌లో లేవు. చెల్లింపు లింక్‌ల కోసం Atithi-Setu ని సంప్రదించండి.',
+  'modules.whatsappLocked': 'WhatsApp సందేశాలు మీ ప్లాన్‌లో లేవు. ప్రారంభించడానికి Atithi-Setu ని సంప్రదించండి.',
+  'modules.whatsappLockedNotifications': 'WhatsApp సందేశాలు మీ ప్లాన్‌లో లేవు, కాబట్టి WhatsApp నోటిఫికేషన్‌లు పంపబడవు. ఇమెయిల్, SMS పనిచేస్తాయి. WhatsApp కోసం Atithi-Setu ని సంప్రదించండి.',
 };

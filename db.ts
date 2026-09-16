@@ -386,6 +386,13 @@ export async function initDb() {
       updated_by TEXT
     );
     INSERT INTO platform_notification_config (id) VALUES ('DEFAULT') ON CONFLICT (id) DO NOTHING;
+    -- Paid modules, switched per tenant by a platform admin (/internal).
+    -- Online Payments: gateway payment links. WhatsApp: business messages on the
+    -- shared sender. Default off; the startup backfill switches Online Payments on
+    -- for a tenant that already has a gateway connected.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS online_payments_enabled INT DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS whatsapp_enabled INT DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS module_flag_backfill (name TEXT PRIMARY KEY, done_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
     -- Platform WhatsApp sender (Meta Cloud API), one row, set in /internal →
     -- WhatsApp. Secrets are sealed (paymentSecrets.ts). No row = META_WA_* env.
     CREATE TABLE IF NOT EXISTS platform_whatsapp_config (

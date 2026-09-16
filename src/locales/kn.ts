@@ -440,4 +440,8 @@ export const kn: Record<string, string> = {
   'rest.pay.linkSubtitle': 'ಇನ್‌ವಾಯ್ಸ್ {id}',
   'rest.pay.tableSubtitle': 'ಟೇಬಲ್ {table}',
   'pg.collect.wholeBill': 'ಸಂಪೂರ್ಣ ಬಿಲ್, ಕೊನೆಯದಾಗಿ ಉಳಿಸಿದಂತೆ.',
+  // ── Paid modules ──
+  'modules.paymentsLocked': 'ಆನ್‌ಲೈನ್ ಪಾವತಿ ನಿಮ್ಮ ಯೋಜನೆಯಲ್ಲಿ ಇಲ್ಲ. ಪಾವತಿ ಲಿಂಕ್‌ಗಳನ್ನು ಸಕ್ರಿಯಗೊಳಿಸಲು Atithi-Setu ಸಂಪರ್ಕಿಸಿ.',
+  'modules.whatsappLocked': 'WhatsApp ಸಂದೇಶ ನಿಮ್ಮ ಯೋಜನೆಯಲ್ಲಿ ಇಲ್ಲ. ಸಕ್ರಿಯಗೊಳಿಸಲು Atithi-Setu ಸಂಪರ್ಕಿಸಿ.',
+  'modules.whatsappLockedNotifications': 'WhatsApp ಸಂದೇಶ ನಿಮ್ಮ ಯೋಜನೆಯಲ್ಲಿ ಇಲ್ಲ, ಆದ್ದರಿಂದ WhatsApp ಅಧಿಸೂಚನೆಗಳು ಹೋಗುವುದಿಲ್ಲ. ಇಮೇಲ್ ಮತ್ತು SMS ಕೆಲಸ ಮಾಡುತ್ತವೆ. WhatsApp ಗಾಗಿ Atithi-Setu ಸಂಪರ್ಕಿಸಿ.',
 };

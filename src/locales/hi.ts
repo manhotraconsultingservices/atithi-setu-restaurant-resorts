@@ -541,4 +541,8 @@ export const hi: Record<string, string> = {
   'rest.pay.linkSubtitle': 'इनवॉइस {id}',
   'rest.pay.tableSubtitle': 'टेबल {table}',
   'pg.collect.wholeBill': 'पूरा बिल, जैसा आखिरी बार सहेजा गया।',
+  // ── Paid modules ──
+  'modules.paymentsLocked': 'ऑनलाइन भुगतान आपके प्लान में नहीं है। भुगतान लिंक चालू करने के लिए Atithi-Setu से संपर्क करें।',
+  'modules.whatsappLocked': 'WhatsApp संदेश आपके प्लान में नहीं है। इसे चालू करने के लिए Atithi-Setu से संपर्क करें।',
+  'modules.whatsappLockedNotifications': 'WhatsApp संदेश आपके प्लान में नहीं है, इसलिए WhatsApp सूचनाएँ नहीं भेजी जातीं। ईमेल और SMS चलते रहेंगे। WhatsApp चालू करने के लिए Atithi-Setu से संपर्क करें।',
 };

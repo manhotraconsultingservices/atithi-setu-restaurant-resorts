@@ -502,4 +502,8 @@ export const pa: Record<string, string> = {
   'rest.pay.linkSubtitle': 'ਇਨਵੌਇਸ {id}',
   'rest.pay.tableSubtitle': 'ਟੇਬਲ {table}',
   'pg.collect.wholeBill': 'ਪੂਰਾ ਬਿੱਲ, ਜਿਵੇਂ ਆਖਰੀ ਵਾਰ ਸੇਵ ਕੀਤਾ।',
+  // ── Paid modules ──
+  'modules.paymentsLocked': 'ਔਨਲਾਈਨ ਭੁਗਤਾਨ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹੈ। ਭੁਗਤਾਨ ਲਿੰਕ ਚਾਲੂ ਕਰਨ ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
+  'modules.whatsappLocked': 'WhatsApp ਸੁਨੇਹੇ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹਨ। ਚਾਲੂ ਕਰਨ ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
+  'modules.whatsappLockedNotifications': 'WhatsApp ਸੁਨੇਹੇ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹਨ, ਇਸ ਲਈ WhatsApp ਸੂਚਨਾਵਾਂ ਨਹੀਂ ਜਾਂਦੀਆਂ। ਈਮੇਲ ਅਤੇ SMS ਚੱਲਦੇ ਰਹਿਣਗੇ। WhatsApp ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
 };

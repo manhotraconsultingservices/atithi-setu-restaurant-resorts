@@ -505,4 +505,8 @@ export const en: Record<string, string> = {
   'rest.pay.linkSubtitle': 'Invoice {id}',
   'rest.pay.tableSubtitle': 'Table {table}',
   'pg.collect.wholeBill': 'The whole bill, as last saved.',
+  // ── Paid modules ──
+  'modules.paymentsLocked': 'Online Payments is not on your plan. Contact Atithi-Setu to enable payment links.',
+  'modules.whatsappLocked': 'WhatsApp messaging is not on your plan. Contact Atithi-Setu to enable it.',
+  'modules.whatsappLockedNotifications': 'WhatsApp messaging is not on your plan, so WhatsApp notifications are not sent. Email and SMS still work. Contact Atithi-Setu to enable WhatsApp.',
 };

@@ -10,6 +10,7 @@ import { ObjectDetail } from './components/ObjectDetail';
 import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { prettyRoleLabel } from './roleLabel';
 import { CollectOnlineDialog } from './PaymentLinks';
+import { moduleOn } from './tenantModules';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
@@ -973,7 +974,7 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
         <div className="flex items-center gap-3 text-xs">
           <span className="text-[#6b5d52]">{t('events.pay.paid')} <b className="text-emerald-700 tabular-nums">{money(pay.paid)}</b></span>
           <span className="text-[#6b5d52]">{t('events.pay.balance')} <b className="text-rose-600 tabular-nums">{money(pay.balance)}</b></span>
-          {canRecord && Number(pay.balance) > 0.01 && <button className={BTN_GHOST} onClick={() => setLinkOpen(true)}><Link2 size={12} />{t('events.pay.sendLink')}</button>}
+          {canRecord && Number(pay.balance) > 0.01 && <button className={`${BTN_GHOST} disabled:opacity-40 disabled:cursor-not-allowed`} disabled={!moduleOn('online_payments')} title={moduleOn('online_payments') ? undefined : t('modules.paymentsLocked')} onClick={() => setLinkOpen(true)}><Link2 size={12} />{t('events.pay.sendLink')}</button>}
           {canRecord && <button className={BTN_PRIMARY} onClick={() => openPay()}><Plus size={12} />{t('events.pay.record')}</button>}
         </div>
       </div>
