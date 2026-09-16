@@ -534,4 +534,11 @@ export const hi: Record<string, string> = {
   // ── Payment link bills ──
   'pg.collect.recordedBill': '{amount} ऑनलाइन प्राप्त हुआ और बिल पर दर्ज किया गया।',
   'pg.collect.reviewBill': 'भुगतान आया, पर इस बिल पर लागू नहीं हो सका। Payment Gateways → भुगतान लिंक देखें।',
+  // ── Restaurant payment links ──
+  'rest.pay.sendLink': 'भुगतान लिंक भेजें',
+  'rest.pay.sendLinkShort': 'लिंक',
+  'rest.pay.sendLinkHint': 'पूरा बिल WhatsApp या ईमेल से भुगतान लिंक के रूप में भेजें; मेहमान के भुगतान करते ही बिल भुगतान हो जाएगा',
+  'rest.pay.linkSubtitle': 'इनवॉइस {id}',
+  'rest.pay.tableSubtitle': 'टेबल {table}',
+  'pg.collect.wholeBill': 'पूरा बिल, जैसा आखिरी बार सहेजा गया।',
 };

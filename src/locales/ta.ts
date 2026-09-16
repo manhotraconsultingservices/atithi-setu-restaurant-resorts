@@ -431,4 +431,11 @@ export const ta: Record<string, string> = {
   // ── Payment link bills ──
   'pg.collect.recordedBill': '{amount} ஆன்லைனில் பெறப்பட்டு பில்லில் பதிவு செய்யப்பட்டது.',
   'pg.collect.reviewBill': 'கட்டணம் வந்தது, ஆனால் இந்த பில்லில் சேர்க்க முடியவில்லை. Payment Gateways → கட்டண இணைப்புகள் பார்க்கவும்.',
+  // ── Restaurant payment links ──
+  'rest.pay.sendLink': 'கட்டண இணைப்பை அனுப்பு',
+  'rest.pay.sendLinkShort': 'இணைப்பு',
+  'rest.pay.sendLinkHint': 'முழு பில்லையும் WhatsApp அல்லது மின்னஞ்சல் மூலம் கட்டண இணைப்பாக அனுப்பவும்; விருந்தினர் செலுத்தியதும் செலுத்தப்பட்டதாகக் குறிக்கப்படும்',
+  'rest.pay.linkSubtitle': 'விலைப்பட்டியல் {id}',
+  'rest.pay.tableSubtitle': 'மேசை {table}',
+  'pg.collect.wholeBill': 'முழு பில், கடைசியாகச் சேமித்தபடி.',
 };

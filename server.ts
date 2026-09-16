@@ -3881,6 +3881,49 @@ async function _pgDescribePayable(db: any, restaurantId: string, objectType: str
       bookingId: f.booking_id || null,
     };
   }
+  if (objectType === 'RESTAURANT_SESSION') {
+    const sess: any = await db.get("SELECT * FROM table_sessions WHERE session_token = ?", [objectId]).catch(() => null);
+    if (!sess) return null;
+    const st = String(sess.status || '').toLowerCase();
+    const pm = String(sess.payment_method || '').toUpperCase();
+    let closedReason: string | null = null;
+    if (st === 'cancelled') closedReason = 'This bill was cancelled.';
+    else if (pm === 'CHARGE_TO_ROOM') closedReason = 'This bill was charged to a room.';
+    else if (st === 'closed' && pm) closedReason = `This bill is already settled (${pm}).`;
+    const due = closedReason ? 0 : await _restaurantSessionDue(db, restaurantId, sess);
+    const contact: any = await db.get(
+      "SELECT customer_name, customer_phone, customer_email FROM orders WHERE session_id = ? AND (customer_phone IS NOT NULL OR customer_email IS NOT NULL) ORDER BY created_at DESC LIMIT 1",
+      [sess.id]).catch(() => null);
+    const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+    return {
+      objectType, objectId, open: !closedReason, closedReason,
+      outstandingPaise: Math.max(0, rupeesToPaise(due)),
+      purpose: `${prop?.name || 'Your bill'} — bill ${sess.invoice_number || `#${String(sess.session_token).slice(-8).toUpperCase()}`}${sess.table_name ? ` (table ${sess.table_name})` : ''}`,
+      customer: { name: sess.customer_name || contact?.customer_name || null, phone: sess.customer_phone || contact?.customer_phone || null, email: contact?.customer_email || null },
+      bookingId: null,
+    };
+  }
+  if (objectType === 'RESTAURANT_ORDER') {
+    const o: any = await db.get("SELECT * FROM orders WHERE id = ?", [objectId]).catch(() => null);
+    if (!o) return null;
+    const pm = String(o.payment_method || '').toUpperCase();
+    const inSession: any = o.session_id ? await db.get(
+      "SELECT session_token, invoice_number FROM table_sessions WHERE id = ? AND status IN ('open', 'bill_requested', 'closed')", [o.session_id]).catch(() => null) : null;
+    let closedReason: string | null = null;
+    if (String(o.status || '').toUpperCase() === 'CANCELLED') closedReason = 'This invoice was cancelled.';
+    else if (String(o.payment_status || '').toUpperCase() === 'PAID') closedReason = 'This invoice is already paid.';
+    else if (pm === 'CHARGE_TO_ROOM' || String(o.folio_post_status || '').toUpperCase() === 'POSTED' || (o.folio_id && o.posted_to_folio_at)) closedReason = 'This invoice was charged to a room.';
+    else if (inSession) closedReason = `This order is part of table bill ${inSession.invoice_number || inSession.session_token}; send the link for that bill.`;
+    const due = closedReason ? 0 : (await _orderNetRevenue(restaurantId, o)).gross;
+    const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+    return {
+      objectType, objectId, open: !closedReason, closedReason,
+      outstandingPaise: Math.max(0, rupeesToPaise(due)),
+      purpose: `${prop?.name || 'Your bill'} — invoice ${o.invoice_number || `#${String(o.id).slice(-8).toUpperCase()}`}`,
+      customer: { name: o.customer_name || null, phone: o.customer_phone || null, email: o.customer_email || null },
+      bookingId: null,
+    };
+  }
   if (objectType === 'SPA_FOLIO') {
     const f: any = await db.get(
       `SELECT f.id, f.status, f.folio_kind, f.invoice_number, a.client_name, a.client_phone, a.client_email
@@ -3949,6 +3992,39 @@ async function _pgRecordToPayable(db: any, restaurantId: string, link: any, p: a
       notes: `Payment link ${link.id}${p.method ? ` · ${p.method}` : ''}`,
     });
     return row.id;
+  }
+  if (link.object_type === 'RESTAURANT_SESSION' || link.object_type === 'RESTAURANT_ORDER') {
+    const paid = Number(p.amount_paise) / 100;
+    const by = { user: { id: null, email: `${gatewayLabel} payment link`, role: 'SYSTEM' } } as any;
+    if (link.object_type === 'RESTAURANT_SESSION') {
+      const sess: any = await db.get("SELECT * FROM table_sessions WHERE session_token = ?", [link.object_id]).catch(() => null);
+      if (!sess) throw new PaymentNeedsReview('The table bill this link was sent for no longer exists.');
+      // Recorded already (a retry after a crash): the bill carries this payment.
+      if (String(sess.status).toLowerCase() === 'closed' && String(sess.payment_method || '').toUpperCase() === 'ONLINE') return `SESSION-${sess.id}`;
+      const payable = await _pgDescribePayable(db, restaurantId, 'RESTAURANT_SESSION', link.object_id);
+      if (!payable || !payable.open) throw new PaymentNeedsReview(`${payable?.closedReason || 'The bill is no longer open.'} The money is in the ${gatewayLabel} account: refund it there, or apply it by hand.`);
+      const due = payable.outstandingPaise / 100;
+      if (Math.abs(paid - due) > 0.01) throw new PaymentNeedsReview(`Paid ₹${paid.toFixed(2)} but the bill now comes to ₹${due.toFixed(2)} (it changed after the link was sent). Settle the bill by hand and adjust the difference.`);
+      const settle = (globalThis as any).__settleRestaurantSession;
+      if (typeof settle !== 'function') throw new Error('Restaurant billing is not ready yet.');
+      const out = await settle(restaurantId, link.object_id, { payment_method: 'ONLINE', final_amount: due }, by, { gateway: true });
+      if (out.status === 200) return `SESSION-${sess.id}`;
+      if (out.status >= 500) throw new Error(out.body?.error || 'Settling the table bill failed.');
+      throw new PaymentNeedsReview(`${out.body?.error || 'The bill refused this payment.'} The money is in the ${gatewayLabel} account.`);
+    }
+    const o: any = await db.get("SELECT id, payment_status, payment_method FROM orders WHERE id = ?", [link.object_id]).catch(() => null);
+    if (!o) throw new PaymentNeedsReview('The invoice this link was sent for no longer exists.');
+    if (String(o.payment_status).toUpperCase() === 'PAID' && String(o.payment_method || '').toUpperCase() === 'ONLINE') return `ORDER-${o.id}`;
+    const payable = await _pgDescribePayable(db, restaurantId, 'RESTAURANT_ORDER', link.object_id);
+    if (!payable || !payable.open) throw new PaymentNeedsReview(`${payable?.closedReason || 'The invoice is no longer open.'} The money is in the ${gatewayLabel} account: refund it there, or apply it by hand.`);
+    const due = payable.outstandingPaise / 100;
+    if (Math.abs(paid - due) > 0.01) throw new PaymentNeedsReview(`Paid ₹${paid.toFixed(2)} but the invoice now comes to ₹${due.toFixed(2)} (it changed after the link was sent). Settle it by hand and adjust the difference.`);
+    const markPaid = (globalThis as any).__markRestaurantOrderPaid;
+    if (typeof markPaid !== 'function') throw new Error('Restaurant billing is not ready yet.');
+    // The method first, so the ledger posts the receipt to gateway clearing.
+    await db.run("UPDATE orders SET payment_method = 'ONLINE' WHERE id = ?", [o.id]);
+    await markPaid(restaurantId, o.id, 'PAID', by);
+    return `ORDER-${o.id}`;
   }
   if (link.object_type === 'SPA_FOLIO') {
     const f: any = await db.get("SELECT id FROM folios WHERE id = ? AND folio_kind = 'SPA'", [link.object_id]).catch(() => null);
@@ -4195,6 +4271,10 @@ async function _pgCreateLink(
   }
   // The event receipt route refuses a payment above the balance, so a link for
   // more could only end in NEEDS_REVIEW. Refuse it now instead.
+  // Restaurant bills settle all at once: the link is for the whole bill.
+  if ((input.objectType === 'RESTAURANT_SESSION' || input.objectType === 'RESTAURANT_ORDER') && Math.abs(amountPaise - payable.outstandingPaise) > 1) {
+    throw new PaymentRequestError(`A restaurant bill is paid in full: the link must be for ₹${(payable.outstandingPaise / 100).toFixed(2)}.`, 400);
+  }
   if (input.objectType === 'SPA_FOLIO' && amountPaise > payable.outstandingPaise) {
     throw new PaymentRequestError(`The balance due on this invoice is ₹${(payable.outstandingPaise / 100).toFixed(2)}. A link cannot ask for more.`, 400);
   }
@@ -7587,6 +7667,33 @@ async function _markRoomChargedOrdersPaid(tenantDb: DbInterface, folioId: string
 // is. An accrual computed on a different basis than the revenue it anticipates
 // leaves a residue behind at every reversal, and residues in a ledger are found
 // by the auditor, not by the person who left them.
+// What a table bill comes to right now, the way the Invoices list and the bill
+// modal compute it: every non-cancelled round, the session's saved discount and
+// service charge, GST from Settings (with the legacy fallback for old sessions).
+async function _restaurantSessionDue(db: any, restaurantId: string, sess: any): Promise<number> {
+  const orders: any[] = await db.query("SELECT items FROM orders WHERE session_id = ? AND status != 'CANCELLED'", [sess.id]);
+  let sub = 0;
+  for (const o of orders) {
+    let items: any[] = [];
+    try { items = typeof o.items === 'string' ? JSON.parse(o.items) : (Array.isArray(o.items) ? o.items : []); } catch { items = []; }
+    for (const it of items) sub += Number(it?.price || 0) * Number(it?.quantity || 1);
+  }
+  const rest: any = await centralDb.get("SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+  const gstRaw = Number(sess.gst_percent || 0);
+  const applyRaw = Number(sess.apply_gst ?? 1);
+  const unconfigured = gstRaw === 0 && applyRaw === 1;
+  const gstPct = unconfigured && rest?.is_gst_enabled ? Number(rest?.gst_percentage || 0) : gstRaw;
+  const applyGst = unconfigured && rest?.is_gst_enabled ? 1 : applyRaw;
+  const engine = (globalThis as any).__computeInvoiceTotals;
+  if (typeof engine !== 'function') throw new Error('Invoice totals are not ready yet.');
+  const t = await engine({
+    tenantId: restaurantId, subtotal: sub, discountAmount: Number(sess.discount_amount || 0),
+    serviceChargePct: Number(sess.service_charge_percent || 0),
+    legacyGstFallback: { gst_percent: gstPct, apply_gst: !!applyGst },
+  });
+  return Math.round(Number(t?.grandTotal || 0) * 100) / 100;
+}
+
 async function _orderNetRevenue(
   restaurantId: string, order: any,
 ): Promise<{ gross: number; netRev: number; svcAmt: number; gst: number }> {
@@ -55750,6 +55857,9 @@ ${data.tenant.name}`;
     HOTEL_FOLIO: { read: [hotelStaff, requireTabAction('FOLIOS', 'READ')], write: [hotelStaff, requireTabAction('FOLIOS', 'CREATE')] },
     EVENT_BOOKING: { read: [eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'READ')], write: [eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE')] },
     SPA_FOLIO: { read: [spaStaff, requireTabAction('SPA_APPOINTMENTS', 'READ')], write: [spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE')] },
+    // Settling a restaurant bill by hand needs Invoices at Edit; so does a link.
+    RESTAURANT_SESSION: { read: [restaurantStaff, requireTabAction('INVOICES', 'READ')], write: [restaurantStaff, requireTabAction('INVOICES', 'UPDATE')] },
+    RESTAURANT_ORDER: { read: [restaurantStaff, requireTabAction('INVOICES', 'READ')], write: [restaurantStaff, requireTabAction('INVOICES', 'UPDATE')] },
   };
   // Runs route middleware inside a handler. A middleware that refuses has
   // already answered the request; false tells the handler to stop.
@@ -55957,6 +56067,24 @@ ${data.tenant.name}`;
     }
   });
 
+  // The amount a link would ask for right now and who it would go to, as the
+  // server computes it (a restaurant bill is always the whole bill).
+  app.get("/api/restaurant/:id/payments/payable", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const objectType = String(req.query.object_type || '').toUpperCase();
+      const gates = PAYABLE_OBJECT_GATES[objectType];
+      if (!gates) return res.status(400).json({ error: 'Unknown object_type.' });
+      if (!(await _pgPassGates(gates.read, req, res))) return;
+      const db = await getTenantDb(req.params.id);
+      const p = await _pgDescribePayable(db, req.params.id, objectType, String(req.query.object_id || ''));
+      if (!p) return res.status(404).json({ error: 'That bill was not found.' });
+      res.json({ open: p.open, closed_reason: p.closedReason, outstanding: p.outstandingPaise / 100, customer: p.customer, purpose: p.purpose });
+    } catch (err: any) {
+      console.error('[payments] payable read failed:', err?.message || err);
+      res.status(500).json({ error: 'Could not work out the amount due.' });
+    }
+  });
+
   app.get("/api/restaurant/:id/payments/links", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const objectType = String(req.query.object_type || '').toUpperCase();
@@ -55991,7 +56119,7 @@ ${data.tenant.name}`;
     const b = req.body || {};
     const objectType = String(b.object_type || '').toUpperCase();
     const gates = PAYABLE_OBJECT_GATES[objectType];
-    if (!gates) return res.status(400).json({ error: 'object_type must be HOTEL_FOLIO, EVENT_BOOKING or SPA_FOLIO.' });
+    if (!gates) return res.status(400).json({ error: 'object_type must be HOTEL_FOLIO, EVENT_BOOKING, SPA_FOLIO, RESTAURANT_SESSION or RESTAURANT_ORDER.' });
     if (!(await _pgPassGates(gates.write, req, res))) return;
     if (objectType === 'HOTEL_FOLIO') {
       const chk = await ensureHotelEnabled(req.params.id);
@@ -57889,10 +58017,12 @@ ${data.tenant.name}`;
   }
 
   // Sessions: Close (Owner/Manager confirms payment — accepts final_amount + payment_method override)
-  app.patch("/api/restaurant/:id/sessions/:token/close", authenticate, restaurantStaff, requireTabAction('INVOICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
-    try {
-      const db = await getTenantDb(req.params.id);
-      const { payment_method, final_amount } = req.body || {};
+  // Settle a table bill. The staff route below and the payment-link recorder
+  // (opts.gateway, method ONLINE) both come through here.
+  const _rsOut = (status: number, body: any) => ({ status, body });
+  const settleRestaurantSession = async (restaurantId: string, token: string, input: any, actorReq: AuthRequest | null, opts: { gateway?: boolean } = {}): Promise<{ status: number; body: any }> => {
+      const db = await getTenantDb(restaurantId);
+      const { payment_method, final_amount } = input || {};
 
       // UAT F-R5 — state guard. Closing used to be an unconditional UPDATE: an
       // unknown token returned success, and settling an already-settled bill again
@@ -57903,15 +58033,15 @@ ${data.tenant.name}`;
       // may still be settled here.
       const target: any = await db.get(
         "SELECT id, status, payment_method FROM table_sessions WHERE session_token = ?",
-        [req.params.token]
+        [token]
       );
-      if (!target) return res.status(404).json({ error: 'Table session not found.', code: 'SESSION_NOT_FOUND' });
+      if (!target) return _rsOut(404, { error: 'Table session not found.', code: 'SESSION_NOT_FOUND' });
       const targetStatus = String(target.status || '').toLowerCase();
       if (targetStatus === 'cancelled') {
-        return res.status(409).json({ error: 'This bill was cancelled — it cannot be settled.', code: 'SESSION_CANCELLED', status: target.status });
+        return _rsOut(409, { error: 'This bill was cancelled — it cannot be settled.', code: 'SESSION_CANCELLED', status: target.status });
       }
-      if (target.payment_method) {
-        return res.status(409).json({
+      if (target.payment_method && !(opts.gateway && targetStatus !== 'closed' && String(target.payment_method).toUpperCase() !== 'CHARGE_TO_ROOM')) {
+        return _rsOut(409, {
           error: `This bill is already settled (${target.payment_method}). Settling it again would overwrite the recorded tender — cancel the invoice first if it was wrong.`,
           code: 'SESSION_ALREADY_SETTLED', status: target.status, payment_method: target.payment_method,
         });
@@ -57931,20 +58061,20 @@ ${data.tenant.name}`;
       // close-time. COALESCE preserves any existing value.
       const existingSess: any = await db.get(
         "SELECT invoice_number FROM table_sessions WHERE session_token = ?",
-        [req.params.token]
+        [token]
       );
       if (existingSess && !existingSess.invoice_number) {
-        const lateInv = await generateInvoiceNumberIfSequential(db, req.params.id);
+        const lateInv = await generateInvoiceNumberIfSequential(db, restaurantId);
         if (lateInv) {
           updateParts.push("invoice_number = COALESCE(invoice_number, ?)");
           updateParams.push(lateInv);
         }
       }
-      updateParams.push(req.params.token);
+      updateParams.push(token);
 
       await db.run(`UPDATE table_sessions SET ${updateParts.join(', ')} WHERE session_token = ?`, updateParams);
 
-      const session = await db.get("SELECT id, table_id FROM table_sessions WHERE session_token = ?", [req.params.token]);
+      const session = await db.get("SELECT id, table_id FROM table_sessions WHERE session_token = ?", [token]);
       if (session) {
         // Mark all orders paid AND delivered so they leave the live kitchen view.
         // S2 fix (15 Jun 2026): NEVER touch cancelled orders. Without this guard
@@ -57956,7 +58086,9 @@ ${data.tenant.name}`;
         // which defaulted every settled order to Bank regardless of how it was paid.
         if (payment_method) {
           await db.run(
-            "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED', payment_method = COALESCE(payment_method, ?) WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'",
+            opts.gateway
+              ? "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED', payment_method = ? WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'"
+              : "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED', payment_method = COALESCE(payment_method, ?) WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'",
             [payment_method, session.id]
           );
         } else {
@@ -57979,7 +58111,7 @@ ${data.tenant.name}`;
             [session.id]
           );
           for (const o of (sessOrders || [])) {
-            await _postOrderGl(db, req.params.id, o, req.user?.email || req.user?.id || null);
+            await _postOrderGl(db, restaurantId, o, actorReq?.user?.email || actorReq?.user?.id || null);
           }
         } catch (glErr) { console.error('[GL] session-close capture failed:', glErr); }
 
@@ -57987,8 +58119,8 @@ ${data.tenant.name}`;
         // the table, and the waiter who served it (actor + timestamp are stamped by
         // writeObjectAudit). Keyed by session id like the session invoice-audit read.
         try {
-          const _ctx = await _invoiceServeContext(db, { sessionToken: req.params.token, sessionId: session.id, tableId: (session as any).table_id });
-          await writeObjectAudit(db, req, {
+          const _ctx = await _invoiceServeContext(db, { sessionToken: token, sessionId: session.id, tableId: (session as any).table_id });
+          await writeObjectAudit(db, actorReq, {
             objectType: 'INVOICE',
             objectId: String(session.id),
             action: 'PAID',
@@ -58005,7 +58137,16 @@ ${data.tenant.name}`;
           });
         } catch { /* audit is non-fatal */ }
       }
-      res.json({ success: true });
+      return _rsOut(200, { success: true });
+  };
+  (globalThis as any).__settleRestaurantSession = settleRestaurantSession;
+
+  app.patch("/api/restaurant/:id/sessions/:token/close", authenticate, restaurantStaff, requireTabAction('INVOICES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    // ONLINE means the payment gateway confirmed the money; only the gateway sets it.
+    if (String(req.body?.payment_method || '').toUpperCase() === 'ONLINE') return res.status(400).json({ error: 'Online payments are recorded by the payment gateway.' });
+    try {
+      const out = await settleRestaurantSession(req.params.id, req.params.token, req.body || {}, req);
+      res.status(out.status).json(out.body);
     } catch (err) {
       res.status(500).json({ error: "Failed to close session" });
     }
@@ -63353,34 +63494,28 @@ ${data.tenant.name}`;
   });
 
   // Orders: Mark Payment
-  app.patch("/api/orders/:id/payment", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    try {
-      if (!(await _roleHasTab(req, 'INVOICES', 2))) return res.status(403).json({ error: 'Forbidden — requires INVOICES access.' });
-      const { status, restaurantId: rId } = req.body;
-      // Tenant-safety: this path carries no :id, so the global tenant-isolation
-      // guard can't apply. Staff act on their OWN tenant (from the JWT); only
-      // platform admins may target another tenant via the body restaurantId.
-      const _role = String(req.user?.role || '').toUpperCase();
-      const tenantId = ((_role === 'SUPER_ADMIN' || _role === 'CTO') && rId) ? rId : req.user!.restaurantId;
+  // Mark a restaurant order invoice paid (or set its payment status). The staff
+  // route below and the payment-link recorder both come through here.
+  const markRestaurantOrderPaid = async (tenantId: string, orderId: string, status: any, actorReq: AuthRequest | null): Promise<void> => {
       const db = await getTenantDb(tenantId);
-      const order = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.id]);
+      const order = await db.get("SELECT * FROM orders WHERE id = ?", [orderId]);
 
       const isPaid = (status === 'PAID' || !status);
       // For prepaid orders: release to kitchen when payment is confirmed
       if (order?.checkout_mode === 'prepaid' && isPaid) {
         await db.run(
           "UPDATE orders SET payment_status = 'PAID', kitchen_status = 'queued', status = 'CONFIRMED' WHERE id = ?",
-          [req.params.id]
+          [orderId]
         );
       } else if (isPaid) {
         // For manual invoices and other non-prepaid orders: mark PAID + DELIVERED
         // so they leave the live KDS view immediately
         await db.run(
           "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED' WHERE id = ?",
-          [req.params.id]
+          [orderId]
         );
       } else {
-        await db.run("UPDATE orders SET payment_status = ? WHERE id = ?", [status, req.params.id]);
+        await db.run("UPDATE orders SET payment_status = ? WHERE id = ?", [status, orderId]);
       }
 
       // ───────────────────────────────────────────────────────────────
@@ -63444,34 +63579,50 @@ ${data.tenant.name}`;
       // orders and is idempotent on ORDER-<id>.
       if (isPaid && order) {
         try {
-          const paidOrder = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.id]);
-          await _postOrderGl(db, tenantId, paidOrder, req.user?.email || req.user?.id || null);
+          const paidOrder = await db.get("SELECT * FROM orders WHERE id = ?", [orderId]);
+          await _postOrderGl(db, tenantId, paidOrder, actorReq?.user?.email || actorReq?.user?.id || null);
         } catch (glErr) { console.error('[GL] order-payment capture failed:', glErr); }
       }
 
-      res.json({ success: true });
 
-      // Notify owner on payment received (non-blocking)
-      // For prepaid: also fire ORDER_PLACED so kitchen knows to start preparing
-      if (order && isPaid) {
-        if (order.checkout_mode === 'prepaid') {
-          const itemsParsed = JSON.parse(order.items || '[]');
-          triggerNotification(tenantId, 'ORDER_PLACED', {
-            orderId: order.id, tableNumber: order.table_number,
-            items: itemsParsed.map((i: any) => `${i.name || 'Item'} x${i.quantity ?? 1}`),
-            total: order.total_amount,
-            customerEmail: order.customer_email, customerPhone: order.customer_phone,
+      // The payment is recorded above; a notification problem must not turn it into an error.
+      try {
+        // Notify owner on payment received (non-blocking)
+        // For prepaid: also fire ORDER_PLACED so kitchen knows to start preparing
+        if (order && isPaid) {
+          if (order.checkout_mode === 'prepaid') {
+            const itemsParsed = JSON.parse(order.items || '[]');
+            triggerNotification(tenantId, 'ORDER_PLACED', {
+              orderId: order.id, tableNumber: order.table_number,
+              items: itemsParsed.map((i: any) => `${i.name || 'Item'} x${i.quantity ?? 1}`),
+              total: order.total_amount,
+              customerEmail: order.customer_email, customerPhone: order.customer_phone,
+            }).catch(() => {});
+          }
+          triggerNotification(tenantId, 'PAYMENT_RECEIVED', {
+            orderId:       order.id,
+            tableNumber:   order.table_number,
+            total:         order.total_amount,
+            paymentMethod: order.payment_method,
+            customerEmail: order.customer_email,
+            customerPhone: order.customer_phone,
           }).catch(() => {});
         }
-        triggerNotification(tenantId, 'PAYMENT_RECEIVED', {
-          orderId:       order.id,
-          tableNumber:   order.table_number,
-          total:         order.total_amount,
-          paymentMethod: order.payment_method,
-          customerEmail: order.customer_email,
-          customerPhone: order.customer_phone,
-        }).catch(() => {});
-      }
+      } catch (notifyErr) { console.error('[order-payment] notification failed:', notifyErr); }
+  };
+  (globalThis as any).__markRestaurantOrderPaid = markRestaurantOrderPaid;
+
+  app.patch("/api/orders/:id/payment", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _roleHasTab(req, 'INVOICES', 2))) return res.status(403).json({ error: 'Forbidden — requires INVOICES access.' });
+      const { status, restaurantId: rId } = req.body;
+      // Tenant-safety: this path carries no :id, so the global tenant-isolation
+      // guard can't apply. Staff act on their OWN tenant (from the JWT); only
+      // platform admins may target another tenant via the body restaurantId.
+      const _role = String(req.user?.role || '').toUpperCase();
+      const tenantId = ((_role === 'SUPER_ADMIN' || _role === 'CTO') && rId) ? rId : req.user!.restaurantId;
+      await markRestaurantOrderPaid(tenantId, req.params.id, status, req);
+      res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update payment status" });
     }
@@ -65292,8 +65443,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'spa-payment-links',
+    commit_marker: 'restaurant-payment-links',
     code_features: [
+      'restaurant-payment-links  Restaurant: Send payment link on the Invoices edit modal (table bills and manual/takeaway invoices) and a Link button on the Command Centre table bill (saves the discount and service charge first). Payables RESTAURANT_SESSION (object id = session token) and RESTAURANT_ORDER; gates restaurantStaff + INVOICES (Edit to send). Restaurant bills settle all at once, so a link is always the whole bill, worked out by the server (_restaurantSessionDue = the Invoices list total; orders = _orderNetRevenue gross, what the ledger posts). New GET /payments/payable shows that amount in the dialog. The session close route became settleRestaurantSession() and the order payment route markRestaurantOrderPaid(), shared with the gateway recorder: a paid link settles the bill as ONLINE (every order ONLINE, table freed, ledger to 1025). A customer Request Bill method preference no longer blocks a gateway settlement (staff behaviour unchanged). A payment that no longer matches the bill total, or arrives for a paid, cancelled or room-charged bill, goes to NEEDS_REVIEW. Staff cannot close a table bill as ONLINE (400). Order payment notifications can no longer fail the payment.',
       'spa-payment-links  Spa: Send link on each open spa invoice (Spa, Invoices and Payments) by WhatsApp, email or copy. SPA_FOLIO is a payable: gates spaStaff + SPA_APPOINTMENTS (the same as recording a spa payment), spa must be enabled, a closed or voided invoice is refused, a link above the balance is refused. The spa folio payment route body moved verbatim into recordSpaFolioPayment(), shared by the route and the gateway recorder, so a gateway payment closes the folio and posts spa revenue (4040) exactly as a hand-entered one. Staff cannot post ONLINE by hand (400). The spa invoice list now returns client_phone and client_email. WhatsApp test: clearer errors for a bad token (Meta 190), a wrong phone number id (100), a test recipient that is not a phone number, and a number outside the test allowed list (131030); a token in quotes or under 60 characters is refused on save.',
       'platform-whatsapp-settings  Platform: /internal gets a WhatsApp view. The shared Meta sender (phone number ID, access token, business account ID, app secret, webhook verify token) is saved in central platform_whatsapp_config with secrets sealed (paymentSecrets.ts), write-only, a blank field keeps the saved value. whatsappConfig.ts holds the effective credentials: saved settings, else the META_WA_* env exactly as before (number + token as a pair; app secret, verify token and business account fall back per field). Loaded at startup, after every save and every 5 minutes; notificationService reads it at send time instead of module-load constants. Admin routes GET/PUT/DELETE /api/admin/whatsapp/config and POST /config/test (asks Meta about the number, optionally sends hello_world). The same view maps notification events to approved templates (existing template-map API). Webhook verification now needs a verify token to be set: a missing token used to match an unset env value.',
       'event-payment-links  Events: Send payment link on the booking payment panel (full balance or the next instalment, or any amount up to the balance) by WhatsApp, email or copy. EVENT_BOOKING is a payable: gates eventsStaff + EVENTS_BOOKINGS, events must be enabled, a link above the balance is refused. The event receipt route body moved verbatim into recordEventPayment(), which the route and the gateway recorder share, so a gateway payment gets the same guards, schedule, GL (Dr 1025 clearing) and receipt voucher. ONLINE receipts get no petty-cash row and no second event notification; staff cannot post ONLINE by hand (400). A payment refused by the booking (cancelled, over the balance) goes to NEEDS_REVIEW.',

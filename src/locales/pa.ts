@@ -495,4 +495,11 @@ export const pa: Record<string, string> = {
   // ── Payment link bills ──
   'pg.collect.recordedBill': '{amount} ਔਨਲਾਈਨ ਮਿਲਿਆ ਅਤੇ ਬਿੱਲ \'ਤੇ ਦਰਜ ਕੀਤਾ ਗਿਆ।',
   'pg.collect.reviewBill': 'ਭੁਗਤਾਨ ਆਇਆ, ਪਰ ਇਸ ਬਿੱਲ \'ਤੇ ਲਾਗੂ ਨਹੀਂ ਹੋ ਸਕਿਆ। Payment Gateways → ਭੁਗਤਾਨ ਲਿੰਕ ਵੇਖੋ।',
+  // ── Restaurant payment links ──
+  'rest.pay.sendLink': 'ਭੁਗਤਾਨ ਲਿੰਕ ਭੇਜੋ',
+  'rest.pay.sendLinkShort': 'ਲਿੰਕ',
+  'rest.pay.sendLinkHint': 'ਪੂਰਾ ਬਿੱਲ WhatsApp ਜਾਂ ਈਮੇਲ ਰਾਹੀਂ ਭੁਗਤਾਨ ਲਿੰਕ ਵਜੋਂ ਭੇਜੋ; ਮਹਿਮਾਨ ਦੇ ਭੁਗਤਾਨ ਕਰਦੇ ਹੀ ਬਿੱਲ ਭੁਗਤਾਨਸ਼ੁਦਾ ਹੋ ਜਾਵੇਗਾ',
+  'rest.pay.linkSubtitle': 'ਇਨਵੌਇਸ {id}',
+  'rest.pay.tableSubtitle': 'ਟੇਬਲ {table}',
+  'pg.collect.wholeBill': 'ਪੂਰਾ ਬਿੱਲ, ਜਿਵੇਂ ਆਖਰੀ ਵਾਰ ਸੇਵ ਕੀਤਾ।',
 };

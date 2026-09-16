@@ -104,6 +104,7 @@ import {
   CalendarRange,
   Store,
   BedDouble,
+  Link2 as LinkIcon2,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -13287,6 +13288,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [deleteError, setDeleteError]                 = useState<string|null>(null);
   // ── Invoice Edit Modal State ──────────────────────────────────────────────
   const [invoiceEditTarget, setInvoiceEditTarget] = useState<any|null>(null);
+  // Invoice a gateway payment link is being sent for (whole bill).
+  const [invLinkFor, setInvLinkFor] = useState<any|null>(null);
   const [invEdit, setInvEdit] = useState<{
     items: {name:string; quantity:number; price:number}[];
     discount: number; svcPct: number; gstPct: number; applyGst: boolean;
@@ -39687,6 +39690,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
                 {/* Footer actions */}
                 <div className="px-6 py-4 border-t border-[#cc5a16]/10 flex gap-2 shrink-0">
+                  {canWriteTab('INVOICES') && (
+                    <button
+                      onClick={() => setInvLinkFor(inv)}
+                      title={tr('rest.pay.sendLinkHint')}
+                      className="py-3 px-4 rounded-2xl border border-[#128c7e]/30 text-[#128c7e] font-bold text-sm hover:bg-[#128c7e]/5 transition-all flex items-center justify-center gap-2"
+                    >
+                      <LinkIcon2 size={14}/>{tr('rest.pay.sendLink')}
+                    </button>
+                  )}
                   <button
                     onClick={saveInvoiceEdit}
                     disabled={
@@ -39732,6 +39744,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           );
         })()}
+
+        {invLinkFor && (
+          <CollectOnlineDialog
+            restaurantId={restaurantId} token={token}
+            folio={{ id: invLinkFor.id, guest_name: invLinkFor.customer_name, guest_phone: invLinkFor.customer_phone, guest_email: invLinkFor.customer_email }}
+            payable={{
+              objectType: invLinkFor.invoice_type === 'SESSION' ? 'RESTAURANT_SESSION' : 'RESTAURANT_ORDER',
+              objectId: invLinkFor.invoice_type === 'SESSION' ? invLinkFor.session_token : invLinkFor.id,
+              permTab: 'INVOICES', fixedAmount: true, outstanding: 0,
+              subtitle: tr('rest.pay.linkSubtitle', { id: invLinkFor.display_number || invLinkFor.id }),
+            }}
+            onClose={() => setInvLinkFor(null)}
+            onRecorded={() => { setInvLinkFor(null); setInvoiceEditTarget(null); fetchInvoices(); fetchLiveTables(); }}
+          />
+        )}
 
         {/* ── Print Preview Modal ── */}
         {/* z-[120]: must sit ABOVE the New Invoice modal (z-50), which renders
@@ -61237,6 +61264,8 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const [confirmClose, setConfirmClose] = useState(false);
   const [payMethod, setPayMethod]     = useState<'CASH' | 'CARD' | 'UPI' | 'CHARGE_TO_ROOM'>('CASH');
   const [expanded, setExpanded]       = useState<Record<number, boolean>>({});
+  const [linkOpen, setLinkOpen]       = useState(false);
+  const { t: trBill } = useT();
 
   // Move / transfer — tick dishes (or all) → target table → TRANSFER KOT.
   const [showMove, setShowMove]           = useState(false);
@@ -62367,6 +62396,25 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
               >
                 <span className="text-sm leading-none">⇄</span> Move
               </button>
+              {canWriteTab('INVOICES') && (
+                <button
+                  // Save the discount / service charge first: the link asks for the bill as saved.
+                  onClick={async () => { try { await persistAdjustments(); } catch { /* the dialog shows the saved amount */ } setLinkOpen(true); }}
+                  title={trBill('rest.pay.sendLinkHint')}
+                  className="flex items-center justify-center gap-1.5 px-3 py-3 rounded-xl border border-[#128c7e]/30 text-[#128c7e] text-xs font-bold uppercase tracking-widest hover:bg-[#128c7e]/5 transition-all"
+                >
+                  <LinkIcon2 size={13} /> {trBill('rest.pay.sendLinkShort')}
+                </button>
+              )}
+              {linkOpen && session && (
+                <CollectOnlineDialog
+                  restaurantId={restaurantId} token={token}
+                  folio={{ id: session.session_token, guest_name: session.customer_name, guest_phone: session.customer_phone }}
+                  payable={{ objectType: 'RESTAURANT_SESSION', objectId: session.session_token, permTab: 'INVOICES', fixedAmount: true, outstanding: 0, subtitle: trBill('rest.pay.tableSubtitle', { table: table.name }) }}
+                  onClose={() => setLinkOpen(false)}
+                  onRecorded={() => { setLinkOpen(false); onClose(); }}
+                />
+              )}
 
               {payMethod === 'CHARGE_TO_ROOM' ? (
                 <button

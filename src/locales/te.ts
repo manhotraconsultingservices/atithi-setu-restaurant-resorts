@@ -431,4 +431,11 @@ export const te: Record<string, string> = {
   // ── Payment link bills ──
   'pg.collect.recordedBill': '{amount} ఆన్‌లైన్‌లో అందింది, బిల్లులో నమోదు చేయబడింది.',
   'pg.collect.reviewBill': 'చెల్లింపు వచ్చింది, కానీ ఈ బిల్లుకు వర్తింపజేయలేకపోయాం. Payment Gateways → చెల్లింపు లింక్‌లు చూడండి.',
+  // ── Restaurant payment links ──
+  'rest.pay.sendLink': 'చెల్లింపు లింక్ పంపండి',
+  'rest.pay.sendLinkShort': 'లింక్',
+  'rest.pay.sendLinkHint': 'మొత్తం బిల్లును WhatsApp లేదా ఇమెయిల్ ద్వారా చెల్లింపు లింక్‌గా పంపండి; అతిథి చెల్లించగానే చెల్లించినట్లు నమోదవుతుంది',
+  'rest.pay.linkSubtitle': 'ఇన్‌వాయిస్ {id}',
+  'rest.pay.tableSubtitle': 'టేబుల్ {table}',
+  'pg.collect.wholeBill': 'మొత్తం బిల్లు, చివరిగా సేవ్ చేసినట్లు.',
 };

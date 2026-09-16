@@ -433,4 +433,11 @@ export const kn: Record<string, string> = {
   // ── Payment link bills ──
   'pg.collect.recordedBill': '{amount} ಆನ್‌ಲೈನ್‌ನಲ್ಲಿ ಸ್ವೀಕರಿಸಿ ಬಿಲ್‌ನಲ್ಲಿ ದಾಖಲಿಸಲಾಗಿದೆ.',
   'pg.collect.reviewBill': 'ಪಾವತಿ ಬಂದಿದೆ, ಆದರೆ ಈ ಬಿಲ್‌ಗೆ ಅನ್ವಯಿಸಲಾಗಲಿಲ್ಲ. Payment Gateways → ಪಾವತಿ ಲಿಂಕ್‌ಗಳನ್ನು ನೋಡಿ.',
+  // ── Restaurant payment links ──
+  'rest.pay.sendLink': 'ಪಾವತಿ ಲಿಂಕ್ ಕಳುಹಿಸಿ',
+  'rest.pay.sendLinkShort': 'ಲಿಂಕ್',
+  'rest.pay.sendLinkHint': 'ಸಂಪೂರ್ಣ ಬಿಲ್ ಅನ್ನು WhatsApp ಅಥವಾ ಇಮೇಲ್ ಮೂಲಕ ಪಾವತಿ ಲಿಂಕ್ ಆಗಿ ಕಳುಹಿಸಿ; ಅತಿಥಿ ಪಾವತಿಸಿದಾಗ ಪಾವತಿಯಾಗಿದೆ ಎಂದು ಗುರುತಿಸಲಾಗುತ್ತದೆ',
+  'rest.pay.linkSubtitle': 'ಇನ್‌ವಾಯ್ಸ್ {id}',
+  'rest.pay.tableSubtitle': 'ಟೇಬಲ್ {table}',
+  'pg.collect.wholeBill': 'ಸಂಪೂರ್ಣ ಬಿಲ್, ಕೊನೆಯದಾಗಿ ಉಳಿಸಿದಂತೆ.',
 };

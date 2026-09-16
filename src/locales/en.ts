@@ -498,4 +498,11 @@ export const en: Record<string, string> = {
   // ── Payment link bills ──
   'pg.collect.recordedBill': '{amount} received online and recorded on the bill.',
   'pg.collect.reviewBill': 'A payment arrived but could not be applied to this bill. See Payment Gateways → Payment links.',
+  // ── Restaurant payment links ──
+  'rest.pay.sendLink': 'Send payment link',
+  'rest.pay.sendLinkShort': 'Link',
+  'rest.pay.sendLinkHint': 'Send the whole bill as a payment link by WhatsApp or email; it is marked paid when the guest pays',
+  'rest.pay.linkSubtitle': 'Invoice {id}',
+  'rest.pay.tableSubtitle': 'Table {table}',
+  'pg.collect.wholeBill': 'The whole bill, as last saved.',
 };

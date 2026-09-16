@@ -554,7 +554,9 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
 // Collect online — from a guest folio, or (with `payable`) from an event booking
 // ═════════════════════════════════════════════════════════════════════════════
 export interface OnlinePayable {
-  objectType: 'EVENT_BOOKING' | 'SPA_FOLIO' | 'RESTAURANT_BILL';
+  objectType: 'EVENT_BOOKING' | 'SPA_FOLIO' | 'RESTAURANT_SESSION' | 'RESTAURANT_ORDER';
+  // Whole bill only: the server works out the amount; staff cannot change it.
+  fixedAmount?: boolean;
   // The tab whose write access recording a payment on this bill needs.
   permTab: string;
   objectId: string;
@@ -598,6 +600,18 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
 
   useEffect(() => {
     (async () => {
+      if (payable?.fixedAmount) {
+        // The server's figure, so the dialog shows exactly what the link will ask for.
+        try {
+          const due = await api(`/payable?object_type=${payable.objectType}&object_id=${encodeURIComponent(payable.objectId)}`);
+          setOutstanding(Number(due.outstanding || 0));
+          setAmount(Number(due.outstanding || 0).toFixed(2));
+          if (!due.open && due.closed_reason) setNotice({ tone: 'warn', text: due.closed_reason });
+          if (due.customer?.phone) setPhone(p => p || due.customer.phone);
+          if (due.customer?.email) setEmail(e => e || due.customer.email);
+        } catch (e: any) { setNotice({ tone: 'error', text: e.message }); }
+        return;
+      }
       if (payable) {
         // The event panel already holds the balance; no folio to ask.
         setOutstanding(payable.outstanding);
@@ -640,7 +654,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
     try {
       const out = await api('/links', {
         method: 'POST',
-        body: JSON.stringify({ object_type: objectType, object_id: objectId, amount, customer_phone: phone, customer_email: email, customer_name: folio.guest_name, expires_in_hours: Number(hours), channel }),
+        body: JSON.stringify({ object_type: objectType, object_id: objectId, amount: payable?.fixedAmount ? undefined : amount, customer_phone: phone, customer_email: email, customer_name: folio.guest_name, expires_in_hours: Number(hours), channel }),
       });
       if (channel === 'NONE') setNotice({ tone: 'ok', text: 'Link created. Copy it or share it on WhatsApp below.' });
       else if (out.sent?.length) setNotice({ tone: out.errors ? 'warn' : 'ok', text: `Sent on ${out.sent.join(' and ').toLowerCase()}.${out.errors ? ` ${out.errors.join(' ')}` : ''}` });
@@ -712,8 +726,9 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={label}>Amount (₹)</label>
-                  <input className={input} inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder={outstanding ? outstanding.toFixed(2) : 'e.g. 5000'} />
-                  {outstanding === 0 && <p className="text-[10px] text-[#9c8e85] mt-1">Nothing charged yet — enter the advance to collect.</p>}
+                  <input className={`${input} ${payable?.fixedAmount ? 'opacity-80 cursor-not-allowed' : ''}`} inputMode="decimal" readOnly={!!payable?.fixedAmount} value={amount} onChange={e => setAmount(e.target.value)} placeholder={outstanding ? outstanding.toFixed(2) : 'e.g. 5000'} />
+                  {payable?.fixedAmount && <p className="text-[10px] text-[#9c8e85] mt-1">{t('pg.collect.wholeBill')}</p>}
+                  {outstanding === 0 && !payable?.fixedAmount && <p className="text-[10px] text-[#9c8e85] mt-1">Nothing charged yet — enter the advance to collect.</p>}
                   {!!payable?.presets?.length && (
                     <div className="flex gap-1.5 flex-wrap mt-1.5">
                       {payable.presets.map(p => (
