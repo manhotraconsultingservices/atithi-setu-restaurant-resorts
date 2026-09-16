@@ -769,8 +769,8 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
                 </div>
               </div>
               <div className="flex gap-2 flex-wrap">
-                <button disabled={!!busy || !phone || !waOn} title={waOn ? undefined : t('modules.whatsappLocked')} onClick={() => create('WHATSAPP')} className={`${btn} bg-[#128c7e] text-white hover:bg-[#0e6f64]`}><MessageCircle size={13} /> {busy === 'create:WHATSAPP' ? 'Sending…' : 'Send on WhatsApp'}</button>
-                <button disabled={!!busy || !phone || !email || !waOn} title={waOn ? t('pg.collect.sendBothHint') : t('modules.whatsappLocked')} onClick={() => create('BOTH')} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}><Send size={13} /> {busy === 'create:BOTH' ? t('pg.collect.sending') : t('pg.collect.sendBoth')}</button>
+                {waOn && <button disabled={!!busy || !phone} onClick={() => create('WHATSAPP')} className={`${btn} bg-[#128c7e] text-white hover:bg-[#0e6f64]`}><MessageCircle size={13} /> {busy === 'create:WHATSAPP' ? 'Sending…' : 'Send on WhatsApp'}</button>}
+                {waOn && <button disabled={!!busy || !phone || !email} title={t('pg.collect.sendBothHint')} onClick={() => create('BOTH')} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}><Send size={13} /> {busy === 'create:BOTH' ? t('pg.collect.sending') : t('pg.collect.sendBoth')}</button>}
                 <button disabled={!!busy || !email || (active?.requires_customer_phone && !phone)} onClick={() => create('EMAIL')} className={`${btn} bg-[#1e3a5f] text-white hover:bg-[#162c49]`}><Mail size={13} /> {busy === 'create:EMAIL' ? 'Sending…' : 'Send by email'}</button>
                 <button disabled={!!busy || (active?.requires_customer_phone && !phone)} onClick={() => create('NONE')} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><Link2 size={13} /> {busy === 'create:NONE' ? 'Creating…' : 'Create link only'}</button>
               </div>

@@ -17186,6 +17186,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           isHotelEnabled,
           isEventsEnabled,
           isSpaEnabled,
+          isOnlinePaymentsEnabled: Number((restaurant as any)?.online_payments_enabled) === 1,
           hasEventsGrant: Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.some(t => String(t).startsWith('EVENTS_')),
           baseTabVisible: (tid: string) => isTabVisible(tid, effectiveAllowedTabs),
           strictGranted: (tid: string) => Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(tid),
@@ -22718,10 +22719,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <Eye size={11} /> Preview
                               </button>
                               {/* Send payment link — the whole bill, by email, WhatsApp or both */}
-                              {canWriteTab('INVOICES') && (() => {
+                              {canWriteTab('INVOICES') && moduleOn('online_payments') && (() => {
                                 const cancelled = String(inv.status || '').toUpperCase() === 'CANCELLED' || String(inv.invoice_status || '').toUpperCase() === 'CANCELLED';
-                                const can = moduleOn('online_payments') && !isPaid && !cancelled && Number(inv.totalAmount || 0) > 0;
-                                const why = !moduleOn('online_payments') ? tr('modules.paymentsLocked') : (isPaid || cancelled || !(Number(inv.totalAmount || 0) > 0)) ? tr('pg.collect.nothingDue') : tr('pg.collect.sendLinkIcon');
+                                const can = !isPaid && !cancelled && Number(inv.totalAmount || 0) > 0;
+                                const why = (isPaid || cancelled || !(Number(inv.totalAmount || 0) > 0)) ? tr('pg.collect.nothingDue') : tr('pg.collect.sendLinkIcon');
                                 return (
                                   <button onClick={() => setInvLinkFor(inv)} disabled={!can} title={why} aria-label={why}
                                     className="px-2 py-1 rounded-lg text-[11px] font-bold bg-[#128c7e]/10 text-[#128c7e] hover:bg-[#128c7e]/20 transition-all flex items-center disabled:opacity-40 disabled:cursor-not-allowed">
@@ -25287,26 +25288,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               which builds the folio breakup + UPI
                               deep link and emails / WhatsApps it
                               with the amount pre-filled. */}
-                          {b.status !== 'CANCELLED' && Number(b.total_amount || 0) > 0 ? (
+                          {moduleOn('online_payments') && b.status !== 'CANCELLED' && Number(b.total_amount || 0) > 0 ? (
                             <div className="inline-flex items-center gap-1">
                               <button
                                 type="button"
-                                disabled={paylinkBusy === `${b.id}|EMAIL` || !b.guest_email || !moduleOn('online_payments')}
+                                disabled={paylinkBusy === `${b.id}|EMAIL` || !b.guest_email}
                                 onClick={() => sendPayLink(b.id, 'EMAIL')}
-                                title={!moduleOn('online_payments') ? tr('modules.paymentsLocked') : b.guest_email ? `Email payment link to ${b.guest_email}` : 'No email on file — add email to booking first'}
+                                title={b.guest_email ? `Email payment link to ${b.guest_email}` : 'No email on file — add email to booking first'}
                                 className="p-1.5 rounded-lg border-2 border-[#cc5a16] text-[#cc5a16] bg-white hover:bg-[#cc5a16]/10 text-base leading-none transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-[#cc5a16]/30 disabled:text-[#cc5a16]/50"
                               >
                                 {paylinkBusy === `${b.id}|EMAIL` ? '…' : '📧'}
                               </button>
-                              <button
+                              {moduleOn('whatsapp') && <button
                                 type="button"
-                                disabled={paylinkBusy === `${b.id}|WHATSAPP` || !b.guest_phone || !moduleOn('online_payments') || !moduleOn('whatsapp')}
+                                disabled={paylinkBusy === `${b.id}|WHATSAPP` || !b.guest_phone}
                                 onClick={() => sendPayLink(b.id, 'WHATSAPP')}
-                                title={!moduleOn('online_payments') ? tr('modules.paymentsLocked') : !moduleOn('whatsapp') ? tr('modules.whatsappLocked') : b.guest_phone ? `WhatsApp payment link to ${b.guest_phone}` : 'No phone on file — add phone to booking first'}
+                                title={b.guest_phone ? `WhatsApp payment link to ${b.guest_phone}` : 'No phone on file — add phone to booking first'}
                                 className="p-1.5 rounded-lg border-2 border-emerald-600 text-emerald-700 bg-white hover:bg-emerald-50 text-base leading-none transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-emerald-300 disabled:text-emerald-400"
                               >
                                 {paylinkBusy === `${b.id}|WHATSAPP` ? '…' : '💬'}
-                              </button>
+                              </button>}
                             </div>
                           ) : (
                             <span className="text-[10px] text-[#9c8e85]">—</span>
@@ -28845,11 +28846,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-3 py-3 text-xs text-[#9c8e85] whitespace-nowrap">{f.settled_at ? String(f.settled_at).slice(0,16).replace('T',' ') : '—'}</td>
                             <td className="px-3 py-3 text-right">
                               <div className="flex items-center gap-1 justify-end">
-                                {canWriteTab('FOLIOS') && (() => {
+                                {canWriteTab('FOLIOS') && moduleOn('online_payments') && (() => {
                                   // A single guest's open bill; group bills are settled from the group.
                                   const open = !f.is_group && !['settled', 'voided', 'closed', 'cancelled'].includes(String(f.status || '').toLowerCase()) && Number(f.grand_total || 0) > 0;
-                                  const can = moduleOn('online_payments') && open;
-                                  const why = !moduleOn('online_payments') ? tr('modules.paymentsLocked') : !open ? tr('pg.collect.nothingDue') : tr('pg.collect.sendLinkIcon');
+                                  const can = open;
+                                  const why = !open ? tr('pg.collect.nothingDue') : tr('pg.collect.sendLinkIcon');
                                   return (
                                     <button onClick={() => setCollectOnlineFolio(f)} disabled={!can} title={why} aria-label={why}
                                       className="px-2 py-1 rounded-lg bg-[#128c7e]/10 text-[#128c7e] hover:bg-[#128c7e]/20 flex items-center disabled:opacity-40 disabled:cursor-not-allowed">
@@ -29137,7 +29138,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               (!t.hotelOnly      || isHotelEnabled) &&
               (!t.restaurantOnly || isRestaurantEnabled) &&
               (!t.eventsOnly     || isEventsEnabled) &&
-              (!t.spaOnly        || isSpaEnabled)
+              (!t.spaOnly        || isSpaEnabled) &&
+              (t.id !== 'PAYMENT_GATEWAYS' || Number((restaurant as any)?.online_payments_enabled) === 1)
             );
 
             // ── RBAC-7 (2026-08-17) — module-scoped Staff Access ─────────
@@ -38012,12 +38014,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   }}
                   className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-[#1e3a5f]/20 text-[#1e3a5f] text-xs font-bold hover:bg-[#1e3a5f]/5"
                 ><Mail size={13}/> Email</button>
-                {canWriteTab('FOLIOS') && viewFolio.status !== 'settled' && viewFolio.status !== 'voided'
+                {canWriteTab('FOLIOS') && moduleOn('online_payments') && viewFolio.status !== 'settled' && viewFolio.status !== 'voided'
                   && String(viewFolio.folio_kind || 'HOTEL').toUpperCase() === 'HOTEL' && (
                   <button
                     onClick={() => setCollectOnlineFolio(viewFolio)}
-                    disabled={!moduleOn('online_payments')}
-                    title={moduleOn('online_payments') ? 'Send the guest a payment link (UPI, card, net banking) on WhatsApp or email. The payment is added to this folio when they pay.' : tr('modules.paymentsLocked')}
+                    title="Send the guest a payment link (UPI, card, net banking) on WhatsApp or email. The payment is added to this folio when they pay."
                     className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-emerald-600/25 text-emerald-700 text-xs font-bold hover:bg-emerald-50 disabled:opacity-40 disabled:cursor-not-allowed"
                   ><CreditCard size={13}/> Collect online</button>
                 )}
@@ -39718,11 +39719,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
                 {/* Footer actions */}
                 <div className="px-6 py-4 border-t border-[#cc5a16]/10 flex gap-2 shrink-0">
-                  {canWriteTab('INVOICES') && (
+                  {canWriteTab('INVOICES') && moduleOn('online_payments') && (
                     <button
                       onClick={() => setInvLinkFor(inv)}
-                      disabled={!moduleOn('online_payments')}
-                      title={moduleOn('online_payments') ? tr('rest.pay.sendLinkHint') : tr('modules.paymentsLocked')}
+                      title={tr('rest.pay.sendLinkHint')}
                       className="py-3 px-4 rounded-2xl border border-[#128c7e]/30 text-[#128c7e] font-bold text-sm hover:bg-[#128c7e]/5 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <LinkIcon2 size={14}/>{tr('rest.pay.sendLink')}
@@ -62461,12 +62461,11 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
               >
                 <span className="text-sm leading-none">⇄</span> Move
               </button>
-              {canWriteTab('INVOICES') && (
+              {canWriteTab('INVOICES') && moduleOn('online_payments') && (
                 <button
                   // Save the discount / service charge first: the link asks for the bill as saved.
                   onClick={async () => { try { await persistAdjustments(); } catch { /* the dialog shows the saved amount */ } setLinkOpen(true); }}
-                  disabled={!moduleOn('online_payments')}
-                  title={moduleOn('online_payments') ? trBill('rest.pay.sendLinkHint') : trBill('modules.paymentsLocked')}
+                  title={trBill('rest.pay.sendLinkHint')}
                   className="flex items-center justify-center gap-1.5 px-3 py-3 rounded-xl border border-[#128c7e]/30 text-[#128c7e] text-xs font-bold uppercase tracking-widest hover:bg-[#128c7e]/5 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <LinkIcon2 size={13} /> {trBill('rest.pay.sendLinkShort')}
@@ -74662,12 +74661,6 @@ function NotificationSettings({ restaurantId, token, restaurantName, isHotelEnab
         )}
       </div>
 
-      {!moduleOn('whatsapp') && (
-        <div className="flex gap-2 items-center bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-sm text-amber-900">
-          <AlertTriangle size={16} className="flex-none" /> {tNotif('modules.whatsappLockedNotifications')}
-        </div>
-      )}
-
       {/* Tabs */}
       <div className="flex gap-1 border-b border-[#cc5a16]/10">
         {tabs.map(t => (
@@ -74731,7 +74724,7 @@ function NotificationSettings({ restaurantId, token, restaurantName, isHotelEnab
                                   <span className="text-[10px] text-[#9c8e85] uppercase tracking-wider">{role.replace(/_/g, ' ')}</span>
                                 )}
                                 <div className="flex flex-wrap gap-1.5">
-                                  {NOTIFICATION_CHANNELS.map(channel => {
+                                  {NOTIFICATION_CHANNELS.filter(channel => channel.id !== 'whatsapp_enabled' || moduleOn('whatsapp')).map(channel => {
                                     const isOn = !!setting?.[channel.id];
                                     return (
                                       <button key={channel.id} onClick={() => handleToggle(event.id, role, channel.id)}
@@ -74774,7 +74767,7 @@ function NotificationSettings({ restaurantId, token, restaurantName, isHotelEnab
           <TenantEmailPanel token={token} canEdit={canEdit} />
 
           {/* WhatsApp — one shared sender, by design */}
-          <div className="bg-white border border-[#cc5a16]/10 rounded-3xl p-6">
+          {moduleOn('whatsapp') && <div className="bg-white border border-[#cc5a16]/10 rounded-3xl p-6">
             <div className="flex items-start gap-3">
               <MessageSquare size={18} className="text-[#25D366] mt-0.5" />
               <div className="flex-1">
@@ -74790,7 +74783,7 @@ function NotificationSettings({ restaurantId, token, restaurantName, isHotelEnab
                 </p>
               </div>
             </div>
-          </div>
+          </div>}
 
           {/* Delivery log */}
           <div className="bg-white border border-[#cc5a16]/10 rounded-3xl p-6">
@@ -74853,7 +74846,7 @@ function NotificationSettings({ restaurantId, token, restaurantName, isHotelEnab
 function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string; canEdit: boolean; propertyName: string }) {
   const toast = useToast();
   const [tab, setTab] = useState<'SEND' | 'ACTIVITY' | 'INBOX'>('SEND');
-  const [channel, setChannel] = useState<'WHATSAPP' | 'EMAIL' | 'SMS'>('WHATSAPP');
+  const [channel, setChannel] = useState<'WHATSAPP' | 'EMAIL' | 'SMS'>(moduleOn('whatsapp') ? 'WHATSAPP' : 'EMAIL');
   const [to, setTo] = useState('');
   const [subject, setSubject] = useState('');
   const [text, setText] = useState('');
@@ -75012,10 +75005,8 @@ function MessagingConsolePanel({ token, canEdit, propertyName }: { token: string
             <div>
               <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Channel</label>
               <div className="flex gap-2 mt-2">
-                {CH.map(c => (
+                {CH.filter(c => c.id !== 'WHATSAPP' || moduleOn('whatsapp')).map(c => (
                   <button key={c.id} onClick={() => { setChannel(c.id as any); setOutcome(null); }}
-                    disabled={c.id === 'WHATSAPP' && !moduleOn('whatsapp')}
-                    title={c.id === 'WHATSAPP' && !moduleOn('whatsapp') ? 'WhatsApp messaging is not on your plan.' : undefined}
                     className={cn('flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-bold border transition-colors',
                       channel === c.id ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#cc5a16]/15 hover:bg-[#faf7f2]')}>
                     <c.icon size={15} /> {c.label}

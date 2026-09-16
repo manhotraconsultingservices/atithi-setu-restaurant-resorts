@@ -885,11 +885,12 @@ function EventBookings({ restaurantId, token }: Props) {
           { key: 'status', label: t('common.status'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.status, render: (r: any) => <Pill status={r.status} /> },
           { key: '_a', label: t('common.actions'), noExport: true, render: (r: any) => {
             const due = Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0));
-            const can = evCanEdit('EVENTS_BOOKINGS') && moduleOn('online_payments') && r.status !== 'CANCELLED' && due > 0.01;
-            const why = !moduleOn('online_payments') ? t('modules.paymentsLocked') : r.status === 'CANCELLED' || due <= 0.01 ? t('pg.collect.nothingDue') : t('pg.collect.sendLinkIcon');
+            const showLink = evCanEdit('EVENTS_BOOKINGS') && moduleOn('online_payments');
+            const can = r.status !== 'CANCELLED' && due > 0.01;
+            const why = can ? t('pg.collect.sendLinkIcon') : t('pg.collect.nothingDue');
             return (
               <div className="flex items-center gap-1.5 justify-end">
-                <button className={`${BTN_GHOST} !px-2 disabled:opacity-40 disabled:cursor-not-allowed`} disabled={!can} title={why} aria-label={why} onClick={() => setLinkRow(r)}><Link2 size={13} /></button>
+                {showLink && <button className={`${BTN_GHOST} !px-2 disabled:opacity-40 disabled:cursor-not-allowed`} disabled={!can} title={why} aria-label={why} onClick={() => setLinkRow(r)}><Link2 size={13} /></button>}
                 <button className={BTN_GHOST} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{t('common.edit')}</button>
               </div>
             );
@@ -994,7 +995,7 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
         <div className="flex items-center gap-3 text-xs">
           <span className="text-[#6b5d52]">{t('events.pay.paid')} <b className="text-emerald-700 tabular-nums">{money(pay.paid)}</b></span>
           <span className="text-[#6b5d52]">{t('events.pay.balance')} <b className="text-rose-600 tabular-nums">{money(pay.balance)}</b></span>
-          {canRecord && Number(pay.balance) > 0.01 && <button className={`${BTN_GHOST} disabled:opacity-40 disabled:cursor-not-allowed`} disabled={!moduleOn('online_payments')} title={moduleOn('online_payments') ? undefined : t('modules.paymentsLocked')} onClick={() => setLinkOpen(true)}><Link2 size={12} />{t('events.pay.sendLink')}</button>}
+          {canRecord && moduleOn('online_payments') && Number(pay.balance) > 0.01 && <button className={BTN_GHOST} onClick={() => setLinkOpen(true)}><Link2 size={12} />{t('events.pay.sendLink')}</button>}
           {canRecord && <button className={BTN_PRIMARY} onClick={() => openPay()}><Plus size={12} />{t('events.pay.record')}</button>}
         </div>
       </div>

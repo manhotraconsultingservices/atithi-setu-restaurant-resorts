@@ -31,6 +31,8 @@ export interface NavVisibilityCtx {
   isHotelEnabled: boolean;
   isEventsEnabled: boolean;
   isSpaEnabled: boolean;
+  /** Online Payments paid module (platform switch). Off hides Payment Gateways for every role. Omitted = on. */
+  isOnlinePaymentsEnabled?: boolean;
   /** true when the role holds ANY EVENTS_* tab grant (drives the Events group). */
   hasEventsGrant: boolean;
   /**
@@ -85,7 +87,8 @@ export function computeTabVisibility(id: string, ctx: NavVisibilityCtx): boolean
   if (id === 'PRINT_TEMPLATES') return isOwnerOrAdmin;
   // Gateway keys can move the property's money: owner, or a role the owner
   // explicitly granted. Not implied by MANAGER, and never under a null list.
-  if (id === 'PAYMENT_GATEWAYS') return isOwnerOrAdmin || strictGranted(id);
+  // A paid module the platform has not switched on is not shown to anyone.
+  if (id === 'PAYMENT_GATEWAYS') return ctx.isOnlinePaymentsEnabled !== false && (isOwnerOrAdmin || strictGranted(id));
 
   // Checklist Templates: owner/admin always, plus any role granted it.
   if (id === 'CHECKLISTS') return isOwnerOrAdmin || baseTabVisible(id);

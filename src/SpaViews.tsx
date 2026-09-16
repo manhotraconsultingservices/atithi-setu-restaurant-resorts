@@ -2812,7 +2812,7 @@ function SpaFolios({ restaurantId, token }: Props) {
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
                         {open && canEdit && <button className={BTN_PRIMARY} onClick={() => openPay(f)}><IndianRupee size={12} /> Payment</button>}
-                        {open && canSendLink && <button className={`${BTN_GHOST} disabled:opacity-40 disabled:cursor-not-allowed`} disabled={!moduleOn('online_payments')} title={moduleOn('online_payments') ? t('spa.pay.sendLinkHint') : t('modules.paymentsLocked')} onClick={() => setLinkFor(f)}><Link2 size={12} /> {t('spa.pay.sendLink')}</button>}
+                        {open && canSendLink && moduleOn('online_payments') && <button className={BTN_GHOST} title={t('spa.pay.sendLinkHint')} onClick={() => setLinkFor(f)}><Link2 size={12} /> {t('spa.pay.sendLink')}</button>}
                         {open && canEdit && <button className={BTN_GHOST} onClick={() => openPromo(f)}><Tag size={12} /> Promo</button>}
                         <button className={BTN_GHOST} onClick={() => downloadPdf(f)}><FileText size={12} /> Invoice</button>
                         <button className={BTN_GHOST} title="Audit log — who changed this invoice" onClick={() => setHistory({ id: f.id, meta: { title: f.invoice_number || f.id, subtitle: [statusOf(f), f.client_name].filter(Boolean).join(' · '), facts: [['Invoice #', f.invoice_number], ['Client', f.client_name], ['Service', f.service_name], ['Total', money(f.grand_total)], ['Paid', money(f.paid_amount)], ['Outstanding', open ? money(outOf(f)) : '—']] } })}><History size={12} /></button>
