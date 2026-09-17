@@ -522,4 +522,8 @@ export const kn: Record<string, string> = {
   'listFilter.totalSettled': 'ಒಟ್ಟು ಇತ್ಯರ್ಥ',
   'listFilter.collected': 'ಸಂಗ್ರಹಿಸಲಾಗಿದೆ',
   'listFilter.outstanding': 'ಬಾಕಿ',
+  // ── Orders list actions ──
+  'actions.viewInvoice': 'ಇನ್‌ವಾಯ್ಸ್ ನೋಡಿ',
+  'actions.openInInvoices': 'ಬಿಲ್ ಅನ್ನು ಇನ್‌ವಾಯ್ಸ್‌ಗಳಲ್ಲಿ ತೆರೆಯಿರಿ',
+  'actions.reprintKot': 'KOT ಮತ್ತೆ ಮುದ್ರಿಸಿ',
 };

@@ -584,4 +584,8 @@ export const pa: Record<string, string> = {
   'listFilter.totalSettled': 'ਕੁੱਲ ਨਿਪਟਾਰਾ',
   'listFilter.collected': 'ਪ੍ਰਾਪਤ',
   'listFilter.outstanding': 'ਬਕਾਇਆ ਰਕਮ',
+  // ── Orders list actions ──
+  'actions.viewInvoice': 'ਇਨਵੌਇਸ ਵੇਖੋ',
+  'actions.openInInvoices': 'ਬਿੱਲ ਇਨਵੌਇਸ ਵਿੱਚ ਖੋਲ੍ਹੋ',
+  'actions.reprintKot': 'KOT ਮੁੜ ਪ੍ਰਿੰਟ ਕਰੋ',
 };

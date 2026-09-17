@@ -623,4 +623,8 @@ export const hi: Record<string, string> = {
   'listFilter.totalSettled': 'कुल निपटान',
   'listFilter.collected': 'प्राप्त',
   'listFilter.outstanding': 'बकाया राशि',
+  // ── Orders list actions ──
+  'actions.viewInvoice': 'इनवॉइस देखें',
+  'actions.openInInvoices': 'बिल इनवॉइस में खोलें',
+  'actions.reprintKot': 'KOT फिर से प्रिंट करें',
 };

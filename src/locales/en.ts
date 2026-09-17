@@ -587,4 +587,8 @@ export const en: Record<string, string> = {
   'listFilter.totalSettled': 'Total settled',
   'listFilter.collected': 'Collected',
   'listFilter.outstanding': 'Outstanding',
+  // ── Orders list actions ──
+  'actions.viewInvoice': 'View invoice',
+  'actions.openInInvoices': 'Open the bill in Invoices',
+  'actions.reprintKot': 'Reprint KOT',
 };

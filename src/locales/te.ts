@@ -520,4 +520,8 @@ export const te: Record<string, string> = {
   'listFilter.totalSettled': 'మొత్తం పరిష్కారం',
   'listFilter.collected': 'వసూలైనది',
   'listFilter.outstanding': 'బకాయి',
+  // ── Orders list actions ──
+  'actions.viewInvoice': 'ఇన్‌వాయిస్ చూడండి',
+  'actions.openInInvoices': 'బిల్లును ఇన్‌వాయిస్‌లలో తెరవండి',
+  'actions.reprintKot': 'KOT మళ్లీ ముద్రించండి',
 };

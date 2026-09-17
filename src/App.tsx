@@ -112,6 +112,7 @@ import {
   Link2 as LinkIcon2,
   BadgePercent,
   LogIn, ClipboardList, ArrowLeftRight, ArrowUpCircle,
+  ExternalLink,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -22374,6 +22375,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         </span>
                       </th>
                     ))}
+                    <th className="px-6 py-4 text-right text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{tr('common.actions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#5A5A40]/5">
@@ -22412,7 +22414,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     const safePage   = Math.min(ordersPage, totalPages);
                     const pageRows   = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
                     if (pageRows.length === 0) return (
-                      <tr><td colSpan={7} className="py-16 text-center text-[#9c8e85] italic">{tr('No orders found')}</td></tr>
+                      <tr><td colSpan={8} className="py-16 text-center text-[#9c8e85] italic">{tr('No orders found')}</td></tr>
                     );
                     return pageRows.map(order => (
                     <tr key={order.id} className={cn("hover:bg-[#faf7f2]/30 transition-colors", (order as any).status === 'CANCELLED' && "opacity-50")}>
@@ -22453,11 +22455,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </span>
                         )}
                       </td>
-                      {/* Action column intentionally removed — Print Invoice,
-                          Edit Invoice, Mark Paid, and Feedback are all handled
-                          from the Invoices tab. The Order list is read-only
-                          for owners; per-order actions caused confusion when
-                          one invoice spanned multiple orders. */}
+                      {/* View-only actions. Editing, marking paid and cancelling stay on
+                          the Invoices tab: one table bill spans several order rounds, and
+                          per-order billing actions confused staff. */}
+                      <td className="px-6 py-4">
+                        <RowActions moreLabel={tr('actions.more')} actions={[
+                          { key: 'view', label: tr('actions.viewInvoice'), icon: Eye, inline: true, onClick: () => openInvoice(order, 'view') },
+                          { key: 'bill', label: tr('actions.openInInvoices'), icon: ExternalLink, inline: true, hidden: tabLevel('INVOICES') < 1, onClick: () => {
+                            // Show every date and status, searched by the order id (the Invoices
+                            // search also matches a table bill by the orders it contains).
+                            const day = String((order as any).createdAt || '').slice(0, 10);
+                            setInvoiceDateRange(day ? { preset: 'CUSTOM', from: day, to: day } : { preset: 'ALL', from: '', to: '' });
+                            setInvoiceStatusFilter('ALL');
+                            setInvoiceSearch(order.id);
+                            setInvoicesPage(1);
+                            setActiveTab('INVOICES');
+                          } },
+                          { key: 'kot', label: tr('actions.reprintKot'), icon: Printer, inline: true, hidden: !canWriteTab('MONITOR') || (order as any).status === 'CANCELLED', onClick: () => printKitchenOrder(order) },
+                        ]} />
+                      </td>
                     </tr>
                     ));
                   })()}

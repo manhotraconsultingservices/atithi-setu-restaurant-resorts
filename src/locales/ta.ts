@@ -520,4 +520,8 @@ export const ta: Record<string, string> = {
   'listFilter.totalSettled': 'மொத்த தீர்வு',
   'listFilter.collected': 'வசூலானது',
   'listFilter.outstanding': 'நிலுவை',
+  // ── Orders list actions ──
+  'actions.viewInvoice': 'விலைப்பட்டியலைப் பார்',
+  'actions.openInInvoices': 'பில்லை விலைப்பட்டியல்களில் திற',
+  'actions.reprintKot': 'KOT மீண்டும் அச்சிடு',
 };
