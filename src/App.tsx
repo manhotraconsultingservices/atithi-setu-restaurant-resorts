@@ -26288,8 +26288,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <HotelAnalyticsDashboard restaurantId={restaurantId} token={token!} />
             </div>
           </details>
-          {/* OTA 360° + Receivables aging folded out of the operational Channel Manager tab (owner/GM view). */}
-          {reportAudience === 'OWNER' && (
+          {/* OTA 360° + Receivables aging folded out of the operational Channel Manager tab (owner/GM view).
+              Receivables belong to the paid Accounts module, so this hides with it. */}
+          {reportAudience === 'OWNER' && Number((restaurant as any)?.accounts_enabled) === 1 && (
             <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
               <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">🎯 OTA 360° &amp; Receivables — channel performance, margins &amp; aging <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand)</span></summary>
               <div className="p-4"><Ota360Report restaurantId={restaurantId} token={token!} /></div>

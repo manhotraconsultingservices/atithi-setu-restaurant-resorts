@@ -3798,6 +3798,34 @@ async function recordFolioPayment(
 class PaymentNeedsReview extends Error {}
 
 // A refusal a staff member can act on, carrying the HTTP status to send.
+// ── Guest pay tokens (public pages) ─────────────────────────────────────────
+// A public page may start a gateway payment only for a record the guest just
+// created or already holds (their booking, order or table bill). The server
+// hands back a signed token naming that record and the amount; the public
+// payment routes accept nothing else, so a guest cannot pay against, or cancel
+// the live link of, anyone else's bill, nor change the amount.
+// Payload: tenant | object type | object id | amount in paise (0 = balance due) | expiry ms.
+const PUBLIC_PAY_SECRET = process.env.PUBLIC_PAY_TOKEN_SECRET || `${process.env.JWT_SECRET || 'atithi-setu'}:public-pay`;
+function issuePublicPayToken(restaurantId: string, objectType: string, objectId: string, amountPaise = 0, ttlMs = 7 * 24 * 3600 * 1000): string {
+  const payload = [restaurantId, objectType, objectId, String(Math.max(0, Math.round(amountPaise))), String(Date.now() + ttlMs)].join('|');
+  const b64 = Buffer.from(payload).toString('base64url');
+  return `${b64}.${createHmac('sha256', PUBLIC_PAY_SECRET).update(payload).digest('base64url')}`;
+}
+function readPublicPayToken(token: string): { restaurantId: string; objectType: string; objectId: string; amountPaise: number; exp: number } | null {
+  try {
+    const [b64, sig] = String(token || '').split('.');
+    if (!b64 || !sig) return null;
+    const payload = Buffer.from(b64, 'base64url').toString();
+    const expected = createHmac('sha256', PUBLIC_PAY_SECRET).update(payload).digest('base64url');
+    const a = Buffer.from(sig), b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const [restaurantId, objectType, objectId, amount, exp] = payload.split('|');
+    if (!restaurantId || !objectType || !objectId || Date.now() > Number(exp)) return null;
+    return { restaurantId, objectType, objectId, amountPaise: Number(amount) || 0, exp: Number(exp) };
+  } catch { return null; }
+}
+const PUBLIC_PAYABLE_TYPES = new Set(['RESTAURANT_ORDER', 'RESTAURANT_SESSION', 'HOTEL_FOLIO', 'HOTEL_GROUP', 'SPA_APPOINTMENT']);
+
 class PaymentRequestError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
 }
@@ -4276,6 +4304,7 @@ async function _pgCreateLink(
   input: {
     objectType: string; objectId: string; amount?: any; name?: string; phone?: string; email?: string; expiresInHours?: any; gateway?: string;
     webhookUrlFor?: (gatewayId: string) => Promise<string>;
+    callbackUrl?: string;
   },
 ): Promise<any> {
   if (!(await tenantModules(restaurantId)).onlinePayments) throw new PaymentRequestError(MODULE_OFF_PAYMENTS, 403);
@@ -4354,6 +4383,7 @@ async function _pgCreateLink(
       customer: { name: customer.name || undefined, phone: customer.phone || undefined, email: customer.email || undefined },
       expiresAt,
       webhookUrl: input.webhookUrlFor ? await input.webhookUrlFor(cfg.gateway.id) : undefined,
+      callbackUrl: input.callbackUrl,
       notes: { atithi_link: id, bill: `${input.objectType}:${input.objectId}` },
     });
     await db.run(
@@ -40865,7 +40895,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/public/restaurant/:id/spa", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/spa", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const gate = await publicSpaGate(req.params.id);
       if (!gate.ok) return res.status(404).json({ error: "Spa not available" });
@@ -40881,7 +40911,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load spa" }); }
   });
 
-  app.get("/api/public/restaurant/:id/spa/availability", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/spa/availability", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const gate = await publicSpaGate(req.params.id);
       if (!gate.ok) return res.status(404).json({ error: "Spa not available" });
@@ -40895,7 +40925,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to compute availability" }); }
   });
 
-  app.post("/api/public/restaurant/:id/spa/booking", async (req: Request, res: Response) => {
+  app.post("/api/public/restaurant/:id/spa/booking", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const gate = await publicSpaGate(req.params.id);
       if (!gate.ok) return res.status(404).json({ error: "Spa not available" });
@@ -49418,7 +49448,7 @@ ${data.tenant.name}`;
   });
 
   // Hotel info card for the landing page.
-  app.get("/api/public/restaurant/:id/hotel", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/hotel", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -49501,7 +49531,7 @@ ${data.tenant.name}`;
   // matrix for a given room category + date range, returns the per-
   // night rate so card displays can show "Starts at ₹2,000". Reuses
   // computeBookingTotalWithExtras() across all active meal plans.
-  app.get("/api/public/restaurant/:id/hotel/rate-preview", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/hotel/rate-preview", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -49590,7 +49620,7 @@ ${data.tenant.name}`;
   //
   // Surfacing extras here lets the room card label "+1 extra adult"
   // BEFORE the guest commits — no surprises at checkout.
-  app.get("/api/public/restaurant/:id/hotel/availability", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/hotel/availability", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -49855,7 +49885,7 @@ ${data.tenant.name}`;
   // confirmation. Reuses computeBookingTotalWithExtras() (the same
   // function the booking-create endpoint uses), so what the guest
   // sees here IS what they'll be charged.
-  app.get("/api/public/restaurant/:id/hotel/booking-preview", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/hotel/booking-preview", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -50008,7 +50038,7 @@ ${data.tenant.name}`;
   //
   // Authentication: none (public). Rate data is not sensitive — it's the
   // same rate the guest sees on the booking page.
-  app.get("/api/public/restaurant/:id/hotel/google-ari", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/hotel/google-ari", resolvePublicTenantParam, async (req: Request, res: Response) => {
     try {
       const restaurantId = req.params.id;
       const db = await getTenantDb(restaurantId).catch(() => null);
@@ -50101,7 +50131,7 @@ ${data.tenant.name}`;
   // Public booking creation. Anyone can hit this — basic rate-limit-
   // friendly fields-only; status starts BOOKED, booking_source set to
   // 'DIRECT_WEB' so reports can attribute revenue.
-  app.post("/api/public/restaurant/:id/hotel/booking", async (req: Request, res: Response) => {
+  app.post("/api/public/restaurant/:id/hotel/booking", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -50474,7 +50504,7 @@ ${data.tenant.name}`;
   // someone from guessing booking ids and submitting fake data, we
   // also require the guest_phone to match what's on file as a soft
   // verification check.
-  app.get("/api/public/restaurant/:id/hotel/checkin/:bookingId", async (req: Request, res: Response) => {
+  app.get("/api/public/restaurant/:id/hotel/checkin/:bookingId", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -50512,7 +50542,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/public/restaurant/:id/hotel/checkin/:bookingId", async (req: Request, res: Response) => {
+  app.post("/api/public/restaurant/:id/hotel/checkin/:bookingId", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -57368,6 +57398,114 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Public pages: pay online through the tenant's gateway ─────────────────
+  // Whether a public page should offer it: the paid module is on and one
+  // gateway is ready. Pages hide the option otherwise.
+  const _publicPayReady = async (restaurantId: string): Promise<{ online: boolean; gateway: string | null }> => {
+    try {
+      if (!(await tenantModules(restaurantId)).onlinePayments) return { online: false, gateway: null };
+      const db = await getTenantDb(restaurantId);
+      const gid = await _pgActiveGatewayId(db);
+      const cfg = await _pgConfig(db, gid);
+      if (!cfg || cfg.missing.length || cfg.unreadable.length) return { online: false, gateway: null };
+      return { online: true, gateway: cfg.gateway.label };
+    } catch { return { online: false, gateway: null }; }
+  };
+  app.get("/api/public/restaurant/:id/payments/options", resolvePublicTenantParam, async (req: Request, res: Response) => {
+    res.json(await _publicPayReady(req.params.id));
+  });
+
+  const _publicPayAuth = (req: Request, res: Response): ReturnType<typeof readPublicPayToken> => {
+    const claim = readPublicPayToken(String((req.body as any)?.t || req.query.t || ''));
+    if (!claim || claim.restaurantId !== req.params.id || !PUBLIC_PAYABLE_TYPES.has(claim.objectType)) {
+      res.status(403).json({ error: 'This payment link is not valid or has expired. Please start again from the page.' });
+      return null;
+    }
+    return claim;
+  };
+
+  // Start (or resume) a gateway payment for the record in the token. A live link
+  // for the same amount is reused, so a double tap or a return visit does not
+  // cancel the link the guest may already be paying on.
+  app.post("/api/public/restaurant/:id/payments/start", resolvePublicTenantParam, async (req: Request, res: Response) => {
+    const claim = _publicPayAuth(req, res); if (!claim) return;
+    try {
+      const rid = req.params.id;
+      const db = await getTenantDb(rid);
+      const payable = await _pgDescribePayable(db, rid, claim.objectType, claim.objectId);
+      if (!payable) return res.status(404).json({ error: 'This bill was not found.' });
+      if (!payable.open) return res.status(409).json({ error: payable.closedReason, closed: true });
+      const want = claim.amountPaise || payable.outstandingPaise;
+      const live: any = await db.get(
+        `SELECT * FROM payment_links WHERE object_type = ? AND object_id = ? AND status = 'CREATED' AND url IS NOT NULL
+          AND amount_paise = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT 1`,
+        [claim.objectType, claim.objectId, want, new Date(Date.now() + 10 * 60 * 1000).toISOString()]).catch(() => null);
+      if (live) return res.json({ url: live.url, link_id: live.id, amount_paise: live.amount_paise, gateway: live.gateway });
+      const token = String((req.body as any)?.t || '');
+      const proto = String((req.headers['x-forwarded-proto'] as string) || 'https').split(',')[0].trim();
+      const host = String((req.headers['x-forwarded-host'] as string) || req.headers.host || '').split(',')[0].trim();
+      const link = await _pgCreateLink(db, rid, { id: null, name: 'Guest (online)' }, {
+        objectType: claim.objectType, objectId: claim.objectId,
+        amount: claim.amountPaise ? claim.amountPaise / 100 : undefined,
+        name: (req.body as any)?.name, phone: (req.body as any)?.phone, email: (req.body as any)?.email,
+        expiresInHours: 24,
+        webhookUrlFor: (gid: string) => _pgWebhookUrl(req, rid, gid),
+        callbackUrl: host ? `${proto}://${host}/?pay_result=${encodeURIComponent(token)}` : undefined,
+      });
+      res.json({ url: link.url, link_id: link.id, amount_paise: link.amount_paise, gateway: link.gateway });
+    } catch (e: any) {
+      if (e instanceof PaymentRequestError) return res.status(e.status).json({ error: e.message });
+      console.error('[public-pay] start failed:', e?.message || e);
+      res.status(502).json({ error: 'Online payment could not be started. Please try again or pay at the property.' });
+    }
+  });
+
+  // Where the guest's payment stands. Reads the link back from the gateway (at
+  // most every 10 s per link), which records a captured payment at once rather
+  // than waiting for the webhook.
+  const _publicPayLastCheck = new Map<string, number>();
+  app.get("/api/public/restaurant/:id/payments/status", resolvePublicTenantParam, async (req: Request, res: Response) => {
+    const claim = _publicPayAuth(req, res); if (!claim) return;
+    try {
+      const rid = req.params.id;
+      const db = await getTenantDb(rid);
+      let link: any = await db.get("SELECT * FROM payment_links WHERE object_type = ? AND object_id = ? ORDER BY created_at DESC LIMIT 1",
+        [claim.objectType, claim.objectId]).catch(() => null);
+      if (link && ['CREATED', 'PARTIALLY_PAID', 'CREATING'].includes(String(link.status))) {
+        const last = _publicPayLastCheck.get(link.id) || 0;
+        if (Date.now() - last > 10_000) {
+          _publicPayLastCheck.set(link.id, Date.now());
+          await _pgReconcileLink(rid, link.id, 'GUEST').catch(() => {});
+          link = await db.get("SELECT * FROM payment_links WHERE id = ?", [link.id]).catch(() => link);
+        }
+      }
+      const payable = await _pgDescribePayable(db, rid, claim.objectType, claim.objectId).catch(() => null);
+      const ls = String(link?.status || '');
+      const status = ls === 'PAID' ? 'PAID' : !link ? 'NONE' : ['EXPIRED', 'CANCELLED', 'FAILED'].includes(ls) ? ls : 'PENDING';
+      res.json({
+        status, link_status: ls || null,
+        amount_paise: link?.amount_paise ?? claim.amountPaise,
+        paid_paise: Number(link?.amount_paid_paise ?? (ls === 'PAID' ? link?.amount_paise : 0)) || 0,
+        outstanding_paise: payable ? payable.outstandingPaise : null,
+        purpose: payable?.purpose || null,
+        object_type: claim.objectType,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: 'Could not check the payment.' });
+    }
+  });
+
+  // A guest reopening the QR page gets a pay token for the table bill they hold.
+  // Holding the session token already proves it is their table.
+  app.get("/api/public/restaurant/:id/sessions/:token/pay-token", resolvePublicTenantParam, async (req: Request, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const sess: any = await db.get("SELECT id FROM table_sessions WHERE session_token = ?", [req.params.token]).catch(() => null);
+      if (!sess) return res.status(404).json({ error: 'Bill not found.' });
+      res.json({ pay_token: issuePublicPayToken(req.params.id, 'RESTAURANT_SESSION', req.params.token), ...(await _publicPayReady(req.params.id)) });
+    } catch { res.status(500).json({ error: 'Could not prepare the payment.' }); }
+  });
+
   // The gateway calls this. Verify, log once per event, answer at once, and only
   // then read the link back (an outbound call) and record what it says.
   app.post("/api/public/payments/webhook/:gateway/:tenant", async (req: any, res: Response) => {
@@ -59086,7 +59224,7 @@ ${data.tenant.name}`;
         customerEmail: null,
       }).catch((notifErr) => console.warn('[request-bill] notify failed:', notifErr));
 
-      res.json({ success: true, bill_amount: billAmount, session_token: req.params.token });
+      res.json({ success: true, bill_amount: billAmount, session_token: req.params.token, pay_token: issuePublicPayToken(req.params.id, 'RESTAURANT_SESSION', req.params.token) });
     } catch (err) {
       console.error(`[request-bill] FATAL for ${req.params.id}/${req.params.token}:`, err);
       res.status(500).json({ error: "Failed to request bill" });
@@ -61557,6 +61695,9 @@ ${data.tenant.name}`;
         invoice_number: orderInvoiceNumber,
         invoice_status: invoiceStatus,
         room_service: isChargeToRoom ? folioResult : undefined,
+        // A prepaid or delivery order paid on its own can be paid online by the guest.
+        pay_token: !finalSessionId && !isChargeToRoom && (checkoutMode === 'prepaid' || checkoutMode === 'cloud_kitchen')
+          ? issuePublicPayToken(req.params.id, 'RESTAURANT_ORDER', id) : undefined,
       });
 
       // ── Loyalty: upsert customer + recompute tier (non-blocking) ─────────
@@ -66576,8 +66717,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tenant-theme-emails-pdfs-finance',
+    commit_marker: 'public-links-token-pay-foundation',
     code_features: [
+      'public-links-token-pay-foundation  Fix (owner): the Home Public pages links use the tenant public token, but the spa and hotel public routes only accepted the internal id, so the Spa booking link (and the hotel link when no booking slug is set) opened a page that could not load. All 11 /api/public/restaurant/:id/hotel* and /spa* routes now run resolvePublicTenantParam, like menu and events. Also: the Owner reports OTA 360 and Receivables section hides when the Accounts module is off. Foundation for online payment on public pages (no UI yet): signed guest pay tokens (issuePublicPayToken/readPublicPayToken, tenant|type|id|amount|expiry), GET /api/public/restaurant/:id/payments/options, POST .../payments/start (reuses a live link, return URL ?pay_result=), GET .../payments/status (reconciles at most every 10s), GET .../sessions/:token/pay-token; _pgCreateLink passes callbackUrl; restaurant order and request-bill responses carry pay_token.',
       'tenant-theme-emails-pdfs-finance  Owner: emails, PDFs and Finance pages follow the tenant theme colour. brandColors.ts gains brandHex()/brandDarkHex() read from an AsyncLocalStorage context (runWithBrand), falling back to the platform colour; every template in invoiceService(Boutique/Shared), notificationService, poService, bankRecStatementPdf and server.ts now reads them at render time. A middleware after the body parsers resolves the tenant (path /api/(public/)restaurant/:id, the decoded JWT restaurantId, ?r=, the feedback link tenant, or the tenant subdomain slug) and runs the request in its colour; triggerNotification and sendPrearrivalEmail set it for crons. tenantBrandColors caches 60s and a theme save clears it. Finance (AccountingView) and the checklist screens used a hardcoded rust accent (#a0522d/#8b4513); now bg/text/border-brand, with warnings that borrowed it moved to amber.',
       'tenant-theme-color  UI (owner): each tenant can replace the peacock default with its own theme colour in Settings > Business > Theme colour (8 presets or a custom colour, live preview, back to default). Saved on restaurants.theme_color via PUT /api/restaurant/:id/settings/theme-color (Settings Edit); tenantTheme.ts (shared) validates the hex and refuses colours under 3:1 contrast with white text, and derives the 20% darker hover shade. The app sets --color-brand and --color-brand-dark on the root element, which every bg-brand/text-brand class reads; index.html applies the remembered colour before the app starts so charts (src/theme.ts) open in it too. Emails and PDFs stay on the platform colour.',
       'wa-webhook-diagnostics  /internal WhatsApp: replies and receipts were silently missing with no way to see why. Every webhook call (URL check or event) is noted in central wa_webhook_log with the outcome: accepted (field, message and status counts, phone number id), rejected (verify token mismatch, missing signature, App secret mismatch) or for another number. GET /api/admin/whatsapp/diagnostics returns the log plus Meta subscribed_apps for the configured account; POST /api/admin/whatsapp/subscribe subscribes it. Shown as a Webhook activity card with a Subscribe now button. Payloads and tokens are never stored.',
