@@ -21,7 +21,7 @@ import { PaymentGatewaysPage, CollectOnlineDialog } from './PaymentLinks';
 import { PlatformWhatsApp } from './PlatformWhatsApp';
 import { NotificationsWorkspace } from './NotificationsWorkspace';
 import { ThemeColorSettings, applyThemeColor } from './ThemeColorSettings';
-import { PayOnlineButton, PaymentResultPage, usePublicPayOptions } from './PublicPay';
+import { PayOnlineButton, PaymentResultPage, usePublicPayOptions, PayChoicePicker, HoldCountdown } from './PublicPay';
 import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, spanInRange, type DateRange } from './components/ListFilters';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
@@ -75020,6 +75020,13 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
   // friendly slug (vivekscafe). Try id first; on 404 fall back to slug
   // resolver. Cached in sessionStorage so repeat visits skip the hop.
   const [resolvedTenantId, setResolvedTenantId] = useState<string>(tenantId);
+  // Pay online through the property's gateway (owner's choices), or at the property.
+  const { t: tBook } = useT();
+  const payOptions = usePublicPayOptions(resolvedTenantId);
+  const [payChoice, setPayChoice] = useState<string>('');
+  const [bookingPaid, setBookingPaid] = useState(false);
+  const effectivePayChoice = !payOptions.online ? 'AT_PROPERTY'
+    : payChoice || (payOptions.pay_full !== false ? 'FULL' : Number(payOptions.pay_advance_pct) > 0 ? 'ADVANCE' : 'AT_PROPERTY');
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -75216,6 +75223,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
         num_guests:   (searchParams.adults || 0) + (searchParams.children || 0),
         meal_plan_id: selectedPlanId || null,
         special_requests: guest.special_requests.trim() || null,
+        pay_option: effectivePayChoice,
       };
       if (pickedRoom.category_id) bookingPayload.room_type_id = pickedRoom.category_id;
       else                        bookingPayload.room_id      = pickedRoom.id;
@@ -75227,6 +75235,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setConfirmation(data);
+      setBookingPaid(false);
       setStep('DONE');
     } catch (err: any) { toast.error(err?.message || 'Booking failed'); }
     finally { setSubmitting(false); }
@@ -76240,6 +76249,10 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 placeholder="e.g. early check-in · airport pickup · dietary"
                 className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-brand/20 outline-none" />
             </div>
+            {payOptions.online && (
+              <PayChoicePicker options={payOptions} value={effectivePayChoice} onChange={setPayChoice}
+                totalPaise={previewPlan?.grand_total ? Math.round(Number(previewPlan.grand_total) * 100) : null} />
+            )}
             <div className="flex gap-2 pt-2">
               <button type="button" onClick={() => setStep('SEARCH')} className="flex-1 px-4 py-2.5 rounded-2xl border border-brand/20 text-[#3d3128] text-sm font-bold">Back</button>
               <button type="submit" disabled={submitting}
@@ -76247,7 +76260,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                   "flex-1 px-4 py-2.5 rounded-2xl text-sm font-bold",
                   submitting ? "bg-brand/40 text-white cursor-not-allowed" : "bg-brand text-white hover:bg-brand-dark"
                 )}>
-                {submitting ? 'Confirming…' : 'Confirm booking'}
+                {submitting ? 'Confirming…' : effectivePayChoice === 'AT_PROPERTY' ? 'Confirm booking' : tBook('pay.continueToPayment')}
               </button>
             </div>
           </form>
@@ -76255,13 +76268,31 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
         })()}
 
         {/* STEP 4: CONFIRMATION */}
-        {step === 'DONE' && confirmation && (
-          <div className="bg-white rounded-3xl shadow-2xl p-7 text-center border-t-[3px] border-emerald-500">
-            <div className="w-14 h-14 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-3">
-              <Check size={30} className="text-emerald-600" />
+        {step === 'DONE' && confirmation && (() => {
+          // A pay-now booking is held until paid; it is confirmed once the payment lands.
+          const held = !!confirmation.pay_token && !bookingPaid;
+          return (
+          <div className={cn("bg-white rounded-3xl shadow-2xl p-7 text-center border-t-[3px]", held ? "border-amber-500" : "border-emerald-500")}>
+            <div className={cn("w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-3", held ? "bg-amber-50" : "bg-emerald-50")}>
+              {held ? <Clock size={30} className="text-amber-600" /> : <Check size={30} className="text-emerald-600" />}
             </div>
-            <h1 className="text-2xl font-bold text-[#1a1208] mb-1" style={{ fontFamily: serifStack }}>Booking confirmed</h1>
-            <p className="text-sm text-[#6b5d52] mb-3">{confirmation.confirmation_message}</p>
+            <h1 className="text-2xl font-bold text-[#1a1208] mb-1" style={{ fontFamily: serifStack }}>
+              {held ? tBook('pay.heldTitle') : confirmation.pay_token ? tBook('pay.confirmedPaid') : 'Booking confirmed'}
+            </h1>
+            <p className="text-sm text-[#6b5d52] mb-3">{held ? tBook('pay.heldHint') : confirmation.pay_token ? tBook('pay.confirmedPaidHint') : confirmation.confirmation_message}</p>
+            {confirmation.pay_token && (
+              <div className="mb-3 space-y-2">
+                {held && confirmation.hold_until && <HoldCountdown until={confirmation.hold_until} />}
+                <PayOnlineButton
+                  restaurantId={resolvedTenantId}
+                  token={confirmation.pay_token}
+                  label={confirmation.pay_option === 'ADVANCE' ? tBook('pay.payAdvance') : tBook('pay.payFull')}
+                  amountPaise={confirmation.pay_amount_paise}
+                  customer={{ name: guest.name, phone: guest.phone, email: guest.email }}
+                  onPaid={() => setBookingPaid(true)}
+                />
+              </div>
+            )}
             <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm text-left space-y-1">
               <div className="flex justify-between"><span className="text-[#6b5d52]">Reference</span><span className="font-mono text-[11px]">{confirmation.booking_id}</span></div>
               <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{formatDateForTenant(confirmation.check_in_date, hotelInfo?.date_format)}</div>
@@ -76346,7 +76377,8 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
               >✓ Done — back to home</button>
             </div>
           </div>
-        )}
+          );
+        })()}
 
             <p className="text-center text-[10px] text-[#9c8e85] mt-6">Powered by Atithi-Setu · Direct booking, no commission</p>
           </div>

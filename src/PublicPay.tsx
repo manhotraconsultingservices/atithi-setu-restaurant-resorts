@@ -18,14 +18,14 @@ const rupees = (paise: number | null | undefined) =>
   `₹${(Number(paise || 0) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /** Whether this property takes online payments on its public pages. */
-export function usePublicPayOptions(restaurantId: string | null | undefined): { online: boolean; gateway: string | null } {
-  const [opts, setOpts] = useState<{ online: boolean; gateway: string | null }>({ online: false, gateway: null });
+export function usePublicPayOptions(restaurantId: string | null | undefined): PublicPayChoices {
+  const [opts, setOpts] = useState<PublicPayChoices>({ online: false, gateway: null });
   useEffect(() => {
     if (!restaurantId) return;
     let alive = true;
     fetch(`/api/public/restaurant/${encodeURIComponent(restaurantId)}/payments/options`)
       .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (alive && d) setOpts({ online: !!d.online, gateway: d.gateway || null }); })
+      .then(d => { if (alive && d) setOpts({ ...d, online: !!d.online, gateway: d.gateway || null }); })
       .catch(() => {});
     return () => { alive = false; };
   }, [restaurantId]);
@@ -109,7 +109,7 @@ export function PayOnlineButton({ restaurantId, token, label, amountPaise, custo
       });
       const b = await r.json().catch(() => ({}));
       if (!r.ok || !b.url) {
-        if (b.closed) { setState('PAID'); onPaid?.(); return; }
+        if (b.paid) { setState('PAID'); onPaid?.(); return; }
         throw new Error(b.error || t('pay.startFailed'));
       }
       setUrl(b.url);
@@ -195,6 +195,50 @@ export function PaymentResultPage({ token }: { token: string }) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/** The owner's payment choices for booking pages, from the options endpoint. */
+export type PublicPayChoices = { online: boolean; gateway: string | null; pay_full?: boolean; pay_advance_pct?: number; pay_at_property?: boolean; hold_minutes?: number };
+
+/** Time left to pay before a held booking is released. */
+export function HoldCountdown({ until }: { until: string }) {
+  const { t } = useT();
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const h = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(h); }, []);
+  const left = Math.max(0, new Date(until).getTime() - now);
+  const mm = Math.floor(left / 60000), ss = Math.floor((left % 60000) / 1000);
+  return left > 0
+    ? <p className="text-xs font-bold text-amber-800">{t('pay.holdLeft', { time: `${mm}:${String(ss).padStart(2, '0')}` })}</p>
+    : <p className="text-xs font-bold text-rose-700">{t('pay.holdExpired')}</p>;
+}
+
+/** FULL / ADVANCE / AT_PROPERTY picker for a booking page. */
+export function PayChoicePicker({ options, value, onChange, totalPaise }: {
+  options: PublicPayChoices; value: string; onChange: (v: string) => void; totalPaise?: number | null;
+}) {
+  const { t } = useT();
+  const pct = Number(options.pay_advance_pct || 0);
+  const rows = [
+    options.pay_full !== false && { id: 'FULL', label: t('pay.choiceFull'), hint: totalPaise ? rupees(totalPaise) : '' },
+    pct > 0 && { id: 'ADVANCE', label: t('pay.choiceAdvance', { pct }), hint: totalPaise ? rupees(Math.round(totalPaise * pct / 100)) : '' },
+    options.pay_at_property !== false && { id: 'AT_PROPERTY', label: t('pay.choiceAtProperty'), hint: '' },
+  ].filter(Boolean) as { id: string; label: string; hint: string }[];
+  if (rows.length < 2 && rows[0]?.id === 'AT_PROPERTY') return null;
+  return (
+    <div>
+      <p className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1.5">{t('pay.howToPay')}</p>
+      <div className="space-y-1.5">
+        {rows.map(r => (
+          <label key={r.id} className={`flex items-center gap-3 rounded-2xl px-4 py-2.5 cursor-pointer border ${value === r.id ? 'border-brand bg-brand/5' : 'border-transparent bg-[#faf7f2]'}`}>
+            <input type="radio" name="pay_choice" className="accent-brand" checked={value === r.id} onChange={() => onChange(r.id)} />
+            <span className="flex-1 text-sm font-semibold text-[#1a1208]">{r.label}</span>
+            {r.hint && <span className="text-sm font-mono font-bold text-[#1a1208]">{r.hint}</span>}
+          </label>
+        ))}
+      </div>
+      {value !== 'AT_PROPERTY' && options.hold_minutes && <p className="text-[10px] text-[#9c8e85] mt-1">{t('pay.holdNote', { minutes: options.hold_minutes })}</p>}
     </div>
   );
 }

@@ -1220,6 +1220,10 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+    -- Public booking page: FULL / ADVANCE / AT_PROPERTY, and when an unpaid
+    -- pay-now booking stops holding its room.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS pay_option TEXT;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS payment_hold_until TIMESTAMP;
     -- Who/what initiated the cancellation, for the Cancelled Reservations
     -- report attribution: STAFF (front desk — cancelled_by holds the staff id,
     -- resolved to a name), OTA (cancelled_by holds the channel), GUEST_ONLINE,
@@ -3936,7 +3940,91 @@ interface _Payable {
 
 // The bills a link can be sent for. Adding one = a branch here and in
 // _pgRecordToPayable, plus its permission gates in PAYABLE_OBJECT_GATES.
+// ── Pay-now holds (public booking pages) ────────────────────────────────────
+// A booking the guest chose to pay online holds its room until hold_until. Paid
+// in time: confirmed, and the booking confirmation goes out then. Not paid: the
+// release sweep cancels it and frees the room.
+async function _publicHoldConfirmed(restaurantId: string, objectType: string, objectId: string): Promise<void> {
+  const r: any = await centralDb.run(
+    "UPDATE public_payment_holds SET status = 'CONFIRMED', resolved_at = CURRENT_TIMESTAMP WHERE restaurant_id = ? AND object_type = ? AND object_id = ? AND status = 'HELD'",
+    [restaurantId, objectType, objectId]).catch(() => ({ changes: 0 }));
+  if (!Number(r?.changes || 0)) return;
+  if (objectType !== 'HOTEL_GROUP') return;
+  const db = await getTenantDb(restaurantId);
+  const rest: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+  for (const b of await _hotelGroupBookings(db, objectId)) {
+    await db.run("UPDATE room_bookings SET payment_hold_until = NULL WHERE id = ?", [b.id]).catch(() => {});
+    triggerNotification(restaurantId, 'BOOKING_CREATED', {
+      bookingId: b.id, guestName: b.guest_name, checkIn: b.check_in_date, checkOut: b.check_out_date,
+      source: 'DIRECT_WEB', mealPlan: b.meal_plan_snapshot, totalAmount: Number(b.total_amount || 0),
+      currencySymbol: rest?.currency_symbol || '₹', upiVpa: '', upiPayeeName: rest?.name || '',
+      checkInTime: rest?.hotel_check_in_time || '', checkOutTime: rest?.hotel_late_checkout_time || '',
+    }).catch(() => {});
+  }
+}
+
+// A public hotel booking paid online as one amount, whether one room or several.
+// objectId is "G:<group id>" or "B:<booking id>". Each room has its own folio;
+// the payment is spread across them in booking order.
+async function _hotelGroupBookings(db: any, objectId: string): Promise<any[]> {
+  const [kind, id] = [String(objectId).slice(0, 2), String(objectId).slice(2)];
+  if (!id) return [];
+  const rows: any[] = kind === 'G:'
+    ? await db.query("SELECT * FROM room_bookings WHERE group_id = ? ORDER BY created_at, id", [id]).catch(() => [])
+    : await db.query("SELECT * FROM room_bookings WHERE id = ?", [id]).catch(() => []);
+  return rows;
+}
+async function _hotelGroupFolios(db: any, bookings: any[]): Promise<any[]> {
+  const out: any[] = [];
+  for (const b of bookings) {
+    const f: any = await db.get(
+      "SELECT id, status FROM folios WHERE booking_id = ? AND COALESCE(folio_kind, 'HOTEL') = 'HOTEL' AND status <> 'voided' ORDER BY created_at DESC LIMIT 1", [b.id]).catch(() => null);
+    out.push({ booking: b, folio: f });
+  }
+  return out;
+}
+/** Open a folio for every room that has none yet (before a payment starts). */
+async function _hotelGroupEnsureFolios(restaurantId: string, db: any, objectId: string): Promise<void> {
+  for (const { booking, folio } of await _hotelGroupFolios(db, await _hotelGroupBookings(db, objectId))) {
+    if (!folio && ['BOOKED', 'CHECKED_IN'].includes(String(booking.status || '').toUpperCase())) await createFolioWithRoomCharges(restaurantId, booking);
+  }
+}
+/** What has been paid and what is still owed across the booking's rooms. */
+async function _hotelGroupMoney(db: any, objectId: string): Promise<{ bookings: any[]; items: any[]; paid: number; owed: number }> {
+  const bookings = await _hotelGroupBookings(db, objectId);
+  const items = await _hotelGroupFolios(db, bookings);
+  let paid = 0, owed = 0;
+  for (const it of items) {
+    const live = !['CANCELLED', 'NO_SHOW'].includes(String(it.booking.status || '').toUpperCase());
+    if (it.folio) {
+      const o = await getFolioOutstanding(db, it.folio.id).catch(() => null);
+      it.outstanding = Math.max(0, Number(o?.outstanding || 0));
+      paid += Number(o?.total_paid || 0);
+      if (live) owed += it.outstanding;
+    } else {
+      it.outstanding = live ? Number(it.booking.total_amount || 0) : 0;
+      owed += it.outstanding;
+    }
+  }
+  return { bookings, items, paid: Math.round(paid * 100) / 100, owed: Math.round(owed * 100) / 100 };
+}
+
 async function _pgDescribePayable(db: any, restaurantId: string, objectType: string, objectId: string): Promise<_Payable | null> {
+  if (objectType === 'HOTEL_GROUP') {
+    const m = await _hotelGroupMoney(db, objectId);
+    if (!m.bookings.length) return null;
+    const first = m.bookings[0];
+    const live = m.bookings.filter(b => ['BOOKED', 'CHECKED_IN'].includes(String(b.status || '').toUpperCase()));
+    const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+    const closedReason = !live.length ? 'This booking is no longer active.' : m.owed <= 0 ? 'This booking is already paid.' : null;
+    return {
+      objectType, objectId, open: !closedReason, closedReason,
+      outstandingPaise: Math.max(0, rupeesToPaise(m.owed)),
+      purpose: `${prop?.name || 'Your stay'} — booking ${first.id}${m.bookings.length > 1 ? ` (${m.bookings.length} rooms)` : ''}`,
+      customer: { name: first.guest_name || null, phone: first.guest_phone || null, email: first.guest_email || null },
+      bookingId: first.id,
+    };
+  }
   if (objectType === 'HOTEL_FOLIO') {
     const f: any = await db.get(
       `SELECT f.id, f.status, f.folio_kind, f.booking_id, b.guest_name, b.guest_phone, b.guest_email
@@ -4044,6 +4132,43 @@ async function _pgDescribePayable(db: any, restaurantId: string, objectType: str
 // PENDING row that the sweep retries, and the retry finds the first recording.
 async function _pgRecordToPayable(db: any, restaurantId: string, link: any, p: any, gatewayLabel: string): Promise<string> {
   const reference = `${link.gateway} ${p.gateway_payment_id}`;
+  if (link.object_type === 'HOTEL_GROUP') {
+    // Already recorded (a retry): some room carries this reference.
+    const bookings = await _hotelGroupBookings(db, link.object_id);
+    if (!bookings.length) throw new PaymentNeedsReview('The booking this payment was for no longer exists.');
+    const ids = bookings.map(b => b.id);
+    const prior: any = await db.get(
+      `SELECT fp.id FROM folio_payments fp JOIN folios f ON f.id = fp.folio_id
+        WHERE f.booking_id IN (${ids.map(() => '?').join(',')}) AND fp.reference_number = ? AND COALESCE(fp.is_voided, 0) = 0 LIMIT 1`,
+      [...ids, reference]).catch(() => null);
+    if (prior) return prior.id;
+    if (!bookings.some(b => ['BOOKED', 'CHECKED_IN'].includes(String(b.status || '').toUpperCase()))) {
+      throw new PaymentNeedsReview(`Paid after the booking was released or cancelled. The money is in the ${gatewayLabel} account: refund it there, or rebook the guest and apply it by hand.`);
+    }
+    await _hotelGroupEnsureFolios(restaurantId, db, link.object_id);
+    const m = await _hotelGroupMoney(db, link.object_id);
+    let remaining = Number(p.amount_paise) / 100;
+    const targets = m.items.filter(it => it.folio && !['settled', 'voided'].includes(String(it.folio.status || '').toLowerCase())
+      && ['BOOKED', 'CHECKED_IN'].includes(String(it.booking.status || '').toUpperCase()));
+    if (!targets.length) throw new PaymentNeedsReview('No open bill was found for this booking. Apply the payment by hand.');
+    let firstId = '';
+    for (let i = 0; i < targets.length && remaining > 0.004; i++) {
+      const it = targets[i];
+      const last = i === targets.length - 1;
+      const amount = Math.round((last ? remaining : Math.min(remaining, it.outstanding)) * 100) / 100;
+      if (amount <= 0) continue;
+      const bs = String(it.booking.status || '').toUpperCase();
+      const row = await recordFolioPayment(db, {
+        restaurantId, folioId: it.folio.id, amount, method: 'ONLINE', type: bs === 'CHECKED_IN' ? 'INTERIM' : 'ADVANCE',
+        reference, recordedBy: `${gatewayLabel} (public booking page)`,
+        notes: `Payment link ${link.id}${p.method ? ` · ${p.method}` : ''}${targets.length > 1 ? ` · room ${i + 1} of ${targets.length}` : ''}`,
+      });
+      if (!firstId) firstId = row.id;
+      remaining = Math.round((remaining - amount) * 100) / 100;
+    }
+    await _publicHoldConfirmed(restaurantId, 'HOTEL_GROUP', link.object_id).catch(() => {});
+    return firstId;
+  }
   if (link.object_type === 'HOTEL_FOLIO') {
     const f: any = await db.get(
       `SELECT f.id, f.status, b.status AS booking_status
@@ -4305,6 +4430,7 @@ async function _pgCreateLink(
     objectType: string; objectId: string; amount?: any; name?: string; phone?: string; email?: string; expiresInHours?: any; gateway?: string;
     webhookUrlFor?: (gatewayId: string) => Promise<string>;
     callbackUrl?: string;
+    expiresAt?: Date;
   },
 ): Promise<any> {
   if (!(await tenantModules(restaurantId)).onlinePayments) throw new PaymentRequestError(MODULE_OFF_PAYMENTS, 403);
@@ -4360,7 +4486,11 @@ async function _pgCreateLink(
     throw new PaymentRequestError(`The balance due on this booking is ₹${(payable.outstandingPaise / 100).toFixed(2)}. A link cannot ask for more.`, 400);
   }
   const hours = Math.min(24 * 30, Math.max(1, Number(input.expiresInHours) || 72));
-  const expiresAt = new Date(Date.now() + hours * 3600 * 1000);
+  // Gateways refuse a link expiring in under ~15 minutes, so an exact expiry is
+  // kept at least 16 minutes out.
+  const expiresAt = input.expiresAt
+    ? new Date(Math.max(input.expiresAt.getTime(), Date.now() + 16 * 60 * 1000))
+    : new Date(Date.now() + hours * 3600 * 1000);
   const customer = {
     name: String(input.name || payable.customer.name || '').trim() || null,
     phone: _pgPhone(input.phone || payable.customer.phone),
@@ -50156,6 +50286,18 @@ ${data.tenant.name}`;
       if (!guest_name || !String(guest_name).trim()) {
         return res.status(400).json({ error: "Name is required." });
       }
+      // How the guest pays: FULL or ADVANCE online (the room is held until paid),
+      // or AT_PROPERTY. An unset choice keeps the old behaviour (pay at property).
+      const payChoices = _publicPayChoices(check.restaurant);
+      const payReady = await _publicPayReady(req.params.id);
+      let payOption = String(b.pay_option || 'AT_PROPERTY').toUpperCase();
+      if (!['FULL', 'ADVANCE', 'AT_PROPERTY'].includes(payOption)) return res.status(400).json({ error: 'Choose how you would like to pay.' });
+      if (payOption !== 'AT_PROPERTY' && !payReady.online) payOption = 'AT_PROPERTY';
+      if ((payOption === 'FULL' && !payChoices.pay_full) || (payOption === 'ADVANCE' && !payChoices.pay_advance_pct)
+        || (payOption === 'AT_PROPERTY' && !payChoices.pay_at_property && payReady.online)) {
+        return res.status(400).json({ error: 'That way of paying is not offered for this property.' });
+      }
+      const payNow = payOption !== 'AT_PROPERTY';
       // Phone is OPTIONAL at booking time (front desk holds, OTA placeholders,
       // guests who book before sharing a number). It becomes MANDATORY at
       // check-in — enforced in POST /hotel/bookings/:id/checkin. Email stays
@@ -50419,7 +50561,8 @@ ${data.tenant.name}`;
         // decrements — important because rooms are independent units).
         // Pass UPI VPA + booking amount so the email template can
         // render a "Pay via UPI" deep link with the amount pre-filled.
-        try {
+        // A pay-now booking is confirmed to the guest once it is paid.
+        if (!payNow) try {
           await triggerNotification(req.params.id, 'BOOKING_CREATED', {
             bookingId: bid,
             guestName: guest_name,
@@ -50447,6 +50590,24 @@ ${data.tenant.name}`;
             [Math.round(grandTotal * 100) / 100, groupId]
           );
         } catch {}
+      }
+
+      // Pay now: hold the rooms, and hand the guest a pay token for them all.
+      let payToken: string | undefined; let payAmountPaise = 0; let holdUntil: string | null = null;
+      if (payNow) {
+        const objectId = isGroup && groupId ? `G:${groupId}` : `B:${createdBookings[0].id}`;
+        holdUntil = new Date(Date.now() + payChoices.hold_minutes * 60 * 1000).toISOString();
+        for (const cb of createdBookings) {
+          await tenantDb.run("UPDATE room_bookings SET pay_option = ?, payment_hold_until = ? WHERE id = ?", [payOption, holdUntil, cb.id]).catch(() => {});
+        }
+        await centralDb.run(
+          `INSERT INTO public_payment_holds (restaurant_id, object_type, object_id, hold_until, status) VALUES (?, 'HOTEL_GROUP', ?, ?, 'HELD')
+           ON CONFLICT (restaurant_id, object_type, object_id) DO UPDATE SET hold_until = EXCLUDED.hold_until, status = 'HELD'`,
+          [req.params.id, objectId, holdUntil]);
+        payAmountPaise = payOption === 'ADVANCE' ? Math.max(100, Math.round(grandTotal * payChoices.pay_advance_pct)) : Math.round(grandTotal * 100);
+        payToken = issuePublicPayToken(req.params.id, 'HOTEL_GROUP', objectId, payOption === 'ADVANCE' ? payAmountPaise : 0, 2 * 24 * 3600 * 1000);
+      } else {
+        for (const cb of createdBookings) await tenantDb.run("UPDATE room_bookings SET pay_option = 'AT_PROPERTY' WHERE id = ?", [cb.id]).catch(() => {});
       }
 
       // Build a UPI deep link if the owner has configured a VPA.
@@ -50480,10 +50641,16 @@ ${data.tenant.name}`;
         bookings: createdBookings.map(b => ({
           id: b.id, room_id: b.room_id, total_amount: b.total_amount,
         })),
-        upi_payment_link,
+        upi_payment_link: payNow ? '' : upi_payment_link,
         upi_payee_name: upiPayeeName,
         upi_vpa: upiVpa,
-        confirmation_message: isGroup
+        pay_option: payOption,
+        pay_token: payToken,
+        pay_amount_paise: payNow ? payAmountPaise : 0,
+        hold_until: holdUntil,
+        confirmation_message: payNow
+          ? `Rooms held for ${payChoices.hold_minutes} minutes. Complete the payment to confirm your booking.`
+          : isGroup
           ? `${num_rooms} rooms confirmed for ${guest_name}.`
           : `Booking confirmed for ${guest_name}.`,
       });
@@ -57411,8 +57578,41 @@ ${data.tenant.name}`;
       return { online: true, gateway: cfg.gateway.label };
     } catch { return { online: false, gateway: null }; }
   };
+  // The owner's choices for the booking pages, safe defaults when unset.
+  const _publicPayChoices = (r: any) => {
+    const advance = Math.min(90, Math.max(0, Math.round(Number(r?.public_pay_advance_pct) || 0)));
+    const full = Number(r?.public_pay_full ?? 1) === 1;
+    const atProperty = Number(r?.public_pay_at_property ?? 1) === 1;
+    return {
+      pay_full: full || (!advance && !atProperty), pay_advance_pct: advance, pay_at_property: atProperty,
+      hold_minutes: Math.min(1440, Math.max(10, Math.round(Number(r?.public_pay_hold_minutes) || 30))),
+    };
+  };
   app.get("/api/public/restaurant/:id/payments/options", resolvePublicTenantParam, async (req: Request, res: Response) => {
-    res.json(await _publicPayReady(req.params.id));
+    const r: any = await centralDb.get("SELECT public_pay_full, public_pay_advance_pct, public_pay_at_property, public_pay_hold_minutes FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+    res.json({ ...(await _publicPayReady(req.params.id)), ..._publicPayChoices(r) });
+  });
+
+  // Owner: what guests may choose on the public booking pages.
+  app.get("/api/restaurant/:id/payments/public-settings", authenticate, async (req: AuthRequest, res: Response) => {
+    const r: any = await centralDb.get("SELECT public_pay_full, public_pay_advance_pct, public_pay_at_property, public_pay_hold_minutes FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+    res.json({ ..._publicPayChoices(r), ...(await _publicPayReady(req.params.id)) });
+  });
+  app.put("/api/restaurant/:id/payments/public-settings", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _requireTabWrite(req, res, 'PAYMENT_GATEWAYS', 2))) return;
+      const b = req.body || {};
+      const full = b.pay_full ? 1 : 0;
+      const atProperty = b.pay_at_property ? 1 : 0;
+      const pct = Math.round(Number(b.pay_advance_pct) || 0);
+      const hold = Math.round(Number(b.hold_minutes) || 0);
+      if (pct < 0 || pct > 90) return res.status(400).json({ error: 'The advance must be between 0% (no advance option) and 90%.' });
+      if (hold < 10 || hold > 1440) return res.status(400).json({ error: 'Hold the room or slot for between 10 minutes and 24 hours.' });
+      if (!full && !atProperty && !pct) return res.status(400).json({ error: 'Leave at least one way for guests to pay.' });
+      await centralDb.run("UPDATE restaurants SET public_pay_full = ?, public_pay_advance_pct = ?, public_pay_at_property = ?, public_pay_hold_minutes = ? WHERE id = ?",
+        [full, pct, atProperty, hold, req.params.id]);
+      res.json({ ok: true, ..._publicPayChoices({ public_pay_full: full, public_pay_advance_pct: pct, public_pay_at_property: atProperty, public_pay_hold_minutes: hold }) });
+    } catch (e: any) { res.status(500).json({ error: 'Could not save the public payment settings.' }); }
   });
 
   const _publicPayAuth = (req: Request, res: Response): ReturnType<typeof readPublicPayToken> => {
@@ -57432,9 +57632,13 @@ ${data.tenant.name}`;
     try {
       const rid = req.params.id;
       const db = await getTenantDb(rid);
+      const hold: any = await centralDb.get("SELECT hold_until, status FROM public_payment_holds WHERE restaurant_id = ? AND object_type = ? AND object_id = ?",
+        [rid, claim.objectType, claim.objectId]).catch(() => null);
+      if (hold && hold.status === 'RELEASED') return res.status(409).json({ error: 'The time to pay for this booking has passed, so it was released. Please book again.', released: true });
+      if (claim.objectType === 'HOTEL_GROUP') await _hotelGroupEnsureFolios(rid, db, claim.objectId);
       const payable = await _pgDescribePayable(db, rid, claim.objectType, claim.objectId);
       if (!payable) return res.status(404).json({ error: 'This bill was not found.' });
-      if (!payable.open) return res.status(409).json({ error: payable.closedReason, closed: true });
+      if (!payable.open) return res.status(409).json({ error: payable.closedReason, closed: true, paid: /already (paid|settled)/i.test(String(payable.closedReason || '')) });
       const want = claim.amountPaise || payable.outstandingPaise;
       const live: any = await db.get(
         `SELECT * FROM payment_links WHERE object_type = ? AND object_id = ? AND status = 'CREATED' AND url IS NOT NULL
@@ -57449,6 +57653,7 @@ ${data.tenant.name}`;
         amount: claim.amountPaise ? claim.amountPaise / 100 : undefined,
         name: (req.body as any)?.name, phone: (req.body as any)?.phone, email: (req.body as any)?.email,
         expiresInHours: 24,
+        expiresAt: hold && hold.status === 'HELD' ? new Date(new Date(hold.hold_until).getTime() + 5 * 60 * 1000) : undefined,
         webhookUrlFor: (gid: string) => _pgWebhookUrl(req, rid, gid),
         callbackUrl: host ? `${proto}://${host}/?pay_result=${encodeURIComponent(token)}` : undefined,
       });
@@ -57489,11 +57694,56 @@ ${data.tenant.name}`;
         outstanding_paise: payable ? payable.outstandingPaise : null,
         purpose: payable?.purpose || null,
         object_type: claim.objectType,
+        hold: await centralDb.get("SELECT hold_until, status FROM public_payment_holds WHERE restaurant_id = ? AND object_type = ? AND object_id = ?",
+          [rid, claim.objectType, claim.objectId]).catch(() => null),
       });
     } catch (e: any) {
       res.status(500).json({ error: 'Could not check the payment.' });
     }
   });
+
+  // ── Release sweep: unpaid pay-now bookings free their room ────────────────
+  // Every minute. Before releasing, the open link is read back from the gateway,
+  // so a payment made in the last seconds is recorded instead of lost.
+  const _releasePublicHolds = async () => {
+    const due: any[] = await centralDb.query(
+      "SELECT * FROM public_payment_holds WHERE status = 'HELD' AND hold_until < CURRENT_TIMESTAMP ORDER BY hold_until LIMIT 50").catch(() => []);
+    for (const h of due) {
+      try {
+        const db = await getTenantDb(h.restaurant_id);
+        const links: any[] = await db.query("SELECT * FROM payment_links WHERE object_type = ? AND object_id = ? AND status IN ('CREATED', 'PARTIALLY_PAID', 'CREATING')",
+          [h.object_type, h.object_id]).catch(() => []);
+        for (const l of links) await _pgReconcileLink(h.restaurant_id, l.id, 'HOLD_EXPIRY').catch(() => {});
+        if (h.object_type === 'HOTEL_GROUP') {
+          const m = await _hotelGroupMoney(db, h.object_id);
+          if (m.paid > 0) { await _publicHoldConfirmed(h.restaurant_id, h.object_type, h.object_id); continue; }
+          for (const l of links) {
+            const cfg = await _pgConfig(db, l.gateway).catch(() => null);
+            if (cfg && !cfg.missing.length && l.gateway_link_id) await cfg.gateway.cancelLink(cfg.creds, { gatewayLinkId: l.gateway_link_id, referenceId: l.id }).catch(() => {});
+            await db.run("UPDATE payment_links SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_error = 'Booking released: not paid in time.' WHERE id = ? AND status IN ('CREATED', 'CREATING')", [l.id]).catch(() => {});
+          }
+          for (const it of m.items) {
+            const b = it.booking;
+            if (String(b.status || '').toUpperCase() !== 'BOOKED') continue;
+            await db.run(
+              `UPDATE room_bookings SET status = 'CANCELLED', cancelled_at = ?, cancelled_source = 'SYSTEM',
+                 cancellation_reason = 'Online payment was not completed in time', payment_hold_until = NULL WHERE id = ? AND status = 'BOOKED'`,
+              [new Date().toISOString(), b.id]).catch(() => {});
+            if (it.folio) await db.run("UPDATE folios SET status = 'voided' WHERE id = ? AND status = 'open'", [it.folio.id]).catch(() => {});
+            triggerAriPush(h.restaurant_id, b).catch(() => {});
+          }
+          if (m.bookings[0]?.group_id) await db.run("UPDATE room_booking_groups SET group_status = 'CANCELLED' WHERE id = ?", [m.bookings[0].group_id]).catch(() => {});
+          try { scheduleAiosellResync(h.restaurant_id); } catch { /* channel manager optional */ }
+        }
+        await centralDb.run("UPDATE public_payment_holds SET status = 'RELEASED', resolved_at = CURRENT_TIMESTAMP WHERE restaurant_id = ? AND object_type = ? AND object_id = ? AND status = 'HELD'",
+          [h.restaurant_id, h.object_type, h.object_id]).catch(() => {});
+        console.log(`[public-pay] released unpaid ${h.object_type} ${h.object_id} for ${h.restaurant_id}`);
+      } catch (e: any) {
+        console.error('[public-pay] release failed:', h.object_id, e?.message || e);
+      }
+    }
+  };
+  setInterval(() => { _releasePublicHolds().catch(() => {}); }, 60 * 1000);
 
   // A guest reopening the QR page gets a pay token for the table bill they hold.
   // Holding the session token already proves it is their table.
@@ -66717,8 +66967,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-pay-restaurant-qr',
+    commit_marker: 'public-pay-hotel-booking',
     code_features: [
+      'public-pay-hotel-booking  Owner: the hotel public booking page takes online payment. Owner settings (Payment Gateways > Public pages; restaurants.public_pay_full / public_pay_advance_pct / public_pay_at_property / public_pay_hold_minutes; GET/PUT /api/restaurant/:id/payments/public-settings, PAYMENT_GATEWAYS Edit): pay in full, an advance %, pay at the property, and how long an unpaid online booking holds its room. The guest picks on the booking form (pay_option FULL/ADVANCE/AT_PROPERTY). Pay-now: bookings get pay_option + payment_hold_until, a central public_payment_holds row, the BOOKING_CREATED confirmation is deferred until paid, and the response carries a pay token for the new HOTEL_GROUP payable (G:<group>|B:<booking>; folios created on start; payment spread across the rooms folios as ADVANCE; the hold is confirmed and the confirmation sent). The confirmation card shows a countdown and Pay now. A 60s sweep reads open links back from the gateway, then releases unpaid holds: links cancelled, bookings CANCELLED (cancelled_source SYSTEM), unpaid folios voided, ARI and Aiosell resynced. Gateway links for held bookings expire with the hold (_pgCreateLink expiresAt). i18n in 6 languages.',
       'public-pay-restaurant-qr  Owner: pay online on public pages, restaurant QR first. src/PublicPay.tsx: usePublicPayOptions, PayOnlineButton (start with the pay token, open the gateway in a new tab or this tab when pop-ups are blocked, poll status every 4s and on return, reuse a live link, not-completed and retry states) and PaymentResultPage at /?pay_result=<token> for gateways that redirect back. CustomerInterface: the pay window (prepaid order, cloud kitchen UPI, postpaid table bill) shows Pay online (card, UPI, net banking) above the existing UPI QR when the tenant has a gateway; tokens come from the order response, the request-bill response, or GET sessions/:token/pay-token. Recording stays with the existing webhook and reconcile (RESTAURANT_ORDER releases a held prepaid order to the kitchen; RESTAURANT_SESSION settles the table bill). i18n pay.* in 6 languages.',
       'public-links-token-pay-foundation  Fix (owner): the Home Public pages links use the tenant public token, but the spa and hotel public routes only accepted the internal id, so the Spa booking link (and the hotel link when no booking slug is set) opened a page that could not load. All 11 /api/public/restaurant/:id/hotel* and /spa* routes now run resolvePublicTenantParam, like menu and events. Also: the Owner reports OTA 360 and Receivables section hides when the Accounts module is off. Foundation for online payment on public pages (no UI yet): signed guest pay tokens (issuePublicPayToken/readPublicPayToken, tenant|type|id|amount|expiry), GET /api/public/restaurant/:id/payments/options, POST .../payments/start (reuses a live link, return URL ?pay_result=), GET .../payments/status (reconciles at most every 10s), GET .../sessions/:token/pay-token; _pgCreateLink passes callbackUrl; restaurant order and request-bill responses carry pay_token.',
       'tenant-theme-emails-pdfs-finance  Owner: emails, PDFs and Finance pages follow the tenant theme colour. brandColors.ts gains brandHex()/brandDarkHex() read from an AsyncLocalStorage context (runWithBrand), falling back to the platform colour; every template in invoiceService(Boutique/Shared), notificationService, poService, bankRecStatementPdf and server.ts now reads them at render time. A middleware after the body parsers resolves the tenant (path /api/(public/)restaurant/:id, the decoded JWT restaurantId, ?r=, the feedback link tenant, or the tenant subdomain slug) and runs the request in its colour; triggerNotification and sendPrearrivalEmail set it for crons. tenantBrandColors caches 60s and a theme save clears it. Finance (AccountingView) and the checklist screens used a hardcoded rust accent (#a0522d/#8b4513); now bg/text/border-brand, with warnings that borrowed it moved to amber.',

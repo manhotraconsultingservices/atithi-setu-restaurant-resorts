@@ -400,6 +400,19 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS accounts_enabled INT DEFAULT 0;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS people_enabled INT DEFAULT 0;
     CREATE TABLE IF NOT EXISTS module_flag_backfill (name TEXT PRIMARY KEY, done_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+    -- Online payment on public booking pages (hotel, spa): which choices the guest
+    -- gets, the advance percentage (0 = no advance option) and how long an unpaid
+    -- pay-now booking holds its room or slot before it is released.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS public_pay_full INT DEFAULT 1;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS public_pay_advance_pct INT DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS public_pay_at_property INT DEFAULT 1;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS public_pay_hold_minutes INT DEFAULT 30;
+    -- A pay-now booking waiting for its payment, across tenants, for the release sweep.
+    CREATE TABLE IF NOT EXISTS public_payment_holds (
+      restaurant_id TEXT NOT NULL, object_type TEXT NOT NULL, object_id TEXT NOT NULL,
+      hold_until TIMESTAMP NOT NULL, status TEXT DEFAULT 'HELD',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, resolved_at TIMESTAMP,
+      PRIMARY KEY (restaurant_id, object_type, object_id));
     -- Platform WhatsApp sender (Meta Cloud API), one row, set in /internal →
     -- WhatsApp. Secrets are sealed (paymentSecrets.ts). No row = META_WA_* env.
     CREATE TABLE IF NOT EXISTS platform_whatsapp_config (

@@ -120,7 +120,7 @@ const btn = 'inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-
 // ═════════════════════════════════════════════════════════════════════════════
 // Payment Gateways page — three sub-tabs: Gateways · Payment links · Webhook log
 // ═════════════════════════════════════════════════════════════════════════════
-type PgTab = 'GATEWAYS' | 'LINKS' | 'WEBHOOKS';
+type PgTab = 'GATEWAYS' | 'LINKS' | 'WEBHOOKS' | 'PUBLIC';
 type LinkFilter = 'ALL' | 'OPEN' | 'PAID' | 'NEEDS_REVIEW';
 
 export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: string; token: string }) {
@@ -368,7 +368,10 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
         {tabBtn('GATEWAYS', t('pg.tab.gateways'))}
         {tabBtn('LINKS', t('pg.tab.links'), needsReview)}
         {tabBtn('WEBHOOKS', t('pg.tab.webhooks'))}
+        {tabBtn('PUBLIC', t('pg.tab.public'))}
       </div>
+
+      {tab === 'PUBLIC' && <PublicPaySettings api={api} canEdit={canEdit} />}
 
       {tab === 'GATEWAYS' && (
         <div className="space-y-4">
@@ -818,6 +821,78 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Public pages: what a guest may choose when booking online ────────────────
+// Used by the hotel and spa booking pages. A pay-now booking holds its room or
+// slot for the hold time and is released if it is not paid by then.
+function PublicPaySettings({ api, canEdit }: { api: (path: string, init?: RequestInit) => Promise<any>; canEdit: boolean }) {
+  const { t } = useT();
+  const toast = useToast();
+  const [v, setV] = useState<Json | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api('/public-settings').then(setV).catch((e: any) => toast.error(e.message)); }, [api]);
+  if (!v) return <div className="p-6 text-sm text-[#9c8e85]">{t('common.loading')}</div>;
+  const set = (k: string, val: any) => setV({ ...v, [k]: val });
+  const save = async () => {
+    setBusy(true);
+    try {
+      const out = await api('/public-settings', { method: 'PUT', body: JSON.stringify({
+        pay_full: !!v.pay_full, pay_at_property: !!v.pay_at_property,
+        pay_advance_pct: v.advance_on ? Number(v.pay_advance_pct) || 0 : 0, hold_minutes: Number(v.hold_minutes) || 30,
+      }) });
+      setV({ ...v, ...out, advance_on: out.pay_advance_pct > 0 });
+      toast.success(t('pg.public.saved'));
+    } catch (e: any) { toast.error(e.message); }
+    setBusy(false);
+  };
+  const advanceOn = v.advance_on ?? Number(v.pay_advance_pct) > 0;
+  const row = 'flex items-center gap-3 bg-[#faf7f2] rounded-xl px-4 py-3';
+  return (
+    <div className="bg-white border border-[#e8dccf] rounded-2xl p-5 space-y-4 max-w-2xl">
+      <div>
+        <h3 className="text-lg font-bold text-[#1a1208]">{t('pg.public.title')}</h3>
+        <p className="text-xs text-[#6b5d52] mt-0.5">{t('pg.public.hint')}</p>
+      </div>
+      {!v.online && (
+        <div className="flex gap-2 items-center bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-xs text-amber-900">
+          <AlertTriangle size={14} className="flex-none" /> {t('pg.public.notReady')}
+        </div>
+      )}
+      <div className="space-y-2">
+        <label className={row}>
+          <input type="checkbox" className="accent-brand" disabled={!canEdit} checked={!!v.pay_full} onChange={e => set('pay_full', e.target.checked)} />
+          <span className="text-sm font-semibold text-[#1a1208]">{t('pg.public.full')}</span>
+        </label>
+        <div className={row}>
+          <input type="checkbox" className="accent-brand" disabled={!canEdit} checked={!!advanceOn}
+            onChange={e => setV({ ...v, advance_on: e.target.checked, pay_advance_pct: e.target.checked ? (Number(v.pay_advance_pct) || 25) : 0 })} />
+          <span className="text-sm font-semibold text-[#1a1208] flex-1">{t('pg.public.advance')}</span>
+          {advanceOn && (
+            <span className="flex items-center gap-1 text-sm">
+              <input type="number" min={1} max={90} disabled={!canEdit} value={v.pay_advance_pct} onChange={e => set('pay_advance_pct', e.target.value)}
+                className="w-16 bg-white border border-[#e8dccf] rounded-lg px-2 py-1 text-right" /> %
+            </span>
+          )}
+        </div>
+        <label className={row}>
+          <input type="checkbox" className="accent-brand" disabled={!canEdit} checked={!!v.pay_at_property} onChange={e => set('pay_at_property', e.target.checked)} />
+          <span className="text-sm font-semibold text-[#1a1208]">{t('pg.public.atProperty')}</span>
+        </label>
+      </div>
+      <div className="flex items-center gap-2 text-sm">
+        <span className="font-semibold text-[#1a1208]">{t('pg.public.hold')}</span>
+        <input type="number" min={10} max={1440} disabled={!canEdit} value={v.hold_minutes} onChange={e => set('hold_minutes', e.target.value)}
+          className="w-20 bg-[#faf7f2] border border-[#e8dccf] rounded-lg px-2 py-1 text-right" />
+        <span className="text-[#6b5d52]">{t('pg.public.minutes')}</span>
+      </div>
+      {canEdit && (
+        <button type="button" onClick={save} disabled={busy} className="px-5 py-2 rounded-xl bg-brand text-white text-sm font-bold disabled:opacity-50">
+          {busy ? t('pg.public.saving') : t('pg.public.save')}
+        </button>
+      )}
     </div>
   );
 }
