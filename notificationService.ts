@@ -24,6 +24,7 @@
  *   TELEGRAM_DEFAULT_CHAT_ID — Default chat/group/channel ID to send to (optional fallback)
  */
 
+import { BRAND_HEX, BRAND_DARK_HEX } from './brandColors.ts';
 import twilio from 'twilio';
 import nodemailer from 'nodemailer';
 import { whatsAppCreds } from './whatsappConfig.ts';
@@ -335,7 +336,7 @@ export function buildNotificationContent(
             : `Your bill of ${data.amount || ''} is settled and your invoice ${data.invoiceNumber || ''} is ready.`) +
           `\n\nWe hope to see you again soon.`,
         html:
-          `<h2 style="color:#cc5a16">${data.isCreditNote ? 'Credit note' : 'Your invoice'}</h2>` +
+          `<h2 style="color:${BRAND_HEX}">${data.isCreditNote ? 'Credit note' : 'Your invoice'}</h2>` +
           `<p>Thank you for staying with <strong>${r}</strong>, ${data.guestName || 'there'}.</p>` +
           `<p>${data.isCreditNote
               ? `Your credit note <strong>${data.invoiceNumber || ''}</strong> is ready.`
@@ -371,10 +372,10 @@ export function buildNotificationContent(
           `${data.purpose ? ` for ${data.purpose}` : ''} using this secure link:\n${data.payUrl || ''}\n\n` +
           `${data.expiresAt ? `The link is valid until ${data.expiresAt}. ` : ''}UPI, card and net banking accepted.`,
         html:
-          `<h2 style="color:#cc5a16">Payment request</h2>` +
+          `<h2 style="color:${BRAND_HEX}">Payment request</h2>` +
           `<p>Dear ${data.customerName || 'Guest'}, please pay <strong>${data.amount || ''}</strong> to <strong>${r}</strong>` +
           `${data.purpose ? ` for ${data.purpose}` : ''}.</p>` +
-          `<p><a href="${data.payUrl || '#'}" style="display:inline-block;padding:12px 24px;background:#cc5a16;color:#fff;border-radius:10px;text-decoration:none;font-weight:bold">Pay ${data.amount || ''}</a></p>` +
+          `<p><a href="${data.payUrl || '#'}" style="display:inline-block;padding:12px 24px;background:${BRAND_HEX};color:#fff;border-radius:10px;text-decoration:none;font-weight:bold">Pay ${data.amount || ''}</a></p>` +
           `<p style="color:#6b5d52;font-size:13px">${data.expiresAt ? `Valid until ${data.expiresAt}. ` : ''}UPI, card and net banking accepted.</p>`,
       };
 
@@ -617,7 +618,7 @@ export function buildNotificationContent(
           (data.priority && data.priority !== 'NORMAL' ? `Priority: ${data.priority}\n` : '') +
           `Ref: ${data.requestId}`,
         html:
-          `<h2 style="color:#cc5a16">🧹 New guest request</h2>` +
+          `<h2 style="color:${BRAND_HEX}">🧹 New guest request</h2>` +
           `<p>Room: <strong>${data.roomId}</strong></p>` +
           `<p>Service: <strong>${data.serviceName}</strong></p>` +
           `<p>Category: ${data.category}</p>` +
@@ -678,7 +679,7 @@ export function buildNotificationContent(
         ? `Amount: ${currencySymbol}${amount.toLocaleString('en-IN')}\n`
         : '';
       const totalHtml = amount > 0
-        ? `<p>Total: <strong style="color:#cc5a16">${currencySymbol}${amount.toLocaleString('en-IN')}</strong></p>`
+        ? `<p>Total: <strong style="color:${BRAND_HEX}">${currencySymbol}${amount.toLocaleString('en-IN')}</strong></p>`
         : '';
       return {
         subject: `📅 Booking confirmed — ${data.guestName} — ${r}`,
@@ -695,7 +696,7 @@ export function buildNotificationContent(
             : ''),
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">📅 Booking confirmed</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">📅 Booking confirmed</h2>` +
           `<p>Thank you, <strong>${data.guestName}</strong> — we've got your reservation locked in.</p>` +
           `<div style="background:#faf7f2;padding:16px;border-radius:8px;margin:16px 0">` +
           `<p style="margin:0 0 4px 0"><strong>Your stay</strong></p>` +
@@ -707,11 +708,11 @@ export function buildNotificationContent(
           `<p style="margin:2px 0;color:#9c8e85;font-size:12px">Ref: ${data.bookingId}</p>` +
           `</div>` +
           (hasUpi ? (
-            `<div style="border-top:2px dashed #cc5a16;padding-top:16px;margin-top:16px">` +
-            `<h3 style="color:#cc5a16;margin-top:0">💰 Pay direct via UPI</h3>` +
+            `<div style="border-top:2px dashed ${BRAND_HEX};padding-top:16px;margin-top:16px">` +
+            `<h3 style="color:${BRAND_HEX};margin-top:0">💰 Pay direct via UPI</h3>` +
             `<p style="color:#6b5d52;font-size:14px;margin:0 0 12px 0">Tap the button below on your phone — your UPI app (Google Pay / PhonePe / Paytm) will open with <strong>${currencySymbol}${amount.toLocaleString('en-IN')}</strong> pre-filled. No gateway fees, the amount goes straight to the property.</p>` +
             `<p style="text-align:center;margin:16px 0">` +
-            `<a href="${upiLink}" style="background:#cc5a16;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Pay ${currencySymbol}${amount.toLocaleString('en-IN')} via UPI</a>` +
+            `<a href="${upiLink}" style="background:${BRAND_HEX};color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Pay ${currencySymbol}${amount.toLocaleString('en-IN')} via UPI</a>` +
             `</p>` +
             `<p style="color:#9c8e85;font-size:12px;text-align:center;margin:4px 0">Or copy this UPI link: <code style="background:#faf7f2;padding:2px 6px;border-radius:4px;font-size:11px">${upiLink}</code></p>` +
             `<p style="color:#9c8e85;font-size:12px;text-align:center;margin:8px 0">Payee: ${upiPayeeName} · UPI ID: <strong>${upiVpa}</strong></p>` +
@@ -739,12 +740,12 @@ export function buildNotificationContent(
           `— ${r}`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">🏨 See you soon at ${r}!</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">🏨 See you soon at ${r}!</h2>` +
           `<p>Hi <strong>${data.guestName || 'there'}</strong>,</p>` +
           `<p>We're getting ready for your stay on <strong>${data.checkIn}</strong>.</p>` +
           `<p>To save time at the front desk when you arrive, please complete your check-in details online:</p>` +
           `<p style="text-align:center;margin:24px 0">` +
-          `<a href="${data.checkinUrl || '#'}" style="background:#cc5a16;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Complete Online Check-In</a>` +
+          `<a href="${data.checkinUrl || '#'}" style="background:${BRAND_HEX};color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Complete Online Check-In</a>` +
           `</p>` +
           `<div style="background:#faf7f2;padding:16px;border-radius:8px;margin:16px 0">` +
           `<p style="margin:0 0 4px 0"><strong>Your stay</strong></p>` +
@@ -913,7 +914,7 @@ export function buildNotificationContent(
           `Payment: ${data.paymentMode || '—'}` +
           unmappedLine,
         html:
-          `<h2 style="color:#cc5a16">🍱 New ${channel} Order</h2>` +
+          `<h2 style="color:${BRAND_HEX}">🍱 New ${channel} Order</h2>` +
           `<table cellpadding="6" style="border-collapse:collapse;font-size:14px;">` +
           `<tr><td style="color:#6b5d52">Order</td><td><strong>${orderRef}</strong></td></tr>` +
           `<tr><td style="color:#6b5d52">Customer</td><td>${data.customerName || '—'} · ${data.customerPhone || '—'}</td></tr>` +
@@ -1012,7 +1013,7 @@ export function buildNotificationContent(
           `<h2 style="color:#dc2626">🛡️ Webhook Signature Failures</h2>` +
           `<p><strong>${data.count}</strong> failures on <strong>${data.channel}</strong> in the last ${data.windowMinutes} min.</p>` +
           `<p>Likely causes: rotated HMAC secret, misconfigured webhook URL, or replay attack.</p>` +
-          `<p><a href="#" style="color:#cc5a16">Open Settings → Integrations → ${data.channel} to rotate credentials.</a></p>`,
+          `<p><a href="#" style="color:${BRAND_HEX}">Open Settings → Integrations → ${data.channel} to rotate credentials.</a></p>`,
       };
 
     /* ── Loyalty (tier-based) ─────────────────────────────────────────── */
@@ -1035,10 +1036,10 @@ export function buildNotificationContent(
           `— The ${r} team`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">🎉 Welcome to ${tier}!</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">🎉 Welcome to ${tier}!</h2>` +
           `<p>Hi <strong>${name}</strong>,</p>` +
           `<p>You've just been upgraded to <strong>${tier}</strong> at <strong>${r}</strong>.</p>` +
-          (pct > 0 ? `<div style="background:#fef0e4;border:1px solid #fcd34d;border-radius:8px;padding:14px;margin:16px 0;text-align:center"><strong style="color:#cc5a16;font-size:22px">${pct}% OFF</strong><br><span style="color:#3d3128">automatically applied to every order, forever.</span></div>` : ``) +
+          (pct > 0 ? `<div style="background:#fef0e4;border:1px solid #fcd34d;border-radius:8px;padding:14px;margin:16px 0;text-align:center"><strong style="color:${BRAND_HEX};font-size:22px">${pct}% OFF</strong><br><span style="color:#3d3128">automatically applied to every order, forever.</span></div>` : ``) +
           (data.perks ? `<p style="background:#f9fafb;padding:12px;border-radius:6px;color:#3d3128"><strong>Perks:</strong> ${data.perks}</p>` : ``) +
           `<p style="color:#6b5d52;font-size:13px">Lifetime spend so far: <strong>₹${totalSpent.toLocaleString('en-IN')}</strong></p>` +
           `<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">` +
@@ -1065,7 +1066,7 @@ export function buildNotificationContent(
           `\n\n— The ${r} team`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">${tier} reward ready</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">${tier} reward ready</h2>` +
           `<p>Hi <strong>${name}</strong>,</p>` +
           (pct > 0
             ? `<p>Your <strong>${tier} discount of ${pct}%</strong> is ready to use on your next order at <strong>${r}</strong>.</p>`
@@ -1094,7 +1095,7 @@ export function buildNotificationContent(
           `\nSee you then!\n— ${r}`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">New shift assigned</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">New shift assigned</h2>` +
           `<p>Hi <strong>${name}</strong>,</p>` +
           `<p>You have a new shift scheduled at <strong>${r}</strong>.</p>` +
           `<table style="margin:12px 0"><tr><td><b>Date:</b></td><td>${date}</td></tr>` +
@@ -1120,7 +1121,7 @@ export function buildNotificationContent(
           `\nReply if you cannot make the new timing.\n— ${r}`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">Shift updated</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">Shift updated</h2>` +
           `<p>Hi <strong>${name}</strong>,</p>` +
           `<p>Your shift at <strong>${r}</strong> has been updated.</p>` +
           `<table style="margin:12px 0"><tr><td><b>Date:</b></td><td>${date}</td></tr>` +
@@ -1164,7 +1165,7 @@ export function buildNotificationContent(
           `\nOpen "My Checklist" to complete it.\n— ${r}`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">New checklist assigned</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">New checklist assigned</h2>` +
           `<p>A checklist is assigned to <strong>${who}</strong> at <strong>${r}</strong>.</p>` +
           `<table style="margin:12px 0"><tr><td><b>Checklist:</b></td><td>${tpl}</td></tr>` +
           (facility ? `<tr><td><b>For:</b></td><td>${facility}</td></tr>` : '') +
@@ -1366,7 +1367,7 @@ export function buildNotificationContent(
           `Date: ${date}\nTime: ${data.start_time}–${data.end_time}\n\nSee you soon!\n— ${r}`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">Shift reminder</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">Shift reminder</h2>` +
           `<p>Hi <strong>${name}</strong>,</p>` +
           `<p>Quick reminder — you're scheduled at <strong>${r}</strong> today.</p>` +
           `<p><b>${date}</b> · ${data.start_time} – ${data.end_time}</p>` +
@@ -1396,7 +1397,7 @@ export function buildNotificationContent(
           `See you soon!\n— The ${r} team`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #fde68a;border-radius:12px;background:#fffbeb">` +
-          `<h2 style="color:#cc5a16;margin-top:0">🎂 Happy birthday, ${name}!</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">🎂 Happy birthday, ${name}!</h2>` +
           `<p>As one of our valued <strong>${tier}</strong> customers, we wanted to wish you a wonderful day at <strong>${r}</strong>.</p>` +
           (pct > 0 ? `<p>Your tier already gives you <strong>${pct}% off</strong> every order — birthdays are always sweeter with that.</p>` : '') +
           (code ? `<p style="background:#fef3c7;border-radius:8px;padding:12px;font-size:15px"><b>Today's gift:</b> use code <strong style="font-family:monospace;font-size:16px">${code}</strong> at checkout.</p>` : '') +
@@ -1423,7 +1424,7 @@ export function buildNotificationContent(
           `Drop by soon — we'd love to bump you up.\n\n— The ${r} team`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">You're almost ${nextTier}!</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">You're almost ${nextTier}!</h2>` +
           `<p>Hi <strong>${name}</strong>,</p>` +
           `<p>You're currently a <strong>${currentTier}</strong> customer at <strong>${r}</strong> — and just <strong>₹${fmtAmt}</strong> away from reaching <strong>${nextTier}</strong>.</p>` +
           (nextPct > 0 ? `<p style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:8px;padding:12px;color:#065f46">${nextTier} members get <strong>${nextPct}% off</strong> every order, automatically.</p>` : '') +
@@ -1450,11 +1451,11 @@ export function buildNotificationContent(
           `Your feedback helps us improve and lets future guests know what to expect.\n\n— The ${r} team`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">How was your visit?</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">How was your visit?</h2>` +
           `<p>Hi <strong>${name}</strong>,</p>` +
           `<p>Thanks for visiting <strong>${r}</strong>! We'd love to hear how it went.</p>` +
           `<p style="text-align:center;margin:24px 0">` +
-          `<a href="${link}" style="background:#cc5a16;color:#fff;padding:14px 28px;border-radius:12px;text-decoration:none;font-weight:700;display:inline-block">Rate your visit</a>` +
+          `<a href="${link}" style="background:${BRAND_HEX};color:#fff;padding:14px 28px;border-radius:12px;text-decoration:none;font-weight:700;display:inline-block">Rate your visit</a>` +
           `</p>` +
           `<p style="color:#6b7280;font-size:13px">Takes 10 seconds. Your feedback helps us improve and lets future guests know what to expect.</p>` +
           `<p style="color:#9ca3af;font-size:12px;margin:0">— The ${r} team</p>` +
@@ -1478,7 +1479,7 @@ export function buildNotificationContent(
           `We appreciate you taking the time to help us improve.\n\n— The ${r} team`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">Thanks for your feedback</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">Thanks for your feedback</h2>` +
           `<p>Hi <strong>${name}</strong>,</p>` +
           (data.rating ? `<p style="font-size:24px;margin:8px 0">${rating}</p>` : '') +
           (data.comment ? `<blockquote style="background:#f9fafb;border-left:3px solid #d1d5db;padding:8px 12px;margin:8px 0;color:#6b7280;font-style:italic">${data.comment}</blockquote>` : '') +
@@ -1797,7 +1798,7 @@ export function buildNotificationContent(
           `\nWe look forward to hosting you!\n— ${r}`,
         html:
           `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-          `<h2 style="color:#cc5a16;margin-top:0">📅 Your event is coming up!</h2>` +
+          `<h2 style="color:${BRAND_HEX};margin-top:0">📅 Your event is coming up!</h2>` +
           `<p>Hi <strong>${data.customer_name || 'there'}</strong>, your <strong>${data.event_type || 'event'}</strong> at <strong>${r}</strong> is on <strong>${data.event_date}</strong>${data.days != null ? ` (in ${data.days} day(s))` : ''}.</p>` +
           `<div style="background:#faf7f2;padding:16px;border-radius:8px;margin:16px 0;color:#6b5d52;font-size:14px">` +
           `<p style="margin:2px 0">Venue: <strong>${data.venue_name || '—'}</strong></p>` +

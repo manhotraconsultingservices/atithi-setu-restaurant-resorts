@@ -24,6 +24,7 @@
  * and event quotation templates use. Do not reintroduce the rupee glyph here.
  */
 
+import { BRAND_HEX, BRAND_DARK_HEX } from './brandColors.ts';
 import PDFDocument from 'pdfkit';
 
 export interface BankRecStatementItem {
@@ -68,7 +69,7 @@ export interface BankRecStatementData {
   generated_at: string;
 }
 
-const ORANGE = '#cc5a16';
+const ORANGE = BRAND_HEX;
 const DARK = '#1a1208';
 const MUTED = '#6b5d52';
 const LIGHT = '#9c8e85';

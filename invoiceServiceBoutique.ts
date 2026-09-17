@@ -32,6 +32,7 @@
  * any tenant who hasn't opted in.
  */
 
+import { BRAND_HEX, BRAND_DARK_HEX } from './brandColors.ts';
 import PDFDocument from 'pdfkit';
 import {
   HINDI_REG, HINDI_BOLD, HAS_HINDI_FONT, L,
@@ -82,7 +83,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
       // ─── Boutique design tokens ────────────────────────────────────
       // Slightly richer than Classic — adds a deep accent for the
       // grand-total box and a stamp color for the PAID/UNPAID badge.
-      const ACCENT      = data.isCreditNote ? '#c13b3b' : '#cc5a16';
+      const ACCENT      = data.isCreditNote ? '#c13b3b' : BRAND_HEX;
       const ACCENT_DARK = data.isCreditNote ? '#7a2727' : '#7a3409';   // for boxed totals
       const STAMP_OK    = '#2d7d5a';   // green for PAID
       const STAMP_WARN  = '#b96b0f';   // amber for UNPAID / PENDING
