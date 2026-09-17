@@ -21,6 +21,7 @@ import { PaymentGatewaysPage, CollectOnlineDialog } from './PaymentLinks';
 import { PlatformWhatsApp } from './PlatformWhatsApp';
 import { NotificationsWorkspace } from './NotificationsWorkspace';
 import { ThemeColorSettings, applyThemeColor } from './ThemeColorSettings';
+import { PayOnlineButton, PaymentResultPage, usePublicPayOptions } from './PublicPay';
 import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, spanInRange, type DateRange } from './components/ListFilters';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
@@ -1882,6 +1883,9 @@ export default function App() {
   // clickable everywhere; the raw upi:// link was not).
   const __payParam = new URLSearchParams(window.location.search).get('pay');
   if (__payParam) return <PayPage payload={__payParam} />;
+  // The gateway sends a guest back here after paying on a public page.
+  const __payResult = new URLSearchParams(window.location.search).get('pay_result');
+  if (__payResult) return <PaymentResultPage token={__payResult} />;
 
   if (view === 'LANDING') {
     return (
@@ -51877,6 +51881,11 @@ function PayPage({ payload }: { payload: string }) {
 
 function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const toast = useToast();
+  const { t: tPay } = useT();
+  // Online payment through the property's gateway: available when the owner has
+  // one switched on; the token names the order or table bill being paid.
+  const payOptions = usePublicPayOptions(restaurantId);
+  const [payToken, setPayToken] = useState<string | null>(null);
   const showConfirm = useConfirm();
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [cart, setCart] = useState<OrderItem[]>([]);
@@ -52163,6 +52172,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       });
       if (res.ok) {
         const data = await res.json();
+        if (data.pay_token) setPayToken(data.pay_token);
         setSession(prev => prev
           ? { ...prev, status: 'bill_requested', bill_amount: data.bill_amount, payment_method: paymentMethod }
           : null
@@ -52232,6 +52242,9 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     };
     setOrder(billOrder);
     setShowUPIModal(true);
+    // A pay token for this table bill (the guest holds its session token).
+    fetch(`/api/public/restaurant/${restaurantId}/sessions/${session.session_token}/pay-token`)
+      .then(r => (r.ok ? r.json() : null)).then(d => { if (d?.pay_token) setPayToken(d.pay_token); }).catch(() => {});
   };
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -52480,6 +52493,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 
       const data = await res.json();
       if (!data.id && !data.orderId) throw new Error('Server did not return an order ID');
+      setPayToken(data.pay_token || null);
 
       const orderId  = data.orderId || data.id;
       const newOrder: Order = {
@@ -53128,6 +53142,28 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                   <p className="text-sm text-[#6b5d52] uppercase tracking-widest font-bold">Order Total</p>
                   <p className="text-4xl font-bold font-mono text-[#1a1a1a]">₹{orderTotal.toFixed(2)}</p>
                 </div>
+
+                {/* Card, UPI, net banking or wallet through the property's gateway;
+                    the UPI QR below stays as the other way to pay. */}
+                {payOptions.online && payToken && (
+                  <div className="space-y-3">
+                    <PayOnlineButton
+                      restaurantId={restaurantId}
+                      token={payToken}
+                      label={tPay('pay.payOnlineCards')}
+                      customer={{ name: order?.customerName || undefined, phone: order?.customerPhone || undefined }}
+                      onPaid={() => {
+                        setOrder(prev => prev ? { ...prev, paymentStatus: 'PAID' } : prev);
+                        if (session && order?.id === session.id) setSession(prev => prev ? { ...prev, status: 'closed' } as any : prev);
+                        toast.success(tPay('pay.paid'));
+                        setTimeout(() => setShowUPIModal(false), 1500);
+                      }}
+                    />
+                    {(restaurant.upi_id || restaurant.upi_qr_image) && (
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">{tPay('pay.orUpi')}</p>
+                    )}
+                  </div>
+                )}
 
                 {restaurant.upi_id ? (
                   <div className="space-y-6">
