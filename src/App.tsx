@@ -44218,7 +44218,21 @@ const CheckInWizardModal: React.FC<{
     ? negotiatedRate * nightCount
     : (pickedRoom?.quoted_total != null ? Number(pickedRoom.quoted_total) : Number(booking.total_amount || 0));
   const advPaid = Number(booking.advance_paid || 0);
-  const outstanding = Math.max(0, stayTotal - advPaid);
+  // The stay on the bill includes GST (and any service charge): the room charge
+  // above is before tax for a GST-exclusive rate. Worked out by the server with
+  // the folio's own slab rules; the pre-tax figure is used until it answers.
+  const [stayTax, setStayTax] = useState<{ taxable: number; gst: number; gst_pct: number; total: number; service_charge: number } | null>(null);
+  const gstExclusiveNow = Number(draft.room_rate_gst_exclusive ?? booking.room_rate_gst_exclusive ?? 1) !== 0 ? 1 : 0;
+  useEffect(() => {
+    if (!(stayTotal > 0)) { setStayTax(null); return; }
+    let alive = true;
+    const qs = new URLSearchParams({ amount: String(stayTotal), nights: String(nightCount), gst_exclusive: String(gstExclusiveNow) });
+    fetch(`/api/restaurant/${restaurantId}/hotel/stay-tax-preview?${qs}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null)).then(d => { if (alive) setStayTax(d); }).catch(() => {});
+    return () => { alive = false; };
+  }, [stayTotal, nightCount, gstExclusiveNow, restaurantId, token]);
+  const stayTotalWithGst = stayTax ? Number(stayTax.total) : stayTotal;
+  const outstanding = Math.max(0, Math.round((stayTotalWithGst - advPaid) * 100) / 100);
   // Quote on mount AND whenever the meal plan changes, so the Stay total is
   // correct immediately and re-prices live when staff switch the plan.
   useEffect(() => { loadAvailableRooms(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [draft.meal_plan_id]);
@@ -44601,8 +44615,8 @@ const CheckInWizardModal: React.FC<{
                   )}
                 </div>
                 <div className="bg-white rounded-lg border border-brand/10 px-2.5 py-1.5 min-w-0">
-                  <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Stay total {draft.room_id !== booking.room_id ? '(new room)' : ''}</p>
-                  <p className="text-[12px] text-brand font-bold font-mono">₹{Number(stayTotal || 0).toLocaleString('en-IN')}</p>
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Stay total incl. GST {draft.room_id !== booking.room_id ? '(new room)' : ''}</p>
+                  <p className="text-[12px] text-brand font-bold font-mono">₹{Number(stayTotalWithGst || 0).toLocaleString('en-IN')}</p>
                 </div>
               </div>
               {/* Rate override — staff can negotiate a different per-night rate at check-in */}
@@ -44805,8 +44819,13 @@ const CheckInWizardModal: React.FC<{
               {/* Money picture so staff see all costs before collecting. */}
               <div className="grid grid-cols-3 gap-2 mb-2 text-center">
                 <div className="bg-white rounded-xl p-2 border border-amber-200/70">
-                  <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Total</p>
-                  <p className="text-sm font-bold text-[#1a1208]">₹{stayTotal.toLocaleString('en-IN')}</p>
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Total incl. GST</p>
+                  <p className="text-sm font-bold text-[#1a1208]">₹{stayTotalWithGst.toLocaleString('en-IN')}</p>
+                  {stayTax && stayTax.gst > 0 && (
+                    <p className="text-[9px] text-[#9c8e85] mt-0.5" title={`GST ${stayTax.gst_pct}%${stayTax.service_charge > 0 ? ' · service charge included' : ''}`}>
+                      ₹{Number(stayTax.taxable).toLocaleString('en-IN')} + GST {stayTax.gst_pct}% ₹{Number(stayTax.gst).toLocaleString('en-IN')}
+                    </p>
+                  )}
                 </div>
                 <div className="bg-white rounded-xl p-2 border border-amber-200/70">
                   <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-800">Paid</p>

@@ -42162,6 +42162,37 @@ ${data.tenant.name}`;
   //   - reason: human label of the blocker ('Guest stay' | 'Maintenance' | ...)
   //   - capacity / base_rate / amenities / image — copied from the room +
   //     its type (type values used as fallback when the room itself lacks).
+  // What a stay comes to on the bill: the room charge with its GST (and any
+  // service charge), worked out the way the folio will be at check-in: the
+  // tenant's slab on each night's charge, GST added on top for an exclusive
+  // rate or taken out of an inclusive one. The check-in screen showed the
+  // pre-GST charge as the Total, so staff collected short.
+  app.get("/api/restaurant/:id/hotel/stay-tax-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const amount = Math.max(0, Number(req.query.amount) || 0);
+      const nights = Math.max(1, Math.round(Number(req.query.nights) || 1));
+      const exclusive = String(req.query.gst_exclusive ?? '1') !== '0';
+      const cfg = await loadHotelTaxConfig(req.params.id);
+      const r2 = (n: number) => Math.round(n * 100) / 100;
+      const line = r2(amount / nights);
+      const gstPct = gstRateForTariff(line, cfg);
+      let taxable = 0, gst = 0;
+      for (let i = 0; i < nights; i++) {
+        // The last night takes the rounding remainder, as the stay total is split per night.
+        const night = i === nights - 1 ? r2(amount - line * (nights - 1)) : line;
+        const base = exclusive ? night : r2(night / (1 + gstPct / 100));
+        const nightGst = exclusive ? r2(night * gstPct / 100) : r2(night - base);
+        const svc = cfg.serviceChargePct > 0 ? r2(base * cfg.serviceChargePct / 100) : 0;
+        taxable = r2(taxable + base + svc);
+        gst = r2(gst + nightGst + (svc > 0 ? r2(svc * gstPct / 100) : 0));
+      }
+      const serviceCharge = cfg.serviceChargePct > 0 ? r2(taxable - (exclusive ? amount : r2(amount / (1 + gstPct / 100)))) : 0;
+      res.json({ taxable, gst, gst_pct: gstPct, service_charge: Math.max(0, serviceCharge), total: r2(taxable + gst), gst_exclusive: exclusive ? 1 : 0 });
+    } catch (e: any) { res.status(500).json({ error: 'Could not work out the GST.' }); }
+  });
+
   app.get("/api/restaurant/:id/hotel/find-available-rooms", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -67073,8 +67104,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-calendar-hides-finished',
+    commit_marker: 'checkin-total-with-gst',
     code_features: [
+      'checkin-total-with-gst  Owner: the hotel check-in wizard showed the pre-GST room charge as Total (and Outstanding from it), so staff collected short of the bill. New GET /api/restaurant/:id/hotel/stay-tax-preview?amount&nights&gst_exclusive works the stay out the way createFolioWithRoomCharges does (tenant GST slab on each night, GST added for an exclusive rate or extracted from an inclusive one, service charge with its GST). The wizard shows Total incl. GST with the taxable + GST % breakdown, Outstanding from it, and Stay total incl. GST in step 1.',
       'events-calendar-hides-finished  Fix (owner): the Events calendar showed events that were over. Completed and cancelled bookings were already excluded, but nothing marks an event Completed when its dates pass, so finished events still In progress / Confirmed kept occupying the grid (11 on RESTO-1003). The calendar now drops a booking once its last day (end_date, else event_date) is before today, KPIs included; the Bookings list gains a Needs closing tile (Confirmed / In progress past their last day, looks across all dates) so staff still close them. Owner chose hiding over nightly auto-complete.',
       'public-pay-spa-booking  Owner: the spa / wellness public booking page takes online payment with the same owner choices as hotels (full, advance %, at the property, hold minutes). New SPA_APPOINTMENT payable: total = price_snapshot plus gst_percent_snapshot; paying opens the spa bill early (folio_kind SPA, appointment_id, no lines) and records an ADVANCE via recordFolioPayment (Dr 1025 / Cr 2100 like any spa advance); spa checkout now fills that open bill instead of opening a second one, so settlement applies the advance; charging to the room is refused (409 PAID_ONLINE_AHEAD) once paid ahead. The booking POST takes pay_option, holds the slot in public_payment_holds and returns a pay token; the done screen shows the countdown and Pay now; the release sweep cancels unpaid held appointments and their links.',
       'public-pay-hotel-booking  Owner: the hotel public booking page takes online payment. Owner settings (Payment Gateways > Public pages; restaurants.public_pay_full / public_pay_advance_pct / public_pay_at_property / public_pay_hold_minutes; GET/PUT /api/restaurant/:id/payments/public-settings, PAYMENT_GATEWAYS Edit): pay in full, an advance %, pay at the property, and how long an unpaid online booking holds its room. The guest picks on the booking form (pay_option FULL/ADVANCE/AT_PROPERTY). Pay-now: bookings get pay_option + payment_hold_until, a central public_payment_holds row, the BOOKING_CREATED confirmation is deferred until paid, and the response carries a pay token for the new HOTEL_GROUP payable (G:<group>|B:<booking>; folios created on start; payment spread across the rooms folios as ADVANCE; the hold is confirmed and the confirmation sent). The confirmation card shows a countdown and Pay now. A 60s sweep reads open links back from the gateway, then releases unpaid holds: links cancelled, bookings CANCELLED (cancelled_source SYSTEM), unpaid folios voided, ARI and Aiosell resynced. Gateway links for held bookings expire with the hold (_pgCreateLink expiresAt). i18n in 6 languages.',
