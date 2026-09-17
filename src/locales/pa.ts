@@ -727,4 +727,7 @@ export const pa: Record<string, string> = {
   'nw.day4': 'ਵੀ',
   'nw.day5': 'ਸ਼ੁ',
   'nw.day6': 'ਸ਼',
+  // ── Notifications inbox: assign to me ──
+  'nw.assignToMe': 'ਮੈਨੂੰ ਸੌਂਪੋ',
+  'nw.you': 'ਤੁਸੀਂ',
 };

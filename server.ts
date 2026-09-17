@@ -13083,6 +13083,26 @@ async function startServer() {
     await ensureWaTables();
     return db;
   };
+  // Who is signed in, as the inbox knows them. A token carries an id (staff and
+  // legacy logins), an email (owner accounts) or a phone (phone logins), while an
+  // assignee is picked from the staff directory. Every one of those identities
+  // counts as "me", so Mine finds a conversation however it was assigned.
+  const _mwMe = async (req: AuthRequest, db: any): Promise<{ id: string; name: string; ids: Set<string> }> => {
+    const u: any = req.user || {};
+    const email = String(u.email || '').trim().toLowerCase();
+    const phone = _contactKey(String(u.phone || ''));
+    const uid = String(u.id || '');
+    const ids = new Set<string>([uid, email, phone].filter(Boolean));
+    const conds: string[] = []; const params: any[] = [];
+    if (uid) { conds.push('id = ?', 'login_id = ?'); params.push(uid, uid); }
+    if (email) { conds.push('LOWER(email) = ?'); params.push(email); }
+    if (phone.length >= 10) { conds.push("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?"); params.push(phone); }
+    const row: any = conds.length
+      ? await db.get(`SELECT id, name FROM attendance_staff WHERE ${conds.join(' OR ')} ORDER BY is_active DESC LIMIT 1`, params).catch(() => null)
+      : null;
+    if (row?.id) ids.add(String(row.id));
+    return { id: row?.id ? String(row.id) : (email || uid || phone), name: String(row?.name || u.userName || email || 'Me'), ids };
+  };
   const _mwWindow = async (key: string) => {
     const w: any = await centralDb.get("SELECT last_inbound_at FROM wa_service_window WHERE phone = ?", [key]).catch(() => null);
     const until = w?.last_inbound_at ? new Date(w.last_inbound_at).getTime() + 24 * 3600e3 : 0;
@@ -13122,7 +13142,8 @@ async function startServer() {
         const wr: any[] = await centralDb.query(`SELECT phone, last_inbound_at FROM wa_service_window WHERE phone IN (${keys.map(() => '?').join(',')})`, keys).catch(() => []);
         for (const w of wr) windows[String(w.phone)] = w.last_inbound_at;
       }
-      const me = String(req.user?.id || '');
+      const me = await _mwMe(req, db);
+      const isMine = (c: any) => !!c.assigned_to && me.ids.has(String(c.assigned_to));
       const all = rows.filter(r => String(r.contact || '').length >= 10).map(r => {
         const s = stateBy.get(r.contact) || {};
         const l = lastBy.get(r.contact) || {};
@@ -13140,15 +13161,15 @@ async function startServer() {
         if (filter === 'OPEN') return c.status === 'OPEN';
         if (filter === 'RESOLVED') return c.status === 'RESOLVED';
         if (filter === 'UNASSIGNED') return !c.assigned_to;
-        if (filter === 'MINE') return c.assigned_to === me;
+        if (filter === 'MINE') return isMine(c);
         if (filter === 'UNREAD') return c.unread > 0;
         return true;
       });
       const counts = {
         all: all.length, open: all.filter(c => c.status === 'OPEN').length, resolved: all.filter(c => c.status === 'RESOLVED').length,
-        unread: all.filter(c => c.unread > 0).length, mine: all.filter(c => c.assigned_to === me).length, unassigned: all.filter(c => !c.assigned_to).length,
+        unread: all.filter(c => c.unread > 0).length, mine: all.filter(isMine).length, unassigned: all.filter(c => !c.assigned_to).length,
       };
-      res.json({ conversations: out, counts });
+      res.json({ conversations: out, counts, me: { id: me.id, name: me.name } });
     } catch (err: any) {
       console.error('[inbox/conversations] failed:', err);
       res.status(500).json({ error: 'Could not load conversations.' });
@@ -66404,8 +66425,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notifications-workspace-inbox-broadcasts',
+    commit_marker: 'inbox-mine-filter-identity',
     code_features: [
+      'inbox-mine-filter-identity  Fix (owner): the Inbox Mine filter compared the assignee with the token id, but owner tokens carry an email, phone logins a phone, and assignees come from the staff directory. _mwMe resolves the signed-in user to every identity (token id, email, phone, matching attendance_staff row) and Mine matches any of them; the conversations response returns me, and the Inbox adds Assign to me.',
       'notifications-workspace-inbox-broadcasts  UI + API (owner: WATI/Gupshup-style Notifications, tidy, little scrolling). src/NotificationsWorkspace.tsx replaces the old Notifications page: Inbox (conversations keyed by the last 10 digits, open/resolved, assignee, tags, notes, unread, quick replies with /shortcut; free text only inside the 24h window else 409 WINDOW_CLOSED and an approved template), Broadcasts (approved template to arrivals, in-house, past stays, diners, wellness clients, event customers or pasted/CSV contacts; {name} per recipient; schedule; opt-outs skipped; delivered/read/replied per campaign via notification_deliveries.broadcast_id; worker mwRunBroadcasts every 30s via central wa_broadcast_index), Automations (auto-saving event matrix plus keyword, welcome and away replies run from the inbound webhook), Templates (Meta templates read only; email/SMS wording unchanged), Analytics, Settings (mail server, smart alerts, opt-outs). Meta templates untouched. Writes need Notifications Edit and the WhatsApp module.',
       'list-date-filter-status-tiles  UI (owner request): Restaurant Invoices, PMS Guest Bills, Events bookings and Wellness invoices share src/components/ListFilters.tsx: a date filter that opens on Today (Yesterday, Last 7 days, This month, All, Custom) and number tiles that filter the list when clicked (click again for all). Invoices by invoice date; Guest Bills by stay overlap (in house on the dates); Events by event date on the server (existing from/to params); Wellness by settled or created date. Tiles count the chosen dates. Staff Directory opens in table view. Frontend only.',
       'brand-peacock-emails-pdfs  Server-rendered output follows the brand colour too: notification, payment link, invoice and PO emails, the invoice PDFs (Classic, Boutique), the purchase order PDF, the bank reconciliation statement and the public feedback / loyalty pages. brandColors.ts reads --color-brand and --color-brand-dark from src/index.css at startup (fallback peacock), so index.css stays the only place the colour is set. Rewritten with the TypeScript parser per string kind; credit-note red unchanged.',

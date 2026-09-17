@@ -766,4 +766,7 @@ export const hi: Record<string, string> = {
   'nw.day4': 'गु',
   'nw.day5': 'शु',
   'nw.day6': 'श',
+  // ── Notifications inbox: assign to me ──
+  'nw.assignToMe': 'मुझे सौंपें',
+  'nw.you': 'आप',
 };

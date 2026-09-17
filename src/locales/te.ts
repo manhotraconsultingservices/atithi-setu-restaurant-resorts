@@ -663,4 +663,7 @@ export const te: Record<string, string> = {
   'nw.day4': 'గు',
   'nw.day5': 'శు',
   'nw.day6': 'శ',
+  // ── Notifications inbox: assign to me ──
+  'nw.assignToMe': 'నాకు కేటాయించు',
+  'nw.you': 'మీరు',
 };

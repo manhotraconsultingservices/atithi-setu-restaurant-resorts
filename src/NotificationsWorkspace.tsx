@@ -127,6 +127,7 @@ function InboxTab({ token, restaurantId, canEdit, propertyName }: { token: strin
   const [sending, setSending] = useState(false);
   const [quick, setQuick] = useState<any[]>([]);
   const [staff, setStaff] = useState<any[]>([]);
+  const [me, setMe] = useState<{ id: string; name: string } | null>(null);
   const [tplOpen, setTplOpen] = useState(false);
   const [tplName, setTplName] = useState('');
   const [vars, setVars] = useState<string[]>([]);
@@ -138,7 +139,7 @@ function InboxTab({ token, restaurantId, canEdit, propertyName }: { token: strin
   const loadList = async () => {
     try {
       const d = await api.get(`/api/owner/inbox/conversations?filter=${filter}&q=${encodeURIComponent(q)}`);
-      setList(d.conversations || []); setCounts(d.counts || {});
+      setList(d.conversations || []); setCounts(d.counts || {}); if (d.me?.id) setMe(d.me);
     } catch (e: any) { toast.error(e.message); }
   };
   const loadConv = async (contact: string) => {
@@ -336,15 +337,22 @@ function InboxTab({ token, restaurantId, canEdit, propertyName }: { token: strin
               <p className="font-bold mt-1 text-sm">{conv.name || '—'}</p>
               <p className="text-xs text-[#6b5d52]">{conv.phone}</p>
             </div>
-            <label className="block text-[11px] font-bold uppercase tracking-wider text-[#9c8e85]"><UserPlus size={11} className="inline mr-1" />{t('nw.assignee')}
+            <div className="text-[11px] font-bold uppercase tracking-wider text-[#9c8e85]">
+              <span className="flex items-center"><UserPlus size={11} className="mr-1" />{t('nw.assignee')}
+                {canEdit && me && conv.assigned_to !== me.id && (
+                  <button onClick={() => patch({ assigned_to: me.id, assigned_name: me.name })} className="ml-auto normal-case tracking-normal text-brand hover:underline">{t('nw.assignToMe')}</button>
+                )}
+              </span>
               <select disabled={!canEdit} value={conv.assigned_to || ''} onChange={e => {
-                const s = staff.find(x => String(x.id) === e.target.value);
-                patch({ assigned_to: e.target.value || null, assigned_name: s?.name || '' });
+                const pick = [...(me ? [me] : []), ...staff].find(x => String(x.id) === e.target.value);
+                patch({ assigned_to: e.target.value || null, assigned_name: pick?.name || '' });
               }} className="mt-1 w-full border border-brand/15 rounded-xl px-2 py-1.5 text-sm font-normal normal-case tracking-normal text-[#1a1208] bg-white">
                 <option value="">{t('nw.unassigned')}</option>
-                {staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {me && !staff.some(x => String(x.id) === me.id) && <option value={me.id}>{me.name} ({t('nw.you')})</option>}
+                {staff.map(x => <option key={x.id} value={x.id}>{x.name}{me && String(x.id) === me.id ? ` (${t('nw.you')})` : ''}</option>)}
+                {conv.assigned_to && conv.assigned_to !== me?.id && !staff.some(x => String(x.id) === conv.assigned_to) && <option value={conv.assigned_to}>{conv.assigned_name || conv.assigned_to}</option>}
               </select>
-            </label>
+            </div>
             <label className="block text-[11px] font-bold uppercase tracking-wider text-[#9c8e85]"><Tag size={11} className="inline mr-1" />{t('nw.tags')}
               <input disabled={!canEdit} value={tags} onChange={e => setTags(e.target.value)} onBlur={() => tags !== (conv.tags || '') && patch({ tags })}
                 placeholder={t('nw.tagsHint')} className="mt-1 w-full border border-brand/15 rounded-xl px-2 py-1.5 text-sm font-normal normal-case tracking-normal text-[#1a1208]" />

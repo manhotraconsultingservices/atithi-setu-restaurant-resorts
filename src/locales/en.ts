@@ -730,4 +730,7 @@ export const en: Record<string, string> = {
   'nw.day4': 'T',
   'nw.day5': 'F',
   'nw.day6': 'S',
+  // ── Notifications inbox: assign to me ──
+  'nw.assignToMe': 'Assign to me',
+  'nw.you': 'you',
 };

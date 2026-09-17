@@ -665,4 +665,7 @@ export const kn: Record<string, string> = {
   'nw.day4': 'ಗು',
   'nw.day5': 'ಶು',
   'nw.day6': 'ಶ',
+  // ── Notifications inbox: assign to me ──
+  'nw.assignToMe': 'ನನಗೆ ನಿಯೋಜಿಸಿ',
+  'nw.you': 'ನೀವು',
 };
