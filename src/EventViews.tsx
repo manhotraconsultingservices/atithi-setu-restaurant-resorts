@@ -11,7 +11,7 @@ import { ObjectDetail } from './components/ObjectDetail';
 import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { prettyRoleLabel } from './roleLabel';
 import { CollectOnlineDialog } from './PaymentLinks';
-import { DateRangeBar, StatusTiles, defaultDateRange, type DateRange } from './components/ListFilters';
+import { DateRangeBar, StatusTiles, defaultDateRange, rangeFor, type DateRange } from './components/ListFilters';
 import { moduleOn } from './tenantModules';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
@@ -726,7 +726,7 @@ function EventBookings({ restaurantId, token }: Props) {
   const [dateRange, setDateRange] = useState<DateRange>(defaultDateRange);
   const dateRef = useRef<DateRange>(dateRange);
   // Payment tile filter, applied to the loaded rows.
-  const [payFilter, setPayFilter] = useState<'ALL' | 'PENDING' | 'PARTIAL' | 'PAID'>('ALL');
+  const [payFilter, setPayFilter] = useState<'ALL' | 'PENDING' | 'PARTIAL' | 'PAID' | 'NEEDS_CLOSING'>('ALL');
   const load = async (offset = 0, q?: string, range?: DateRange) => {
     const term = q === undefined ? searchRef.current : q;
     searchRef.current = term;
@@ -864,7 +864,12 @@ function EventBookings({ restaurantId, token }: Props) {
           const count = (st: string) => rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount) === st).length;
           const due = rows.filter((r: any) => r.status !== 'CANCELLED').reduce((sum: number, r: any) => sum + Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0)), 0);
           return (
-            <StatusTiles active={payFilter} onSelect={f => setPayFilter(f as any)} tiles={[
+            <StatusTiles active={payFilter} onSelect={f => {
+              // Finished events can be from any date, so this view looks at all dates.
+              if (f === 'NEEDS_CLOSING' && dateRange.preset !== 'ALL') { const all = rangeFor('ALL'); setDateRange(all); load(0, undefined, all); }
+              setPayFilter(f as any);
+            }} tiles={[
+              { filter: 'NEEDS_CLOSING', label: t('events.needsClosing'), value: rows.filter(evNeedsClosing).length, tone: 'bg-violet-50 border-violet-200 text-violet-700' },
               { filter: 'PENDING', label: t('events.pay.pending'), value: count('PENDING'), tone: 'bg-rose-50 border-rose-200 text-rose-700' },
               { filter: 'PARTIAL', label: t('events.pay.partial'), value: count('PARTIAL'), tone: 'bg-amber-50 border-amber-200 text-amber-700' },
               { filter: 'PAID', label: t('events.pay.paid'), value: count('PAID'), tone: 'bg-green-50 border-green-200 text-green-700' },
@@ -887,7 +892,7 @@ function EventBookings({ restaurantId, token }: Props) {
       )}
 
       <DataTable
-        data={payFilter === 'ALL' ? rows : rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount) === payFilter)}
+        data={payFilter === 'ALL' ? rows : payFilter === 'NEEDS_CLOSING' ? rows.filter(evNeedsClosing) : rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount) === payFilter)}
         rowKey={(r: any) => r.id}
         onSearch={runBookingSearch}
         searchPlaceholder="Search all bookings — name, phone, email, booking ID, venue"
@@ -2262,6 +2267,14 @@ const EV_CAL = {
 };
 const WD = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const todayIso = () => new Date().toISOString().slice(0, 10);
+/** An event's last day (end_date, else the event date), as YYYY-MM-DD. */
+const evEndDate = (b: any): string => {
+  const s = String(b?.event_date || '').slice(0, 10);
+  const e = b?.end_date ? String(b.end_date).slice(0, 10) : s;
+  return e > s ? e : s;
+};
+/** Over by date but never marked Completed: it still needs closing. */
+const evNeedsClosing = (b: any): boolean => ['CONFIRMED', 'IN_PROGRESS'].includes(String(b?.status || '')) && evEndDate(b) < todayIso();
 
 function EventCalendar({ restaurantId, token }: Props) {
   const { t } = useT();
@@ -2295,8 +2308,12 @@ function EventCalendar({ restaurantId, token }: Props) {
   // confirmed/in-progress ranked ahead of tentative inquiries/quotes. Returning the
   // full list (not just the first) is what fixes multiple-bookings-per-day.
   const CONFIRMED_ST = ['CONFIRMED', 'IN_PROGRESS'];
+  // An event whose last day is before today is over, whether or not anyone
+  // marked it Completed, so it no longer occupies the calendar. Staff find the
+  // ones still to close under Bookings → Needs closing.
+  const stillOn = (b: any) => evEndDate(b) >= todayIso();
   const coveringBookings = (venueId: string, date: string) => (data?.bookings || [])
-    .filter((b: any) => b.venue_id === venueId && covers(b, date) && [...CONFIRMED_ST, 'INQUIRY', 'QUOTED'].includes(b.status))
+    .filter((b: any) => b.venue_id === venueId && stillOn(b) && covers(b, date) && [...CONFIRMED_ST, 'INQUIRY', 'QUOTED'].includes(b.status))
     .sort((a: any, b: any) => (CONFIRMED_ST.includes(a.status) ? 0 : 1) - (CONFIRMED_ST.includes(b.status) ? 0 : 1));
   const cellFor = (venueId: string, date: string) => {
     const blocked = (data?.blocks || []).some((b: any) => b.venue_id === venueId && String(b.from_date).slice(0, 10) <= date && String(b.to_date).slice(0, 10) >= date);
@@ -2321,7 +2338,7 @@ function EventCalendar({ restaurantId, token }: Props) {
   );
 
   // KPI strip over the visible window.
-  const bookings = data?.bookings || [];
+  const bookings = (data?.bookings || []).filter(stillOn);
   const kConfirmed = bookings.filter((b: any) => ['CONFIRMED', 'IN_PROGRESS'].includes(b.status)).length;
   const kTentative = bookings.filter((b: any) => ['INQUIRY', 'QUOTED'].includes(b.status)).length;
   const kBlocked = (data?.blocks || []).length;

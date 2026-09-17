@@ -740,4 +740,6 @@ export const kn: Record<string, string> = {
   // ── Spa booking page: pay online (pay.*) ──
   'pay.heldHintSpa': 'ನಿಮ್ಮ ಸಮಯದ ಸ್ಲಾಟ್ ಕಾಯ್ದಿರಿಸಲಾಗಿದೆ. ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್ ದೃಢೀಕರಿಸಲು ಈಗ ಪಾವತಿಸಿ.',
   'pay.confirmedPaidHintSpa': 'ನಿಮ್ಮ ಪಾವತಿ ಸ್ವೀಕರಿಸಲಾಗಿದೆ ಮತ್ತು ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್ ದೃಢೀಕರಿಸಲಾಗಿದೆ.',
+  // ── Events: needs closing ──
+  'events.needsClosing': 'ಮುಚ್ಚಬೇಕಾದವು',
 };

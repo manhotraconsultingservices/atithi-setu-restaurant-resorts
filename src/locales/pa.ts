@@ -802,4 +802,6 @@ export const pa: Record<string, string> = {
   // ── Spa booking page: pay online (pay.*) ──
   'pay.heldHintSpa': 'ਤੁਹਾਡਾ ਸਮਾਂ ਸਲਾਟ ਰੱਖਿਆ ਗਿਆ ਹੈ। ਅਪੌਇੰਟਮੈਂਟ ਪੱਕੀ ਕਰਨ ਲਈ ਹੁਣੇ ਭੁਗਤਾਨ ਕਰੋ।',
   'pay.confirmedPaidHintSpa': 'ਤੁਹਾਡਾ ਭੁਗਤਾਨ ਮਿਲ ਗਿਆ ਅਤੇ ਤੁਹਾਡੀ ਅਪੌਇੰਟਮੈਂਟ ਪੱਕੀ ਹੈ।',
+  // ── Events: needs closing ──
+  'events.needsClosing': 'ਬੰਦ ਕਰਨੇ ਬਾਕੀ',
 };

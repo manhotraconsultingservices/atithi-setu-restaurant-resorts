@@ -805,4 +805,6 @@ export const en: Record<string, string> = {
   // ── Spa booking page: pay online (pay.*) ──
   'pay.heldHintSpa': 'Your time slot is held. Pay now to confirm the appointment.',
   'pay.confirmedPaidHintSpa': 'Your payment is received and your appointment is confirmed.',
+  // ── Events: needs closing ──
+  'events.needsClosing': 'Needs closing',
 };

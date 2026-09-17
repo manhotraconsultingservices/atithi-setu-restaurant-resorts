@@ -738,4 +738,6 @@ export const ta: Record<string, string> = {
   // ── Spa booking page: pay online (pay.*) ──
   'pay.heldHintSpa': 'உங்கள் நேர இடம் வைத்திருக்கப்பட்டுள்ளது. சந்திப்பை உறுதிசெய்ய இப்போது செலுத்தவும்.',
   'pay.confirmedPaidHintSpa': 'உங்கள் கட்டணம் பெறப்பட்டது, உங்கள் சந்திப்பு உறுதிசெய்யப்பட்டது.',
+  // ── Events: needs closing ──
+  'events.needsClosing': 'மூட வேண்டியவை',
 };

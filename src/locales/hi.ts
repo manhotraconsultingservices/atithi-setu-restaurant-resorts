@@ -841,4 +841,6 @@ export const hi: Record<string, string> = {
   // ── Spa booking page: pay online (pay.*) ──
   'pay.heldHintSpa': 'आपका समय स्लॉट रोका गया है। अपॉइंटमेंट पक्का करने के लिए अभी भुगतान करें।',
   'pay.confirmedPaidHintSpa': 'आपका भुगतान मिल गया और आपका अपॉइंटमेंट पक्का है।',
+  // ── Events: needs closing ──
+  'events.needsClosing': 'बंद करना बाकी',
 };
