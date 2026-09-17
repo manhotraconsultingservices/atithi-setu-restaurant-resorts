@@ -20,6 +20,7 @@ import { buildUpiUri } from '../upiLink';
 import { PaymentGatewaysPage, CollectOnlineDialog } from './PaymentLinks';
 import { PlatformWhatsApp } from './PlatformWhatsApp';
 import { NotificationsWorkspace } from './NotificationsWorkspace';
+import { ThemeColorSettings, applyThemeColor } from './ThemeColorSettings';
 import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, spanInRange, type DateRange } from './components/ListFilters';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
@@ -15305,6 +15306,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         if (contentType && contentType.indexOf("application/json") !== -1) {
           const rr = await res.json();
           setTenantModules(rr);
+          applyThemeColor(rr?.theme_color);
           setRestaurant(rr);
         }
       }
@@ -30838,6 +30840,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
           {settingsTab === 'BUSINESS' && restaurantId && token && (
             <LanguageSettings restaurantId={restaurantId} token={token} current={secondaryLanguage} onSaved={fetchRestaurant} />
+          )}
+          {settingsTab === 'BUSINESS' && restaurantId && token && (
+            <ThemeColorSettings restaurantId={restaurantId} token={token} current={(restaurant as any)?.theme_color} onSaved={fetchRestaurant} />
           )}
 
           {/* ── Brand Logo (used on invoice PDF) ───────────────────── */}
@@ -52002,6 +52007,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         if (contentType && contentType.indexOf("application/json") !== -1) {
           const rr = await res.json();
           setTenantModules(rr);
+          applyThemeColor(rr?.theme_color);
           setRestaurant(rr);
         }
       }

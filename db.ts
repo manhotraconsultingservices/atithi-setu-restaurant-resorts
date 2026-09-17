@@ -392,6 +392,8 @@ export async function initDb() {
     -- for a tenant that already has a gateway connected.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS online_payments_enabled INT DEFAULT 0;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS whatsapp_enabled INT DEFAULT 0;
+    -- Tenant theme colour (#RRGGBB); NULL = the platform default (peacock).
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS theme_color TEXT;
     -- Accounts (books, reports, statutory) and People (attendance, roster, timesheet,
     -- payroll, HR, staff self-service). Default off for new tenants; the one-time
     -- startup backfill switches both on for every tenant that existed before.

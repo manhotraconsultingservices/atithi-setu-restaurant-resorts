@@ -85,6 +85,7 @@ import {
 } from "./aiosellClient.ts";
 import { buildUpiUri } from "./upiLink.ts";
 import { RESERVED_SUBDOMAINS } from "./tenantHost.ts";
+import { checkThemeColor } from "./tenantTheme.ts";
 import { getGateway, listGateways } from "./paymentGatewayRegistry.ts";
 import { keepWebhookRawBody } from "./webhookRawBody.ts";
 import { GatewayError, rupeesToPaise, type GatewayCredentials, type PaymentGateway } from "./paymentGateway.ts";
@@ -32671,6 +32672,23 @@ ${data.tenant.name}`;
       if (!r) return res.status(404).json({ error: "Restaurant not found" });
       res.json({ secondary_language: r.secondary_language || null, suggested_language: regionalLanguageForState(r.state), state: r.state || null });
     } catch (err: any) { res.status(500).json({ error: "Failed to read language setting" }); }
+  });
+
+  // Theme colour for everyone on this account (null returns to the platform
+  // default, peacock). Checked for contrast: the app puts white text on it.
+  app.put("/api/restaurant/:id/settings/theme-color", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _requireTabWrite(req, res, 'SETTINGS', 2))) return;
+      const raw = req.body?.theme_color;
+      let color: string | null = null;
+      if (raw !== null && raw !== undefined && String(raw).trim() !== '') {
+        const c = checkThemeColor(raw);
+        if (!c.ok) return res.status(400).json({ error: c.error });
+        color = c.hex;
+      }
+      await centralDb.run("UPDATE restaurants SET theme_color = ? WHERE id = ?", [color, req.params.id]);
+      res.json({ success: true, theme_color: color });
+    } catch (err: any) { res.status(500).json({ error: 'Could not save the theme colour.' }); }
   });
 
   app.put("/api/restaurant/:id/settings/language", authenticate, async (req: AuthRequest, res: Response) => {
@@ -66500,8 +66518,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-webhook-diagnostics',
+    commit_marker: 'tenant-theme-color',
     code_features: [
+      'tenant-theme-color  UI (owner): each tenant can replace the peacock default with its own theme colour in Settings > Business > Theme colour (8 presets or a custom colour, live preview, back to default). Saved on restaurants.theme_color via PUT /api/restaurant/:id/settings/theme-color (Settings Edit); tenantTheme.ts (shared) validates the hex and refuses colours under 3:1 contrast with white text, and derives the 20% darker hover shade. The app sets --color-brand and --color-brand-dark on the root element, which every bg-brand/text-brand class reads; index.html applies the remembered colour before the app starts so charts (src/theme.ts) open in it too. Emails and PDFs stay on the platform colour.',
       'wa-webhook-diagnostics  /internal WhatsApp: replies and receipts were silently missing with no way to see why. Every webhook call (URL check or event) is noted in central wa_webhook_log with the outcome: accepted (field, message and status counts, phone number id), rejected (verify token mismatch, missing signature, App secret mismatch) or for another number. GET /api/admin/whatsapp/diagnostics returns the log plus Meta subscribed_apps for the configured account; POST /api/admin/whatsapp/subscribe subscribes it. Shown as a Webhook activity card with a Subscribe now button. Payloads and tokens are never stored.',
       'wa-template-param-count  Fix: broadcasts, inbox templates and on-demand sends always passed the property name as {{1}}, so a template with no placeholders (Meta stock hello_world) was refused for a parameter mismatch. The client sends the template variable_count and mwTemplateVars trims the parameters to it (broadcasts store it in wa_broadcasts.variable_count); unknown count keeps the old behaviour.',
       'inbox-mine-filter-identity  Fix (owner): the Inbox Mine filter compared the assignee with the token id, but owner tokens carry an email, phone logins a phone, and assignees come from the staff directory. _mwMe resolves the signed-in user to every identity (token id, email, phone, matching attendance_staff row) and Mine matches any of them; the conversations response returns me, and the Inbox adds Assign to me.',

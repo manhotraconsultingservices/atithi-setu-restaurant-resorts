@@ -119,6 +119,17 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // The tenant's theme colour, remembered from the last visit, applied before
+      // the app starts so screens and charts open in it (src/ThemeColorSettings.tsx).
+      try {
+        var t = JSON.parse(localStorage.getItem('tenant:theme') || 'null');
+        if (t && /^#[0-9a-fA-F]{6}$/.test(t.brand) && /^#[0-9a-fA-F]{6}$/.test(t.dark)) {
+          document.documentElement.style.setProperty('--color-brand', t.brand);
+          document.documentElement.style.setProperty('--color-brand-dark', t.dark);
+        }
+      } catch (e) {}
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
