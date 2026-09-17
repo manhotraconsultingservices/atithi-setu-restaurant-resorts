@@ -222,6 +222,8 @@ export function PlatformWhatsApp({ token, events }: { token: string; events: { i
         </div>
       </div>
 
+      <WebhookDiagnostics api={api} />
+
       <div className={CARD}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-xl font-bold">Message templates</h3>
@@ -287,6 +289,69 @@ export function PlatformWhatsApp({ token, events }: { token: string; events: { i
             <h4 className="text-sm font-bold text-[#1a1208] mb-2">Approved on Meta</h4>
             <DataTable data={templates} columns={tplColumns} rowKey={r => `${r.name}|${r.language}`} columnChooser columnFilters tableId="admin-wa-templates" exportFilename="whatsapp-templates" />
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Replies and delivery receipts arrive only through the webhook. This shows
+// whether the WhatsApp account is subscribed to the app and every recent call
+// Meta made, accepted or rejected, so a silent gap has a visible cause.
+function WebhookDiagnostics({ api }: { api: (path: string, init?: RequestInit) => Promise<any> }) {
+  const toast = useToast();
+  const [d, setD] = useState<Json | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    setBusy(true);
+    try { setD(await api('/diagnostics')); } catch (e: any) { toast.error(e.message); }
+    setBusy(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
+  useEffect(() => { load(); }, [load]);
+  const subscribe = async () => {
+    setBusy(true);
+    try { await api('/subscribe', { method: 'POST' }); toast.success('Subscribed.'); await load(); }
+    catch (e: any) { toast.error(e.message); setBusy(false); }
+  };
+  const sub = d?.subscription || {};
+  const rows: Json[] = d?.webhook || [];
+  const tone = (res: string) => res === 'ACCEPTED' ? 'bg-emerald-100 text-emerald-700' : res === 'OTHER_NUMBER' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700';
+  return (
+    <div className={`${CARD} max-w-3xl`}>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-xl font-bold">Webhook activity</h3>
+        <button className={`${BTN} bg-[#faf7f2] hover:bg-emerald-50`} disabled={busy} onClick={load}><RefreshCw size={14} className={busy ? 'animate-spin' : ''} /> Refresh</button>
+      </div>
+      <div className="mt-4 grid sm:grid-cols-2 gap-2 text-sm">
+        <div className={`rounded-xl border px-3 py-2 ${sub.subscribed ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+          <p className="font-bold text-xs">Account subscribed to the app</p>
+          <p className="text-xs mt-0.5">
+            {!sub.checked ? 'Save the account ID and token first.' : sub.error ? sub.error : sub.subscribed ? `Yes: ${(sub.apps || []).join(', ')}` : 'No. Meta will not send replies or receipts.'}
+          </p>
+          {sub.checked && !sub.subscribed && !sub.error && <button className={`${BTN} mt-2 bg-emerald-600 text-white hover:bg-emerald-700`} disabled={busy} onClick={subscribe} data-allow-readonly>Subscribe now</button>}
+        </div>
+        <div className={`rounded-xl border px-3 py-2 ${d?.app_secret_set ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+          <p className="font-bold text-xs">Signature check</p>
+          <p className="text-xs mt-0.5">{d?.app_secret_set ? 'App secret saved: calls must be signed by that app.' : 'No App secret saved: calls are accepted unsigned.'}</p>
+        </div>
+      </div>
+      <div className="mt-4 max-h-72 overflow-y-auto rounded-xl border border-[#f0ebe4]">
+        {rows.length === 0 ? (
+          <p className="p-4 text-xs text-[#6b5d52]">No webhook call received yet. If you have sent a WhatsApp message to the number, Meta is not calling this server: check the subscription above and that the Meta app is published (Live).</p>
+        ) : (
+          <table className="w-full text-xs">
+            <tbody>
+              {rows.map((w, i) => (
+                <tr key={i} className="border-t border-[#f0ebe4] first:border-0 align-top">
+                  <td className="px-3 py-1.5 whitespace-nowrap text-[#6b5d52]">{new Date(w.received_at).toLocaleString()}</td>
+                  <td className="px-2 py-1.5">{w.kind === 'VERIFY' ? 'URL check' : 'Event'}</td>
+                  <td className="px-2 py-1.5"><span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${tone(w.result)}`}>{w.result === 'OTHER_NUMBER' ? 'OTHER NUMBER' : w.result}</span></td>
+                  <td className="px-3 py-1.5 text-[#1a1208]">{w.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
     </div>

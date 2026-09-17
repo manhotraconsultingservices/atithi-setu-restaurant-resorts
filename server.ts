@@ -9214,6 +9214,21 @@ async function mwAfterInbound(rid: string, from: string, rawText: string): Promi
   }
 }
 
+// ── WhatsApp webhook activity (for /internal diagnostics) ────────────────────
+// Meta gives no delivery log for real webhook calls, so a rejected or missing
+// call was invisible: replies and receipts simply never appeared. Every call is
+// noted here (never the payload, never a token) and the latest are shown in
+// /internal → WhatsApp.
+async function logWaWebhook(kind: string, result: string, detail: string): Promise<void> {
+  try {
+    await centralDb.exec(`CREATE TABLE IF NOT EXISTS wa_webhook_log (
+      id TEXT PRIMARY KEY, received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, kind TEXT, result TEXT, detail TEXT)`);
+    await centralDb.run("INSERT INTO wa_webhook_log (id, kind, result, detail) VALUES (?, ?, ?, ?)",
+      [`WH-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, result, String(detail || '').slice(0, 300)]);
+    if (Math.random() < 0.05) await centralDb.run("DELETE FROM wa_webhook_log WHERE received_at < CURRENT_TIMESTAMP - INTERVAL '7 days'").catch(() => {});
+  } catch { /* diagnostics must never affect the webhook */ }
+}
+
 // ── WhatsApp: message index, service window and consent ─────────────────────
 // The sender is ONE shared Atithi-Setu number, so Meta's delivery receipts and
 // inbound messages arrive platform-wide with no tenant on them. Three small
@@ -10835,6 +10850,37 @@ async function startServer() {
   // Ask Meta about the number with the credentials in use. With { to }, also
   // send Meta's stock hello_world template there (a plain message would be
   // refused outside the 24-hour window).
+  // Why are replies and receipts not arriving? Recent webhook calls, plus Meta's
+  // own answer on whether the WhatsApp Business Account is subscribed to an app.
+  app.get("/api/admin/whatsapp/diagnostics", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      const rows = await centralDb.query("SELECT received_at, kind, result, detail FROM wa_webhook_log ORDER BY received_at DESC LIMIT 25").catch(() => []);
+      const c = whatsAppCreds();
+      let subscription: any = { checked: false };
+      if (c.businessAccountId && c.accessToken) {
+        const r = await fetch(`https://graph.facebook.com/v21.0/${c.businessAccountId}/subscribed_apps`, { headers: { Authorization: `Bearer ${c.accessToken}` } }).catch(() => null);
+        const b: any = r ? await r.json().catch(() => ({})) : {};
+        subscription = r && r.ok && !b?.error
+          ? { checked: true, subscribed: (b.data || []).length > 0, apps: (b.data || []).map((a: any) => a?.whatsapp_business_api_data?.name || a?.whatsapp_business_api_data?.id || 'app') }
+          : { checked: true, error: b?.error?.message || 'Meta did not answer.' };
+      }
+      res.json({ webhook: rows || [], subscription, phone_number_id: c.phoneNumberId || null, business_account_id: c.businessAccountId || null, app_secret_set: !!c.appSecret, verify_token_set: !!c.verifyToken });
+    } catch (err: any) { res.status(500).json({ error: 'Could not load the diagnostics.' }); }
+  });
+
+  // Subscribe the WhatsApp Business Account to the app the token belongs to, so
+  // Meta sends its messages and receipts to the webhook.
+  app.post("/api/admin/whatsapp/subscribe", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      const c = whatsAppCreds();
+      if (!c.businessAccountId || !c.accessToken) return res.status(400).json({ error: 'Save the WhatsApp Business Account ID and the access token first.' });
+      const r = await fetch(`https://graph.facebook.com/v21.0/${c.businessAccountId}/subscribed_apps`, { method: 'POST', headers: { Authorization: `Bearer ${c.accessToken}` } });
+      const b: any = await r.json().catch(() => ({}));
+      if (!r.ok || b?.error) return res.status(400).json({ error: `Meta refused: ${b?.error?.message || r.status}` });
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: 'Could not reach Meta.' }); }
+  });
+
   app.post("/api/admin/whatsapp/config/test", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     const eff = whatsAppCreds();
     if (!eff.phoneNumberId || !eff.accessToken) return res.status(409).json({ ok: false, detail: 'No WhatsApp sender is set: save a phone number ID and access token first.' });
@@ -14110,9 +14156,11 @@ async function startServer() {
     const verifyToken = whatsAppCreds().verifyToken;
     if (mode === "subscribe" && verifyToken && token === verifyToken) {
       console.log("[Meta Webhook] Verification successful.");
+      logWaWebhook('VERIFY', 'ACCEPTED', 'Webhook URL verified by Meta.');
       res.status(200).send(challenge);
     } else {
       console.warn("[Meta Webhook] Verification failed — token mismatch.");
+      logWaWebhook('VERIFY', 'REJECTED', !verifyToken ? 'No verify token is saved here.' : !token ? 'The request carried no verify token.' : 'The verify token does not match the one saved here.');
       res.status(403).send("Forbidden");
     }
   });
@@ -14201,6 +14249,9 @@ async function startServer() {
       const a = Buffer.from(sig), b = Buffer.from(expected);
       if (a.length !== b.length || !timingSafeEqual(a, b)) {
         console.warn('[Meta Webhook] Rejected — signature mismatch.');
+        logWaWebhook('EVENT', 'REJECTED', sig
+          ? 'Signature does not match: the App secret saved here is not the App secret of the Meta app sending the webhook.'
+          : 'No signature on the request (not sent by Meta, or a test tool).');
         return res.status(401).json({ error: 'Invalid signature' });
       }
     }
@@ -14212,6 +14263,19 @@ async function startServer() {
     (async () => {
       try {
         const body = req.body as any;
+        {
+          // A summary for the diagnostics log: which number, and what kind of event.
+          const numbers = new Set<string>(); let msgs = 0; let sts = 0; const fields = new Set<string>();
+          for (const entry of (body?.entry || [])) for (const change of (entry?.changes || [])) {
+            if (change?.field) fields.add(String(change.field));
+            const pid = change?.value?.metadata?.phone_number_id; if (pid) numbers.add(String(pid));
+            msgs += (change?.value?.messages || []).length; sts += (change?.value?.statuses || []).length;
+          }
+          const mine = whatsAppCreds().phoneNumberId;
+          const other = [...numbers].filter(n => n !== mine);
+          logWaWebhook('EVENT', other.length && !numbers.has(String(mine)) ? 'OTHER_NUMBER' : 'ACCEPTED',
+            `${[...fields].join(', ') || 'no field'} · ${msgs} message(s), ${sts} status update(s)${numbers.size ? ` · number ${[...numbers].join(', ')}` : ''}${other.length && !numbers.has(String(mine)) ? ` (sending number here is ${mine || 'not set'})` : ''}`);
+        }
         for (const entry of (body?.entry || [])) {
           for (const change of (entry?.changes || [])) {
             const value = change?.value;
@@ -66436,8 +66500,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-template-param-count',
+    commit_marker: 'wa-webhook-diagnostics',
     code_features: [
+      'wa-webhook-diagnostics  /internal WhatsApp: replies and receipts were silently missing with no way to see why. Every webhook call (URL check or event) is noted in central wa_webhook_log with the outcome: accepted (field, message and status counts, phone number id), rejected (verify token mismatch, missing signature, App secret mismatch) or for another number. GET /api/admin/whatsapp/diagnostics returns the log plus Meta subscribed_apps for the configured account; POST /api/admin/whatsapp/subscribe subscribes it. Shown as a Webhook activity card with a Subscribe now button. Payloads and tokens are never stored.',
       'wa-template-param-count  Fix: broadcasts, inbox templates and on-demand sends always passed the property name as {{1}}, so a template with no placeholders (Meta stock hello_world) was refused for a parameter mismatch. The client sends the template variable_count and mwTemplateVars trims the parameters to it (broadcasts store it in wa_broadcasts.variable_count); unknown count keeps the old behaviour.',
       'inbox-mine-filter-identity  Fix (owner): the Inbox Mine filter compared the assignee with the token id, but owner tokens carry an email, phone logins a phone, and assignees come from the staff directory. _mwMe resolves the signed-in user to every identity (token id, email, phone, matching attendance_staff row) and Mine matches any of them; the conversations response returns me, and the Inbox adds Assign to me.',
       'notifications-workspace-inbox-broadcasts  UI + API (owner: WATI/Gupshup-style Notifications, tidy, little scrolling). src/NotificationsWorkspace.tsx replaces the old Notifications page: Inbox (conversations keyed by the last 10 digits, open/resolved, assignee, tags, notes, unread, quick replies with /shortcut; free text only inside the 24h window else 409 WINDOW_CLOSED and an approved template), Broadcasts (approved template to arrivals, in-house, past stays, diners, wellness clients, event customers or pasted/CSV contacts; {name} per recipient; schedule; opt-outs skipped; delivered/read/replied per campaign via notification_deliveries.broadcast_id; worker mwRunBroadcasts every 30s via central wa_broadcast_index), Automations (auto-saving event matrix plus keyword, welcome and away replies run from the inbound webhook), Templates (Meta templates read only; email/SMS wording unchanged), Analytics, Settings (mail server, smart alerts, opt-outs). Meta templates untouched. Writes need Notifications Edit and the WhatsApp module.',
