@@ -1,3 +1,4 @@
+import { BRAND, BRAND_DARK } from './theme';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 /**
@@ -36,7 +37,7 @@ const TILE_W = 128;
 const TILE_H = 84;
 const GRID = 20;
 
-const SECTION_TINTS = ['#cc5a16', '#2563eb', '#059669', '#7c3aed', '#db2777', '#0891b2', '#ca8a04', '#dc2626'];
+const SECTION_TINTS = [BRAND, '#2563eb', '#059669', '#7c3aed', '#db2777', '#0891b2', '#ca8a04', '#dc2626'];
 
 function cx(...parts: (string | false | null | undefined)[]) { return parts.filter(Boolean).join(' '); }
 function snap(n: number) { return Math.round(n / GRID) * GRID; }
@@ -124,9 +125,9 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
     const cls = bill ? 'border-orange-400 bg-orange-50 text-orange-900'
       : over ? 'border-rose-400 bg-rose-50 text-rose-900'
       : warn ? 'border-amber-400 bg-amber-50 text-amber-900'
-      : occ ? 'border-[#cc5a16]/55 bg-[#cc5a16]/8 text-[#1a1208]'
+      : occ ? 'border-brand/55 bg-brand/8 text-[#1a1208]'
       : unavail ? 'border-zinc-200 bg-zinc-50 text-zinc-400'
-      : 'border-dashed border-[#cc5a16]/25 bg-white text-[#9c8e85]';
+      : 'border-dashed border-brand/25 bg-white text-[#9c8e85]';
     // Pulse ONLY transient "act now" states (a bill request) — never a slow turn.
     // A slow turn is a persistent status (a table can sit slow for hours) and the
     // solid red border already makes it obvious; animating every slow tile made
@@ -183,15 +184,15 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
             className={cx(
               'px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-widest transition-all border',
               activeSection === tab.id
-                ? 'bg-[#cc5a16] text-white border-[#cc5a16] shadow-sm'
-                : 'bg-[#faf7f2] text-[#6b5d52] border-[#cc5a16]/10 hover:bg-[#cc5a16]/5')}>
+                ? 'bg-brand text-white border-brand shadow-sm'
+                : 'bg-[#faf7f2] text-[#6b5d52] border-brand/10 hover:bg-brand/5')}>
             {tab.tint && <span className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle" style={{ background: tab.tint }} />}
             {tab.label}
           </button>
         ))}
         {isOwner && (
           <button onClick={() => enterArrange()}
-            className="ml-auto px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-widest border border-[#cc5a16]/30 text-[#cc5a16] hover:bg-[#cc5a16]/5 transition-all">
+            className="ml-auto px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-widest border border-brand/30 text-brand hover:bg-brand/5 transition-all">
             ✎ Arrange
           </button>
         )}
@@ -237,8 +238,8 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
     const maxY = Math.max(CANVAS_H, ...placed.map(t => (Number(t.pos_y) || 0) + TILE_H + 24));
     return (
       <div className="p-4">
-        <div className="overflow-auto rounded-2xl border border-[#cc5a16]/10 bg-[#faf7f2]/40"
-          style={{ backgroundImage: 'radial-gradient(#cc5a1618 1px, transparent 1px)', backgroundSize: `${GRID}px ${GRID}px` }}>
+        <div className="overflow-auto rounded-2xl border border-brand/10 bg-[#faf7f2]/40"
+          style={{ backgroundImage: 'radial-gradient(color-mix(in srgb, var(--color-brand) 9%, transparent) 1px, transparent 1px)', backgroundSize: `${GRID}px ${GRID}px` }}>
           <div className="relative" style={{ width: maxX, height: maxY }}>
             {placed.map(t => {
               const s = tileStatus(t);
@@ -375,16 +376,16 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
   const ArrangeMode = () => (
     <div className="p-4">
       {/* toolbar */}
-      <div className="flex items-center gap-2 flex-wrap mb-3 p-3 rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/10">
-        <span className="text-[11px] font-bold uppercase tracking-widest text-[#cc5a16]">Arrange Floor</span>
+      <div className="flex items-center gap-2 flex-wrap mb-3 p-3 rounded-2xl bg-[#faf7f2] border border-brand/10">
+        <span className="text-[11px] font-bold uppercase tracking-widest text-brand">Arrange Floor</span>
         <span className="text-[11px] text-[#9c8e85] hidden sm:inline">· drag tiles to position · click a tile to set its section &amp; shape</span>
         <div className="ml-auto flex items-center gap-2">
           <button onClick={addSection} disabled={busy}
-            className="px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-widest border border-[#cc5a16]/25 text-[#6b5d52] hover:bg-white transition-all">+ Section</button>
+            className="px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-widest border border-brand/25 text-[#6b5d52] hover:bg-white transition-all">+ Section</button>
           <button onClick={() => setArrange(false)} disabled={busy}
             className="px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] hover:text-[#6b5d52] transition-all">Cancel</button>
           <button onClick={saveLayout} disabled={busy}
-            className="px-4 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-widest bg-[#cc5a16] text-white shadow-sm hover:bg-[#b34e12] transition-all disabled:opacity-50">
+            className="px-4 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-widest bg-brand text-white shadow-sm hover:bg-[#b34e12] transition-all disabled:opacity-50">
             {busy ? 'Saving…' : 'Save Layout'}
           </button>
         </div>
@@ -408,12 +409,12 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
       <div className="relative">
         {/* inspector for the selected tile */}
         {sel && selTable && (
-          <div className="absolute z-20 top-2 right-2 w-60 rounded-2xl bg-white border border-[#cc5a16]/15 shadow-lg p-3 space-y-2.5">
+          <div className="absolute z-20 top-2 right-2 w-60 rounded-2xl bg-white border border-brand/15 shadow-lg p-3 space-y-2.5">
             <div className="text-[13px] font-bold text-[#1a1208] truncate">{selTable.name}</div>
             <label className="block">
               <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Section</span>
               <select value={sel.section_id || ''} onChange={e => setDraft(p => ({ ...p, [selId!]: { ...p[selId!], section_id: e.target.value || null } }))}
-                className="mt-1 w-full text-sm border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 bg-white">
+                className="mt-1 w-full text-sm border border-brand/15 rounded-lg px-2 py-1.5 bg-white">
                 <option value="">Unsectioned</option>
                 {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
@@ -421,7 +422,7 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
             <label className="block">
               <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Shape</span>
               <select value={sel.shape} onChange={e => setDraft(p => ({ ...p, [selId!]: { ...p[selId!], shape: e.target.value } }))}
-                className="mt-1 w-full text-sm border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 bg-white">
+                className="mt-1 w-full text-sm border border-brand/15 rounded-lg px-2 py-1.5 bg-white">
                 <option value="square">Square</option>
                 <option value="rect">Rectangle</option>
                 <option value="circle">Round</option>
@@ -432,16 +433,16 @@ export function FloorPlanMap(props: FloorPlanMapProps) {
         )}
 
         <div ref={canvasRef} onPointerMove={onCanvasPointerMove} onPointerUp={onCanvasPointerUp} onPointerLeave={onCanvasPointerUp}
-          className="overflow-auto rounded-2xl border border-[#cc5a16]/15 bg-[#faf7f2]/50 select-none"
+          className="overflow-auto rounded-2xl border border-brand/15 bg-[#faf7f2]/50 select-none"
           style={{ touchAction: 'none' }}>
-          <div className="relative" style={{ width: CANVAS_W, height: CANVAS_H, backgroundImage: 'radial-gradient(#cc5a1622 1px, transparent 1px)', backgroundSize: `${GRID}px ${GRID}px` }}>
+          <div className="relative" style={{ width: CANVAS_W, height: CANVAS_H, backgroundImage: 'radial-gradient(color-mix(in srgb, var(--color-brand) 13%, transparent) 1px, transparent 1px)', backgroundSize: `${GRID}px ${GRID}px` }}>
             {[...tables].sort((a, b) => natCmp(a.name, b.name)).map(t => {
               const d = draft[t.id]; if (!d) return null;
               const s = tileStatus(t);
               const isSel = selId === t.id;
               return (
                 <div key={t.id} onPointerDown={e => onTilePointerDown(e, t.id)}
-                  className={cx('absolute border-2 p-2 flex flex-col justify-between cursor-grab active:cursor-grabbing', s.cls, isSel && 'ring-2 ring-[#cc5a16] ring-offset-1')}
+                  className={cx('absolute border-2 p-2 flex flex-col justify-between cursor-grab active:cursor-grabbing', s.cls, isSel && 'ring-2 ring-brand ring-offset-1')}
                   style={{ left: d.pos_x, top: d.pos_y, width: TILE_W, height: TILE_H, borderRadius: shapeRadius(d.shape) }}>
                   {TileBody({ t, compact: true })}
                   <span className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full border-2 border-white" style={{ background: sectionColor(d.section_id) }} title={sectionName(d.section_id)} />

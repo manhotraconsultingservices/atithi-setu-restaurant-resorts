@@ -116,7 +116,7 @@ export function PaymentDialogProvider({ children }: { children: React.ReactNode 
                       value={values[f.name] ?? ''}
                       onChange={e => change(f.name, e.target.value)}
                       className={cn(
-                        'w-full px-3 py-2.5 rounded-xl border text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30',
+                        'w-full px-3 py-2.5 rounded-xl border text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand/30',
                         errors[f.name] ? 'border-red-400' : 'border-gray-200',
                       )}
                     >
@@ -132,7 +132,7 @@ export function PaymentDialogProvider({ children }: { children: React.ReactNode 
                       placeholder={f.placeholder}
                       rows={3}
                       className={cn(
-                        'w-full px-3 py-2.5 rounded-xl border text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30',
+                        'w-full px-3 py-2.5 rounded-xl border text-sm resize-none focus:outline-none focus:ring-2 focus:ring-brand/30',
                         errors[f.name] ? 'border-red-400' : 'border-gray-200',
                       )}
                     />
@@ -143,7 +143,7 @@ export function PaymentDialogProvider({ children }: { children: React.ReactNode 
                       onChange={e => change(f.name, e.target.value)}
                       placeholder={f.placeholder}
                       className={cn(
-                        'w-full px-3 py-2.5 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30',
+                        'w-full px-3 py-2.5 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-brand/30',
                         errors[f.name] ? 'border-red-400' : 'border-gray-200',
                       )}
                     />
@@ -165,7 +165,7 @@ export function PaymentDialogProvider({ children }: { children: React.ReactNode 
               </button>
               <button
                 onClick={submit}
-                className="flex-1 px-4 py-2.5 rounded-xl bg-[#cc5a16] hover:bg-[#b34d12] text-white text-sm font-medium transition-colors"
+                className="flex-1 px-4 py-2.5 rounded-xl bg-brand hover:bg-[#b34d12] text-white text-sm font-medium transition-colors"
               >
                 {pending.opts.confirmLabel ?? 'Confirm'}
               </button>

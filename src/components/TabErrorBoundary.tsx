@@ -48,11 +48,11 @@ export class TabErrorBoundary extends Component<Props, State> {
         </details>
         <div className="flex gap-2">
           <button type="button" onClick={() => this.setState({ error: null })}
-            className="px-4 py-2 rounded-xl text-sm font-bold border border-[#cc5a16]/20 text-[#6b5d52] hover:bg-[#faf7f2]">
+            className="px-4 py-2 rounded-xl text-sm font-bold border border-brand/20 text-[#6b5d52] hover:bg-[#faf7f2]">
             Try again
           </button>
           <button type="button" onClick={() => window.location.reload()}
-            className="px-4 py-2 rounded-xl text-sm font-bold bg-[#cc5a16] text-white hover:bg-[#b34e12]">
+            className="px-4 py-2 rounded-xl text-sm font-bold bg-brand text-white hover:bg-[#b34e12]">
             Reload app
           </button>
         </div>

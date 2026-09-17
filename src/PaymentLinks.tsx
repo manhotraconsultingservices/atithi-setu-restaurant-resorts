@@ -113,7 +113,7 @@ function linkMessage(l: Json, property?: string) {
 
 const BRAND: Record<string, string> = { RAZORPAY: '#0c2451', PHONEPE: '#5f259f', PAYTM: '#00baf2' };
 
-const input = 'w-full bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm text-[#1a1208] focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30';
+const input = 'w-full bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm text-[#1a1208] focus:outline-none focus:ring-2 focus:ring-brand/30';
 const label = 'block text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52] mb-1';
 const btn = 'inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50 disabled:cursor-not-allowed';
 
@@ -289,7 +289,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
               {p.record_error && <div className="text-[10px] text-red-700 max-w-[220px]">{p.record_error}</div>}
               {p.resolution_note && <div className="text-[10px] text-[#6b5d52] max-w-[220px]">“{p.resolution_note}”</div>}
               {p.record_status === 'NEEDS_REVIEW' && canEdit && (
-                <button onClick={() => { setResolving(p); setResolveNote(''); }} className="text-[10px] font-bold text-[#cc5a16] underline">{t('pg.action.resolve')}</button>
+                <button onClick={() => { setResolving(p); setResolveNote(''); }} className="text-[10px] font-bold text-brand underline">{t('pg.action.resolve')}</button>
               )}
             </div>
           ))}
@@ -341,7 +341,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
     <button
       key={id}
       onClick={() => setTab(id)}
-      className={`px-5 py-2.5 text-sm font-semibold rounded-t-xl whitespace-nowrap ${tab === id ? 'bg-white border border-b-white border-[#e8e0d8] text-[#cc5a16] -mb-px' : 'text-[#6b5d52] hover:text-[#1a1208] hover:bg-[#f5f0ea]'}`}
+      className={`px-5 py-2.5 text-sm font-semibold rounded-t-xl whitespace-nowrap ${tab === id ? 'bg-white border border-b-white border-[#e8e0d8] text-brand -mb-px' : 'text-[#6b5d52] hover:text-[#1a1208] hover:bg-[#f5f0ea]'}`}
     >
       {text}
       {badge ? <span className="ml-2 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold">{badge}</span> : null}
@@ -377,7 +377,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
             <select
               id="pg-default"
               disabled={!canConfigure || busy === 'default' || enabled.length === 0}
-              className="bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm text-[#1a1208] focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30 min-w-[240px] disabled:opacity-60"
+              className="bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2 text-sm text-[#1a1208] focus:outline-none focus:ring-2 focus:ring-brand/30 min-w-[240px] disabled:opacity-60"
               value={data.default_gateway || ''}
               onChange={e => e.target.value && chooseDefault(e.target.value)}
             >
@@ -433,7 +433,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
                       {g.connected && <button disabled={!!busy} onClick={() => test(g)} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><RefreshCw size={13} className={busy === `${g.gateway}:test` ? 'animate-spin' : ''} /> {t('pg.test')}</button>}
                       {g.is_enabled
                         ? <button disabled={!!busy} onClick={() => save(g, false)} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}>{t('pg.switchOff')}</button>
-                        : <button disabled={!!busy} onClick={() => save(g, true)} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}>{busy === `${g.gateway}:save` ? t('pg.switchingOn') : t('pg.switchOn')}</button>}
+                        : <button disabled={!!busy} onClick={() => save(g, true)} className={`${btn} bg-brand text-white hover:bg-brand-dark`}>{busy === `${g.gateway}:save` ? t('pg.switchingOn') : t('pg.switchOn')}</button>}
                     </div>
                   )}
                 </div>
@@ -550,7 +550,7 @@ export function PaymentGatewaysPage({ restaurantId, token }: { restaurantId: str
             </div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setResolving(null)} className={`${btn} border border-[#e8dccf]`}>{t('common.cancel')}</button>
-              <button disabled={resolveNote.trim().length < 5 || busy === 'resolve'} onClick={submitResolve} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}>{t('pg.action.resolve')}</button>
+              <button disabled={resolveNote.trim().length < 5 || busy === 'resolve'} onClick={submitResolve} className={`${btn} bg-brand text-white hover:bg-brand-dark`}>{t('pg.action.resolve')}</button>
             </div>
           </div>
         </div>
@@ -725,7 +725,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
         <div className="flex items-start justify-between px-6 pt-5 pb-3 border-b border-[#f3ece0]">
           <div>
-            <div className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">Collect online</div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-brand">Collect online</div>
             <h3 className="text-lg font-bold font-serif text-[#1a1208]">{folio.guest_name || 'Guest'}</h3>
             <p className="text-xs text-[#6b5d52]">{payable ? payable.subtitle : `Folio ${folio.id}`}{outstanding != null ? ` · ${payable ? t('pg.collect.balanceDue', { amount: money(outstanding) }) : `balance due ${money(outstanding)}`}` : ''}</p>
           </div>
@@ -751,7 +751,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
                     <div className="flex gap-1.5 flex-wrap mt-1.5">
                       {payable.presets.map(p => (
                         <button key={p.label} type="button" onClick={() => setAmount(p.amount.toFixed(2))}
-                          className={`text-[10px] font-semibold px-2 py-1 rounded-lg border ${Math.abs(Number(amount) - p.amount) < 0.005 ? 'border-[#cc5a16] bg-[#cc5a16]/10 text-[#cc5a16]' : 'border-[#e8dccf] text-[#6b5d52] hover:bg-[#faf7f2]'}`}>
+                          className={`text-[10px] font-semibold px-2 py-1 rounded-lg border ${Math.abs(Number(amount) - p.amount) < 0.005 ? 'border-brand bg-brand/10 text-brand' : 'border-[#e8dccf] text-[#6b5d52] hover:bg-[#faf7f2]'}`}>
                           {p.label} · {money(p.amount)}
                         </button>
                       ))}
@@ -778,7 +778,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
               </div>
               <div className="flex gap-2 flex-wrap">
                 {waOn && <button disabled={!!busy || !phone} onClick={() => create('WHATSAPP')} className={`${btn} bg-[#128c7e] text-white hover:bg-[#0e6f64]`}><MessageCircle size={13} /> {busy === 'create:WHATSAPP' ? 'Sending…' : 'Send on WhatsApp'}</button>}
-                {waOn && <button disabled={!!busy || !phone || !email} title={t('pg.collect.sendBothHint')} onClick={() => create('BOTH')} className={`${btn} bg-[#cc5a16] text-white hover:bg-[#a84612]`}><Send size={13} /> {busy === 'create:BOTH' ? t('pg.collect.sending') : t('pg.collect.sendBoth')}</button>}
+                {waOn && <button disabled={!!busy || !phone || !email} title={t('pg.collect.sendBothHint')} onClick={() => create('BOTH')} className={`${btn} bg-brand text-white hover:bg-brand-dark`}><Send size={13} /> {busy === 'create:BOTH' ? t('pg.collect.sending') : t('pg.collect.sendBoth')}</button>}
                 <button disabled={!!busy || !email || (active?.requires_customer_phone && !phone)} onClick={() => create('EMAIL')} className={`${btn} bg-[#1e3a5f] text-white hover:bg-[#162c49]`}><Mail size={13} /> {busy === 'create:EMAIL' ? 'Sending…' : 'Send by email'}</button>
                 <button disabled={!!busy || (active?.requires_customer_phone && !phone)} onClick={() => create('NONE')} className={`${btn} border border-[#e8dccf] text-[#3d3128] hover:bg-[#faf7f2]`}><Link2 size={13} /> {busy === 'create:NONE' ? 'Creating…' : 'Create link only'}</button>
               </div>
@@ -810,7 +810,7 @@ export function CollectOnlineDialog({ restaurantId, token, folio, payable, prope
                 ))}
                 {l.last_error && l.status === 'FAILED' && <div className="text-[11px] text-red-700">{l.last_error}</div>}
                 <div className="flex gap-2">
-                  {l.status !== 'FAILED' && <button disabled={!!busy} onClick={() => refresh(l)} className="text-[11px] font-bold text-[#cc5a16] inline-flex items-center gap-1"><RefreshCw size={11} className={busy === `refresh:${l.id}` ? 'animate-spin' : ''} /> Check status</button>}
+                  {l.status !== 'FAILED' && <button disabled={!!busy} onClick={() => refresh(l)} className="text-[11px] font-bold text-brand inline-flex items-center gap-1"><RefreshCw size={11} className={busy === `refresh:${l.id}` ? 'animate-spin' : ''} /> Check status</button>}
                   {canCollect && ['CREATED', 'PARTIALLY_PAID'].includes(l.status) && <button disabled={!!busy} onClick={() => cancel(l)} className="text-[11px] font-bold text-red-700">Cancel link</button>}
                 </div>
               </div>

@@ -33,13 +33,13 @@ export interface RowAction {
 
 const INLINE_TONE: Record<RowActionTone, string> = {
   default: 'text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#1a1208] border-[#e8dccf]',
-  primary: 'text-[#cc5a16] hover:bg-[#cc5a16]/10 border-[#cc5a16]/25',
+  primary: 'text-brand hover:bg-brand/10 border-brand/25',
   success: 'text-emerald-700 hover:bg-emerald-50 border-emerald-200',
   danger: 'text-red-700 hover:bg-red-50 border-red-200',
 };
 const MENU_TONE: Record<RowActionTone, string> = {
   default: 'text-[#3d3128] hover:bg-[#faf7f2]',
-  primary: 'text-[#cc5a16] hover:bg-[#cc5a16]/10',
+  primary: 'text-brand hover:bg-brand/10',
   success: 'text-emerald-700 hover:bg-emerald-50',
   danger: 'text-red-700 hover:bg-red-50',
 };
@@ -125,7 +125,7 @@ export function RowActions({ actions, moreLabel = 'More actions', align = 'end' 
             aria-expanded={open}
             aria-label={moreLabel}
             title={moreLabel}
-            className={`w-8 h-8 shrink-0 rounded-lg border bg-white flex items-center justify-center transition-colors ${open ? 'bg-[#faf7f2] text-[#1a1208] border-[#cc5a16]/30' : INLINE_TONE.default}`}
+            className={`w-8 h-8 shrink-0 rounded-lg border bg-white flex items-center justify-center transition-colors ${open ? 'bg-[#faf7f2] text-[#1a1208] border-brand/30' : INLINE_TONE.default}`}
           >
             <MoreHorizontal size={16} />
           </button>

@@ -143,7 +143,7 @@ function AuditView({ url, token, nonce }: { url: string; token: string; nonce?: 
     { key: 'action', label: 'Action', sortable: true, filterable: true, filterType: 'select', getValue: r => humanizeAction(r.action), render: r => <span className="text-xs font-bold text-[#14110c]">{humanizeAction(r.action)}</span> },
     { key: 'summary', label: 'Details', sortable: true, searchable: true, getValue: r => r.summary || '', render: r => <span className="text-xs text-[#3d3128]">{r.summary || '—'}</span> },
     { key: 'actor', label: 'By', sortable: true, filterable: true, filterType: 'text', getValue: r => (r.actor_name || r.actor_email || 'system') + (r.actor_role ? ' · ' + prettyRole(r.actor_role) : ''), render: r => <span className="text-[11px] text-[#6b5d52]">{r.actor_name || r.actor_email || 'system'}{r.actor_role ? ` · ${prettyRole(r.actor_role)}` : ''}</span> },
-    { key: 'changes', label: 'Changes', searchable: false, noExport: true, render: r => (r.before_json || r.after_json) ? <button className="text-[11px] text-[#cc5a16] font-semibold" onClick={() => setOpenId(openId === r.id ? null : r.id)}>{openId === r.id ? 'Hide' : 'View'}</button> : <span className="text-[#c9bcae]">—</span> },
+    { key: 'changes', label: 'Changes', searchable: false, noExport: true, render: r => (r.before_json || r.after_json) ? <button className="text-[11px] text-brand font-semibold" onClick={() => setOpenId(openId === r.id ? null : r.id)}>{openId === r.id ? 'Hide' : 'View'}</button> : <span className="text-[#c9bcae]">—</span> },
   ];
 
   return (
@@ -401,7 +401,7 @@ export function ObjectDetail(rootProps: ObjectDetailProps) {
   const railItem = (key: Node, icon: React.ReactNode, label: string) => (
     <button
       onClick={() => setNode(key)}
-      className={`${RAIL_BTN} ${node === key ? 'bg-[#cc5a16] text-white' : 'text-[#3d3128] hover:bg-[#f0e9df]'}`}
+      className={`${RAIL_BTN} ${node === key ? 'bg-brand text-white' : 'text-[#3d3128] hover:bg-[#f0e9df]'}`}
     >
       {icon}{label}
     </button>
@@ -417,7 +417,7 @@ export function ObjectDetail(rootProps: ObjectDetailProps) {
       <div className="mb-4">
         <h2 className="text-xl font-bold font-serif text-[#14110c]">{cur.title}</h2>
         {cur.subtitle && <p className="text-xs text-[#6b5d52]">{cur.subtitle}</p>}
-        {resolving && <p className="text-[11px] text-[#cc5a16] mt-1">Opening…</p>}
+        {resolving && <p className="text-[11px] text-brand mt-1">Opening…</p>}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-4">

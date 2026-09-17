@@ -14,10 +14,10 @@ import { DataTable, type ColDef } from './components/DataTable';
 
 type Json = Record<string, any>;
 
-const INPUT = 'w-full bg-[#faf7f2] rounded-lg px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none focus:border-emerald-500';
+const INPUT = 'w-full bg-[#faf7f2] rounded-lg px-3 py-2 text-sm border border-brand/10 outline-none focus:border-emerald-500';
 const LABEL = 'text-xs font-semibold text-[#6b5d52] block mb-1';
 const BTN = 'px-4 py-2 rounded-2xl text-sm font-bold transition-colors disabled:opacity-50 inline-flex items-center gap-1.5';
-const CARD = 'bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8';
+const CARD = 'bg-white rounded-[32px] border border-brand/10 shadow-sm p-6 md:p-8';
 
 function useAdminApi(token: string) {
   return useCallback(async (path: string, init: RequestInit = {}) => {

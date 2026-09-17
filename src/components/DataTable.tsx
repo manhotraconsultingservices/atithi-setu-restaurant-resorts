@@ -248,9 +248,9 @@ export function DataTable<T = any>({
   const chooserCols = columns.filter(c => !c.hidden);
 
   return (
-    <div className={cn('overflow-hidden rounded-2xl border border-[#cc5a16]/10 bg-white', containerClassName)}>
+    <div className={cn('overflow-hidden rounded-2xl border border-brand/10 bg-white', containerClassName)}>
       {showToolbar && (
-        <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]/50">
+        <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-brand/10 bg-[#faf7f2]/50">
           {toolbarLeft}
           {!hideSearch && (
             <div className="relative flex-1 min-w-[160px] max-w-xs">
@@ -260,10 +260,10 @@ export function DataTable<T = any>({
                 value={query}
                 onChange={e => { setQuery(e.target.value); setPage(1); }}
                 placeholder={searchPlaceholder}
-                className="w-full bg-white border border-[#e8dccf] rounded-xl pl-8 pr-7 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 transition"
+                className="w-full bg-white border border-[#e8dccf] rounded-xl pl-8 pr-7 py-1.5 text-sm outline-none focus:ring-2 ring-brand/20 transition"
               />
               {query && (
-                <button onClick={() => { setQuery(''); setPage(1); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-[#9c8e85] hover:text-[#cc5a16] transition-colors">
+                <button onClick={() => { setQuery(''); setPage(1); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-[#9c8e85] hover:text-brand transition-colors">
                   <X size={12} />
                 </button>
               )}
@@ -279,7 +279,7 @@ export function DataTable<T = any>({
             <div className="relative">
               <button
                 onClick={() => setChooserOpen(o => !o)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#6b5d52] bg-white border border-[#e8dccf] rounded-xl hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#6b5d52] bg-white border border-[#e8dccf] rounded-xl hover:border-brand/50 hover:text-brand transition-colors"
                 title="Choose columns"
               >
                 <SlidersHorizontal size={13} />
@@ -304,7 +304,7 @@ export function DataTable<T = any>({
                               locked ? 'text-[#c4b8ab] cursor-default' : 'text-[#3d3128] hover:bg-[#faf7f2]',
                             )}
                           >
-                            <span className={cn('w-4 h-4 rounded border flex items-center justify-center shrink-0', shown ? 'bg-[#cc5a16] border-[#cc5a16] text-white' : 'border-[#d4c4a8] bg-white')}>
+                            <span className={cn('w-4 h-4 rounded border flex items-center justify-center shrink-0', shown ? 'bg-brand border-brand text-white' : 'border-[#d4c4a8] bg-white')}>
                               {shown && <Check size={11} strokeWidth={3} />}
                             </span>
                             {c.label}{locked && <span className="ml-auto text-[9px] uppercase tracking-wide text-[#c4b8ab]">fixed</span>}
@@ -320,7 +320,7 @@ export function DataTable<T = any>({
           {!hideExport && (
             <button
               onClick={() => exportToCsv(sorted, visible, exportFilename)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#6b5d52] bg-white border border-[#e8dccf] rounded-xl hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#6b5d52] bg-white border border-[#e8dccf] rounded-xl hover:border-brand/50 hover:text-brand transition-colors"
               title="Export to CSV"
             >
               <Download size={13} />
@@ -333,7 +333,7 @@ export function DataTable<T = any>({
       <div className="overflow-x-auto">
         <table className="w-full text-sm text-left border-collapse">
           <thead>
-            <tr className="bg-[#faf7f2]/70 border-b border-[#cc5a16]/10">
+            <tr className="bg-[#faf7f2]/70 border-b border-brand/10">
               {visible.map(col => (
                 <th
                   key={col.key}
@@ -341,7 +341,7 @@ export function DataTable<T = any>({
                   className={cn(
                     headPad,
                     'text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap',
-                    col.sortable && 'cursor-pointer hover:text-[#cc5a16] select-none transition-colors',
+                    col.sortable && 'cursor-pointer hover:text-brand select-none transition-colors',
                     col.align === 'right' && 'text-right',
                     col.align === 'center' && 'text-center',
                     col.headerClassName
@@ -352,8 +352,8 @@ export function DataTable<T = any>({
                     {col.sortable && (
                       sortCol === col.key
                         ? sortDir === 'asc'
-                          ? <ChevronUp size={12} className="text-[#cc5a16] shrink-0" />
-                          : <ChevronDown size={12} className="text-[#cc5a16] shrink-0" />
+                          ? <ChevronUp size={12} className="text-brand shrink-0" />
+                          : <ChevronDown size={12} className="text-brand shrink-0" />
                         : <ChevronsUpDown size={12} className="opacity-25 shrink-0" />
                     )}
                   </span>
@@ -369,7 +369,7 @@ export function DataTable<T = any>({
                         <select
                           value={colFilters[col.key] || ''}
                           onChange={e => setFilter(col.key, e.target.value)}
-                          className="w-full text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20 font-normal normal-case tracking-normal"
+                          className="w-full text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-brand/20 font-normal normal-case tracking-normal"
                         >
                           <option value="">All</option>
                           {(selectOptions[col.key] || []).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -380,10 +380,10 @@ export function DataTable<T = any>({
                             value={colFilters[col.key] || ''}
                             onChange={e => setFilter(col.key, e.target.value)}
                             placeholder="Filter…"
-                            className="w-full text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 pr-5 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20 font-normal normal-case tracking-normal"
+                            className="w-full text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 pr-5 bg-white outline-none focus:ring-2 ring-brand/20 font-normal normal-case tracking-normal"
                           />
                           {colFilters[col.key] && (
-                            <button onClick={() => setFilter(col.key, '')} className="absolute right-1 top-1/2 -translate-y-1/2 text-[#9c8e85] hover:text-[#cc5a16]"><X size={11} /></button>
+                            <button onClick={() => setFilter(col.key, '')} className="absolute right-1 top-1/2 -translate-y-1/2 text-[#9c8e85] hover:text-brand"><X size={11} /></button>
                           )}
                         </div>
                       )
@@ -398,7 +398,7 @@ export function DataTable<T = any>({
               <tr>
                 <td colSpan={visible.length} className="py-14 text-center text-[#9c8e85] italic">
                   <div className="flex justify-center items-center gap-2">
-                    <div className="w-4 h-4 border-2 border-[#cc5a16]/30 border-t-[#cc5a16] rounded-full animate-spin" />
+                    <div className="w-4 h-4 border-2 border-brand/30 border-t-brand rounded-full animate-spin" />
                     Loading…
                   </div>
                 </td>
@@ -454,7 +454,7 @@ export function DataTable<T = any>({
             <select
               value={pageSize}
               onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
-              className="bg-white border border-[#e8dccf] rounded-lg px-2 py-0.5 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
+              className="bg-white border border-[#e8dccf] rounded-lg px-2 py-0.5 text-xs outline-none focus:ring-2 ring-brand/20"
             >
               {PAGE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
             </select>

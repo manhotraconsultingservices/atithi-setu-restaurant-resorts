@@ -4,6 +4,11 @@
    The previous @import url(...) here was render-blocking and has been removed. */
 
 @theme {
+  /* Brand colour — the ONE place to change it. Tailwind classes (bg-brand,
+     text-brand/10, hover:bg-brand-dark…) and src/theme.ts both read these. */
+  --color-brand:      #0F6E78;   /* peacock */
+  --color-brand-dark: #0B5961;   /* peacock, hover / pressed */
+
   /* Font families — reduced from 7 loaded families to 3 actually used */
   --font-sans:  "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-serif: "Cormorant Garamond", Georgia, serif;

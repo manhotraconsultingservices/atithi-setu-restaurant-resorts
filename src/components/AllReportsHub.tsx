@@ -442,8 +442,8 @@ const ReportCard: React.FC<ReportCardProps> = ({ report, isActive, loading, onRu
   return (
     <div className={`bg-white rounded-3xl border-2 transition-all duration-150 p-4 flex flex-col gap-3 ${
       isActive
-        ? 'border-[#cc5a16] shadow-lg shadow-[#cc5a16]/10'
-        : 'border-[#e8dccf] hover:border-[#cc5a16]/40'
+        ? 'border-brand shadow-lg shadow-brand/10'
+        : 'border-[#e8dccf] hover:border-brand/40'
     }`}>
       <div className="flex items-start justify-between">
         <span
@@ -466,7 +466,7 @@ const ReportCard: React.FC<ReportCardProps> = ({ report, isActive, loading, onRu
         <button
           onClick={onRun}
           disabled={loading}
-          className="mt-auto flex items-center justify-center gap-1.5 px-3 py-2 bg-[#cc5a16] hover:bg-[#a84612] text-white text-xs font-semibold rounded-xl transition-colors disabled:opacity-60 w-full"
+          className="mt-auto flex items-center justify-center gap-1.5 px-3 py-2 bg-brand hover:bg-brand-dark text-white text-xs font-semibold rounded-xl transition-colors disabled:opacity-60 w-full"
         >
           {loading
             ? <RefreshCw size={12} className="animate-spin" />
@@ -534,8 +534,8 @@ export function AllReportsHub({ restaurantId, token }: Props) {
             onClick={() => { setCategory(c.id); setActiveKey(null); setReportState(null); }}
             className={`px-4 py-2 rounded-2xl text-sm font-semibold transition-colors ${
               category === c.id
-                ? 'bg-[#cc5a16] text-white shadow-sm'
-                : 'bg-white text-[#6b5d52] border border-[#e8dccf] hover:border-[#cc5a16] hover:text-[#cc5a16]'
+                ? 'bg-brand text-white shadow-sm'
+                : 'bg-white text-[#6b5d52] border border-[#e8dccf] hover:border-brand hover:text-brand'
             }`}
           >
             {c.emoji} {c.label}
@@ -552,7 +552,7 @@ export function AllReportsHub({ restaurantId, token }: Props) {
             <input
               type="date" value={from} max={to}
               onChange={e => setFrom(e.target.value)}
-              className="border border-[#e8dccf] rounded-xl px-2 py-1 text-sm text-[#3d3128] focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30"
+              className="border border-[#e8dccf] rounded-xl px-2 py-1 text-sm text-[#3d3128] focus:outline-none focus:ring-2 focus:ring-brand/30"
             />
           </div>
           <div className="flex items-center gap-1.5">
@@ -560,16 +560,16 @@ export function AllReportsHub({ restaurantId, token }: Props) {
             <input
               type="date" value={to} min={from}
               onChange={e => setTo(e.target.value)}
-              className="border border-[#e8dccf] rounded-xl px-2 py-1 text-sm text-[#3d3128] focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/30"
+              className="border border-[#e8dccf] rounded-xl px-2 py-1 text-sm text-[#3d3128] focus:outline-none focus:ring-2 focus:ring-brand/30"
             />
           </div>
           <button
             onClick={() => { setFrom(todayStr); setTo(todayStr); }}
-            className="text-xs text-[#cc5a16] underline underline-offset-2"
+            className="text-xs text-brand underline underline-offset-2"
           >Today</button>
           <button
             onClick={() => { setFrom(firstOfMonth); setTo(todayStr); }}
-            className="text-xs text-[#cc5a16] underline underline-offset-2"
+            className="text-xs text-brand underline underline-offset-2"
           >This month</button>
         </div>
       )}

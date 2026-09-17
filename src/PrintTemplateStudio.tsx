@@ -231,7 +231,7 @@ export function PrintTemplateStudio({ restaurantId, token }: { restaurantId: str
   const W = c.paper == 58 ? 210 : 300;
   const tab = (d: DocType, label: string) => (
     <button onClick={() => { setDocType(d); setSaved(false); }}
-      className={'px-4 py-2 rounded-lg text-sm font-bold transition ' + (docType === d ? 'bg-[#cc5a16] text-white shadow' : 'text-[#7c7267] hover:text-[#241d14]')}>{label}</button>
+      className={'px-4 py-2 rounded-lg text-sm font-bold transition ' + (docType === d ? 'bg-brand text-white shadow' : 'text-[#7c7267] hover:text-[#241d14]')}>{label}</button>
   );
 
   return (
@@ -246,7 +246,7 @@ export function PrintTemplateStudio({ restaurantId, token }: { restaurantId: str
           <div className="inline-flex bg-[#faf7f2] border border-[#e7e0d5] rounded-xl p-1 gap-1">{tab('INVOICE', 'Invoice')}{tab('KOT', 'Order (KOT)')}</div>
           <button onClick={resetDefaults} className="px-3 py-2 rounded-lg border border-[#e7e0d5] text-sm font-semibold text-[#7c7267] hover:bg-[#faf7f2]">Reset</button>
           <button onClick={save} disabled={saving}
-            className="px-5 py-2 rounded-lg bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-60">
+            className="px-5 py-2 rounded-lg bg-brand text-white text-sm font-bold hover:bg-brand-dark disabled:opacity-60">
             {saving ? 'Saving…' : saved ? 'Saved ✓' : `Save ${docType === 'KOT' ? 'KOT' : 'Invoice'}`}
           </button>
         </div>
@@ -259,7 +259,7 @@ export function PrintTemplateStudio({ restaurantId, token }: { restaurantId: str
             SCHEMA[docType].map((g, gi) => (
               <div key={gi} className="bg-white border border-[#e7e0d5] rounded-2xl overflow-hidden">
                 <h3 className="text-[11px] font-extrabold uppercase tracking-wider text-[#7c7267] px-4 py-3 border-b border-[#efe9df] bg-[#faf7f2] flex items-center gap-2">
-                  {g.n !== '' && <span className="w-5 h-5 rounded-md bg-[#cc5a16]/10 text-[#cc5a16] grid place-items-center text-[11px] font-extrabold">{g.n}</span>}{g.t}
+                  {g.n !== '' && <span className="w-5 h-5 rounded-md bg-brand/10 text-brand grid place-items-center text-[11px] font-extrabold">{g.n}</span>}{g.t}
                 </h3>
                 <div className="px-4 py-2">{g.rows.map((row, ri) => <React.Fragment key={ri}><ControlRow row={row} c={c} setKey={setKey} /></React.Fragment>)}</div>
               </div>
@@ -288,7 +288,7 @@ function ControlRow({ row, c, setKey }: { row: Row; c: Cfg; setKey: (k: string, 
     return (
       <div className="flex items-center justify-between gap-3 py-2 min-h-[34px] border-b border-[#efe9df] last:border-0">
         <label className="text-[13.5px] font-semibold flex-1 flex flex-col">
-          <span className="flex items-center gap-2">{row.label}{row.neu && <span className="text-[9.5px] font-extrabold tracking-wide text-[#cc5a16] bg-[#cc5a16]/10 px-1.5 py-0.5 rounded-full uppercase">new</span>}</span>
+          <span className="flex items-center gap-2">{row.label}{row.neu && <span className="text-[9.5px] font-extrabold tracking-wide text-brand bg-brand/10 px-1.5 py-0.5 rounded-full uppercase">new</span>}</span>
           {row.sub && <small className="font-normal text-[#7c7267] text-[11.5px]">{row.sub}</small>}
         </label>
         <Switch on={!!c[row.sw]} onChange={(v) => setKey(row.sw, v)} />
@@ -302,7 +302,7 @@ function ControlRow({ row, c, setKey }: { row: Row; c: Cfg; setKey: (k: string, 
         <div className="inline-flex gap-1 flex-wrap">
           {row.opts.map(([v, lbl]) => (
             <button key={v} onClick={() => setKey(row.seg, isNaN(Number(v)) ? v : Number(v))}
-              className={'text-xs font-bold px-2.5 py-1.5 rounded-lg border ' + (String(c[row.seg]) === v ? 'border-[#cc5a16] bg-[#cc5a16]/10 text-[#cc5a16]' : 'border-[#e7e0d5] bg-[#faf7f2] text-[#7c7267]')}>{lbl}</button>
+              className={'text-xs font-bold px-2.5 py-1.5 rounded-lg border ' + (String(c[row.seg]) === v ? 'border-brand bg-brand/10 text-brand' : 'border-[#e7e0d5] bg-[#faf7f2] text-[#7c7267]')}>{lbl}</button>
           ))}
         </div>
       </div>
@@ -316,7 +316,7 @@ function ControlRow({ row, c, setKey }: { row: Row; c: Cfg; setKey: (k: string, 
           <span className="text-xs font-semibold border border-[#e7e0d5] bg-[#faf7f2] px-2.5 py-1.5 rounded-lg opacity-60">Item ✓</span>
           {row.cols.map((k, i) => (
             <button key={k} onClick={() => setKey(k, !c[k])}
-              className={'text-xs font-semibold px-2.5 py-1.5 rounded-lg border ' + (c[k] ? 'border-[#cc5a16] bg-[#cc5a16]/10 text-[#cc5a16]' : 'border-[#e7e0d5] bg-[#faf7f2] text-[#7c7267]')}>{row.labels[i]}</button>
+              className={'text-xs font-semibold px-2.5 py-1.5 rounded-lg border ' + (c[k] ? 'border-brand bg-brand/10 text-brand' : 'border-[#e7e0d5] bg-[#faf7f2] text-[#7c7267]')}>{row.labels[i]}</button>
           ))}
         </div>
       </div>
@@ -327,7 +327,7 @@ function ControlRow({ row, c, setKey }: { row: Row; c: Cfg; setKey: (k: string, 
     <div className="flex flex-col gap-1.5 py-2 border-b border-[#efe9df] last:border-0">
       <label className="text-xs font-bold text-[#7c7267]">{row.label}</label>
       <input type="text" value={c[row.text] || ''} onChange={(e) => setKey(row.text, e.target.value)}
-        className="text-[13.5px] bg-[#faf7f2] border border-[#e7e0d5] rounded-lg px-2.5 py-2 outline-none focus:border-[#cc5a16]" />
+        className="text-[13.5px] bg-[#faf7f2] border border-[#e7e0d5] rounded-lg px-2.5 py-2 outline-none focus:border-brand" />
     </div>
   );
 }
@@ -335,7 +335,7 @@ function ControlRow({ row, c, setKey }: { row: Row; c: Cfg; setKey: (k: string, 
 function Switch({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
   return (
     <button type="button" onClick={() => onChange(!on)} aria-pressed={on}
-      className={'relative w-10 h-[23px] rounded-full transition ' + (on ? 'bg-[#cc5a16]' : 'bg-[#e7e0d5]')}>
+      className={'relative w-10 h-[23px] rounded-full transition ' + (on ? 'bg-brand' : 'bg-[#e7e0d5]')}>
       <span className={'absolute top-[2px] w-[19px] h-[19px] rounded-full bg-white shadow transition-all ' + (on ? 'left-[19px]' : 'left-[2px]')} />
     </button>
   );

@@ -168,11 +168,11 @@ export function ChecklistBoard({ restaurantId, token }: Props) {
         onRowClick={(job) => setDetail(job)}
         toolbarLeft={
           <div className="flex items-center gap-1.5">
-            <select value={status} onChange={e => setStatus(e.target.value as any)} className="text-sm border border-[#e8dccf] rounded-xl px-2 py-1.5 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20">
+            <select value={status} onChange={e => setStatus(e.target.value as any)} className="text-sm border border-[#e8dccf] rounded-xl px-2 py-1.5 bg-white outline-none focus:ring-2 ring-brand/20">
               <option value="OPEN">Open only</option>
               <option value="ALL">All checklists</option>
             </select>
-            <button onClick={load} className="px-3 py-1.5 border border-[#e8dccf] text-sm rounded-xl hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors">Refresh</button>
+            <button onClick={load} className="px-3 py-1.5 border border-[#e8dccf] text-sm rounded-xl hover:border-brand/50 hover:text-brand transition-colors">Refresh</button>
           </div>
         }
       />

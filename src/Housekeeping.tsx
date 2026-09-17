@@ -10,9 +10,9 @@ import { canDeleteTab } from './perm';
 
 const CARD = 'bg-white rounded-2xl border border-[#e8dccf] p-5';
 const BTN = 'px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors';
-const BTN_PRIMARY = `${BTN} bg-[#cc5a16] text-white hover:bg-[#b34f12] disabled:opacity-50`;
+const BTN_PRIMARY = `${BTN} bg-brand text-white hover:bg-[#b34f12] disabled:opacity-50`;
 const BTN_GHOST = `${BTN} bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] hover:bg-[#f0e9df]`;
-const INPUT = 'w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white focus:outline-none focus:border-[#cc5a16]';
+const INPUT = 'w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white focus:outline-none focus:border-brand';
 const dt = (v: any) => v ? new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
 
 // scope='EVENT' → a focused view for the Events module (event venues only);
@@ -27,7 +27,7 @@ export function HousekeepingModule({ restaurantId, token, scope = 'ALL' }: { res
     return b;
   };
   const tabBtn = (k: typeof view, label: string, icon: any) => (
-    <button onClick={() => setView(k)} className={`${BTN} flex-1 sm:flex-none justify-center whitespace-nowrap ${view === k ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] border border-[#e8dccf] text-[#6b5d52]'}`}>{icon}{label}</button>
+    <button onClick={() => setView(k)} className={`${BTN} flex-1 sm:flex-none justify-center whitespace-nowrap ${view === k ? 'bg-brand text-white' : 'bg-[#faf7f2] border border-[#e8dccf] text-[#6b5d52]'}`}>{icon}{label}</button>
   );
   const title = scope === 'EVENT' ? 'Event Housekeeping' : scope === 'ROOM' ? 'Room Housekeeping' : 'Housekeeping';
   const subtitle = scope === 'EVENT'
@@ -38,7 +38,7 @@ export function HousekeepingModule({ restaurantId, token, scope = 'ALL' }: { res
     <div>
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
         <div className="flex items-center gap-2.5">
-          <div className="grid place-items-center w-9 h-9 rounded-xl bg-[#fbeee3] text-[#cc5a16]"><Sparkles size={18} /></div>
+          <div className="grid place-items-center w-9 h-9 rounded-xl bg-[#fbeee3] text-brand"><Sparkles size={18} /></div>
           <div>
             <h2 className="text-xl font-bold text-[#14110c] leading-tight">{title}</h2>
             <p className="text-xs text-[#9c8e85]">{subtitle}</p>
@@ -143,9 +143,9 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
           {jobs.map(j => {
             const pct = j.task_count ? Math.round((j.done_count / j.task_count) * 100) : 0;
             return (
-              <button key={j.id} onClick={() => openDetail(j)} className={`${CARD} text-left hover:border-[#cc5a16] transition-colors`}>
+              <button key={j.id} onClick={() => openDetail(j)} className={`${CARD} text-left hover:border-brand transition-colors`}>
                 <div className="flex items-center justify-between gap-2 mb-1">
-                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#fbeee3] text-[#cc5a16]">
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#fbeee3] text-brand">
                     {j.facility_type === 'EVENT' ? <Building2 size={11} /> : <DoorOpen size={11} />}{j.facility_type}
                   </span>
                   {j.pending_mandatory > 0
@@ -153,9 +153,9 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
                     : <span className="text-[10px] font-bold text-emerald-600">ready to close</span>}
                 </div>
                 <div className="font-bold text-[#14110c]">{j.facility_label || j.facility_id}</div>
-                {j.template_name && <div className="text-[11px] font-semibold text-[#cc5a16]">{j.template_name}{Number(j.blocks_release) === 0 ? <span className="ml-1 text-[9px] font-bold uppercase text-[#9c8e85]">· non-blocking</span> : null}</div>}
+                {j.template_name && <div className="text-[11px] font-semibold text-brand">{j.template_name}{Number(j.blocks_release) === 0 ? <span className="ml-1 text-[9px] font-bold uppercase text-[#9c8e85]">· non-blocking</span> : null}</div>}
                 <div className="text-[11px] text-[#9c8e85]">{j.guest_label ? `after ${j.guest_label} · ` : ''}{dt(j.created_at)}</div>
-                <div className="mt-2 h-1.5 rounded-full bg-[#f0e9df] overflow-hidden"><div className="h-full bg-[#cc5a16]" style={{ width: `${pct}%` }} /></div>
+                <div className="mt-2 h-1.5 rounded-full bg-[#f0e9df] overflow-hidden"><div className="h-full bg-brand" style={{ width: `${pct}%` }} /></div>
                 <div className="text-[10px] text-[#9c8e85] mt-1">{j.done_count}/{j.task_count} tasks</div>
               </button>
             );
@@ -175,7 +175,7 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
             </div>
             <div className="flex flex-col gap-1.5 my-3">
               {(openJob.tasks || []).map((t: any) => (
-                <button key={t.id} onClick={() => toggle(t)} className={`flex items-center gap-2.5 text-left px-3 py-3 rounded-xl border transition-colors active:scale-[0.99] ${t.is_done ? 'bg-emerald-50 border-emerald-200' : 'bg-[#faf7f2] border-[#e8dccf] hover:border-[#cc5a16]'}`}>
+                <button key={t.id} onClick={() => toggle(t)} className={`flex items-center gap-2.5 text-left px-3 py-3 rounded-xl border transition-colors active:scale-[0.99] ${t.is_done ? 'bg-emerald-50 border-emerald-200' : 'bg-[#faf7f2] border-[#e8dccf] hover:border-brand'}`}>
                   <span className={`w-6 h-6 rounded-md grid place-items-center shrink-0 ${t.is_done ? 'bg-emerald-500 text-white' : 'border-2 border-[#cbb9a8]'}`}>{t.is_done && <Check size={15} />}</span>
                   <span className={`text-sm flex-1 ${t.is_done ? 'line-through text-[#9c8e85]' : 'text-[#3d3128]'}`}>{t.label}</span>
                   {!t.is_mandatory && <span className="text-[9px] font-bold text-[#b9a897] uppercase shrink-0">optional</span>}

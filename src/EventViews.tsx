@@ -4,6 +4,7 @@
 // right sub-view; the public inquiry page is exported separately. Strings run
 // through the i18n t() so the whole module is translatable.
 // ════════════════════════════════════════════════════════════════════════
+import { BRAND, BRAND_DARK } from './theme';
 import React, { useState, useEffect, useRef } from 'react';
 import { DataTable } from './components/DataTable';
 import { ObjectDetail } from './components/ObjectDetail';
@@ -152,10 +153,10 @@ async function openAuthedPdf(url: string, token: string) {
 
 const CARD = 'bg-white rounded-2xl border border-[#e8dccf] p-5';
 const BTN = 'px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors';
-const BTN_PRIMARY = `${BTN} bg-[#cc5a16] text-white hover:bg-[#b34f12]`;
+const BTN_PRIMARY = `${BTN} bg-brand text-white hover:bg-[#b34f12]`;
 const BTN_GHOST = `${BTN} bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] hover:bg-[#f0e9df]`;
 const BTN_DANGER = `${BTN} bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100`;
-const INPUT = 'w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white focus:outline-none focus:border-[#cc5a16]';
+const INPUT = 'w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white focus:outline-none focus:border-brand';
 const LABEL = 'text-xs font-semibold text-[#6b5d52] mb-1 block';
 const money = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
@@ -248,7 +249,7 @@ function SectionHeader({ icon, title, sub, action }: { icon: React.ReactNode; ti
   return (
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
       <div className="flex items-center gap-2.5">
-        <div className="w-9 h-9 rounded-xl bg-[#faf7f2] border border-[#e8dccf] flex items-center justify-center text-[#cc5a16]">{icon}</div>
+        <div className="w-9 h-9 rounded-xl bg-[#faf7f2] border border-[#e8dccf] flex items-center justify-center text-brand">{icon}</div>
         <div>
           <h2 className="text-2xl font-bold font-serif text-[#14110c]">{title}</h2>
           {sub && <p className="text-xs text-[#6b5d52]">{sub}</p>}
@@ -398,7 +399,7 @@ function EventVenues({ restaurantId, token }: Props) {
           { key: 'turnaround_min', label: 'Turnaround (min)', sortable: true, align: 'right', defaultHidden: true, getValue: (r: any) => Number(r.turnaround_min || 0), render: (r: any) => (r.turnaround_min != null && r.turnaround_min !== '') ? r.turnaround_min : '—' },
           { key: 'status', label: 'Status', filterable: true, filterType: 'select', getValue: (r: any) => String(r.status || 'VACANT').toUpperCase(), render: (r: any) => (
             <select value={String(r.status || 'VACANT').toUpperCase()} onChange={e => setStatus(r.id, e.target.value)}
-              className="text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-[#cc5a16]/20">
+              className="text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-brand/20">
               {VENUE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           ) },
@@ -848,13 +849,13 @@ function EventBookings({ restaurantId, token }: Props) {
       )}
 
       {bookingsTotal > rows.length && (
-        <div className="flex items-center justify-between gap-3 flex-wrap mb-2 px-3 py-2 rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15">
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-2 px-3 py-2 rounded-xl bg-brand/5 border border-brand/15">
           <span className="text-xs text-[#6b5d52]">
             Showing <b>{rows.length}</b> of <b>{bookingsTotal}</b> {bookingSearch ? 'matching bookings' : 'bookings'}
           </span>
           <button
             type="button" onClick={loadMore} disabled={loadingMore}
-            className="px-3 py-1.5 rounded-xl text-xs font-bold bg-[#cc5a16] text-white disabled:opacity-50"
+            className="px-3 py-1.5 rounded-xl text-xs font-bold bg-brand text-white disabled:opacity-50"
           >{loadingMore ? 'Loading…' : `Load ${Math.min(BOOKINGS_PAGE, bookingsTotal - rows.length)} more`}</button>
         </div>
       )}
@@ -1736,7 +1737,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             )}
             <div className="pt-1.5 border-t border-[#e8dccf] flex items-baseline justify-between">
               <span className="text-xs font-semibold text-[#14110c]">{t('events.bookings.grandTotal')}</span>
-              <span className="text-2xl font-bold text-[#cc5a16] tabular-nums">{money(evGrand)}</span>
+              <span className="text-2xl font-bold text-brand tabular-nums">{money(evGrand)}</span>
             </div>
             <p className="text-[10px] text-[#9d8b7e] text-right">{evTax > 0 ? t('events.bookings.gstInclNote') : t('events.bookings.gstNote')}</p>
           </div>
@@ -1890,7 +1891,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
                     </span>
                   ) : bookedEditable ? (
                     <span className="w-[74px] flex items-center justify-center gap-1">
-                      <button title="Release one room" onClick={() => removeRoom(ln.ids[ln.ids.length - 1])} className="w-5 h-5 rounded border border-[#e8dccf] leading-none text-[#cc5a16] font-bold hover:bg-[#f0e9df]">−</button>
+                      <button title="Release one room" onClick={() => removeRoom(ln.ids[ln.ids.length - 1])} className="w-5 h-5 rounded border border-[#e8dccf] leading-none text-brand font-bold hover:bg-[#f0e9df]">−</button>
                       <span className="w-5 text-center font-semibold tabular-nums">{ln.qty}</span>
                       <button title="Reserve one more room" onClick={() => addRoom(ln.room_type_id, ln.room_type_snapshot, Number(ln.quoted_rate) || 0, 1)} className="w-5 h-5 rounded border border-[#e8dccf] leading-none text-emerald-600 font-bold hover:bg-[#f0e9df]">+</button>
                     </span>
@@ -1922,7 +1923,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
                 <span className="w-[74px]" />
                 <span className="w-16 text-right tabular-nums" title="Total room rent (ex-GST)">{money(tBase)}</span>
                 <span className="w-16 text-right tabular-nums" title="Total room GST">{money(Math.round(tGst * 100) / 100)}</span>
-                <span className="w-16 text-right tabular-nums text-[#cc5a16]" title="Total incl. GST">{money(tBase + Math.round(tGst * 100) / 100)}</span>
+                <span className="w-16 text-right tabular-nums text-brand" title="Total incl. GST">{money(tBase + Math.round(tGst * 100) / 100)}</span>
                 <span className="w-3.5" />
               </div>
             </>);
@@ -2130,7 +2131,7 @@ function EventQuotationDetail({ restaurantId, token, quotationId, onBack, onOpen
               <div className="font-bold">{q.quote_number} <span className="text-[#9d8b7e] font-normal">v{q.version}</span></div>
               <div className="text-xs text-[#6b5d52]">Subtotal {money(q.subtotal)} · GST {money(q.tax_amount)}{Number(q.discount) > 0 ? ` · Disc ${money(q.discount)}` : ''}</div>
             </div>
-            <div className="text-right"><div className="text-2xl font-bold text-[#cc5a16]">{money(q.grand_total)}</div></div>
+            <div className="text-right"><div className="text-2xl font-bold text-brand">{money(q.grand_total)}</div></div>
           </div>
           <div className={CARD}>
             <div className="flex items-center justify-between mb-2">
@@ -2183,7 +2184,7 @@ function EventFolioDetail({ restaurantId, token, folioId, onBack, onOpenObject }
                 </div>
               )}
             </div>
-            <div className="text-right"><div className="text-2xl font-bold text-[#cc5a16]">{money(f.grand_total)}</div><div className="text-xs text-[#6b5d52]">{t('events.bookings.grandTotal')}</div></div>
+            <div className="text-right"><div className="text-2xl font-bold text-brand">{money(f.grand_total)}</div><div className="text-xs text-[#6b5d52]">{t('events.bookings.grandTotal')}</div></div>
           </div>
           <div className={CARD}>
             <h3 className="font-bold text-sm mb-2">Line items</h3>
@@ -2338,7 +2339,7 @@ function EventCalendar({ restaurantId, token }: Props) {
                   return (
                     <th key={d} className={`p-1 border-b-2 border-[#e8dccf] min-w-[44px] ${weekend ? 'bg-[#f5efe6]' : 'bg-[#faf7f2]'}`}>
                       <div className={`text-[9px] font-semibold ${weekend ? 'text-[#b5651d]' : 'text-[#9d8b7e]'}`}>{WD[dow]}</div>
-                      <div className={`text-[11px] font-bold ${isToday ? 'text-white bg-[#cc5a16] rounded-full w-5 h-5 leading-5 mx-auto' : 'text-[#3d3128]'}`}>{d.slice(8, 10)}</div>
+                      <div className={`text-[11px] font-bold ${isToday ? 'text-white bg-brand rounded-full w-5 h-5 leading-5 mx-auto' : 'text-[#3d3128]'}`}>{d.slice(8, 10)}</div>
                     </th>
                   );
                 })}
@@ -2367,7 +2368,7 @@ function EventCalendar({ restaurantId, token }: Props) {
                             style={{ background: c.sty.bg, color: c.sty.fg }}>
                             {label || (c.count > 1 ? '•' : '')}
                             {c.count > 1 && (
-                              <span className="absolute top-0 right-0 min-w-[13px] text-[8px] font-bold leading-[13px] bg-[#cc5a16] text-white rounded-bl-md px-[3px]">{c.count}</span>
+                              <span className="absolute top-0 right-0 min-w-[13px] text-[8px] font-bold leading-[13px] bg-brand text-white rounded-bl-md px-[3px]">{c.count}</span>
                             )}
                           </button>
                         ) : (
@@ -2571,7 +2572,7 @@ function EventDashboard({ restaurantId, token }: Props) {
     const up = d > 0, good = up === goodUp;
     return <span className="text-[10px] font-bold" style={{ color: good ? '#059669' : '#dc2626' }}>{up ? '▲' : '▼'}{Math.abs(d)}{kind === 'pp' ? 'pp' : '%'}</span>;
   };
-  const tile = (label: string, value: string, sub?: string, accent = '#cc5a16', delta?: React.ReactNode) => (
+  const tile = (label: string, value: string, sub?: string, accent = BRAND, delta?: React.ReactNode) => (
     <div className={CARD}>
       <div className="text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e]">{label}</div>
       <div className="flex items-baseline gap-1.5 mt-0.5">
@@ -2657,7 +2658,7 @@ function EventDashboard({ restaurantId, token }: Props) {
             </div>
           )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-1">
-            {tile(t('events.dash.confirmedRevenue'), money(k.confirmedRevenue), `${k.wonCount} ${t('events.dash.wonEvents')}`, '#cc5a16', deltaBadge(data.deltas?.confirmedRevenue))}
+            {tile(t('events.dash.confirmedRevenue'), money(k.confirmedRevenue), `${k.wonCount} ${t('events.dash.wonEvents')}`, BRAND, deltaBadge(data.deltas?.confirmedRevenue))}
             {tile(t('events.dash.pipeline'), money(k.pipelineRevenue), `${openLeads} ${t('events.dash.openLeads')}`, '#2563eb', deltaBadge(data.deltas?.pipelineRevenue))}
             {tile(t('events.dash.winRate'), `${k.winRate}%`, `${k.wonCount} ${t('common.of')} ${k.wonCount + k.lostCount}`, '#059669', deltaBadge(data.deltas?.winRatePp, 'pp'))}
             {tile(t('events.dash.avgValue'), money(k.avgBookingValue), t('events.dash.perEvent'), '#7c3aed', deltaBadge(data.deltas?.avgBookingValue))}
@@ -2686,7 +2687,7 @@ function EventDashboard({ restaurantId, token }: Props) {
                 <div className="flex gap-1">
                   {(['type', 'venue'] as const).map(m => (
                     <button key={m} onClick={() => setSegMode(m)}
-                      className={`px-2 py-0.5 rounded-lg text-[11px] font-bold border ${segMode === m ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>
+                      className={`px-2 py-0.5 rounded-lg text-[11px] font-bold border ${segMode === m ? 'bg-brand text-white border-brand' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>
                       {m === 'type' ? t('events.dash.byType') : t('events.dash.byVenue')}
                     </button>
                   ))}
@@ -2809,7 +2810,7 @@ function EventDashboard({ restaurantId, token }: Props) {
                     <span>{m.month}</span><span className="tabular-nums text-[#6b5d52]">{money(m.revenue)} · {m.events} {t('events.dash.evShort')}</span>
                   </div>
                   <div className="h-2 rounded bg-[#f0e9df] overflow-hidden">
-                    <div className="h-full rounded bg-[#cc5a16]" style={{ width: `${Math.round(m.revenue / maxMonth * 100)}%` }} />
+                    <div className="h-full rounded bg-brand" style={{ width: `${Math.round(m.revenue / maxMonth * 100)}%` }} />
                   </div>
                 </div>
               ))}
@@ -3129,14 +3130,14 @@ function EventSettings({ restaurantId, token }: Props) {
           <span className="text-xs text-[#9d8b7e]">{canEditLang ? 'Staff can toggle English ↔ this language.' : 'View-only — you need Edit access to Settings to change this.'}</span>
         </div>
         {!secLang && gst.suggested_language && canEditLang && (
-          <p className="text-[11px] text-[#9d8b7e] mt-1.5">Suggested for your state: <strong>{LANGUAGE_NAMES[gst.suggested_language] || gst.suggested_language}</strong> — <button className="text-[#cc5a16] font-semibold hover:underline" onClick={() => saveLang(gst.suggested_language)}>Use this</button></p>
+          <p className="text-[11px] text-[#9d8b7e] mt-1.5">Suggested for your state: <strong>{LANGUAGE_NAMES[gst.suggested_language] || gst.suggested_language}</strong> — <button className="text-brand font-semibold hover:underline" onClick={() => saveLang(gst.suggested_language)}>Use this</button></p>
         )}
       </div>
 
       {/* Event & Convention — Invoice GST (owner-configurable default) */}
       <div className={`${CARD} mb-4 space-y-3`}>
         <div className="flex items-center gap-2">
-          <FileText size={16} className="text-[#cc5a16]" />
+          <FileText size={16} className="text-brand" />
           <div>
             <div className="text-sm font-bold text-[#3d2e22]">Invoice GST — Event &amp; Convention</div>
             <div className="text-[11px] text-[#9d8b7e]">Default GST applied to event quotations &amp; invoices (venue, rentals, services, catering). Hotel rooms always follow the Hotel GST slab settings.</div>
@@ -3178,7 +3179,7 @@ function EventSettings({ restaurantId, token }: Props) {
       {/* Event & Convention — Venue booking rules (house defaults) */}
       <div className={`${CARD} mb-4 space-y-3`}>
         <div className="flex items-center gap-2">
-          <CalendarRange size={16} className="text-[#cc5a16]" />
+          <CalendarRange size={16} className="text-brand" />
           <div>
             <div className="text-sm font-bold text-[#3d2e22]">Venue booking rules — house defaults</div>
             <div className="text-[11px] text-[#9d8b7e]">Half-day AM/PM windows, turnaround/prep buffer, and peak days. Individual halls can override these in the Venues master.</div>
@@ -3196,7 +3197,7 @@ function EventSettings({ restaurantId, token }: Props) {
               const set = String(vr.weekend_days || '').split(',').map((s: string) => s.trim()).filter(Boolean);
               const on = set.includes(String(i));
               return <button key={d} type="button" disabled={!canEdit} onClick={() => { const s = new Set(set); if (on) s.delete(String(i)); else s.add(String(i)); setVr({ ...vr, weekend_days: Array.from(s).sort().join(',') }); }}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border disabled:opacity-60 ${on ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>{d}</button>;
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border disabled:opacity-60 ${on ? 'bg-brand text-white border-brand' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>{d}</button>;
             })}
           </div>
           <p className="text-[11px] text-[#9d8b7e] mt-1">Selected days use the Weekend/Peak column of each hall's price matrix.</p>
@@ -3210,7 +3211,7 @@ function EventSettings({ restaurantId, token }: Props) {
       {/* Business targets + cash-risk alerts (drives dashboard attainment + alerts) */}
       <div className={`${CARD} mb-4 space-y-3`}>
         <div className="flex items-center gap-2">
-          <IndianRupee size={16} className="text-[#cc5a16]" />
+          <IndianRupee size={16} className="text-brand" />
           <div>
             <div className="text-sm font-bold text-[#3d2e22]">{t('events.settings.targetsTitle')}</div>
             <div className="text-[11px] text-[#9d8b7e]">{t('events.settings.targetsSub')}</div>
@@ -3294,7 +3295,7 @@ function LanguageToggle() {
     <div className="flex items-center gap-1 mb-3">
       {['en', secondary].map(l => (
         <button key={l} onClick={() => setLang(l)}
-          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${lang === l ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>
+          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border ${lang === l ? 'bg-brand text-white border-brand' : 'bg-white text-[#6b5d52] border-[#e8dccf]'}`}>
           {LANGUAGE_NAMES[l] || l}
         </button>
       ))}
@@ -3514,7 +3515,7 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
   const capMax = venues.length ? Math.max(...venues.map((v: any) => Number(v.max_occupancy || 0))) : 0;
   const heroBg = heroImg
     ? `linear-gradient(180deg, rgba(20,17,12,0.35) 0%, rgba(20,17,12,0.75) 100%), url("${heroImg}") center/cover no-repeat`
-    : 'linear-gradient(135deg, #cc5a16, #7c3aed)';
+    : `linear-gradient(135deg, ${BRAND}, #7c3aed)`;
 
   return (
     <div style={{ minHeight: '100vh', background: '#faf7f2', color: '#14110c', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif' }}>
@@ -3566,7 +3567,7 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
         {venues.length > 0 && (
           <div style={{ margin: '44px 0' }}>
             <h2 style={{ fontSize: 26, fontWeight: 800, marginBottom: 4, letterSpacing: '-0.01em' }}>{t('public.events.venues')}</h2>
-            <div style={{ width: 48, height: 3, background: '#cc5a16', borderRadius: 2, marginBottom: 22 }} />
+            <div style={{ width: 48, height: 3, background: BRAND, borderRadius: 2, marginBottom: 22 }} />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 18 }}>
               {venues.map((v: any) => (
                 <div key={v.id} style={{ background: '#fff', border: '1px solid #ece3d7', borderRadius: 18, overflow: 'hidden', boxShadow: '0 2px 12px rgba(20,17,12,0.05)' }}>
@@ -3580,7 +3581,7 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
                     <div style={{ fontSize: 13, color: '#6b5d52', marginTop: 2 }}>{v.category} · {t('public.events.capacity')} {v.min_occupancy}–{v.max_occupancy}</div>
                     {v.amenities && <div style={{ fontSize: 12, color: '#9d8b7e', marginTop: 8, lineHeight: 1.4 }}>{String(v.amenities).split(',').slice(0, 4).map((a: string) => a.trim()).filter(Boolean).join(' · ')}</div>}
                     <div style={{ marginTop: 12, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-                      <span style={{ fontWeight: 800, color: '#cc5a16', fontSize: 19 }}>{money(v.daily_rate)}<span style={{ fontSize: 12, fontWeight: 400, color: '#9d8b7e' }}> / day</span></span>
+                      <span style={{ fontWeight: 800, color: BRAND, fontSize: 19 }}>{money(v.daily_rate)}<span style={{ fontSize: 12, fontWeight: 400, color: '#9d8b7e' }}> / day</span></span>
                       <a href="#enquire" onClick={() => setForm((f: any) => ({ ...f, venue_id: v.id }))} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>{t('public.events.enquire')} →</a>
                     </div>
                   </div>

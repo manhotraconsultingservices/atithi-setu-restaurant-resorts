@@ -3,6 +3,7 @@
 // Single import surface for App.tsx: <SpaModule tab={activeTab} .../> dispatches
 // to the right view. Public booking page exported separately.
 // ════════════════════════════════════════════════════════════════════════
+import { BRAND, BRAND_DARK } from './theme';
 import React, { useState, useEffect } from 'react';
 import { DataTable } from './components/DataTable';
 import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
@@ -82,9 +83,9 @@ function makeApi(restaurantId: string, token: string) {
 
 const CARD = "bg-white rounded-2xl border border-[#e8dccf] p-5";
 const BTN = "px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors";
-const BTN_PRIMARY = `${BTN} bg-[#cc5a16] text-white hover:bg-[#b34f12]`;
+const BTN_PRIMARY = `${BTN} bg-brand text-white hover:bg-[#b34f12]`;
 const BTN_GHOST = `${BTN} bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128] hover:bg-[#f0e9df]`;
-const INPUT = "w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white focus:outline-none focus:border-[#cc5a16]";
+const INPUT = "w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-white focus:outline-none focus:border-brand";
 const LABEL = "text-xs font-semibold text-[#6b5d52] mb-1 block";
 const money = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 // Today in India. `new Date().toISOString()` is UTC, so before 05:30 IST the
@@ -109,7 +110,7 @@ function SectionHeader({ icon, title, sub, action }: { icon: React.ReactNode; ti
   return (
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
       <div className="flex items-center gap-2.5">
-        <div className="w-9 h-9 rounded-xl bg-[#faf7f2] border border-[#e8dccf] flex items-center justify-center text-[#cc5a16]">{icon}</div>
+        <div className="w-9 h-9 rounded-xl bg-[#faf7f2] border border-[#e8dccf] flex items-center justify-center text-brand">{icon}</div>
         <div>
           <h2 className="text-2xl font-bold font-serif text-[#14110c]">{title}</h2>
           {sub && <p className="text-xs text-[#6b5d52]">{sub}</p>}
@@ -472,7 +473,7 @@ export function SpaFinishDialog({ restaurantId, token, appt, onClose, onDone }: 
             <div className="flex flex-wrap gap-1.5 mb-3">
               {shown.map((t: any) => (
                 <button key={t.id} type="button" onClick={() => toggle(t.id)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${performers.includes(t.id) ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>{t.display_name}</button>
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${performers.includes(t.id) ? 'bg-brand text-white border-brand' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>{t.display_name}</button>
               ))}
             </div>
             <div className="grid grid-cols-2 gap-3 mb-3">
@@ -1280,7 +1281,7 @@ function SpaResources({ restaurantId, token }: Props) {
               <div key={t.id} className={`rounded-xl border border-[#e8dccf] p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${isOn(t) ? '' : 'opacity-60'}`}>
                 <div className="min-w-0">
                   <div className="font-semibold text-sm flex items-center gap-2 flex-wrap">
-                    <User size={14} className="text-[#cc5a16]" /> {t.display_name}
+                    <User size={14} className="text-brand" /> {t.display_name}
                     {t.gender && <span className="text-[10px] font-normal text-[#6b5d52]">{SPA_GENDER_LABEL[t.gender] || t.gender}</span>}
                     {t.languages && <span className="text-[10px] font-normal text-[#6b5d52]">· {t.languages}</span>}
                     {Number(t.max_treatments_per_day || 0) > 0 && <span className="text-[10px] font-normal text-[#6b5d52]">· up to {t.max_treatments_per_day} a day</span>}
@@ -1318,7 +1319,7 @@ function SpaResources({ restaurantId, token }: Props) {
             <div className={CARD}>
               <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
                 <div>
-                  <h3 className="font-bold text-[#14110c] flex items-center gap-2"><Award size={16} className="text-[#cc5a16]" /> Ayurveda starter pack</h3>
+                  <h3 className="font-bold text-[#14110c] flex items-center gap-2"><Award size={16} className="text-brand" /> Ayurveda starter pack</h3>
                   <p className="text-xs text-[#6b5d52] mt-1 max-w-xl">Thirteen therapy skills — Abhyanga, Pizhichil, Njavarakizhi, Shirodhara, Udvartana and more — and seven cabin types, from the droni cabin to the herbal steam room. Skills and cabin types already on file are kept as they are.</p>
                 </div>
                 <div className="flex gap-2 shrink-0">
@@ -1397,7 +1398,7 @@ function SpaResources({ restaurantId, token }: Props) {
 
           {canEdit && (
             <div className={CARD}>
-              <h3 className="font-bold text-[#14110c] mb-1 flex items-center gap-2"><FileText size={16} className="text-[#cc5a16]" /> Import from a spreadsheet</h3>
+              <h3 className="font-bold text-[#14110c] mb-1 flex items-center gap-2"><FileText size={16} className="text-brand" /> Import from a spreadsheet</h3>
               <p className="text-xs text-[#6b5d52] mb-3">Paste CSV with a header row. A row whose name matches a therapist or cabin on file updates it; any other row is added. Preview first — nothing is saved until you import.</p>
               <div className="flex gap-2 mb-2">
                 {(['therapists', 'cabins'] as const).map(k => (
@@ -1509,7 +1510,7 @@ function SpaResources({ restaurantId, token }: Props) {
               {/* Active treatments, plus any inactive one still assigned so it can be taken off. */}
               {services.filter(s => isOn(s) || svcSkills.includes(s.id)).map(s => (
                 <button key={s.id} onClick={() => toggleSvc(s.id)} disabled={!canEdit}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border disabled:opacity-60 ${svcSkills.includes(s.id) ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border disabled:opacity-60 ${svcSkills.includes(s.id) ? 'bg-brand text-white border-brand' : 'bg-white border-[#e8dccf] text-[#3d3128]'}`}>
                   {s.name}{isOn(s) ? '' : ' (inactive)'}
                 </button>
               ))}
@@ -2049,7 +2050,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                 <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-44 overflow-auto">
                   {slots.map((s, i) => (
                     <button key={i} onClick={() => chooseSlot(s)}
-                      className={`px-2 py-1.5 rounded-lg text-[11px] border ${chosenSlot === s ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#e8dccf]'}`}>
+                      className={`px-2 py-1.5 rounded-lg text-[11px] border ${chosenSlot === s ? 'bg-brand text-white border-brand' : 'bg-white border-[#e8dccf]'}`}>
                       {s.start_at.slice(11, 16)}<br /><span className="opacity-70">{s.therapist_name}{s.assistant_names?.length ? ` + ${s.assistant_names.join(', ')}` : ''}</span>
                     </button>
                   ))}
@@ -2280,7 +2281,7 @@ function SpaPackages({ restaurantId, token }: Props) {
       <SectionHeader icon={<Award size={18} />} title="Packages & Memberships" sub="Prepaid series + recurring tiers" />
       <div className="grid sm:grid-cols-2 gap-4">
         <div className={CARD}>
-          <h4 className="font-bold mb-3 flex items-center gap-1.5"><Package size={15} className="text-[#cc5a16]" /> Packages</h4>
+          <h4 className="font-bold mb-3 flex items-center gap-1.5"><Package size={15} className="text-brand" /> Packages</h4>
           <div className="space-y-1.5 mb-4">
             {packages.map(p => <div key={p.id} className="text-sm rounded-lg border border-[#e8dccf] p-2 flex justify-between"><span>{p.name}</span><span className="text-[#6b5d52]">{p.total_sessions} × · {money(p.price)}</span></div>)}
             {!packages.length && <p className="text-xs text-[#6b5d52]">No packages yet.</p>}
@@ -2294,7 +2295,7 @@ function SpaPackages({ restaurantId, token }: Props) {
           <button className={BTN_PRIMARY + ' mt-2'} onClick={addPkg}><Plus size={14} /> Add Package</button></>}
         </div>
         <div className={CARD}>
-          <h4 className="font-bold mb-3 flex items-center gap-1.5"><Award size={15} className="text-[#cc5a16]" /> Memberships</h4>
+          <h4 className="font-bold mb-3 flex items-center gap-1.5"><Award size={15} className="text-brand" /> Memberships</h4>
           <div className="space-y-1.5 mb-4">
             {memberships.map(m => <div key={m.id} className="text-sm rounded-lg border border-[#e8dccf] p-2 flex justify-between"><span>{m.name}</span><span className="text-[#6b5d52]">{money(m.monthly_fee)}/mo</span></div>)}
             {!memberships.length && <p className="text-xs text-[#6b5d52]">No memberships yet.</p>}
@@ -2456,7 +2457,7 @@ function SpaReports({ restaurantId, token }: Props) {
           <h4 className="font-bold mb-3">Rebooking Rate</h4>
           {rebook ? (
             <div className="text-center py-4">
-              <div className="text-4xl font-bold text-[#cc5a16]">{rebook.rebooking_pct}%</div>
+              <div className="text-4xl font-bold text-brand">{rebook.rebooking_pct}%</div>
               <p className="text-xs text-[#6b5d52] mt-1">{rebook.returning_clients} of {rebook.clients} clients returned</p>
             </div>
           ) : <p className="text-xs text-[#6b5d52]">No data.</p>}
@@ -2572,7 +2573,7 @@ function SpaSettings({ restaurantId, token }: Props) {
       <div className={CARD}>
         <p className="text-xs font-semibold text-[#6b5d52] mb-1">Your public booking link</p>
         <div className="flex items-center gap-2">
-          <a href={publicUrl} target="_blank" rel="noreferrer" className="flex-1 text-sm text-[#cc5a16] underline break-all">{publicUrl}</a>
+          <a href={publicUrl} target="_blank" rel="noreferrer" className="flex-1 text-sm text-brand underline break-all">{publicUrl}</a>
           <button className={BTN_GHOST} onClick={() => navigator.clipboard.writeText(publicUrl).then(() => toast.success('Link copied'), () => toast.error('The link could not be copied.'))}>Copy</button>
         </div>
       </div>
@@ -2644,8 +2645,8 @@ function SpaSettings({ restaurantId, token }: Props) {
               </div>
               {/* mini preview */}
               {o.title && (
-                <div className="mt-3 rounded-xl px-3 py-2 text-white text-xs" style={{ background: 'linear-gradient(135deg, #cc5a16, #8b3a0f)' }}>
-                  {o.badge && <span className="bg-white text-[#cc5a16] rounded-full px-1.5 py-0.5 text-[9px] font-bold mr-1">{o.badge}</span>}
+                <div className="mt-3 rounded-xl px-3 py-2 text-white text-xs" style={{ background: `linear-gradient(135deg, ${BRAND}, #8b3a0f)` }}>
+                  {o.badge && <span className="bg-white text-brand rounded-full px-1.5 py-0.5 text-[9px] font-bold mr-1">{o.badge}</span>}
                   <span className="font-semibold">{o.title}</span>
                   {o.description && <span className="opacity-70 ml-1">— {o.description}</span>}
                 </div>
@@ -2780,7 +2781,7 @@ function SpaFolios({ restaurantId, token }: Props) {
       <div className="flex items-center gap-1.5 mb-3">
         {(['all', 'unpaid', 'paid'] as const).map(k => (
           <button key={k} onClick={() => setFilter(k)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold capitalize ${filter === k ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] border border-[#e8dccf] text-[#6b5d52]'}`}>{k}</button>
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold capitalize ${filter === k ? 'bg-brand text-white' : 'bg-[#faf7f2] border border-[#e8dccf] text-[#6b5d52]'}`}>{k}</button>
         ))}
         <span className="text-[11px] text-[#9c8e85] ml-1">{filtered.length} shown</span>
       </div>
@@ -2907,7 +2908,7 @@ const CATEGORY_ICON: Record<string, string> = {
   MASSAGE: '💆', FACIAL: '✨', BODY: '🌿', SAUNA: '🔥', SALON: '💅', WELLNESS: '🧘', DEFAULT: '🌸',
 };
 const CATEGORY_COLOR: Record<string, string> = {
-  MASSAGE: '#b45309', FACIAL: '#7c3aed', BODY: '#047857', SAUNA: '#dc2626', SALON: '#db2777', WELLNESS: '#0284c7', DEFAULT: '#cc5a16',
+  MASSAGE: '#b45309', FACIAL: '#7c3aed', BODY: '#047857', SAUNA: '#dc2626', SALON: '#db2777', WELLNESS: '#0284c7', DEFAULT: BRAND,
 };
 
 // Repeating mandala/lotus SVG pattern — overlaid on hero at 8% opacity
@@ -3014,7 +3015,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const SPA_DARK  = '#0d1f18';
   const SPA_GOLD  = '#c9a96e';
   const SPA_CREAM = '#f9f5ef';
-  const SPA_BRAND = '#cc5a16';
+  const SPA_BRAND = BRAND;
   const SERIF: React.CSSProperties = { fontFamily: "'Playfair Display', Georgia, serif" };
   const fmtDate = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
   const fmtTime = (iso: string) => iso.slice(11, 16);

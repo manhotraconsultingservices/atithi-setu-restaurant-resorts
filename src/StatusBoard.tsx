@@ -88,7 +88,7 @@ export function StatusBoard({ restaurantId, token, isEventsEnabled, onOpenRoom }
         </div>
         {sub && <div className="text-[10px] text-[#6b5d52] truncate">{sub}</div>}
         <select value={s} disabled={busy === item.id} onChange={e => change(kind, item, e.target.value)}
-          className={`mt-auto text-[11px] font-semibold rounded-lg px-1.5 py-1 bg-white border outline-none focus:ring-2 ring-[#cc5a16]/20 ${m.sel}`}>
+          className={`mt-auto text-[11px] font-semibold rounded-lg px-1.5 py-1 bg-white border outline-none focus:ring-2 ring-brand/20 ${m.sel}`}>
           {ROOM_STATUSES.map(st => <option key={st} value={st}>{META[st].label}</option>)}
         </select>
       </div>
@@ -110,7 +110,7 @@ export function StatusBoard({ restaurantId, token, isEventsEnabled, onOpenRoom }
             <span className="tabular-nums text-[#6b5d52]">{roomCounts[s] || 0}</span>
           </span>
         ))}
-        <button onClick={load} className="ml-auto px-3 py-1.5 border border-[#e8dccf] text-sm rounded-xl hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors">Refresh</button>
+        <button onClick={load} className="ml-auto px-3 py-1.5 border border-[#e8dccf] text-sm rounded-xl hover:border-brand/50 hover:text-brand transition-colors">Refresh</button>
       </div>
 
       {err && <div className="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded px-3 py-2">{err}</div>}

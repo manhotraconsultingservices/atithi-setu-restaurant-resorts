@@ -73,7 +73,7 @@ export function ConfirmDialogProvider({ children }: { children: React.ReactNode 
                   'flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-white transition-colors',
                   pending.opts.danger
                     ? 'bg-red-600 hover:bg-red-700'
-                    : 'bg-[#cc5a16] hover:bg-[#b34d12]',
+                    : 'bg-brand hover:bg-[#b34d12]',
                 )}
               >
                 {pending.opts.confirmLabel ?? 'Confirm'}
