@@ -802,4 +802,7 @@ export const en: Record<string, string> = {
   'pg.public.save': 'Save',
   'pg.public.saving': 'Saving…',
   'pg.public.saved': 'Saved.',
+  // ── Spa booking page: pay online (pay.*) ──
+  'pay.heldHintSpa': 'Your time slot is held. Pay now to confirm the appointment.',
+  'pay.confirmedPaidHintSpa': 'Your payment is received and your appointment is confirmed.',
 };

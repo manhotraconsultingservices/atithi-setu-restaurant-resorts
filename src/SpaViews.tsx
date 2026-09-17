@@ -26,6 +26,7 @@ import { moduleOn } from './tenantModules';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { useT } from './i18n';
+import { PayOnlineButton, usePublicPayOptions, PayChoicePicker, HoldCountdown } from './PublicPay';
 
 // ── Spa History overlay — audit log (who changed what) for an appointment or
 // folio, via the reusable ObjectDetail shell. Opened by a "History" button. ──
@@ -2987,6 +2988,13 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [failedImages, setFailedImages] = useState<Set<number>>(new Set());
+  // Pay online through the property's gateway (owner's choices), or at the property.
+  const { t: tPay } = useT();
+  const payOptions = usePublicPayOptions(restaurantId);
+  const [payChoice, setPayChoice] = useState<string>('');
+  const [apptPaid, setApptPaid] = useState(false);
+  const effectivePayChoice = !payOptions.online ? 'AT_PROPERTY'
+    : payChoice || (payOptions.pay_full !== false ? 'FULL' : Number(payOptions.pay_advance_pct) > 0 ? 'ADVANCE' : 'AT_PROPERTY');
 
   // Resolve slug → real tenant id
   useEffect(() => { (async () => {
@@ -3017,7 +3025,8 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
       const r = await fetch(`/api/public/restaurant/${restaurantId}/spa/booking`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ service_id: service.id, start_at: slot.start_at, therapist_id: slot.therapist_id, resource_id: slot.resource_id, assistant_ids: slot.assistant_ids, ...guest,
-          client_gender: genderPick.guest_gender || undefined, therapist_gender_pref: genderPick.therapist_gender || undefined }),
+          client_gender: genderPick.guest_gender || undefined, therapist_gender_pref: genderPick.therapist_gender || undefined,
+          pay_option: effectivePayChoice }),
       });
       const b = await r.json();
       if (!r.ok) {
@@ -3031,6 +3040,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
         }
         setError(b.error || 'Booking failed. Please try again.'); return;
       }
+      setApptPaid(false);
       setDone(b);
     } catch { setError('Network error. Please check your connection.'); } finally { setBusy(false); }
   };
@@ -3095,8 +3105,25 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
             <div style={{ width: 72, height: 72, borderRadius: '50%', background: '#f0faf5', border: '3px solid #d1f0e0', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
               <Check size={32} style={{ color: '#22a05a' }} />
             </div>
-            <h2 style={{ ...SERIF, fontSize: 24, fontWeight: 700, color: '#0d1a14', marginBottom: 6 }}>Booking Confirmed!</h2>
-            <p style={{ color: '#6b5d52', fontSize: 13 }}>Your appointment has been received.</p>
+            <h2 style={{ ...SERIF, fontSize: 24, fontWeight: 700, color: '#0d1a14', marginBottom: 6 }}>
+              {done.pay_token && !apptPaid ? tPay('pay.heldTitle') : 'Booking Confirmed!'}
+            </h2>
+            <p style={{ color: '#6b5d52', fontSize: 13 }}>
+              {done.pay_token && !apptPaid ? tPay('pay.heldHintSpa') : done.pay_token ? tPay('pay.confirmedPaidHintSpa') : 'Your appointment has been received.'}
+            </p>
+            {done.pay_token && (
+              <div style={{ marginTop: 16, textAlign: 'center' }} className="space-y-2">
+                {!apptPaid && done.hold_until && <HoldCountdown until={done.hold_until} />}
+                <PayOnlineButton
+                  restaurantId={restaurantId}
+                  token={done.pay_token}
+                  label={done.pay_option === 'ADVANCE' ? tPay('pay.payAdvance') : tPay('pay.payFull')}
+                  amountPaise={done.pay_amount_paise}
+                  customer={{ name: guest.client_name, phone: guest.client_phone, email: guest.client_email }}
+                  onPaid={() => setApptPaid(true)}
+                />
+              </div>
+            )}
             <div style={{ marginTop: 24, borderRadius: 18, padding: 20, textAlign: 'left', background: '#f9f5ef', border: '1px solid #ede5d8' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
                 <div>
@@ -3426,13 +3453,20 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
               </div>
             ))}
 
+            {payOptions.online && service && (
+              <div style={{ marginBottom: 16 }}>
+                <PayChoicePicker options={payOptions} value={effectivePayChoice} onChange={setPayChoice}
+                  totalPaise={Math.round(Number(service.price || 0) * (1 + Number(service.gst_percent ?? 18) / 100) * 100)} />
+              </div>
+            )}
+
             {error && <div style={{ padding: '12px 16px', borderRadius: 12, background: '#fff5f5', border: '1px solid #fecaca', color: '#c0392b', fontSize: 12, marginBottom: 16 }}>{error}</div>}
 
             <button onClick={submit} disabled={busy || !guest.client_name || !guest.client_phone}
               style={{ width: '100%', marginTop: 8, padding: '15px 0', borderRadius: 18, fontWeight: 700, fontSize: 14, border: 'none', cursor: busy || !guest.client_name || !guest.client_phone ? 'not-allowed' : 'pointer', transition: 'all 0.2s', background: busy || !guest.client_name || !guest.client_phone ? '#d6c9be' : `linear-gradient(135deg, ${SPA_DARK} 0%, #1a3828 100%)`, color: busy || !guest.client_name || !guest.client_phone ? '#a09080' : SPA_GOLD, boxShadow: busy || !guest.client_name || !guest.client_phone ? 'none' : '0 4px 16px rgba(13,31,24,0.28)', letterSpacing: 0.3 }}>
-              {busy ? 'Booking your appointment…' : '✦ Confirm Booking'}
+              {busy ? 'Booking your appointment…' : effectivePayChoice === 'AT_PROPERTY' ? '✦ Confirm Booking' : `✦ ${tPay('pay.continueToPayment')}`}
             </button>
-            <p style={{ textAlign: 'center', fontSize: 11, color: '#b0a090', marginTop: 12 }}>No payment required today. Cancellation policy applies.</p>
+            {effectivePayChoice === 'AT_PROPERTY' && <p style={{ textAlign: 'center', fontSize: 11, color: '#b0a090', marginTop: 12 }}>No payment required today. Cancellation policy applies.</p>}
           </div>
         )}
       </div>

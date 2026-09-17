@@ -735,4 +735,7 @@ export const te: Record<string, string> = {
   'pg.public.save': 'సేవ్ చేయి',
   'pg.public.saving': 'సేవ్ అవుతోంది…',
   'pg.public.saved': 'సేవ్ అయింది.',
+  // ── Spa booking page: pay online (pay.*) ──
+  'pay.heldHintSpa': 'మీ సమయ స్లాట్ ఉంచబడింది. అపాయింట్‌మెంట్ నిర్ధారించడానికి ఇప్పుడే చెల్లించండి.',
+  'pay.confirmedPaidHintSpa': 'మీ చెల్లింపు అందింది, మీ అపాయింట్‌మెంట్ నిర్ధారించబడింది.',
 };

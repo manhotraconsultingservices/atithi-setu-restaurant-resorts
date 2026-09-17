@@ -4009,7 +4009,40 @@ async function _hotelGroupMoney(db: any, objectId: string): Promise<{ bookings: 
   return { bookings, items, paid: Math.round(paid * 100) / 100, owed: Math.round(owed * 100) / 100 };
 }
 
+// A spa appointment booked online and paid ahead. The spa bill normally opens at
+// checkout; an online payment opens it early (folio_kind SPA, no lines yet) and
+// records the payment as an ADVANCE, and checkout then fills that same bill, so
+// the advance is applied against the invoice by the usual settlement.
+async function _spaPrepayMoney(db: any, apptId: string): Promise<{ appt: any; folio: any; total: number; paid: number; owed: number }> {
+  const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [apptId]).catch(() => null);
+  if (!appt) return { appt: null, folio: null, total: 0, paid: 0, owed: 0 };
+  const price = Number(appt.price_snapshot || 0);
+  const gst = Number(appt.gst_percent_snapshot ?? 18);
+  const total = Math.round(price * (1 + gst / 100) * 100) / 100;
+  const folio: any = await db.get(
+    "SELECT * FROM folios WHERE appointment_id = ? AND folio_kind = 'SPA' AND status = 'open' ORDER BY created_at LIMIT 1", [apptId]).catch(() => null);
+  let paid = 0;
+  if (folio) { const o = await getFolioOutstanding(db, folio.id).catch(() => null); paid = Number(o?.total_paid || 0); }
+  return { appt, folio, total, paid: Math.round(paid * 100) / 100, owed: Math.max(0, Math.round((total - paid) * 100) / 100) };
+}
+
 async function _pgDescribePayable(db: any, restaurantId: string, objectType: string, objectId: string): Promise<_Payable | null> {
+  if (objectType === 'SPA_APPOINTMENT') {
+    const m = await _spaPrepayMoney(db, objectId);
+    if (!m.appt) return null;
+    const st = String(m.appt.status || 'BOOKED').toUpperCase();
+    const closedReason = ['CANCELLED', 'NO_SHOW'].includes(st) ? 'This appointment is no longer active.'
+      : (m.appt.folio_id || m.appt.room_folio_id) ? 'This appointment has already been billed.'
+      : m.owed <= 0 ? 'This appointment is already paid.' : null;
+    const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+    return {
+      objectType, objectId, open: !closedReason, closedReason,
+      outstandingPaise: Math.max(0, rupeesToPaise(m.owed)),
+      purpose: `${prop?.name || 'Wellness'} — ${m.appt.service_name || 'treatment'} on ${String(m.appt.start_at || '').slice(0, 10)}`,
+      customer: { name: m.appt.client_name || null, phone: m.appt.client_phone || null, email: m.appt.client_email || null },
+      bookingId: null,
+    };
+  }
   if (objectType === 'HOTEL_GROUP') {
     const m = await _hotelGroupMoney(db, objectId);
     if (!m.bookings.length) return null;
@@ -4132,6 +4165,33 @@ async function _pgDescribePayable(db: any, restaurantId: string, objectType: str
 // PENDING row that the sweep retries, and the retry finds the first recording.
 async function _pgRecordToPayable(db: any, restaurantId: string, link: any, p: any, gatewayLabel: string): Promise<string> {
   const reference = `${link.gateway} ${p.gateway_payment_id}`;
+  if (link.object_type === 'SPA_APPOINTMENT') {
+    const m = await _spaPrepayMoney(db, link.object_id);
+    if (!m.appt) throw new PaymentNeedsReview('The appointment this payment was for no longer exists.');
+    if (m.folio) {
+      const prior: any = await db.get("SELECT id FROM folio_payments WHERE folio_id = ? AND reference_number = ? AND COALESCE(is_voided, 0) = 0 LIMIT 1", [m.folio.id, reference]).catch(() => null);
+      if (prior) return prior.id;
+    }
+    const st = String(m.appt.status || 'BOOKED').toUpperCase();
+    if (['CANCELLED', 'NO_SHOW'].includes(st) || m.appt.folio_id || m.appt.room_folio_id) {
+      throw new PaymentNeedsReview(`Paid after the appointment was ${m.appt.folio_id || m.appt.room_folio_id ? 'billed' : 'released or cancelled'}. The money is in the ${gatewayLabel} account: refund it there, or apply it by hand.`);
+    }
+    let folioId = m.folio?.id;
+    if (!folioId) {
+      folioId = `SPAFOL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const rest: any = await centralDb.get("SELECT currency_code FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+      await db.run(
+        `INSERT INTO folios (id, folio_kind, appointment_id, status, currency_snapshot, tax_label_snapshot, doc_type)
+         VALUES (?, 'SPA', ?, 'open', ?, 'GST', 'INVOICE')`, [folioId, m.appt.id, rest?.currency_code || 'INR']);
+    }
+    const row = await recordFolioPayment(db, {
+      restaurantId, folioId, amount: Number(p.amount_paise) / 100, method: 'ONLINE', type: 'ADVANCE',
+      reference, recordedBy: `${gatewayLabel} (public booking page)`,
+      notes: `Paid online for appointment ${m.appt.id} · payment link ${link.id}${p.method ? ` · ${p.method}` : ''}`,
+    });
+    await _publicHoldConfirmed(restaurantId, 'SPA_APPOINTMENT', link.object_id).catch(() => {});
+    return row.id;
+  }
   if (link.object_type === 'HOTEL_GROUP') {
     // Already recorded (a retry): some room carries this reference.
     const bookings = await _hotelGroupBookings(db, link.object_id);
@@ -39261,6 +39321,9 @@ ${data.tenant.name}`;
       // room bill and are paid with the stay at hotel check-out. No spa invoice is
       // raised and no payment is taken here.
       if (b.charge_to_room) {
+        const paidAhead: any = await db.get(
+          "SELECT fp.id FROM folio_payments fp JOIN folios f ON f.id = fp.folio_id WHERE f.appointment_id = ? AND f.folio_kind = 'SPA' AND f.status = 'open' AND COALESCE(fp.is_voided, 0) = 0 LIMIT 1", [appt.id]).catch(() => null);
+        if (paidAhead) return res.status(409).json({ error: 'The guest paid for this treatment online in advance, so it cannot be charged to the room. Check out to the spa bill instead.', code: 'PAID_ONLINE_AHEAD' });
         const stay: any = await spaInHouseStay(db, String(b.room_booking_id || appt.room_booking_id || ''));
         if (!stay) return res.status(409).json({ error: 'The guest is not checked in to a room, so the treatment cannot be charged to it. Take payment instead.', code: 'STAY_NOT_IN_HOUSE' });
         if (!stay.folio_id) return res.status(409).json({ error: 'The stay has no open room bill to charge. Take payment instead.', code: 'ROOM_FOLIO_MISSING' });
@@ -39363,12 +39426,18 @@ ${data.tenant.name}`;
         });
       }
 
-      const folioId = mkSpaId('SPAFOL');
-      await db.run(
-        `INSERT INTO folios (id, folio_kind, appointment_id, status, currency_snapshot, tax_label_snapshot, doc_type)
-         VALUES (?, 'SPA', ?, 'open', ?, 'GST', 'INVOICE')`,
-        [folioId, appt.id, tenant.currency_code || 'INR']
-      );
+      // A bill opened by an online advance on the booking page is filled here, so
+      // the advance settles against this invoice. Otherwise a new bill opens.
+      const prepaidFolio: any = await db.get(
+        "SELECT id FROM folios WHERE appointment_id = ? AND folio_kind = 'SPA' AND status = 'open' ORDER BY created_at LIMIT 1", [appt.id]).catch(() => null);
+      const folioId = prepaidFolio?.id || mkSpaId('SPAFOL');
+      if (!prepaidFolio) {
+        await db.run(
+          `INSERT INTO folios (id, folio_kind, appointment_id, status, currency_snapshot, tax_label_snapshot, doc_type)
+           VALUES (?, 'SPA', ?, 'open', ?, 'GST', 'INVOICE')`,
+          [folioId, appt.id, tenant.currency_code || 'INR']
+        );
+      }
 
       const price = round2(appt.price_snapshot || 0);
       const gstPct = Number(appt.gst_percent_snapshot ?? 18);
@@ -41066,6 +41135,16 @@ ${data.tenant.name}`;
       }
       const service: any = await db.get("SELECT * FROM spa_services WHERE id = ? AND is_active = 1", [b.service_id]);
       if (!service) return res.status(404).json({ error: "Service not found" });
+      // How the guest pays: FULL or ADVANCE online (the slot is held until paid), or AT_PROPERTY.
+      const spaPayChoices = _publicPayChoices(gate.restaurant);
+      const spaPayReady = await _publicPayReady(req.params.id);
+      let spaPayOption = String(b.pay_option || 'AT_PROPERTY').toUpperCase();
+      if (!['FULL', 'ADVANCE', 'AT_PROPERTY'].includes(spaPayOption)) return res.status(400).json({ error: 'Choose how you would like to pay.' });
+      if (spaPayOption !== 'AT_PROPERTY' && !spaPayReady.online) spaPayOption = 'AT_PROPERTY';
+      if ((spaPayOption === 'FULL' && !spaPayChoices.pay_full) || (spaPayOption === 'ADVANCE' && !spaPayChoices.pay_advance_pct)
+        || (spaPayOption === 'AT_PROPERTY' && !spaPayChoices.pay_at_property && spaPayReady.online)) {
+        return res.status(400).json({ error: 'That way of paying is not offered for this property.' });
+      }
       const windowMin = serviceWindowMinutes(service, []);
       const m = String(b.start_at).match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/);
       if (!m) return res.status(400).json({ error: "Invalid start_at" });
@@ -41144,7 +41223,22 @@ ${data.tenant.name}`;
         await db.run("UPDATE spa_appointments SET client_gender = ?, therapist_gender_pref = ? WHERE id = ?", [pubGuest, pubPref, id])
           .catch((e: any) => console.error('[spa] online booking gender not saved:', id, e?.message || e));
       }
-      res.status(201).json({ success: true, appointment_id: id, start_at: startAt, end_at: endAt });
+      // Pay now: hold the slot and hand the guest a pay token for this appointment.
+      let spaPay: any = { pay_option: spaPayOption };
+      if (spaPayOption !== 'AT_PROPERTY') {
+        const holdUntil = new Date(Date.now() + spaPayChoices.hold_minutes * 60 * 1000).toISOString();
+        await centralDb.run(
+          `INSERT INTO public_payment_holds (restaurant_id, object_type, object_id, hold_until, status) VALUES (?, 'SPA_APPOINTMENT', ?, ?, 'HELD')
+           ON CONFLICT (restaurant_id, object_type, object_id) DO UPDATE SET hold_until = EXCLUDED.hold_until, status = 'HELD'`,
+          [req.params.id, id, holdUntil]);
+        const totalPaise = Math.round(round2(service.price || 0) * (1 + Number(service.gst_percent ?? 18) / 100) * 100);
+        const amountPaise = spaPayOption === 'ADVANCE' ? Math.max(100, Math.round(totalPaise * spaPayChoices.pay_advance_pct / 100)) : totalPaise;
+        spaPay = {
+          pay_option: spaPayOption, hold_until: holdUntil, pay_amount_paise: amountPaise, total_paise: totalPaise,
+          pay_token: issuePublicPayToken(req.params.id, 'SPA_APPOINTMENT', id, spaPayOption === 'ADVANCE' ? amountPaise : 0, 2 * 24 * 3600 * 1000),
+        };
+      }
+      res.status(201).json({ success: true, appointment_id: id, start_at: startAt, end_at: endAt, ...spaPay });
     } catch (err: any) { console.error("public spa booking error:", err); res.status(500).json({ error: "Failed to book" }); }
   });
 
@@ -57735,6 +57829,18 @@ ${data.tenant.name}`;
           if (m.bookings[0]?.group_id) await db.run("UPDATE room_booking_groups SET group_status = 'CANCELLED' WHERE id = ?", [m.bookings[0].group_id]).catch(() => {});
           try { scheduleAiosellResync(h.restaurant_id); } catch { /* channel manager optional */ }
         }
+        if (h.object_type === 'SPA_APPOINTMENT') {
+          const m = await _spaPrepayMoney(db, h.object_id);
+          if (m.paid > 0) { await _publicHoldConfirmed(h.restaurant_id, h.object_type, h.object_id); continue; }
+          for (const l of links) {
+            const cfg = await _pgConfig(db, l.gateway).catch(() => null);
+            if (cfg && !cfg.missing.length && l.gateway_link_id) await cfg.gateway.cancelLink(cfg.creds, { gatewayLinkId: l.gateway_link_id, referenceId: l.id }).catch(() => {});
+            await db.run("UPDATE payment_links SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_error = 'Appointment released: not paid in time.' WHERE id = ? AND status IN ('CREATED', 'CREATING')", [l.id]).catch(() => {});
+          }
+          await db.run(
+            "UPDATE spa_appointments SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancellation_reason = 'Online payment was not completed in time' WHERE id = ? AND COALESCE(status, 'BOOKED') = 'BOOKED'",
+            [h.object_id]).catch(() => {});
+        }
         await centralDb.run("UPDATE public_payment_holds SET status = 'RELEASED', resolved_at = CURRENT_TIMESTAMP WHERE restaurant_id = ? AND object_type = ? AND object_id = ? AND status = 'HELD'",
           [h.restaurant_id, h.object_type, h.object_id]).catch(() => {});
         console.log(`[public-pay] released unpaid ${h.object_type} ${h.object_id} for ${h.restaurant_id}`);
@@ -66967,8 +67073,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-pay-hotel-booking',
+    commit_marker: 'public-pay-spa-booking',
     code_features: [
+      'public-pay-spa-booking  Owner: the spa / wellness public booking page takes online payment with the same owner choices as hotels (full, advance %, at the property, hold minutes). New SPA_APPOINTMENT payable: total = price_snapshot plus gst_percent_snapshot; paying opens the spa bill early (folio_kind SPA, appointment_id, no lines) and records an ADVANCE via recordFolioPayment (Dr 1025 / Cr 2100 like any spa advance); spa checkout now fills that open bill instead of opening a second one, so settlement applies the advance; charging to the room is refused (409 PAID_ONLINE_AHEAD) once paid ahead. The booking POST takes pay_option, holds the slot in public_payment_holds and returns a pay token; the done screen shows the countdown and Pay now; the release sweep cancels unpaid held appointments and their links.',
       'public-pay-hotel-booking  Owner: the hotel public booking page takes online payment. Owner settings (Payment Gateways > Public pages; restaurants.public_pay_full / public_pay_advance_pct / public_pay_at_property / public_pay_hold_minutes; GET/PUT /api/restaurant/:id/payments/public-settings, PAYMENT_GATEWAYS Edit): pay in full, an advance %, pay at the property, and how long an unpaid online booking holds its room. The guest picks on the booking form (pay_option FULL/ADVANCE/AT_PROPERTY). Pay-now: bookings get pay_option + payment_hold_until, a central public_payment_holds row, the BOOKING_CREATED confirmation is deferred until paid, and the response carries a pay token for the new HOTEL_GROUP payable (G:<group>|B:<booking>; folios created on start; payment spread across the rooms folios as ADVANCE; the hold is confirmed and the confirmation sent). The confirmation card shows a countdown and Pay now. A 60s sweep reads open links back from the gateway, then releases unpaid holds: links cancelled, bookings CANCELLED (cancelled_source SYSTEM), unpaid folios voided, ARI and Aiosell resynced. Gateway links for held bookings expire with the hold (_pgCreateLink expiresAt). i18n in 6 languages.',
       'public-pay-restaurant-qr  Owner: pay online on public pages, restaurant QR first. src/PublicPay.tsx: usePublicPayOptions, PayOnlineButton (start with the pay token, open the gateway in a new tab or this tab when pop-ups are blocked, poll status every 4s and on return, reuse a live link, not-completed and retry states) and PaymentResultPage at /?pay_result=<token> for gateways that redirect back. CustomerInterface: the pay window (prepaid order, cloud kitchen UPI, postpaid table bill) shows Pay online (card, UPI, net banking) above the existing UPI QR when the tenant has a gateway; tokens come from the order response, the request-bill response, or GET sessions/:token/pay-token. Recording stays with the existing webhook and reconcile (RESTAURANT_ORDER releases a held prepaid order to the kitchen; RESTAURANT_SESSION settles the table bill). i18n pay.* in 6 languages.',
       'public-links-token-pay-foundation  Fix (owner): the Home Public pages links use the tenant public token, but the spa and hotel public routes only accepted the internal id, so the Spa booking link (and the hotel link when no booking slug is set) opened a page that could not load. All 11 /api/public/restaurant/:id/hotel* and /spa* routes now run resolvePublicTenantParam, like menu and events. Also: the Owner reports OTA 360 and Receivables section hides when the Accounts module is off. Foundation for online payment on public pages (no UI yet): signed guest pay tokens (issuePublicPayToken/readPublicPayToken, tenant|type|id|amount|expiry), GET /api/public/restaurant/:id/payments/options, POST .../payments/start (reuses a live link, return URL ?pay_result=), GET .../payments/status (reconciles at most every 10s), GET .../sessions/:token/pay-token; _pgCreateLink passes callbackUrl; restaurant order and request-bill responses carry pay_token.',

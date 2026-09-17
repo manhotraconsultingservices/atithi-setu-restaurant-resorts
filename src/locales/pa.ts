@@ -799,4 +799,7 @@ export const pa: Record<string, string> = {
   'pg.public.save': 'ਸੰਭਾਲੋ',
   'pg.public.saving': 'ਸੰਭਾਲ ਰਿਹਾ ਹੈ…',
   'pg.public.saved': 'ਸੰਭਾਲਿਆ ਗਿਆ।',
+  // ── Spa booking page: pay online (pay.*) ──
+  'pay.heldHintSpa': 'ਤੁਹਾਡਾ ਸਮਾਂ ਸਲਾਟ ਰੱਖਿਆ ਗਿਆ ਹੈ। ਅਪੌਇੰਟਮੈਂਟ ਪੱਕੀ ਕਰਨ ਲਈ ਹੁਣੇ ਭੁਗਤਾਨ ਕਰੋ।',
+  'pay.confirmedPaidHintSpa': 'ਤੁਹਾਡਾ ਭੁਗਤਾਨ ਮਿਲ ਗਿਆ ਅਤੇ ਤੁਹਾਡੀ ਅਪੌਇੰਟਮੈਂਟ ਪੱਕੀ ਹੈ।',
 };
