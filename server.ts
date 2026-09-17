@@ -8973,6 +8973,7 @@ async function ensureMessagingWorkspace(db: any, rid: string): Promise<void> {
     total INT DEFAULT 0, sent INT DEFAULT 0, failed INT DEFAULT 0, skipped INT DEFAULT 0,
     status TEXT DEFAULT 'SCHEDULED', scheduled_at TIMESTAMP, started_at TIMESTAMP, finished_at TIMESTAMP,
     last_error TEXT, created_by TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  await db.exec(`ALTER TABLE wa_broadcasts ADD COLUMN IF NOT EXISTS variable_count INT`).catch(() => {});
   await db.exec(`CREATE TABLE IF NOT EXISTS wa_broadcast_recipients (
     broadcast_id TEXT NOT NULL, contact TEXT NOT NULL, phone TEXT, name TEXT, status TEXT DEFAULT 'PENDING',
     error TEXT, sent_at TIMESTAMP, PRIMARY KEY (broadcast_id, contact))`).catch(() => {});
@@ -9073,6 +9074,15 @@ async function mwResolveAudience(db: any, audience: any): Promise<{ phone: strin
   return out;
 }
 
+// {{1}} is the property name and the owner's values follow. A template with
+// fewer placeholders (Meta's stock hello_world has none) must get exactly that
+// many parameters or Meta refuses the send, so trim to the count when known.
+function mwTemplateVars(propertyName: string, values: string[], variableCount: any): string[] {
+  const all = [propertyName, ...values];
+  const n = Number(variableCount);
+  return variableCount != null && variableCount !== '' && Number.isInteger(n) && n >= 0 ? all.slice(0, n) : all;
+}
+
 // A template variable may say {name}: filled per recipient.
 function mwFillVars(vars: string[], name: string): string[] {
   return vars.map(v => String(v ?? '').replace(/\{name\}/gi, name || 'Guest'));
@@ -9119,7 +9129,7 @@ async function mwRunBroadcasts(): Promise<void> {
         }
         const ok = await mwSendWhatsApp(db, d.restaurant_id, {
           phone: r.phone || r.contact, name: r.name, event: 'BROADCAST', broadcastId: b.id,
-          template: { name: b.template_name, language: b.template_language || 'en', category: b.category || 'MARKETING', variables: [prop?.name || 'Atithi-Setu', ...mwFillVars(vars, r.name || '')] },
+          template: { name: b.template_name, language: b.template_language || 'en', category: b.category || 'MARKETING', variables: mwTemplateVars(prop?.name || 'Atithi-Setu', mwFillVars(vars, r.name || ''), b.variable_count) },
         });
         await db.run("UPDATE wa_broadcast_recipients SET status = ?, sent_at = CURRENT_TIMESTAMP WHERE broadcast_id = ? AND contact = ?", [ok ? 'SENT' : 'FAILED', b.id, r.contact]);
         await new Promise(res => setTimeout(res, 120));   // gentle pace for the shared sender
@@ -13285,7 +13295,7 @@ async function startServer() {
       const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [rid]).catch(() => null);
       const phone = await _mwPhoneFor(db, key);
       const ok = await mwSendWhatsApp(db, rid, { phone, event: 'INBOX_TEMPLATE',
-        template: { name, language: String(b.language || 'en'), category, variables: [prop?.name || 'Atithi-Setu', ...vars] } });
+        template: { name, language: String(b.language || 'en'), category, variables: mwTemplateVars(prop?.name || 'Atithi-Setu', vars, b.variable_count) } });
       if (!ok) {
         const f: any = await db.get(`SELECT error FROM notification_deliveries WHERE ${MW_KEY_SQL} = ? AND status = 'FAILED' ORDER BY created_at DESC LIMIT 1`, [key]).catch(() => null);
         return res.status(502).json({ error: f?.error ? `WhatsApp refused the message: ${f.error}` : 'WhatsApp did not accept the template.' });
@@ -13400,9 +13410,10 @@ async function startServer() {
       if (!people.length) return res.status(400).json({ error: 'Nobody matches this audience.' });
       const id = `BR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
-        `INSERT INTO wa_broadcasts (id, name, template_name, template_language, category, variables, audience, total, status, scheduled_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, ?)`,
-        [id, name, template, String(b.language || 'en'), category, JSON.stringify(vars), JSON.stringify(audience), people.length, when.toISOString(), req.user?.email || null]);
+        `INSERT INTO wa_broadcasts (id, name, template_name, template_language, category, variables, audience, total, status, scheduled_at, created_by, variable_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, ?, ?)`,
+        [id, name, template, String(b.language || 'en'), category, JSON.stringify(vars), JSON.stringify(audience), people.length, when.toISOString(), req.user?.email || null,
+         Number.isInteger(Number(b.variable_count)) && b.variable_count !== null && b.variable_count !== '' ? Number(b.variable_count) : null]);
       for (const p of people) {
         await db.run("INSERT INTO wa_broadcast_recipients (broadcast_id, contact, phone, name) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
           [id, _contactKey(p.phone), p.phone, p.name || null]);
@@ -13609,7 +13620,7 @@ async function startServer() {
         } else {
           // {{1}} is always the property name — the sender is shared, so the guest
           // must be told who is writing. The owner supplies {{2}} onward.
-          const useTemplate = { name: templateName, languageCode: templateLang, variables: [propertyName, ...variables] };
+          const useTemplate = { name: templateName, languageCode: templateLang, variables: mwTemplateVars(propertyName, variables, req.body?.variable_count) };
           _logAndSendCategory = category;
           _logAndSendTemplate = templateName;
           ok = await logAndSend(db, 'ON_DEMAND', 'WHATSAPP', to, `${templateName}(${variables.join(' | ')})`,
@@ -66425,8 +66436,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inbox-mine-filter-identity',
+    commit_marker: 'wa-template-param-count',
     code_features: [
+      'wa-template-param-count  Fix: broadcasts, inbox templates and on-demand sends always passed the property name as {{1}}, so a template with no placeholders (Meta stock hello_world) was refused for a parameter mismatch. The client sends the template variable_count and mwTemplateVars trims the parameters to it (broadcasts store it in wa_broadcasts.variable_count); unknown count keeps the old behaviour.',
       'inbox-mine-filter-identity  Fix (owner): the Inbox Mine filter compared the assignee with the token id, but owner tokens carry an email, phone logins a phone, and assignees come from the staff directory. _mwMe resolves the signed-in user to every identity (token id, email, phone, matching attendance_staff row) and Mine matches any of them; the conversations response returns me, and the Inbox adds Assign to me.',
       'notifications-workspace-inbox-broadcasts  UI + API (owner: WATI/Gupshup-style Notifications, tidy, little scrolling). src/NotificationsWorkspace.tsx replaces the old Notifications page: Inbox (conversations keyed by the last 10 digits, open/resolved, assignee, tags, notes, unread, quick replies with /shortcut; free text only inside the 24h window else 409 WINDOW_CLOSED and an approved template), Broadcasts (approved template to arrivals, in-house, past stays, diners, wellness clients, event customers or pasted/CSV contacts; {name} per recipient; schedule; opt-outs skipped; delivered/read/replied per campaign via notification_deliveries.broadcast_id; worker mwRunBroadcasts every 30s via central wa_broadcast_index), Automations (auto-saving event matrix plus keyword, welcome and away replies run from the inbound webhook), Templates (Meta templates read only; email/SMS wording unchanged), Analytics, Settings (mail server, smart alerts, opt-outs). Meta templates untouched. Writes need Notifications Edit and the WhatsApp module.',
       'list-date-filter-status-tiles  UI (owner request): Restaurant Invoices, PMS Guest Bills, Events bookings and Wellness invoices share src/components/ListFilters.tsx: a date filter that opens on Today (Yesterday, Last 7 days, This month, All, Custom) and number tiles that filter the list when clicked (click again for all). Invoices by invoice date; Guest Bills by stay overlap (in house on the dates); Events by event date on the server (existing from/to params); Wellness by settled or created date. Tiles count the chosen dates. Staff Directory opens in table view. Frontend only.',

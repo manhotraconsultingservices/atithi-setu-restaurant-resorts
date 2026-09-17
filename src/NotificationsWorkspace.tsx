@@ -184,7 +184,7 @@ function InboxTab({ token, restaurantId, canEdit, propertyName }: { token: strin
     if (!tpl) return;
     setSending(true);
     try {
-      await api.send('POST', '/api/owner/inbox/template', { contact: active, template_name: tpl.name, language: tpl.language, category: tpl.category, variables: vars });
+      await api.send('POST', '/api/owner/inbox/template', { contact: active, template_name: tpl.name, language: tpl.language, category: tpl.category, variables: vars, variable_count: tpl.variable_count });
       setTplOpen(false); setTplName(''); setVars([]); loadConv(active);
       toast.success(t('nw.templateSent'));
     } catch (e: any) { toast.error(e.message); }
@@ -421,7 +421,7 @@ function ComposeModal({ token, propertyName, templates, onClose }: { token: stri
     try {
       const d = await api.send('POST', '/api/owner/messaging/send', {
         channel, recipients, text, subject, template_name: channel === 'WHATSAPP' ? tplName : '',
-        template_language: tpl?.language || 'en', category: tpl?.category || 'UTILITY', variables: vars,
+        template_language: tpl?.language || 'en', category: tpl?.category || 'UTILITY', variables: vars, variable_count: tpl?.variable_count,
       });
       if (d.sent) { toast.success(t('nw.sentTo', { n: d.sent, total: recipients.length })); onClose(); }
       else toast.error((d.results || []).map((r: any) => r.error).filter(Boolean)[0] || t('nw.nothingSent'));
@@ -568,7 +568,7 @@ function BroadcastForm({ token, templates, propertyName, onDone }: { token: stri
     try {
       await api.send('POST', '/api/owner/broadcasts', {
         name, template_name: tplName, language: tpl?.language || 'en', category: tpl?.category || 'MARKETING',
-        variables: vars, audience: audience(), scheduled_at: when ? new Date(when).toISOString() : null,
+        variables: vars, variable_count: tpl?.variable_count, audience: audience(), scheduled_at: when ? new Date(when).toISOString() : null,
       });
       toast.success(when ? t('nw.scheduled') : t('nw.sending'));
       onDone();
