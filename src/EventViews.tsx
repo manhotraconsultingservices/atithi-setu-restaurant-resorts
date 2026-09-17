@@ -11,6 +11,7 @@ import { ObjectDetail } from './components/ObjectDetail';
 import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { prettyRoleLabel } from './roleLabel';
 import { CollectOnlineDialog } from './PaymentLinks';
+import { DateRangeBar, StatusTiles, defaultDateRange, type DateRange } from './components/ListFilters';
 import { moduleOn } from './tenantModules';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
@@ -720,11 +721,20 @@ function EventBookings({ restaurantId, token }: Props) {
   // the full list.
   const [bookingSearch, setBookingSearch] = useState('');
   const searchRef = useRef('');
-  const load = async (offset = 0, q?: string) => {
+  // Event date filter (server side, like the search); opens on today. Kept in a ref
+  // for the same reason: every load() call stays inside the dates on screen.
+  const [dateRange, setDateRange] = useState<DateRange>(defaultDateRange);
+  const dateRef = useRef<DateRange>(dateRange);
+  // Payment tile filter, applied to the loaded rows.
+  const [payFilter, setPayFilter] = useState<'ALL' | 'PENDING' | 'PARTIAL' | 'PAID'>('ALL');
+  const load = async (offset = 0, q?: string, range?: DateRange) => {
     const term = q === undefined ? searchRef.current : q;
     searchRef.current = term;
+    const dr = range || dateRef.current;
+    dateRef.current = dr;
     try {
-      const d: any = await api(`/events/bookings?paged=1&limit=${BOOKINGS_PAGE}&offset=${offset}${term ? `&search=${encodeURIComponent(term)}` : ''}`);
+      const dates = `${dr.from ? `&from=${dr.from}` : ''}${dr.to ? `&to=${dr.to}` : ''}`;
+      const d: any = await api(`/events/bookings?paged=1&limit=${BOOKINGS_PAGE}&offset=${offset}${term ? `&search=${encodeURIComponent(term)}` : ''}${dates}`);
       const page: any[] = Array.isArray(d) ? d : (d?.rows || []);
       // offset 0 replaces, anything else appends — so every existing caller of
       // load() (after create, cancel, confirm…) still gets a clean first page.
@@ -848,6 +858,22 @@ function EventBookings({ restaurantId, token }: Props) {
         </div>
       )}
 
+      <div className="space-y-3 mb-3">
+        <DateRangeBar value={dateRange} onChange={r => { setDateRange(r); load(0, undefined, r); }} label={t('listFilter.eventDate')} />
+        {(() => {
+          const count = (st: string) => rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount) === st).length;
+          const due = rows.filter((r: any) => r.status !== 'CANCELLED').reduce((sum: number, r: any) => sum + Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0)), 0);
+          return (
+            <StatusTiles active={payFilter} onSelect={f => setPayFilter(f as any)} tiles={[
+              { filter: 'PENDING', label: t('events.pay.pending'), value: count('PENDING'), tone: 'bg-rose-50 border-rose-200 text-rose-700' },
+              { filter: 'PARTIAL', label: t('events.pay.partial'), value: count('PARTIAL'), tone: 'bg-amber-50 border-amber-200 text-amber-700' },
+              { filter: 'PAID', label: t('events.pay.paid'), value: count('PAID'), tone: 'bg-green-50 border-green-200 text-green-700' },
+              { label: t('events.dash.outstanding'), value: money(due), tone: 'bg-brand/5 border-brand/20 text-brand' },
+            ]} />
+          );
+        })()}
+      </div>
+
       {bookingsTotal > rows.length && (
         <div className="flex items-center justify-between gap-3 flex-wrap mb-2 px-3 py-2 rounded-xl bg-brand/5 border border-brand/15">
           <span className="text-xs text-[#6b5d52]">
@@ -861,7 +887,7 @@ function EventBookings({ restaurantId, token }: Props) {
       )}
 
       <DataTable
-        data={rows}
+        data={payFilter === 'ALL' ? rows : rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount) === payFilter)}
         rowKey={(r: any) => r.id}
         onSearch={runBookingSearch}
         searchPlaceholder="Search all bookings — name, phone, email, booking ID, venue"

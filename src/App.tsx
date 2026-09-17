@@ -19,6 +19,7 @@ import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import { buildUpiUri } from '../upiLink';
 import { PaymentGatewaysPage, CollectOnlineDialog } from './PaymentLinks';
 import { PlatformWhatsApp } from './PlatformWhatsApp';
+import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, spanInRange, type DateRange } from './components/ListFilters';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules } from './tenantModules';
@@ -11936,9 +11937,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
   const [foliosStatusFilter, setFoliosStatusFilter] = useState('all');
+  // Guest Bills date filter: bills whose stay overlaps the chosen dates; opens on today (in-house today).
+  const [foliosDateRange, setFoliosDateRange] = useState<DateRange>(defaultDateRange);
   const [foliosSearch, setFoliosSearch] = useState('');
-  const [foliosDateFrom, setFoliosDateFrom] = useState('');
-  const [foliosDateTo, setFoliosDateTo] = useState('');
   const [foliosSort, setFoliosSort] = useState<{col:string;dir:'asc'|'desc'}>({col:'check_in_date',dir:'desc'});
   const [complianceList, setComplianceList] = useState<any[]>([]);
   const [hotelAnalytics, setHotelAnalytics] = useState<any>(null);
@@ -12315,6 +12316,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [invoices, setInvoices]               = useState<any[]>([]);
   const [invoiceSearch, setInvoiceSearch]     = useState('');
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState<'ALL'|'UNPAID'|'PAID'|'PRINTED'>('ALL');
+  // Invoices list date filter (invoice date); opens on today.
+  const [invoiceDateRange, setInvoiceDateRange] = useState<DateRange>(defaultDateRange);
   const [invoiceSortKey, setInvoiceSortKey]   = useState<string>('date');
   const [invoiceSortDir, setInvoiceSortDir]   = useState<'asc'|'desc'>('desc');
 
@@ -13441,7 +13444,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingCustomRole, setEditingCustomRole] = useState<any | null>(null);
   const [staffSearch, setStaffSearch]         = useState('');
   const [staffRoleFilter, setStaffRoleFilter] = useState<string>('ALL');
-  const [staffViewMode, setStaffViewMode]     = useState<'grid' | 'table'>('grid');
+  // Table by default (owner request); the grid is one click away.
+  const [staffViewMode, setStaffViewMode]     = useState<'grid' | 'table'>('table');
 
   // ── Staff role metadata ─────────────────────────────────────────────
   // Single source of truth for Staff Management dropdowns / filters / chips.
@@ -22528,27 +22532,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
 
-          {/* Invoice stats */}
+          <DateRangeBar value={invoiceDateRange} onChange={r => { setInvoiceDateRange(r); setInvoicesPage(1); }} label={tr('listFilter.invoiceDate')} />
+
+          {/* Invoice stats — for the chosen dates; a tile filters the list to its invoices */}
           {invoices.length > 0 && (() => {
             const isPaidFn = isInvoicePaid;
-            const paid    = invoices.filter(isPaidFn).length;
-            const unpaid  = invoices.filter(i => !isPaidFn(i)).length;
-            const printed = invoices.filter(i => i.invoice_status === 'PRINTED' && !isPaidFn(i)).length;
-            const total   = invoices.filter(isPaidFn).reduce((s, i) => s + Number(i.totalAmount||0), 0);
+            const inDates = invoices.filter(i => dayInRange(i.createdAt || (i as any).created_at, invoiceDateRange));
+            const paid    = inDates.filter(isPaidFn).length;
+            const unpaid  = inDates.filter(i => !isPaidFn(i)).length;
+            const printed = inDates.filter(i => i.invoice_status === 'PRINTED' && !isPaidFn(i)).length;
+            const total   = inDates.filter(isPaidFn).reduce((s, i) => s + Number(i.totalAmount||0), 0);
             return (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {[
-                  { label: 'Unpaid',    value: unpaid,   color: 'bg-amber-50 border-amber-200 text-amber-700' },
-                  { label: 'Paid',      value: paid,     color: 'bg-green-50 border-green-200 text-green-700' },
-                  { label: 'Printed',   value: printed,  color: 'bg-blue-50 border-blue-200 text-blue-700' },
-                  { label: 'Revenue',   value: `₹${total.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`, color: 'bg-brand/5 border-brand/20 text-brand' },
-                ].map(s => (
-                  <div key={s.label} className={cn("rounded-2xl border p-3 text-center", s.color)}>
-                    <p className="font-bold text-lg leading-none">{s.value}</p>
-                    <p className="text-[11px] uppercase tracking-widest mt-1 opacity-70">{s.label}</p>
-                  </div>
-                ))}
-              </div>
+              <StatusTiles
+                active={invoiceStatusFilter}
+                onSelect={f => { setInvoiceStatusFilter(f as any); setInvoicesPage(1); }}
+                tiles={[
+                  { filter: 'UNPAID',  label: tr('listFilter.unpaid'),  value: unpaid,  tone: 'bg-amber-50 border-amber-200 text-amber-700' },
+                  { filter: 'PAID',    label: tr('listFilter.paid'),    value: paid,    tone: 'bg-green-50 border-green-200 text-green-700' },
+                  { filter: 'PRINTED', label: tr('listFilter.printed'), value: printed, tone: 'bg-blue-50 border-blue-200 text-blue-700' },
+                  { label: tr('listFilter.revenue'), value: `₹${total.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`, tone: 'bg-brand/5 border-brand/20 text-brand' },
+                ]}
+              />
             );
           })()}
 
@@ -22593,6 +22597,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   {(() => {
                     const q = invoiceSearch.toLowerCase();
                     let rows = invoices.filter(inv => {
+                      if (!dayInRange(inv.createdAt || (inv as any).created_at, invoiceDateRange)) return false;
                       const paidNow = isInvoicePaid(inv);
                       if (invoiceStatusFilter === 'PAID'    && !paidNow) return false;
                       if (invoiceStatusFilter === 'UNPAID'  && paidNow)  return false;
@@ -22754,7 +22759,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             {(() => {
               const q = invoiceSearch.toLowerCase();
               let rows = invoices.filter(inv => {
-                const paidNow = inv.invoice_type === 'SESSION' ? inv.session_status === 'closed' : inv.payment_status === 'PAID';
+                if (!dayInRange(inv.createdAt || (inv as any).created_at, invoiceDateRange)) return false;
+                const paidNow = isInvoicePaid(inv);
                 if (invoiceStatusFilter === 'PAID'    && !paidNow) return false;
                 if (invoiceStatusFilter === 'UNPAID'  && paidNow)  return false;
                 if (invoiceStatusFilter === 'PRINTED' && (inv.invoice_status !== 'PRINTED' || paidNow)) return false;
@@ -28463,8 +28469,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const q = foliosSearch.trim().toLowerCase();
                   const rows = hotelFolios.filter((f: any) => {
                     if (foliosStatusFilter !== 'all' && f.status !== foliosStatusFilter) return false;
-                    if (foliosDateFrom && String(f.check_in_date||'').slice(0,10) < foliosDateFrom) return false;
-                    if (foliosDateTo   && String(f.check_in_date||'').slice(0,10) > foliosDateTo)   return false;
+                    if (!spanInRange(f.check_in_date, f.check_out_date, foliosDateRange)) return false;
                     if (!q) return true;
                     return String(f.guest_name||'').toLowerCase().includes(q) || String(f.id||'').toLowerCase().includes(q) || String(f.room_name||f.room_id||'').toLowerCase().includes(q) || String(f.invoice_number||'').toLowerCase().includes(q);
                   }).map((f: any) => [
@@ -28490,42 +28495,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             token={token}
             onReconciled={async () => { await fetchPendingFolioOrders(); await fetchHotelFolios(); }}
           />
-          {/* Stats strip */}
+          <DateRangeBar value={foliosDateRange} onChange={setFoliosDateRange} label={tr('listFilter.stayDates')} />
+          {/* Stats strip — for the chosen dates; a tile filters the list to its bills */}
           {(() => {
-            const settled = hotelFolios.filter((f:any) => f.status === 'settled');
-            const open    = hotelFolios.filter((f:any) => f.status === 'open');
+            const inDates = hotelFolios.filter((f: any) => spanInRange(f.check_in_date, f.check_out_date, foliosDateRange));
+            const settled = inDates.filter((f:any) => f.status === 'settled');
+            const open    = inDates.filter((f:any) => f.status === 'open');
+            const voided  = inDates.filter((f:any) => f.status === 'voided');
             const totalSettled = settled.reduce((s:number,f:any) => s+Number(f.grand_total||0), 0);
             return (
-              <div className="grid grid-cols-3 gap-3">
-                <div className="rounded-2xl bg-white border border-brand/10 p-4 shadow-sm">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Settled</p>
-                  <p className="text-2xl font-bold text-[#1a1208] mt-1">{settled.length}</p>
-                </div>
-                <div className="rounded-2xl bg-white border border-brand/10 p-4 shadow-sm">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Open</p>
-                  <p className="text-2xl font-bold text-[#1a1208] mt-1">{open.length}</p>
-                </div>
-                <div className="rounded-2xl bg-white border border-brand/10 p-4 shadow-sm">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Total Settled</p>
-                  <p className="text-2xl font-bold text-brand mt-1 font-mono">₹{totalSettled.toLocaleString('en-IN')}</p>
-                </div>
-              </div>
+              <StatusTiles
+                active={foliosStatusFilter}
+                allValue="all"
+                onSelect={setFoliosStatusFilter}
+                tiles={[
+                  { filter: 'open',    label: tr('listFilter.open'),    value: open.length,    tone: 'bg-amber-50 border-amber-200 text-amber-700' },
+                  { filter: 'settled', label: tr('listFilter.settled'), value: settled.length, tone: 'bg-green-50 border-green-200 text-green-700' },
+                  { filter: 'voided',  label: tr('listFilter.voided'),  value: voided.length,  tone: 'bg-rose-50 border-rose-200 text-rose-700' },
+                  { label: tr('listFilter.totalSettled'), value: `₹${totalSettled.toLocaleString('en-IN')}`, tone: 'bg-brand/5 border-brand/20 text-brand' },
+                ]}
+              />
             );
           })()}
           {/* Filters */}
           <div className="bg-white rounded-2xl border border-brand/10 shadow-sm p-4 space-y-3">
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] shrink-0">Check-in Date</span>
-              <input type="date" value={foliosDateFrom} onChange={e => setFoliosDateFrom(e.target.value)}
-                className="px-3 py-1.5 text-xs rounded-lg border border-brand/15 bg-[#faf7f2] focus:outline-none focus:ring-1 ring-brand/30" />
-              <span className="text-[10px] text-[#9c8e85]">to</span>
-              <input type="date" value={foliosDateTo} onChange={e => setFoliosDateTo(e.target.value)}
-                className="px-3 py-1.5 text-xs rounded-lg border border-brand/15 bg-[#faf7f2] focus:outline-none focus:ring-1 ring-brand/30" />
-              {(foliosDateFrom || foliosDateTo) && (
-                <button type="button" onClick={() => { setFoliosDateFrom(''); setFoliosDateTo(''); }}
-                  className="text-[10px] text-red-500 hover:underline">Clear dates</button>
-              )}
-            </div>
             <div className="flex items-center gap-3 flex-wrap">
               <div className="flex gap-1 bg-[#faf7f2] rounded-xl p-1 border border-brand/10 shrink-0">
                 {(['all','settled','open','voided'] as const).map(s => (
@@ -28549,8 +28542,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             const q = foliosSearch.trim().toLowerCase();
             const filtered = hotelFolios.filter((f: any) => {
               if (foliosStatusFilter !== 'all' && f.status !== foliosStatusFilter) return false;
-              if (foliosDateFrom && String(f.check_in_date||'').slice(0,10) < foliosDateFrom) return false;
-              if (foliosDateTo   && String(f.check_in_date||'').slice(0,10) > foliosDateTo)   return false;
+              if (!spanInRange(f.check_in_date, f.check_out_date, foliosDateRange)) return false;
               if (!q) return true;
               return String(f.guest_name||'').toLowerCase().includes(q)
                   || String(f.id||'').toLowerCase().includes(q)

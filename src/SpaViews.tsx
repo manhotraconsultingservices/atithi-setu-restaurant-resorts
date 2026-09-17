@@ -21,6 +21,7 @@ import { useConfirm } from './components/ConfirmDialog';
 import { usePaymentDialog } from './components/PaymentDialog';
 import { QRCodeCanvas } from 'qrcode.react';
 import { CollectOnlineDialog } from './PaymentLinks';
+import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, type DateRange } from './components/ListFilters';
 import { moduleOn } from './tenantModules';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
@@ -2701,6 +2702,8 @@ function SpaFolios({ restaurantId, token }: Props) {
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'unpaid' | 'paid'>('all');
+  // Invoice date filter (settled or created date); opens on today.
+  const [dateRange, setDateRange] = useState<DateRange>(defaultDateRange);
   const [payFor, setPayFor] = useState<any>(null);
   const [promoFor, setPromoFor] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -2743,10 +2746,10 @@ function SpaFolios({ restaurantId, token }: Props) {
   const statusOf = (f: any) => f.status === 'closed' || outOf(f) <= 0.01 ? 'PAID' : (Number(f.paid_amount || 0) > 0 ? 'PART-PAID' : 'UNPAID');
   const stColor = (s: string) => s === 'PAID' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : s === 'PART-PAID' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-rose-50 text-rose-700 border-rose-200';
 
-  const filtered = rows.filter(f => filter === 'all' ? true : filter === 'paid' ? outOf(f) <= 0.01 : outOf(f) > 0.01);
-  const totInvoiced = rows.reduce((s, f) => s + Number(f.grand_total || 0), 0);
-  const totPaid = rows.reduce((s, f) => s + Number(f.paid_amount || 0), 0);
-  const totOut = rows.reduce((s, f) => s + outOf(f), 0);
+  const inDates = rows.filter(f => dayInRange(f.settled_at || f.created_at, dateRange));
+  const filtered = inDates.filter(f => filter === 'all' ? true : filter === 'paid' ? outOf(f) <= 0.01 : outOf(f) > 0.01);
+  const totPaid = inDates.reduce((s, f) => s + Number(f.paid_amount || 0), 0);
+  const totOut = inDates.reduce((s, f) => s + outOf(f), 0);
 
   const downloadPdf = async (f: any) => {
     try {
@@ -2789,11 +2792,14 @@ function SpaFolios({ restaurantId, token }: Props) {
         sub="Every spa invoice — record payments and apply promo codes / discounts."
         action={<button className={BTN_GHOST} onClick={load}><RefreshCw size={13} /> Refresh</button>} />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        {tile('Invoices', String(rows.length), 'text-[#3d3128]')}
-        {tile('Invoiced', money(totInvoiced), 'text-indigo-700')}
-        {tile('Collected', money(totPaid), 'text-emerald-700')}
-        {tile('Outstanding', money(totOut), totOut > 0 ? 'text-rose-600' : 'text-[#9c8e85]')}
+      <div className="space-y-3 mb-4">
+        <DateRangeBar value={dateRange} onChange={setDateRange} label={t('listFilter.invoiceDate')} />
+        <StatusTiles active={filter} allValue="all" onSelect={f => setFilter(f as any)} tiles={[
+          { filter: 'unpaid', label: t('listFilter.unpaid'), value: inDates.filter(f => outOf(f) > 0.01).length, tone: 'bg-amber-50 border-amber-200 text-amber-700' },
+          { filter: 'paid', label: t('listFilter.paid'), value: inDates.filter(f => outOf(f) <= 0.01).length, tone: 'bg-green-50 border-green-200 text-green-700' },
+          { label: t('listFilter.collected'), value: money(totPaid), tone: 'bg-brand/5 border-brand/20 text-brand' },
+          { label: t('listFilter.outstanding'), value: money(totOut), tone: 'bg-rose-50 border-rose-200 text-rose-700' },
+        ]} />
       </div>
 
       <div className="flex items-center gap-1.5 mb-3">
