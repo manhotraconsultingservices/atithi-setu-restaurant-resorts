@@ -1,4 +1,4 @@
-import { BRAND_HEX, BRAND_DARK_HEX } from './brandColors.ts';
+import { brandHex, brandDarkHex, runWithBrand, type BrandColors } from './brandColors.ts';
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import path from "path";
@@ -85,7 +85,7 @@ import {
 } from "./aiosellClient.ts";
 import { buildUpiUri } from "./upiLink.ts";
 import { RESERVED_SUBDOMAINS } from "./tenantHost.ts";
-import { checkThemeColor } from "./tenantTheme.ts";
+import { checkThemeColor, darkerShade } from "./tenantTheme.ts";
 import { getGateway, listGateways } from "./paymentGatewayRegistry.ts";
 import { keepWebhookRawBody } from "./webhookRawBody.ts";
 import { GatewayError, rupeesToPaise, type GatewayCredentials, type PaymentGateway } from "./paymentGateway.ts";
@@ -500,6 +500,52 @@ function slugify(name: string): string {
 // through this so links like /menu/<token> and ?r=<token> work without exposing
 // RESTO-<id>. Cheap single central lookup.
 const _publicIdCache = new Map<string, { id: string | null; at: number }>();
+// ── Tenant theme colour for server-rendered output ───────────────────────────
+// Emails, PDFs and the small public pages use the tenant's theme colour
+// (restaurants.theme_color) when it has one. Cached for a minute; a save clears it.
+const _tenantBrandCache = new Map<string, { at: number; colors: BrandColors | null }>();
+async function tenantBrandColors(restaurantId: string | null | undefined): Promise<BrandColors | null> {
+  const rid = String(restaurantId || '');
+  if (!rid) return null;
+  const hit = _tenantBrandCache.get(rid);
+  if (hit && Date.now() - hit.at < 60_000) return hit.colors;
+  const row: any = await centralDb.get("SELECT theme_color FROM restaurants WHERE id = ?", [rid]).catch(() => null);
+  const c = row?.theme_color ? checkThemeColor(row.theme_color) : null;
+  const colors = c && c.ok ? { brand: c.hex, dark: darkerShade(c.hex) } : null;
+  _tenantBrandCache.set(rid, { at: Date.now(), colors });
+  return colors;
+}
+function forgetTenantBrand(restaurantId: string): void { _tenantBrandCache.delete(String(restaurantId)); }
+
+// Which tenant a request is for: the restaurant in the path, the signed-in
+// user's restaurant, or the tenant subdomain. It only picks a colour, so the
+// token is decoded, not verified; authorisation stays with each route.
+const _slugTenantCache = new Map<string, { at: number; id: string | null }>();
+async function requestTenantId(req: Request): Promise<string | null> {
+  const m = String(req.path || '').match(/^\/api\/(?:public\/)?restaurant\/([^/]+)/);
+  if (m) return (await resolvePublicRestaurantId(decodeURIComponent(m[1])).catch(() => null)) || decodeURIComponent(m[1]);
+  // The guest feedback page carries its tenant inside the signed link (tenant|order|expiry).
+  if (req.path === '/feedback' && req.query?.t) {
+    const tid = Buffer.from(String(req.query.t).split('.')[0] || '', 'base64url').toString().split('|')[0];
+    if (tid) return tid;
+  }
+  const auth = String(req.headers.authorization || '');
+  if (auth.startsWith('Bearer ')) {
+    const d: any = jwt.decode(auth.slice(7));
+    if (d?.restaurantId) return String(d.restaurantId);
+  }
+  const q = String((req.query as any)?.r || (req.query as any)?.restaurant || '');
+  if (q) return (await resolvePublicRestaurantId(q).catch(() => null)) || null;
+  const host = String(req.hostname || '').toLowerCase();
+  const slug = host.split('.')[0];
+  if (!slug || !host.includes('.') || RESERVED_SUBDOMAINS.has(slug)) return null;
+  const hit = _slugTenantCache.get(slug);
+  if (hit && Date.now() - hit.at < 300_000) return hit.id;
+  const row: any = await centralDb.get("SELECT id FROM restaurants WHERE LOWER(slug) = ?", [slug]).catch(() => null);
+  _slugTenantCache.set(slug, { at: Date.now(), id: row?.id || null });
+  return row?.id || null;
+}
+
 async function resolvePublicRestaurantId(param: string): Promise<string | null> {
   const p = String(param || '').trim();
   if (!p) return null;
@@ -3050,19 +3096,19 @@ function renderPaymentLinkMessage(p: Awaited<ReturnType<typeof buildHotelPayment
     `— ${p.property_name}`;
   const html =
     `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
-    `<h2 style="color:${BRAND_HEX};margin-top:0">💳 Payment link · ${p.property_name}</h2>` +
+    `<h2 style="color:${brandHex()};margin-top:0">💳 Payment link · ${p.property_name}</h2>` +
     `<p>Hello <strong>${p.guest_name || 'Guest'}</strong>,</p>` +
     `<p style="color:#6b5d52">Here's the payment summary for your stay <strong>${p.check_in_date} → ${p.check_out_date}</strong>:</p>` +
     `<table style="width:100%;border-collapse:collapse;margin:12px 0;background:#faf7f2;border-radius:8px;overflow:hidden">` +
     breakupHtmlRows +
-    `<tr style="border-top:2px solid ${BRAND_HEX}"><td style="padding:8px;font-weight:bold;color:#1a1208">Total</td>` +
-    `<td style="padding:8px;text-align:right;font-family:monospace;font-weight:bold;color:${BRAND_HEX};font-size:16px">${fmt(p.amount)}</td></tr>` +
+    `<tr style="border-top:2px solid ${brandHex()}"><td style="padding:8px;font-weight:bold;color:#1a1208">Total</td>` +
+    `<td style="padding:8px;text-align:right;font-family:monospace;font-weight:bold;color:${brandHex()};font-size:16px">${fmt(p.amount)}</td></tr>` +
     `</table>` +
     (hasUpi ? (
-      `<div style="border-top:2px dashed ${BRAND_HEX};padding-top:16px;margin-top:16px;text-align:center">` +
-      `<h3 style="color:${BRAND_HEX};margin-top:0">💰 Pay securely via UPI</h3>` +
+      `<div style="border-top:2px dashed ${brandHex()};padding-top:16px;margin-top:16px;text-align:center">` +
+      `<h3 style="color:${brandHex()};margin-top:0">💰 Pay securely via UPI</h3>` +
       `<p style="color:#6b5d52;font-size:13px;margin:0 0 12px 0">Tap below to open the secure payment page — pay with any UPI app (GPay / PhonePe / Paytm) or scan the QR. <strong>${fmt(p.amount)}</strong>, no gateway fees.</p>` +
-      `<p style="margin:16px 0"><a href="${payLink}" style="background:${BRAND_HEX};color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Pay ${fmt(p.amount)} via UPI</a></p>` +
+      `<p style="margin:16px 0"><a href="${payLink}" style="background:${brandHex()};color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Pay ${fmt(p.amount)} via UPI</a></p>` +
       `<p style="color:#9c8e85;font-size:11px;margin:6px 0">Payee: ${p.upi_payee} · UPI ID: <strong>${p.upi_vpa}</strong></p>` +
       `</div>`
     ) : (
@@ -4354,10 +4400,10 @@ async function _pgSendLink(
       const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
       const html =
         `<div style="font-family:Inter,Arial,sans-serif;max-width:520px;margin:auto;padding:24px;background:#faf7f2;border-radius:16px">` +
-        `<h2 style="color:${BRAND_HEX};margin:0 0 12px">Payment request</h2>` +
+        `<h2 style="color:${brandHex()};margin:0 0 12px">Payment request</h2>` +
         `<p style="color:#333">Dear ${esc(name)},</p>` +
         `<p style="color:#333">Please pay <strong>${esc(amount)}</strong> to <strong>${esc(property)}</strong> for ${esc(link.description || 'your bill')}.</p>` +
-        `<a href="${esc(link.url)}" style="display:inline-block;margin:16px 0;padding:14px 28px;background:${BRAND_HEX};color:#fff;text-decoration:none;border-radius:12px;font-weight:bold">Pay ${esc(amount)}</a>` +
+        `<a href="${esc(link.url)}" style="display:inline-block;margin:16px 0;padding:14px 28px;background:${brandHex()};color:#fff;text-decoration:none;border-radius:12px;font-weight:bold">Pay ${esc(amount)}</a>` +
         `<p style="color:#6b5d52;font-size:13px">${expires ? `Valid until ${esc(expires)}. ` : ''}UPI, card and net banking accepted. The payment page is run by our payment gateway.</p>` +
         `</div>`;
       const r: any = await sendTenantEmail(restaurantId, to, `Payment request from ${property} — ${amount}`, message, html, 'GUEST');
@@ -9722,6 +9768,11 @@ async function notifyNewTenant(meta: {
 // interactive caller tell the user what happened; automatic callers ignore it.
 type NotifyTally = { sent: number; failed: number; skipped: number; channels: string[] };
 async function triggerNotification(restaurantId: string, eventName: string, data: any, opts?: { onlyChannels?: string[] }): Promise<NotifyTally> {
+  // In the tenant's colours even when no request is in flight (crons, sweeps).
+  const colors = await tenantBrandColors(restaurantId).catch(() => null);
+  return runWithBrand(colors, () => _triggerNotificationRun(restaurantId, eventName, data, opts));
+}
+async function _triggerNotificationRun(restaurantId: string, eventName: string, data: any, opts?: { onlyChannels?: string[] }): Promise<NotifyTally> {
   const tally: NotifyTally = { sent: 0, failed: 0, skipped: 0, channels: [] };
   const wants = (ch: string) => !opts?.onlyChannels || opts.onlyChannels.includes(ch);
   const record = (ok: boolean | void, ch: string) => {
@@ -10497,6 +10548,12 @@ async function startServer() {
   // aggregators — not for every request.
   app.use(express.json({ limit: '2mb', verify: keepWebhookRawBody }));
   app.use(express.urlencoded({ extended: true, limit: '2mb', verify: keepWebhookRawBody }));
+  // Emails, PDFs and public pages rendered for this request use its tenant's colour.
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    requestTenantId(req)
+      .then(rid => tenantBrandColors(rid))
+      .then(colors => runWithBrand(colors, () => next()), () => next());
+  });
 
   // ─────────────────────────────────────────────────────────────────────
   // T1-S8 — JWT cookie support (BCG audit, Tier 1 follow-up)
@@ -17534,14 +17591,14 @@ async function startServer() {
   input,button{font:inherit}
   input[type=tel]{width:100%;padding:14px 16px;border-radius:14px;border:none;background:#faf7f2;font-size:16px;outline:none}
   input[type=tel]:focus{box-shadow:0 0 0 2px rgba(204,90,22,0.2)}
-  button{width:100%;padding:14px;background:${BRAND_HEX};color:#fff;border:none;border-radius:14px;font-weight:700;font-size:14px;letter-spacing:0.05em;text-transform:uppercase;cursor:pointer;margin-top:12px}
+  button{width:100%;padding:14px;background:${brandHex()};color:#fff;border:none;border-radius:14px;font-weight:700;font-size:14px;letter-spacing:0.05em;text-transform:uppercase;cursor:pointer;margin-top:12px}
   button:disabled{opacity:0.5;cursor:not-allowed}
   .tier-badge{display:inline-block;padding:6px 14px;border-radius:999px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;margin:8px 0}
   .tier-GOLD{background:#fef3c7;color:#92400e}
   .tier-SILVER{background:#e5e7eb;color:#374151}
   .tier-BRONZE{background:#fde4cf;color:#9a3412}
   .progress{height:8px;background:#faf7f2;border-radius:999px;overflow:hidden;margin:12px 0 6px}
-  .progress-bar{height:100%;background:${BRAND_HEX};transition:width 0.5s}
+  .progress-bar{height:100%;background:${brandHex()};transition:width 0.5s}
   .stat{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f5ece0;font-size:14px}
   .stat:last-child{border:0}
   .stat .lbl{color:#6b5d52}
@@ -17549,7 +17606,7 @@ async function startServer() {
   .err{background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:12px;padding:12px;font-size:14px;margin-top:12px}
   .ok{background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:16px;margin-bottom:16px}
   .footer{margin-top:auto;padding-top:32px;text-align:center;color:#9c8e85;font-size:12px}
-  a{color:${BRAND_HEX}}
+  a{color:${brandHex()}}
 </style>
 </head><body>
 <div class="wrap">
@@ -17635,7 +17692,7 @@ async function startServer() {
     html += '<div style="font-size:14px;color:#6b5d52">Welcome back,</div>';
     html += '<div style="font-size:22px;font-weight:700;font-family:Georgia,serif">' + (c.name || 'Loyalty member') + '</div>';
     html += '<span class="tier-badge ' + tierClass + '">' + tierName + ' member</span>';
-    if(pct > 0) html += '<div style="color:${BRAND_HEX};font-weight:700;font-size:18px;margin-top:4px">' + pct + '% off every order</div>';
+    if(pct > 0) html += '<div style="color:${brandHex()};font-weight:700;font-size:18px;margin-top:4px">' + pct + '% off every order</div>';
     html += '</div>';
     html += '<div class="stat"><span class="lbl">Total orders</span><span class="val">' + (Number(c.total_orders) || 0) + '</span></div>';
     html += '<div class="stat"><span class="lbl">Lifetime spend</span><span class="val">' + sym + Number(c.total_spent || 0).toLocaleString('en-IN') + '</span></div>';
@@ -17775,14 +17832,14 @@ async function startServer() {
   .stars span.active,.stars span.preview{filter:none;opacity:1;transform:scale(1.1)}
   .sentiments{display:flex;gap:8px;justify-content:space-between}
   .sent-btn{flex:1;padding:14px;background:#faf7f2;border:2px solid transparent;border-radius:14px;font-size:24px;cursor:pointer;text-align:center;transition:all .15s}
-  .sent-btn.active{border-color:${BRAND_HEX};background:#fff}
+  .sent-btn.active{border-color:${brandHex()};background:#fff}
   .nps-row{display:grid;grid-template-columns:repeat(11,1fr);gap:4px;margin-top:4px}
   .nps-btn{padding:8px 0;background:#faf7f2;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px;transition:all .15s}
-  .nps-btn.active{background:${BRAND_HEX};color:#fff}
+  .nps-btn.active{background:${brandHex()};color:#fff}
   .nps-labels{display:flex;justify-content:space-between;font-size:10px;color:#9c8e85;margin-top:4px}
   textarea,input[type=text],input[type=email]{width:100%;padding:12px 14px;border-radius:14px;border:none;background:#faf7f2;font-size:15px;font-family:inherit;resize:none}
   textarea:focus,input:focus{outline:none;box-shadow:0 0 0 2px rgba(204,90,22,.2)}
-  button.submit{width:100%;padding:16px;background:${BRAND_HEX};color:#fff;border:none;border-radius:14px;font-weight:700;font-size:15px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;margin-top:24px}
+  button.submit{width:100%;padding:16px;background:${brandHex()};color:#fff;border:none;border-radius:14px;font-weight:700;font-size:15px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;margin-top:24px}
   button.submit:disabled{opacity:.4;cursor:not-allowed}
   .footer{text-align:center;color:#9c8e85;font-size:11px;margin-top:24px}
   .err{background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:12px;padding:12px;font-size:14px;margin-top:12px}
@@ -17818,7 +17875,7 @@ async function startServer() {
       <button id="submit" class="submit" disabled>Submit feedback</button>
     </div>
     <div id="ok" class="ok" style="display:none">
-      <h2 style="color:${BRAND_HEX}">Thank you!</h2>
+      <h2 style="color:${brandHex()}">Thank you!</h2>
       <p style="color:#6b5d52">Your feedback helps ${restaurantName} get better every visit.</p>
     </div>
   </div>
@@ -18131,7 +18188,7 @@ async function startServer() {
   .sub{color:#6b5d52;font-size:14px;margin-bottom:24px}
   .stat{display:flex;gap:24px;background:#fff;border-radius:24px;padding:24px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
   .stat-blk{flex:1;text-align:center}
-  .stat-val{font-size:32px;font-weight:700;font-family:Georgia,serif;color:${BRAND_HEX}}
+  .stat-val{font-size:32px;font-weight:700;font-family:Georgia,serif;color:${brandHex()}}
   .stat-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#9c8e85;margin-top:4px}
   .review{background:#fff;border-radius:24px;padding:20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
   .review-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
@@ -18139,11 +18196,11 @@ async function startServer() {
   .date{font-size:12px;color:#9c8e85}
   .stars{font-size:18px;margin-bottom:8px}
   .comment{color:#3d3128;line-height:1.5;margin:0}
-  .reply{background:#faf7f2;border-radius:14px;padding:14px;margin-top:12px;border-left:3px solid ${BRAND_HEX}}
-  .reply-head{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:${BRAND_HEX};font-weight:700;margin-bottom:6px}
+  .reply{background:#faf7f2;border-radius:14px;padding:14px;margin-top:12px;border-left:3px solid ${brandHex()}}
+  .reply-head{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:${brandHex()};font-weight:700;margin-bottom:6px}
   .filter{display:flex;gap:8px;margin-bottom:16px}
   .filter button{padding:8px 16px;background:#fff;border:1px solid rgba(204,90,22,.15);border-radius:14px;font-size:13px;cursor:pointer}
-  .filter button.active{background:${BRAND_HEX};color:#fff;border-color:${BRAND_HEX}}
+  .filter button.active{background:${brandHex()};color:#fff;border-color:${brandHex()}}
   .empty{text-align:center;color:#9c8e85;padding:48px 20px;background:#fff;border-radius:24px}
   .footer{text-align:center;color:#9c8e85;font-size:11px;margin-top:32px;padding-top:16px;border-top:1px solid rgba(0,0,0,.05)}
 </style>
@@ -32687,6 +32744,7 @@ ${data.tenant.name}`;
         color = c.hex;
       }
       await centralDb.run("UPDATE restaurants SET theme_color = ? WHERE id = ?", [color, req.params.id]);
+      forgetTenantBrand(req.params.id);
       res.json({ success: true, theme_color: color });
     } catch (err: any) { res.status(500).json({ error: 'Could not save the theme colour.' }); }
   });
@@ -53867,7 +53925,7 @@ ${data.tenant.name}`;
               `We hope to host you again soon!\n\n${hotel.name} Team`;
             const htmlBody =
               `<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:auto;padding:24px;background:#faf7f2">` +
-                `<div style="background:${BRAND_HEX};color:#fff;padding:24px;border-radius:24px 24px 0 0">` +
+                `<div style="background:${brandHex()};color:#fff;padding:24px;border-radius:24px 24px 0 0">` +
                   `<h1 style="font-family:Georgia,serif;margin:0;font-size:22px">Tax Invoice</h1>` +
                   `<p style="margin:6px 0 0;opacity:0.85">${hotel.name}</p>` +
                 `</div>` +
@@ -56856,7 +56914,7 @@ ${data.tenant.name}`;
         `\n\nFor any queries, reply to this email.\n\n${hotel.name} Team`;
       const htmlBody =
         `<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:auto;padding:24px;background:#faf7f2">
-           <div style="background:${isCredit ? '#c13b3b' : BRAND_HEX};color:#fff;padding:24px;border-radius:24px 24px 0 0">
+           <div style="background:${isCredit ? '#c13b3b' : brandHex()};color:#fff;padding:24px;border-radius:24px 24px 0 0">
              <h1 style="font-family:Georgia,serif;margin:0;font-size:22px">${isCredit ? 'Credit Note' : 'Tax Invoice'}</h1>
              <p style="margin:6px 0 0;opacity:0.85">${hotel.name}</p>
            </div>
@@ -66518,8 +66576,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tenant-theme-color',
+    commit_marker: 'tenant-theme-emails-pdfs-finance',
     code_features: [
+      'tenant-theme-emails-pdfs-finance  Owner: emails, PDFs and Finance pages follow the tenant theme colour. brandColors.ts gains brandHex()/brandDarkHex() read from an AsyncLocalStorage context (runWithBrand), falling back to the platform colour; every template in invoiceService(Boutique/Shared), notificationService, poService, bankRecStatementPdf and server.ts now reads them at render time. A middleware after the body parsers resolves the tenant (path /api/(public/)restaurant/:id, the decoded JWT restaurantId, ?r=, the feedback link tenant, or the tenant subdomain slug) and runs the request in its colour; triggerNotification and sendPrearrivalEmail set it for crons. tenantBrandColors caches 60s and a theme save clears it. Finance (AccountingView) and the checklist screens used a hardcoded rust accent (#a0522d/#8b4513); now bg/text/border-brand, with warnings that borrowed it moved to amber.',
       'tenant-theme-color  UI (owner): each tenant can replace the peacock default with its own theme colour in Settings > Business > Theme colour (8 presets or a custom colour, live preview, back to default). Saved on restaurants.theme_color via PUT /api/restaurant/:id/settings/theme-color (Settings Edit); tenantTheme.ts (shared) validates the hex and refuses colours under 3:1 contrast with white text, and derives the 20% darker hover shade. The app sets --color-brand and --color-brand-dark on the root element, which every bg-brand/text-brand class reads; index.html applies the remembered colour before the app starts so charts (src/theme.ts) open in it too. Emails and PDFs stay on the platform colour.',
       'wa-webhook-diagnostics  /internal WhatsApp: replies and receipts were silently missing with no way to see why. Every webhook call (URL check or event) is noted in central wa_webhook_log with the outcome: accepted (field, message and status counts, phone number id), rejected (verify token mismatch, missing signature, App secret mismatch) or for another number. GET /api/admin/whatsapp/diagnostics returns the log plus Meta subscribed_apps for the configured account; POST /api/admin/whatsapp/subscribe subscribes it. Shown as a Webhook activity card with a Subscribe now button. Payloads and tokens are never stored.',
       'wa-template-param-count  Fix: broadcasts, inbox templates and on-demand sends always passed the property name as {{1}}, so a template with no placeholders (Meta stock hello_world) was refused for a parameter mismatch. The client sends the template variable_count and mwTemplateVars trims the parameters to it (broadcasts store it in wa_broadcasts.variable_count); unknown count keeps the old behaviour.',
@@ -72783,6 +72842,10 @@ ${data.tenant.name}`;
 
 // Helper: send pre-arrival email and record which stage was sent
 async function sendPrearrivalEmail(hotel: any, booking: any, stage: 'upsell_7d' | 'confirm_1d', tdb: DbInterface): Promise<void> {
+  const colors = await tenantBrandColors(hotel?.id).catch(() => null);
+  return runWithBrand(colors, () => _sendPrearrivalEmailRun(hotel, booking, stage, tdb));
+}
+async function _sendPrearrivalEmailRun(hotel: any, booking: any, stage: 'upsell_7d' | 'confirm_1d', tdb: DbInterface): Promise<void> {
   try {
     const isUpsell = stage === 'upsell_7d';
     const subject = isUpsell
@@ -72812,7 +72875,7 @@ async function sendPrearrivalEmail(hotel: any, booking: any, stage: 'upsell_7d' 
 
     const html = isUpsell
       ? `<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:auto;padding:24px;background:#faf7f2">
-           <div style="background:linear-gradient(135deg,${BRAND_HEX} 0%,${BRAND_DARK_HEX} 100%);color:#fff;padding:24px;border-radius:24px 24px 0 0">
+           <div style="background:linear-gradient(135deg,${brandHex()} 0%,${brandDarkHex()} 100%);color:#fff;padding:24px;border-radius:24px 24px 0 0">
              <h1 style="font-family:Georgia,serif;margin:0;font-size:24px">Your stay awaits</h1>
              <p style="margin:6px 0 0;opacity:0.85">${hotel.name}</p>
            </div>

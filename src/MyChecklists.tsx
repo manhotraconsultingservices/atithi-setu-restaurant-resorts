@@ -31,7 +31,7 @@ const ROLE_LABEL: Record<string, string> = {
   CONCIERGE: 'Concierge', EVENTS_MANAGER: 'Events', MANAGER: 'Manager',
 };
 const fmtWhen = (iso: string) => String(iso || '').replace('T', ' ').slice(0, 16);
-const BTN = 'px-3 py-1.5 bg-[#a0522d] text-white text-sm rounded hover:bg-[#8b4513] disabled:opacity-40';
+const BTN = 'px-3 py-1.5 bg-brand text-white text-sm rounded hover:bg-brand-dark disabled:opacity-40';
 
 const taskCounts = (job: any) => {
   const t = job.tasks || [];
@@ -141,7 +141,7 @@ export function MyChecklists({ restaurantId, token }: Props) {
       <div className="flex gap-0 border-b border-[#e8ded0]">
         {(['ASSIGNED', 'COMPLETE'] as const).map(t => (
           <button key={t} onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === t ? 'border-brand text-brand' : 'border-transparent text-[#6b5d52] hover:text-brand'}`}>
             {t === 'ASSIGNED' ? `To do${pendingCount ? ` (${pendingCount})` : ''}` : 'Completed'}
           </button>
         ))}
@@ -217,14 +217,14 @@ export function ChecklistDetail({ restaurantId, token, job: initial, onBack }: {
           {tasks.map(t => (
             <li key={t.id} className="border-b border-[#f0e8d8] pb-2 last:border-0 last:pb-0">
               <label className={`flex items-start gap-2 text-sm ${isComplete ? '' : 'cursor-pointer'}`}>
-                <input type="checkbox" className="mt-0.5 accent-[#a0522d]" checked={Number(t.is_done) === 1} disabled={isComplete || busy === t.id} onChange={e => tick(t, e.target.checked)} />
+                <input type="checkbox" className="mt-0.5 accent-brand" checked={Number(t.is_done) === 1} disabled={isComplete || busy === t.id} onChange={e => tick(t, e.target.checked)} />
                 <span className={Number(t.is_done) === 1 ? 'text-[#9c8e85] line-through' : 'text-[#3d3128]'}>{t.label}{Number(t.is_mandatory) === 1 ? '' : <span className="text-[11px] text-[#9c8e85]"> (optional)</span>}</span>
               </label>
               {isComplete ? (
                 t.remark ? <p className="mt-1 ml-6 text-[12px] text-[#6b5d52] italic">“{t.remark}”</p> : null
               ) : (
                 <input defaultValue={t.remark || ''} onBlur={e => saveRemark(t, e.target.value)} placeholder="Add remark…"
-                  className="mt-1 ml-6 w-[calc(100%-1.5rem)] text-[12px] border border-[#e8dccf] rounded px-2 py-1 bg-[#faf7f2] focus:outline-none focus:border-[#a0522d]" />
+                  className="mt-1 ml-6 w-[calc(100%-1.5rem)] text-[12px] border border-[#e8dccf] rounded px-2 py-1 bg-[#faf7f2] focus:outline-none focus:border-brand" />
               )}
               {t.done_by && Number(t.is_done) === 1 && <p className="mt-0.5 ml-6 text-[10px] text-[#9d8b7e]">done by {t.done_by}{t.done_at ? ` · ${fmtWhen(t.done_at)}` : ''}</p>}
             </li>

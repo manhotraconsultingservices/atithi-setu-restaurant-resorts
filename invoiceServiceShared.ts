@@ -33,7 +33,7 @@
  *   adds the dispatcher.
  */
 
-import { BRAND_HEX, BRAND_DARK_HEX } from './brandColors.ts';
+import { brandHex, brandDarkHex } from './brandColors.ts';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -261,7 +261,7 @@ export const HIGHLIGHT = '#faf7f2';   // zebra band / amount-words background
 // classic ochre vs the safety red. Helper rather than constant so each
 // renderer can pass in their data.
 export function accentFor(isCreditNote?: boolean): string {
-  return isCreditNote ? '#c13b3b' : BRAND_HEX;
+  return isCreditNote ? '#c13b3b' : brandHex();
 }
 
 // ─────────────────────────────────────────────────────────────────────

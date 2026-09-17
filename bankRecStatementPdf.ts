@@ -24,7 +24,7 @@
  * and event quotation templates use. Do not reintroduce the rupee glyph here.
  */
 
-import { BRAND_HEX, BRAND_DARK_HEX } from './brandColors.ts';
+import { brandHex, brandDarkHex } from './brandColors.ts';
 import PDFDocument from 'pdfkit';
 
 export interface BankRecStatementItem {
@@ -69,7 +69,8 @@ export interface BankRecStatementData {
   generated_at: string;
 }
 
-const ORANGE = BRAND_HEX;
+// The accent is the tenant's theme colour, read when the statement is drawn.
+const ORANGE = (): string => brandHex();
 const DARK = '#1a1208';
 const MUTED = '#6b5d52';
 const LIGHT = '#9c8e85';
@@ -148,7 +149,7 @@ export async function generateBankRecStatementPdf(data: BankRecStatementData): P
       };
 
       // -- Header ----------------------------------------------------------
-      doc.fillColor(ORANGE).rect(0, 0, doc.page.width, 6).fill();
+      doc.fillColor(ORANGE()).rect(0, 0, doc.page.width, 6).fill();
 
       const TITLE = 'BANK RECONCILIATION STATEMENT';
       doc.font('Helvetica-Bold').fontSize(17);
@@ -162,7 +163,7 @@ export async function generateBankRecStatementPdf(data: BankRecStatementData): P
 
       // Whatever the title leaves, minus a gap. The label is property data and
       // can be long; the title is fixed, so it is the one that gets measured.
-      doc.fillColor(ORANGE).font('Helvetica-Bold').fontSize(11.5);
+      doc.fillColor(ORANGE()).font('Helvetica-Bold').fontSize(11.5);
       doc.text(clip(`${data.account_code}  ${data.account_label || ''}`.trim(), Math.max(90, W - TITLE_W - 16)),
         0, 29, { align: 'right', width: R, lineBreak: false });
       doc.fillColor(DARK).font('Helvetica-Bold').fontSize(10)

@@ -15,7 +15,7 @@
  *   • Credit-note variant for refunds/cancellations
  */
 
-import { BRAND_HEX, BRAND_DARK_HEX } from './brandColors.ts';
+import { brandHex, brandDarkHex } from './brandColors.ts';
 import PDFDocument from 'pdfkit';
 // BCG Phase 0 (7 Jun 2026): pure helpers, label dictionary, interface, page
 // constants, Hindi fonts, and logo resolver now live in invoiceServiceShared.ts
@@ -99,7 +99,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       const PAGE_H = 842;
       const M = 40;
       const INNER_W = PAGE_W - M * 2;
-      const ACCENT = data.isCreditNote ? '#c13b3b' : BRAND_HEX;
+      const ACCENT = data.isCreditNote ? '#c13b3b' : brandHex();
       const INK = '#14110c';
       const INK_SOFT = '#3d3128';
       const MUTED = '#6b5d52';

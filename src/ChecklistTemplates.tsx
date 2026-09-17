@@ -72,9 +72,9 @@ function makeApi(restaurantId: string, token: string) {
   };
 }
 
-const BTN = 'px-3 py-1.5 bg-[#a0522d] text-white text-sm rounded hover:bg-[#8b4513] disabled:opacity-40';
+const BTN = 'px-3 py-1.5 bg-brand text-white text-sm rounded hover:bg-brand-dark disabled:opacity-40';
 const GHOST = 'px-3 py-1.5 border border-[#d4c4a8] text-sm rounded hover:bg-[#f5f0e8]';
-const INPUT = 'text-sm border border-[#d4c4a8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#a0522d]';
+const INPUT = 'text-sm border border-[#d4c4a8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-brand';
 
 // The "small setting": per-module on/off toggles so the owner decides which
 // modules run checklists — no code change. Only shows modules this tenant runs.
@@ -108,7 +108,7 @@ function ModuleToggles({ api }: { api: (p: string, i?: RequestInit) => Promise<a
         {mods.map(m => (
           <div key={m.key} className="flex items-start gap-3 rounded-lg border border-[#e8ded0] bg-white px-3 py-2.5">
             <button type="button" onClick={() => toggle(m.key)} disabled={busy === m.key} aria-label={`Toggle ${m.label} checklists`}
-              className={`mt-0.5 relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${settings[m.key] ? 'bg-[#a0522d]' : 'bg-[#d4c4a8]'}`}>
+              className={`mt-0.5 relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${settings[m.key] ? 'bg-brand' : 'bg-[#d4c4a8]'}`}>
               <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${settings[m.key] ? 'translate-x-4' : 'translate-x-0.5'}`} />
             </button>
             <span>
@@ -173,7 +173,7 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL',
       <div className="flex gap-0 border-b border-[#e8ded0]">
         {(['TEMPLATES', 'CATEGORIES'] as const).map(t => (
           <button key={t} onClick={() => { setTab(t); setEditing(null); }}
-            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === t ? 'border-brand text-brand' : 'border-transparent text-[#6b5d52] hover:text-brand'}`}>
             {t === 'TEMPLATES' ? 'Templates' : 'Categories'}
           </button>
         ))}
@@ -209,7 +209,7 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL',
                     <tr key={t.id} className={`border-t border-[#f0e8d8] hover:bg-[#fdf8f0] ${Number(t.is_active) === 0 ? 'opacity-50' : ''}`}>
                       <td className="px-3 py-2 font-medium">{t.name}{t.is_system ? <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#f0e8d8] text-[#6b5d52]">system</span> : null}</td>
                       <td className="px-3 py-2 text-[#6b5d52]">{catName(t.category_id)}</td>
-                      <td className="px-3 py-2">{FTYPES.find(f => f.v === t.facility_type)?.label || t.facility_type}{Number(t.assignment_count) > 0 ? <span className="ml-1 text-[11px] text-[#a0522d]">· {t.assignment_count} specific</span> : <span className="ml-1 text-[11px] text-[#9c8e85]">· all</span>}</td>
+                      <td className="px-3 py-2">{FTYPES.find(f => f.v === t.facility_type)?.label || t.facility_type}{Number(t.assignment_count) > 0 ? <span className="ml-1 text-[11px] text-brand">· {t.assignment_count} specific</span> : <span className="ml-1 text-[11px] text-[#9c8e85]">· all</span>}</td>
                       <td className="px-3 py-2 text-[#6b5d52]">{trgLabel(t.trigger_event)}{t.trigger_event === 'MID_STAY' ? ` (every ${t.recurrence_nights}n)` : ''}</td>
                       <td className="px-3 py-2 text-center tabular-nums">{t.step_count}</td>
                       <td className="px-3 py-2 text-center">{Number(t.blocks_release) === 1 ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-50 text-rose-600">YES</span> : <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#f0e8d8] text-[#6b5d52]">no</span>}</td>
@@ -464,7 +464,7 @@ function AssignmentsPanel({ api, restaurantId, token, facilityScope = 'ALL', tem
               {targetTypes.map(tt => <option key={tt} value={tt}>{TARGET_LABEL[tt]}</option>)}
             </select>
           ) : <span className="text-xs font-medium text-[#1a1208]">{TARGET_LABEL[scope]}</span>}
-          {selectable.length > 0 && <button onClick={toggleAll} className="text-[11px] text-[#a0522d] underline">{allSel ? 'Clear' : 'Select all'}</button>}
+          {selectable.length > 0 && <button onClick={toggleAll} className="text-[11px] text-brand underline">{allSel ? 'Clear' : 'Select all'}</button>}
         </div>
         {selectable.length === 0 ? (
           <p className="text-xs text-[#9c8e85] italic">{opts.length === 0 ? 'None available (module may be off, or none created yet).' : 'All already assigned.'}</p>

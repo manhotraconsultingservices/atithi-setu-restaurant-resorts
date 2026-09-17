@@ -8938,8 +8938,8 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
     finally { setMjSaving(false); }
   };
 
-  const AC_INPUT = 'text-sm border border-[#d4c4a8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#a0522d]';
-  const AC_BTN = 'px-3 py-1.5 bg-[#a0522d] text-white text-sm rounded hover:bg-[#8b4513] disabled:opacity-40';
+  const AC_INPUT = 'text-sm border border-[#d4c4a8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-brand';
+  const AC_BTN = 'px-3 py-1.5 bg-brand text-white text-sm rounded hover:bg-brand-dark disabled:opacity-40';
 
   // Two-tier accounting nav: a group row + the active group's sub-tabs.
   // Named as Tally Prime / Zoho Books / QuickBooks name them. "GL Ledger" read
@@ -8990,7 +8990,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
         <div className="flex gap-1.5 flex-wrap">
           {ACCT_GROUPS.map(g => (
             <button key={g.key} onClick={() => setAcctTab(g.tabs[0])}
-              className={`px-3 py-1.5 text-sm font-semibold rounded-full transition-colors ${activeGroup.key === g.key ? 'bg-[#a0522d] text-white' : 'bg-[#f0e8d8] text-[#6b5d52] hover:bg-[#e5d9c3]'}`}>
+              className={`px-3 py-1.5 text-sm font-semibold rounded-full transition-colors ${activeGroup.key === g.key ? 'bg-brand text-white' : 'bg-[#f0e8d8] text-[#6b5d52] hover:bg-[#e5d9c3]'}`}>
               {g.label}
             </button>
           ))}
@@ -8998,7 +8998,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
         <div className="flex gap-0 border-b border-[#e8ded0] overflow-x-auto">
           {activeGroup.tabs.map(t => (
             <button key={t} onClick={() => setAcctTab(t)}
-              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${acctTab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${acctTab === t ? 'border-brand text-brand' : 'border-transparent text-[#6b5d52] hover:text-brand'}`}>
               {TAB_LABEL[t]}
             </button>
           ))}
@@ -9013,7 +9013,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
         <div className="flex gap-0 border-b border-[#e8ded0] overflow-x-auto">
           {(['CASHDRAWER', 'CASHCOUNT'] as SubTab[]).map(t => (
             <button key={t} onClick={() => setAcctTab(t)}
-              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${acctTab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${acctTab === t ? 'border-brand text-brand' : 'border-transparent text-[#6b5d52] hover:text-brand'}`}>
               {TAB_LABEL[t]}
             </button>
           ))}
@@ -9056,7 +9056,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                     <td className="px-3 py-2 font-mono text-xs text-[#6b5d52]">{a.gl_account_code}</td>
                     <td className="px-3 py-2 text-right font-mono text-[#1a1208]">₹{Number(a.balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">
-                      <button onClick={() => editBank(a)} className="text-xs font-bold text-[#a0522d] hover:underline mr-3">Edit</button>
+                      <button onClick={() => editBank(a)} className="text-xs font-bold text-brand hover:underline mr-3">Edit</button>
                       {String(a.gl_account_code) !== '1010' && <button onClick={() => delBank(a)} className="text-xs font-bold text-red-500 hover:underline">Remove</button>}
                     </td>
                   </tr>
@@ -9088,7 +9088,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
       {acctTab === 'OWNER_EQUITY' && stmtOwner && (
         <div className="space-y-4">
           <div className="flex items-center gap-3 flex-wrap">
-            <button onClick={() => { setStmtOwner(null); setStmt(null); }} className="text-sm font-bold text-[#a0522d] hover:underline">← Back to owners</button>
+            <button onClick={() => { setStmtOwner(null); setStmt(null); }} className="text-sm font-bold text-brand hover:underline">← Back to owners</button>
             <h3 className="text-lg font-bold text-[#1a1208]">{stmtOwner.name} — Capital Account Statement</h3>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -9097,7 +9097,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <label className="text-xs text-[#6b5d52]">To</label>
             <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
             <button onClick={() => loadStatement(stmtOwner.id)} className={AC_BTN}>Refresh</button>
-            {stmt && <button onClick={() => printStatement(stmt)} className="px-3 py-1.5 text-sm rounded border border-[#a0522d]/40 text-[#a0522d] font-bold hover:bg-[#a0522d]/5">🖨 Print</button>}
+            {stmt && <button onClick={() => printStatement(stmt)} className="px-3 py-1.5 text-sm rounded border border-brand/40 text-brand font-bold hover:bg-brand/5">🖨 Print</button>}
             {stmt && <button onClick={exportStatementCsv} className="px-3 py-1.5 text-sm rounded border border-[#d4c4a8] text-[#6b5d52] font-bold hover:bg-[#f5f0e8]">Export CSV</button>}
           </div>
           {stmtLoading && <p className="text-sm text-[#6b5d52] animate-pulse">Loading…</p>}
@@ -9154,7 +9154,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                     <td className="px-3 py-2 text-right font-mono font-bold text-[#1a1208]">{inr(o.net)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">
                       <button onClick={() => openTxn(o, 'INVEST')} className="text-xs font-bold text-emerald-700 hover:underline mr-2">Invest</button>
-                      <button onClick={() => openTxn(o, 'PAYOUT')} className="text-xs font-bold text-[#a0522d] hover:underline mr-2">Payout</button>
+                      <button onClick={() => openTxn(o, 'PAYOUT')} className="text-xs font-bold text-brand hover:underline mr-2">Payout</button>
                       <button onClick={() => openStatement(o)} className="text-xs font-bold text-indigo-600 hover:underline mr-2">Statement</button>
                       <button onClick={() => editOwner(o)} className="text-xs font-bold text-[#6b5d52] hover:underline mr-2">Edit</button>
                       <button onClick={() => delOwner(o)} className="text-xs font-bold text-red-400 hover:underline">Remove</button>
@@ -9167,7 +9167,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
           </div>
 
           {txnOwner && (
-            <div className="rounded-lg border-2 border-[#a0522d]/30 p-4 bg-[#fdf8f0] space-y-3 max-w-2xl">
+            <div className="rounded-lg border-2 border-brand/30 p-4 bg-[#fdf8f0] space-y-3 max-w-2xl">
               <p className="text-sm font-bold text-[#1a1208]">{txnForm.txn_type === 'INVEST' ? 'Record investment' : 'Record payout / withdrawal'} — {txnOwner.name}</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div><label className="text-xs text-[#6b5d52]">Amount *</label><input type="number" className={ACCT_INPUT} value={txnForm.amount} onChange={e => setTxnForm({ ...txnForm, amount: e.target.value })} placeholder="0.00" /></div>
@@ -9229,7 +9229,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                 </tr></thead>
                 <tbody>
                   {TYPE_ORDER.filter(t => typeGroups[t]?.length).flatMap(type => [
-                    <tr key={`hdr-${type}`}><td colSpan={6} className="px-3 py-1 text-xs font-bold text-[#a0522d] bg-[#faf7f2] uppercase tracking-wide">{type}</td></tr>,
+                    <tr key={`hdr-${type}`}><td colSpan={6} className="px-3 py-1 text-xs font-bold text-brand bg-[#faf7f2] uppercase tracking-wide">{type}</td></tr>,
                     ...typeGroups[type].map((row: any) => {
                       const dr = Number(row.dr_total || 0), cr = Number(row.cr_total || 0);
                       const debitNormal = ['ASSET', 'EXPENSE'].includes(type);
@@ -9248,7 +9248,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                       );
                     }),
                   ])}
-                  <tr className="border-t-2 border-[#a0522d] bg-[#f5f0e8] font-bold">
+                  <tr className="border-t-2 border-brand bg-[#f5f0e8] font-bold">
                     <td colSpan={3} className="px-3 py-2 text-[#1a1208]">Grand Total</td>
                     <td className="px-3 py-2 text-right font-mono">{fmtAmt(trialDrTotal)}</td>
                     <td className="px-3 py-2 text-right font-mono">{fmtAmt(trialCrTotal)}</td>
@@ -9287,8 +9287,8 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   <p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">− {fmtAmt(gstOut.input_tax_credit)}</p>
                   <p className="text-[11px] text-[#9c8e85] mt-1">ITC Receivable on purchases</p>
                 </div>
-                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4">
-                  <p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Net GST Outstanding</p>
+                <div className="rounded-lg border-2 border-brand bg-brand/5 p-4">
+                  <p className="text-xs text-brand uppercase tracking-wide font-semibold">Net GST Outstanding</p>
                   <p className={`text-2xl font-bold mt-1 tabular-nums ${Number(gstOut.net_outstanding) > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{fmtAmt(gstOut.net_outstanding)}</p>
                   <p className="text-[11px] text-[#9c8e85] mt-1">{Number(gstOut.net_outstanding) > 0.005 ? 'Payable to government' : Number(gstOut.net_outstanding) < -0.005 ? 'Net credit carried forward' : 'Nothing outstanding'}</p>
                 </div>
@@ -9387,8 +9387,8 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                 </div>
               )}
               <div className="grid sm:grid-cols-2 gap-3">
-                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4">
-                  <p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Total cash position (Hand + Bank)</p>
+                <div className="rounded-lg border-2 border-brand bg-brand/5 p-4">
+                  <p className="text-xs text-brand uppercase tracking-wide font-semibold">Total cash position (Hand + Bank)</p>
                   <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashBook.total_cash_position)}</p>
                   <p className="text-[11px] text-[#9c8e85] mt-1">Closing cash + bank at end of {cashBook.date}</p>
                 </div>
@@ -9522,7 +9522,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <>
               <div className="grid sm:grid-cols-3 gap-3">
                 <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Opening Cash + Bank</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashFlowGl.opening_balance)}</p></div>
-                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Net Change</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashFlowGl.net_change)}</p></div>
+                <div className="rounded-lg border-2 border-brand bg-brand/5 p-4"><p className="text-xs text-brand uppercase tracking-wide font-semibold">Net Change</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashFlowGl.net_change)}</p></div>
                 <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Closing Cash + Bank</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(cashFlowGl.closing_balance)}</p></div>
               </div>
               {([['Operating', cashFlowGl.operating], ['Investing', cashFlowGl.investing], ['Financing', cashFlowGl.financing]] as [string, any][]).map(([title, b]) => (
@@ -9550,7 +9550,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             <>
               <div className="grid sm:grid-cols-2 gap-3">
                 <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Taxable Value</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstr1.totals.taxable)}</p></div>
-                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Output GST</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstr1.totals.output_gst)}</p></div>
+                <div className="rounded-lg border-2 border-brand bg-brand/5 p-4"><p className="text-xs text-brand uppercase tracking-wide font-semibold">Output GST</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstr1.totals.output_gst)}</p></div>
               </div>
               {([['B2B (registered)', gstr1.b2b], ['B2C (unregistered)', gstr1.b2c]] as [string, any[]][]).map(([title, rows]) => (
                 <div key={title} className="overflow-x-auto rounded-lg border border-[#e8ded0]">
@@ -9658,7 +9658,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
               <div className="grid sm:grid-cols-3 gap-3">
                 <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Output Tax</p><p className="text-2xl font-bold text-rose-700 mt-1 tabular-nums">{fmtAmt(gstr3b.output_tax)}</p></div>
                 <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">ITC Available</p><p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">− {fmtAmt(gstr3b.itc_available.total)}</p></div>
-                <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Net Tax Payable</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstr3b.net_tax_payable)}</p></div>
+                <div className="rounded-lg border-2 border-brand bg-brand/5 p-4"><p className="text-xs text-brand uppercase tracking-wide font-semibold">Net Tax Payable</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(gstr3b.net_tax_payable)}</p></div>
               </div>
               <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
                 <table className="w-full text-sm border-collapse">
@@ -9720,7 +9720,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   <thead><tr className="bg-[#f5f0e8] text-left"><th className={TH}>Return period</th><th className={TH}>File</th><th className={cn(TH, 'text-right')}>Documents</th><th className={cn(TH, 'text-right')}>Matched</th><th className={cn(TH, 'text-right')}>Not in books</th><th className={cn(TH, 'text-right')}>Claimed, not in 2B</th><th className={TH}>Imported</th><th className={TH}></th></tr></thead>
                   <tbody>
                     {g2bImports.map((im: any) => (
-                      <tr key={im.id} className={cn('border-t border-[#f0e8d8]', d?.id === im.id && 'bg-[#fdf6ef]')}>
+                      <tr key={im.id} className={cn('border-t border-[#f0e8d8]', d?.id === im.id && 'bg-brand/5')}>
                         <td className="px-3 py-2 font-semibold tabular-nums">{im.return_period}</td>
                         <td className="px-3 py-2 text-xs text-[#6b5d52]">{im.source_name || '—'}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{im.line_count}</td>
@@ -9728,7 +9728,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                         <td className="px-3 py-2 text-right tabular-nums">{im.summary?.counts?.NOT_IN_BOOKS || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{im.summary?.books_not_in_2b?.count ?? '—'}</td>
                         <td className="px-3 py-2 text-xs text-[#6b5d52] whitespace-nowrap">{String(im.created_at || '').slice(0, 10)}</td>
-                        <td className="px-3 py-2 text-right"><button onClick={() => openG2b(im.id)} className="text-xs font-semibold text-[#a0522d] hover:underline">Open</button></td>
+                        <td className="px-3 py-2 text-right"><button onClick={() => openG2b(im.id)} className="text-xs font-semibold text-brand hover:underline">Open</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -9753,7 +9753,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                 <div className="flex gap-1.5 flex-wrap">
                   {['ALL', ...Object.keys(STATUS).filter(k => Number(sm.counts?.[k] || 0) > 0)].map(k => (
                     <button key={k} onClick={() => setG2bFilter(k)}
-                      className={cn('px-2.5 py-1 rounded-full text-xs border', g2bFilter === k ? 'bg-[#a0522d] text-white border-[#a0522d]' : 'bg-white text-[#3d3128] border-[#e8ded0] hover:bg-[#faf6ef]')}>
+                      className={cn('px-2.5 py-1 rounded-full text-xs border', g2bFilter === k ? 'bg-brand text-white border-brand' : 'bg-white text-[#3d3128] border-[#e8ded0] hover:bg-[#faf6ef]')}>
                       {k === 'ALL' ? `All · ${lines.length}` : `${STATUS[k].label} · ${sm.counts[k]}`}
                     </button>
                   ))}
@@ -9851,7 +9851,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             {r37 ? (
               <>
                 <div className="grid sm:grid-cols-3 gap-3">
-                  <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Credit to reverse now</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(r37.totals?.to_reverse)}</p><p className="text-[11px] text-[#6b5d52] mt-1">{(r37.due || []).length} bill(s) dated on or before {r37.invoices_dated_on_or_before}</p></div>
+                  <div className="rounded-lg border-2 border-brand bg-brand/5 p-4"><p className="text-xs text-brand uppercase tracking-wide font-semibold">Credit to reverse now</p><p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(r37.totals?.to_reverse)}</p><p className="text-[11px] text-[#6b5d52] mt-1">{(r37.due || []).length} bill(s) dated on or before {r37.invoices_dated_on_or_before}</p></div>
                   <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Held — back when paid</p><p className="text-2xl font-bold text-rose-700 mt-1 tabular-nums">{fmtAmt(r37.totals?.held)}</p><p className="text-[11px] text-[#9c8e85] mt-1">{(r37.held || []).length} bill(s)</p></div>
                   <div className="rounded-lg border border-[#e8ded0] bg-white p-4"><p className="text-xs text-[#6b5d52] uppercase tracking-wide">Reaching day 180 in 30 days</p><p className="text-2xl font-bold text-amber-800 mt-1 tabular-nums">{fmtAmt(r37.totals?.due_soon_credit)}</p><p className="text-[11px] text-[#9c8e85] mt-1">{(r37.due_soon || []).length} bill(s) — pay these to avoid a reversal</p></div>
                 </div>
@@ -9892,7 +9892,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                   {([['0–30 days', a.buckets.d0_30], ['31–60 days', a.buckets.d31_60], ['61–90 days', a.buckets.d61_90], ['90+ days', a.buckets.d90_plus]] as [string, number][]).map(([t, v], i) => (
                     <div key={t} className={`rounded-lg border p-4 ${i === 3 ? 'border-rose-300 bg-rose-50' : 'border-[#e8ded0] bg-white'}`}><p className="text-xs text-[#6b5d52] uppercase tracking-wide">{t}</p><p className="text-xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(v)}</p></div>
                   ))}
-                  <div className="rounded-lg border-2 border-[#a0522d] bg-[#fdf6ef] p-4"><p className="text-xs text-[#a0522d] uppercase tracking-wide font-semibold">Total Open</p><p className="text-xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(a.total_open)}</p></div>
+                  <div className="rounded-lg border-2 border-brand bg-brand/5 p-4"><p className="text-xs text-brand uppercase tracking-wide font-semibold">Total Open</p><p className="text-xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(a.total_open)}</p></div>
                 </div>
                 {Number(a.unapplied) > 0.005 && <p className="text-xs text-[#9c8e85]">Unapplied credits (overpayments/advances): {fmtAmt(a.unapplied)}</p>}
                 <p className="text-[11px] text-[#9c8e85]">{label} aged FIFO from the GL. Total Open reconciles to the control account's Trial-Balance net.</p>
@@ -10004,13 +10004,13 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                         <p className="text-xs text-[#6b5d52] uppercase tracking-wide">Statement Closing Balance</p>
                         <input type="number" value={bankRecStmtBal} onChange={e => setBankRecStmtBal(e.target.value)} placeholder="Enter from your statement" className="mt-1 w-full text-lg font-bold border border-[#d4c4a8] rounded px-2 py-1 bg-white tabular-nums" />
                       </div>
-                      <div className={`rounded-lg border-2 p-4 ${!entered ? 'border-[#e8ded0] bg-white' : agreed ? 'border-emerald-600 bg-emerald-50' : 'border-[#a0522d] bg-[#fdf6ef]'}`}>
+                      <div className={`rounded-lg border-2 p-4 ${!entered ? 'border-[#e8ded0] bg-white' : agreed ? 'border-emerald-600 bg-emerald-50' : 'border-amber-400 bg-amber-50'}`}>
                         <p className="text-xs uppercase tracking-wide font-semibold text-[#6b5d52]">Unexplained Difference</p>
                         {!entered
                           ? <p className="text-sm text-[#9c8e85] mt-2 italic">Enter the statement balance</p>
                           : <>
                               <p className="text-2xl font-bold text-[#1a1208] mt-1 tabular-nums">{fmtAmt(diff)}</p>
-                              <p className={`text-[11px] mt-1 font-semibold ${agreed ? 'text-emerald-700' : 'text-[#a0522d]'}`}>
+                              <p className={`text-[11px] mt-1 font-semibold ${agreed ? 'text-emerald-700' : 'text-amber-700'}`}>
                                 {agreed ? 'Reconciled — the gap is fully explained' : 'Not yet explained'}
                               </p>
                             </>}
@@ -10025,7 +10025,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                       <div className="divide-y divide-[#f0e8d8] text-sm">
                         <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Balance per bank statement</span><span className="tabular-nums">{entered ? fmtAmt(stmt) : '—'}</span></div>
                         <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Add: deposits in transit <span className="text-[10px] text-[#9c8e85]">(banked, not yet credited)</span></span><span className="tabular-nums text-emerald-700">+ {fmtAmt(depositsInTransit)}</span></div>
-                        <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Less: outstanding cheques <span className="text-[10px] text-[#9c8e85]">(issued, not yet presented)</span></span><span className="tabular-nums text-[#a0522d]">− {fmtAmt(outstandingCheques)}</span></div>
+                        <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Less: outstanding cheques <span className="text-[10px] text-[#9c8e85]">(issued, not yet presented)</span></span><span className="tabular-nums text-brand">− {fmtAmt(outstandingCheques)}</span></div>
                         <div className="flex justify-between px-4 py-2 bg-[#fdfaf5] font-semibold"><span>Should equal the book balance</span><span className="tabular-nums">{entered ? fmtAmt(stmt + depositsInTransit - outstandingCheques) : '—'}</span></div>
                         <div className="flex justify-between px-4 py-2"><span className="text-[#6b5d52]">Book balance (GL)</span><span className="tabular-nums">{fmtAmt(bankRec.book_balance)}</span></div>
                         {bankRec.window_movement && (
@@ -10040,10 +10040,10 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                     </div>
 
                     {bankRecStmtErr && (
-                      <div className="rounded-lg border border-[#a0522d] bg-[#fdf6ef] px-4 py-2 text-xs text-[#1a1208]">{bankRecStmtErr}</div>
+                      <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-xs text-[#1a1208]">{bankRecStmtErr}</div>
                     )}
                     <div className="flex justify-end items-center gap-3">
-                      {bankRec.locked && <span className="text-xs text-[#a0522d] font-semibold">Signed off — reopen it below to make changes</span>}
+                      {bankRec.locked && <span className="text-xs text-brand font-semibold">Signed off — reopen it below to make changes</span>}
                       {(() => {
                         // The statement is built from SAVED state. Ticks and a
                         // statement balance that have not been saved yet are on
@@ -10056,7 +10056,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                           || (savedBal == null && String(bankRecStmtBal || '') !== '');
                         return (
                           <>
-                            {dirty && <span className="text-[11px] text-[#a0522d]">Save first — the statement is built from saved work</span>}
+                            {dirty && <span className="text-[11px] text-amber-700">Save first — the statement is built from saved work</span>}
                             <button onClick={() => { setBankRecChargeOpen(o => !o); setBankRecChargeMsg(null); }}
                               className="px-3 py-1.5 rounded-lg border border-[#d4c4a8] text-[#6b5d52] text-xs font-bold hover:bg-[#f5f0e8]">
                               Bank charge / interest
@@ -10120,7 +10120,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                       <button onClick={postBankRecCharge} className={AC_BTN}>Post it</button>
                     </div>
                     {bankRecChargeMsg && (
-                      <p className={'text-xs ' + (bankRecChargeMsg.type === 'ok' ? 'text-emerald-700' : 'text-[#a0522d]')}>{bankRecChargeMsg.text}</p>
+                      <p className={'text-xs ' + (bankRecChargeMsg.type === 'ok' ? 'text-emerald-700' : 'text-amber-700')}>{bankRecChargeMsg.text}</p>
                     )}
                     <p className="text-[11px] text-[#9c8e85]">
                       This posts a real journal — a charge through the Expense Journal, interest as a manual journal — so it appears in the ledger and can be reversed there like any other entry. It is not a note to self.
@@ -10141,12 +10141,12 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                       <span className="text-[#6b5d52]">Read <b className="text-[#1a1208]">{bankRecMatch.parsed_rows}</b> movements</span>
                       <span className="text-emerald-700">Matched <b>{bankRecMatch.summary?.matched}</b></span>
                       {Number(bankRecMatch.summary?.ambiguous) > 0 && (
-                        <span className="text-[#a0522d]">Ambiguous <b>{bankRecMatch.summary.ambiguous}</b></span>
+                        <span className="text-amber-700">Ambiguous <b>{bankRecMatch.summary.ambiguous}</b></span>
                       )}
-                      <span className="text-[#a0522d]">Unmatched <b>{bankRecMatch.summary?.unmatched}</b></span>
+                      <span className="text-amber-700">Unmatched <b>{bankRecMatch.summary?.unmatched}</b></span>
                     </div>
                     {Number(bankRecMatch.summary?.ambiguous) > 0 && (
-                      <p className="text-[11px] text-[#a0522d]">
+                      <p className="text-[11px] text-amber-700">
                         Some rows matched more than one movement at the same amount and date. Those are marked below — check them before applying.
                       </p>
                     )}
@@ -10173,7 +10173,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                             <div key={i} className="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                               <span className="text-[#6b5d52]">{m.statement?.date}</span>
                               <span className="flex-1 truncate text-[#6b5d52]">{m.narration || m.statement?.description || '—'}</span>
-                              {m.ambiguous && <span className="text-[10px] font-bold text-[#a0522d]">ambiguous</span>}
+                              {m.ambiguous && <span className="text-[10px] font-bold text-amber-700">ambiguous</span>}
                               {m.day_gap > 0 && <span className="text-[10px] text-[#9c8e85]">{m.day_gap}d apart</span>}
                               <span className="tabular-nums">{fmtAmt(m.dr_amount || m.cr_amount)}</span>
                             </div>
@@ -10262,7 +10262,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                             {String(h.status) === 'FINAL' ? 'Signed off' : 'Draft'}
                           </span>
                           <button onClick={() => setBankRecStatus(h.id, String(h.status) === 'FINAL' ? 'DRAFT' : 'FINAL')}
-                            className="text-[11px] font-bold text-[#a0522d] hover:underline">
+                            className="text-[11px] font-bold text-brand hover:underline">
                             {String(h.status) === 'FINAL' ? 'Reopen' : 'Sign off'}
                           </button>
                         </div>
@@ -10359,7 +10359,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-sm font-semibold text-[#1a1208]">What is in the number</p>
-                    {accrual.lines.length > 12 && <button onClick={() => setAccrualShowAll(v => !v)} className="text-xs text-[#a0522d] font-semibold hover:underline">{accrualShowAll ? 'Show less' : `Show all ${accrual.lines.length}`}</button>}
+                    {accrual.lines.length > 12 && <button onClick={() => setAccrualShowAll(v => !v)} className="text-xs text-brand font-semibold hover:underline">{accrualShowAll ? 'Show less' : `Show all ${accrual.lines.length}`}</button>}
                   </div>
                   <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
                     <table className="w-full text-sm border-collapse">
@@ -10575,7 +10575,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                     <td className="px-3 py-2 text-right tabular-nums">{fmtAmt(d.deposit_amount)}</td>
                     <td className="px-3 py-2"><span className={`text-xs rounded-full px-2 py-0.5 whitespace-nowrap ${d.status === 'APPROVED' ? 'bg-emerald-100 text-emerald-800' : d.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-800' : d.status === 'REJECTED' ? 'bg-rose-100 text-rose-800' : 'bg-sky-100 text-sky-800'}`}>{String(d.status).replace(/_/g, ' ')}</span></td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {(d.status === 'OPEN' || d.status === 'REJECTED') && canWriteTab('CASH_DRAWER') && <button onClick={() => { setClosingDrawer(d); setDenomQty({}); setCdDeposit(''); }} className="text-xs text-[#a0522d] underline">Close &amp; count</button>}
+                      {(d.status === 'OPEN' || d.status === 'REJECTED') && canWriteTab('CASH_DRAWER') && <button onClick={() => { setClosingDrawer(d); setDenomQty({}); setCdDeposit(''); }} className="text-xs text-brand underline">Close &amp; count</button>}
                       {d.status === 'OPEN' && canWriteTab('CASH_DRAWER') && <button onClick={() => { setHandoverDrawer(d); setHoDenomQty({}); setHoDeposit(''); setHoTo(''); setHoShift(d.shift_label || ''); }} className="text-xs text-sky-700 underline ml-2">Hand over</button>}
                       {d.status === 'PENDING_APPROVAL' && (dayClose?.can_lock && canWriteTab('CASH_DRAWER') ? (<span className="flex gap-2"><button onClick={() => approveDrawer(d)} className="text-xs text-emerald-700 underline">Approve</button><button onClick={() => rejectDrawer(d)} className="text-xs text-rose-700 underline">Reject</button></span>) : <span className="text-[11px] text-amber-700">awaiting manager approval</span>)}
                       {d.status === 'APPROVED' && <span className="text-[11px] font-mono text-[#9c8e85]">{d.deposit_journal_ref || '✓'}</span>}
@@ -10884,7 +10884,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
                         </tr>
                       )))}
                     </tbody>
-                    <tfoot><tr className="bg-[#faf7f2] border-t-2 border-[#a0522d]/30 font-bold text-[#1a1208]">
+                    <tfoot><tr className="bg-[#faf7f2] border-t-2 border-brand/30 font-bold text-[#1a1208]">
                       <td className="px-3 py-2" colSpan={3}>Day total ({order.length} {order.length === 1 ? 'entry' : 'entries'}) {Math.abs(totalDr - totalCr) < 0.02 ? '· balanced ✓' : '· ⚠ OUT OF BALANCE'}</td>
                       <td className="px-3 py-2 text-right font-mono">{fmtAmt(totalDr)}</td>
                       <td className="px-3 py-2 text-right font-mono">{fmtAmt(totalCr)}</td>
@@ -11085,7 +11085,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
             </table>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
-            <button onClick={() => setMjLines(ls => [...ls, emptyMjLine()])} className="text-sm text-[#a0522d] hover:underline">+ Add line</button>
+            <button onClick={() => setMjLines(ls => [...ls, emptyMjLine()])} className="text-sm text-brand hover:underline">+ Add line</button>
             {mjTotalDr > 0 && !mjBalanced && <span className="text-xs text-red-600">Unbalanced by {fmtAmt(Math.abs(mjTotalDr - mjTotalCr))}</span>}
           </div>
           {mjMsg && <div className={`text-sm px-3 py-2 rounded border ${mjMsg.type === 'ok' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200'}`}>{mjMsg.text}</div>}

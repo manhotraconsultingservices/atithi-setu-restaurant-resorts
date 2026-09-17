@@ -7,7 +7,7 @@
  * — but it stays GST-aware for tax-deductible procurement.
  */
 
-import { BRAND_HEX, BRAND_DARK_HEX } from './brandColors.ts';
+import { brandHex, brandDarkHex } from './brandColors.ts';
 import PDFDocument from 'pdfkit';
 
 export interface POPdfData {
@@ -74,7 +74,7 @@ export async function generatePOPdf(data: POPdfData): Promise<Buffer> {
       const PAGE_W = doc.page.width - 80;          // content width
       const COL_LEFT = 40;
       const COL_RIGHT = doc.page.width - 40;
-      const ORANGE = BRAND_HEX;
+      const ORANGE = brandHex();
       const DARK = '#1a1208';
       const MUTED = '#6b5d52';
       const LIGHT = '#9c8e85';
@@ -292,11 +292,11 @@ export function buildPOEmailBody(data: POPdfData): { subject: string; text: stri
     (data.restaurant_email ? `\n${data.restaurant_email}` : '');
   const html =
     `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:600px;margin:auto">` +
-    `<h2 style="color:${BRAND_HEX}">Purchase Order ${data.po_id}</h2>` +
+    `<h2 style="color:${brandHex()}">Purchase Order ${data.po_id}</h2>` +
     `<p>Hello <strong>${data.supplier_name}</strong>,</p>` +
     `<p>Please find attached our Purchase Order. Summary below — full details in the PDF.</p>` +
     `<table cellpadding="6" style="border-collapse:collapse;border:1px solid #e5d3c3;font-size:14px;width:100%">` +
-    `<thead><tr style="background:${BRAND_HEX};color:white">` +
+    `<thead><tr style="background:${brandHex()};color:white">` +
     `<th align="left">Item</th><th align="right">Qty</th><th align="right">Rate</th><th align="right">Total</th>` +
     `</tr></thead><tbody>` +
     data.items.map(it => `<tr style="border-bottom:1px solid #f0e6d8"><td>${it.ingredient_name}</td><td align="right">${it.qty_ordered} ${it.unit}</td><td align="right">${fmtINR(it.unit_price)}</td><td align="right">${fmtINR(it.line_total)}</td></tr>`).join('') +
@@ -304,7 +304,7 @@ export function buildPOEmailBody(data: POPdfData): { subject: string; text: stri
     `<table cellpadding="4" style="margin-left:auto;margin-top:12px;font-size:14px">` +
     `<tr><td style="color:#6b5d52">Subtotal</td><td align="right">${fmtINR(data.total_amount)}</td></tr>` +
     `<tr><td style="color:#6b5d52">GST</td><td align="right">${fmtINR(data.gst_amount)}</td></tr>` +
-    `<tr><td style="color:${BRAND_HEX};font-weight:bold;font-size:16px">GRAND TOTAL</td><td align="right" style="color:${BRAND_HEX};font-weight:bold;font-size:16px">${fmtINR(data.grand_total)}</td></tr>` +
+    `<tr><td style="color:${brandHex()};font-weight:bold;font-size:16px">GRAND TOTAL</td><td align="right" style="color:${brandHex()};font-weight:bold;font-size:16px">${fmtINR(data.grand_total)}</td></tr>` +
     `</table>` +
     (data.expected_delivery_date ? `<p>Expected delivery: <strong>${data.expected_delivery_date}</strong></p>` : '') +
     `<p>Please confirm receipt and expected delivery date.</p>` +
