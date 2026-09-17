@@ -589,4 +589,13 @@ export const hi: Record<string, string> = {
   // ── Paid modules: Accounts, People ──
   'modules.accountsLocked': 'अकाउंट्स आपके प्लान में नहीं है। बहीखाते, रिपोर्ट और GST चालू करने के लिए Atithi-Setu से संपर्क करें।',
   'modules.peopleLocked': 'पीपल आपके प्लान में नहीं है। उपस्थिति, रोस्टर, टाइमशीट और पेरोल चालू करने के लिए Atithi-Setu से संपर्क करें।',
+  // ── Spa appointment actions ──
+  'actions.confirm': 'पुष्टि करें',
+  'actions.checkIn': 'चेक-इन',
+  'actions.startTreatment': 'उपचार शुरू करें',
+  'actions.finish': 'पूरा करें',
+  'actions.checkout': 'चेकआउट और इनवॉइस',
+  'actions.noShow': 'नहीं आए चिह्नित करें',
+  'actions.treatmentRecord': 'उपचार रिकॉर्ड',
+  'actions.cancelAppointment': 'अपॉइंटमेंट रद्द करें',
 };

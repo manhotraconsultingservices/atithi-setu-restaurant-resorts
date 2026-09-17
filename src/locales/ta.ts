@@ -486,4 +486,13 @@ export const ta: Record<string, string> = {
   // ── Paid modules: Accounts, People ──
   'modules.accountsLocked': 'கணக்குகள் உங்கள் திட்டத்தில் இல்லை. கணக்கேடுகள், அறிக்கைகள், GST இயக்க Atithi-Setu-வை தொடர்பு கொள்ளவும்.',
   'modules.peopleLocked': 'பணியாளர் பிரிவு உங்கள் திட்டத்தில் இல்லை. வருகை, பணி அட்டவணை, நேரத்தாள், ஊதியம் இயக்க Atithi-Setu-வை தொடர்பு கொள்ளவும்.',
+  // ── Spa appointment actions ──
+  'actions.confirm': 'உறுதிசெய்',
+  'actions.checkIn': 'செக்-இன்',
+  'actions.startTreatment': 'சிகிச்சையைத் தொடங்கு',
+  'actions.finish': 'முடி',
+  'actions.checkout': 'செக்அவுட் மற்றும் விலைப்பட்டியல்',
+  'actions.noShow': 'வரவில்லை எனக் குறி',
+  'actions.treatmentRecord': 'சிகிச்சைப் பதிவு',
+  'actions.cancelAppointment': 'சந்திப்பை ரத்து செய்',
 };

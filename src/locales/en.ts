@@ -553,4 +553,13 @@ export const en: Record<string, string> = {
   // ── Paid modules: Accounts, People ──
   'modules.accountsLocked': 'Accounts is not on your plan. Contact Atithi-Setu to enable books, reports and GST.',
   'modules.peopleLocked': 'People is not on your plan. Contact Atithi-Setu to enable attendance, roster, timesheet and payroll.',
+  // ── Spa appointment actions ──
+  'actions.confirm': 'Confirm',
+  'actions.checkIn': 'Check in',
+  'actions.startTreatment': 'Start treatment',
+  'actions.finish': 'Finish',
+  'actions.checkout': 'Checkout and invoice',
+  'actions.noShow': 'Mark no-show',
+  'actions.treatmentRecord': 'Treatment record',
+  'actions.cancelAppointment': 'Cancel appointment',
 };

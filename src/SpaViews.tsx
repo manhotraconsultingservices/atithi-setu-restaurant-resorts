@@ -10,6 +10,7 @@ import { ObjectDetail, buildObjectResolver } from './components/ObjectDetail';
 import {
   Calendar, Clock, Plus, Trash2, Check, X, User, Package, Award,
   TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText, History, Link2, Send, Ban, BadgePercent,
+  CalendarCheck, LogIn, Play, UserX, ClipboardList,
 } from 'lucide-react';
 // RBAC — shared frontend gates (View=1, Edit=2, Full=3) reading the tab_perms
 // map App.tsx mirrors into localStorage. These detached Spa views hide write
@@ -1595,6 +1596,7 @@ function SpaResources({ restaurantId, token }: Props) {
 // APPOINTMENTS + CALENDAR + booking + checkout
 // ════════════════════════════════════════════════════════════════════════
 function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?: boolean }) {
+  const { t } = useT();
   const api = makeApi(restaurantId, token);
   const toast = useToast();
   const confirmDlg = useConfirm();
@@ -1961,24 +1963,40 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
               { key: 'therapist_name', label: 'Therapist', render: (r: any) => (r.assistant_names?.length ? `${r.therapist_name || '—'} + ${r.assistant_names.join(', ')}` : (r.therapist_name || '—')), exportValue: (r: any) => [r.therapist_name, ...(r.assistant_names || [])].filter(Boolean).join(' + ') },
               { key: 'resource_name', label: 'Cabin' },
               { key: 'status', label: 'Status', render: (r: any) => <Pill status={r.status} /> },
-              { key: '_a', label: 'Actions', noExport: true, render: (r: any) => (
-                <div className="flex gap-1 flex-wrap">
-                  {canEdit && r.status === 'BOOKED' && <button className={BTN_GHOST} onClick={() => transition(r, 'confirm')}>Confirm</button>}
-                  {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'check-in')}>Check-in</button>}
-                  {/* A treatment starts only once the guest has checked in, and completes only after that. */}
-                  {canEdit && r.status === 'CHECKED_IN' && <button className={BTN_GHOST} onClick={() => transition(r, 'start')}>Start</button>}
-                  {canEdit && ['CHECKED_IN', 'IN_PROGRESS'].includes(r.status) && <button className={BTN_GHOST} onClick={() => setFinishAppt(r)}><Check size={12} /> Finish</button>}
-                  {canEdit && ['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} title="The guest did not arrive" onClick={() => transition(r, 'no-show')}>No-show</button>}
-                  {canEdit && r.status === 'COMPLETED' && !r.folio_id && !r.room_folio_id && <button className={BTN_PRIMARY} onClick={() => openCheckout(r)}>Checkout</button>}
-                  {r.shift_note && <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200" title={r.shift_note}>To be confirmed</span>}
-                  {r.room_folio_id && <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200" title="On the room bill, paid at hotel check-out">Charged to room {r.room_number || ''}</span>}
-                  {!r.room_folio_id && r.room_booking_id && r.room_number && <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-sky-50 text-sky-700" title="Staying with us">Room {r.room_number}</span>}
-                  {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { toast.error(err.message); } }}><FileText size={12} /> Invoice</button>}
-                  {r.status === 'COMPLETED' && <button className={BTN_GHOST} title="What happened in this treatment" onClick={() => setSessionAppt(r)}>Record</button>}
-                  {canEdit && ['BOOKED', 'CONFIRMED', 'CHECKED_IN'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} title="Cancel appointment" onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
-                  <button className={BTN_GHOST} title="Audit log — who changed this appointment" onClick={() => setHistory({ id: r.id, meta: { title: r.service_name || r.id, subtitle: [r.status, r.client_name].filter(Boolean).join(' · '), facts: [['Service', r.service_name], ['Status', r.status], ['Client', r.client_name], ['Time', `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}`], ['Therapist', r.therapist_name], ['Cabin', r.resource_name]] } })}><History size={12} /></button>
-                </div>
-              ) },
+              { key: '_a', label: t('common.actions'), noExport: true, render: (r: any) => {
+                const st = String(r.status || '');
+                const downloadInvoice = async () => {
+                  try {
+                    const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } });
+                    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); }
+                    const blob = await res.blob(); const url = URL.createObjectURL(blob); const el = document.createElement('a');
+                    el.href = url; el.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(el); el.click();
+                    setTimeout(() => { URL.revokeObjectURL(url); el.remove(); }, 1000);
+                  } catch (err: any) { toast.error(err.message); }
+                };
+                return (
+                  <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                    {r.shift_note && <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200" title={r.shift_note}>To be confirmed</span>}
+                    {r.room_folio_id && <span className="px-2 py-1 rounded-lg text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200" title="On the room bill, paid at hotel check-out">Charged to room {r.room_number || ''}</span>}
+                    {!r.room_folio_id && r.room_booking_id && r.room_number && <span className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-sky-50 text-sky-700" title="Staying with us">Room {r.room_number}</span>}
+                    <RowActions moreLabel={t('actions.more')} actions={[
+                      // The next step for this appointment, inline. A treatment starts only once
+                      // the guest has checked in, and completes only after that.
+                      { key: 'confirm', label: t('actions.confirm'), icon: CalendarCheck, inline: true, hidden: !canEdit || st !== 'BOOKED', onClick: () => transition(r, 'confirm') },
+                      { key: 'checkin', label: t('actions.checkIn'), icon: LogIn, inline: true, tone: 'success', hidden: !canEdit || !['BOOKED', 'CONFIRMED'].includes(st), onClick: () => transition(r, 'check-in') },
+                      { key: 'start', label: t('actions.startTreatment'), icon: Play, inline: true, tone: 'primary', hidden: !canEdit || st !== 'CHECKED_IN', onClick: () => transition(r, 'start') },
+                      { key: 'finish', label: t('actions.finish'), icon: Check, inline: true, tone: 'success', hidden: !canEdit || !['CHECKED_IN', 'IN_PROGRESS'].includes(st), onClick: () => setFinishAppt(r) },
+                      { key: 'checkout', label: t('actions.checkout'), icon: IndianRupee, inline: true, tone: 'primary', hidden: !canEdit || st !== 'COMPLETED' || !!r.folio_id || !!r.room_folio_id, onClick: () => openCheckout(r) },
+                      { key: 'invoice', label: t('actions.invoicePdf'), icon: FileText, inline: true, hidden: !r.folio_id, onClick: downloadInvoice },
+                      // The rest in the "…" menu.
+                      { key: 'noshow', label: t('actions.noShow'), icon: UserX, hidden: !canEdit || !['BOOKED', 'CONFIRMED'].includes(st), onClick: () => transition(r, 'no-show') },
+                      { key: 'record', label: t('actions.treatmentRecord'), icon: ClipboardList, hidden: st !== 'COMPLETED', onClick: () => setSessionAppt(r) },
+                      { key: 'history', label: t('actions.history'), icon: History, onClick: () => setHistory({ id: r.id, meta: { title: r.service_name || r.id, subtitle: [r.status, r.client_name].filter(Boolean).join(' · '), facts: [['Service', r.service_name], ['Status', r.status], ['Client', r.client_name], ['Time', `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}`], ['Therapist', r.therapist_name], ['Cabin', r.resource_name]] } }) },
+                      { key: 'cancel', label: t('actions.cancelAppointment'), icon: Ban, tone: 'danger', hidden: !canEdit || !['BOOKED', 'CONFIRMED', 'CHECKED_IN'].includes(st), onClick: () => transition(r, 'cancel') },
+                    ]} />
+                  </div>
+                );
+              } },
             ]}
           />
         </div>

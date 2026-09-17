@@ -488,4 +488,13 @@ export const kn: Record<string, string> = {
   // ── Paid modules: Accounts, People ──
   'modules.accountsLocked': 'ಖಾತೆಗಳು ನಿಮ್ಮ ಯೋಜನೆಯಲ್ಲಿ ಇಲ್ಲ. ಪುಸ್ತಕಗಳು, ವರದಿಗಳು ಮತ್ತು GST ಗಾಗಿ Atithi-Setu ಸಂಪರ್ಕಿಸಿ.',
   'modules.peopleLocked': 'ಸಿಬ್ಬಂದಿ ವಿಭಾಗ ನಿಮ್ಮ ಯೋಜನೆಯಲ್ಲಿ ಇಲ್ಲ. ಹಾಜರಾತಿ, ರೋಸ್ಟರ್, ಟೈಮ್‌ಶೀಟ್ ಮತ್ತು ವೇತನಕ್ಕಾಗಿ Atithi-Setu ಸಂಪರ್ಕಿಸಿ.',
+  // ── Spa appointment actions ──
+  'actions.confirm': 'ದೃಢೀಕರಿಸಿ',
+  'actions.checkIn': 'ಚೆಕ್-ಇನ್',
+  'actions.startTreatment': 'ಚಿಕಿತ್ಸೆ ಪ್ರಾರಂಭಿಸಿ',
+  'actions.finish': 'ಮುಗಿಸಿ',
+  'actions.checkout': 'ಚೆಕ್‌ಔಟ್ ಮತ್ತು ಇನ್‌ವಾಯ್ಸ್',
+  'actions.noShow': 'ಬರಲಿಲ್ಲ ಎಂದು ಗುರುತಿಸಿ',
+  'actions.treatmentRecord': 'ಚಿಕಿತ್ಸಾ ದಾಖಲೆ',
+  'actions.cancelAppointment': 'ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್ ರದ್ದುಮಾಡಿ',
 };

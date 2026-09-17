@@ -550,4 +550,13 @@ export const pa: Record<string, string> = {
   // ── Paid modules: Accounts, People ──
   'modules.accountsLocked': 'ਖਾਤੇ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹਨ। ਬਹੀ-ਖਾਤੇ, ਰਿਪੋਰਟਾਂ ਅਤੇ GST ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
   'modules.peopleLocked': 'ਸਟਾਫ਼ ਵਿਭਾਗ ਤੁਹਾਡੇ ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ ਹੈ। ਹਾਜ਼ਰੀ, ਰੋਸਟਰ, ਟਾਈਮਸ਼ੀਟ ਅਤੇ ਤਨਖਾਹ ਲਈ Atithi-Setu ਨਾਲ ਸੰਪਰਕ ਕਰੋ।',
+  // ── Spa appointment actions ──
+  'actions.confirm': 'ਪੁਸ਼ਟੀ ਕਰੋ',
+  'actions.checkIn': 'ਚੈੱਕ-ਇਨ',
+  'actions.startTreatment': 'ਇਲਾਜ ਸ਼ੁਰੂ ਕਰੋ',
+  'actions.finish': 'ਪੂਰਾ ਕਰੋ',
+  'actions.checkout': 'ਚੈੱਕਆਊਟ ਅਤੇ ਇਨਵੌਇਸ',
+  'actions.noShow': 'ਨਹੀਂ ਆਏ ਨਿਸ਼ਾਨ ਲਗਾਓ',
+  'actions.treatmentRecord': 'ਇਲਾਜ ਰਿਕਾਰਡ',
+  'actions.cancelAppointment': 'ਅਪੌਇੰਟਮੈਂਟ ਰੱਦ ਕਰੋ',
 };
