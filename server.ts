@@ -8945,6 +8945,265 @@ async function ensureNotifDeliveries(db: any, rid: string) {
 // never abort the others) and the outcome logged.
 
 
+// ══ Messaging workspace (team inbox, broadcasts, automations) ════════════════
+// The Notifications screen works like a WhatsApp business console (WATI,
+// Gupshup): a shared inbox with replies inside the 24-hour window, template
+// broadcasts to audiences taken from the property's own records, and automatic
+// replies. Everything is filed in notification_deliveries, the same log every
+// other message uses, so analytics and delivery receipts need nothing new.
+//
+// A conversation is keyed by the last 10 digits of the phone number: the same
+// guest is stored as "+9198…", "9198…" and "98…" by different writers, and a
+// raw-string key split one person into several threads.
+const _mwReady = new Set<string>();
+async function ensureMessagingWorkspace(db: any, rid: string): Promise<void> {
+  if (_mwReady.has(rid)) return;
+  await ensureNotifDeliveries(db, rid);
+  await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS broadcast_id TEXT`).catch(() => {});
+  await db.exec(`CREATE TABLE IF NOT EXISTS wa_conversations (
+    contact TEXT PRIMARY KEY, status TEXT DEFAULT 'OPEN', assigned_to TEXT, assigned_name TEXT,
+    unread INT DEFAULT 0, tags TEXT, notes TEXT, last_inbound_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  await db.exec(`CREATE TABLE IF NOT EXISTS quick_replies (
+    id TEXT PRIMARY KEY, shortcut TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  await db.exec(`CREATE TABLE IF NOT EXISTS wa_broadcasts (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, template_name TEXT NOT NULL, template_language TEXT DEFAULT 'en',
+    category TEXT DEFAULT 'MARKETING', variables TEXT, audience TEXT,
+    total INT DEFAULT 0, sent INT DEFAULT 0, failed INT DEFAULT 0, skipped INT DEFAULT 0,
+    status TEXT DEFAULT 'SCHEDULED', scheduled_at TIMESTAMP, started_at TIMESTAMP, finished_at TIMESTAMP,
+    last_error TEXT, created_by TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  await db.exec(`CREATE TABLE IF NOT EXISTS wa_broadcast_recipients (
+    broadcast_id TEXT NOT NULL, contact TEXT NOT NULL, phone TEXT, name TEXT, status TEXT DEFAULT 'PENDING',
+    error TEXT, sent_at TIMESTAMP, PRIMARY KEY (broadcast_id, contact))`).catch(() => {});
+  await db.exec(`CREATE TABLE IF NOT EXISTS wa_automations (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, keywords TEXT, match_mode TEXT DEFAULT 'CONTAINS',
+    reply_text TEXT NOT NULL, is_active INT DEFAULT 1, hours_start TEXT, hours_end TEXT, days TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  await db.exec(`CREATE TABLE IF NOT EXISTS wa_automation_log (
+    contact TEXT NOT NULL, kind TEXT NOT NULL, sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_automation_log ON wa_automation_log(contact, kind, sent_at DESC)`).catch(() => {});
+  await centralDb.exec(`CREATE TABLE IF NOT EXISTS wa_broadcast_index (
+    broadcast_id TEXT PRIMARY KEY, restaurant_id TEXT NOT NULL, scheduled_at TIMESTAMP, status TEXT)`).catch(() => {});
+  _mwReady.add(rid);
+}
+
+// The SQL form of _contactKey, for grouping and matching stored recipients.
+const MW_KEY_SQL = "right(regexp_replace(COALESCE(recipient, ''), '[^0-9]', '', 'g'), 10)";
+
+// Send one WhatsApp message (free text inside the window, or an approved
+// template) through the same logger as every other message, tagged so replies
+// route back to this property and receipts find the row.
+async function mwSendWhatsApp(db: any, rid: string, opts: {
+  phone: string; name?: string | null; event: string; text?: string;
+  template?: { name: string; language: string; category: string; variables: string[] } | null;
+  broadcastId?: string | null;
+}): Promise<boolean> {
+  _logAndSendTenant = rid;
+  _logAndSendName = opts.name || null;
+  _logAndSendBroadcast = opts.broadcastId || null;
+  if (opts.template) {
+    _logAndSendCategory = opts.template.category;
+    _logAndSendTemplate = opts.template.name;
+  } else {
+    _logAndSendCategory = 'SERVICE';
+    _logAndSendTemplate = null;
+  }
+  try {
+    const tpl = opts.template;
+    // The sender number is shared by every property, so free text says who is writing.
+    let text = String(opts.text || '');
+    if (!tpl) {
+      const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [rid]).catch(() => null);
+      const pn = String(prop?.name || '');
+      if (pn && !text.includes(pn)) text = `${pn}
+${text}`;
+    }
+    const preview = tpl ? `${tpl.name}(${tpl.variables.slice(1).join(' | ')})` : text;
+    return await logAndSend(db, opts.event, 'WHATSAPP', opts.phone, preview,
+      () => tpl
+        ? sendWhatsAppDetailed(opts.phone, tpl.name, { name: tpl.name, languageCode: tpl.language, variables: tpl.variables })
+        : sendWhatsAppDetailed(opts.phone, text, null),
+      'GUEST');
+  } finally {
+    _logAndSendCategory = null; _logAndSendTemplate = null; _logAndSendName = null; _logAndSendBroadcast = null;
+  }
+}
+
+// Who a broadcast goes to, from the property's own records. Each source is
+// optional — a restaurant-only tenant has no bookings table — so every query
+// falls back to an empty list rather than failing the whole audience.
+async function mwResolveAudience(db: any, audience: any): Promise<{ phone: string; name: string }[]> {
+  const src = String(audience?.source || '').toUpperCase();
+  const days = Math.min(Math.max(Number(audience?.days) || 30, 1), 730);
+  const today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+  const shift = (n: number) => new Date(Date.parse(today + 'T00:00:00Z') + n * 86400e3).toISOString().slice(0, 10);
+  let rows: any[] = [];
+  const q = (sql: string, p: any[] = []) => db.query(sql, p).catch(() => []);
+  if (src === 'ARRIVALS') {
+    rows = await q(`SELECT guest_phone AS phone, guest_name AS name FROM room_bookings
+      WHERE UPPER(COALESCE(status,'')) = 'BOOKED' AND check_in_date >= ? AND check_in_date <= ?`, [today, shift(days)]);
+  } else if (src === 'IN_HOUSE') {
+    rows = await q(`SELECT guest_phone AS phone, guest_name AS name FROM room_bookings WHERE UPPER(COALESCE(status,'')) = 'CHECKED_IN'`);
+  } else if (src === 'PAST_STAYS') {
+    rows = await q(`SELECT guest_phone AS phone, guest_name AS name FROM room_bookings
+      WHERE UPPER(COALESCE(status,'')) = 'CHECKED_OUT' AND check_out_date >= ?`, [shift(-days)]);
+  } else if (src === 'DINERS') {
+    const tier = String(audience?.tier_id || '').trim();
+    rows = await q(`SELECT phone, name FROM loyalty_customers WHERE COALESCE(is_blocked, 0) = 0
+      AND last_order_at >= (CURRENT_TIMESTAMP - INTERVAL '${days} days')${tier ? ' AND current_tier_id = ?' : ''}`, tier ? [tier] : []);
+  } else if (src === 'SPA_CLIENTS') {
+    rows = await q(`SELECT phone, name FROM spa_clients WHERE COALESCE(phone, '') <> ''`);
+  } else if (src === 'EVENT_CUSTOMERS') {
+    rows = await q(`SELECT customer_phone AS phone, customer_name AS name FROM event_bookings
+      WHERE UPPER(COALESCE(status,'')) <> 'CANCELLED' AND created_at >= (CURRENT_TIMESTAMP - INTERVAL '${days} days')`);
+  } else if (src === 'MANUAL') {
+    rows = (Array.isArray(audience?.contacts) ? audience.contacts : []).map((c: any) => ({ phone: c?.phone, name: c?.name }));
+  }
+  const seen = new Set<string>();
+  const out: { phone: string; name: string }[] = [];
+  for (const r of rows) {
+    const phone = String(r?.phone || '').trim();
+    const key = _contactKey(phone);
+    if (key.length < 10 || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ phone, name: String(r?.name || '').trim() });
+    if (out.length >= 5000) break;
+  }
+  return out;
+}
+
+// A template variable may say {name}: filled per recipient.
+function mwFillVars(vars: string[], name: string): string[] {
+  return vars.map(v => String(v ?? '').replace(/\{name\}/gi, name || 'Guest'));
+}
+
+// ── Broadcast sender: due broadcasts across tenants, a batch per tick ───────
+const _mwBroadcastBusy = new Set<string>();
+async function mwRunBroadcasts(): Promise<void> {
+  const due: any[] = await centralDb.query(
+    "SELECT broadcast_id, restaurant_id FROM wa_broadcast_index WHERE status IN ('SCHEDULED','SENDING') AND scheduled_at <= CURRENT_TIMESTAMP ORDER BY scheduled_at LIMIT 20"
+  ).catch(() => []);
+  for (const d of due) {
+    if (_mwBroadcastBusy.has(d.broadcast_id)) continue;
+    _mwBroadcastBusy.add(d.broadcast_id);
+    try {
+      const db = await getTenantDb(d.restaurant_id);
+      await ensureMessagingWorkspace(db, d.restaurant_id);
+      const b: any = await db.get("SELECT * FROM wa_broadcasts WHERE id = ?", [d.broadcast_id]);
+      if (!b || !['SCHEDULED', 'SENDING'].includes(String(b.status))) {
+        await centralDb.run("UPDATE wa_broadcast_index SET status = ? WHERE broadcast_id = ?", [b?.status || 'CANCELLED', d.broadcast_id]).catch(() => {});
+        continue;
+      }
+      const mods = await tenantModules(d.restaurant_id);
+      if (!mods.whatsapp) {
+        await db.run("UPDATE wa_broadcasts SET status = 'FAILED', last_error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?", [MODULE_OFF_WHATSAPP, b.id]);
+        await centralDb.run("UPDATE wa_broadcast_index SET status = 'FAILED' WHERE broadcast_id = ?", [b.id]).catch(() => {});
+        continue;
+      }
+      if (b.status === 'SCHEDULED') {
+        await db.run("UPDATE wa_broadcasts SET status = 'SENDING', started_at = COALESCE(started_at, CURRENT_TIMESTAMP) WHERE id = ?", [b.id]);
+        await centralDb.run("UPDATE wa_broadcast_index SET status = 'SENDING' WHERE broadcast_id = ?", [b.id]).catch(() => {});
+      }
+      const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [d.restaurant_id]).catch(() => null);
+      let vars: string[] = [];
+      try { vars = JSON.parse(b.variables || '[]'); } catch { vars = []; }
+      const batch: any[] = await db.query("SELECT * FROM wa_broadcast_recipients WHERE broadcast_id = ? AND status = 'PENDING' LIMIT 40", [b.id]);
+      for (const r of batch) {
+        const fresh: any = await db.get("SELECT status FROM wa_broadcasts WHERE id = ?", [b.id]);
+        if (fresh?.status !== 'SENDING') break;   // cancelled mid-run
+        const consent = await _waConsent(r.phone || r.contact, 'WHATSAPP');
+        if (consent.blocked) {
+          await db.run("UPDATE wa_broadcast_recipients SET status = 'SKIPPED', error = 'Opted out' WHERE broadcast_id = ? AND contact = ?", [b.id, r.contact]);
+          continue;
+        }
+        const ok = await mwSendWhatsApp(db, d.restaurant_id, {
+          phone: r.phone || r.contact, name: r.name, event: 'BROADCAST', broadcastId: b.id,
+          template: { name: b.template_name, language: b.template_language || 'en', category: b.category || 'MARKETING', variables: [prop?.name || 'Atithi-Setu', ...mwFillVars(vars, r.name || '')] },
+        });
+        await db.run("UPDATE wa_broadcast_recipients SET status = ?, sent_at = CURRENT_TIMESTAMP WHERE broadcast_id = ? AND contact = ?", [ok ? 'SENT' : 'FAILED', b.id, r.contact]);
+        await new Promise(res => setTimeout(res, 120));   // gentle pace for the shared sender
+      }
+      const c: any = await db.get(
+        `SELECT COUNT(*) FILTER (WHERE status = 'SENT')::int AS sent, COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed,
+                COUNT(*) FILTER (WHERE status = 'SKIPPED')::int AS skipped, COUNT(*) FILTER (WHERE status = 'PENDING')::int AS pending
+           FROM wa_broadcast_recipients WHERE broadcast_id = ?`, [b.id]);
+      const done = Number(c?.pending || 0) === 0;
+      const now: any = await db.get("SELECT status FROM wa_broadcasts WHERE id = ?", [b.id]);
+      const finalStatus = now?.status === 'CANCELLED' ? 'CANCELLED' : done ? 'SENT' : 'SENDING';
+      await db.run(
+        `UPDATE wa_broadcasts SET sent = ?, failed = ?, skipped = ?, status = ?, finished_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE finished_at END WHERE id = ?`,
+        [Number(c?.sent || 0), Number(c?.failed || 0), Number(c?.skipped || 0), finalStatus, finalStatus !== 'SENDING', b.id]);
+      await centralDb.run("UPDATE wa_broadcast_index SET status = ? WHERE broadcast_id = ?", [finalStatus, b.id]).catch(() => {});
+    } catch (err: any) {
+      console.error(`[broadcasts] ${d.broadcast_id} tick failed:`, err?.message || err);
+    } finally {
+      _mwBroadcastBusy.delete(d.broadcast_id);
+    }
+  }
+}
+
+// ── Automatic replies to an incoming WhatsApp message ───────────────────────
+// Keyword replies first; a welcome for a contact's very first message; an
+// away message outside the business hours (India time), at most once in 12
+// hours. Replies are free text: the incoming message has just opened the window.
+async function mwAfterInbound(rid: string, from: string, rawText: string): Promise<void> {
+  try {
+    const mods = await tenantModules(rid);
+    if (!mods.whatsapp) return;
+    const db = await getTenantDb(rid);
+    await ensureMessagingWorkspace(db, rid);
+    const key = _contactKey(from);
+    await db.run(
+      `INSERT INTO wa_conversations (contact, status, unread, last_inbound_at, updated_at) VALUES (?, 'OPEN', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT (contact) DO UPDATE SET unread = wa_conversations.unread + 1, status = 'OPEN', last_inbound_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP`,
+      [key]).catch(() => {});
+    const text = String(rawText || '').trim();
+    if (/^(STOP|UNSUBSCRIBE|OPTOUT|OPT OUT|START|SUBSCRIBE|UNSTOP|OPTIN|OPT IN)\b/i.test(text)) return;
+    const rules: any[] = await db.query("SELECT * FROM wa_automations WHERE is_active = 1").catch(() => []);
+    if (!rules.length) return;
+    const nameRow: any = await db.get(
+      `SELECT contact_name FROM notification_deliveries WHERE ${MW_KEY_SQL} = ? AND COALESCE(contact_name, '') <> '' ORDER BY created_at DESC LIMIT 1`, [key]).catch(() => null);
+    const name = nameRow?.contact_name || null;
+    const send = async (kind: string, reply: string) => {
+      await mwSendWhatsApp(db, rid, { phone: from, name, event: 'AUTO_REPLY', text: reply });
+      await db.run("INSERT INTO wa_automation_log (contact, kind) VALUES (?, ?)", [key, kind]).catch(() => {});
+    };
+    const lower = text.toLowerCase();
+    for (const r of rules.filter(x => x.kind === 'KEYWORD')) {
+      const words = String(r.keywords || '').split(',').map((w: string) => w.trim().toLowerCase()).filter(Boolean);
+      const hit = words.some((w: string) => r.match_mode === 'EXACT'
+        ? lower === w
+        : new RegExp(`(^|\\W)${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\W|$)`, 'i').test(lower));
+      if (hit) { await send('KEYWORD', r.reply_text); return; }
+    }
+    const welcome = rules.find(x => x.kind === 'WELCOME');
+    if (welcome) {
+      const prior: any = await db.get(
+        `SELECT COUNT(*)::int AS n FROM notification_deliveries WHERE ${MW_KEY_SQL} = ? AND COALESCE(direction, 'OUT') = 'IN'`, [key]).catch(() => null);
+      const sentBefore: any = await db.get("SELECT 1 FROM wa_automation_log WHERE contact = ? AND kind = 'WELCOME' LIMIT 1", [key]).catch(() => null);
+      if (Number(prior?.n || 0) <= 1 && !sentBefore) { await send('WELCOME', welcome.reply_text); return; }
+    }
+    const away = rules.find(x => x.kind === 'AWAY');
+    if (away && away.hours_start && away.hours_end) {
+      const ist = new Date(Date.now() + 5.5 * 3600e3);
+      const hm = ist.toISOString().slice(11, 16);
+      const dow = String(ist.getUTCDay());
+      const days = String(away.days || '0,1,2,3,4,5,6').split(',').map((s: string) => s.trim());
+      const open = days.includes(dow) && (away.hours_start <= away.hours_end
+        ? hm >= away.hours_start && hm < away.hours_end
+        : hm >= away.hours_start || hm < away.hours_end);
+      if (!open) {
+        const recent: any = await db.get(
+          "SELECT 1 FROM wa_automation_log WHERE contact = ? AND kind = 'AWAY' AND sent_at > (CURRENT_TIMESTAMP - INTERVAL '12 hours') LIMIT 1", [key]).catch(() => null);
+        if (!recent) await send('AWAY', away.reply_text);
+      }
+    }
+  } catch (err: any) {
+    console.error('[automations] inbound handling failed:', err?.message || err);
+  }
+}
+
 // ── WhatsApp: message index, service window and consent ─────────────────────
 // The sender is ONE shared Atithi-Setu number, so Meta's delivery receipts and
 // inbound messages arrive platform-wide with no tenant on them. Three small
@@ -9109,12 +9368,17 @@ let _logAndSendTemplate: string | null = null;
 // the same way as the category so logAndSend can label a log row with a person
 // rather than a bare phone number, without changing 60 call sites.
 let _logAndSendName: string | null = null;
+// The broadcast a message belongs to, so per-campaign delivery stats can be counted.
+let _logAndSendBroadcast: string | null = null;
 async function logAndSend(db: any, eventName: string, channel: string, recipient: string, preview: string, fn: () => Promise<any>, audience?: string) {
   const id = `ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  // broadcast_id is written only for a broadcast send: that path has made sure the
+  // column exists, while an older tenant log may not have it yet.
+  const broadcastId = _logAndSendBroadcast;
   const write = (status: string, error: string | null, code: string | null, providerId: string | null) =>
-    db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, error_code, provider_message_id, audience, preview, template_name, contact_name, direction) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OUT')",
+    db.run(`INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, error_code, provider_message_id, audience, preview, template_name, contact_name, direction${broadcastId ? ', broadcast_id' : ''}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OUT'${broadcastId ? ', ?' : ''})`,
       [id, eventName, channel, recipient || '', status, error, code, providerId, audience || null, String(preview || '').slice(0, 140),
-       _logAndSendTemplate || null, _logAndSendName || null]).catch(() => {});
+       _logAndSendTemplate || null, _logAndSendName || null, ...(broadcastId ? [broadcastId] : [])]).catch(() => {});
   let res: any;
   try {
     res = await fn();
@@ -9640,6 +9904,8 @@ async function startServer() {
   // Platform WhatsApp sender saved in /internal (env META_WA_* until one is saved).
   await loadPlatformWhatsApp().catch((e: any) => console.error('[whatsapp] platform config load failed:', e?.message || e));
   setInterval(() => { loadPlatformWhatsApp().catch(() => {}); }, 5 * 60 * 1000);
+  // WhatsApp broadcasts: send what is due, a batch per tick.
+  setInterval(() => { mwRunBroadcasts().catch((e: any) => console.error('[broadcasts] tick failed:', e?.message || e)); }, 30 * 1000);
   // Background: opening every tenant must not hold up the server start.
   backfillOnlinePaymentsModule().catch((e: any) => console.error('[modules] backfill failed:', e?.message || e));
   // Awaited: a request must never see an existing tenant with these still off.
@@ -12795,6 +13061,416 @@ async function startServer() {
     return ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(r) || await _roleHasTab(req, 'NOTIFICATIONS', 2);
   };
 
+  // ══ Messaging workspace routes: inbox, quick replies, broadcasts, automations ══
+  // Reads need Notifications at View; anything that sends or changes needs Edit
+  // and the WhatsApp paid module.
+  const _notifCanRead = async (req: AuthRequest) => {
+    const r = String(req.user?.role || '').toUpperCase();
+    return ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(r) || await _roleHasTab(req, 'NOTIFICATIONS', 1);
+  };
+  const _mwOpen = async (req: AuthRequest, res: Response, write: boolean): Promise<any | null> => {
+    if (!(await (write ? _notifCanEdit(req) : _notifCanRead(req)))) {
+      res.status(403).json({ error: write ? 'You need Edit access to Notifications.' : 'You do not have access to Notifications.' });
+      return null;
+    }
+    const rid = req.user!.restaurantId;
+    if (write && !(await tenantModules(rid)).whatsapp) {
+      res.status(403).json({ error: MODULE_OFF_WHATSAPP, code: 'MODULE_NOT_ENABLED' });
+      return null;
+    }
+    const db = await getTenantDb(rid);
+    await ensureMessagingWorkspace(db, rid);
+    await ensureWaTables();
+    return db;
+  };
+  const _mwWindow = async (key: string) => {
+    const w: any = await centralDb.get("SELECT last_inbound_at FROM wa_service_window WHERE phone = ?", [key]).catch(() => null);
+    const until = w?.last_inbound_at ? new Date(w.last_inbound_at).getTime() + 24 * 3600e3 : 0;
+    return { window_open: until > Date.now(), window_closes_at: until ? new Date(until).toISOString() : null };
+  };
+  // The number to write back on: prefer the one the guest wrote from (it
+  // carries the country code), else the latest one we sent to.
+  const _mwPhoneFor = async (db: any, key: string): Promise<string> => {
+    const r: any = await db.get(
+      `SELECT recipient FROM notification_deliveries WHERE channel = 'WHATSAPP' AND ${MW_KEY_SQL} = ?
+        ORDER BY (CASE WHEN COALESCE(direction, 'OUT') = 'IN' THEN 0 ELSE 1 END), created_at DESC LIMIT 1`, [key]).catch(() => null);
+    return r?.recipient || key;
+  };
+
+  app.get("/api/owner/inbox/conversations", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, false); if (!db) return;
+      const search = String(req.query.q || '').trim().toLowerCase();
+      const filter = String(req.query.filter || 'ALL').toUpperCase();
+      const rows: any[] = await db.query(
+        `SELECT ${MW_KEY_SQL} AS contact, MAX(recipient) AS phone, MAX(COALESCE(contact_name, '')) AS name,
+                COUNT(*)::int AS messages, MAX(created_at) AS last_at
+           FROM notification_deliveries
+          WHERE channel = 'WHATSAPP' AND COALESCE(recipient, '') <> ''
+          GROUP BY 1
+          ORDER BY last_at DESC LIMIT 300`).catch(() => []);
+      const last: any[] = await db.query(
+        `SELECT DISTINCT ON (${MW_KEY_SQL}) ${MW_KEY_SQL} AS contact, preview, status, direction
+           FROM notification_deliveries WHERE channel = 'WHATSAPP' AND COALESCE(recipient, '') <> ''
+          ORDER BY ${MW_KEY_SQL}, created_at DESC`).catch(() => []);
+      const lastBy = new Map(last.map((l: any) => [l.contact, l]));
+      const state: any[] = await db.query("SELECT * FROM wa_conversations").catch(() => []);
+      const stateBy = new Map(state.map((s: any) => [s.contact, s]));
+      const keys = rows.map(r => r.contact).filter(Boolean);
+      const windows: Record<string, string> = {};
+      if (keys.length) {
+        const wr: any[] = await centralDb.query(`SELECT phone, last_inbound_at FROM wa_service_window WHERE phone IN (${keys.map(() => '?').join(',')})`, keys).catch(() => []);
+        for (const w of wr) windows[String(w.phone)] = w.last_inbound_at;
+      }
+      const me = String(req.user?.id || '');
+      const all = rows.filter(r => String(r.contact || '').length >= 10).map(r => {
+        const s = stateBy.get(r.contact) || {};
+        const l = lastBy.get(r.contact) || {};
+        const until = windows[r.contact] ? new Date(windows[r.contact]).getTime() + 24 * 3600e3 : 0;
+        return {
+          contact: r.contact, phone: r.phone, name: r.name || '', messages: r.messages, last_at: r.last_at,
+          last_preview: l.preview || '', last_direction: l.direction || 'OUT', last_status: l.status || '',
+          status: s.status || 'OPEN', assigned_to: s.assigned_to || null, assigned_name: s.assigned_name || null,
+          unread: Number(s.unread || 0), tags: s.tags || '', notes: s.notes || '',
+          window_open: until > Date.now(), window_closes_at: until ? new Date(until).toISOString() : null,
+        };
+      });
+      const out = all.filter(c => {
+        if (search && !(`${c.name} ${c.phone} ${c.contact} ${c.tags}`.toLowerCase().includes(search))) return false;
+        if (filter === 'OPEN') return c.status === 'OPEN';
+        if (filter === 'RESOLVED') return c.status === 'RESOLVED';
+        if (filter === 'UNASSIGNED') return !c.assigned_to;
+        if (filter === 'MINE') return c.assigned_to === me;
+        if (filter === 'UNREAD') return c.unread > 0;
+        return true;
+      });
+      const counts = {
+        all: all.length, open: all.filter(c => c.status === 'OPEN').length, resolved: all.filter(c => c.status === 'RESOLVED').length,
+        unread: all.filter(c => c.unread > 0).length, mine: all.filter(c => c.assigned_to === me).length, unassigned: all.filter(c => !c.assigned_to).length,
+      };
+      res.json({ conversations: out, counts });
+    } catch (err: any) {
+      console.error('[inbox/conversations] failed:', err);
+      res.status(500).json({ error: 'Could not load conversations.' });
+    }
+  });
+
+  app.get("/api/owner/inbox/conversation", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, false); if (!db) return;
+      const key = _contactKey(String(req.query.contact || ''));
+      if (key.length < 10) return res.status(400).json({ error: 'Which contact?' });
+      const messages = await db.query(
+        `SELECT id, preview, status, error, direction, template_name, event_name, contact_name, created_at
+           FROM notification_deliveries WHERE channel = 'WHATSAPP' AND ${MW_KEY_SQL} = ?
+          ORDER BY created_at ASC LIMIT 500`, [key]).catch(() => []);
+      const s: any = await db.get("SELECT * FROM wa_conversations WHERE contact = ?", [key]).catch(() => null);
+      const consent = await _waConsent(key, 'WHATSAPP');
+      res.json({
+        contact: key, phone: await _mwPhoneFor(db, key),
+        name: (messages as any[]).map(m => m.contact_name).filter(Boolean).pop() || '',
+        status: s?.status || 'OPEN', assigned_to: s?.assigned_to || null, assigned_name: s?.assigned_name || null,
+        tags: s?.tags || '', notes: s?.notes || '', opted_out: consent.blocked,
+        ...(await _mwWindow(key)), messages,
+      });
+    } catch (err: any) {
+      console.error('[inbox/conversation] failed:', err);
+      res.status(500).json({ error: 'Could not load this conversation.' });
+    }
+  });
+
+  // Mark read. Needs only View: reading is not a change to the conversation.
+  app.post("/api/owner/inbox/read", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, false); if (!db) return;
+      const key = _contactKey(String(req.body?.contact || ''));
+      if (key.length < 10) return res.status(400).json({ error: 'Which contact?' });
+      await db.run(`INSERT INTO wa_conversations (contact, unread) VALUES (?, 0) ON CONFLICT (contact) DO UPDATE SET unread = 0`, [key]);
+      res.json({ ok: true });
+    } catch { res.status(500).json({ error: 'Could not update the conversation.' }); }
+  });
+
+  app.patch("/api/owner/inbox/conversation", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications.' });
+      const rid = req.user!.restaurantId;
+      const db = await getTenantDb(rid);
+      await ensureMessagingWorkspace(db, rid);
+      const b = req.body || {};
+      const key = _contactKey(String(b.contact || ''));
+      if (key.length < 10) return res.status(400).json({ error: 'Which contact?' });
+      if (b.status !== undefined && !['OPEN', 'RESOLVED'].includes(String(b.status).toUpperCase())) return res.status(400).json({ error: 'status must be OPEN or RESOLVED.' });
+      const cur: any = await db.get("SELECT * FROM wa_conversations WHERE contact = ?", [key]).catch(() => null);
+      const next = {
+        status: b.status !== undefined ? String(b.status).toUpperCase() : (cur?.status || 'OPEN'),
+        assigned_to: b.assigned_to !== undefined ? (b.assigned_to ? String(b.assigned_to) : null) : (cur?.assigned_to || null),
+        assigned_name: b.assigned_to !== undefined ? (b.assigned_to ? String(b.assigned_name || '').slice(0, 120) : null) : (cur?.assigned_name || null),
+        tags: b.tags !== undefined ? String(b.tags || '').slice(0, 300) : (cur?.tags || ''),
+        notes: b.notes !== undefined ? String(b.notes || '').slice(0, 2000) : (cur?.notes || ''),
+      };
+      await db.run(
+        `INSERT INTO wa_conversations (contact, status, assigned_to, assigned_name, tags, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (contact) DO UPDATE SET status = EXCLUDED.status, assigned_to = EXCLUDED.assigned_to, assigned_name = EXCLUDED.assigned_name,
+           tags = EXCLUDED.tags, notes = EXCLUDED.notes, updated_at = CURRENT_TIMESTAMP`,
+        [key, next.status, next.assigned_to, next.assigned_name, next.tags, next.notes]);
+      res.json({ ok: true, ...next });
+    } catch (err: any) {
+      console.error('[inbox/conversation patch] failed:', err);
+      res.status(500).json({ error: 'Could not update the conversation.' });
+    }
+  });
+
+  // Free-form reply, only while the guest's 24-hour window is open.
+  app.post("/api/owner/inbox/reply", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, true); if (!db) return;
+      const rid = req.user!.restaurantId;
+      const key = _contactKey(String(req.body?.contact || ''));
+      const text = String(req.body?.text || '').trim();
+      if (key.length < 10) return res.status(400).json({ error: 'Which contact?' });
+      if (!text) return res.status(400).json({ error: 'Type a message.' });
+      if (text.length > 4096) return res.status(400).json({ error: 'A WhatsApp message can be at most 4096 characters.' });
+      if ((await _waConsent(key, 'WHATSAPP')).blocked) return res.status(409).json({ error: 'This contact has opted out of WhatsApp.', code: 'OPTED_OUT' });
+      const win = await _mwWindow(key);
+      if (!win.window_open) return res.status(409).json({ error: 'The 24-hour window is closed. Send an approved template instead.', code: 'WINDOW_CLOSED' });
+      const phone = await _mwPhoneFor(db, key);
+      const nameRow: any = await db.get(`SELECT contact_name FROM notification_deliveries WHERE ${MW_KEY_SQL} = ? AND COALESCE(contact_name, '') <> '' ORDER BY created_at DESC LIMIT 1`, [key]).catch(() => null);
+      const ok = await mwSendWhatsApp(db, rid, { phone, name: nameRow?.contact_name || null, event: 'INBOX_REPLY', text });
+      if (!ok) {
+        const f: any = await db.get(`SELECT error FROM notification_deliveries WHERE ${MW_KEY_SQL} = ? AND status = 'FAILED' ORDER BY created_at DESC LIMIT 1`, [key]).catch(() => null);
+        return res.status(502).json({ error: f?.error ? `WhatsApp refused the message: ${f.error}` : 'WhatsApp did not accept the message.' });
+      }
+      await db.run(`INSERT INTO wa_conversations (contact, unread) VALUES (?, 0) ON CONFLICT (contact) DO UPDATE SET unread = 0, updated_at = CURRENT_TIMESTAMP`, [key]).catch(() => {});
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error('[inbox/reply] failed:', err);
+      res.status(500).json({ error: 'Could not send the reply.' });
+    }
+  });
+
+  // An approved template to one contact (the way back in once the window closes).
+  app.post("/api/owner/inbox/template", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, true); if (!db) return;
+      const rid = req.user!.restaurantId;
+      const b = req.body || {};
+      const key = _contactKey(String(b.contact || ''));
+      const name = String(b.template_name || '').trim();
+      if (key.length < 10) return res.status(400).json({ error: 'Which contact?' });
+      if (!name) return res.status(400).json({ error: 'Pick an approved template.' });
+      if ((await _waConsent(key, 'WHATSAPP')).blocked) return res.status(409).json({ error: 'This contact has opted out of WhatsApp.', code: 'OPTED_OUT' });
+      const category = WA_CATEGORIES.includes(String(b.category || '').toUpperCase()) ? String(b.category).toUpperCase() : 'UTILITY';
+      const vars: string[] = Array.isArray(b.variables) ? b.variables.map((v: any) => String(v ?? '')) : [];
+      const prop: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [rid]).catch(() => null);
+      const phone = await _mwPhoneFor(db, key);
+      const ok = await mwSendWhatsApp(db, rid, { phone, event: 'INBOX_TEMPLATE',
+        template: { name, language: String(b.language || 'en'), category, variables: [prop?.name || 'Atithi-Setu', ...vars] } });
+      if (!ok) {
+        const f: any = await db.get(`SELECT error FROM notification_deliveries WHERE ${MW_KEY_SQL} = ? AND status = 'FAILED' ORDER BY created_at DESC LIMIT 1`, [key]).catch(() => null);
+        return res.status(502).json({ error: f?.error ? `WhatsApp refused the message: ${f.error}` : 'WhatsApp did not accept the template.' });
+      }
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error('[inbox/template] failed:', err);
+      res.status(500).json({ error: 'Could not send the template.' });
+    }
+  });
+
+  // ── Quick replies ─────────────────────────────────────────────────────────
+  app.get("/api/owner/inbox/quick-replies", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, false); if (!db) return;
+      res.json({ quick_replies: await db.query("SELECT id, shortcut, body FROM quick_replies ORDER BY shortcut").catch(() => []) });
+    } catch { res.status(500).json({ error: 'Could not load quick replies.' }); }
+  });
+  app.post("/api/owner/inbox/quick-replies", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications.' });
+      const rid = req.user!.restaurantId; const db = await getTenantDb(rid); await ensureMessagingWorkspace(db, rid);
+      const shortcut = String(req.body?.shortcut || '').trim().replace(/^\//, '').slice(0, 40);
+      const body = String(req.body?.body || '').trim().slice(0, 4096);
+      if (!shortcut || !body) return res.status(400).json({ error: 'A shortcut and a message are required.' });
+      const id = String(req.body?.id || '') || `QR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      await db.run(`INSERT INTO quick_replies (id, shortcut, body, created_by) VALUES (?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET shortcut = EXCLUDED.shortcut, body = EXCLUDED.body`, [id, shortcut, body, req.user?.email || null]);
+      res.json({ ok: true, id });
+    } catch { res.status(500).json({ error: 'Could not save the quick reply.' }); }
+  });
+  app.delete("/api/owner/inbox/quick-replies/:qid", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications.' });
+      const rid = req.user!.restaurantId; const db = await getTenantDb(rid); await ensureMessagingWorkspace(db, rid);
+      await db.run("DELETE FROM quick_replies WHERE id = ?", [req.params.qid]);
+      res.json({ ok: true });
+    } catch { res.status(500).json({ error: 'Could not delete the quick reply.' }); }
+  });
+
+  // ── Broadcasts ────────────────────────────────────────────────────────────
+  const BROADCAST_SOURCES = ['ARRIVALS', 'IN_HOUSE', 'PAST_STAYS', 'DINERS', 'SPA_CLIENTS', 'EVENT_CUSTOMERS', 'MANUAL'];
+  const _mwRate = async (category: string) => {
+    const r: any = await centralDb.get("SELECT rate FROM messaging_rates WHERE key = ?", [`WHATSAPP_${category}`]).catch(() => null);
+    const defaults: Record<string, number> = { MARKETING: 0.78, UTILITY: 0.115, AUTHENTICATION: 0.115, SERVICE: 0 };
+    return r?.rate != null ? Number(r.rate) : (defaults[category] ?? 0);
+  };
+
+  app.get("/api/owner/broadcasts", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, false); if (!db) return;
+      const list: any[] = await db.query("SELECT * FROM wa_broadcasts ORDER BY created_at DESC LIMIT 200").catch(() => []);
+      const stats: any[] = await db.query(
+        `SELECT broadcast_id, COUNT(*) FILTER (WHERE status IN ('DELIVERED','READ'))::int AS delivered,
+                COUNT(*) FILTER (WHERE status = 'READ')::int AS read
+           FROM notification_deliveries WHERE COALESCE(broadcast_id, '') <> '' GROUP BY broadcast_id`).catch(() => []);
+      const replies: any[] = await db.query(
+        `SELECT r.broadcast_id, COUNT(DISTINCT r.contact)::int AS replied
+           FROM wa_broadcast_recipients r JOIN wa_broadcasts b ON b.id = r.broadcast_id
+           JOIN notification_deliveries d ON ${MW_KEY_SQL.replace(/recipient/g, 'd.recipient')} = r.contact
+            AND COALESCE(d.direction, 'OUT') = 'IN' AND d.created_at > COALESCE(b.started_at, b.created_at)
+          GROUP BY r.broadcast_id`).catch(() => []);
+      const by = new Map(stats.map((s: any) => [s.broadcast_id, s]));
+      const rby = new Map(replies.map((s: any) => [s.broadcast_id, s]));
+      res.json({ broadcasts: list.map(b => ({ ...b, delivered: by.get(b.id)?.delivered || 0, read: by.get(b.id)?.read || 0, replied: rby.get(b.id)?.replied || 0,
+        variables: (() => { try { return JSON.parse(b.variables || '[]'); } catch { return []; } })(),
+        audience: (() => { try { const a = JSON.parse(b.audience || '{}'); delete a.contacts; return a; } catch { return {}; } })() })) });
+    } catch (err: any) {
+      console.error('[broadcasts] list failed:', err);
+      res.status(500).json({ error: 'Could not load broadcasts.' });
+    }
+  });
+
+  app.post("/api/owner/broadcasts/audience", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, false); if (!db) return;
+      const audience = req.body?.audience || {};
+      if (!BROADCAST_SOURCES.includes(String(audience.source || '').toUpperCase())) return res.status(400).json({ error: 'Choose who to send to.' });
+      const people = await mwResolveAudience(db, audience);
+      let optedOut = 0;
+      for (const p of people) if ((await _waConsent(p.phone, 'WHATSAPP')).blocked) optedOut++;
+      const category = String(req.body?.category || 'MARKETING').toUpperCase();
+      const rate = await _mwRate(category);
+      const reach = people.length - optedOut;
+      res.json({ count: people.length, opted_out: optedOut, reachable: reach, sample: people.slice(0, 5),
+        estimated_cost: Math.round(reach * rate * 100) / 100, rate, currency: 'INR' });
+    } catch (err: any) {
+      console.error('[broadcasts] audience failed:', err);
+      res.status(500).json({ error: 'Could not work out the audience.' });
+    }
+  });
+
+  app.post("/api/owner/broadcasts", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, true); if (!db) return;
+      const rid = req.user!.restaurantId;
+      const b = req.body || {};
+      const name = String(b.name || '').trim().slice(0, 120);
+      const template = String(b.template_name || '').trim();
+      const audience = b.audience || {};
+      if (!name) return res.status(400).json({ error: 'Give the broadcast a name.' });
+      if (!template) return res.status(400).json({ error: 'Pick an approved template.' });
+      if (!BROADCAST_SOURCES.includes(String(audience.source || '').toUpperCase())) return res.status(400).json({ error: 'Choose who to send to.' });
+      const category = WA_CATEGORIES.includes(String(b.category || '').toUpperCase()) ? String(b.category).toUpperCase() : 'MARKETING';
+      const vars: string[] = Array.isArray(b.variables) ? b.variables.map((v: any) => String(v ?? '')) : [];
+      let when = new Date();
+      if (b.scheduled_at) {
+        when = new Date(String(b.scheduled_at));
+        if (isNaN(when.getTime())) return res.status(400).json({ error: 'The schedule time is not valid.' });
+      }
+      const people = await mwResolveAudience(db, audience);
+      if (!people.length) return res.status(400).json({ error: 'Nobody matches this audience.' });
+      const id = `BR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO wa_broadcasts (id, name, template_name, template_language, category, variables, audience, total, status, scheduled_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, ?)`,
+        [id, name, template, String(b.language || 'en'), category, JSON.stringify(vars), JSON.stringify(audience), people.length, when.toISOString(), req.user?.email || null]);
+      for (const p of people) {
+        await db.run("INSERT INTO wa_broadcast_recipients (broadcast_id, contact, phone, name) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+          [id, _contactKey(p.phone), p.phone, p.name || null]);
+      }
+      await centralDb.run("INSERT INTO wa_broadcast_index (broadcast_id, restaurant_id, scheduled_at, status) VALUES (?, ?, ?, 'SCHEDULED')", [id, rid, when.toISOString()]);
+      res.status(201).json({ id, total: people.length, scheduled_at: when.toISOString() });
+      if (when.getTime() <= Date.now() + 1000) mwRunBroadcasts().catch(() => {});
+    } catch (err: any) {
+      console.error('[broadcasts] create failed:', err);
+      res.status(500).json({ error: 'Could not create the broadcast.' });
+    }
+  });
+
+  app.get("/api/owner/broadcasts/:bid", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, false); if (!db) return;
+      const b: any = await db.get("SELECT * FROM wa_broadcasts WHERE id = ?", [req.params.bid]);
+      if (!b) return res.status(404).json({ error: 'Broadcast not found.' });
+      const recipients = await db.query(
+        `SELECT r.contact, r.phone, r.name, r.status AS send_status, r.error, r.sent_at,
+                (SELECT d.status FROM notification_deliveries d WHERE d.broadcast_id = r.broadcast_id AND ${MW_KEY_SQL.replace(/recipient/g, 'd.recipient')} = r.contact ORDER BY d.created_at DESC LIMIT 1) AS delivery_status,
+                (SELECT d.error FROM notification_deliveries d WHERE d.broadcast_id = r.broadcast_id AND ${MW_KEY_SQL.replace(/recipient/g, 'd.recipient')} = r.contact ORDER BY d.created_at DESC LIMIT 1) AS delivery_error
+           FROM wa_broadcast_recipients r WHERE r.broadcast_id = ? ORDER BY r.name LIMIT 1000`, [b.id]).catch(() => []);
+      res.json({ broadcast: b, recipients });
+    } catch { res.status(500).json({ error: 'Could not load the broadcast.' }); }
+  });
+
+  app.post("/api/owner/broadcasts/:bid/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications.' });
+      const rid = req.user!.restaurantId; const db = await getTenantDb(rid); await ensureMessagingWorkspace(db, rid);
+      const r: any = await db.run("UPDATE wa_broadcasts SET status = 'CANCELLED', finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('SCHEDULED','SENDING')", [req.params.bid]);
+      if (!Number(r?.changes || 0)) return res.status(409).json({ error: 'Only a scheduled or sending broadcast can be cancelled.' });
+      await centralDb.run("UPDATE wa_broadcast_index SET status = 'CANCELLED' WHERE broadcast_id = ?", [req.params.bid]).catch(() => {});
+      res.json({ ok: true });
+    } catch { res.status(500).json({ error: 'Could not cancel the broadcast.' }); }
+  });
+
+  // ── Automations ───────────────────────────────────────────────────────────
+  app.get("/api/owner/automations", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await _mwOpen(req, res, false); if (!db) return;
+      res.json({ rules: await db.query("SELECT * FROM wa_automations ORDER BY kind, updated_at").catch(() => []) });
+    } catch { res.status(500).json({ error: 'Could not load automations.' }); }
+  });
+
+  // Replace the whole set: keyword rules plus at most one welcome and one away message.
+  app.put("/api/owner/automations", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!(await _notifCanEdit(req))) return res.status(403).json({ error: 'You need Edit access to Notifications.' });
+      const rid = req.user!.restaurantId; const db = await getTenantDb(rid); await ensureMessagingWorkspace(db, rid);
+      const rules: any[] = Array.isArray(req.body?.rules) ? req.body.rules : [];
+      const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+      const clean: any[] = [];
+      let welcome = 0, away = 0;
+      for (const r of rules) {
+        const kind = String(r?.kind || '').toUpperCase();
+        const reply = String(r?.reply_text || '').trim().slice(0, 4096);
+        if (!['KEYWORD', 'WELCOME', 'AWAY'].includes(kind)) return res.status(400).json({ error: 'kind must be KEYWORD, WELCOME or AWAY.' });
+        if (!reply) return res.status(400).json({ error: 'Every automatic reply needs a message.' });
+        if (kind === 'KEYWORD' && !String(r?.keywords || '').trim()) return res.status(400).json({ error: 'A keyword reply needs at least one keyword.' });
+        if (kind === 'WELCOME' && ++welcome > 1) return res.status(400).json({ error: 'Only one welcome message.' });
+        if (kind === 'AWAY') {
+          if (++away > 1) return res.status(400).json({ error: 'Only one away message.' });
+          if (!hhmm.test(String(r?.hours_start || '')) || !hhmm.test(String(r?.hours_end || ''))) return res.status(400).json({ error: 'Business hours must be HH:MM.' });
+        }
+        clean.push({
+          id: String(r?.id || '') || `AU-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, kind,
+          keywords: kind === 'KEYWORD' ? String(r.keywords).slice(0, 300) : null,
+          match_mode: String(r?.match_mode || 'CONTAINS').toUpperCase() === 'EXACT' ? 'EXACT' : 'CONTAINS',
+          reply_text: reply, is_active: r?.is_active === false || Number(r?.is_active) === 0 ? 0 : 1,
+          hours_start: kind === 'AWAY' ? r.hours_start : null, hours_end: kind === 'AWAY' ? r.hours_end : null,
+          days: kind === 'AWAY' ? String(r?.days || '0,1,2,3,4,5,6').split(',').map((d: string) => d.trim()).filter((d: string) => /^[0-6]$/.test(d)).join(',') : null,
+        });
+      }
+      await db.run("DELETE FROM wa_automations");
+      for (const c of clean) {
+        await db.run(`INSERT INTO wa_automations (id, kind, keywords, match_mode, reply_text, is_active, hours_start, hours_end, days, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [c.id, c.kind, c.keywords, c.match_mode, c.reply_text, c.is_active, c.hours_start, c.hours_end, c.days]);
+      }
+      res.json({ ok: true, rules: clean });
+    } catch (err: any) {
+      console.error('[automations] save failed:', err);
+      res.status(500).json({ error: 'Could not save automations.' });
+    }
+  });
+
+
   // ── Owner: WhatsApp templates, and who has opted out ──────────────────────
   // The sender is one shared Atithi-Setu number, so the approved templates on it
   // are shared too — this lists what Meta has approved so an owner picks a real
@@ -13449,11 +14125,13 @@ async function startServer() {
     // File the reply in the log of whichever property last wrote to this number.
     // A receipt carries no tenant — the sender is shared — so this is the only
     // link back. Without it there is no inbound history and no RECEIVED count.
+    let ownerRid: string | null = null;
     try {
       const owner: any = await centralDb.get(
         "SELECT restaurant_id FROM wa_message_index WHERE recipient = ? ORDER BY created_at DESC LIMIT 1",
         [_contactKey(from)]).catch(() => null);
       if (owner?.restaurant_id) {
+        ownerRid = owner.restaurant_id;
         const tdb = await getTenantDb(owner.restaurant_id);
         await ensureNotifDeliveries(tdb, owner.restaurant_id);
         await tdb.run(
@@ -13473,6 +14151,8 @@ async function startServer() {
       await _recordOptIn(from, 'WHATSAPP');
       console.log(`[Meta Webhook] ${from} opted back in to WhatsApp`);
     }
+    // Team inbox state and automatic replies (keyword, welcome, away).
+    if (ownerRid) await mwAfterInbound(ownerRid, from, String(msg?.text?.body || msg?.button?.text || ''));
   };
 
   app.post("/api/webhooks/whatsapp", (req: Request, res: Response) => {
@@ -65724,8 +66404,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'list-date-filter-status-tiles',
+    commit_marker: 'notifications-workspace-inbox-broadcasts',
     code_features: [
+      'notifications-workspace-inbox-broadcasts  UI + API (owner: WATI/Gupshup-style Notifications, tidy, little scrolling). src/NotificationsWorkspace.tsx replaces the old Notifications page: Inbox (conversations keyed by the last 10 digits, open/resolved, assignee, tags, notes, unread, quick replies with /shortcut; free text only inside the 24h window else 409 WINDOW_CLOSED and an approved template), Broadcasts (approved template to arrivals, in-house, past stays, diners, wellness clients, event customers or pasted/CSV contacts; {name} per recipient; schedule; opt-outs skipped; delivered/read/replied per campaign via notification_deliveries.broadcast_id; worker mwRunBroadcasts every 30s via central wa_broadcast_index), Automations (auto-saving event matrix plus keyword, welcome and away replies run from the inbound webhook), Templates (Meta templates read only; email/SMS wording unchanged), Analytics, Settings (mail server, smart alerts, opt-outs). Meta templates untouched. Writes need Notifications Edit and the WhatsApp module.',
       'list-date-filter-status-tiles  UI (owner request): Restaurant Invoices, PMS Guest Bills, Events bookings and Wellness invoices share src/components/ListFilters.tsx: a date filter that opens on Today (Yesterday, Last 7 days, This month, All, Custom) and number tiles that filter the list when clicked (click again for all). Invoices by invoice date; Guest Bills by stay overlap (in house on the dates); Events by event date on the server (existing from/to params); Wellness by settled or created date. Tiles count the chosen dates. Staff Directory opens in table view. Frontend only.',
       'brand-peacock-emails-pdfs  Server-rendered output follows the brand colour too: notification, payment link, invoice and PO emails, the invoice PDFs (Classic, Boutique), the purchase order PDF, the bank reconciliation statement and the public feedback / loyalty pages. brandColors.ts reads --color-brand and --color-brand-dark from src/index.css at startup (fallback peacock), so index.css stays the only place the colour is set. Rewritten with the TypeScript parser per string kind; credit-note red unchanged.',
       'brand-peacock-centralised  UI (owner: fresh look, and no hardcoding). The brand colour is defined once, in src/index.css @theme as --color-brand (#0F6E78 peacock) and --color-brand-dark (#0B5961), replacing the old saffron colours. 3,422 Tailwind arbitrary values became bg-brand, text-brand/10, hover:bg-brand-dark and so on; 40 chart and inline colours read src/theme.ts, which reads the same variables; gradients and translucent tints use color-mix on the variable; index.html variables and theme-color updated. No literal saffron remains in src. Tenant brand colours on public pages are unchanged; server-rendered emails and PDFs keep their own colours. Frontend only.',
