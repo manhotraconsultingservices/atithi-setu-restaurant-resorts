@@ -10006,6 +10006,38 @@ async function triggerNotification(restaurantId: string, eventName: string, data
   const colors = await tenantBrandColors(restaurantId).catch(() => null);
   return runWithBrand(colors, () => _triggerNotificationRun(restaurantId, eventName, data, opts));
 }
+// Values for an approved Meta template, from the central wa_template_map spec.
+// Each spec entry is a data key (dotted paths allowed) with optional
+//   :date   -> "18 Sep 2026"      :money -> "₹3,500" (a string already carrying ₹ is kept)
+//   =Text   -> used when the value is missing
+// The property name is always {{1}} (the sender is shared across properties).
+// Meta rejects an empty parameter, so a missing value becomes "-".
+function _waTemplateVariables(spec: any, data: any): string[] {
+  const entries = String(spec || '').split(',').map((v: string) => v.trim()).filter(Boolean);
+  const list = entries.length ? entries : ['restaurantName', 'guestName=Guest'];
+  if (!/^restaurantName(\b|$)/.test(list[0])) list.unshift('restaurantName');
+  const fmtDate = (v: any): string => {
+    const d = v instanceof Date ? v : new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? String(v) + 'T00:00:00+05:30' : String(v));
+    if (isNaN(d.getTime())) return String(v);
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+  };
+  return list.map((entry: string) => {
+    const eq = entry.indexOf('=');
+    const fallback = eq >= 0 ? entry.slice(eq + 1).trim() : '';
+    const head = eq >= 0 ? entry.slice(0, eq).trim() : entry;
+    const [key, fmt] = head.split(':').map((x: string) => x.trim());
+    let v: any = key.split('.').reduce((acc: any, p: string) => acc == null ? acc : acc[p], data);
+    if (v == null || String(v).trim() === '') return fallback || '-';
+    if (fmt === 'date' || v instanceof Date) return fmtDate(v);
+    if (fmt === 'money') {
+      if (String(v).includes('₹')) return String(v);
+      const num = Number(String(v).replace(/[^0-9.\-]/g, ''));
+      return isNaN(num) ? String(v) : '₹' + num.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+    }
+    return String(v);
+  });
+}
+
 async function _triggerNotificationRun(restaurantId: string, eventName: string, data: any, opts?: { onlyChannels?: string[] }): Promise<NotifyTally> {
   const tally: NotifyTally = { sent: 0, failed: 0, skipped: 0, channels: [] };
   const wants = (ch: string) => !opts?.onlyChannels || opts.onlyChannels.includes(ch);
@@ -10122,16 +10154,10 @@ async function _triggerNotificationRun(restaurantId: string, eventName: string, 
         if (map?.template_name) {
           // The property name always fills the first placeholder: the sender is
           // shared, so the guest must be told which business is writing.
-          const mapped = String(map.variables || '').split(',').map((v: string) => v.trim()).filter(Boolean);
-          const names = mapped.length ? mapped : ['restaurantName', 'guestName'];
-          if (names[0] !== 'restaurantName') names.unshift('restaurantName');
           metaTemplate = {
             name: String(map.template_name),
             languageCode: String(map.language || 'en'),
-            variables: names.map((k: string) => {
-              const v = k.split('.').reduce((acc: any, p: string) => acc == null ? acc : acc[p], data);
-              return v == null ? '' : String(v);
-            }),
+            variables: _waTemplateVariables(map.variables, data),
           };
           metaCategory = String(map.category || 'UTILITY').toUpperCase();
         }
@@ -11039,6 +11065,32 @@ async function startServer() {
       );
       res.json({ success: true });
     } catch { res.status(500).json({ error: 'Failed to save the mapping' }); }
+  });
+
+  // Send an event's mapped template to one number, as a test. Always sends the
+  // TEMPLATE (even inside an open 24h window, where real sends go as free text),
+  // so the owner can see exactly what a guest receives. Touches no tenant setting.
+  app.post("/api/admin/whatsapp/template-test", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureWaTables();
+      const ev = String(req.body?.event || '').trim().toUpperCase();
+      const rid = String(req.body?.restaurant_id || '').trim();
+      const phone = String(req.body?.phone || '').replace(/[^0-9+]/g, '');
+      if (!ev || !rid || phone.replace(/\D/g, '').length < 10) return res.status(400).json({ error: 'event, restaurant_id and a phone number are required.' });
+      const map: any = await centralDb.get("SELECT template_name, language, category, variables FROM wa_template_map WHERE event_name = ?", [ev]).catch(() => null);
+      if (!map?.template_name) return res.status(404).json({ error: 'No template is linked to ' + ev + '.' });
+      const rRow: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [rid]).catch(() => null);
+      if (!rRow) return res.status(404).json({ error: 'Unknown property.' });
+      const data = { ...(req.body?.data || {}), restaurantName: rRow.name };
+      const variables = _waTemplateVariables(map.variables, data);
+      const db = await getTenantDb(rid);
+      const ok = await mwSendWhatsApp(db, rid, {
+        phone, name: String(data.guestName || data.customerName || data.customer_name || '') || null, event: ev,
+        template: { name: String(map.template_name), language: String(map.language || 'en'), category: String(map.category || 'UTILITY').toUpperCase(), variables },
+      });
+      const last: any = await db.get("SELECT id, status, error, provider_message_id FROM notification_deliveries WHERE channel = 'WHATSAPP' AND event_name = ? ORDER BY created_at DESC LIMIT 1", [ev]).catch(() => null);
+      res.json({ success: !!ok, template: map.template_name, variables, log: last || null });
+    } catch (e: any) { res.status(500).json({ error: 'Test send failed: ' + (e?.message || 'unknown') }); }
   });
 
   // ── The platform sender itself: phone number id, token, webhook secrets ──
@@ -54491,7 +54543,7 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const b: any = await tenantDb.get(
-        'SELECT id, status, room_id, check_in_date, check_out_date, total_amount, booking_source FROM room_bookings WHERE id = ?',
+        'SELECT id, status, room_id, check_in_date, check_out_date, total_amount, booking_source, guest_name FROM room_bookings WHERE id = ?',
         [req.params.bookingId]
       );
       if (!b) return res.status(404).json({ error: 'Booking not found.' });
@@ -54532,7 +54584,7 @@ ${data.tenant.name}`;
           req.params.bookingId,
         ]
       );
-      try { await triggerNotification(req.params.id, 'BOOKING_CANCELLED', { bookingId: b.id, refundPct: refund.refund_pct, refundAmount: refund.refund_amount }); } catch {}
+      try { await triggerNotification(req.params.id, 'BOOKING_CANCELLED', { bookingId: b.id, guestName: b.guest_name, checkIn: b.check_in_date, refundPct: refund.refund_pct, refundAmount: refund.refund_amount }); } catch {}
       // BCG Sprint 1 — reverse any open folio entries for this booking.
       // For BOOKED bookings that had an advance payment (and therefore a folio),
       // we must reverse the ROOM_CHARGE/SERVICE_CHARGE lines so the folio total
@@ -62231,7 +62283,7 @@ ${data.tenant.name}`;
         }).catch(() => {});
         if (finalCustomerEmail || finalCustomerPhone) {
           triggerNotification(req.params.id, 'CUSTOMER_ORDER_CONFIRMATION', {
-            orderId: id, items: itemLabels, total: finalTotalAmount,
+            orderId: id, items: itemLabels, total: finalTotalAmount, customerName: finalCustomerName || '',
             customerEmail: finalCustomerEmail, customerPhone: finalCustomerPhone,
           }).catch(() => {});
         }
@@ -67197,8 +67249,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-app-webhook-fields',
+    commit_marker: 'wa-event-template-links',
     code_features: [
+      'wa-event-template-links  Guest notification events are linked to the Meta-approved WhatsApp templates. Template values come from one builder (_waTemplateVariables) that formats dates and money, falls back to a default and never sends an empty parameter. A super-admin test route sends an event template to one number. Cancellation and order-confirmation events now carry the guest name.',
       'wa-app-webhook-fields  /internal WhatsApp: no event had ever reached the webhook although the account was subscribed. Diagnostics now read the Meta app behind the token (debug_token) and its webhook subscription (GET /{app}/subscriptions with the app access token app_id|App secret): the callback URL and whether the messages field is subscribed. POST /api/admin/whatsapp/subscribe-fields subscribes whatsapp_business_account messages at this server callback URL with the saved verify token (Meta verifies it through the GET webhook). Shown as a card with Subscribe to messages.',
       'booking-preview-custom-rate-all-in  Owner: the New Booking Live Preview added matrix extra-person charges on top of a typed custom rate, but the bill treats a custom rate (one that differs from night 1 plan rate) as all-in with no extras, and a typed rate equal to the plan rate as plan pricing with extras. The preview now follows the same rule as _folioPerNightPlan.',
       'new-booking-bill-incl-gst  Owner: the New / Edit Booking form now shows Bill incl. GST (room charge or pre-GST amount, GST with the rate or rates used, total) under the rate and guests, for every tariff model. BookingGstSummary asks GET /hotel/stay-tax-preview with the form fields (room_id, dates, meal_plan_id, room_rate, extra persons, booking_type, gst_exclusive); the route builds an unsaved booking through _folioPerNightPlan, the same nightly lines the folio uses, and applies GST per night. TC-HOTEL-NEWBOOKING-GST compares it with the bill a real check-in creates.',
