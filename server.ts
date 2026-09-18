@@ -14557,7 +14557,12 @@ async function startServer() {
     if (!id) return;
     await ensureWaTables();
     const idx: any = await centralDb.get("SELECT restaurant_id FROM messaging_usage WHERE provider_message_id = ?", [id]).catch(() => null);
-    await centralDb.run("UPDATE messaging_usage SET status = ? WHERE provider_message_id = ?", [String(st.status || '').toUpperCase() || 'SENT', id]).catch(() => {});
+    // Meta's receipts can arrive out of order; a late "sent" must never undo
+    // "delivered" or "read". FAILED always lands.
+    const newStatus = String(st.status || '').toUpperCase() || 'SENT';
+    const notAbove = newStatus === 'SENT' ? " AND COALESCE(status, '') NOT IN ('DELIVERED', 'READ', 'FAILED')"
+      : newStatus === 'DELIVERED' ? " AND COALESCE(status, '') NOT IN ('READ', 'FAILED')" : '';
+    await centralDb.run("UPDATE messaging_usage SET status = ? WHERE provider_message_id = ?" + notAbove, [newStatus, id]).catch(() => {});
     if (!idx?.restaurant_id) return;   // not one of ours, or sent before indexing existed
     const status = String(st.status || '').toUpperCase();   // SENT | DELIVERED | READ | FAILED
     const errTitle = st?.errors?.[0]?.title || st?.errors?.[0]?.message || null;
@@ -14565,7 +14570,7 @@ async function startServer() {
     try {
       const db = await getTenantDb(idx.restaurant_id);
       await db.run(
-        "UPDATE notification_deliveries SET status = ?, error = COALESCE(?, error), error_code = COALESCE(?, error_code) WHERE provider_message_id = ?",
+        "UPDATE notification_deliveries SET status = ?, error = COALESCE(?, error), error_code = COALESCE(?, error_code) WHERE provider_message_id = ?" + notAbove,
         [status === 'FAILED' ? 'FAILED' : status, errTitle ? String(errTitle).slice(0, 300) : null, errCode, id]
       ).catch(() => {});
     } catch { /* tenant may be gone */ }
@@ -67249,8 +67254,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-event-template-links',
+    commit_marker: 'wa-receipt-no-downgrade',
     code_features: [
+      'wa-receipt-no-downgrade  WhatsApp delivery receipts can arrive out of order; a late sent receipt no longer overwrites delivered or read on the delivery log.',
       'wa-event-template-links  Guest notification events are linked to the Meta-approved WhatsApp templates. Template values come from one builder (_waTemplateVariables) that formats dates and money, falls back to a default and never sends an empty parameter. A super-admin test route sends an event template to one number. Cancellation and order-confirmation events now carry the guest name.',
       'wa-app-webhook-fields  /internal WhatsApp: no event had ever reached the webhook although the account was subscribed. Diagnostics now read the Meta app behind the token (debug_token) and its webhook subscription (GET /{app}/subscriptions with the app access token app_id|App secret): the callback URL and whether the messages field is subscribed. POST /api/admin/whatsapp/subscribe-fields subscribes whatsapp_business_account messages at this server callback URL with the saved verify token (Meta verifies it through the GET webhook). Shown as a card with Subscribe to messages.',
       'booking-preview-custom-rate-all-in  Owner: the New Booking Live Preview added matrix extra-person charges on top of a typed custom rate, but the bill treats a custom rate (one that differs from night 1 plan rate) as all-in with no extras, and a typed rate equal to the plan rate as plan pricing with extras. The preview now follows the same rule as _folioPerNightPlan.',
