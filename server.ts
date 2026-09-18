@@ -11142,6 +11142,41 @@ async function startServer() {
   // Ask Meta about the number with the credentials in use. With { to }, also
   // send Meta's stock hello_world template there (a plain message would be
   // refused outside the 24-hour window).
+  // The Meta app the access token belongs to, and what that app's webhook is
+  // subscribed to. Needs the App secret (an app access token is app_id|secret).
+  const _waAppWebhook = async (): Promise<{ appId: string | null; error?: string; callbackUrl?: string | null; fields?: string[] }> => {
+    const c = whatsAppCreds();
+    if (!c.accessToken) return { appId: null, error: 'No access token saved.' };
+    const dbg: any = await fetch(`https://graph.facebook.com/debug_token?input_token=${encodeURIComponent(c.accessToken)}&access_token=${encodeURIComponent(c.accessToken)}`)
+      .then(r => r.json()).catch(() => ({}));
+    const appId = dbg?.data?.app_id ? String(dbg.data.app_id) : null;
+    if (!appId) return { appId: null, error: dbg?.error?.message || 'Meta did not say which app the token belongs to.' };
+    if (!c.appSecret) return { appId, error: 'Save the App secret to check the webhook fields.' };
+    const sub: any = await fetch(`https://graph.facebook.com/v21.0/${appId}/subscriptions?access_token=${encodeURIComponent(`${appId}|${c.appSecret}`)}`)
+      .then(r => r.json()).catch(() => ({}));
+    if (sub?.error) return { appId, error: `Meta refused: ${sub.error.message}` };
+    const wa = (sub?.data || []).find((x: any) => x.object === 'whatsapp_business_account');
+    return { appId, callbackUrl: wa?.callback_url || null, fields: (wa?.fields || []).map((f: any) => String(f.name || f)) };
+  };
+
+  // Subscribe the app's webhook to WhatsApp messages (guest replies and delivery
+  // receipts) at this server's callback URL, with the saved verify token. Meta
+  // calls the URL to verify before it accepts, which the GET webhook answers.
+  app.post("/api/admin/whatsapp/subscribe-fields", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const c = whatsAppCreds();
+      if (!c.appSecret || !c.verifyToken) return res.status(400).json({ error: 'Save the App secret and the webhook verify token first.' });
+      const info = await _waAppWebhook();
+      if (!info.appId) return res.status(400).json({ error: info.error || 'Could not find the Meta app.' });
+      const callbackUrl = `${appOriginFromReq(req)}/api/webhooks/whatsapp`;
+      const body = new URLSearchParams({ object: 'whatsapp_business_account', callback_url: callbackUrl, verify_token: c.verifyToken, fields: 'messages', include_values: 'true' });
+      const r = await fetch(`https://graph.facebook.com/v21.0/${info.appId}/subscriptions?access_token=${encodeURIComponent(`${info.appId}|${c.appSecret}`)}`, { method: 'POST', body });
+      const b: any = await r.json().catch(() => ({}));
+      if (!r.ok || b?.error) return res.status(400).json({ error: `Meta refused: ${b?.error?.message || r.status}` });
+      res.json({ ok: true, ...(await _waAppWebhook()) });
+    } catch (e: any) { res.status(500).json({ error: 'Could not reach Meta.' }); }
+  });
+
   // Why are replies and receipts not arriving? Recent webhook calls, plus Meta's
   // own answer on whether the WhatsApp Business Account is subscribed to an app.
   app.get("/api/admin/whatsapp/diagnostics", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
@@ -11156,7 +11191,8 @@ async function startServer() {
           ? { checked: true, subscribed: (b.data || []).length > 0, apps: (b.data || []).map((a: any) => a?.whatsapp_business_api_data?.name || a?.whatsapp_business_api_data?.id || 'app') }
           : { checked: true, error: b?.error?.message || 'Meta did not answer.' };
       }
-      res.json({ webhook: rows || [], subscription, phone_number_id: c.phoneNumberId || null, business_account_id: c.businessAccountId || null, app_secret_set: !!c.appSecret, verify_token_set: !!c.verifyToken });
+      const appWebhook = await _waAppWebhook().catch((e: any) => ({ appId: null, error: String(e?.message || e) }));
+      res.json({ webhook: rows || [], subscription, app_webhook: appWebhook, phone_number_id: c.phoneNumberId || null, business_account_id: c.businessAccountId || null, app_secret_set: !!c.appSecret, verify_token_set: !!c.verifyToken });
     } catch (err: any) { res.status(500).json({ error: 'Could not load the diagnostics.' }); }
   });
 
@@ -67161,8 +67197,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'booking-preview-custom-rate-all-in',
+    commit_marker: 'wa-app-webhook-fields',
     code_features: [
+      'wa-app-webhook-fields  /internal WhatsApp: no event had ever reached the webhook although the account was subscribed. Diagnostics now read the Meta app behind the token (debug_token) and its webhook subscription (GET /{app}/subscriptions with the app access token app_id|App secret): the callback URL and whether the messages field is subscribed. POST /api/admin/whatsapp/subscribe-fields subscribes whatsapp_business_account messages at this server callback URL with the saved verify token (Meta verifies it through the GET webhook). Shown as a card with Subscribe to messages.',
       'booking-preview-custom-rate-all-in  Owner: the New Booking Live Preview added matrix extra-person charges on top of a typed custom rate, but the bill treats a custom rate (one that differs from night 1 plan rate) as all-in with no extras, and a typed rate equal to the plan rate as plan pricing with extras. The preview now follows the same rule as _folioPerNightPlan.',
       'new-booking-bill-incl-gst  Owner: the New / Edit Booking form now shows Bill incl. GST (room charge or pre-GST amount, GST with the rate or rates used, total) under the rate and guests, for every tariff model. BookingGstSummary asks GET /hotel/stay-tax-preview with the form fields (room_id, dates, meal_plan_id, room_rate, extra persons, booking_type, gst_exclusive); the route builds an unsaved booking through _folioPerNightPlan, the same nightly lines the folio uses, and applies GST per night. TC-HOTEL-NEWBOOKING-GST compares it with the bill a real check-in creates.',
       'checkin-gst-per-night  Owner: GST applies per night, not on the whole stay. The check-in preview averaged the stay across nights, which misstates a stay whose nights fall in different slabs (a weekend or season rate crossing 7,500). The per-night room-charge builder is extracted from createFolioWithRoomCharges into _folioPerNightPlan (matrix plan rate + extras, rate plan, or the manual rate) and used by both; stay-tax-preview now takes booking_id with the check-in screens changes (room_id, room_rate, meal_plan_id, gst_exclusive), applies the slab to each night and returns per-night lines and the rates used. The wizard shows the mixed rates (e.g. 12%/18%) when nights differ. Test TC-HOTEL-CHECKIN-GST-FOLIO compares the preview with the bill a real check-in creates.',

@@ -315,6 +315,13 @@ function WebhookDiagnostics({ api }: { api: (path: string, init?: RequestInit) =
     catch (e: any) { toast.error(e.message); setBusy(false); }
   };
   const sub = d?.subscription || {};
+  const aw = d?.app_webhook || {};
+  const fieldsOn = Array.isArray(aw.fields) && aw.fields.includes('messages');
+  const subscribeFields = async () => {
+    setBusy(true);
+    try { await api('/subscribe-fields', { method: 'POST' }); toast.success('Webhook subscribed to messages.'); await load(); }
+    catch (e: any) { toast.error(e.message); setBusy(false); }
+  };
   const rows: Json[] = d?.webhook || [];
   const tone = (res: string) => res === 'ACCEPTED' ? 'bg-emerald-100 text-emerald-700' : res === 'OTHER_NUMBER' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700';
   return (
@@ -330,6 +337,13 @@ function WebhookDiagnostics({ api }: { api: (path: string, init?: RequestInit) =
             {!sub.checked ? 'Save the account ID and token first.' : sub.error ? sub.error : sub.subscribed ? `Yes: ${(sub.apps || []).join(', ')}` : 'No. Meta will not send replies or receipts.'}
           </p>
           {sub.checked && !sub.subscribed && !sub.error && <button className={`${BTN} mt-2 bg-emerald-600 text-white hover:bg-emerald-700`} disabled={busy} onClick={subscribe} data-allow-readonly>Subscribe now</button>}
+        </div>
+        <div className={`rounded-xl border px-3 py-2 sm:col-span-2 ${fieldsOn ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+          <p className="font-bold text-xs">App webhook subscribed to messages</p>
+          <p className="text-xs mt-0.5">
+            {aw.error ? aw.error : fieldsOn ? `Yes: ${aw.callbackUrl || ''}` : `No${aw.fields?.length ? ` (subscribed: ${aw.fields.join(', ')})` : ''}. Guest replies and delivery receipts will not arrive.`}
+          </p>
+          {!fieldsOn && !aw.error?.startsWith('Save') && <button className={`${BTN} mt-2 bg-emerald-600 text-white hover:bg-emerald-700`} disabled={busy} onClick={subscribeFields} data-allow-readonly>Subscribe to messages</button>}
         </div>
         <div className={`rounded-xl border px-3 py-2 ${d?.app_secret_set ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
           <p className="font-bold text-xs">Signature check</p>
