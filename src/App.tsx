@@ -36482,6 +36482,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   )}
                 </div>
               </div>
+              <BookingGstSummary restaurantId={restaurantId} token={token} booking={editingBooking} />
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Special Requests</label>
                 <textarea value={editingBooking.special_requests || ''} onChange={e => setEditingBooking({...editingBooking, special_requests: e.target.value})} rows={2} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-brand/20 outline-none"/>
@@ -44080,6 +44081,64 @@ const GroupCheckInWizard: React.FC<{
    the server returns 409 (CHK-1 lock — booking already checked in),
    we show an inline error and don't advance.
 */
+// New Booking / Edit Booking: what the bill will come to, GST included. Asks the
+// server, which builds the same nightly room charges the folio is created from
+// (plan rate with extras, or the typed rate) and applies GST night by night.
+function BookingGstSummary({ restaurantId, token, booking }: { restaurantId: string | null; token: string | null; booking: any }) {
+  const [tax, setTax] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const b = booking || {};
+  const key = [b.room_id, b.check_in_date, b.check_out_date, b.meal_plan_id, b.room_rate, b.extra_adults, b.extra_children_with_mattress, b.extra_children_no_mattress, b.booking_type, b.room_rate_gst_exclusive].join('|');
+  useEffect(() => {
+    if (!restaurantId || !token || !b.room_id || !b.check_in_date || !b.check_out_date) { setTax(null); return; }
+    let alive = true;
+    setLoading(true);
+    const h = setTimeout(() => {
+      const qs = new URLSearchParams({
+        room_id: String(b.room_id), check_in_date: String(b.check_in_date).slice(0, 10), check_out_date: String(b.check_out_date).slice(0, 10),
+        meal_plan_id: String(b.meal_plan_id || ''), room_rate: String(Number(b.room_rate) || 0),
+        extra_adults: String(Number(b.extra_adults) || 0), extra_children_with_mattress: String(Number(b.extra_children_with_mattress) || 0),
+        extra_children_no_mattress: String(Number(b.extra_children_no_mattress) || 0), booking_type: String(b.booking_type || 'OVERNIGHT'),
+        gst_exclusive: String(Number(b.room_rate_gst_exclusive ?? 1) !== 0 ? 1 : 0),
+      });
+      fetch(`/api/restaurant/${restaurantId}/hotel/stay-tax-preview?${qs}`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => (r.ok ? r.json() : null)).then(d => { if (alive) { setTax(d); setLoading(false); } }).catch(() => { if (alive) setLoading(false); });
+    }, 350);
+    return () => { alive = false; clearTimeout(h); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, restaurantId, token]);
+  if (!b.room_id || !b.check_in_date || !b.check_out_date) return null;
+  const fmt = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+  const rates = tax ? (tax.gst_pct != null ? `${tax.gst_pct}%` : (tax.gst_rates || []).map((r: number) => `${r}%`).join(' / ')) : '';
+  return (
+    <div className="rounded-2xl border border-brand/20 bg-brand/5 px-4 py-3">
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Bill incl. GST</p>
+        {tax && <p className="text-[10px] text-[#9c8e85]">{(tax.nights || []).length} night{(tax.nights || []).length === 1 ? '' : 's'} · GST per night</p>}
+      </div>
+      {!tax ? (
+        <p className="text-xs text-[#9c8e85] mt-1">{loading ? 'Working out GST…' : 'Pick a room and dates to see the bill.'}</p>
+      ) : (
+        <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+          <div>
+            <p className="text-[9px] uppercase tracking-widest text-[#9c8e85]">{tax.gst_exclusive ? 'Room charge' : 'Before GST'}</p>
+            <p className="font-mono font-semibold text-[#1a1208]">{fmt(tax.taxable)}</p>
+            {tax.service_charge > 0 && <p className="text-[9px] text-[#9c8e85]">incl. service {fmt(tax.service_charge)}</p>}
+          </div>
+          <div>
+            <p className="text-[9px] uppercase tracking-widest text-[#9c8e85]">GST {rates}</p>
+            <p className="font-mono font-semibold text-[#1a1208]">{fmt(tax.gst)}</p>
+          </div>
+          <div>
+            <p className="text-[9px] uppercase tracking-widest text-[#9c8e85]">Total</p>
+            <p className="font-mono text-base font-bold text-brand">{fmt(tax.total)}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const CheckInWizardModal: React.FC<{
   booking: any;
   requireDocs: boolean;

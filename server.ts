@@ -42207,6 +42207,21 @@ ${data.tenant.name}`;
         exclusive = Number(virt.room_rate_gst_exclusive ?? 1) !== 0;
         const plan = await _folioPerNightPlan(req.params.id, virt);
         nightsIn = plan.perNight.map(n => ({ date: n.date, amount: r2(n.base_rate + n.extras) }));
+      } else if (q.room_id && q.check_in_date && q.check_out_date) {
+        // A booking not saved yet (the New Booking form): the same nightly lines
+        // the folio will be built from once it is saved and checked in.
+        const virt = {
+          room_id: String(q.room_id), check_in_date: String(q.check_in_date), check_out_date: String(q.check_out_date),
+          meal_plan_id: q.meal_plan_id ? String(q.meal_plan_id) : null,
+          room_rate: Number(q.room_rate) || 0,
+          extra_adults: Number(q.extra_adults) || 0,
+          extra_children_with_mattress: Number(q.extra_children_with_mattress) || 0,
+          extra_children_no_mattress: Number(q.extra_children_no_mattress) || 0,
+          booking_type: String(q.booking_type || 'OVERNIGHT'),
+          room_rate_gst_exclusive: exclusive ? 1 : 0,
+        };
+        const plan = await _folioPerNightPlan(req.params.id, virt);
+        nightsIn = plan.perNight.map(n => ({ date: n.date, amount: r2(n.base_rate + n.extras) }));
       } else {
         const amount = Math.max(0, Number(q.amount) || 0);
         const nights = Math.max(1, Math.round(Number(q.nights) || 1));
@@ -67146,8 +67161,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checkin-gst-per-night',
+    commit_marker: 'new-booking-bill-incl-gst',
     code_features: [
+      'new-booking-bill-incl-gst  Owner: the New / Edit Booking form now shows Bill incl. GST (room charge or pre-GST amount, GST with the rate or rates used, total) under the rate and guests, for every tariff model. BookingGstSummary asks GET /hotel/stay-tax-preview with the form fields (room_id, dates, meal_plan_id, room_rate, extra persons, booking_type, gst_exclusive); the route builds an unsaved booking through _folioPerNightPlan, the same nightly lines the folio uses, and applies GST per night. TC-HOTEL-NEWBOOKING-GST compares it with the bill a real check-in creates.',
       'checkin-gst-per-night  Owner: GST applies per night, not on the whole stay. The check-in preview averaged the stay across nights, which misstates a stay whose nights fall in different slabs (a weekend or season rate crossing 7,500). The per-night room-charge builder is extracted from createFolioWithRoomCharges into _folioPerNightPlan (matrix plan rate + extras, rate plan, or the manual rate) and used by both; stay-tax-preview now takes booking_id with the check-in screens changes (room_id, room_rate, meal_plan_id, gst_exclusive), applies the slab to each night and returns per-night lines and the rates used. The wizard shows the mixed rates (e.g. 12%/18%) when nights differ. Test TC-HOTEL-CHECKIN-GST-FOLIO compares the preview with the bill a real check-in creates.',
       'checkin-total-with-gst  Owner: the hotel check-in wizard showed the pre-GST room charge as Total (and Outstanding from it), so staff collected short of the bill. New GET /api/restaurant/:id/hotel/stay-tax-preview?amount&nights&gst_exclusive works the stay out the way createFolioWithRoomCharges does (tenant GST slab on each night, GST added for an exclusive rate or extracted from an inclusive one, service charge with its GST). The wizard shows Total incl. GST with the taxable + GST % breakdown, Outstanding from it, and Stay total incl. GST in step 1.',
       'events-calendar-hides-finished  Fix (owner): the Events calendar showed events that were over. Completed and cancelled bookings were already excluded, but nothing marks an event Completed when its dates pass, so finished events still In progress / Confirmed kept occupying the grid (11 on RESTO-1003). The calendar now drops a booking once its last day (end_date, else event_date) is before today, KPIs included; the Bookings list gains a Needs closing tile (Confirmed / In progress past their last day, looks across all dates) so staff still close them. Owner chose hiding over nightly auto-complete.',
