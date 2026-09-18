@@ -44221,16 +44221,21 @@ const CheckInWizardModal: React.FC<{
   // The stay on the bill includes GST (and any service charge): the room charge
   // above is before tax for a GST-exclusive rate. Worked out by the server with
   // the folio's own slab rules; the pre-tax figure is used until it answers.
-  const [stayTax, setStayTax] = useState<{ taxable: number; gst: number; gst_pct: number; total: number; service_charge: number } | null>(null);
+  const [stayTax, setStayTax] = useState<{ room_charge: number; taxable: number; gst: number; gst_pct: number | null; gst_rates: number[]; total: number; service_charge: number } | null>(null);
   const gstExclusiveNow = Number(draft.room_rate_gst_exclusive ?? booking.room_rate_gst_exclusive ?? 1) !== 0 ? 1 : 0;
   useEffect(() => {
     if (!(stayTotal > 0)) { setStayTax(null); return; }
     let alive = true;
-    const qs = new URLSearchParams({ amount: String(stayTotal), nights: String(nightCount), gst_exclusive: String(gstExclusiveNow) });
+    // The server builds each night's charge the way the bill will (plan rate,
+    // extras or the manual rate) and applies GST night by night.
+    const qs = new URLSearchParams({ booking_id: String(booking.id), gst_exclusive: String(gstExclusiveNow) });
+    if (draft.room_id) qs.set('room_id', String(draft.room_id));
+    if (draft.room_rate != null) qs.set('room_rate', String(draft.room_rate));
+    if (draft.meal_plan_id !== undefined) qs.set('meal_plan_id', String(draft.meal_plan_id || ''));
     fetch(`/api/restaurant/${restaurantId}/hotel/stay-tax-preview?${qs}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => (r.ok ? r.json() : null)).then(d => { if (alive) setStayTax(d); }).catch(() => {});
     return () => { alive = false; };
-  }, [stayTotal, nightCount, gstExclusiveNow, restaurantId, token]);
+  }, [stayTotal, nightCount, gstExclusiveNow, draft.room_id, draft.room_rate, draft.meal_plan_id, booking.id, restaurantId, token]);
   const stayTotalWithGst = stayTax ? Number(stayTax.total) : stayTotal;
   const outstanding = Math.max(0, Math.round((stayTotalWithGst - advPaid) * 100) / 100);
   // Quote on mount AND whenever the meal plan changes, so the Stay total is
@@ -44822,8 +44827,8 @@ const CheckInWizardModal: React.FC<{
                   <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Total incl. GST</p>
                   <p className="text-sm font-bold text-[#1a1208]">₹{stayTotalWithGst.toLocaleString('en-IN')}</p>
                   {stayTax && stayTax.gst > 0 && (
-                    <p className="text-[9px] text-[#9c8e85] mt-0.5" title={`GST ${stayTax.gst_pct}%${stayTax.service_charge > 0 ? ' · service charge included' : ''}`}>
-                      ₹{Number(stayTax.taxable).toLocaleString('en-IN')} + GST {stayTax.gst_pct}% ₹{Number(stayTax.gst).toLocaleString('en-IN')}
+                    <p className="text-[9px] text-[#9c8e85] mt-0.5" title={`GST per night${stayTax.service_charge > 0 ? ' · service charge included' : ''}`}>
+                      ₹{Number(stayTax.taxable).toLocaleString('en-IN')} + GST {stayTax.gst_pct != null ? `${stayTax.gst_pct}%` : (stayTax.gst_rates || []).map(r => `${r}%`).join('/')} ₹{Number(stayTax.gst).toLocaleString('en-IN')}
                     </p>
                   )}
                 </div>

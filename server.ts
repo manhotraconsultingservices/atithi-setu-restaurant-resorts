@@ -2256,6 +2256,94 @@ function rateBreakdown(
 // add a separate SERVICE_CHARGE row per night so the line is auditable
 // on the folio + invoice PDF — and GST is computed on (room rate +
 // service charge), matching real-world hotel billing.
+// The room charge for each night of a stay, before tax: the matrix plan rate
+// with extra-person charges, or the rate-plan / base rate, or the booking's
+// manual rate for every night when staff set one. Shared by folio creation and
+// the check-in preview, so the preview's per-night GST is the bill's.
+async function _folioPerNightPlan(restaurantId: string, booking: any): Promise<{
+  perNight: Array<{ date: string; base_rate: number; extras: number; label: string | null }>;
+  xpAdults: number; xpChildM: number; xpChildN: number; totalExtraHeads: number;
+}> {
+  const ci = normaliseDateIso(booking.check_in_date);
+  const co = normaliseDateIso(booking.check_out_date);
+  const explicitRate = Number(booking.room_rate) || 0;
+  const tariffModel = await getTariffModel(restaurantId);
+  const useMatrix = tariffModel === 'MATRIX' && !!booking.meal_plan_id;
+  const xpAdults  = Math.max(0, Number(booking.extra_adults || 0));
+  const xpChildM  = Math.max(0, Number(booking.extra_children_with_mattress || 0));
+  const xpChildN  = Math.max(0, Number(booking.extra_children_no_mattress || 0));
+  const totalExtraHeads = xpAdults + xpChildM + xpChildN;
+
+  // ─── MATRIX path: matrix-resolved per-night base + extras ───
+  // ─── LEGACY path: existing rate_overrides → base_rate flow ─
+  let perNight: Array<{ date: string; base_rate: number; extras: number; label: string | null }> = [];
+  if (useMatrix) {
+    const breakdown = await computeBookingTotalWithExtras(
+      restaurantId, booking.room_id, ci, co,
+      {
+        mealPlanId: booking.meal_plan_id,
+        extraAdults: xpAdults,
+        extraChildrenWithMattress: xpChildM,
+        extraChildrenNoMattress: xpChildN,
+        bookingType: booking.booking_type || 'OVERNIGHT',
+      }
+    );
+    // BCG Tariff Phase 4.1 — manual-rate override in MATRIX mode.
+    // When the booking POST stored a room_rate that disagrees with what
+    // the matrix would compute for night 1, the staff explicitly set the
+    // per-night rate (negotiated corporate rate, special promo, etc.).
+    // Honour their override for every night, drop matrix-derived extras
+    // (the booking POST also skipped extras in that branch — total =
+    // rate × nights — so the folio matches the original quote). This
+    // mirrors the LEGACY useExplicit logic at parity.
+    const matrixNight1 = breakdown.per_night[0]?.base_rate || 0;
+    const useExplicitInMatrix = explicitRate > 0 && Math.abs(explicitRate - matrixNight1) > 0.01;
+    perNight = breakdown.per_night.map(n => ({
+      date: n.date,
+      base_rate: useExplicitInMatrix ? explicitRate : n.base_rate,
+      extras: useExplicitInMatrix ? 0 : n.extras,
+      // Append the meal-plan code so the line audits cleanly on the
+      // invoice ("Room charge · 2026-05-20 · MAP · incl. 1 extra adult").
+      // Manual override drops the meal-plan label too — it's no longer
+      // accurate when the rate isn't the matrix's plan rate.
+      label: useExplicitInMatrix ? null : (booking.meal_plan_snapshot || booking.meal_plan_id || null),
+    }));
+  } else {
+    const ratePlan = await computeRoomTotal(restaurantId, booking.room_id, ci, co);
+    // Detect whether the staff manually overrode the rate (legacy
+    // behaviour preserved exactly). Compare against the FIRST night's
+    // plan rate; match → use per-night rates; differ → use explicit
+    // for every night.
+    const firstNightPlanRate = ratePlan.nights[0]?.rate || 0;
+    const useExplicit = explicitRate > 0 && Math.abs(explicitRate - firstNightPlanRate) > 0.01;
+    // Extra-person charges on a ROOM-ONLY / no-meal-plan stay (19 Jun 2026).
+    // Previously this branch hard-coded extras=0, so extra adults/children on
+    // a room-only booking were never billed. Matrix tenants now charge them
+    // via the per-night extra-person lookup (room-only falls back to the
+    // lowest configured rate). Legacy tenants have no extra_person_charges so
+    // this resolves to 0 — unchanged. A manual rate override is treated as
+    // all-in (no separate extras), matching the matrix branch + the booking
+    // POST (total = rate × nights).
+    const addExtras = tariffModel === 'MATRIX' && !useExplicit && totalExtraHeads > 0;
+    perNight = await Promise.all(ratePlan.nights.map(async n => {
+      let extrasForNight = 0;
+      if (addExtras) {
+        if (xpAdults > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'ADULT')) * xpAdults;
+        if (xpChildM > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'CHILD_WITH_MATTRESS')) * xpChildM;
+        if (xpChildN > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'CHILD_NO_MATTRESS')) * xpChildN;
+      }
+      return {
+        date: n.date,
+        base_rate: useExplicit ? explicitRate : n.rate,
+        extras: Math.round(extrasForNight * 100) / 100,
+        label: !useExplicit ? n.label : null,
+      };
+    }));
+  }
+
+  return { perNight, xpAdults, xpChildM, xpChildN, totalExtraHeads };
+}
+
 async function createFolioWithRoomCharges(restaurantId: string, booking: any): Promise<any> {
   try {
     const tenantDb = await getTenantDb(restaurantId);
@@ -2303,82 +2391,8 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
     // GST. Multi-extra OFF-season stays drifted ~₹22k. A cross-season
     // stay went the other way (over-billed by using night-1's PEAK rate
     // for night-2's OFF date). All gone after this fix.
-    const ci = normaliseDateIso(booking.check_in_date);
-    const co = normaliseDateIso(booking.check_out_date);
-    const explicitRate = Number(booking.room_rate) || 0;
-    const tariffModel = await getTariffModel(restaurantId);
-    const useMatrix = tariffModel === 'MATRIX' && !!booking.meal_plan_id;
-    const xpAdults  = Math.max(0, Number(booking.extra_adults || 0));
-    const xpChildM  = Math.max(0, Number(booking.extra_children_with_mattress || 0));
-    const xpChildN  = Math.max(0, Number(booking.extra_children_no_mattress || 0));
-    const totalExtraHeads = xpAdults + xpChildM + xpChildN;
-
-    // ─── MATRIX path: matrix-resolved per-night base + extras ───
-    // ─── LEGACY path: existing rate_overrides → base_rate flow ─
-    let perNight: Array<{ date: string; base_rate: number; extras: number; label: string | null }> = [];
-    if (useMatrix) {
-      const breakdown = await computeBookingTotalWithExtras(
-        restaurantId, booking.room_id, ci, co,
-        {
-          mealPlanId: booking.meal_plan_id,
-          extraAdults: xpAdults,
-          extraChildrenWithMattress: xpChildM,
-          extraChildrenNoMattress: xpChildN,
-          bookingType: booking.booking_type || 'OVERNIGHT',
-        }
-      );
-      // BCG Tariff Phase 4.1 — manual-rate override in MATRIX mode.
-      // When the booking POST stored a room_rate that disagrees with what
-      // the matrix would compute for night 1, the staff explicitly set the
-      // per-night rate (negotiated corporate rate, special promo, etc.).
-      // Honour their override for every night, drop matrix-derived extras
-      // (the booking POST also skipped extras in that branch — total =
-      // rate × nights — so the folio matches the original quote). This
-      // mirrors the LEGACY useExplicit logic at parity.
-      const matrixNight1 = breakdown.per_night[0]?.base_rate || 0;
-      const useExplicitInMatrix = explicitRate > 0 && Math.abs(explicitRate - matrixNight1) > 0.01;
-      perNight = breakdown.per_night.map(n => ({
-        date: n.date,
-        base_rate: useExplicitInMatrix ? explicitRate : n.base_rate,
-        extras: useExplicitInMatrix ? 0 : n.extras,
-        // Append the meal-plan code so the line audits cleanly on the
-        // invoice ("Room charge · 2026-05-20 · MAP · incl. 1 extra adult").
-        // Manual override drops the meal-plan label too — it's no longer
-        // accurate when the rate isn't the matrix's plan rate.
-        label: useExplicitInMatrix ? null : (booking.meal_plan_snapshot || booking.meal_plan_id || null),
-      }));
-    } else {
-      const ratePlan = await computeRoomTotal(restaurantId, booking.room_id, ci, co);
-      // Detect whether the staff manually overrode the rate (legacy
-      // behaviour preserved exactly). Compare against the FIRST night's
-      // plan rate; match → use per-night rates; differ → use explicit
-      // for every night.
-      const firstNightPlanRate = ratePlan.nights[0]?.rate || 0;
-      const useExplicit = explicitRate > 0 && Math.abs(explicitRate - firstNightPlanRate) > 0.01;
-      // Extra-person charges on a ROOM-ONLY / no-meal-plan stay (19 Jun 2026).
-      // Previously this branch hard-coded extras=0, so extra adults/children on
-      // a room-only booking were never billed. Matrix tenants now charge them
-      // via the per-night extra-person lookup (room-only falls back to the
-      // lowest configured rate). Legacy tenants have no extra_person_charges so
-      // this resolves to 0 — unchanged. A manual rate override is treated as
-      // all-in (no separate extras), matching the matrix branch + the booking
-      // POST (total = rate × nights).
-      const addExtras = tariffModel === 'MATRIX' && !useExplicit && totalExtraHeads > 0;
-      perNight = await Promise.all(ratePlan.nights.map(async n => {
-        let extrasForNight = 0;
-        if (addExtras) {
-          if (xpAdults > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'ADULT')) * xpAdults;
-          if (xpChildM > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'CHILD_WITH_MATTRESS')) * xpChildM;
-          if (xpChildN > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'CHILD_NO_MATTRESS')) * xpChildN;
-        }
-        return {
-          date: n.date,
-          base_rate: useExplicit ? explicitRate : n.rate,
-          extras: Math.round(extrasForNight * 100) / 100,
-          label: !useExplicit ? n.label : null,
-        };
-      }));
-    }
+    // The same per-night lines the check-in preview uses (_folioPerNightPlan).
+    const { perNight, xpAdults, xpChildM, xpChildN, totalExtraHeads } = await _folioPerNightPlan(restaurantId, booking);
 
     const nights = perNight.length;
     const svcPct = cfg.serviceChargePct;
@@ -42162,34 +42176,62 @@ ${data.tenant.name}`;
   //   - reason: human label of the blocker ('Guest stay' | 'Maintenance' | ...)
   //   - capacity / base_rate / amenities / image — copied from the room +
   //     its type (type values used as fallback when the room itself lacks).
-  // What a stay comes to on the bill: the room charge with its GST (and any
-  // service charge), worked out the way the folio will be at check-in: the
-  // tenant's slab on each night's charge, GST added on top for an exclusive
-  // rate or taken out of an inclusive one. The check-in screen showed the
-  // pre-GST charge as the Total, so staff collected short.
+  // What a stay comes to on the bill, night by night: each night's room charge
+  // (plan rate with extras, or the manual rate) with GST at that night's slab,
+  // added on top for an exclusive rate or taken out of an inclusive one, plus any
+  // service charge and its GST. Built with _folioPerNightPlan, the same lines the
+  // folio is created from at check-in, so a stay whose nights fall in different
+  // slabs is taxed per night exactly as it will be billed.
+  // Query: booking_id with the check-in screen's changes (room_id, room_rate,
+  // meal_plan_id, gst_exclusive); or amount + nights for a stay not yet booked.
   app.get("/api/restaurant/:id/hotel/stay-tax-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const amount = Math.max(0, Number(req.query.amount) || 0);
-      const nights = Math.max(1, Math.round(Number(req.query.nights) || 1));
-      const exclusive = String(req.query.gst_exclusive ?? '1') !== '0';
       const cfg = await loadHotelTaxConfig(req.params.id);
       const r2 = (n: number) => Math.round(n * 100) / 100;
-      const line = r2(amount / nights);
-      const gstPct = gstRateForTariff(line, cfg);
-      let taxable = 0, gst = 0;
-      for (let i = 0; i < nights; i++) {
-        // The last night takes the rounding remainder, as the stay total is split per night.
-        const night = i === nights - 1 ? r2(amount - line * (nights - 1)) : line;
-        const base = exclusive ? night : r2(night / (1 + gstPct / 100));
-        const nightGst = exclusive ? r2(night * gstPct / 100) : r2(night - base);
-        const svc = cfg.serviceChargePct > 0 ? r2(base * cfg.serviceChargePct / 100) : 0;
-        taxable = r2(taxable + base + svc);
-        gst = r2(gst + nightGst + (svc > 0 ? r2(svc * gstPct / 100) : 0));
+      const q: any = req.query || {};
+      let nightsIn: { date: string; amount: number }[] = [];
+      let exclusive = String(q.gst_exclusive ?? '1') !== '0';
+      if (q.booking_id) {
+        const db = await getTenantDb(req.params.id);
+        const b: any = await db.get("SELECT * FROM room_bookings WHERE id = ?", [String(q.booking_id)]);
+        if (!b) return res.status(404).json({ error: 'Booking not found' });
+        const virt = {
+          ...b,
+          room_id: q.room_id ? String(q.room_id) : b.room_id,
+          room_rate: q.room_rate != null && q.room_rate !== '' ? Number(q.room_rate) || 0 : b.room_rate,
+          meal_plan_id: q.meal_plan_id != null ? (String(q.meal_plan_id) || null) : b.meal_plan_id,
+          room_rate_gst_exclusive: q.gst_exclusive != null ? (String(q.gst_exclusive) === '0' ? 0 : 1) : b.room_rate_gst_exclusive,
+        };
+        exclusive = Number(virt.room_rate_gst_exclusive ?? 1) !== 0;
+        const plan = await _folioPerNightPlan(req.params.id, virt);
+        nightsIn = plan.perNight.map(n => ({ date: n.date, amount: r2(n.base_rate + n.extras) }));
+      } else {
+        const amount = Math.max(0, Number(q.amount) || 0);
+        const nights = Math.max(1, Math.round(Number(q.nights) || 1));
+        const each = r2(amount / nights);
+        nightsIn = Array.from({ length: nights }, (_, i) => ({ date: '', amount: i === nights - 1 ? r2(amount - each * (nights - 1)) : each }));
       }
-      const serviceCharge = cfg.serviceChargePct > 0 ? r2(taxable - (exclusive ? amount : r2(amount / (1 + gstPct / 100)))) : 0;
-      res.json({ taxable, gst, gst_pct: gstPct, service_charge: Math.max(0, serviceCharge), total: r2(taxable + gst), gst_exclusive: exclusive ? 1 : 0 });
+      let charged = 0, taxable = 0, gst = 0, serviceCharge = 0;
+      const nights = nightsIn.map(n => {
+        // Slab on the night's charge, as the folio does.
+        const pct = gstRateForTariff(n.amount, cfg);
+        const base = exclusive ? n.amount : r2(n.amount / (1 + pct / 100));
+        const nightGst = exclusive ? r2(n.amount * pct / 100) : r2(n.amount - base);
+        const svc = cfg.serviceChargePct > 0 ? r2(base * cfg.serviceChargePct / 100) : 0;
+        const svcGst = svc > 0 ? r2(svc * pct / 100) : 0;
+        charged = r2(charged + n.amount);
+        taxable = r2(taxable + base + svc);
+        gst = r2(gst + nightGst + svcGst);
+        serviceCharge = r2(serviceCharge + svc);
+        return { date: n.date, room_charge: n.amount, gst_pct: pct, gst: r2(nightGst + svcGst), total: r2(base + svc + nightGst + svcGst) };
+      });
+      const rates = Array.from(new Set(nights.map(n => n.gst_pct))).sort((x, y) => x - y);
+      res.json({
+        room_charge: charged, taxable, gst, service_charge: serviceCharge, total: r2(taxable + gst),
+        gst_pct: rates.length === 1 ? rates[0] : null, gst_rates: rates, nights, gst_exclusive: exclusive ? 1 : 0,
+      });
     } catch (e: any) { res.status(500).json({ error: 'Could not work out the GST.' }); }
   });
 
@@ -67104,8 +67146,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checkin-total-with-gst',
+    commit_marker: 'checkin-gst-per-night',
     code_features: [
+      'checkin-gst-per-night  Owner: GST applies per night, not on the whole stay. The check-in preview averaged the stay across nights, which misstates a stay whose nights fall in different slabs (a weekend or season rate crossing 7,500). The per-night room-charge builder is extracted from createFolioWithRoomCharges into _folioPerNightPlan (matrix plan rate + extras, rate plan, or the manual rate) and used by both; stay-tax-preview now takes booking_id with the check-in screens changes (room_id, room_rate, meal_plan_id, gst_exclusive), applies the slab to each night and returns per-night lines and the rates used. The wizard shows the mixed rates (e.g. 12%/18%) when nights differ. Test TC-HOTEL-CHECKIN-GST-FOLIO compares the preview with the bill a real check-in creates.',
       'checkin-total-with-gst  Owner: the hotel check-in wizard showed the pre-GST room charge as Total (and Outstanding from it), so staff collected short of the bill. New GET /api/restaurant/:id/hotel/stay-tax-preview?amount&nights&gst_exclusive works the stay out the way createFolioWithRoomCharges does (tenant GST slab on each night, GST added for an exclusive rate or extracted from an inclusive one, service charge with its GST). The wizard shows Total incl. GST with the taxable + GST % breakdown, Outstanding from it, and Stay total incl. GST in step 1.',
       'events-calendar-hides-finished  Fix (owner): the Events calendar showed events that were over. Completed and cancelled bookings were already excluded, but nothing marks an event Completed when its dates pass, so finished events still In progress / Confirmed kept occupying the grid (11 on RESTO-1003). The calendar now drops a booking once its last day (end_date, else event_date) is before today, KPIs included; the Bookings list gains a Needs closing tile (Confirmed / In progress past their last day, looks across all dates) so staff still close them. Owner chose hiding over nightly auto-complete.',
       'public-pay-spa-booking  Owner: the spa / wellness public booking page takes online payment with the same owner choices as hotels (full, advance %, at the property, hold minutes). New SPA_APPOINTMENT payable: total = price_snapshot plus gst_percent_snapshot; paying opens the spa bill early (folio_kind SPA, appointment_id, no lines) and records an ADVANCE via recordFolioPayment (Dr 1025 / Cr 2100 like any spa advance); spa checkout now fills that open bill instead of opening a second one, so settlement applies the advance; charging to the room is refused (409 PAID_ONLINE_AHEAD) once paid ahead. The booking POST takes pay_option, holds the slot in public_payment_holds and returns a pay token; the done screen shows the countdown and Pay now; the release sweep cancels unpaid held appointments and their links.',
