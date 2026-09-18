@@ -67254,8 +67254,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-receipt-no-downgrade',
+    commit_marker: 'feedback-link-app-host',
     code_features: [
+      'feedback-link-app-host  Guest feedback links pointed at the bare domain, which is the marketing site, so every guest landed on its homepage instead of the feedback form. They now use the app host (FRONTEND_URL, else erp.atithi-setu.com), where GET /feedback is served.',
       'wa-receipt-no-downgrade  WhatsApp delivery receipts can arrive out of order; a late sent receipt no longer overwrites delivered or read on the delivery log.',
       'wa-event-template-links  Guest notification events are linked to the Meta-approved WhatsApp templates. Template values come from one builder (_waTemplateVariables) that formats dates and money, falls back to a default and never sends an empty parameter. A super-admin test route sends an event template to one number. Cancellation and order-confirmation events now carry the guest name.',
       'wa-app-webhook-fields  /internal WhatsApp: no event had ever reached the webhook although the account was subscribed. Diagnostics now read the Meta app behind the token (debug_token) and its webhook subscription (GET /{app}/subscriptions with the app access token app_id|App secret): the callback URL and whether the messages field is subscribed. POST /api/admin/whatsapp/subscribe-fields subscribes whatsapp_business_account messages at this server callback URL with the saved verify token (Meta verifies it through the GET webhook). Shown as a card with Subscribe to messages.',
@@ -73336,7 +73337,9 @@ ${data.tenant.name}`;
           if (!candidates || candidates.length === 0) continue;
           for (const o of candidates) {
             const token = _signFeedbackToken(t.id, o.id);
-            const link = `https://${process.env.PUBLIC_HOST || 'atithi-setu.com'}/feedback?t=${encodeURIComponent(token)}`;
+            // The feedback page is served by the app, not the marketing site at the
+            // bare domain (which answered with its homepage), so link to the app host.
+            const link = `${String(process.env.FRONTEND_URL || 'https://erp.atithi-setu.com').replace(/\/+$/, '')}/feedback?t=${encodeURIComponent(token)}`;
             // Pick the primary channel — first one in the list for which we
             // have contact info. We record one feedback_requests row per send
             // attempt so dedup + response-rate stats stay clean.
