@@ -11081,7 +11081,9 @@ async function startServer() {
       if (!map?.template_name) return res.status(404).json({ error: 'No template is linked to ' + ev + '.' });
       const rRow: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [rid]).catch(() => null);
       if (!rRow) return res.status(404).json({ error: 'Unknown property.' });
-      const data = { ...(req.body?.data || {}), restaurantName: rRow.name };
+      const data: any = { ...(req.body?.data || {}), restaurantName: rRow.name };
+      // A feedback test carries a REAL signed link for one order, built exactly as the sweep builds it.
+      if (ev === 'FEEDBACK_REQUEST' && req.body?.feedback_order_id) data.feedback_link = _feedbackLinkFor(rid, String(req.body.feedback_order_id));
       const variables = _waTemplateVariables(map.variables, data);
       const db = await getTenantDb(rid);
       const ok = await mwSendWhatsApp(db, rid, {
@@ -11268,7 +11270,7 @@ async function startServer() {
     const timer = setTimeout(() => controller.abort(), 8000);
     let ok = false, detail = '', display: string | null = null, name: string | null = null;
     try {
-      const r = await fetch(`https://graph.facebook.com/v21.0/${eff.phoneNumberId}?fields=display_phone_number,verified_name,quality_rating`,
+      const r = await fetch(`https://graph.facebook.com/v21.0/${eff.phoneNumberId}?fields=display_phone_number,verified_name,quality_rating,name_status,new_name_status,is_official_business_account`,
         { headers: { Authorization: `Bearer ${eff.accessToken}` }, signal: controller.signal });
       const body: any = await r.json().catch(() => ({}));
       if (!r.ok || body?.error) {
@@ -11279,6 +11281,19 @@ async function startServer() {
       } else {
         ok = true; display = body.display_phone_number || null; name = body.verified_name || null;
         detail = `Connected: ${name || 'number'} ${display || eff.phoneNumberId}${body.quality_rating ? ` (quality ${body.quality_rating})` : ''}`;
+        // Whether guests see the business name or only the number depends on
+        // Meta approving the display name. Say plainly where it stands.
+        const ns = String(body.new_name_status && body.new_name_status !== 'NONE' ? body.new_name_status : body.name_status || '').toUpperCase();
+        const nameNote: Record<string, string> = {
+          APPROVED: 'display name approved',
+          AVAILABLE_WITHOUT_REVIEW: 'display name usable without review',
+          PENDING_REVIEW: 'display name waiting for Meta review, so guests see only the number until it is approved',
+          DECLINED: 'display name DECLINED by Meta, so guests see only the number. Submit a new name in WhatsApp Manager, Phone numbers',
+          EXPIRED: 'display name approval expired. Resubmit it in WhatsApp Manager',
+          NON_EXISTS: 'no display name submitted. Add one in WhatsApp Manager, Phone numbers',
+        };
+        if (ns) detail += ` · ${nameNote[ns] || `display name status ${ns}`}`;
+        if (body.is_official_business_account) detail += ' · Official Business Account';
       }
     } catch (e: any) {
       detail = e?.name === 'AbortError' ? 'Meta did not answer within 8 seconds.' : `Could not reach Meta: ${e?.message || e}`;
@@ -18089,6 +18104,13 @@ async function startServer() {
     const b64 = Buffer.from(payload).toString('base64url');
     const sig = createHmac('sha256', FEEDBACK_TOKEN_SECRET).update(payload).digest('base64url');
     return `${b64}.${sig}`;
+  }
+
+  // The guest's feedback link. The page is served by the app, not the marketing
+  // site at the bare domain (which answered with its homepage), so use the app host.
+  function _feedbackLinkFor(tenantId: string, orderId: string): string {
+    const origin = String(process.env.FRONTEND_URL || 'https://erp.atithi-setu.com').replace(/\/+$/, '');
+    return `${origin}/feedback?t=${encodeURIComponent(_signFeedbackToken(tenantId, orderId))}`;
   }
 
   function _verifyFeedbackToken(token: string): { tenantId: string; orderId: string } | null {
@@ -67254,8 +67276,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'feedback-link-app-host',
+    commit_marker: 'feedback-link-builder-wa-name-status',
     code_features: [
+      'feedback-link-builder-wa-name-status  One feedback link builder (_feedbackLinkFor) shared by the sweep and the admin template test, which can now send a real signed feedback link for an order. The WhatsApp connection test reports the sender display-name status from Meta (approved, pending, declined, none), which decides whether guests see the business name or just the number.',
       'feedback-link-app-host  Guest feedback links pointed at the bare domain, which is the marketing site, so every guest landed on its homepage instead of the feedback form. They now use the app host (FRONTEND_URL, else erp.atithi-setu.com), where GET /feedback is served.',
       'wa-receipt-no-downgrade  WhatsApp delivery receipts can arrive out of order; a late sent receipt no longer overwrites delivered or read on the delivery log.',
       'wa-event-template-links  Guest notification events are linked to the Meta-approved WhatsApp templates. Template values come from one builder (_waTemplateVariables) that formats dates and money, falls back to a default and never sends an empty parameter. A super-admin test route sends an event template to one number. Cancellation and order-confirmation events now carry the guest name.',
@@ -73336,10 +73359,7 @@ ${data.tenant.name}`;
           ).catch(() => []);
           if (!candidates || candidates.length === 0) continue;
           for (const o of candidates) {
-            const token = _signFeedbackToken(t.id, o.id);
-            // The feedback page is served by the app, not the marketing site at the
-            // bare domain (which answered with its homepage), so link to the app host.
-            const link = `${String(process.env.FRONTEND_URL || 'https://erp.atithi-setu.com').replace(/\/+$/, '')}/feedback?t=${encodeURIComponent(token)}`;
+            const link = _feedbackLinkFor(t.id, o.id);
             // Pick the primary channel — first one in the list for which we
             // have contact info. We record one feedback_requests row per send
             // attempt so dedup + response-rate stats stay clean.
