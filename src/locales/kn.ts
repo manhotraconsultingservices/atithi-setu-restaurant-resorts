@@ -657,6 +657,7 @@ export const kn: Record<string, string> = {
   'nw.rs.READ': 'ಓದಲಾಗಿದೆ',
   'nw.rs.FAILED': 'ವಿಫಲ',
   'nw.rs.SKIPPED': 'ಬಿಡಲಾಗಿದೆ',
+  'nw.rs.NOT_IN_PLAN': 'ಯೋಜನೆಯಲ್ಲಿ ಇಲ್ಲ',
   'nw.rs.RECEIVED': 'ಸ್ವೀಕರಿಸಲಾಗಿದೆ',
   'nw.day0': 'ಭಾ',
   'nw.day1': 'ಸೋ',

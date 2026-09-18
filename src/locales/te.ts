@@ -655,6 +655,7 @@ export const te: Record<string, string> = {
   'nw.rs.READ': 'చదివారు',
   'nw.rs.FAILED': 'విఫలం',
   'nw.rs.SKIPPED': 'దాటవేశారు',
+  'nw.rs.NOT_IN_PLAN': 'ప్లాన్‌లో లేదు',
   'nw.rs.RECEIVED': 'అందింది',
   'nw.day0': 'ఆ',
   'nw.day1': 'సో',

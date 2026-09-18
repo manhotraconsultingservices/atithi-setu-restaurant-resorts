@@ -758,6 +758,7 @@ export const hi: Record<string, string> = {
   'nw.rs.READ': 'पढ़ा',
   'nw.rs.FAILED': 'विफल',
   'nw.rs.SKIPPED': 'छोड़ा',
+  'nw.rs.NOT_IN_PLAN': 'प्लान में नहीं',
   'nw.rs.RECEIVED': 'प्राप्त',
   'nw.day0': 'र',
   'nw.day1': 'सो',

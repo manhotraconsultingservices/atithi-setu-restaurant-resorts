@@ -719,6 +719,7 @@ export const pa: Record<string, string> = {
   'nw.rs.READ': 'ਪੜ੍ਹਿਆ',
   'nw.rs.FAILED': 'ਅਸਫਲ',
   'nw.rs.SKIPPED': 'ਛੱਡਿਆ',
+  'nw.rs.NOT_IN_PLAN': 'ਪਲਾਨ ਵਿੱਚ ਨਹੀਂ',
   'nw.rs.RECEIVED': 'ਪ੍ਰਾਪਤ',
   'nw.day0': 'ਐ',
   'nw.day1': 'ਸੋ',

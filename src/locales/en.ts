@@ -722,6 +722,7 @@ export const en: Record<string, string> = {
   'nw.rs.READ': 'Read',
   'nw.rs.FAILED': 'Failed',
   'nw.rs.SKIPPED': 'Skipped',
+  'nw.rs.NOT_IN_PLAN': 'Not in plan',
   'nw.rs.RECEIVED': 'Received',
   'nw.day0': 'S',
   'nw.day1': 'M',

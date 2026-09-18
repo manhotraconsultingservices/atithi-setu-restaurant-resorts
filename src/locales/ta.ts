@@ -655,6 +655,7 @@ export const ta: Record<string, string> = {
   'nw.rs.READ': 'படிக்கப்பட்டது',
   'nw.rs.FAILED': 'தோல்வி',
   'nw.rs.SKIPPED': 'தவிர்க்கப்பட்டது',
+  'nw.rs.NOT_IN_PLAN': 'திட்டத்தில் இல்லை',
   'nw.rs.RECEIVED': 'பெறப்பட்டது',
   'nw.day0': 'ஞா',
   'nw.day1': 'தி',

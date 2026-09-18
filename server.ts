@@ -9219,6 +9219,8 @@ async function ensureNotifDeliveries(db: any, rid: string) {
     await db.exec(`ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS direction TEXT DEFAULT 'OUT'`).catch(() => {});
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_notif_deliv_created ON notification_deliveries(created_at DESC)`);
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_notif_deliv_recipient ON notification_deliveries(recipient, created_at DESC)`).catch(() => {});
+    // Sends blocked by the WhatsApp add-on used to be logged FAILED; they are NOT_IN_PLAN.
+    await db.run("UPDATE notification_deliveries SET status = 'NOT_IN_PLAN' WHERE status = 'FAILED' AND channel = 'WHATSAPP' AND error LIKE 'WhatsApp messaging is not enabled for this property%'").catch(() => {});
   } catch { /* ignore */ }
   _notifDelivReady.add(rid);
 }
@@ -10194,7 +10196,13 @@ async function _triggerNotificationRun(restaurantId: string, eventName: string, 
           // shared across every property, so one ignored opt-out would damage
           // deliverability for all of them.
           const consent = isGuestAudience ? await _waConsent(recipient, 'WHATSAPP') : { blocked: false };
-          if (consent.blocked) {
+          if (!(await tenantModules(restaurantId)).whatsapp) {
+            // WhatsApp is a paid add-on. Without it nothing is attempted, and the
+            // log says so plainly: NOT_IN_PLAN, not a failure that looks like a fault.
+            tally.skipped++;
+            await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'NOT_IN_PLAN', ?, ?, ?)",
+              [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, eventName, 'WHATSAPP', recipient, MODULE_OFF_WHATSAPP, audienceTag, String(waText).slice(0, 140)]).catch(() => {});
+          } else if (consent.blocked) {
             tally.skipped++;
             await db.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?, ?)",
               [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, eventName, 'WHATSAPP', recipient, 'This guest asked to stop receiving WhatsApp messages.', audienceTag, String(waText).slice(0, 140)]).catch(() => {});
@@ -10207,11 +10215,8 @@ async function _triggerNotificationRun(restaurantId: string, eventName: string, 
             // at its category rate, which is what the cost report attributes.
             _logAndSendCategory = useTemplate ? metaCategory : 'SERVICE';
             _logAndSendTemplate = useTemplate ? useTemplate.name : null;
-            record(await logAndSend(db, eventName, 'WHATSAPP', recipient, waText, async () => {
-              // Not on this property's plan: logged as not sent, with the reason.
-              if (!(await tenantModules(restaurantId)).whatsapp) return { ok: false, error: MODULE_OFF_WHATSAPP, code: 'MODULE_NOT_ENABLED' };
-              return sendWhatsAppDetailed(recipient, waText, useTemplate);
-            }, audienceTag), 'WHATSAPP');
+            record(await logAndSend(db, eventName, 'WHATSAPP', recipient, waText,
+              () => sendWhatsAppDetailed(recipient, waText, useTemplate), audienceTag), 'WHATSAPP');
             _logAndSendCategory = null; _logAndSendTemplate = null;
           }
         }
@@ -14444,7 +14449,7 @@ async function startServer() {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const status = String(req.query.status || '').toUpperCase();
       const clauses: string[] = []; const params: any[] = [];
-      if (['SENT', 'FAILED', 'SKIPPED', 'DELIVERED', 'READ'].includes(status)) { clauses.push('status = ?'); params.push(status); }
+      if (['SENT', 'FAILED', 'SKIPPED', 'NOT_IN_PLAN', 'DELIVERED', 'READ'].includes(status)) { clauses.push('status = ?'); params.push(status); }
       if (req.query.channel) { clauses.push('channel = ?'); params.push(String(req.query.channel).toUpperCase()); }
       // Drill-down for the messaging console: one contact's whole history, one
       // event's sends, or everything since a date.
@@ -67281,8 +67286,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-name-status-current',
+    commit_marker: 'wa-not-in-plan-status',
     code_features: [
+      'wa-not-in-plan-status  A WhatsApp notification for a property without the WhatsApp add-on is logged NOT_IN_PLAN (with the upgrade hint), not FAILED, and nothing is attempted, so the failed counters and log only show real delivery problems. Older rows blocked for the same reason are relabelled once per tenant.',
       'feedback-link-builder-wa-name-status  One feedback link builder (_feedbackLinkFor) shared by the sweep and the admin template test, which can now send a real signed feedback link for an order. The WhatsApp connection test reports the sender display-name status from Meta (approved, pending, declined, none), which decides whether guests see the business name or just the number.',
       'feedback-link-app-host  Guest feedback links pointed at the bare domain, which is the marketing site, so every guest landed on its homepage instead of the feedback form. They now use the app host (FRONTEND_URL, else erp.atithi-setu.com), where GET /feedback is served.',
       'wa-receipt-no-downgrade  WhatsApp delivery receipts can arrive out of order; a late sent receipt no longer overwrites delivered or read on the delivery log.',
