@@ -36349,12 +36349,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     // the matrix base rate so the preview reflects the actual
                     // amount the server will charge (not the matrix tariff).
                     // Extra-person charges from the matrix are still added on top.
+                    // Same rule as the bill (_folioPerNightPlan): a typed rate that differs from
+                    // the first night's plan rate is the all-in rate for every night, with no
+                    // extra-person charges on top; a typed rate equal to the plan rate leaves
+                    // the plan pricing, extras included, as it is.
                     const manualRate = Number(editingBooking.room_rate || 0);
-                    const usingOverride = manualRate > 0;
+                    const planNight1 = Number(matrixPreview.per_night[0]?.base_rate || 0);
+                    const usingOverride = manualRate > 0 && Math.abs(manualRate - planNight1) > 0.01;
                     const preview = usingOverride ? (() => {
-                      const nights = matrixPreview.per_night.map(n => ({ ...n, base_rate: manualRate, source: 'MANUAL_OVERRIDE' }));
+                      const nights = matrixPreview.per_night.map(n => ({ ...n, base_rate: manualRate, extras: 0, source: 'MANUAL_OVERRIDE' }));
                       const baseTotal = Math.round(manualRate * nights.length * 100) / 100;
-                      return { ...matrixPreview, per_night: nights, base_total: baseTotal, total: Math.round((baseTotal + matrixPreview.extras_total) * 100) / 100 };
+                      return { ...matrixPreview, per_night: nights, base_total: baseTotal, extras_total: 0, extra_lines: [], total: baseTotal };
                     })() : matrixPreview;
                     const nightCount = preview.per_night.length;
                     const seasonsInStay = Array.from(new Set(matrixPreview.per_night.map(n => n.season_id || 'no-season')));
@@ -36417,7 +36422,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </div>
                         </div>
                         {usingOverride && (
-                          <p className="text-[9px] font-semibold text-amber-800">Custom rate ₹{manualRate.toLocaleString('en-IN')}/night · matrix tariff bypassed. Clear the rate field to revert to matrix.</p>
+                          <p className="text-[9px] font-semibold text-amber-800">Custom rate ₹{manualRate.toLocaleString('en-IN')}/night, all-in: matrix tariff and extra-person charges bypassed. Clear the rate field to revert to matrix.</p>
                         )}
                         {!usingOverride && !matrixPreview.matrix_used && (() => {
                           const rt = (tariffData.room_types || []).find((t: any) => t.id === (hotelRooms.find(r => r.id === editingBooking.room_id)?.type_id));
