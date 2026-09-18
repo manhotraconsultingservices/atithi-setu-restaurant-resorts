@@ -11283,7 +11283,9 @@ async function startServer() {
         detail = `Connected: ${name || 'number'} ${display || eff.phoneNumberId}${body.quality_rating ? ` (quality ${body.quality_rating})` : ''}`;
         // Whether guests see the business name or only the number depends on
         // Meta approving the display name. Say plainly where it stands.
-        const ns = String(body.new_name_status && body.new_name_status !== 'NONE' ? body.new_name_status : body.name_status || '').toUpperCase();
+        // name_status is the CURRENT name; new_name_status only describes a requested change.
+        const ns = String(body.name_status || '').toUpperCase();
+        const nns = String(body.new_name_status || '').toUpperCase();
         const nameNote: Record<string, string> = {
           APPROVED: 'display name approved',
           AVAILABLE_WITHOUT_REVIEW: 'display name usable without review',
@@ -11293,6 +11295,9 @@ async function startServer() {
           NON_EXISTS: 'no display name submitted. Add one in WhatsApp Manager, Phone numbers',
         };
         if (ns) detail += ` · ${nameNote[ns] || `display name status ${ns}`}`;
+        if (nns === 'PENDING_REVIEW') detail += ' · a name change is waiting for Meta review';
+        else if (nns === 'DECLINED') detail += ' · the requested name change was declined';
+        detail += ` [raw name_status=${ns || '-'} new_name_status=${nns || '-'}]`;
         if (body.is_official_business_account) detail += ' · Official Business Account';
       }
     } catch (e: any) {
@@ -67276,7 +67281,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'feedback-link-builder-wa-name-status',
+    commit_marker: 'wa-name-status-current',
     code_features: [
       'feedback-link-builder-wa-name-status  One feedback link builder (_feedbackLinkFor) shared by the sweep and the admin template test, which can now send a real signed feedback link for an order. The WhatsApp connection test reports the sender display-name status from Meta (approved, pending, declined, none), which decides whether guests see the business name or just the number.',
       'feedback-link-app-host  Guest feedback links pointed at the bare domain, which is the marketing site, so every guest landed on its homepage instead of the feedback form. They now use the app host (FRONTEND_URL, else erp.atithi-setu.com), where GET /feedback is served.',
