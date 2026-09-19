@@ -8538,6 +8538,14 @@ const isAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
   }
   next();
 };
+// Platform staff: super admin, CTO and sales reps. For platform reads a sales rep
+// may make (their own onboarded tenants); never a tenant's own users.
+const isPlatformStaff = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (!['SUPER_ADMIN', 'CTO', 'SALES_REP'].includes(String(req.user?.role || ''))) {
+    return res.status(403).json({ error: "Access denied" });
+  }
+  next();
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // REQ 2 — Role-based access control middleware for hotel mutations
@@ -11451,7 +11459,7 @@ async function startServer() {
   });
 
   // Admin: Get Restaurants
-  app.get("/api/admin/restaurants", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/admin/restaurants", authenticate, isPlatformStaff, async (req: AuthRequest, res: Response) => {
     try {
       let query = `
         SELECT r.*,
@@ -66319,7 +66327,7 @@ ${data.tenant.name}`;
   });
 
   // CTO: Onboarding Report (sales reps with restaurant counts)
-  app.get("/api/cto/onboarding-report", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/cto/onboarding-report", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
       const reps = await centralDb.query(`
         SELECT u.id as sales_rep_id, u.name as sales_rep_name,
@@ -66339,7 +66347,7 @@ ${data.tenant.name}`;
   });
 
   // CTO: Get Restaurants by Sales Rep
-  app.get("/api/cto/sales-rep-restaurants/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/cto/sales-rep-restaurants/:id", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
       const restaurants = await centralDb.query(
         "SELECT * FROM restaurants WHERE sales_rep_id = ? ORDER BY registered_at DESC",
@@ -66352,7 +66360,7 @@ ${data.tenant.name}`;
   });
 
   // Admin: Get Subscription Prices (per-tier: restaurant / hotel / combined)
-  app.get("/api/admin/subscription-prices", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/admin/subscription-prices", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
       const keys = ['price_monthly', 'price_annual', 'price_monthly_hotel', 'price_annual_hotel', 'price_monthly_combined', 'price_annual_combined'];
       const defaults: Record<string, string> = {
@@ -67945,8 +67953,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'data-loader-spa-events',
+    commit_marker: 'admin-tenant-list-gated',
     code_features: [
+      'admin-tenant-list-gated  SECURITY: GET /api/admin/restaurants had only authenticate, so any signed-in tenant user (e.g. a property owner) could read every tenant record with other owners name, email and phone (verified live: 13 tenants returned to an owner token). Now gated by a new isPlatformStaff (SUPER_ADMIN / CTO / SALES_REP; a sales rep still sees only their own tenants). /api/cto/onboarding-report, /api/cto/sales-rep-restaurants/:id and GET /api/admin/subscription-prices now require isAdmin.',
       'data-loader-spa-events  Owner: the super-admin Data Loader only handled hotel bookings. It now has a module switch (Hotel / Ayurvedic & Spa / Events). Spa: list, guarded delete (skips an appointment with a bill or with clinical notes, treatment records, intake forms, photos, tips, package or consumption), CSV import (client, service by name, date+time, therapist, status, price) at /api/admin/data-migration/spa-appointments. Events: list and guarded delete (skips a booking with an invoice, payments, reserved hotel rooms or a quotation; removes its own line items) at /api/admin/data-migration/event-bookings; import embeds the existing Events migration engine.',
       'expense-journal-recorded-by  Owner bug: Finance > Expenses, Recorded by was blank on every row. The /petty-cash list never returned it. Now each row carries recorded_by: the manual entry recorder, else the ledger line posted_by, resolved to a staff or user name (_resolveActorNames); lines with no posted_by are named from the statutory books audit trail. _postGlEntries now falls back to the request user when a caller passes no actor (folio settlement, event and staff advances posted none).',
       'event-room-folio-settled-paid-with-event  Owner: at event completion an event room\'s empty hotel bill was voided at Rs 0; it must read Settled, paid with the event. It is now status settled, payment_method EVENT, settlement_note Paid with event (event name, event invoice number), and invoice_number = the event invoice reference so it never draws its own GST serial. No ledger posting (the event invoice carries the revenue). New folios.settlement_note column.',
