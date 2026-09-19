@@ -26,7 +26,9 @@ import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, spanInRange, t
 import { MissingGuestIdPanel } from './MissingGuestIdPanel';
 import { EventRoomBilling } from './EventRoomBilling';
 import { DataLoaderSpa, DataLoaderEvents } from './DataLoaderModules';
-import { TenantDirectory } from './admin/TenantDirectory';
+import { TenantDirectory, type ConsoleTool } from './admin/TenantDirectory';
+import { ConsoleShell } from './admin/ConsoleShell';
+import { SubscriptionPrices } from './admin/SubscriptionPrices';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
@@ -54561,7 +54563,15 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
-  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS' | 'WHATSAPP' | 'PRINT_AGENTS'>('RESTAURANTS');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'APPROVALS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'SUBSCRIPTIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS' | 'WHATSAPP' | 'PRINT_AGENTS'>('RESTAURANTS');
+  // Console menu counts (from the directory) and a request to open one tenant's
+  // panel — set by the Ctrl K finder.
+  const [dirCounts, setDirCounts] = useState<any>({});
+  const [openTenantReq, setOpenTenantReq] = useState<{ id: string; n: number } | null>(null);
+  useEffect(() => {
+    fetch('/api/admin/tenants/directory?limit=10', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null)).then(d => { if (d?.counts) setDirCounts(d.counts); }).catch(() => {});
+  }, [token, viewMode]);
   const [editTenant, setEditTenant] = useState<any | null>(null);
 
   // Subscription billing state (admin Billing tab)
@@ -55512,109 +55522,69 @@ function SuperAdminDashboard({ token }: { token: string }) {
     );
   }
 
-  return (
-    <div className="space-y-8">
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
-        <div>
-          <h2 className="text-3xl font-bold font-serif">ERP Super Admin</h2>
-          <p className="text-sm text-[#6b5d52]">Manage business partners, internal users, and activations.</p>
-        </div>
-        <div className="flex bg-white p-1 rounded-2xl border border-brand/10 flex-wrap gap-1">
-          <button
-            onClick={() => setViewMode('RESTAURANTS')}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'RESTAURANTS' ? "bg-brand text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Layout size={16} /> Businesses
-          </button>
-          <button
-            onClick={() => setViewMode('USERS')}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'USERS' ? "bg-brand text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Users size={16} /> Internal Users
-          </button>
-          <button
-            onClick={() => { setViewMode('LOCATIONS'); fetchAdminLocations(); }}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'LOCATIONS' ? "bg-indigo-600 text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <MapPin size={16} /> Locations
-          </button>
-          <button
-            onClick={() => setViewMode('PERMISSIONS')}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'PERMISSIONS' ? "bg-violet-600 text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Shield size={16} /> Role Access
-          </button>
-          <button
-            onClick={() => { setViewMode('BILLING'); fetchTenantBilling(); }}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'BILLING' ? "bg-emerald-600 text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Clock size={16} /> Billing
-          </button>
-          <button
-            onClick={() => { setViewMode('DATA_MIGRATION'); fetchMigTenants(); }}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'DATA_MIGRATION' ? "bg-red-600 text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Database size={16} /> Data Loader
-          </button>
-          <button
-            onClick={() => { setViewMode('SQL_CONSOLE'); fetchMigTenants(); }}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'SQL_CONSOLE' ? "bg-violet-600 text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Terminal size={16} /> SQL Console
-          </button>
-          <button
-            onClick={() => { setViewMode('ADMIN_ALERTS'); fetchAdminAlerts(); }}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'ADMIN_ALERTS' ? "bg-sky-600 text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Bell size={16} /> Admin Alerts
-          </button>
-          <button
-            onClick={() => setViewMode('WHATSAPP')}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'WHATSAPP' ? "bg-emerald-600 text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <MessageCircle size={16} /> WhatsApp
-          </button>
-          <button
-            onClick={() => { setViewMode('PRINT_AGENTS'); fetchAgentRollout(); }}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'PRINT_AGENTS' ? "bg-violet-600 text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Printer size={16} /> Print Agents
-          </button>
-        </div>
-      </div>
+  // Opens a console tool already pointed at one tenant (panel → Maintenance).
+  const openConsoleTool = (tool: ConsoleTool, tenantId: string, module?: 'HOTEL' | 'SPA' | 'EVENTS') => {
+    if (tool === 'DATA_LOADER') {
+      fetchMigTenants(); setMigSelectedTenant(tenantId); setMigModule(module || 'HOTEL');
+      setMigCsvRows([]); setMigImportStep('idle'); setMigImportResult(null); setMigMsg(null);
+      if ((module || 'HOTEL') === 'HOTEL') fetchMigBookings(tenantId);
+      setViewMode('DATA_MIGRATION');
+    } else if (tool === 'SQL') {
+      fetchMigTenants(); setSqlTarget('tenant'); setSqlTenantId(tenantId); setSqlResult(null); setSqlError('');
+      setViewMode('SQL_CONSOLE');
+    } else {
+      setPermSelectedRestaurant(tenantId); fetchPermissions(tenantId); setViewMode('PERMISSIONS');
+    }
+  };
+  const selectConsoleView = (k: string) => {
+    setViewMode(k as any);
+    if (k === 'LOCATIONS') fetchAdminLocations();
+    if (k === 'BILLING') fetchTenantBilling();
+    if (k === 'DATA_MIGRATION' || k === 'SQL_CONSOLE') fetchMigTenants();
+    if (k === 'ADMIN_ALERTS') fetchAdminAlerts();
+    if (k === 'PRINT_AGENTS') fetchAgentRollout();
+  };
 
+  return (
+    <ConsoleShell
+      title="Atithi-Setu"
+      subtitle="Platform console · Super admin"
+      token={token}
+      active={viewMode}
+      onSelect={selectConsoleView}
+      onJump={id => { setViewMode('RESTAURANTS'); setOpenTenantReq({ id, n: Date.now() }); }}
+      groups={[
+        { label: 'Tenants', items: [
+          { key: 'RESTAURANTS', label: 'Directory', count: dirCounts.ALL },
+          { key: 'APPROVALS', label: 'Approvals', count: dirCounts.PENDING, tone: 'warn' },
+          { key: 'BILLING', label: 'Billing & renewals', count: dirCounts.OVERDUE, tone: 'crit' },
+        ] },
+        { label: 'Platform', items: [
+          { key: 'USERS', label: 'Internal users' },
+          { key: 'LOCATIONS', label: 'Locations' },
+          { key: 'PERMISSIONS', label: 'Role access' },
+          { key: 'SUBSCRIPTIONS', label: 'Subscription prices' },
+        ] },
+        { label: 'Operations', items: [
+          { key: 'PRINT_AGENTS', label: 'Print agents' },
+          { key: 'WHATSAPP', label: 'WhatsApp' },
+          { key: 'ADMIN_ALERTS', label: 'Admin alerts' },
+        ] },
+        { label: 'Tools', items: [
+          { key: 'DATA_MIGRATION', label: 'Data loader' },
+          { key: 'SQL_CONSOLE', label: 'SQL console' },
+        ] },
+      ]}
+    >
+    <div className="space-y-8">
       {viewMode === 'RESTAURANTS' ? (
-        <TenantDirectory token={token} role="SUPER_ADMIN" />
+        <TenantDirectory token={token} role="SUPER_ADMIN" openRequest={openTenantReq} onTool={openConsoleTool} />
+      ) : viewMode === 'APPROVALS' ? (
+        <TenantDirectory token={token} role="SUPER_ADMIN" fixedChip="PENDING" heading="Approvals"
+          blurb="Businesses that signed up and are waiting. Open one to check it, then approve it — or tick several and approve them together."
+          onTool={openConsoleTool} />
+      ) : viewMode === 'SUBSCRIPTIONS' ? (
+        <SubscriptionPrices token={token} />
       ) : viewMode === 'USERS' ? (
         <div className="space-y-6">
           <div className="flex justify-between items-center">
@@ -57072,184 +57042,38 @@ function SuperAdminDashboard({ token }: { token: string }) {
         </div>
       ) : null}
     </div>
+    </ConsoleShell>
   );
 }
 
+// Sales rep console: the platform directory, which the server limits to the
+// rep's own businesses. From a business's panel the rep can approve it while it
+// waits and load the demo tariff before it goes live.
 function SalesRepresentativeDashboard({ token }: { token: string }) {
-  const toast = useToast();
-  const showConfirm = useConfirm();
-  const [restaurants, setRestaurants] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-
+  const [view, setView] = useState<'MINE' | 'PENDING'>('MINE');
+  const [counts, setCounts] = useState<any>({});
+  const [openReq, setOpenReq] = useState<{ id: string; n: number } | null>(null);
   useEffect(() => {
-    fetchMyRestaurants();
-  }, []);
-
-  const fetchMyRestaurants = async () => {
-    try {
-      const res = await fetch('/api/admin/restaurants', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        setRestaurants(await res.json());
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const approveRestaurant = async (id: string) => {
-    try {
-      const res = await fetch(`/api/admin/restaurants/${id}/toggle-status`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ is_active: 1 })
-      });
-      if (res.ok) fetchMyRestaurants();
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  // BCG-SEED-BUTTON (client request 7 Jun 2026): one-click GUI seed
-  // of the BCG-onboarding boutique resort's tariff matrix (3 categories
-  // × 2 seasons × 4 meal plans + extras + 27 rooms). Idempotent —
-  // re-running just refreshes any drifted rates. Confirms before
-  // running because the seed overwrites 50+ rows on the target tenant.
-  const [seedingTariffFor, setSeedingTariffFor] = useState<string | null>(null);
-  const seedBcgTariff = async (id: string, name: string) => {
-    if (!await showConfirm({
-      title: `Seed BCG demo tariff into ${name}?`,
-      body: `Creates/refreshes 3 room categories, 27 sample rooms, 4 season date ranges, and 24 room-rate cells. Flips tariff_model to MATRIX. Idempotent — safe to re-run.`,
-    })) return;
-    setSeedingTariffFor(id);
-    try {
-      const res = await fetch(`/api/admin/tenants/${id}/seed-bcg-tariff`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        toast.error('Seed failed: ' + (data.error || `HTTP ${res.status}`));
-        return;
-      }
-      toast.success('BCG demo tariff seeded for ' + (data.tenant?.name || id));
-    } catch (err: any) {
-      toast.error('Seed failed: ' + (err?.message || 'Network error'));
-    } finally {
-      setSeedingTariffFor(null);
-    }
-  };
-
-  if (loading) return <div className="flex justify-center p-12"><Clock className="animate-spin" /></div>;
-
+    fetch('/api/admin/tenants/directory?limit=10', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null)).then(d => { if (d?.counts) setCounts(d.counts); }).catch(() => {});
+  }, [token, view]);
   return (
-    <div className="space-y-8">
-      <div>
-        <h2 className="text-3xl font-bold font-serif">Sales Representative Dashboard</h2>
-        <p className="text-sm text-[#6b5d52]">Your onboarded businesses and performance tracking.</p>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-white p-8 rounded-[32px] border border-brand/10 shadow-sm text-center">
-          <p className="text-4xl font-bold text-[#1a1208] mb-2">{restaurants.length}</p>
-          <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Total Onboarded</p>
-        </div>
-        <div className="bg-white p-8 rounded-[32px] border border-brand/10 shadow-sm text-center">
-          <p className="text-4xl font-bold text-green-600 mb-2">{restaurants.filter(r => r.is_active === 1).length}</p>
-          <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Active Businesses</p>
-        </div>
-        <div className="bg-white p-8 rounded-[32px] border border-brand/10 shadow-sm text-center">
-          <p className="text-4xl font-bold text-orange-500 mb-2">{restaurants.filter(r => r.is_active === 0).length}</p>
-          <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Pending Approval</p>
-        </div>
-      </div>
-
-      <div className="bg-white p-8 rounded-[32px] border border-brand/10 shadow-sm">
-        <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
-          <Layout size={20} /> My Onboarded Businesses
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {restaurants.map(r => (
-            <div key={r.id} className="p-6 rounded-3xl bg-[#faf7f2] flex justify-between items-center">
-              <div>
-                <h4 className="font-bold">{r.name}</h4>
-                <p className="text-xs text-[#6b5d52]">{r.city}, {r.state}</p>
-                <div className="mt-2 flex items-center gap-2">
-                  <span className={cn(
-                    "px-2 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-widest",
-                    r.is_active === 1 ? "bg-green-100 text-green-700" : 
-                    r.is_active === 0 ? "bg-orange-100 text-orange-700" : 
-                    "bg-red-100 text-red-700"
-                  )}>
-                    {r.is_active === 1 ? 'Active' : r.is_active === 0 ? 'Pending' : 'Inactive'}
-                  </span>
-                  {r.subscription_expires_at && (
-                    <span className={cn(
-                      "px-2 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-widest flex items-center gap-1",
-                      new Date(r.subscription_expires_at) < new Date() ? "bg-red-50 text-red-600" : "bg-blue-50 text-blue-600"
-                    )}>
-                      <Clock size={8} /> Due: {new Date(r.subscription_expires_at).toLocaleDateString()}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="text-right flex flex-col items-end gap-2">
-                <div>
-                  <p className="text-xs font-bold">{r.owner_name}</p>
-                  <p className="text-[11px] text-[#9c8e85] font-mono">{r.id}</p>
-                </div>
-                {r.is_active === 0 && (
-                  <button
-                    onClick={() => approveRestaurant(r.id)}
-                    className="bg-green-600 text-white px-4 py-2 rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-green-700 transition-all shadow-lg shadow-green-600/20"
-                  >
-                    Approve
-                  </button>
-                )}
-                {/* BCG demo tariff seed button — only shown for hotel /
-                    both tenants since restaurant-only tenants don't have
-                    the tariff tables. Disabled while in-flight. */}
-                {(r.property_type === 'HOTEL' || r.property_type === 'BOTH') && (
-                  <button
-                    onClick={() => seedBcgTariff(r.id, r.name || r.id)}
-                    disabled={seedingTariffFor === r.id}
-                    title="Load the BCG demo room categories + matrix tariff + sample rooms. Idempotent."
-                    className="bg-brand text-white px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-brand-dark transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {seedingTariffFor === r.id ? 'Seeding…' : '⚡ Seed BCG Tariff'}
-                  </button>
-                )}
-                {/* Quick link to the public booking page — works for both
-                    slug-based and id-based URLs (the route resolver tries
-                    slug first, falls back to id). */}
-                {(r.property_type === 'HOTEL' || r.property_type === 'BOTH') && (
-                  <a
-                    href={`/book/${r.booking_slug || r.id}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="Open this property's public booking page in a new tab"
-                    className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-100"
-                  >
-                    🌐 View public page
-                  </a>
-                )}
-              </div>
-            </div>
-          ))}
-          {restaurants.length === 0 && (
-            <div className="col-span-full py-12 text-center text-[#9c8e85] italic">
-              You haven't onboarded any businesses yet.
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+    <ConsoleShell
+      title="Atithi-Setu"
+      subtitle="Platform console · Sales"
+      token={token}
+      active={view}
+      onSelect={k => setView(k as any)}
+      onJump={id => { setView('MINE'); setOpenReq({ id, n: Date.now() }); }}
+      groups={[{ label: 'My businesses', items: [
+        { key: 'MINE', label: 'All', count: counts.ALL },
+        { key: 'PENDING', label: 'Needs approval', count: counts.PENDING, tone: 'warn' },
+      ] }]}
+    >
+      {view === 'MINE'
+        ? <TenantDirectory token={token} role="SALES_REP" heading="My businesses" blurb="The businesses you look after. Open one to see its details, approve it or load the demo tariff." openRequest={openReq} />
+        : <TenantDirectory token={token} role="SALES_REP" fixedChip="PENDING" heading="Needs approval" blurb="Your businesses that signed up and are waiting. Open one and approve it." />}
+    </ConsoleShell>
   );
 }
 
@@ -57377,43 +57201,19 @@ function CTODashboard({ token }: { token: string }) {
   if (loading) return <div className="flex justify-center p-12"><Clock className="animate-spin" /></div>;
 
   return (
+    <ConsoleShell
+      title="Atithi-Setu"
+      subtitle="Platform console · CTO"
+      token={token}
+      active={viewMode}
+      onSelect={k => setViewMode(k as any)}
+      groups={[{ label: 'Platform', items: [
+        { key: 'REPORTS', label: 'Onboarding reports' },
+        { key: 'USERS', label: 'Internal users' },
+        { key: 'SUBSCRIPTIONS', label: 'Subscription prices' },
+      ] }]}
+    >
     <div className="space-y-8">
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
-        <div>
-          <h2 className="text-3xl font-bold font-serif">CTO Dashboard</h2>
-          <p className="text-sm text-[#6b5d52]">Onboarding performance and internal user management.</p>
-        </div>
-        <div className="flex bg-white p-1 rounded-2xl border border-brand/10">
-          <button 
-            onClick={() => setViewMode('REPORTS')}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'REPORTS' ? "bg-brand text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <BarChart size={16} /> Reports
-          </button>
-          <button 
-            onClick={() => setViewMode('USERS')}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'USERS' ? "bg-brand text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <Users size={16} /> Internal Users
-          </button>
-          <button 
-            onClick={() => setViewMode('SUBSCRIPTIONS')}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
-              viewMode === 'SUBSCRIPTIONS' ? "bg-brand text-white shadow-md" : "text-[#1a1208] hover:bg-brand/5"
-            )}
-          >
-            <CreditCard size={16} /> Subscriptions
-          </button>
-        </div>
-      </div>
-
       {viewMode === 'REPORTS' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           <div className="bg-white p-8 rounded-[32px] border border-brand/10 shadow-sm">
@@ -57534,61 +57334,10 @@ function CTODashboard({ token }: { token: string }) {
           ))}
         </div>
       ) : (
-        <div className="bg-white p-10 rounded-[32px] border border-brand/10 shadow-sm max-w-3xl mx-auto">
-          <h3 className="text-2xl font-bold font-serif mb-8 flex items-center gap-2">
-            <CreditCard size={28} /> Subscription Pricing — by Tier
-          </h3>
-          <div className="space-y-6">
-            {/* Per-tier pricing grid */}
-            {([
-              { tier: 'Restaurant', plans: 'Starter / Professional / Multi-Outlet', key: '' as const },
-              { tier: 'Hotel',      plans: 'Boutique / Resort / Chain',             key: '_hotel' as const },
-              { tier: 'Combined',   plans: 'Restaurant + Hotel together',           key: '_combined' as const },
-            ] as { tier: string; plans: string; key: '' | '_hotel' | '_combined' }[]).map(({ tier, plans, key }) => (
-              <div key={tier} className="bg-[#faf7f2] rounded-3xl p-6 space-y-4">
-                <div>
-                  <p className="font-bold text-sm">{tier} Tier</p>
-                  <p className="text-[11px] text-[#9c8e85]">{plans}</p>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] ml-1">Monthly (₹)</label>
-                    <input
-                      type="number"
-                      className="w-full bg-white border-none rounded-2xl px-4 py-3 outline-none font-bold text-sm"
-                      value={(prices as any)[`monthly_price${key}`]}
-                      onChange={e => setPrices({ ...prices, [`monthly_price${key}`]: e.target.value } as typeof prices)}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] ml-1">Annual (₹)</label>
-                    <input
-                      type="number"
-                      className="w-full bg-white border-none rounded-2xl px-4 py-3 outline-none font-bold text-sm"
-                      value={(prices as any)[`annual_price${key}`]}
-                      onChange={e => setPrices({ ...prices, [`annual_price${key}`]: e.target.value } as typeof prices)}
-                    />
-                  </div>
-                </div>
-              </div>
-            ))}
-            <button
-              onClick={savePrices}
-              disabled={isSavingPrices}
-              className="w-full bg-brand text-white py-4 rounded-2xl font-bold hover:bg-brand-dark transition-all disabled:opacity-50"
-            >
-              {isSavingPrices ? 'Saving...' : 'Update Subscription Prices'}
-            </button>
-            <div className="bg-orange-50 p-6 rounded-3xl border border-orange-100 flex gap-4">
-              <Info className="text-orange-500 shrink-0" size={20} />
-              <p className="text-xs text-orange-700 leading-relaxed">
-                Only the CTO can modify tier pricing. Prices are shown on the owner Subscription tab based on their assigned plan. Restaurant tier uses the default Monthly / Annual price.
-              </p>
-            </div>
-          </div>
-        </div>
+        <SubscriptionPrices token={token} />
       )}
     </div>
+    </ConsoleShell>
   );
 }
 

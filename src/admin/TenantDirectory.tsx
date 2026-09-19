@@ -55,12 +55,22 @@ const Mods = ({ r }: { r: TRow }) => (
   ))}</span>
 );
 
-export function TenantDirectory({ token, role }: { token: string; role: string }) {
+export type ConsoleTool = 'DATA_LOADER' | 'SQL' | 'ROLE_ACCESS';
+export function TenantDirectory({ token, role, fixedChip, heading, blurb, openRequest, onTool }: {
+  token: string; role: string;
+  /** Pins the list to one filter (Approvals = PENDING) and hides the filter chips. */
+  fixedChip?: string;
+  heading?: string; blurb?: string;
+  /** Opens this tenant's panel; n changes on every request so the same id can be reopened. */
+  openRequest?: { id: string; n: number } | null;
+  /** Opens a console tool already scoped to the tenant (Maintenance tab). */
+  onTool?: (tool: ConsoleTool, tenantId: string, module?: 'HOTEL' | 'SPA' | 'EVENTS') => void;
+}) {
   const toast = useToast();
   const confirm = useConfirm();
   const prompt = usePaymentDialog();
   const isSuper = role === 'SUPER_ADMIN';
-  const [chip, setChip] = useState<string>(() => { try { return localStorage.getItem('adm:dir:chip') || 'ALL'; } catch { return 'ALL'; } });
+  const [chip, setChip] = useState<string>(() => { if (fixedChip) return fixedChip; try { return localStorage.getItem('adm:dir:chip') || 'ALL'; } catch { return 'ALL'; } });
   const [q, setQ] = useState('');
   const [qLive, setQLive] = useState('');
   const [type, setType] = useState('');
@@ -94,10 +104,10 @@ export function TenantDirectory({ token, role }: { token: string; role: string }
   }, [api, chip, q, sort, page, type, rep]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { const t = setTimeout(() => { setQ(qLive.trim()); setPage(1); }, 250); return () => clearTimeout(t); }, [qLive]);
-  useEffect(() => { try { localStorage.setItem('adm:dir:chip', chip); } catch { /* private mode */ } }, [chip]);
+  useEffect(() => { if (fixedChip) return; try { localStorage.setItem('adm:dir:chip', chip); } catch { /* private mode */ } }, [chip, fixedChip]);
+  useEffect(() => { if (openRequest?.id) setOpenId(openRequest.id); }, [openRequest?.n]);
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
       if (e.key === 'Escape' && openId) setOpenId(null);
     };
     window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k);
@@ -141,30 +151,29 @@ export function TenantDirectory({ token, role }: { token: string; role: string }
     <div className="space-y-4 text-slate-900">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h2 className="text-[22px] font-semibold tracking-tight">Tenant directory</h2>
-          <p className="text-[13px] text-slate-500">Every property on the platform. Click a row to manage it.</p>
+          <h2 className="text-[22px] font-semibold tracking-tight">{heading || 'Tenant directory'}</h2>
+          <p className="text-[13px] text-slate-500">{blurb || 'Every property on the platform. Click a row to manage it.'}</p>
         </div>
         <div className="flex gap-2">
           <button type="button" onClick={() => exportCsv(data.rows)} className="h-9 px-3 rounded-lg border border-slate-200 bg-white text-[13px] font-medium inline-flex items-center gap-1.5 hover:border-slate-300"><Download size={14} /> Export page</button>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-slate-200 border border-slate-200 rounded-xl overflow-hidden">
+      {!fixedChip && <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-slate-200 border border-slate-200 rounded-xl overflow-hidden">
         {kpis.map(([l, v, cls, ch]) => (
           <button key={l} type="button" onClick={() => setChipTo(ch)} className={`bg-white px-4 py-3 text-left hover:bg-slate-50 ${chip === ch ? 'ring-2 ring-inset ring-brand/40' : ''}`}>
             <div className="text-[11.5px] text-slate-500">{l}</div>
             <div className={`font-mono text-[21px] tabular-nums ${cls}`}>{Number(v || 0).toLocaleString('en-IN')}</div>
           </button>
         ))}
-      </div>
+      </div>}
 
       <div className="flex flex-wrap items-center gap-2">
         <label className="relative flex-1 min-w-[220px] max-w-[520px]">
           <Search size={15} className="absolute left-3 top-2.5 text-slate-400" />
           <input ref={searchRef} id="tenant-search" value={qLive} onChange={e => setQLive(e.target.value)}
             placeholder="Search name, ID, owner, email, phone, city"
-            className="w-full h-9 pl-9 pr-16 rounded-lg border border-slate-200 bg-white text-[13.5px] outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" />
-          <span className="absolute right-2 top-2 text-[10.5px] font-mono text-slate-400 border border-slate-200 rounded px-1.5 py-0.5 bg-slate-50">Ctrl K</span>
+            className="w-full h-9 pl-9 pr-3 rounded-lg border border-slate-200 bg-white text-[13.5px] outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" />
         </label>
         <select id="tenant-type" value={type} onChange={e => { setType(e.target.value); setPage(1); }} className="h-9 rounded-lg border border-slate-200 bg-white px-2 text-[13px] text-slate-600">
           <option value="">All types</option><option value="HOTEL">Hotel</option><option value="RESTAURANT">Restaurant</option><option value="BOTH">Hotel + Restaurant</option>
@@ -177,14 +186,14 @@ export function TenantDirectory({ token, role }: { token: string; role: string }
         )}
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
+      {!fixedChip && <div className="flex flex-wrap gap-1.5">
         {CHIPS.map(([k, l]) => (
           <button key={k} type="button" aria-pressed={chip === k} onClick={() => setChipTo(k)}
             className={`h-[30px] px-3 rounded-full border text-[12.5px] inline-flex items-center gap-1.5 ${chip === k ? 'bg-slate-900 border-slate-900 text-white' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'}`}>
             {l}<span className={`font-mono text-[11px] ${chip === k ? 'text-white/70' : 'text-slate-400'}`}>{Number(c[k] || 0).toLocaleString('en-IN')}</span>
           </button>
         ))}
-      </div>
+      </div>}
 
       {sel.size > 0 && isSuper && (
         <div className="flex flex-wrap items-center gap-2 bg-slate-900 text-white rounded-xl px-4 py-2 text-[13px]">
@@ -261,18 +270,19 @@ export function TenantDirectory({ token, role }: { token: string; role: string }
         </div>
       </div>
 
-      {openId && <TenantPanel id={openId} api={api} role={role} reps={data.reps} onClose={() => setOpenId(null)} onChanged={load} />}
+      {openId && <TenantPanel id={openId} api={api} role={role} reps={data.reps} onClose={() => setOpenId(null)} onChanged={load} onTool={onTool} />}
     </div>
   );
 }
 
 // ── Side panel for one tenant ────────────────────────────────────────────────
-const TABS = ['Overview', 'Modules', 'Owner & access', 'Billing'] as const;
-function TenantPanel({ id, api, role, reps, onClose, onChanged }: { id: string; api: (p: string, i?: RequestInit) => Promise<any>; role: string; reps: any[]; onClose: () => void; onChanged: () => void }) {
+const TABS = ['Overview', 'Modules', 'Owner & access', 'Billing', 'Maintenance'] as const;
+function TenantPanel({ id, api, role, reps, onClose, onChanged, onTool }: { id: string; api: (p: string, i?: RequestInit) => Promise<any>; role: string; reps: any[]; onClose: () => void; onChanged: () => void; onTool?: (tool: ConsoleTool, tenantId: string, module?: 'HOTEL' | 'SPA' | 'EVENTS') => void }) {
   const toast = useToast();
   const confirm = useConfirm();
   const prompt = usePaymentDialog();
   const isSuper = role === 'SUPER_ADMIN';
+  const isRep = role === 'SALES_REP';
   const [t, setT] = useState<any>(null);
   const [tab, setTab] = useState<typeof TABS[number]>('Overview');
   const [busy, setBusy] = useState(false);
@@ -297,6 +307,16 @@ function TenantPanel({ id, api, role, reps, onClose, onChanged }: { id: string; 
   const apex = typeof window !== 'undefined' && /atithi-setu\.com$/.test(window.location.hostname) ? 'atithi-setu.com' : 'atithi-setu.com';
   const setActive = (v: number, label: string) => run(() => api(`/api/admin/restaurants/${t.id}/toggle-status`, { method: 'POST', body: JSON.stringify({ is_active: v }) }), label);
   const off = busy || !isSuper;
+  // A sales rep may approve a business of theirs that is waiting, and load the
+  // demo tariff into one that is not live yet. The server enforces both.
+  const pending = !Number(t.is_active);
+  const approveOff = busy || !(isSuper || (isRep && pending));
+  const isHotel = t.property_type === 'HOTEL' || t.property_type === 'BOTH';
+  const seedOff = busy || !(isSuper || (isRep && Number(t.is_active) !== 1));
+  const seedTariff = async () => {
+    if (!await confirm({ title: `Load the demo tariff into ${t.name}?`, body: 'Creates or refreshes 3 room categories, 27 sample rooms, 4 seasons and 24 rate cells, and switches the property to matrix pricing. Safe to run again.', confirmLabel: 'Load demo tariff' })) return;
+    run(() => api(`/api/admin/tenants/${t.id}/seed-bcg-tariff`, { method: 'POST' }), 'Demo tariff loaded.');
+  };
 
   const toggleModule = async (k: string, label: string, on: boolean) => {
     if (!await confirm({ title: `${on ? 'Switch on' : 'Switch off'} ${label}?`, body: `${t.name} ${on ? 'gets' : 'loses'} ${label} straight away.${on ? '' : ' Its records are kept.'}`, confirmLabel: on ? 'Switch on' : 'Switch off', danger: !on })) return;
@@ -355,12 +375,13 @@ function TenantPanel({ id, api, role, reps, onClose, onChanged }: { id: string; 
       actions={<>
         <button type="button" onClick={() => { navigator.clipboard?.writeText(t.id); toast.success('Tenant ID copied.'); }} className="h-8 px-3 rounded-lg border border-slate-200 bg-white text-[12.5px] inline-flex items-center gap-1.5"><Copy size={13} />Copy ID</button>
         {t.slug && <a href={`https://${t.slug}.${apex}`} target="_blank" rel="noreferrer" className="h-8 px-3 rounded-lg border border-slate-200 bg-white text-[12.5px] inline-flex items-center gap-1.5"><ExternalLink size={13} />Open site</a>}
+        {isHotel && <a href={`/book/${t.booking_slug || t.id}`} target="_blank" rel="noreferrer" className="h-8 px-3 rounded-lg border border-slate-200 bg-white text-[12.5px] inline-flex items-center gap-1.5"><ExternalLink size={13} />Booking page</a>}
       </>}
       tabs={<div className="flex gap-1 border-b border-slate-200 px-3 overflow-x-auto" role="tablist">{TABS.map(x => (
         <button key={x} type="button" role="tab" aria-selected={tab === x} onClick={() => setTab(x)}
           className={`px-2 py-2.5 text-[13px] border-b-2 whitespace-nowrap ${tab === x ? 'border-brand text-slate-900 font-semibold' : 'border-transparent text-slate-500'}`}>{x}</button>
       ))}</div>}>
-      {!isSuper && <div className="text-[12px] bg-slate-50 text-slate-600 rounded-lg px-3 py-2">View only — changes are made by a super admin.</div>}
+      {!isSuper && <div className="text-[12px] bg-slate-50 text-slate-600 rounded-lg px-3 py-2">{isRep ? 'You can approve a business that is waiting and load the demo tariff before it goes live. Other changes are made by a super admin.' : 'View only — changes are made by a super admin.'}</div>}
 
       {tab === 'Overview' && (<>
         <div className="grid grid-cols-3 gap-2">
@@ -401,7 +422,7 @@ function TenantPanel({ id, api, role, reps, onClose, onChanged }: { id: string; 
           <Row title="Account status" sub={Number(t.is_active) === 1 ? 'The property can sign in.' : Number(t.is_active) === 2 ? 'Deactivated — nobody at the property can sign in.' : 'Signed up and waiting for approval.'}>
             {Number(t.is_active) === 1
               ? <Btn off={off} onClick={async () => { if (await confirm({ title: `Deactivate ${t.name}?`, body: 'Nobody at the property can sign in until it is re-activated. Records are kept.', confirmLabel: 'Deactivate', danger: true })) setActive(2, 'Deactivated.'); }}>Deactivate</Btn>
-              : <Btn off={off} tone="primary" onClick={() => setActive(1, Number(t.is_active) === 2 ? 'Re-activated.' : 'Approved and activated.')}>{Number(t.is_active) === 2 ? 'Re-activate' : 'Approve & activate'}</Btn>}
+              : <Btn off={Number(t.is_active) === 2 ? off : approveOff} tone="primary" onClick={() => setActive(1, Number(t.is_active) === 2 ? 'Re-activated.' : 'Approved and activated.')}>{Number(t.is_active) === 2 ? 'Re-activate' : 'Approve & activate'}</Btn>}
           </Row>
           <Row title="Owner" sub={t.owner_email || 'No owner account yet'}><Btn off={off} onClick={editOwner}>{t.owner_email ? 'Edit owner' : 'Create owner'}</Btn></Row>
           <Row title="Reset owner password" sub="You set a new password and share it with the owner."><Btn off={off} onClick={resetPassword}>Reset</Btn></Row>
@@ -412,6 +433,24 @@ function TenantPanel({ id, api, role, reps, onClose, onChanged }: { id: string; 
               <option value="">Unassigned</option>{reps.map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}
             </select>
           </Row>
+        </div>
+      )}
+
+      {tab === 'Maintenance' && (<>
+        <div className="border border-slate-200 rounded-xl">
+          {isSuper && onTool && (<>
+            <Row title="Data loader" sub="List, import and clean up this tenant's bookings, opened on this tenant.">
+              <span className="flex flex-wrap justify-end gap-1.5">
+                {isHotel && <Btn off={busy} onClick={() => onTool('DATA_LOADER', t.id, 'HOTEL')}>Hotel</Btn>}
+                {!!Number(t.spa) && <Btn off={busy} onClick={() => onTool('DATA_LOADER', t.id, 'SPA')}>Spa</Btn>}
+                {!!Number(t.events) && <Btn off={busy} onClick={() => onTool('DATA_LOADER', t.id, 'EVENTS')}>Events</Btn>}
+                {!isHotel && !Number(t.spa) && !Number(t.events) && <span className="text-[12px] text-slate-400">No bookings modules</span>}
+              </span>
+            </Row>
+            <Row title="SQL console" sub="Read-only queries, already pointed at this tenant."><Btn off={busy} onClick={() => onTool('SQL', t.id)}>Open</Btn></Row>
+            <Row title="Role access" sub="What each staff role at the property can see and change."><Btn off={busy} onClick={() => onTool('ROLE_ACCESS', t.id)}>Open</Btn></Row>
+          </>)}
+          {isHotel && <Row title="Demo tariff" sub={Number(t.is_active) === 1 && !isSuper ? 'Only before the business goes live.' : 'Loads sample room categories, rooms and rates for a sales demo. Safe to run again.'}><Btn off={seedOff} onClick={seedTariff}>Load demo tariff</Btn></Row>}
           <Row title="Provision DNS" sub={`Creates ${t.slug || '…'}.${apex} if it is missing.`}><Btn off={off} onClick={() => run(() => api(`/api/admin/restaurants/${t.id}/provision-dns`, { method: 'POST' }), 'DNS record requested.')}>Provision</Btn></Row>
           <Row title="Invoice deletion" sub="Legacy switch. Leave off — invoices are cancelled, never deleted.">
             <Switch off={off} on={!!Number(t.invoice_delete_enabled)} label="Invoice deletion" onToggle={async () => {
@@ -421,7 +460,14 @@ function TenantPanel({ id, api, role, reps, onClose, onChanged }: { id: string; 
             }} />
           </Row>
         </div>
-      )}
+        {isSuper && Number(t.is_active) === 1 && (
+          <div className="border border-rose-100 rounded-xl px-4 py-3 space-y-2">
+            <div className="text-[13.5px] font-medium text-rose-700">Danger zone</div>
+            <div className="text-[12.5px] text-slate-500">Deactivating stops every sign-in at the property. Its records, invoices and ledger are kept.</div>
+            <Btn off={off} tone="danger" onClick={async () => { if (await confirm({ title: `Deactivate ${t.name}?`, body: 'Nobody at the property can sign in until it is re-activated. Records are kept.', confirmLabel: 'Deactivate', danger: true })) setActive(2, 'Deactivated.'); }}>Deactivate tenant</Btn>
+          </div>
+        )}
+      </>)}
 
       {tab === 'Billing' && (<>
         <div className="flex items-center gap-2"><Pill label={bl} tone={bt} />{Number(t.access_revoked) === 1 && t.access_revoked_reason && <span className="text-[12px] text-slate-500">Reason: {t.access_revoked_reason}</span>}</div>

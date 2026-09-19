@@ -68210,8 +68210,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'row-menu-portal',
+    commit_marker: 'admin-console-phase23',
     code_features: [
+      'admin-console-phase23  Admin redesign phases 2 and 3. Super Admin, Sales Rep and CTO consoles share one frame (src/admin/ConsoleShell.tsx): a left menu grouped Tenants / Platform / Operations / Tools with live counts, and a Ctrl K finder that opens any tenant. New screens: Approvals (directory pinned to waiting sign-ups, bulk approve) and Subscription prices (src/admin/SubscriptionPrices.tsx, shared with CTO). Tenant panel gains Maintenance: Data loader (Hotel/Spa/Events), SQL console and Role access opened on that tenant, demo tariff, DNS, invoice-deletion switch, danger zone. Sales Rep tile list replaced by the directory scoped to the rep; a rep can approve a waiting business and load the demo tariff before go-live (server rules unchanged).',
       'row-menu-portal  PMS Reservations: the row menu first entries were hidden behind the next rows action buttons. The shared RowActions menu now renders at the page root through a portal, so no row, sticky cell or animated card can cover it (every table using it).',
       'gstr1-hsn-zero-net-tax  GSTR-1 Table 12 skipped any journal whose revenue nets to zero, so a fully discounted bill that still collected GST (Rs 180 on RESTO-1003, May) was counted in Tables 4 and 7 but missing from the HSN summary. Its tax is now spread over the journal positive revenue lines; the discount line carries the negative taxable at 0 tax.',
       'event-invoice-after-cancel  The event invoice route returned the bookings CANCELLED/voided/superseded invoice as already billed, so the event could never be invoiced again and callers (Complete, the admin backfill) reported success with nothing posted (Parandhayya: P Madhavarao). A dead invoice no longer counts; a new one is raised.',
