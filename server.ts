@@ -7469,6 +7469,13 @@ interface GlPostResult { ok: boolean; posted: number; dropped: boolean; reason?:
 //     garbage entry_date that no Day Book date filter ever matches.
 // Coerce Date | ISO/date string | null to a real YYYY-MM-DD (falling back to
 // now), so every settlement journal lands on a valid, filterable date.
+// A ledger date as YYYY-MM-DD. A string that already starts with a calendar date
+// keeps it exactly (no timezone shift); anything else goes through _glPostDate.
+function _glEntryDate(v: unknown): string {
+  if (typeof v === 'string') { const m = v.trim().match(/^(d{4}-d{2}-d{2})/); if (m) return m[1]; }
+  return _glPostDate(v);
+}
+
 function _glPostDate(ts?: unknown): string {
   let d: Date;
   if (ts instanceof Date) d = ts;
@@ -7801,6 +7808,11 @@ async function _postGlEntries(
   // actor, which left "Recorded by" blank in the Expense Journal. The request's
   // own user is on the books-audit context — use it. Cron/boot work has none.
   if (!postedBy) postedBy = booksAuditContext.getStore()?.id || null;
+  // Every ledger line is dated YYYY-MM-DD, whatever the caller passed. A Date or
+  // a full timestamp used to land as "Wed Aug 05" or "2026-09-30T00:00:00.000+00:00",
+  // which no date-range report matches, so those journals silently dropped out
+  // of the Day Book, P&L and GST reports. This is the one place lines are written.
+  entryDate = _glEntryDate(entryDate);
   // The backstop. Routes below refuse up front with a 409 so the user gets a
   // sentence they can act on; this catches anything that did not, and records a
   // GL exception so a refused posting is VISIBLE rather than quietly missing.
@@ -68100,8 +68112,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'module-filters-by-subscription',
+    commit_marker: 'gl-entry-date-normalised',
     code_features: [
+      'gl-entry-date-normalised  Ledger lines were being stored with non-date text in entry_date (inventory-close reversals as 2026-09-30T00:00:00.000+00:00 through 19 Sep; older F&B/folio/event journals as Wed Aug 05), so date-range reports skipped them. _postGlEntries, the single writer of gl_entries, now normalises every entryDate to YYYY-MM-DD via _glEntryDate. Existing malformed rows are not changed by this commit.',
       'admin-directory-phase1  Admin console redesign phase 1: the Businesses tiles (every tenant, ~130 columns each, ~16 buttons per tile) become a tenant directory — GET /api/admin/tenants/directory searches (name, ID, city, slug, owner name/email/phone), filters (chips: all, needs approval, active, overdue, suspended, inactive, spa, events, quiet 30+ days; type; sales rep), sorts and pages on the server, returning only the table columns plus filter counts; GET /api/admin/tenants/:id/overview feeds the side panel (row + staff logins, rooms, halls). New restaurants.last_active_at, stamped by authenticate at most once per tenant per 10 minutes. A sales rep sees only their tenants.',
       'admin-cto-narrowed-seed-salesrep  SECURITY: isAdmin admitted the CTO, so a CTO login could perform every super-admin action through the API (tenant module switches, owner password resets, billing, suspend, data loader, SQL console, WhatsApp sender) while only the console hid them. isAdmin is now SUPER_ADMIN only; a new isAdminOrCto covers what the CTO console uses (onboarding report, sales-rep drill-down, subscription prices, renewals, internal users). Module enable (spa, events, paid modules, hotel type), tenant approve/deactivate and Locations are super-admin only. The CTO keeps tenant-level access inside each property (unchanged). Also: the Sales Rep Seed tariff button always failed (route was super-admin only); a sales rep may now seed their own tenant that is not yet live (409 on a live one, since seeding rewrites season rates).',
       'admin-tenant-list-gated  SECURITY: GET /api/admin/restaurants had only authenticate, so any signed-in tenant user (e.g. a property owner) could read every tenant record with other owners name, email and phone (verified live: 13 tenants returned to an owner token). Now gated by a new isPlatformStaff (SUPER_ADMIN / CTO / SALES_REP; a sales rep still sees only their own tenants). /api/cto/onboarding-report, /api/cto/sales-rep-restaurants/:id and GET /api/admin/subscription-prices now require isAdmin.',
