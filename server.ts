@@ -3365,7 +3365,7 @@ async function _postFolioAdvanceGl(db: any, restaurantId: string, payment: any, 
   if (exists) return { journal_ref: ref, already: true, receipt_voucher: null };
   const amount = +Number(payment.amount || 0).toFixed(2);
   if (!(amount > 0)) return null;
-  const date = new Date().toISOString().slice(0, 10);
+  const date = _todayIST();
   const cashAcct = _glAccountForPaymentMethod(payment.payment_method);
   const sourceType = kind === 'SPA' ? (type === 'INTERIM' ? 'SPA_INTERIM' : 'FOLIO_ADVANCE') : (type === 'ADVANCE' ? 'FOLIO_ADVANCE' : 'FOLIO_PAYMENT');
   let rate = 0, basis = 'NOT_A_HOTEL_ADVANCE';
@@ -4371,7 +4371,7 @@ async function _pgPostFeeJournal(db: any, restaurantId: string, link: any, p: an
   ];
   if (tax > 0) lines.push({ account_code: '1330', account_name: 'ITC — Payment Gateway GST', dr_amount: tax / 100, cr_amount: 0, narration: `GST on ${narr}` });
   lines.push({ account_code: '1025', account_name: 'Payment Gateway Clearing', dr_amount: 0, cr_amount: fee / 100, narration: narr });
-  const r = await _postGlEntries(db, restaurantId, ref, new Date().toISOString().slice(0, 10), 'GATEWAY_FEE', p.id, lines, `${gatewayLabel} payment link`);
+  const r = await _postGlEntries(db, restaurantId, ref, _todayIST(), 'GATEWAY_FEE', p.id, lines, `${gatewayLabel} payment link`);
   return r.ok && r.posted > 0 ? ref : null;
 }
 
@@ -4808,7 +4808,7 @@ async function ensureFolioForRoom(
   );
   if (existing) return { folioId: existing.id, bookingId: existing.booking_id, created: false };
   // Find the room's current booking (CHECKED_IN preferred, then BOOKED arriving today).
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = _todayIST();
   let booking: any = await tenantDb.get(
     "SELECT * FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' ORDER BY actual_checkin_at DESC LIMIT 1",
     [roomId]
@@ -4889,7 +4889,7 @@ async function validateBookingRequest(
   // is NOT being changed so staff can still edit room_rate / notes /
   // num_guests on historical bookings.
   if (!opts.skipPastDateCheck) {
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = _todayIST();
     if (check_in_date < todayIso) {
       return {
         ok: false, status: 400,
@@ -5268,7 +5268,7 @@ async function syncOneIcalFeed(restaurantId: string, feedId: string): Promise<{
   }
 
   const events = parseIcalFeed(icsText);
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = _todayIST();
   let imported = 0, skipped = 0, failed = 0;
   // Determine rooms in scope. PROPERTY scope means we need to assign a
   // room — for v1 we DO NOT assign automatically (would require choosing
@@ -7471,18 +7471,33 @@ interface GlPostResult { ok: boolean; posted: number; dropped: boolean; reason?:
 // now), so every settlement journal lands on a valid, filterable date.
 // A ledger date as YYYY-MM-DD. A string that already starts with a calendar date
 // keeps it exactly (no timezone shift); anything else goes through _glPostDate.
+// The business day is India's (Asia/Kolkata, UTC+5:30, no daylight saving).
+// Deriving "today" from toISOString() gives the UTC date, which is still
+// YESTERDAY between midnight and 05:30 IST — every posting in that window was
+// dated the previous day in the Day Book (reported 20 Sep 2026).
+function _istDate(d: Date): string {
+  return new Date(d.getTime() + 330 * 60000).toISOString().slice(0, 10);
+}
+function _todayIST(): string { return _istDate(new Date()); }
+
 function _glEntryDate(v: unknown): string {
-  if (typeof v === 'string') { const m = v.trim().match(/^(d{4}-d{2}-d{2})/); if (m) return m[1]; }
+  // A plain calendar date is taken as given. (This pattern had lost its
+  // backslashes — d{4} instead of \d{4} — so no date string ever matched.)
+  // A date with a wall-clock time but no zone is already local: keep its day.
+  if (typeof v === 'string') { const m = v.trim().match(/^(\d{4}-\d{2}-\d{2})(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/); if (m) return m[1]; }
   return _glPostDate(v);
 }
 
+// A timestamp becomes the IST calendar day it happened on. A pg DATE arrives as
+// a Date at UTC midnight, which is 05:30 IST on the same day, so it is unchanged.
 function _glPostDate(ts?: unknown): string {
+  if (typeof ts === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ts.trim())) return ts.trim();
   let d: Date;
   if (ts instanceof Date) d = ts;
   else if (ts != null && String(ts).trim() !== '') d = new Date(String(ts));
   else d = new Date();
   if (isNaN(d.getTime())) d = new Date();
-  return d.toISOString().slice(0, 10);
+  return _istDate(d);
 }
 
 // ── A closed accounting period REFUSES a posting dated inside it ───────────
@@ -7903,7 +7918,7 @@ async function _reverseJournal(
       [restaurantId, originalRef]
     );
     if (!originals || originals.length === 0) return { ok: false, reversed: 0, reason: 'no_original_journal', reversalRef };
-    const date = opts.date || new Date().toISOString().slice(0, 10);
+    const date = opts.date || _todayIST();
     const rev = opts.reason ? ` — ${opts.reason}` : '';
     const lines: GlLine[] = originals.map((o: any) => ({
       account_code: o.account_code,
@@ -10038,7 +10053,7 @@ async function notifyNewTenant(meta: {
     );
   } catch (e: any) { console.error('[new-tenant] billing_start_date set failed:', e?.message || e); }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = _todayIST();
   const loc = [meta.city, meta.state].filter(Boolean).map(_tgEsc).join(', ') || '—';
   const lines = [
     '🆕 *New tenant registered — Atithi-Setu*',
@@ -13539,7 +13554,7 @@ async function startServer() {
          Number(source.hourly_rate || 0),
          source.payroll_id || null,
          source.joined_at || null,
-         (source.notes ? source.notes + '\n' : '') + `Transferred from ${fromId} on ${new Date().toISOString().slice(0,10)}`]
+         (source.notes ? source.notes + '\n' : '') + `Transferred from ${fromId} on ${_todayIST()}`]
       );
       let sourceDeactivated = 0;
       if (mode === 'TRANSFER') {
@@ -21084,7 +21099,7 @@ async function startServer() {
         ].map(escape).join(','));
       }
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="employees-${new Date().toISOString().slice(0,10)}.csv"`);
+      res.setHeader('Content-Disposition', `attachment; filename="employees-${_todayIST()}.csv"`);
       // UTF-8 BOM so Excel renders ₹ + Devanagari without garbling
       res.send('﻿' + lines.join('\n'));
     } catch (err: any) {
@@ -21572,7 +21587,7 @@ async function startServer() {
   // because the old seed added a copy of every row on each start (HRMS-R0A).
   async function getCentralPtSlabs(state: string | null, asOf?: any): Promise<PtSlab[]> {
     if (!state) return [];
-    const today = asOf || new Date().toISOString().slice(0, 10);
+    const today = asOf || _todayIST();
     const rows: any[] = await centralDb.query(
       `SELECT DISTINCT state_code, min_gross, max_gross, amount, extra_month, extra_amount
          FROM central_pt_slabs
@@ -22617,7 +22632,7 @@ You can also view all your payslips in the employee portal.
       await db.run(
         `INSERT INTO expense_claims (id, staff_id, claim_number, claim_date, total_amount, status, notes)
            VALUES (?, ?, ?, ?, ?, 'DRAFT', ?)`,
-        [claim_id, staff_id, claim_number, b.claim_date || new Date().toISOString().slice(0, 10), total, b.notes || null]
+        [claim_id, staff_id, claim_number, b.claim_date || _todayIST(), total, b.notes || null]
       );
       for (const i of items) {
         await db.run(
@@ -22729,7 +22744,7 @@ You can also view all your payslips in the employee portal.
           const total = Math.round(lines.reduce((sum, l) => sum + l.dr_amount, 0) * 100) / 100;
           if (total > 0) {
             lines.push({ account_code: '2400', account_name: 'Salaries & Wages Payable', dr_amount: 0, cr_amount: total, narration });
-            const today = new Date().toISOString().slice(0, 10);
+            const today = _todayIST();
             await _postGlEntries(db, req.params.id, `EXP-${req.params.claimId}`, today, 'EXPENSE_CLAIM', req.params.claimId, lines, req.user?.id || req.user?.email || null);
           }
         } catch (glErr) { console.error('[GL] expense claim error:', glErr); }
@@ -23231,7 +23246,7 @@ ${data.tenant.name}`;
       await db.run(
         `INSERT INTO expense_claims (id, staff_id, claim_number, claim_date, total_amount, status, notes, submitted_at)
            VALUES (?, ?, ?, ?, ?, 'SUBMITTED', ?, ?)`,
-        [claim_id, staff.id, claim_number, b.claim_date || new Date().toISOString().slice(0, 10), total, b.notes || null, new Date().toISOString()]
+        [claim_id, staff.id, claim_number, b.claim_date || _todayIST(), total, b.notes || null, new Date().toISOString()]
       );
       for (const i of items) {
         await db.run(
@@ -23563,8 +23578,8 @@ ${data.tenant.name}`;
             if (!maxDate || d > maxDate) maxDate = d;
           }
         }
-        const periodFrom = req.body?.period_from || minDate || new Date().toISOString().slice(0, 10);
-        const periodTo   = req.body?.period_to   || maxDate || new Date().toISOString().slice(0, 10);
+        const periodFrom = req.body?.period_from || minDate || _todayIST();
+        const periodTo   = req.body?.period_to   || maxDate || _todayIST();
 
         const settlementId = `STL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         await db.run(
@@ -23728,7 +23743,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
       const fromDate = from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-      const toDate   = to || new Date().toISOString().slice(0, 10);
+      const toDate   = to || _todayIST();
 
       // 1. Per-channel order aggregates
       const orderRows: any[] = await db.query(
@@ -23940,7 +23955,7 @@ ${data.tenant.name}`;
       const byStatus: Record<string, number> = {};
       let openCount = 0; // Not DELIVERED / CANCELLED
       let todayGross = 0;
-      const todayStr = new Date().toISOString().slice(0, 10);
+      const todayStr = _todayIST();
       rows.forEach(r => {
         const ch = String(r.external_platform);
         if (!byPlatform[ch]) byPlatform[ch] = { count: 0, gross: 0 };
@@ -28057,7 +28072,7 @@ ${data.tenant.name}`;
       }
       const seq = await getNextTenantSequence(db, 'count');
       const countId = `COUNT-${String(seq).padStart(4, '0')}`;
-      const today = (count_date && /^\d{4}-\d{2}-\d{2}$/.test(count_date)) ? count_date : new Date().toISOString().slice(0, 10);
+      const today = (count_date && /^\d{4}-\d{2}-\d{2}$/.test(count_date)) ? count_date : _todayIST();
 
       await db.run(
         `INSERT INTO physical_counts (id, count_date, status, counted_by_user_id, notes, module)
@@ -29413,7 +29428,7 @@ ${data.tenant.name}`;
       const quantity = Number(req.body?.quantity);
       if (!(Math.abs(quantity) > 0)) return res.status(400).json({ error: 'quantity must be non-zero' });
       const unit_price = req.body?.unit_price != null ? Number(req.body.unit_price) : null;
-      const movement_date = String(req.body?.movement_date || new Date().toISOString().slice(0, 10));
+      const movement_date = String(req.body?.movement_date || _todayIST());
       const notes = req.body?.notes || null;
       const mid = `HSM-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const delta = movement_type === 'CONSUME' ? -Math.abs(quantity)
@@ -29632,7 +29647,7 @@ ${data.tenant.name}`;
            subtotal, gst_amount, total_amount, paid_amount, outstanding_amount, status, notes, created_by,
            itc_eligibility, itc_block_reason, is_interstate)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,'UNPAID',?,?,?,?,?)`,
-        [id, supplier_id, invoice_number || null, invoice_date || new Date().toISOString().slice(0,10),
+        [id, supplier_id, invoice_number || null, invoice_date || _todayIST(),
          due_date || null, po_id || null, grn_id || null, invModule,
          sub, gst, total, outstanding, notes || null, (req as any).user?.email || (req as any).user?.id,
          itc.eligibility, itc.blockReason, itc.isInterstate]
@@ -29642,7 +29657,7 @@ ${data.tenant.name}`;
       // _supplierInvoiceGlLines an edit re-posts with, from the stored module.
       let glJournalRef: string | null = null;
       try {
-        const invDate = (invoice_date || new Date().toISOString().slice(0, 10)) as string;
+        const invDate = (invoice_date || _todayIST()) as string;
         const glLines = _supplierInvoiceGlLines({
           id, invoice_number, subtotal: sub, gst_amount: gst, total_amount: total, module: invModule, notes: notes || '',
           itc_eligibility: itc.eligibility, itc_block_reason: itc.blockReason, is_interstate: itc.isInterstate,
@@ -29782,7 +29797,7 @@ ${data.tenant.name}`;
       }
       await db.run("DELETE FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
       // Phase 3.2 — reverse the invoice's GL journal (expense + ITC + AP backed out).
-      const todayIso = new Date().toISOString().slice(0, 10);
+      const todayIso = _todayIST();
       const reversals: { ref: string; date: string; ok: boolean; reversed: number }[] = [];
       const toReverse: { ref: string; date: string | null }[] = liveSi.length
         ? liveSi.map(j => ({ ref: j.ref, date: j.entry_date }))
@@ -29829,7 +29844,7 @@ ${data.tenant.name}`;
         `INSERT INTO supplier_payments (id, supplier_id, invoice_id, payment_date, amount, payment_method, reference_number, notes, recorded_by)
          VALUES (?,?,?,?,?,?,?,?,?)`,
         [pid, inv.supplier_id, inv.id,
-         payment_date || new Date().toISOString().slice(0,10),
+         payment_date || _todayIST(),
          payAmt, payment_method || 'CASH', reference_number || null, notes || null,
          (req as any).user?.email || (req as any).user?.id]
       );
@@ -29847,13 +29862,13 @@ ${data.tenant.name}`;
       // GL backfill shares — see there for why this block never posted at all.
       try {
         const glRes = await _postSupplierPaymentGl(db, req.params.id,
-          { id: pid, amount: payAmt, payment_method: payment_method || 'CASH', payment_date: payment_date || new Date().toISOString().slice(0, 10) },
+          { id: pid, amount: payAmt, payment_method: payment_method || 'CASH', payment_date: payment_date || _todayIST() },
           inv, { postedBy: (req as any).user?.email || (req as any).user?.id || null, applyTds: true });
         if (!glRes.ok) console.error(`[GL] supplier payment ${pid} not posted: ${glRes.reason}`);
       } catch (glErr) { console.error('[GL] supplier payment error:', glErr); }
       // Rule 37 — paying the supplier gives back the credit the reversal held.
       try {
-        await _postRule37Reclaim(db, req.params.id, inv.id, pid, payment_date || new Date().toISOString().slice(0, 10),
+        await _postRule37Reclaim(db, req.params.id, inv.id, pid, payment_date || _todayIST(),
           (req as any).user?.email || (req as any).user?.id || null);
       } catch (r37Err) { console.error('[R37] reclaim error:', r37Err); }
       const updatedInv: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [inv.id]);
@@ -29958,7 +29973,7 @@ ${data.tenant.name}`;
         `SELECT * FROM supplier_payments WHERE supplier_id = ? ORDER BY payment_date DESC`,
         [req.params.supplierId]
       );
-      const today = new Date().toISOString().slice(0,10);
+      const today = _todayIST();
       const summary = invoices.reduce((acc: any, inv: any) => {
         acc.total_billed += inv.total_amount;
         acc.total_outstanding += inv.outstanding_amount;
@@ -29985,7 +30000,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/procurement/reports/payables", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      const today = new Date().toISOString().slice(0,10);
+      const today = _todayIST();
       const rows: any[] = await db.query(
         `SELECT s.id AS supplier_id, s.name AS supplier_name, s.phone, s.email,
                 COUNT(si.id) AS invoice_count,
@@ -33939,7 +33954,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const from = String(req.query.from || '').trim() || new Date().toISOString().slice(0, 10);
+      const from = String(req.query.from || '').trim() || _todayIST();
       const toRaw = String(req.query.to || '').trim();
       // Default window: 14 days from `from`.
       const start = new Date(from + 'T00:00:00Z');
@@ -33977,7 +33992,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const date = String(req.query.date || '').trim() || new Date().toISOString().slice(0, 10);
+      const date = String(req.query.date || '').trim() || _todayIST();
       const excludeBookingId = String(req.query.exclude || '').trim() || undefined;
       const items: any[] = await db.query("SELECT * FROM event_rental_items WHERE is_active = 1 ORDER BY display_order, name");
       const out = [];
@@ -34327,7 +34342,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       const from = String(req.query.from || '').trim() || new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10);
       const to = String(req.query.to || '').trim() || new Date(Date.now() + 180 * 86400000).toISOString().slice(0, 10);
       const ymd = (v: any) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
@@ -35744,7 +35759,7 @@ ${data.tenant.name}`;
       const total = Number(bk.total_amount || 0);
       await db.run("DELETE FROM event_payment_schedule WHERE booking_id = ? AND status = 'DUE'", [req.params.bid]);
       let order = 0;
-      const todayIso = new Date().toISOString().slice(0, 10);
+      const todayIso = _todayIST();
       for (const s of splits) {
         const pct = Number(s.percent || 0);
         const amount = round2(total * pct / 100);
@@ -35844,7 +35859,7 @@ ${data.tenant.name}`;
       const pid = mkEventId('EPY');
       await db.run(
         `INSERT INTO event_payments (id, booking_id, schedule_id, amount, method, reference, paid_at, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [pid, bid, b.schedule_id || null, amount, b.method || 'CASH', b.reference || null, b.paid_at || new Date().toISOString().slice(0, 10), b.note || null, actorReq?.user?.email || null]
+        [pid, bid, b.schedule_id || null, amount, b.method || 'CASH', b.reference || null, b.paid_at || _todayIST(), b.note || null, actorReq?.user?.email || null]
       );
       const paid = await recomputeEventPaid(db, bid);
       // Money in against an event reduces what its company owes. Without this
@@ -35869,7 +35884,7 @@ ${data.tenant.name}`;
           await db.run(
             `INSERT INTO petty_cash (id, entry_date, direction, category, amount, notes, recorded_by, module, reference_id)
              VALUES (?, ?, 'IN', 'EVENT_PAYMENT', ?, ?, ?, 'SHARED', ?)`,
-            [`PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`, (b.paid_at || new Date().toISOString().slice(0, 10)),
+            [`PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`, (b.paid_at || _todayIST()),
               amount, `Event payment — ${bk.customer_name || ''} via ${b.method || 'CASH'}${b.reference ? ' (' + b.reference + ')' : ''}`,
               actorReq?.user?.email || null, refKey]
           );
@@ -35886,7 +35901,7 @@ ${data.tenant.name}`;
         const evRef = `EVENT-PAY-${pid}`;
         const evGuard = await db.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [evRef]);
         if (!evGuard) {
-          const payDate = String(b.paid_at || new Date().toISOString().slice(0, 10)).slice(0, 10);
+          const payDate = String(b.paid_at || _todayIST()).slice(0, 10);
           const cashAcct = _glAccountForPaymentMethod(b.method);
           // An advance only while no invoice stands for the booking. A receipt
           // against a live invoice PAYS it — Dr cash, Cr the receivable that invoice
@@ -35998,7 +36013,7 @@ ${data.tenant.name}`;
       if (reason.length < 3) return res.status(400).json({ error: 'Give the reason for the refund — it is kept in the audit trail.', code: 'REASON_REQUIRED' });
       const method = String(b.method || pay.method || 'CASH').toUpperCase().trim();
       if (!_REFUND_METHODS.includes(method)) return res.status(400).json({ error: `method must be one of ${_REFUND_METHODS.join(', ')}`, code: 'METHOD_INVALID' });
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       const refundDate = /^\d{4}-\d{2}-\d{2}$/.test(String(b.refund_date || '')) ? String(b.refund_date) : today;
       if (refundDate > today) return res.status(400).json({ error: 'A refund cannot be dated in the future.', code: 'DATE_INVALID' });
       const paidOn = ymd(pay.paid_at);
@@ -36102,7 +36117,7 @@ ${data.tenant.name}`;
       });
       // The reversal takes the advance tax back out with the rest of the journal;
       // the voucher that recorded it is cancelled on the same date.
-      await _cancelVouchersForPayment(db, req.params.pid, new Date().toISOString().slice(0, 10), 'Event payment deleted');
+      await _cancelVouchersForPayment(db, req.params.pid, _todayIST(), 'Event payment deleted');
       const paid = await recomputeEventPaid(db, pay.booking_id);
       // Re-project the schedule from the remaining receipts so reversing a payment
       // correctly un-marks the instalments it had covered.
@@ -36373,7 +36388,7 @@ ${data.tenant.name}`;
         const t2 = Date.parse(s);
         return isNaN(t2) ? '' : new Date(t2).toISOString().slice(0, 10);
       };
-      const from = isoDate(req.query.check_in) || isoDate(bk.event_date) || new Date().toISOString().slice(0, 10);
+      const from = isoDate(req.query.check_in) || isoDate(bk.event_date) || _todayIST();
       const to = isoDate(req.query.check_out) || isoDate(bk.end_date) || from;
       // Hotel availability takes start + days (NOT from/to). Cover the event window.
       const nights = Math.max(1, Math.round((new Date(to + 'T00:00:00Z').getTime() - new Date(from + 'T00:00:00Z').getTime()) / 86400000) || 1);
@@ -37007,7 +37022,7 @@ ${data.tenant.name}`;
       const r: any = { ...saved };
       for (const k of OVR) if (b[k] !== undefined) r[k] = b[k];
       const mod = String((req.query.module as string) || b.module || 'hotel').toLowerCase();
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
 
       let pdf: Buffer;
       if (mod === 'events') {
@@ -38912,8 +38927,8 @@ ${data.tenant.name}`;
         const thr: any = await db.get("SELECT id FROM spa_therapists WHERE staff_id = ? AND is_active = 1", [userId]);
         if (thr) therapistId = thr.id;
       }
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
+      const to   = String(req.query.to   || _todayIST());
       // Inclusive of the whole `to` day → boundary is next-day midnight. Compute
       // it in JS: Postgres has no SQLite-style date(x, '+1 day') 2-arg function.
       const toNext = new Date(to + 'T00:00:00Z'); toNext.setUTCDate(toNext.getUTCDate() + 1);
@@ -42075,7 +42090,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const todayIso = new Date().toISOString().slice(0, 10);
+      const todayIso = _todayIST();
       const fromDate = (req.query.from as string) || todayIso;
       const toDate   = (req.query.to as string) || (() => {
         const d = new Date(fromDate + 'T12:00:00Z'); d.setDate(d.getDate() + 13);
@@ -42307,7 +42322,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const toRaw = String(req.query.to || '');
       const toDate = toRaw || (() => { const d = new Date(from + 'T12:00:00Z'); d.setDate(d.getDate() + 13); return d.toISOString().slice(0, 10); })();
 
@@ -42591,7 +42606,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const start = (req.query.start as string) || new Date().toISOString().slice(0, 10);
+      const start = (req.query.start as string) || _todayIST();
       const days  = Math.max(1, Math.min(90, Number(req.query.days) || 14));
       if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
         return res.status(400).json({ error: "start must be YYYY-MM-DD" });
@@ -44395,7 +44410,7 @@ ${data.tenant.name}`;
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const asOf = String(req.query.as_of || new Date().toISOString().slice(0, 10)).trim();
+      const asOf = String(req.query.as_of || _todayIST()).trim();
       const tenantDb = await getTenantDb(req.params.id);
       // For each room, find the booking (if any) that has the room
       // occupied as-of `asOf`: status IN ('BOOKED','CHECKED_IN') AND
@@ -44448,7 +44463,7 @@ ${data.tenant.name}`;
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const asOf = String(req.query.date || new Date().toISOString().slice(0, 10)).trim();
+      const asOf = String(req.query.date || _todayIST()).trim();
       const tenantDb = await getTenantDb(req.params.id);
       // Total rooms in inventory (excludes archived/inactive rooms — if
       // we ever add that flag).
@@ -44569,7 +44584,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const grain = String(req.query.grain || 'daily');
       const fmt = _grainFmt(grain);
       const tenantDb = await getTenantDb(req.params.id);
@@ -44625,7 +44640,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const tenantDb = await getTenantDb(req.params.id);
       // REVENUE-DEDUP (16 Jun 2026): charge-to-room F&B is recognised as
       // Restaurant/F&B revenue (it stays in the `orders` reports). It must NOT
@@ -44668,7 +44683,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const from = String(req.query.from || new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const tenantDb = await getTenantDb(req.params.id);
       const totalRow: any = await tenantDb.get(`SELECT COUNT(*)::int AS n FROM rooms`);
       const totalRooms = Number(totalRow?.n || 0);
@@ -44727,7 +44742,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const tenantDb = await getTenantDb(req.params.id);
       // Resolve the canceller name (attendance_staff) + the agent name so the
       // report can show WHO cancelled — staff member, OTA channel, agent, the
@@ -44788,7 +44803,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/reports/purchase", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const tenantDb = await getTenantDb(req.params.id);
       const rows: any[] = await tenantDb.query(
         `SELECT po.id, po.status, po.raised_at,
@@ -44897,7 +44912,7 @@ ${data.tenant.name}`;
       const direction = String(req.body?.direction || '').toUpperCase() === 'OUT' ? 'OUT' : 'IN';
       const amount = Math.abs(Number(req.body?.amount || 0));
       if (!(amount > 0)) return res.status(400).json({ error: 'amount must be greater than 0' });
-      const entry_date = String(req.body?.entry_date || new Date().toISOString().slice(0, 10));
+      const entry_date = String(req.body?.entry_date || _todayIST());
       if (await _blockIfAcctClosed(res, tenantDb, entry_date)) return;
       // Coerces an unrecognised module rather than rejecting it, which is the
       // long-standing behaviour — but the list now covers all four business
@@ -44975,7 +44990,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       // GL-DERIVED cash-in-hand (account 1000) — owner directive 2026-08-28. This is
       // the TRUE cash position, reconciled with the General Ledger: it reflects EVERY
       // cash movement (sales, expenses, receipts, manual petty-cash), not just the
@@ -45273,7 +45288,7 @@ ${data.tenant.name}`;
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const moduleFilter = req.query.module ? String(req.query.module).toUpperCase() : null;
       const modClause = moduleFilter ? ` AND COALESCE(module,'RESTAURANT') = ?` : '';
       const modParam = moduleFilter ? [moduleFilter] : [];
@@ -45303,7 +45318,7 @@ ${data.tenant.name}`;
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const rows: any[] = await tenantDb.query(
         `SELECT COALESCE(module,'RESTAURANT') AS module,
                 COALESCE(category,'Uncategorised') AS category,
@@ -45328,7 +45343,7 @@ ${data.tenant.name}`;
       if (!(await _canReadExpenseJournal(req, res))) return;
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
       const diffMs = new Date(to).getTime() - new Date(from).getTime();
       const prevTo   = new Date(new Date(from).getTime() - 86400000).toISOString().slice(0, 10);
@@ -47775,7 +47790,7 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const rows: any[] = await tenantDb.query(
         `SELECT booking_source,
                 COUNT(*) AS bookings,
@@ -47834,7 +47849,7 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const days  = Math.max(1, Math.min(730, Number(req.query.days) || 30));
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       const from  = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
       // Per-attribution rollup. Day-use bookings counted as 1 night so
@@ -48376,7 +48391,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
       const f = from || new Date().toISOString().slice(0, 7) + '-01';
-      const t = to   || new Date().toISOString().slice(0, 10);
+      const t = to   || _todayIST();
 
       const [summary, folios] = await Promise.all([
         db.get(`
@@ -48999,7 +49014,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
       const f = from || new Date().toISOString().slice(0, 7) + '-01';
-      const t = to   || new Date().toISOString().slice(0, 10);
+      const t = to   || _todayIST();
 
       const [hotelFolio, spaFolio, eventFolio, restaurantOrders, procurement, petty, payroll] = await Promise.all([
         // Hotel folios settle with status='settled' (see server ~4301/37500/42831);
@@ -49064,7 +49079,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
       const f = from || new Date().toISOString().slice(0, 7) + '-01';
-      const t = to   || new Date().toISOString().slice(0, 10);
+      const t = to   || _todayIST();
 
       const [hotelIn, spaIn, eventIn, hotelRefund, restCash, procPaid, opexPaid, payrollPaid,
              dailyHotel, dailyRest, dailyProcOut, dailyOpex, dailyPayroll] = await Promise.all([
@@ -49277,7 +49292,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const from = String(req.query.from || new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10));
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
       const bookingsSql = partnerType === 'OTA'
         ? `SELECT id, guest_name, check_in_date, check_out_date, status,
                   total_amount, commission_amount, net_amount, payment_status
@@ -49551,7 +49566,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       const date = String(req.query.date || today).slice(0, 10);
       const range = Math.max(1, Math.min(31, Number(req.query.range) || 1));
       // Window: [start, end] inclusive of both ends. For range=1, start === end.
@@ -50469,7 +50484,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const room_type_id = String(req.query.room_type_id || '');
-      const start = String(req.query.start || new Date().toISOString().slice(0, 10));
+      const start = String(req.query.start || _todayIST());
       const end   = String(req.query.end   || new Date(Date.now() + 86400000).toISOString().slice(0, 10));
       if (!room_type_id) return res.status(400).json({ error: 'room_type_id required' });
       const tenantDb = await getTenantDb(req.params.id);
@@ -53108,7 +53123,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/room-changes", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || from);
       const rows = await tenantDb.query(
         `SELECT rc.id,
@@ -53135,7 +53150,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/police-enquiry", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || from);
       const rows = await tenantDb.query(
         `SELECT b.id,
@@ -53164,7 +53179,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/no-shows", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || from);
       const rows = await tenantDb.query(
         `SELECT b.id,
@@ -53210,7 +53225,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/hotel-sales", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || from);
       const rows = await tenantDb.query(
         `SELECT TO_CHAR(f.settled_at, 'YYYY-MM-DD')                                                                   AS sale_date,
@@ -53237,7 +53252,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/pos-report", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || from);
       const rows = await tenantDb.query(
         `SELECT TO_CHAR(o.created_at, 'YYYY-MM-DD')                          AS sale_date,
@@ -53262,7 +53277,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/item-consumption", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || from);
       const rows = await tenantDb.query(
         `SELECT item->>'name'                                            AS item_name,
@@ -53292,7 +53307,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/daily-forecast", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10));
       const rows = await tenantDb.query(
         `SELECT b.check_in_date                                                         AS forecast_date,
@@ -53317,7 +53332,7 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || new Date().toISOString().slice(0, 8) + '01');
-      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || _todayIST());
 
       const revenue: any[] = await tenantDb.query(
         `SELECT SUBSTR(TO_CHAR(f.settled_at, 'YYYY-MM-DD'), 1, 7) AS month,
@@ -53358,7 +53373,7 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/contribution", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || from);
       const rows: any[] = await tenantDb.query(
         `SELECT COALESCE(b.booking_source, 'DIRECT')                                          AS source,
@@ -55017,7 +55032,7 @@ ${data.tenant.name}`;
         // Sprint 2 BCG — GST output register (best-effort, never blocks checkout).
         writeGstRegisterFromFolio(tenantDb, req.params.id, settled.id, {
           invoiceNumber: settledInvNum,
-          invoiceDate: (settled as any).settled_at || new Date().toISOString().slice(0, 10),
+          invoiceDate: (settled as any).settled_at || _todayIST(),
           bookingId:   b.id,
           guestGstin:  b.guest_gstin || null,
         }).catch(e => console.warn('[hotel-checkout] GST register write failed:', e));
@@ -55467,7 +55482,7 @@ ${data.tenant.name}`;
               if (_fs > 0) lines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: _fs, narration: `SGST on forfeited advance ${req.params.bookingId}` });
               if (_fi > 0) lines.push({ account_code: '2220', account_name: 'GST Payable — IGST', dr_amount: 0, cr_amount: _fi, narration: `IGST on forfeited advance ${req.params.bookingId}` });
             }
-            const _cancelDate = new Date().toISOString().slice(0, 10);
+            const _cancelDate = _todayIST();
             const _cgp = await _postGlEntries(tenantDb, req.params.id, journalRef, _cancelDate, 'BOOKING_CANCEL', req.params.bookingId, lines, req.user?.id || req.user?.email || null);
             if (_cgp.ok && (_cRvs || []).length) {
               const _ph = _cRvs.map(() => '?').join(',');
@@ -57221,7 +57236,7 @@ ${data.tenant.name}`;
       if (reason.length < 3) return res.status(400).json({ error: 'Give the reason for the refund — it is printed on the refund voucher and kept in the audit trail.', code: 'REASON_REQUIRED' });
       const method = String(b.method || rv.payment_method || 'CASH').toUpperCase().trim();
       if (!_REFUND_METHODS.includes(method)) return res.status(400).json({ error: `method must be one of ${_REFUND_METHODS.join(', ')}`, code: 'METHOD_INVALID' });
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       const refundDate = /^\d{4}-\d{2}-\d{2}$/.test(String(b.refund_date || '')) ? String(b.refund_date) : today;
       if (refundDate > today) return res.status(400).json({ error: 'A refund cannot be dated in the future.', code: 'DATE_INVALID' });
       if (refundDate < String(rv.receipt_date || '')) return res.status(400).json({ error: `A refund cannot be dated before the advance was received (${rv.receipt_date}).`, code: 'DATE_INVALID' });
@@ -57376,7 +57391,7 @@ ${data.tenant.name}`;
       if (_pt === 'ADVANCE' || _pt === 'INTERIM') {
         const _fol: any = await tenantDb.get("SELECT status FROM folios WHERE id = ?", [payment.folio_id]).catch(() => null);
         if (_fol && !['settled', 'closed'].includes(String(_fol.status || '').toLowerCase())) {
-          const _d = new Date().toISOString().slice(0, 10);
+          const _d = _todayIST();
           const _ref = _pt === 'ADVANCE' ? `ADV-${payment.id}` : `INTPAY-${payment.id}`;
           const _rev = await _reverseJournal(tenantDb, req.params.id, _ref, {
             reversalRef: `REV-${_ref}`, date: _d, sourceType: 'FOLIO_ADVANCE_REVERSAL', sourceId: payment.id,
@@ -64691,7 +64706,7 @@ ${data.tenant.name}`;
   app.get("/api/public/restaurants/:id/reservation-config", async (req: Request, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      const today = new Date().toISOString().split('T')[0];
+      const today = _todayIST();
       const end60 = new Date(Date.now() + 60 * 86400000).toISOString().split('T')[0];
 
       // Fetch configs and all relevant booking counts in 2 queries (no N+1)
@@ -64765,7 +64780,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
 
       // Date range (default: last 30 days)
-      const to   = (req.query.to   as string) || new Date().toISOString().slice(0, 10);
+      const to   = (req.query.to   as string) || _todayIST();
       const from = (req.query.from as string) || new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
 
       const allOrders = await db.query(
@@ -65466,12 +65481,12 @@ ${data.tenant.name}`;
       const id = randomUUID();
       await db.run(
         `INSERT INTO staff_advances (id, staff_id, amount, advance_date, note, recorded_by, payment_method, payment_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, staff_id, amt, advance_date || new Date().toISOString().slice(0, 10), note || null, req.user?.email || null, method, payment_reference || null]
+        [id, staff_id, amt, advance_date || _todayIST(), note || null, req.user?.email || null, method, payment_reference || null]
       );
       // Phase 3.1 — book the advance payout (Dr Advances to Staff / Cr Cash-or-Bank by mode).
       try {
         const src = _glAccountForPaymentMethod(method);   // CASH → 1000; UPI/ONLINE/OTHERS → 1010 Bank
-        await _postGlEntries(db, targetId, `SADV-${id}`, (advance_date || new Date().toISOString().slice(0, 10)), 'STAFF_ADVANCE', id, [
+        await _postGlEntries(db, targetId, `SADV-${id}`, (advance_date || _todayIST()), 'STAFF_ADVANCE', id, [
           { account_code: '1210', account_name: 'Advances to Staff', dr_amount: amt, cr_amount: 0, narration: `Staff advance ${staff_id}` },
           { account_code: src.code, account_name: src.name, dr_amount: 0, cr_amount: amt, narration: `Staff advance paid via ${method}` },
         ], req.user?.email || null);
@@ -65657,7 +65672,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(targetId);
       await ensurePayrollTables(db);
       const { period } = monthRange(String(req.body?.month || ''));
-      const payDate = String(req.body?.pay_date || new Date().toISOString().slice(0, 10));
+      const payDate = String(req.body?.pay_date || _todayIST());
       const methodRaw = String(req.body?.pay_method || 'BANK').toUpperCase();
       const method = ['CASH', 'UPI', 'ONLINE', 'BANK', 'OTHERS'].includes(methodRaw) ? methodRaw : 'BANK';
       const reference = req.body?.pay_reference || null;
@@ -67556,6 +67571,51 @@ ${data.tenant.name}`;
     }
   });
 
+  // Journals dated the day BEFORE they were posted in India, because "today"
+  // was taken from the UTC clock (fixed in gl-dates-ist). A journal qualifies when
+  // every one of its lines carries the UTC date of its posting and that date is
+  // not the IST date — i.e. it was posted between 00:00 and 05:30 IST and dated
+  // by the clock, not by a person. Hand-dated kinds are left alone (a manual
+  // journal, an opening balance, a year-end or payroll accrual, a stock close),
+  // and so is anything inside a closed period. dry_run by default.
+  app.post("/api/admin/tenants/:id/gl/repair-ist-dates", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const SKIP = ['MANUAL_JOURNAL', 'BANK_OPENING', 'YEAR_END_ACCRUAL', 'YEAR_END_REVERSAL', 'PAYROLL_RUN', 'STAFF_PAYROLL', 'INVENTORY_CLOSE', 'OPENING_BALANCE'];
+      const utcD = "to_char(created_at::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD')";
+      const istD = "to_char(created_at::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')";
+      const since = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.since || '')) ? String(req.body.since) : '2026-04-01';
+      const js: any[] = await db.query(
+        `SELECT journal_ref, MIN(source_type) AS source_type, MIN(entry_date) AS entry_date, MIN(${istD}) AS ist_date, COUNT(*)::int AS lines
+           FROM gl_entries
+          WHERE is_reversed = 0 AND created_at::timestamptz >= ?::timestamptz
+          GROUP BY journal_ref
+         HAVING BOOL_AND(entry_date = ${utcD} AND entry_date <> ${istD})
+            AND COUNT(DISTINCT entry_date) = 1 AND COUNT(DISTINCT ${istD}) = 1`, [since]).catch(() => []);
+      const closed: any[] = await db.query("SELECT from_date, to_date FROM accounting_periods WHERE UPPER(COALESCE(status, '')) IN ('CLOSED', 'LOCKED')").catch(() => []);
+      const inClosed = (d: string) => closed.some((p: any) => String(p.from_date || '') <= d && d <= String(p.to_date || ''));
+      const plan = js.filter(j => !SKIP.includes(String(j.source_type || '')));
+      const locked = plan.filter(j => inClosed(String(j.entry_date)) || inClosed(String(j.ist_date)));
+      const todo = plan.filter(j => !locked.includes(j));
+      const bySource: Record<string, number> = {};
+      for (const j of todo) bySource[j.source_type || '—'] = (bySource[j.source_type || '—'] || 0) + 1;
+      if (req.body?.dry_run !== false) {
+        return res.json({ dry_run: true, since, journals: todo.length, lines: todo.reduce((a, j) => a + Number(j.lines || 0), 0),
+          skipped_hand_dated: js.length - plan.length, skipped_closed_period: locked.length, by_source: bySource,
+          samples: todo.slice(0, 10).map(j => ({ journal_ref: j.journal_ref, source_type: j.source_type, from: j.entry_date, to: j.ist_date })) });
+      }
+      let updated = 0;
+      for (const j of todo) {
+        const r = await db.run(`UPDATE gl_entries SET entry_date = ? WHERE journal_ref = ? AND is_reversed = 0 AND entry_date = ?`, [j.ist_date, j.journal_ref, j.entry_date]);
+        updated += Number(r?.changes || 0);
+      }
+      res.json({ dry_run: false, journals: todo.length, lines_updated: updated });
+    } catch (err: any) {
+      console.error('[admin] gl repair-ist-dates failed:', err);
+      res.status(500).json({ error: 'Failed to repair ledger dates' });
+    }
+  });
+
   // ── Data Loader: Ayurvedic & Spa appointments ─────────────────────────────
   // List, delete and import, like the hotel bookings above. Delete is guarded:
   // an appointment that was billed, or that carries clinical / treatment records
@@ -68259,8 +68319,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'expense-journal-expenses-only',
+    commit_marker: 'gl-dates-ist',
     code_features: [
+      'gl-dates-ist  Day Book showed postings on the previous day: every today in the server was new Date().toISOString().slice(0,10), the UTC date, which is yesterday between 00:00 and 05:30 IST; _glPostDate converted timestamps through UTC too; and _glEntryDate had lost the backslashes in its date pattern so it never matched. New _istDate/_todayIST (Asia/Kolkata); all server today defaults use it; timestamps become their IST calendar day. Existing mis-dated lines are not changed (repair is separate, dry run first).',
       'expense-journal-expenses-only  Expense Journal listed guest settlements, advances and sales as Income: it read the whole Cash (1000) book. GET /petty-cash?view=expenses now returns only money spent: a cash or bank (10xx) payment whose journal debits an expense account (5xxx/6xxx), named by that account, plus manual entries (read from Cash only). The module filter now applies to ledger lines too (cost_centre, none = SHARED), with the include_shared overlay for any module; before, ledger lines had no module and the filter ignored them. The cash book (no view) is unchanged apart from the module filter. Chips offer every module the property runs, incl. Wellness and Events; ledger lines cannot be deleted from the journal.',
       'admin-console-phase23  Admin redesign phases 2 and 3. Super Admin, Sales Rep and CTO consoles share one frame (src/admin/ConsoleShell.tsx): a left menu grouped Tenants / Platform / Operations / Tools with live counts, and a Ctrl K finder that opens any tenant. New screens: Approvals (directory pinned to waiting sign-ups, bulk approve) and Subscription prices (src/admin/SubscriptionPrices.tsx, shared with CTO). Tenant panel gains Maintenance: Data loader (Hotel/Spa/Events), SQL console and Role access opened on that tenant, demo tariff, DNS, invoice-deletion switch, danger zone. Sales Rep tile list replaced by the directory scoped to the rep; a rep can approve a waiting business and load the demo tariff before go-live (server rules unchanged).',
       'row-menu-portal  PMS Reservations: the row menu first entries were hidden behind the next rows action buttons. The shared RowActions menu now renders at the page root through a portal, so no row, sticky cell or animated card can cover it (every table using it).',
@@ -68897,7 +68958,7 @@ ${data.tenant.name}`;
       if (ob > 0.009) {
         const seq = await getNextTenantSequence(db, 'bankopening');
         const ref = `OB-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
-        const date = String(b.opening_date || new Date().toISOString().slice(0, 10));
+        const date = String(b.opening_date || _todayIST());
         await _postGlEntries(db, req.params.id, ref, date, 'BANK_OPENING', id, [
           { account_code: code,   account_name: label,                    dr_amount: ob, cr_amount: 0,  narration: `Opening balance — ${label}` },
           { account_code: '3200', account_name: 'Opening Balance Equity', dr_amount: 0,  cr_amount: ob, narration: `Opening balance — ${label}` },
@@ -69071,7 +69132,7 @@ ${data.tenant.name}`;
       const amount = _acctRound(b.amount);
       if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than zero.' });
       const src = await _resolvePaySource(db, b.bank_account_id);
-      const date = String(b.txn_date || new Date().toISOString().slice(0, 10));
+      const date = String(b.txn_date || _todayIST());
       const txnId = `OWTX-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const seq = await getNextTenantSequence(db, 'ownerequity');
       const ref = `OWN-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
@@ -69308,7 +69369,7 @@ ${data.tenant.name}`;
     if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const date = String(req.query.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+      const date = String(req.query.date || _todayIST()).slice(0, 10);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const CASH = ['1000'];            // Cash in Hand
       const BANK = ['1010', '1020'];    // Bank — Main + OTA Receivable
@@ -69430,7 +69491,7 @@ ${data.tenant.name}`;
       const principal = round(b.principal);
       if (!b.name || principal <= 0) return res.status(400).json({ error: 'Loan name and a principal amount are required.' });
       const id = `LOAN-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-      const date = String(b.start_date || new Date().toISOString().slice(0, 10));
+      const date = String(b.start_date || _todayIST());
       const by = (req.user as any)?.id || (req.user as any)?.email || null;
       const funding = String(b.funding || 'OPENING').toUpperCase();
       let ref: string;
@@ -69498,7 +69559,7 @@ ${data.tenant.name}`;
         if (!known) return res.status(400).json({ error: 'That bank account is not on file for this property.' });
         cashAcct = { code: wanted, name: String(known.label || known.bank_name || 'Bank') };
       }
-      const date = String(b.entry_date || new Date().toISOString().slice(0, 10));
+      const date = String(b.entry_date || _todayIST());
       if (await _blockIfAcctClosed(res, db, date)) return;
       const by = (req.user as any)?.id || (req.user as any)?.email || null;
       const id = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -69586,7 +69647,7 @@ ${data.tenant.name}`;
       }));
       const seq = await getNextTenantSequence(db, 'journal');
       const journalRef = `MJ-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
-      const date = String(entry_date || new Date().toISOString().slice(0, 10));
+      const date = String(entry_date || _todayIST());
       const result = await _postGlEntries(db, req.params.id, journalRef, date, 'MANUAL_JOURNAL', null, glLines,
         req.user?.id || (req.user as any)?.email || null);
       // H1 — never report success on a journal that did not balance. It was
@@ -69628,7 +69689,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const from = String(req.query.from || req.body?.from || '2000-01-01');
-      const to = String(req.query.to || req.body?.to || new Date().toISOString().slice(0, 10));
+      const to = String(req.query.to || req.body?.to || _todayIST());
       const dryRun = String(req.query.dry_run || req.body?.dry_run || '') === '1';
       // Optional `sections=folios,orders,supplier_payments`. Absent, every section
       // runs exactly as before. It exists because approval to post one kind of
@@ -69932,7 +69993,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
-      const asOf = String((req.query as any).asOf || new Date().toISOString().slice(0, 10));
+      const asOf = String((req.query as any).asOf || _todayIST());
       const bsMod = _glModuleFilter(req, 'g.cost_centre');
       // One row per account code — see the trial-balance note above. Splitting
       // here lists the same asset (e.g. the bank account) twice on the balance
@@ -69995,7 +70056,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const f = String((req.query as any).from || (new Date().toISOString().slice(0, 7) + '-01'));
-      const t = String((req.query as any).to || new Date().toISOString().slice(0, 10));
+      const t = String((req.query as any).to || _todayIST());
       const CASH = ['1000', '1010', '1020'];
       const ph = CASH.map(() => '?').join(',');
       // Applied to opening and closing too — this report asserts that its
@@ -70484,7 +70545,7 @@ ${data.tenant.name}`;
       const blkRows: any[] = await db.query(
         `SELECT itc_eligibility, COUNT(*) AS n, SUM(gst_amount) AS gst FROM supplier_invoices WHERE ${blkWhere} GROUP BY itc_eligibility`,
         blkParams).catch(() => []);
-      const periodKey = String(to || new Date().toISOString().slice(0, 10)).slice(0, 7);
+      const periodKey = String(to || _todayIST()).slice(0, 7);
       const imp2b: any = await db.get(
         "SELECT id, return_period, summary_json, created_at FROM gstr2b_imports WHERE return_period = ? ORDER BY created_at DESC LIMIT 1",
         [periodKey]).catch(() => null);
@@ -70661,7 +70722,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const q = String(req.query.as_of || '');
-      const asOf = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : new Date().toISOString().slice(0, 10);
+      const asOf = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : _todayIST();
       res.json(await _rule37Report(db, asOf));
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to build the Rule 37 report' }); }
   });
@@ -70670,7 +70731,7 @@ ${data.tenant.name}`;
     if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       const q = String(req.body?.as_of || '');
       const asOf = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : today;
       // The reversal is dated today: it belongs to the return being prepared now,
@@ -70931,7 +70992,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const type = String((req.query as any).type || 'AR').toUpperCase() === 'AP' ? 'AP' : 'AR';
-      const asOf = String((req.query as any).asOf || new Date().toISOString().slice(0, 10));
+      const asOf = String((req.query as any).asOf || _todayIST());
       const codes = type === 'AP' ? ['2000'] : ['1100', '1110'];
       const ph = codes.map(() => '?').join(',');
       const rows: any[] = await db.query(
@@ -71041,7 +71102,7 @@ ${data.tenant.name}`;
         });
       }
       const _prior: any = await db.get("SELECT note, closed_by, closed_at FROM accounting_periods WHERE period_key = ?", [String(period_key)]).catch(() => null);
-      const _trail = `[reopened ${new Date().toISOString().slice(0, 10)} by ${_actorDisplayName(req.user || {})}: ${reopenReason}]`;
+      const _trail = `[reopened ${_todayIST()} by ${_actorDisplayName(req.user || {})}: ${reopenReason}]`;
       await db.run(
         "UPDATE accounting_periods SET status='OPEN', closed_by=NULL, closed_at=NULL, note = ? WHERE period_key = ?",
         [((_prior?.note ? _prior.note + ' ' : '') + _trail).slice(0, 2000), String(period_key)]
@@ -71201,7 +71262,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
-      const date = String((req.query as any).date || new Date().toISOString().slice(0, 10));
+      const date = String((req.query as any).date || _todayIST());
       const expRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code='1000' AND entry_date <= ?`, [req.params.id, date]).catch(() => ({ bal: 0 }));
       const counts = await db.query("SELECT * FROM cash_counts WHERE restaurant_id=? AND count_date=? ORDER BY created_at DESC", [req.params.id, date]).catch(() => []);
       res.json({ date, expected_amount: round(expRow?.bal || 0), counts });
@@ -71214,7 +71275,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const { count_date, session, counted_amount, note, post_variance } = req.body || {};
-      const date = String(count_date || new Date().toISOString().slice(0, 10));
+      const date = String(count_date || _todayIST());
       const sess = String(session || 'CLOSE').toUpperCase() === 'OPEN' ? 'OPEN' : 'CLOSE';
       const counted = round(Number(counted_amount || 0));
       const expRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code='1000' AND entry_date <= ?`, [req.params.id, date]).catch(() => ({ bal: 0 }));
@@ -71330,7 +71391,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const body = req.body || {};
-      const date = String(body.business_date || new Date().toISOString().slice(0, 10));
+      const date = String(body.business_date || _todayIST());
       if (await _dayLocked(db, req.params.id, date)) return res.status(409).json({ error: 'This business day is locked. Ask an owner to unlock it to open a drawer.' });
       const selfId = _drawerUserId(req);
       const cashierId = (_isMgr(req) && body.cashier_id) ? String(body.cashier_id) : selfId;
@@ -71623,7 +71684,7 @@ ${data.tenant.name}`;
     if (!_acctStaff(req, res)) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const date = String((req.query as any).date || new Date().toISOString().slice(0, 10));
+      const date = String((req.query as any).date || _todayIST());
       const isMgr = _isMgr(req);
       const dClauses = ['restaurant_id=?', 'business_date=?']; const dParams: any[] = [req.params.id, date];
       if (!isMgr) { dClauses.push('cashier_id=?'); dParams.push(_drawerUserId(req)); }
@@ -71686,7 +71747,7 @@ ${data.tenant.name}`;
     if (!(await _acctManager(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const date = String(req.body?.business_date || new Date().toISOString().slice(0, 10));
+      const date = String(req.body?.business_date || _todayIST());
       const open: any = await db.get("SELECT COUNT(*) AS n FROM cash_drawers WHERE restaurant_id=? AND business_date=? AND status IN ('OPEN','PENDING_APPROVAL')", [req.params.id, date]).catch(() => ({ n: 0 }));
       if (Number(open?.n || 0) > 0) return res.status(409).json({ error: `${open.n} drawer(s) still open or pending approval — approve them before locking the day.` });
       const id = `CDL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -71705,7 +71766,7 @@ ${data.tenant.name}`;
     if (!(await _acctCanWrite(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const date = String(req.body?.business_date || new Date().toISOString().slice(0, 10));
+      const date = String(req.body?.business_date || _todayIST());
       await db.run("UPDATE cash_day_locks SET status='UNLOCKED' WHERE restaurant_id=? AND business_date=?", [req.params.id, date]);
       res.json({ success: true, date, locked: false });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
@@ -71719,7 +71780,7 @@ ${data.tenant.name}`;
       const round = (n: number) => Math.round(Number(n || 0) * 100) / 100;
       const account = String((req.query as any).account || '1010');
       const from = String((req.query as any).from || (new Date().toISOString().slice(0, 7) + '-01'));
-      const to = String((req.query as any).to || new Date().toISOString().slice(0, 10));
+      const to = String((req.query as any).to || _todayIST());
       const bookRow: any = await db.get(`SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries WHERE restaurant_id=? AND is_reversed=0 AND account_code=? AND entry_date <= ?`, [req.params.id, account, to]).catch(() => ({ bal: 0 }));
       const book_balance = round(bookRow?.bal || 0);
       // ── F-13 / F-11: what to show, in what order, and which slice ──────
@@ -72226,7 +72287,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const account = String(b.account || '1010');
-      const to = String(b.to || new Date().toISOString().slice(0, 10));
+      const to = String(b.to || _todayIST());
       const tolerance = Math.min(15, Math.max(0, Number(b.tolerance_days) || 3));
       const parsed = _parseStatementCsv(String(b.csv || ''));
       if (parsed.error) return res.status(400).json({ error: parsed.error, detected: parsed.detected });
@@ -72282,7 +72343,7 @@ ${data.tenant.name}`;
         req.params.id,
         String(q.account || '1010'),
         String(q.from || (new Date().toISOString().slice(0, 7) + '-01')),
-        String(q.to || new Date().toISOString().slice(0, 10)),
+        String(q.to || _todayIST()),
       );
       res.json(model);
     } catch (err: any) {
@@ -72299,7 +72360,7 @@ ${data.tenant.name}`;
     try {
       const q: any = req.query || {};
       const account = String(q.account || '1010');
-      const to = String(q.to || new Date().toISOString().slice(0, 10));
+      const to = String(q.to || _todayIST());
       const model = await _buildBankRecStatement(
         req.params.id, account,
         String(q.from || (new Date().toISOString().slice(0, 7) + '-01')), to,
@@ -72371,7 +72432,7 @@ ${data.tenant.name}`;
           [recId, acct, period, stmtDate, scb, by]);
       }
       const ids: string[] = Array.isArray(cleared_entry_ids) ? cleared_entry_ids.map((x: any) => String(x)) : [];
-      const clearedOn = String(to || new Date().toISOString().slice(0, 10));
+      const clearedOn = String(to || _todayIST());
       for (const gid of ids) {
         // Written to both for one release: the durable table because clearing
         // has to outlive the period it was made in, the old one so a rollback
@@ -72490,7 +72551,7 @@ ${data.tenant.name}`;
 
             // Build real data payload for each schedulable event type
             if (setting.event_name === 'DAILY_REPORT') {
-              const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+              const today = _todayIST(); // YYYY-MM-DD
 
               // Total orders and revenue for today (exclude cancelled)
               const summary = await db.get(
@@ -73690,7 +73751,7 @@ ${data.tenant.name}`;
             `INSERT INTO channel_reconciliation_reports
                (id, channel, period_start, period_end, local_count, remote_count, missing_in_local, missing_in_remote, status, summary_json, error)
              VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
-            [reportId, channelKey, since.slice(0, 10), new Date().toISOString().slice(0, 10),
+            [reportId, channelKey, since.slice(0, 10), _todayIST(),
              localRows.length, (pull.bookings || []).length, status, summary, pull.reason || null]
           ).catch(() => {});
           reports.push({ channel: channelKey, status, local_count: localRows.length, remote_count: (pull.bookings || []).length });
@@ -73840,7 +73901,7 @@ ${data.tenant.name}`;
       );
       if (!tenants || tenants.length === 0) return;
       console.log(`[shift-reminder] 08:00 IST — scanning ${tenants.length} opted-in tenants`);
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       let sent = 0;
       for (const t of tenants) {
         try {
@@ -73897,7 +73958,7 @@ ${data.tenant.name}`;
       const tenants: any[] = await centralDb.query(
         `SELECT id FROM restaurants WHERE is_active = 1 AND access_revoked = 0`
       );
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       const yest = (() => {
         const d = new Date(); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10);
       })();
@@ -74036,7 +74097,7 @@ ${data.tenant.name}`;
       const tenants: any[] = await centralDb.query(
         `SELECT id FROM restaurants WHERE is_active = 1 AND access_revoked = 0`
       );
-      const today = new Date().toISOString().slice(0, 10);
+      const today = _todayIST();
       let expired = 0;
       for (const t of tenants) {
         try {
@@ -74246,7 +74307,7 @@ ${data.tenant.name}`;
       const tenants: any[] = await centralDb.query(
         "SELECT id, name FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM' AND access_revoked = 0"
       );
-      const todayIso = new Date().toISOString().slice(0, 10);
+      const todayIso = _todayIST();
       let sent = 0;
       for (const t of (tenants || [])) {
         try {
