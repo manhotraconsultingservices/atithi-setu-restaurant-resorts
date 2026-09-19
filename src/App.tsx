@@ -29,7 +29,7 @@ import { DataLoaderSpa, DataLoaderEvents } from './DataLoaderModules';
 import { TenantDirectory } from './admin/TenantDirectory';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
-import { moduleOn, moduleOff, setTenantModules } from './tenantModules';
+import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
 import { canWriteTab, canDeleteTab, tabLevel } from './perm';
@@ -8132,8 +8132,10 @@ const COST_MODULE_BADGE: Record<string, string> = {
   SPA: 'bg-teal-100 text-teal-700',
   SHARED: 'bg-purple-100 text-purple-700',
 };
+// Only the modules this property runs (plus Shared when there are several).
+const costModuleList = (): string[] => { const b = businessModules(); return b ? COST_MODULES.filter(m => b.includes(m)) : [...COST_MODULES]; };
 const costModuleOptions = () =>
-  COST_MODULES.map(m => <option key={m} value={m}>{COST_MODULE_LABEL[m]}</option>);
+  costModuleList().map(m => <option key={m} value={m}>{COST_MODULE_LABEL[m]}</option>);
 
 function AccountingView({ restaurantId, token, initialTab, cashierMode }: { restaurantId: string; token: string; initialTab?: string; cashierMode?: boolean }) {
   type SubTab = 'TRIAL' | 'GL' | 'GST' | 'CASHBOOK' | 'TDS' | 'JOURNAL'
@@ -47259,15 +47261,16 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
           <input type="date" value={to} min={from} onChange={e => setTo(e.target.value)}
             className="bg-white border border-[#e8dccf] rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 ring-brand/20" />
         </div>
-        <div className="flex gap-1">
-          {(['ALL', 'HOTEL', 'RESTAURANT', 'SHARED'] as const).map(m => (
+        {/* Module filter — only modules the property runs; none when it runs one. */}
+        {costModuleList().filter(m => ['HOTEL', 'RESTAURANT', 'SHARED'].includes(m)).length > 1 && <div className="flex gap-1">
+          {(['ALL', 'HOTEL', 'RESTAURANT', 'SHARED'] as const).filter(m => m === 'ALL' || costModuleList().includes(m)).map(m => (
             <button key={m} onClick={() => setModFilter(m)}
               className={cn('px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all',
                 modFilter === m ? 'bg-brand text-white' : 'bg-white border border-[#e8dccf] text-[#6b5d52] hover:border-brand/40')}>
               {m === 'ALL' ? 'All' : m.charAt(0) + m.slice(1).toLowerCase()}
             </button>
           ))}
-        </div>
+        </div>}
         {/* Opt-in overlay — only for a specific module. Folds property-wide SHARED
             costs into this Hotel/Restaurant view; they stay labeled + subtotalled
             separately (strict buckets remain the default). */}
