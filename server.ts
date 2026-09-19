@@ -7797,6 +7797,10 @@ async function _postGlEntries(
   // both, it is derived from the source type, and absent that it stays NULL.
   costCentre?: string | null,
 ): Promise<GlPostResult> {
+  // Several callers (folio settlement, event advances, staff advances) pass no
+  // actor, which left "Recorded by" blank in the Expense Journal. The request's
+  // own user is on the books-audit context — use it. Cron/boot work has none.
+  if (!postedBy) postedBy = booksAuditContext.getStore()?.id || null;
   // The backstop. Routes below refuse up front with a 409 so the user gets a
   // sentence they can act on; this catches anything that did not, and records a
   // GL exception so a refused posting is VISIBLE rather than quietly missing.
@@ -44810,7 +44814,7 @@ ${data.tenant.name}`;
       ).catch(() => ({ bal: 0 }));
       const opening = round(Number(openRow?.bal || 0));
       const glRows: any[] = await db.query(
-        `SELECT id, entry_date, source_type, source_id, narration, dr_amount, cr_amount, created_at
+        `SELECT id, entry_date, source_type, source_id, narration, dr_amount, cr_amount, created_at, posted_by
            FROM gl_entries
           WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = ?
             AND entry_date BETWEEN ? AND ?
@@ -44826,10 +44830,40 @@ ${data.tenant.name}`;
       if (pcIds.length) {
         const placeholders = pcIds.map(() => '?').join(',');
         const pcRows: any[] = await db.query(
-          `SELECT id, category, notes, module FROM petty_cash WHERE id IN (${placeholders})`, pcIds
+          `SELECT id, category, notes, module, recorded_by FROM petty_cash WHERE id IN (${placeholders})`, pcIds
         ).catch(() => []);
         for (const p of (pcRows || [])) pcMap[p.id] = p;
       }
+      // Who recorded each movement. A manual entry names its own recorder; any
+      // other line names the user who posted it. Lines posted before the poster
+      // took the actor from the request have no id, so they are named from the
+      // statutory books audit trail, which recorded the actor of every insert.
+      const actorOf = new Map<string, string>();   // gl row id → actor id or name
+      for (const r of (glRows || [])) {
+        const pc = (r.source_type === 'PETTY_CASH' && r.source_id) ? pcMap[r.source_id] : null;
+        const who = (pc?.recorded_by) || r.posted_by;
+        if (who) actorOf.set(String(r.id), String(who));
+      }
+      const unknown = (glRows || []).map((r: any) => String(r.id)).filter((id: string) => !actorOf.has(id));
+      const trailName = new Map<string, string>();
+      for (let k = 0; k < unknown.length; k += 500) {
+        const chunk = unknown.slice(k, k + 500);
+        const trail: any[] = await db.query(
+          `SELECT row_key, actor_id, actor_name FROM books_audit_log
+            WHERE table_name = 'gl_entries' AND operation = 'INSERT' AND row_key IN (${chunk.map(() => '?').join(',')})`, chunk).catch(() => []);
+        for (const t of (trail || [])) {
+          if (t.actor_name) trailName.set(String(t.row_key), String(t.actor_name));
+          else if (t.actor_id) actorOf.set(String(t.row_key), String(t.actor_id));
+        }
+      }
+      const names = await _resolveActorNames(db, [...new Set(actorOf.values())]);
+      const nameFor = (glId: string): string | null => {
+        if (trailName.has(glId)) return trailName.get(glId)!;
+        const a = actorOf.get(glId);
+        if (!a) return null;
+        if (a === 'system' || a === 'SYSTEM') return 'System';
+        return names.get(a) || a;
+      };
       let totalIn = 0, totalOut = 0;
       const rows = (glRows || []).map((r: any) => {
         const dr = Number(r.dr_amount || 0), cr = Number(r.cr_amount || 0);
@@ -44847,6 +44881,7 @@ ${data.tenant.name}`;
           module: pc.module || 'RESTAURANT',
           source: 'PETTY_CASH',                   // a manual entry — editable + deletable
           readonly: false,
+          recorded_by: nameFor(String(r.id)),
         };
         return {
           id: r.id,
@@ -44857,6 +44892,7 @@ ${data.tenant.name}`;
           notes: r.narration || null,
           source: 'GL',        // derived from another module → read-only
           readonly: true,
+          recorded_by: nameFor(String(r.id)),
         };
       });
       totalIn = round(totalIn); totalOut = round(totalOut);
@@ -67758,8 +67794,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-room-folio-settled-paid-with-event',
+    commit_marker: 'expense-journal-recorded-by',
     code_features: [
+      'expense-journal-recorded-by  Owner bug: Finance > Expenses, Recorded by was blank on every row. The /petty-cash list never returned it. Now each row carries recorded_by: the manual entry recorder, else the ledger line posted_by, resolved to a staff or user name (_resolveActorNames); lines with no posted_by are named from the statutory books audit trail. _postGlEntries now falls back to the request user when a caller passes no actor (folio settlement, event and staff advances posted none).',
       'event-room-folio-settled-paid-with-event  Owner: at event completion an event room\'s empty hotel bill was voided at Rs 0; it must read Settled, paid with the event. It is now status settled, payment_method EVENT, settlement_note Paid with event (event name, event invoice number), and invoice_number = the event invoice reference so it never draws its own GST serial. No ledger posting (the event invoice carries the revenue). New folios.settlement_note column.',
       'event-room-checkin-floating-repick  Owner bug (Ankur Cafe): with two rooms on an event, Start checked in one and refused the other because its pencilled room (a FLOATING reservation, shown Unassigned) still had guests checked in past their check-out dates. _eventRoomCheckin now moves a floating reservation (room_locked=0) whose pencilled room is occupied or out of order to another free room of the same type (not taken for the dates, no guest in house, not maintenance/blocked/occupied; vacant first), audits ROOM_MOVED, then checks in. A room fixed on purpose (room_locked=1) is never moved.',
       'housekeeping-occupancy-check  Owner request: a report of rooms and halls still tied up when they should be free. GET /housekeeping/occupancy-check (HOUSEKEEPING tab) lists: room Occupied with nobody checked in; guest checked in past the check-out date; event over but its room still booked or checked in; room or hall in Cleaning with no open cleaning task; hall in use with no event running; event past its end date never completed. Housekeeping gets an Occupancy check tab (smart table, what-to-do per row).',
