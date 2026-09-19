@@ -67252,6 +67252,156 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Data Loader: Ayurvedic & Spa appointments ─────────────────────────────
+  // List, delete and import, like the hotel bookings above. Delete is guarded:
+  // an appointment that was billed, or that carries clinical / treatment records
+  // (medical history the property must keep), is skipped with the reason — never
+  // wiped. Only its therapist-assignment rows go with it.
+  const _dlPage = (req: AuthRequest) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit || 250)));
+    return { page, limit, offset: (page - 1) * limit };
+  };
+  app.get("/api/admin/data-migration/spa-appointments", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId || '');
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const { page, limit, offset } = _dlPage(req);
+      const db = await getTenantDb(tenantId);
+      const countRow: any = await db.get("SELECT COUNT(*) AS total FROM spa_appointments").catch(() => null);
+      if (!countRow) return res.json({ total: 0, page, limit, rows: [], module_missing: true });
+      const rows = await db.query(
+        `SELECT a.id, a.client_name, a.client_phone, a.service_name, t.display_name AS therapist, a.start_at, a.end_at,
+                a.status, a.price_snapshot, a.booking_source, a.folio_id, a.created_at
+           FROM spa_appointments a LEFT JOIN spa_therapists t ON t.id = a.therapist_id
+          ORDER BY a.start_at DESC LIMIT ? OFFSET ?`, [limit, offset]).catch(() => []);
+      res.json({ total: Number(countRow.total || 0), page, limit, rows });
+    } catch (err) { res.status(500).json({ error: "Failed to fetch spa appointments" }); }
+  });
+  app.delete("/api/admin/data-migration/spa-appointments", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { tenantId, ids } = req.body as { tenantId: string; ids: string[] };
+      if (!tenantId || !Array.isArray(ids) || !ids.length) return res.status(400).json({ error: "tenantId and ids[] required" });
+      if (ids.length > 500) return res.status(400).json({ error: "Max 500 per request" });
+      const db = await getTenantDb(tenantId);
+      const keep: Array<[string, string]> = [
+        ['spa_clinical_notes', 'clinical notes'], ['spa_treatment_sessions', 'a treatment record'], ['spa_client_intake_forms', 'a health intake form'],
+        ['spa_client_photos', 'client photos'], ['spa_tip_splits', 'therapist tips'], ['spa_package_redemptions', 'a package redemption'],
+        ['spa_consumption_batches', 'product consumption'], ['spa_session_consumables', 'product consumption'],
+      ];
+      let deleted = 0; const skipped: any[] = [];
+      for (const id of ids) {
+        const a: any = await db.get("SELECT id, folio_id, room_folio_id FROM spa_appointments WHERE id = ?", [id]).catch(() => null);
+        if (!a) { skipped.push({ id, reason: 'not found' }); continue; }
+        const billed = a.folio_id || a.room_folio_id || (await db.get("SELECT id FROM folios WHERE appointment_id = ? LIMIT 1", [id]).catch(() => null));
+        if (billed) { skipped.push({ id, reason: 'it has a bill — cancel the invoice instead' }); continue; }
+        let why: string | null = null;
+        for (const [t, label] of keep) {
+          if (await db.get(`SELECT 1 AS x FROM ${t} WHERE appointment_id = ? LIMIT 1`, [id]).catch(() => null)) { why = `it has ${label}`; break; }
+        }
+        if (why) { skipped.push({ id, reason: why }); continue; }
+        await db.run("DELETE FROM spa_appointment_therapists WHERE appointment_id = ?", [id]).catch(() => {});
+        await db.run("DELETE FROM spa_session_therapists WHERE appointment_id = ?", [id]).catch(() => {});
+        const r = await db.run("DELETE FROM spa_appointments WHERE id = ?", [id]).catch((e: any) => { skipped.push({ id, reason: e?.message || 'delete failed' }); return null; });
+        if (r?.changes) deleted++;
+      }
+      res.json({ success: true, deleted, skipped });
+    } catch (err) { res.status(500).json({ error: "Failed to delete spa appointments" }); }
+  });
+  app.post("/api/admin/data-migration/spa-appointments/import", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { tenantId, rows } = req.body as { tenantId: string; rows: any[] };
+      if (!tenantId || !Array.isArray(rows) || !rows.length) return res.status(400).json({ error: "tenantId and rows[] required" });
+      if (rows.length > 2000) return res.status(400).json({ error: "Max 2000 rows per import" });
+      const db = await getTenantDb(tenantId);
+      const services: any[] = await db.query("SELECT id, name, duration_min, price, gst_percent FROM spa_services").catch(() => []);
+      if (!services.length) return res.status(400).json({ error: "This property has no spa services. Add the treatment menu first, so each appointment can name its service." });
+      const therapists: any[] = await db.query("SELECT id, display_name FROM spa_therapists").catch(() => []);
+      const svcBy = (v: string) => services.find(s => s.id === v) || services.find(s => String(s.name).trim().toLowerCase() === v.trim().toLowerCase());
+      const thBy = (v: string) => therapists.find(t => t.id === v) || therapists.find(t => String(t.display_name || '').trim().toLowerCase() === v.trim().toLowerCase());
+      const STATUSES = ['BOOKED', 'CONFIRMED', 'CHECKED_IN', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'NO_SHOW'];
+      const results: Array<{ index: number; id?: string; error?: string }> = [];
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i] || {};
+        const name = String(r.client_name || '').trim();
+        const svc = svcBy(String(r.service_id || r.service || r.service_name || ''));
+        const date = String(r.date || r.start_date || '').trim();
+        const time = String(r.time || r.start_time || '10:00').trim();
+        const startRaw = String(r.start_at || (date ? `${date} ${time}` : '')).trim();
+        const start = new Date(startRaw.replace(' ', 'T'));
+        if (!name) { results.push({ index: i, error: 'client_name is required' }); continue; }
+        if (!svc) { results.push({ index: i, error: `Unknown service "${r.service || r.service_name || r.service_id || ''}" — use a service name from the treatment menu` }); continue; }
+        if (!startRaw || isNaN(start.getTime())) { results.push({ index: i, error: 'date (YYYY-MM-DD) and time (HH:MM), or start_at, are required' }); continue; }
+        const status = STATUSES.includes(String(r.status || '').toUpperCase()) ? String(r.status).toUpperCase() : 'COMPLETED';
+        const dur = Number(r.duration_min) > 0 ? Number(r.duration_min) : Number(svc.duration_min || 60);
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const fmt = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+        const end = new Date(start.getTime() + dur * 60000);
+        const th = r.therapist ? thBy(String(r.therapist)) : null;
+        if (r.therapist && !th) { results.push({ index: i, error: `Unknown therapist "${r.therapist}"` }); continue; }
+        const price = r.price !== undefined && r.price !== '' ? Number(r.price) : Number(svc.price || 0);
+        const gstPct = r.gst_percent !== undefined && r.gst_percent !== '' ? Number(r.gst_percent) : Number(svc.gst_percent || 0);
+        const id = `SPA-MIG-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${i}`;
+        try {
+          await db.run(
+            `INSERT INTO spa_appointments (id, client_name, client_phone, client_email, service_id, service_name, therapist_id, start_at, end_at, status,
+               price_snapshot, gst_percent_snapshot, gst_snapshot, booking_source, notes, completed_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MIGRATION', ?, ?, CURRENT_TIMESTAMP)`,
+            [id, name, r.client_phone || null, r.client_email || null, svc.id, svc.name, th?.id || null, fmt(start), fmt(end), status,
+             price, gstPct, Math.round(price * gstPct) / 100, r.notes || null, status === 'COMPLETED' ? fmt(end) : null]);
+          results.push({ index: i, id });
+        } catch (e: any) { results.push({ index: i, error: e?.message || 'Insert failed' }); }
+      }
+      res.json({ success: true, total: rows.length, succeeded: results.filter(x => x.id).length, failed: results.filter(x => x.error).length, results });
+    } catch (err) { res.status(500).json({ error: "Failed to import spa appointments" }); }
+  });
+
+  // ── Data Loader: Event bookings ───────────────────────────────────────────
+  // List and delete here; import uses the Events migration engine the loader
+  // embeds (bookings, invoices, rental items, add-on services). Delete is guarded:
+  // a booking with an invoice, payments, reserved hotel rooms or a quotation is
+  // skipped with the reason — those are business records, not stray data.
+  app.get("/api/admin/data-migration/event-bookings", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId || '');
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const { page, limit, offset } = _dlPage(req);
+      const db = await getTenantDb(tenantId);
+      const countRow: any = await db.get("SELECT COUNT(*) AS total FROM event_bookings").catch(() => null);
+      if (!countRow) return res.json({ total: 0, page, limit, rows: [], module_missing: true });
+      const rows = await db.query(
+        `SELECT b.id, b.customer_name, b.customer_phone, b.event_type, b.event_date, b.end_date, b.status, b.guest_count,
+                b.total_amount, b.advance_amount, b.booking_source, v.name AS venue_name, b.created_at
+           FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
+          ORDER BY b.event_date DESC, b.created_at DESC LIMIT ? OFFSET ?`, [limit, offset]).catch(() => []);
+      res.json({ total: Number(countRow.total || 0), page, limit, rows });
+    } catch (err) { res.status(500).json({ error: "Failed to fetch event bookings" }); }
+  });
+  app.delete("/api/admin/data-migration/event-bookings", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { tenantId, ids } = req.body as { tenantId: string; ids: string[] };
+      if (!tenantId || !Array.isArray(ids) || !ids.length) return res.status(400).json({ error: "tenantId and ids[] required" });
+      if (ids.length > 500) return res.status(400).json({ error: "Max 500 per request" });
+      const db = await getTenantDb(tenantId);
+      let deleted = 0; const skipped: any[] = [];
+      for (const id of ids) {
+        const b: any = await db.get("SELECT id FROM event_bookings WHERE id = ?", [id]).catch(() => null);
+        if (!b) { skipped.push({ id, reason: 'not found' }); continue; }
+        const has = async (sql: string) => !!(await db.get(sql, [id]).catch(() => null));
+        if (await has("SELECT id FROM folios WHERE event_booking_id = ? LIMIT 1")) { skipped.push({ id, reason: 'it has an invoice — cancel the invoice instead' }); continue; }
+        if (await has("SELECT id FROM event_payments WHERE booking_id = ? LIMIT 1")) { skipped.push({ id, reason: 'it has payments recorded' }); continue; }
+        if (await has("SELECT id FROM event_booking_rooms WHERE booking_id = ? AND hotel_booking_id IS NOT NULL LIMIT 1")) { skipped.push({ id, reason: 'it has hotel rooms reserved — cancel the booking instead' }); continue; }
+        if (await has("SELECT id FROM event_quotations WHERE booking_id = ? LIMIT 1")) { skipped.push({ id, reason: 'it has a quotation' }); continue; }
+        for (const t of ['event_booking_items', 'event_booking_services', 'event_booking_catering', 'event_booking_addons', 'event_booking_staff', 'event_payment_schedule', 'event_booking_rooms']) {
+          await db.run(`DELETE FROM ${t} WHERE booking_id = ?`, [id]).catch(() => {});
+        }
+        const r = await db.run("DELETE FROM event_bookings WHERE id = ?", [id]).catch((e: any) => { skipped.push({ id, reason: e?.message || 'delete failed' }); return null; });
+        if (r?.changes) deleted++;
+      }
+      res.json({ success: true, deleted, skipped });
+    } catch (err) { res.status(500).json({ error: "Failed to delete event bookings" }); }
+  });
+
   // ────────────────────────────────────────────────────────────────────
   // SQL Console — SUPER_ADMIN read-only query interface
   // POST /api/admin/sql-console
@@ -67795,8 +67945,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'expense-journal-recorded-by-2',
+    commit_marker: 'data-loader-spa-events',
     code_features: [
+      'data-loader-spa-events  Owner: the super-admin Data Loader only handled hotel bookings. It now has a module switch (Hotel / Ayurvedic & Spa / Events). Spa: list, guarded delete (skips an appointment with a bill or with clinical notes, treatment records, intake forms, photos, tips, package or consumption), CSV import (client, service by name, date+time, therapist, status, price) at /api/admin/data-migration/spa-appointments. Events: list and guarded delete (skips a booking with an invoice, payments, reserved hotel rooms or a quotation; removes its own line items) at /api/admin/data-migration/event-bookings; import embeds the existing Events migration engine.',
       'expense-journal-recorded-by  Owner bug: Finance > Expenses, Recorded by was blank on every row. The /petty-cash list never returned it. Now each row carries recorded_by: the manual entry recorder, else the ledger line posted_by, resolved to a staff or user name (_resolveActorNames); lines with no posted_by are named from the statutory books audit trail. _postGlEntries now falls back to the request user when a caller passes no actor (folio settlement, event and staff advances posted none).',
       'event-room-folio-settled-paid-with-event  Owner: at event completion an event room\'s empty hotel bill was voided at Rs 0; it must read Settled, paid with the event. It is now status settled, payment_method EVENT, settlement_note Paid with event (event name, event invoice number), and invoice_number = the event invoice reference so it never draws its own GST serial. No ledger posting (the event invoice carries the revenue). New folios.settlement_note column.',
       'event-room-checkin-floating-repick  Owner bug (Ankur Cafe): with two rooms on an event, Start checked in one and refused the other because its pencilled room (a FLOATING reservation, shown Unassigned) still had guests checked in past their check-out dates. _eventRoomCheckin now moves a floating reservation (room_locked=0) whose pencilled room is occupied or out of order to another free room of the same type (not taken for the dates, no guest in house, not maintenance/blocked/occupied; vacant first), audits ROOM_MOVED, then checks in. A room fixed on purpose (room_locked=1) is never moved.',

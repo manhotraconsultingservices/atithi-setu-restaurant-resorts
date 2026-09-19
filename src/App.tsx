@@ -25,6 +25,7 @@ import { PayOnlineButton, PaymentResultPage, usePublicPayOptions, PayChoicePicke
 import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, spanInRange, type DateRange } from './components/ListFilters';
 import { MissingGuestIdPanel } from './MissingGuestIdPanel';
 import { EventRoomBilling } from './EventRoomBilling';
+import { DataLoaderSpa, DataLoaderEvents } from './DataLoaderModules';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules } from './tenantModules';
@@ -54597,6 +54598,8 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // Data Migration Console state (renamed from Data Migration)
   const [migTenants, setMigTenants] = useState<any[]>([]);
   const [migSelectedTenant, setMigSelectedTenant] = useState<string>('');
+  // Which module the Data Loader works on: hotel bookings, spa appointments or event bookings.
+  const [migModule, setMigModule] = useState<'HOTEL' | 'SPA' | 'EVENTS'>('HOTEL');
   const [migBookings, setMigBookings] = useState<any[]>([]);
   const [migBookingsTotal, setMigBookingsTotal] = useState(0);
   const [migBookingsPage, setMigBookingsPage] = useState(1);
@@ -56754,10 +56757,23 @@ function SuperAdminDashboard({ token }: { token: string }) {
             {migTenants.length === 0 && (
               <p className="mt-2 text-xs text-[#9c8e85] italic">Loading tenants… (click Data Loader tab again if empty)</p>
             )}
+            {migSelectedTenant && (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {([['HOTEL', 'Hotel bookings'], ['SPA', 'Ayurvedic & Spa appointments'], ['EVENTS', 'Event bookings']] as const).map(([k, label]) => (
+                  <button key={k} onClick={() => setMigModule(k)}
+                    className={cn('px-4 py-2 rounded-xl text-sm font-bold border transition-colors', migModule === k ? 'bg-brand text-white border-brand' : 'bg-[#faf7f2] text-[#6b5d52] border-[#e8dccf] hover:border-brand/50')}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
+          {migSelectedTenant && migModule === 'SPA' && <DataLoaderSpa tenantId={migSelectedTenant} token={token} />}
+          {migSelectedTenant && migModule === 'EVENTS' && <DataLoaderEvents tenantId={migSelectedTenant} token={token} />}
+
           {/* Booking Manager */}
-          {migSelectedTenant && (
+          {migSelectedTenant && migModule === 'HOTEL' && (
             <div className="bg-white rounded-[32px] border border-brand/10 shadow-sm p-6">
               <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
                 <h3 className="text-lg font-bold flex items-center gap-2">
@@ -56881,7 +56897,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
           )}
 
           {/* CSV Import — 2-step: Review then Confirm */}
-          {migSelectedTenant && (
+          {migSelectedTenant && migModule === 'HOTEL' && (
             <div className="bg-white rounded-[32px] border border-brand/10 shadow-sm p-6">
               {/* Header */}
               <div className="flex items-center justify-between mb-5 gap-3 flex-wrap">

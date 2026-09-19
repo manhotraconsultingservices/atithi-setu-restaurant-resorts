@@ -3447,7 +3447,7 @@ function LanguageToggle() {
 // ── Data Migration utility — owner-only bulk CSV import with server validation,
 // duplicate detection, and an editable fix-it grid. Download a template, upload a
 // filled CSV, fix any flagged cells inline, then migrate only the OK rows. ──────
-function EventMigration({ restaurantId, token }: Props) {
+export function EventMigration({ restaurantId, token }: Props) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const [specs, setSpecs] = useState<any[]>([]);
