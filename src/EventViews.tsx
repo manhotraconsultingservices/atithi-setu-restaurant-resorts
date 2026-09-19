@@ -1539,6 +1539,9 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
   const runAct = async (path: string, body: any, okMsg?: string) => {
     const r = await api(`/events/bookings/${bookingId}/${path}`, { method: 'POST', body: JSON.stringify(body) });
+    // Completing an event raises its tax invoice when none exists yet.
+    if (r?.invoice?.raised) alert(`Tax invoice ${r.invoice.invoice_number || ''} raised for this event.`.replace('  ', ' '));
+    else if (r?.invoice && r.invoice.error) alert(`The event is complete, but its invoice could not be raised: ${r.invoice.error}. Raise it from the Invoice button.`);
     // Completing an event sends its hotel rooms to cleaning: say what happened to each.
     const rooms: any[] = Array.isArray(r?.rooms_to_cleaning) ? r.rooms_to_cleaning : [];
     if (rooms.length) {

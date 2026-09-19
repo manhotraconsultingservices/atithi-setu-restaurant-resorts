@@ -36243,6 +36243,20 @@ ${data.tenant.name}`;
         });
       }
       await db.run("UPDATE event_bookings SET status = 'COMPLETED' WHERE id = ?", [req.params.bid]);
+      // The event has been delivered, so it is sold: raise its tax invoice now if
+      // nobody has. Until this, a completed event without an invoice put no revenue,
+      // no output GST and no receivable in the books — its advances sat as a
+      // liability for ever. Goes through the invoice route itself (one billing path).
+      let invoice: any = null;
+      const liveInv: any = await db.get(
+        "SELECT invoice_number FROM folios WHERE event_booking_id = ? AND COALESCE(doc_type, 'INVOICE') = 'INVOICE' AND LOWER(COALESCE(status, '')) NOT IN ('voided', 'cancelled', 'superseded') ORDER BY created_at DESC LIMIT 1",
+        [req.params.bid]).catch(() => null);
+      if (liveInv) invoice = { raised: false, already: true, invoice_number: liveInv.invoice_number || null };
+      else {
+        const inv = await callSelfApi('POST', `/api/restaurant/${req.params.id}/events/bookings/${encodeURIComponent(req.params.bid)}/checkout`, req.headers.authorization, {});
+        invoice = inv.ok ? { raised: true, folio_id: inv.data?.id || null, invoice_number: inv.data?.invoice_number || null, total: inv.data?.grand_total ?? null }
+          : { raised: false, error: inv.data?.error || `HTTP ${inv.status}` };
+      }
       // Housekeeping: raise a cleaning job for the venue from the EVENT checklist.
       //
       // ONLY when the booking actually has a venue. `venue_id || null` used to
@@ -36270,7 +36284,7 @@ ${data.tenant.name}`;
       if (rooms.length) {
         await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'ROOMS_TO_CLEANING', summary: `${rooms.filter(r => r.released).length} of ${rooms.length} event room(s) sent to cleaning`, after: { rooms } }).catch(() => {});
       }
-      res.json({ success: true, rooms_to_cleaning: rooms });
+      res.json({ success: true, rooms_to_cleaning: rooms, invoice });
     } catch (err: any) { res.status(500).json({ error: "Failed to complete booking" }); }
   });
 
@@ -67409,6 +67423,85 @@ ${data.tenant.name}`;
     }
   });
 
+  // Completed events that were never invoiced carry no revenue, GST or receivable
+  // in the books. List them (dry_run) for review, then raise each invoice through
+  // the event invoice route — dated today, since a GST invoice cannot be back-dated.
+  app.post("/api/admin/tenants/:id/events/invoice-completed", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT b.id, b.customer_name, b.event_date, b.total_amount, b.advance_amount
+           FROM event_bookings b
+          WHERE b.status = 'COMPLETED'
+            AND NOT EXISTS (SELECT 1 FROM folios f WHERE f.event_booking_id = b.id AND COALESCE(f.doc_type, 'INVOICE') = 'INVOICE'
+                              AND LOWER(COALESCE(f.status, '')) NOT IN ('voided', 'cancelled', 'superseded'))
+          ORDER BY b.event_date`).catch(() => []);
+      const only = Array.isArray(req.body?.ids) && req.body.ids.length ? new Set(req.body.ids.map(String)) : null;
+      const list = rows.filter(r => !only || only.has(String(r.id))).map(r => ({
+        id: r.id, customer_name: r.customer_name, event_date: normaliseDateIso(r.event_date),
+        total: Number(r.total_amount || 0), paid: Number(r.advance_amount || 0), balance: Math.round((Number(r.total_amount || 0) - Number(r.advance_amount || 0)) * 100) / 100,
+      }));
+      if (req.body?.dry_run !== false) return res.json({ dry_run: true, count: list.length, total: list.reduce((a, r) => a + r.total, 0), rows: list });
+      const results: any[] = [];
+      for (const r of list) {
+        const inv = await callSelfApi('POST', `/api/restaurant/${req.params.id}/events/bookings/${encodeURIComponent(r.id)}/checkout`, req.headers.authorization, {});
+        results.push({ id: r.id, customer_name: r.customer_name, ok: inv.ok, invoice_number: inv.data?.invoice_number || null, error: inv.ok ? null : (inv.data?.error || `HTTP ${inv.status}`) });
+      }
+      res.json({ dry_run: false, raised: results.filter(x => x.ok).length, failed: results.filter(x => !x.ok).length, results });
+    } catch (err: any) {
+      console.error('[admin] invoice-completed failed:', err);
+      res.status(500).json({ error: 'Failed to invoice completed events' });
+    }
+  });
+
+  // Ledger lines whose entry_date is not a calendar date (a full timestamp, or
+  // "Wed Aug 05" from an old bug) are skipped by every date-range report. Set
+  // each to its real date: a timestamp keeps its date part; "Wed Aug 05" takes
+  // the year its journal was posted, checked against the weekday. Amounts and
+  // accounts are never touched. dry_run first.
+  app.post("/api/admin/tenants/:id/gl/repair-dates", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bad: any[] = await db.query(
+        "SELECT id, entry_date, created_at, journal_ref, source_type FROM gl_entries WHERE entry_date !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'").catch(() => []);
+      const MON: Record<string, number> = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+      const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const fix = (raw: string, created: any): string | null => {
+        const s = String(raw || '').trim();
+        const iso = s.match(/^(\d{4}-\d{2}-\d{2})/); if (iso) return iso[1];
+        const m = s.match(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})/);
+        if (!m) return null;
+        const cy = new Date(created || Date.now()).getUTCFullYear();
+        for (const y of [cy, cy - 1, cy + 1, cy - 2]) {
+          const d = new Date(Date.UTC(y, MON[m[2]], Number(m[3])));
+          if (DOW[d.getUTCDay()] === m[1]) return d.toISOString().slice(0, 10);
+        }
+        return null;
+      };
+      const plan = bad.map(r => ({ id: r.id, from: r.entry_date, to: fix(r.entry_date, r.created_at), journal_ref: r.journal_ref, source_type: r.source_type }));
+      const fixable = plan.filter(p => p.to), unfixable = plan.filter(p => !p.to);
+      const summary: Record<string, number> = {};
+      for (const p of fixable) summary[`${p.from} → ${p.to}`] = (summary[`${p.from} → ${p.to}`] || 0) + 1;
+      if (req.body?.dry_run !== false) {
+        return res.json({ dry_run: true, lines: bad.length, fixable: fixable.length, unfixable: unfixable.length, changes: summary, unfixable_samples: unfixable.slice(0, 10) });
+      }
+      let updated = 0;
+      const byTarget = new Map<string, string[]>();
+      for (const p of fixable) { const k = p.to as string; if (!byTarget.has(k)) byTarget.set(k, []); byTarget.get(k)!.push(p.id); }
+      for (const [to, ids] of byTarget) {
+        for (let i = 0; i < ids.length; i += 500) {
+          const chunk = ids.slice(i, i + 500);
+          const r = await db.run(`UPDATE gl_entries SET entry_date = ? WHERE id IN (${chunk.map(() => '?').join(',')}) AND entry_date !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'`, [to, ...chunk]);
+          updated += Number(r?.changes || 0);
+        }
+      }
+      res.json({ dry_run: false, updated, unfixable: unfixable.length });
+    } catch (err: any) {
+      console.error('[admin] gl repair-dates failed:', err);
+      res.status(500).json({ error: 'Failed to repair ledger dates' });
+    }
+  });
+
   // ── Data Loader: Ayurvedic & Spa appointments ─────────────────────────────
   // List, delete and import, like the hotel bookings above. Delete is guarded:
   // an appointment that was billed, or that carries clinical / treatment records
@@ -68112,8 +68205,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gl-entry-date-normalised',
+    commit_marker: 'event-complete-invoices',
     code_features: [
+      'event-complete-invoices  Owner: accounts captured nothing from events. Advances were posted, but revenue, output GST and the receivable are posted only when the event tax invoice is raised, and completing an event never raised one (Ankur Cafe: 23 of 27 completed events uninvoiced, Rs 11.6 lakh). Complete now raises the invoice through the event invoice route when there is no live one (response carries invoice). Super-admin repair routes: POST /api/admin/tenants/:id/events/invoice-completed (dry_run lists, then raises; ids optional) and POST /api/admin/tenants/:id/gl/repair-dates (dry_run; sets malformed entry_date from the timestamp prefix or, for Wed Aug 05, from the posting year checked against the weekday).',
       'gl-entry-date-normalised  Ledger lines were being stored with non-date text in entry_date (inventory-close reversals as 2026-09-30T00:00:00.000+00:00 through 19 Sep; older F&B/folio/event journals as Wed Aug 05), so date-range reports skipped them. _postGlEntries, the single writer of gl_entries, now normalises every entryDate to YYYY-MM-DD via _glEntryDate. Existing malformed rows are not changed by this commit.',
       'admin-directory-phase1  Admin console redesign phase 1: the Businesses tiles (every tenant, ~130 columns each, ~16 buttons per tile) become a tenant directory — GET /api/admin/tenants/directory searches (name, ID, city, slug, owner name/email/phone), filters (chips: all, needs approval, active, overdue, suspended, inactive, spa, events, quiet 30+ days; type; sales rep), sorts and pages on the server, returning only the table columns plus filter counts; GET /api/admin/tenants/:id/overview feeds the side panel (row + staff logins, rooms, halls). New restaurants.last_active_at, stamped by authenticate at most once per tenant per 10 minutes. A sales rep sees only their tenants.',
       'admin-cto-narrowed-seed-salesrep  SECURITY: isAdmin admitted the CTO, so a CTO login could perform every super-admin action through the API (tenant module switches, owner password resets, billing, suspend, data loader, SQL console, WhatsApp sender) while only the console hid them. isAdmin is now SUPER_ADMIN only; a new isAdminOrCto covers what the CTO console uses (onboarding report, sales-rep drill-down, subscription prices, renewals, internal users). Module enable (spa, events, paid modules, hotel type), tenant approve/deactivate and Locations are super-admin only. The CTO keeps tenant-level access inside each property (unchanged). Also: the Sales Rep Seed tariff button always failed (route was super-admin only); a sales rep may now seed their own tenant that is not yet live (409 on a live one, since seeding rewrites season rates).',
