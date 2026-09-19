@@ -47120,6 +47120,7 @@ function BookingTrendReport({ restaurantId, token }: { restaurantId: string; tok
   );
 }
 
+const EXP_MOD_SHORT: Record<string, string> = { RESTAURANT: 'Restaurant', HOTEL: 'Hotel', EVENTS: 'Events', SPA: 'Wellness', SHARED: 'Shared' };
 function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; token: string }) {
   const toast = useToast();
   const showConfirm = useConfirm();
@@ -47127,7 +47128,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const [from, setFrom] = useState(monthAgo);
   const [to, setTo] = useState(today);
-  const [modFilter, setModFilter] = useState<'ALL' | 'HOTEL' | 'RESTAURANT' | 'SHARED'>('ALL');
+  const [modFilter, setModFilter] = useState<string>('ALL');
   const [includeShared, setIncludeShared] = useState(false);   // opt-in overlay: fold property-wide SHARED into a Hotel/Restaurant view
   const [rows, setRows] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
@@ -47149,12 +47150,14 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
     }).then(r => r.ok ? r.json() : r.json().then((b: any) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))),
   [restaurantId, token]);
 
-  const canOverlayShared = modFilter === 'HOTEL' || modFilter === 'RESTAURANT';
+  const canOverlayShared = modFilter !== 'ALL' && modFilter !== 'SHARED';
   const load = useCallback(() => {
     setLoading(true);
     const mod = modFilter !== 'ALL' ? `&module=${modFilter}` : '';
-    const overlay = (modFilter === 'HOTEL' || modFilter === 'RESTAURANT') && includeShared ? '&include_shared=1' : '';
-    api(`/petty-cash?from=${from}&to=${to}${mod}${overlay}`)
+    const overlay = modFilter !== 'ALL' && modFilter !== 'SHARED' && includeShared ? '&include_shared=1' : '';
+    // view=expenses: only money spent (payments against an expense account, and
+    // manual entries) — not the cash book, which also holds guest receipts.
+    api(`/petty-cash?view=expenses&from=${from}&to=${to}${mod}${overlay}`)
       .then((d: any) => { setRows(d.rows ?? []); setSummary(d.summary ?? null); })
       .catch(() => { setRows([]); setSummary(null); })
       .finally(() => setLoading(false));
@@ -47264,12 +47267,12 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
             className="bg-white border border-[#e8dccf] rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 ring-brand/20" />
         </div>
         {/* Module filter — only modules the property runs; none when it runs one. */}
-        {costModuleList().filter(m => ['HOTEL', 'RESTAURANT', 'SHARED'].includes(m)).length > 1 && <div className="flex gap-1">
-          {(['ALL', 'HOTEL', 'RESTAURANT', 'SHARED'] as const).filter(m => m === 'ALL' || costModuleList().includes(m)).map(m => (
+        {costModuleList().length > 1 && <div className="flex flex-wrap gap-1">
+          {['ALL', ...costModuleList()].map(m => (
             <button key={m} onClick={() => setModFilter(m)}
               className={cn('px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all',
                 modFilter === m ? 'bg-brand text-white' : 'bg-white border border-[#e8dccf] text-[#6b5d52] hover:border-brand/40')}>
-              {m === 'ALL' ? 'All' : m.charAt(0) + m.slice(1).toLowerCase()}
+              {m === 'ALL' ? 'All' : (EXP_MOD_SHORT[m] || m)}
             </button>
           ))}
         </div>}
@@ -47290,10 +47293,10 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
 
       {canOverlayShared && includeShared && summary?.include_shared && (
         <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[#6b5d52] bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-3 py-2">
-          <span>Showing <b className="text-[#1a1208]">{modFilter.charAt(0) + modFilter.slice(1).toLowerCase()}</b> + property-wide <b className="text-[#1a1208]">Shared</b> costs.</span>
+          <span>Showing <b className="text-[#1a1208]">{EXP_MOD_SHORT[modFilter] || modFilter}</b> + property-wide <b className="text-[#1a1208]">Shared</b> costs.</span>
           <span>Total expense: <b className="text-red-600 tabular-nums">₹{Number(summary.total_out || 0).toLocaleString('en-IN')}</b></span>
           <span>· of which Shared: <b className="text-red-600 tabular-nums">₹{Number(summary.shared_out || 0).toLocaleString('en-IN')}</b></span>
-          <span className="text-[#9c8e85]">· {modFilter.charAt(0) + modFilter.slice(1).toLowerCase()}-only: ₹{Number((summary.total_out || 0) - (summary.shared_out || 0)).toLocaleString('en-IN')}</span>
+          <span className="text-[#9c8e85]">· {EXP_MOD_SHORT[modFilter] || modFilter}-only: ₹{Number((summary.total_out || 0) - (summary.shared_out || 0)).toLocaleString('en-IN')}</span>
         </div>
       )}
 
@@ -47304,7 +47307,8 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
             exportValue: (e: any) => String(e.entry_date).slice(0, 10),
             render: (e: any) => <span className="font-mono text-xs">{String(e.entry_date).slice(0, 10)}</span> },
           { key: 'module', label: 'Module', sortable: true,
-            render: (e: any) => <span className={cn('px-2 py-0.5 rounded-full text-[11px] font-bold uppercase', modColors[e.module] ?? 'bg-gray-100 text-gray-600')}>{e.module}</span> },
+            exportValue: (e: any) => EXP_MOD_SHORT[e.module] || e.module || '',
+            render: (e: any) => <span className={cn('px-2 py-0.5 rounded-full text-[11px] font-bold', modColors[e.module] ?? 'bg-gray-100 text-gray-600')}>{EXP_MOD_SHORT[e.module] || e.module || '—'}</span> },
           { key: 'direction', label: 'Type', sortable: true,
             render: (e: any) => <span className={cn('font-bold text-sm', e.direction === 'OUT' ? 'text-red-600' : 'text-emerald-600')}>{e.direction === 'OUT' ? 'Expense' : 'Income'}</span>,
             exportValue: (e: any) => e.direction === 'OUT' ? 'Expense' : 'Income' },
@@ -47318,7 +47322,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
           { key: 'notes', label: 'Notes' },
           { key: 'recorded_by', label: 'Recorded By', sortable: true },
           { key: 'del', label: '', hidden: !canDelete, searchable: false,
-            render: (e: any) => canDelete ? (
+            render: (e: any) => canDelete && !e.readonly ? (
               <button onClick={() => del(e.id)} className="p-1.5 hover:bg-red-50 text-red-400 hover:text-red-600 rounded-lg transition-colors" title="Delete">
                 <Trash2 size={13} />
               </button>

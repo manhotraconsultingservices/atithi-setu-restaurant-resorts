@@ -44983,20 +44983,61 @@ ${data.tenant.name}`;
       // receipts as petty-cash IN. Strictly read-only. Opening = Σ(dr−cr) before
       // `from`; in = window debits, out = window credits; closing = opening + in − out.
       const CASH = '1000';
-      const openRow: any = await db.get(
+      // Two readings of the same ledger. The default is the cash book: every
+      // movement in Cash in hand. view=expenses is the Expense Journal: only money
+      // SPENT — a cash or bank payment whose journal debits an expense account
+      // (5xxx/6xxx), plus the entries people record here by hand. Before this, the
+      // Expense Journal read the cash book and listed guest settlements, advances
+      // and sales as "Income" (reported 20 Sep 2026).
+      const expensesView = String(req.query.view || '') === 'expenses';
+      // Module filter. Ledger lines carry their module as cost_centre (none = SHARED);
+      // a manual entry carries its own. It used to be ignored for ledger lines.
+      const MODS = ['HOTEL', 'RESTAURANT', 'SPA', 'EVENTS', 'SHARED'];
+      const modQ = String(req.query.module || '').toUpperCase();
+      const mod = MODS.includes(modQ) ? modQ : '';
+      const incShared = !!mod && mod !== 'SHARED' && ['1', 'true'].includes(String(req.query.include_shared || ''));
+      const wantMods = mod ? (incShared ? [mod, 'SHARED'] : [mod]) : null;
+      const ccExpr = "COALESCE(NULLIF(UPPER(cost_centre), ''), 'SHARED')";
+      const ccSql = wantMods ? ` AND ${ccExpr} IN (${wantMods.map(() => '?').join(',')})` : '';
+      const ccParams = wantMods || [];
+      const openRow: any = expensesView ? { bal: 0 } : await db.get(
         `SELECT COALESCE(SUM(dr_amount - cr_amount),0) AS bal FROM gl_entries
-          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = ? AND entry_date < ?`,
-        [req.params.id, CASH, from]
+          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = ? AND entry_date < ?${ccSql}`,
+        [req.params.id, CASH, from, ...ccParams]
       ).catch(() => ({ bal: 0 }));
       const opening = round(Number(openRow?.bal || 0));
-      const glRows: any[] = await db.query(
-        `SELECT id, entry_date, source_type, source_id, narration, dr_amount, cr_amount, created_at, posted_by
+      // The expense view reads cash AND bank (10xx): an expense paid from the bank
+      // is still an expense. Manual entries are read from Cash only — a till top-up
+      // also touches the bank and must not appear twice.
+      const glRowsAll: any[] = await db.query(
+        `SELECT id, entry_date, source_type, source_id, narration, dr_amount, cr_amount, created_at, posted_by, journal_ref, account_code,
+                ${ccExpr} AS module
            FROM gl_entries
-          WHERE restaurant_id = ? AND is_reversed = 0 AND account_code = ?
+          WHERE restaurant_id = ? AND is_reversed = 0 AND ${expensesView ? "account_code LIKE '10%'" : 'account_code = ?'}
             AND entry_date BETWEEN ? AND ?
           ORDER BY entry_date DESC, created_at DESC`,
-        [req.params.id, CASH, from, to]
+        expensesView ? [req.params.id, from, to] : [req.params.id, CASH, from, to]
       ).catch(() => []);
+      // Expense account behind each payment journal (its debit line), with its name.
+      const expAcct = new Map<string, { code: string; name: string }>();
+      if (expensesView) {
+        const refs = [...new Set(glRowsAll.filter((r: any) => Number(r.cr_amount || 0) > Number(r.dr_amount || 0) && r.journal_ref).map((r: any) => String(r.journal_ref)))];
+        for (let k = 0; k < refs.length; k += 500) {
+          const chunk = refs.slice(k, k + 500);
+          const lines: any[] = await db.query(
+            `SELECT g.journal_ref, g.account_code, c.name FROM gl_entries g
+               LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+              WHERE g.restaurant_id = ? AND g.is_reversed = 0 AND g.dr_amount > 0
+                AND (g.account_code LIKE '5%' OR g.account_code LIKE '6%')
+                AND g.journal_ref IN (${chunk.map(() => '?').join(',')})`, [req.params.id, ...chunk]).catch(() => []);
+          for (const l of lines) if (!expAcct.has(String(l.journal_ref))) expAcct.set(String(l.journal_ref), { code: String(l.account_code), name: l.name || String(l.account_code) });
+        }
+      }
+      const glRows: any[] = (glRowsAll || []).filter((r: any) => {
+        if (!expensesView) return true;
+        if (r.source_type === 'PETTY_CASH') return r.account_code === CASH;
+        return Number(r.cr_amount || 0) > Number(r.dr_amount || 0) && expAcct.has(String(r.journal_ref));
+      });
       // Pull back the manual petty-cash rows (by source_id) so the ledger shows the
       // user's real category — not just the "PETTY_CASH" source type — and hands the
       // UI the petty_cash id, marking those rows editable/deletable. Every other cash
@@ -45040,12 +45081,11 @@ ${data.tenant.name}`;
         if (a === 'system' || a === 'SYSTEM') return 'System';
         return names.get(a) || a;
       };
-      let totalIn = 0, totalOut = 0;
+      let totalIn = 0, totalOut = 0, sharedIn = 0, sharedOut = 0;
       const rows = (glRows || []).map((r: any) => {
         const dr = Number(r.dr_amount || 0), cr = Number(r.cr_amount || 0);
         const isIn = dr >= cr;
         const amount = round(isIn ? dr : cr);
-        if (isIn) totalIn += amount; else totalOut += amount;
         const pc = (r.source_type === 'PETTY_CASH' && r.source_id) ? pcMap[r.source_id] : null;
         if (pc) return {
           id: r.source_id,                        // the petty_cash id → edit/delete target
@@ -45054,7 +45094,7 @@ ${data.tenant.name}`;
           category: pc.category || 'Petty Cash',  // the user's own category
           amount,
           notes: (pc.notes ?? r.narration) || null,
-          module: pc.module || 'RESTAURANT',
+          module: String(pc.module || r.module || 'SHARED').toUpperCase(),
           source: 'PETTY_CASH',                   // a manual entry — editable + deletable
           readonly: false,
           recorded_by: nameFor(String(r.id)),
@@ -45063,7 +45103,9 @@ ${data.tenant.name}`;
           id: r.id,
           entry_date: r.entry_date,
           direction: isIn ? 'IN' : 'OUT',
-          category: r.source_type || 'CASH',
+          category: (expensesView && expAcct.get(String(r.journal_ref))?.name) || r.source_type || 'CASH',
+          module: r.module || 'SHARED',
+          account: expensesView ? (r.account_code === CASH ? 'Cash' : 'Bank') : undefined,
           amount,
           notes: r.narration || null,
           source: 'GL',        // derived from another module → read-only
@@ -45071,19 +45113,26 @@ ${data.tenant.name}`;
           recorded_by: nameFor(String(r.id)),
         };
       });
+      const shown = wantMods ? rows.filter((x: any) => wantMods.includes(String(x.module || 'SHARED').toUpperCase())) : rows;
+      for (const x of shown) {
+        const shared = String(x.module || '').toUpperCase() === 'SHARED';
+        if (x.direction === 'IN') { totalIn += x.amount; if (shared) sharedIn += x.amount; }
+        else { totalOut += x.amount; if (shared) sharedOut += x.amount; }
+      }
       totalIn = round(totalIn); totalOut = round(totalOut);
       res.json({
-        from, to, rows,
+        from, to, rows: shown,
         summary: {
-          opening_balance: opening,
+          view: expensesView ? 'EXPENSES' : 'CASH_BOOK',
+          opening_balance: expensesView ? null : opening,
           total_in: totalIn,
           total_out: totalOut,
-          closing_balance: round(opening + totalIn - totalOut),
+          closing_balance: expensesView ? null : round(opening + totalIn - totalOut),
           source: 'GENERAL_LEDGER',
-          // Legacy fields kept so the existing UI keeps rendering.
-          include_shared: false,
-          shared_in: 0,
-          shared_out: 0,
+          module: mod || 'ALL',
+          include_shared: incShared,
+          shared_in: incShared ? round(sharedIn) : 0,
+          shared_out: incShared ? round(sharedOut) : 0,
         },
       });
     } catch (err: any) {
@@ -68210,8 +68259,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'admin-console-phase23',
+    commit_marker: 'expense-journal-expenses-only',
     code_features: [
+      'expense-journal-expenses-only  Expense Journal listed guest settlements, advances and sales as Income: it read the whole Cash (1000) book. GET /petty-cash?view=expenses now returns only money spent: a cash or bank (10xx) payment whose journal debits an expense account (5xxx/6xxx), named by that account, plus manual entries (read from Cash only). The module filter now applies to ledger lines too (cost_centre, none = SHARED), with the include_shared overlay for any module; before, ledger lines had no module and the filter ignored them. The cash book (no view) is unchanged apart from the module filter. Chips offer every module the property runs, incl. Wellness and Events; ledger lines cannot be deleted from the journal.',
       'admin-console-phase23  Admin redesign phases 2 and 3. Super Admin, Sales Rep and CTO consoles share one frame (src/admin/ConsoleShell.tsx): a left menu grouped Tenants / Platform / Operations / Tools with live counts, and a Ctrl K finder that opens any tenant. New screens: Approvals (directory pinned to waiting sign-ups, bulk approve) and Subscription prices (src/admin/SubscriptionPrices.tsx, shared with CTO). Tenant panel gains Maintenance: Data loader (Hotel/Spa/Events), SQL console and Role access opened on that tenant, demo tariff, DNS, invoice-deletion switch, danger zone. Sales Rep tile list replaced by the directory scoped to the rep; a rep can approve a waiting business and load the demo tariff before go-live (server rules unchanged).',
       'row-menu-portal  PMS Reservations: the row menu first entries were hidden behind the next rows action buttons. The shared RowActions menu now renders at the page root through a portal, so no row, sticky cell or animated card can cover it (every table using it).',
       'gstr1-hsn-zero-net-tax  GSTR-1 Table 12 skipped any journal whose revenue nets to zero, so a fully discounted bill that still collected GST (Rs 180 on RESTO-1003, May) was counted in Tables 4 and 7 but missing from the HSN summary. Its tax is now spread over the journal positive revenue lines; the discount line carries the negative taxable at 0 tax.',
