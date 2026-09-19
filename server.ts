@@ -8341,6 +8341,19 @@ function _actorDisplayName(u: any): string {
   return role ? role.replace(/\w/g, (c: string) => c.toUpperCase()) : 'Staff';
 }
 
+// When anyone at a property last made a signed-in request, for the admin
+// directory's "Last active". Throttled in memory to one write per tenant per ten
+// minutes and never awaited, so it costs a request nothing.
+const _tenantActiveAt = new Map<string, number>();
+function _touchTenantActive(rid: any, role: any) {
+  const id = String(rid || '');
+  if (!id || id === 'SYSTEM' || ['SUPER_ADMIN', 'CTO', 'SALES_REP'].includes(String(role || ''))) return;
+  const now = Date.now();
+  if (now - (_tenantActiveAt.get(id) || 0) < 10 * 60 * 1000) return;
+  _tenantActiveAt.set(id, now);
+  centralDb.run("UPDATE restaurants SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?", [id]).catch(() => {});
+}
+
 const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
   // T1-S8 — accept the JWT from EITHER the Authorization header (legacy
   // SPA, mobile clients, integrations) OR the HttpOnly cookie issued at
@@ -8355,6 +8368,7 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
   try {
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as any;
     req.user = decoded;
+    _touchTenantActive(decoded?.restaurantId, decoded?.role);
 
     // Name the actor on the audit context opened above. Mutating the store in
     // place rather than opening a nested one keeps the request id stable, so
@@ -8532,7 +8546,19 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
   }
 };
 
+// Platform administration (tenant switches, owner accounts, billing, data loader,
+// SQL console, WhatsApp sender, …): SUPER ADMIN only. The CTO used to pass this
+// gate too, so a CTO login could do every super-admin action through the API even
+// though the console hid them.
 const isAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (req.user?.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: "Access denied" });
+  }
+  next();
+};
+// What the CTO console actually does: onboarding reports, subscription prices,
+// renewals, and internal users.
+const isAdminOrCto = (req: AuthRequest, res: Response, next: NextFunction) => {
   if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
     return res.status(403).json({ error: "Access denied" });
   }
@@ -11422,7 +11448,7 @@ async function startServer() {
     } catch { res.status(500).json({ error: 'Failed to build the usage report' }); }
   });
 
-  app.get("/api/admin/users", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+  app.get("/api/admin/users", authenticate, isAdminOrCto, async (req: AuthRequest, res: Response) => {
     try {
       const users = await centralDb.query("SELECT id, login_id, name, email, phone, role, is_active FROM users WHERE role IN ('SUPER_ADMIN', 'SALES_REP', 'CTO')");
       res.json(users);
@@ -11448,7 +11474,7 @@ async function startServer() {
   });
 
   // Admin: Toggle User Status
-  app.post("/api/admin/users/:id/toggle-status", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+  app.post("/api/admin/users/:id/toggle-status", authenticate, isAdminOrCto, async (req: AuthRequest, res: Response) => {
     const { is_active } = req.body;
     try {
       await centralDb.run("UPDATE users SET is_active = ? WHERE id = ?", [is_active === 1 ? 0 : 1, req.params.id]);
@@ -11459,6 +11485,117 @@ async function startServer() {
   });
 
   // Admin: Get Restaurants
+  // ── Tenant directory: search, filter, sort and page on the server ─────────
+  // The console used to fetch every tenant with every column (~130 fields each)
+  // and render all of them as tiles. This returns one page of the columns the
+  // table shows, plus the filter counts. A sales rep sees only their tenants.
+  const _DIR_BILLING = `CASE
+      WHEN COALESCE(r.access_revoked, 0) = 1 THEN 'SUSPENDED'
+      WHEN NULLIF(CAST(r.subscription_due_date AS TEXT), '') IS NULL THEN 'NO_DUE_DATE'
+      WHEN CAST(r.subscription_due_date AS DATE) >= CURRENT_DATE THEN
+        CASE WHEN CAST(r.subscription_due_date AS DATE) - CURRENT_DATE <= 7 THEN 'DUE_SOON' ELSE 'ACTIVE' END
+      WHEN CURRENT_DATE - CAST(r.subscription_due_date AS DATE) <= COALESCE(r.grace_period_days, 7) THEN 'OVERDUE_GRACE'
+      ELSE 'OVERDUE_PAST_GRACE' END`;
+  const _DIR_CHIPS: Record<string, string> = {
+    ALL: 'TRUE',
+    PENDING: 'COALESCE(r.is_active, 0) = 0',
+    ACTIVE: 'r.is_active = 1 AND COALESCE(r.access_revoked, 0) = 0',
+    OVERDUE: '',   // set below: it needs the billing CASE
+    SUSPENDED: 'COALESCE(r.access_revoked, 0) = 1',
+    INACTIVE: 'r.is_active = 2',
+    SPA: 'COALESCE(r.spa_enabled, 0) = 1',
+    EVENTS: 'COALESCE(r.events_enabled, 0) = 1',
+    QUIET: "r.is_active = 1 AND (r.last_active_at IS NULL OR r.last_active_at < CURRENT_TIMESTAMP - INTERVAL '30 days')",
+  };
+  _DIR_CHIPS.OVERDUE = `(${_DIR_BILLING}) = 'OVERDUE_PAST_GRACE'`;
+  app.get("/api/admin/tenants/directory", authenticate, isPlatformStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const where: string[] = ["r.id <> 'SYSTEM'"]; const params: any[] = [];
+      const scope: string[] = ["r.id <> 'SYSTEM'"]; const scopeParams: any[] = [];
+      if (req.user?.role === 'SALES_REP') { where.push('r.sales_rep_id = ?'); params.push(req.user.id); scope.push('r.sales_rep_id = ?'); scopeParams.push(req.user.id); }
+      const chip = String(req.query.chip || 'ALL').toUpperCase();
+      where.push(_DIR_CHIPS[chip] || 'TRUE');
+      const q = String(req.query.q || '').trim().toLowerCase().slice(0, 80);
+      if (q) {
+        where.push(`(LOWER(r.name) LIKE ? OR LOWER(r.id) LIKE ? OR LOWER(COALESCE(r.city,'')) LIKE ? OR LOWER(COALESCE(r.slug,'')) LIKE ?
+          OR LOWER(COALESCE(u.name, oa.owner_name, '')) LIKE ? OR LOWER(COALESCE(u.email, oa.email, '')) LIKE ? OR COALESCE(u.phone, oa.phone_number, '') LIKE ?)`);
+        const like = `%${q}%`; params.push(like, like, like, like, like, like, like);
+      }
+      const type = String(req.query.type || '').toUpperCase();
+      if (['RESTAURANT', 'HOTEL', 'BOTH'].includes(type)) { where.push("COALESCE(r.property_type, 'RESTAURANT') = ?"); params.push(type); }
+      const rep = String(req.query.rep || '');
+      if (rep === 'UNASSIGNED') where.push("NULLIF(r.sales_rep_id, '') IS NULL");
+      else if (rep) { where.push('r.sales_rep_id = ?'); params.push(rep); }
+      const SORT: Record<string, string> = {
+        name: 'LOWER(r.name)', owner: "LOWER(COALESCE(u.name, oa.owner_name, ''))", due: 'CAST(r.subscription_due_date AS DATE)',
+        billing: `CASE (${_DIR_BILLING}) WHEN 'SUSPENDED' THEN 0 WHEN 'OVERDUE_PAST_GRACE' THEN 1 WHEN 'OVERDUE_GRACE' THEN 2 WHEN 'DUE_SOON' THEN 3 WHEN 'ACTIVE' THEN 4 ELSE 5 END`,
+        rep: "LOWER(COALESCE(sr.name, 'zzz'))", active: 'r.last_active_at', status: 'COALESCE(r.is_active, 0)', joined: 'r.registered_at',
+      };
+      const sortKey = SORT[String(req.query.sort || '')] ? String(req.query.sort) : 'joined';
+      const dir = String(req.query.dir || (sortKey === 'active' || sortKey === 'joined' ? 'desc' : 'asc')).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+      const limit = Math.min(100, Math.max(10, Number(req.query.limit) || 50));
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const from = `FROM restaurants r
+          LEFT JOIN LATERAL (SELECT name, email, phone FROM users WHERE restaurant_id = r.id AND role = 'OWNER' ORDER BY id LIMIT 1) u ON TRUE
+          LEFT JOIN owner_accounts oa ON LOWER(oa.email) = LOWER(r.admin_id)
+          LEFT JOIN users sr ON sr.id = r.sales_rep_id`;
+      const whereSql = where.join(' AND ');
+      const totalRow: any = await centralDb.get(`SELECT COUNT(*) AS n ${from} WHERE ${whereSql}`, params);
+      const rows = await centralDb.query(
+        `SELECT r.id, r.name, r.city, r.state, COALESCE(r.property_type, 'RESTAURANT') AS property_type,
+                r.is_active, COALESCE(r.access_revoked, 0) AS access_revoked, r.slug, r.booking_slug,
+                COALESCE(r.spa_enabled, 0) AS spa, COALESCE(r.events_enabled, 0) AS events, COALESCE(r.online_payments_enabled, 0) AS payments,
+                COALESCE(r.whatsapp_enabled, 0) AS whatsapp, COALESCE(r.accounts_enabled, 0) AS accounts, COALESCE(r.people_enabled, 0) AS people,
+                COALESCE(u.name, oa.owner_name) AS owner_name, COALESCE(u.email, oa.email) AS owner_email, COALESCE(u.phone, oa.phone_number) AS owner_phone,
+                r.sales_rep_id, sr.name AS sales_rep_name, r.subscription_plan, r.subscription_due_date, r.grace_period_days,
+                (${_DIR_BILLING}) AS billing_status, r.last_active_at, r.registered_at
+           ${from} WHERE ${whereSql}
+          ORDER BY ${SORT[sortKey]} ${dir} NULLS LAST, r.id
+          LIMIT ? OFFSET ?`, [...params, limit, (page - 1) * limit]);
+      const scopeSql = scope.join(' AND ');
+      const cnt: any = await centralDb.get(
+        `SELECT ${Object.entries(_DIR_CHIPS).map(([k, v]) => `COUNT(*) FILTER (WHERE ${v})::int AS "${k}"`).join(', ')} FROM restaurants r WHERE ${scopeSql}`, scopeParams);
+      const reps = req.user?.role === 'SALES_REP' ? [] : await centralDb.query("SELECT id, name FROM users WHERE role = 'SALES_REP' ORDER BY name").catch(() => []);
+      res.json({ rows, total: Number(totalRow?.n || 0), page, limit, counts: cnt || {}, reps });
+    } catch (err: any) {
+      console.error('[admin] tenant directory failed:', err);
+      res.status(500).json({ error: 'Failed to load the tenant directory' });
+    }
+  });
+
+  // One tenant, for the directory's side panel: the row plus a few live counts.
+  app.get("/api/admin/tenants/:id/overview", authenticate, isPlatformStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const r: any = await centralDb.get(
+        `SELECT r.id, r.name, r.city, r.state, COALESCE(r.property_type, 'RESTAURANT') AS property_type, r.is_active, COALESCE(r.access_revoked, 0) AS access_revoked,
+                r.access_revoked_reason, r.slug, r.booking_slug, r.gst_number, COALESCE(r.is_gst_enabled, 0) AS is_gst_enabled, COALESCE(r.invoice_delete_enabled, 0) AS invoice_delete_enabled,
+                COALESCE(r.spa_enabled, 0) AS spa, COALESCE(r.events_enabled, 0) AS events, COALESCE(r.online_payments_enabled, 0) AS payments,
+                COALESCE(r.whatsapp_enabled, 0) AS whatsapp, COALESCE(r.accounts_enabled, 0) AS accounts, COALESCE(r.people_enabled, 0) AS people,
+                COALESCE(u.name, oa.owner_name) AS owner_name, COALESCE(u.email, oa.email) AS owner_email, COALESCE(u.phone, oa.phone_number) AS owner_phone,
+                r.sales_rep_id, sr.name AS sales_rep_name, r.subscription_plan, r.subscription_due_date, r.grace_period_days,
+                r.last_payment_date, r.last_payment_amount, r.last_payment_reference, r.billing_notes,
+                (${_DIR_BILLING}) AS billing_status, r.last_active_at, r.registered_at
+           FROM restaurants r
+           LEFT JOIN LATERAL (SELECT name, email, phone FROM users WHERE restaurant_id = r.id AND role = 'OWNER' ORDER BY id LIMIT 1) u ON TRUE
+           LEFT JOIN owner_accounts oa ON LOWER(oa.email) = LOWER(r.admin_id)
+           LEFT JOIN users sr ON sr.id = r.sales_rep_id
+          WHERE r.id = ? LIMIT 1`, [req.params.id]);
+      if (!r) return res.status(404).json({ error: 'Tenant not found' });
+      if (req.user?.role === 'SALES_REP' && String(r.sales_rep_id || '') !== String(req.user.id)) return res.status(403).json({ error: 'This business is not assigned to you.' });
+      const staff: any = await centralDb.get("SELECT COUNT(*)::int AS n FROM users WHERE restaurant_id = ?", [req.params.id]).catch(() => ({ n: 0 }));
+      let rooms = 0, halls = 0;
+      try {
+        const db = await getTenantDb(req.params.id);
+        rooms = Number((await db.get("SELECT COUNT(*)::int AS n FROM rooms").catch(() => ({ n: 0 })))?.n || 0);
+        halls = Number((await db.get("SELECT COUNT(*)::int AS n FROM event_venues WHERE is_active = 1").catch(() => ({ n: 0 })))?.n || 0);
+      } catch { /* tenant schema not ready */ }
+      res.json({ ...r, counts: { staff_logins: Number(staff?.n || 0), rooms, halls } });
+    } catch (err: any) {
+      console.error('[admin] tenant overview failed:', err);
+      res.status(500).json({ error: 'Failed to load the tenant' });
+    }
+  });
+
   app.get("/api/admin/restaurants", authenticate, isPlatformStaff, async (req: AuthRequest, res: Response) => {
     try {
       let query = `
@@ -11506,7 +11643,7 @@ async function startServer() {
 
   // Admin: get full locations list (with zip, status, id)
   app.get("/api/admin/locations", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!['SUPER_ADMIN', 'CTO'].includes(req.user?.role ?? '')) {
+    if (req.user?.role !== 'SUPER_ADMIN') {
       return res.status(403).json({ error: "Forbidden" });
     }
     try {
@@ -11521,7 +11658,7 @@ async function startServer() {
 
   // Admin: add a new location
   app.post("/api/admin/locations", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!['SUPER_ADMIN', 'CTO'].includes(req.user?.role ?? '')) {
+    if (req.user?.role !== 'SUPER_ADMIN') {
       return res.status(403).json({ error: "Forbidden" });
     }
     const { state, city, zip_code } = req.body;
@@ -11545,7 +11682,7 @@ async function startServer() {
 
   // Admin: update zip_code or is_active for a location
   app.patch("/api/admin/locations/:id", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!['SUPER_ADMIN', 'CTO'].includes(req.user?.role ?? '')) {
+    if (req.user?.role !== 'SUPER_ADMIN') {
       return res.status(403).json({ error: "Forbidden" });
     }
     const { zip_code, is_active } = req.body;
@@ -11565,7 +11702,7 @@ async function startServer() {
 
   // Admin: delete a location
   app.delete("/api/admin/locations/:id", authenticate, async (req: AuthRequest, res: Response) => {
-    if (!['SUPER_ADMIN', 'CTO'].includes(req.user?.role ?? '')) {
+    if (req.user?.role !== 'SUPER_ADMIN') {
       return res.status(403).json({ error: "Forbidden" });
     }
     try {
@@ -11646,7 +11783,7 @@ async function startServer() {
       if (req.user?.role === 'SALES_REP') {
         const restaurant = await centralDb.get("SELECT * FROM restaurants WHERE id = ? AND sales_rep_id = ?", [req.params.id, req.user.id]);
         if (!restaurant) return res.status(403).json({ error: "Access denied" });
-      } else if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+      } else if (req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -31467,7 +31604,7 @@ ${data.tenant.name}`;
       // Hard gate — only platform admins can toggle module access.
       // The tenant Owner sees a read-only view + a "Contact sales" CTA
       // in the dashboard; they cannot reach this endpoint.
-      if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+      if (req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({
           error: "This action is restricted to platform administrators. To enable or disable the Hotel module on your subscription, contact sales at contact@atithi-setu.com or WhatsApp +91 70111 89371."
         });
@@ -33143,7 +33280,7 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/events/enable", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const restaurantId = req.params.id;
-      if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+      if (req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "This action is restricted to platform administrators. Contact sales to add the Events module to your subscription." });
       }
       const enabled: boolean = req.body?.enabled !== false; // default true
@@ -37302,7 +37439,7 @@ ${data.tenant.name}`;
   // ─── Paid modules: Online Payments / WhatsApp (SUPER_ADMIN / CTO only) ────────
   app.post("/api/restaurant/:id/modules/:module/enable", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+      if (req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: 'This action is restricted to platform administrators. Contact sales to add this module to your subscription.' });
       }
       const MODULES: Record<string, { col: string; label: string }> = {
@@ -37335,7 +37472,7 @@ ${data.tenant.name}`;
   app.post("/api/restaurant/:id/spa/enable", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const restaurantId = req.params.id;
-      if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+      if (req.user?.role !== 'SUPER_ADMIN') {
         return res.status(403).json({ error: "This action is restricted to platform administrators. Contact sales to add the Spa module to your subscription." });
       }
       const enabled: boolean = req.body?.enabled !== false; // default true
@@ -66327,7 +66464,7 @@ ${data.tenant.name}`;
   });
 
   // CTO: Onboarding Report (sales reps with restaurant counts)
-  app.get("/api/cto/onboarding-report", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+  app.get("/api/cto/onboarding-report", authenticate, isAdminOrCto, async (req: AuthRequest, res: Response) => {
     try {
       const reps = await centralDb.query(`
         SELECT u.id as sales_rep_id, u.name as sales_rep_name,
@@ -66347,7 +66484,7 @@ ${data.tenant.name}`;
   });
 
   // CTO: Get Restaurants by Sales Rep
-  app.get("/api/cto/sales-rep-restaurants/:id", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+  app.get("/api/cto/sales-rep-restaurants/:id", authenticate, isAdminOrCto, async (req: AuthRequest, res: Response) => {
     try {
       const restaurants = await centralDb.query(
         "SELECT * FROM restaurants WHERE sales_rep_id = ? ORDER BY registered_at DESC",
@@ -66360,7 +66497,7 @@ ${data.tenant.name}`;
   });
 
   // Admin: Get Subscription Prices (per-tier: restaurant / hotel / combined)
-  app.get("/api/admin/subscription-prices", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+  app.get("/api/admin/subscription-prices", authenticate, isAdminOrCto, async (req: AuthRequest, res: Response) => {
     try {
       const keys = ['price_monthly', 'price_annual', 'price_monthly_hotel', 'price_annual_hotel', 'price_monthly_combined', 'price_annual_combined'];
       const defaults: Record<string, string> = {
@@ -66388,7 +66525,7 @@ ${data.tenant.name}`;
   });
 
   // Admin: Save Subscription Prices (per-tier)
-  app.post("/api/admin/subscription-prices", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+  app.post("/api/admin/subscription-prices", authenticate, isAdminOrCto, async (req: AuthRequest, res: Response) => {
     try {
       const fields: Record<string, string> = {
         price_monthly:           req.body.monthly_price,
@@ -66413,7 +66550,7 @@ ${data.tenant.name}`;
   });
 
   // Admin: Renew Subscription
-  app.post("/api/admin/restaurants/:id/renew-subscription", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+  app.post("/api/admin/restaurants/:id/renew-subscription", authenticate, isAdminOrCto, async (req: AuthRequest, res: Response) => {
     try {
       const { type } = req.body;
       const restaurant = await centralDb.get("SELECT subscription_expires_at FROM restaurants WHERE id = ?", [req.params.id]);
@@ -67458,9 +67595,19 @@ ${data.tenant.name}`;
   //
   // Idempotent: re-running refreshes any drifted rates. Wipes +
   // re-inserts season_periods (to avoid duplicate date ranges).
-  app.post("/api/admin/tenants/:id/seed-bcg-tariff", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+  app.post("/api/admin/tenants/:id/seed-bcg-tariff", authenticate, isPlatformStaff, async (req: AuthRequest, res: Response) => {
     const tenantId = req.params.id;
     try {
+      // The Sales Rep dashboard offers this button for demos, but the route was
+      // super-admin only, so it always failed for them. Seeding rewrites the
+      // property's season rates, so a rep may seed only a tenant assigned to them
+      // that has not gone live; a CTO may not seed at all.
+      if (req.user?.role === 'CTO') return res.status(403).json({ error: 'Access denied' });
+      if (req.user?.role === 'SALES_REP') {
+        const own: any = await centralDb.get("SELECT is_active, sales_rep_id FROM restaurants WHERE id = ?", [tenantId]).catch(() => null);
+        if (!own || String(own.sales_rep_id || '') !== String(req.user.id)) return res.status(403).json({ error: 'This business is not assigned to you.' });
+        if (Number(own.is_active) === 1) return res.status(409).json({ error: 'This business is live. Demo rates would overwrite its real season rates, so ask a super admin to seed it.' });
+      }
       const tenant: any = await centralDb.get(
         "SELECT id, name, property_type FROM restaurants WHERE id = ?",
         [tenantId]
@@ -67953,8 +68100,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'admin-tenant-list-gated',
+    commit_marker: 'admin-directory-phase1',
     code_features: [
+      'admin-directory-phase1  Admin console redesign phase 1: the Businesses tiles (every tenant, ~130 columns each, ~16 buttons per tile) become a tenant directory — GET /api/admin/tenants/directory searches (name, ID, city, slug, owner name/email/phone), filters (chips: all, needs approval, active, overdue, suspended, inactive, spa, events, quiet 30+ days; type; sales rep), sorts and pages on the server, returning only the table columns plus filter counts; GET /api/admin/tenants/:id/overview feeds the side panel (row + staff logins, rooms, halls). New restaurants.last_active_at, stamped by authenticate at most once per tenant per 10 minutes. A sales rep sees only their tenants.',
+      'admin-cto-narrowed-seed-salesrep  SECURITY: isAdmin admitted the CTO, so a CTO login could perform every super-admin action through the API (tenant module switches, owner password resets, billing, suspend, data loader, SQL console, WhatsApp sender) while only the console hid them. isAdmin is now SUPER_ADMIN only; a new isAdminOrCto covers what the CTO console uses (onboarding report, sales-rep drill-down, subscription prices, renewals, internal users). Module enable (spa, events, paid modules, hotel type), tenant approve/deactivate and Locations are super-admin only. The CTO keeps tenant-level access inside each property (unchanged). Also: the Sales Rep Seed tariff button always failed (route was super-admin only); a sales rep may now seed their own tenant that is not yet live (409 on a live one, since seeding rewrites season rates).',
       'admin-tenant-list-gated  SECURITY: GET /api/admin/restaurants had only authenticate, so any signed-in tenant user (e.g. a property owner) could read every tenant record with other owners name, email and phone (verified live: 13 tenants returned to an owner token). Now gated by a new isPlatformStaff (SUPER_ADMIN / CTO / SALES_REP; a sales rep still sees only their own tenants). /api/cto/onboarding-report, /api/cto/sales-rep-restaurants/:id and GET /api/admin/subscription-prices now require isAdmin.',
       'data-loader-spa-events  Owner: the super-admin Data Loader only handled hotel bookings. It now has a module switch (Hotel / Ayurvedic & Spa / Events). Spa: list, guarded delete (skips an appointment with a bill or with clinical notes, treatment records, intake forms, photos, tips, package or consumption), CSV import (client, service by name, date+time, therapist, status, price) at /api/admin/data-migration/spa-appointments. Events: list and guarded delete (skips a booking with an invoice, payments, reserved hotel rooms or a quotation; removes its own line items) at /api/admin/data-migration/event-bookings; import embeds the existing Events migration engine.',
       'expense-journal-recorded-by  Owner bug: Finance > Expenses, Recorded by was blank on every row. The /petty-cash list never returned it. Now each row carries recorded_by: the manual entry recorder, else the ledger line posted_by, resolved to a staff or user name (_resolveActorNames); lines with no posted_by are named from the statutory books audit trail. _postGlEntries now falls back to the request user when a caller passes no actor (folio settlement, event and staff advances posted none).',

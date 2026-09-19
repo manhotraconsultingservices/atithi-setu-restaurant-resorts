@@ -399,6 +399,8 @@ export async function initDb() {
     -- startup backfill switches both on for every tenant that existed before.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS accounts_enabled INT DEFAULT 0;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS people_enabled INT DEFAULT 0;
+    -- Last time anyone at the property made a signed-in request (admin directory).
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMP;
     CREATE TABLE IF NOT EXISTS module_flag_backfill (name TEXT PRIMARY KEY, done_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
     -- Online payment on public booking pages (hotel, spa): which choices the guest
     -- gets, the advance percentage (0 = no advance option) and how long an unpaid
