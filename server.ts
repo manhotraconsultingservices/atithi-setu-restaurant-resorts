@@ -54319,7 +54319,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const b: any = await tenantDb.get("SELECT id, status, room_id, guest_name, check_out_date FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      const b: any = await tenantDb.get("SELECT id, status, room_id, guest_name, check_out_date, booking_source FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!b) return res.status(404).json({ error: 'Booking not found' });
       // Hotel room rights, OR the event manager completing the event this room belongs to.
       if (!(await _eventRoomActorOk(tenantDb, req, req.params.bookingId, ['COMPLETED']))) return res.status(403).json({ error: 'You do not have permission to change room status.' });
@@ -67577,7 +67577,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-rooms-auto-checkin-checkout',
+    commit_marker: 'event-rooms-auto-checkin-checkout-2',
     code_features: [
       'event-rooms-auto-checkin-checkout  Owner request: event guests no longer end up NO_SHOW. Starting an event checks in its reserved hotel rooms through a new Hotel route POST /hotel/bookings/:bookingId/event-checkin (_eventRoomCheckin: date must have come, Form-C still enforced for foreign guests, room must not be occupied or out of order; a missing ID does not block — the room is listed by GET /hotel/reports/missing-guest-id, shown to the front desk on Hotel Bookings). An hourly job checks in later nights of multi-day events. Completing the event checks the rooms out: nothing on the hotel bill closes it quietly (no zero-value tax invoice), extras go through the normal check-out, unpaid extras are left for the desk. Billing: createFolioWithRoomCharges never seeds room charges for booking_source EVENT (the rooms are on the event invoice), which also fixes charge-to-room on an event room billing the nights twice; no late-checkout night on event rooms. The nightly no-show sweep skips rooms of events still confirmed or running.',
       'events-rooms-cleaning-rental-shortage-calendar-completed  Owner bug batch. (1) Completing an event sent only the hall to cleaning; every hotel room reserved for the event now goes to CLEANING with the departure checklist, through a new Hotel route POST /hotel/bookings/:bookingId/release-for-cleaning (skips a guest still checked in, a room another guest occupies, maintenance/blocked rooms). The check-out cleaning steps moved into one helper, _sendRoomToCleaning, used by both. (2) Rental items could be added beyond stock with no warning. Booking create/edit and rental add-ons now return 409 RENTAL_SHORTAGE with the per-item shortfall unless confirm_shortage is sent; an accepted shortage is audited. Availability now counts multi-day overlap and add-on rentals. New GET /events/reports/rental-shortages lists upcoming bookings short of stock. (3) The events calendar shows completed bookings.',
