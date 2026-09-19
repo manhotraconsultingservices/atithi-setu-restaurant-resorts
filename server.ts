@@ -68210,8 +68210,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-invoice-after-cancel-2',
+    commit_marker: 'gstr1-hsn-zero-net-tax',
     code_features: [
+      'gstr1-hsn-zero-net-tax  GSTR-1 Table 12 skipped any journal whose revenue nets to zero, so a fully discounted bill that still collected GST (Rs 180 on RESTO-1003, May) was counted in Tables 4 and 7 but missing from the HSN summary. Its tax is now spread over the journal positive revenue lines; the discount line carries the negative taxable at 0 tax.',
       'event-invoice-after-cancel  The event invoice route returned the bookings CANCELLED/voided/superseded invoice as already billed, so the event could never be invoiced again and callers (Complete, the admin backfill) reported success with nothing posted (Parandhayya: P Madhavarao). A dead invoice no longer counts; a new one is raised.',
       'event-complete-invoices  Owner: accounts captured nothing from events. Advances were posted, but revenue, output GST and the receivable are posted only when the event tax invoice is raised, and completing an event never raised one (Ankur Cafe: 23 of 27 completed events uninvoiced, Rs 11.6 lakh). Complete now raises the invoice through the event invoice route when there is no live one (response carries invoice). Super-admin repair routes: POST /api/admin/tenants/:id/events/invoice-completed (dry_run lists, then raises; ids optional) and POST /api/admin/tenants/:id/gl/repair-dates (dry_run; sets malformed entry_date from the timestamp prefix or, for Wed Aug 05, from the posting year checked against the weekday).',
       'gl-entry-date-normalised  Ledger lines were being stored with non-date text in entry_date (inventory-close reversals as 2026-09-30T00:00:00.000+00:00 through 19 Sep; older F&B/folio/event journals as Wed Aug 05), so date-range reports skipped them. _postGlEntries, the single writer of gl_entries, now normalises every entryDate to YYYY-MM-DD via _glEntryDate. Existing malformed rows are not changed by this commit.',
@@ -70210,13 +70211,23 @@ ${data.tenant.name}`;
           const codeOf: Record<string, any> = {};
           for (const c of codeRows) codeOf[String(c.supply_kind)] = c;
 
+          // A journal whose revenue nets to nothing (a bill discounted in full)
+          // can still have collected tax. Tables 4/7 count that tax, so Table 12
+          // must too: spread it over the journal's POSITIVE revenue lines instead
+          // of dividing by a zero net and dropping it.
+          const jGross: Record<string, number> = {};
+          for (const l of revLines) { const v = Number(l.taxable || 0); if (v > 0) jGross[String(l.journal_ref)] = (jGross[String(l.journal_ref)] || 0) + v; }
           const bucket: Record<string, any> = {};
           for (const l of revLines) {
             const j = jTax[String(l.journal_ref)];
-            if (!j || Math.abs(j.taxable) < 0.005) continue;
+            if (!j) continue;
             const lineTaxable = Number(l.taxable || 0);
             if (Math.abs(lineTaxable) < 0.005) continue;
-            const share = lineTaxable / j.taxable;
+            const netZero = Math.abs(j.taxable) < 0.005;
+            const gross = jGross[String(l.journal_ref)] || 0;
+            // Nets to zero and collected nothing (or has nowhere to put it): no row, as before.
+            if (netZero && (Math.abs(j.cgst + j.sgst + j.igst) < 0.005 || gross < 0.005)) continue;
+            const share = netZero ? (lineTaxable > 0 && gross >= 0.005 ? lineTaxable / gross : 0) : lineTaxable / j.taxable;
             const cgst = j.cgst * share, sgst = j.sgst * share, igst = j.igst * share;
             const kind = _gstSupplyKind(l.account_code, l.cost_centre, l.source_type);
             const meta = codeOf[kind] || null;
