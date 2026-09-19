@@ -22812,7 +22812,7 @@ You can also view all your payslips in the employee portal.
       let reversal: any = null;
       if (claim.status === 'HR_APPROVED') {
         reversal = await _reverseJournal(db, req.params.id, `EXP-${req.params.claimId}`, {
-          date: stamp.slice(0, 10), sourceType: 'EXPENSE_CLAIM', sourceId: req.params.claimId,
+          date: _glPostDate(stamp), sourceType: 'EXPENSE_CLAIM', sourceId: req.params.claimId,
           reason, postedBy: req.user?.email || req.user?.id || null,
         });
       }
@@ -52405,7 +52405,7 @@ ${data.tenant.name}`;
           if (settled?.id) {
             writeGstRegisterFromFolio(tenantDb, req.params.id, settled.id, {
               invoiceNumber: childInvNum,
-              invoiceDate: now.slice(0, 10),
+              invoiceDate: _glPostDate(now),
               bookingId: b.id,
               guestGstin: b.guest_gstin || null,
             }).catch(e => console.warn('[group-checkout] GST register write failed:', e));
@@ -52439,7 +52439,7 @@ ${data.tenant.name}`;
             .catch((e: any) => { console.warn('[group-checkout] master folio serial alloc failed:', e); return null; });
           writeGstRegisterFromFolio(tenantDb, req.params.id, masterFolioRow.id, {
             invoiceNumber: masterInvNum,
-            invoiceDate: now.slice(0, 10),
+            invoiceDate: _glPostDate(now),
             bookingId: null,
             guestGstin: null,
           }).catch(e => console.warn('[group-checkout] master folio GST register write failed:', e));
@@ -59330,7 +59330,7 @@ ${data.tenant.name}`;
         const journalRef = `FOLIO-${folio.id}`;
         const already = await tenantDb.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
         if (!already) {
-          const entryDate = now.slice(0, 10);
+          const entryDate = _glPostDate(now);
           const subtotal  = Number(refreshed.subtotal  || 0);
           const gstAmt    = Number(refreshed.gst_amount || 0);
           const disc      = Number(refreshed.discount  || 0);
@@ -68322,8 +68322,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'dates-ist-frontend',
+    commit_marker: 'dates-ist-reversals',
     code_features: [
+      'dates-ist-reversals  Four postings still took a UTC timestamp and cut it to a date, so they landed on the previous day in the early hours IST: the expense-claim cancel reversal, two hotel invoice dates and one settlement ledger date. All go through _glPostDate now.',
       'dates-ist-frontend  The app date pickers defaulted to the UTC date (yesterday between 00:00 and 05:30 IST), so an expense, payment or booking entered after midnight was dated the day before even after the server fix. New todayIST() in src/lib/utils.ts replaces all 121 toISOString today defaults in the frontend. Expense view drops orphan manual lines coming in.',
       'gl-dates-ist  Day Book showed postings on the previous day: every today in the server was new Date().toISOString().slice(0,10), the UTC date, which is yesterday between 00:00 and 05:30 IST; _glPostDate converted timestamps through UTC too; and _glEntryDate had lost the backslashes in its date pattern so it never matched. New _istDate/_todayIST (Asia/Kolkata); all server today defaults use it; timestamps become their IST calendar day. Existing mis-dated lines are not changed (repair is separate, dry run first).',
       'expense-journal-expenses-only  Expense Journal listed guest settlements, advances and sales as Income: it read the whole Cash (1000) book. GET /petty-cash?view=expenses now returns only money spent: a cash or bank (10xx) payment whose journal debits an expense account (5xxx/6xxx), named by that account, plus manual entries (read from Cash only). The module filter now applies to ledger lines too (cost_centre, none = SHARED), with the include_shared overlay for any module; before, ledger lines had no module and the filter ignored them. The cash book (no view) is unchanged apart from the module filter. Chips offer every module the property runs, incl. Wellness and Events; ledger lines cannot be deleted from the journal.',
