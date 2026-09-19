@@ -28647,7 +28647,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-3 py-3 text-right font-mono text-xs">₹{Number(f.subtotal||0).toLocaleString('en-IN')}</td>
                             <td className="px-3 py-3 text-right font-mono text-xs text-[#6b5d52]">₹{Number(f.gst_amount||0).toLocaleString('en-IN')}</td>
                             <td className="px-3 py-3 text-right font-mono font-bold text-brand">₹{Number(f.grand_total||0).toLocaleString('en-IN')}</td>
-                            <td className="px-3 py-3 text-xs text-[#6b5d52]">{f.payment_method || '—'}</td>
+                            <td className="px-3 py-3 text-xs text-[#6b5d52]">{f.payment_method || '—'}{f.settlement_note && <span className="block text-[10px] text-indigo-700">{f.settlement_note}</span>}</td>
                             <td className="px-3 py-3 text-xs text-[#9c8e85] whitespace-nowrap">{f.settled_at ? String(f.settled_at).slice(0,16).replace('T',' ') : '—'}</td>
                             <td className="px-3 py-3 text-right">
                               <RowActions moreLabel={tr('actions.more')} actions={(() => {

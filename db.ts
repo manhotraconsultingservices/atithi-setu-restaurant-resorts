@@ -2897,6 +2897,8 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS irn_applied_at TIMESTAMP`).catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_irn_pending ON orders (created_at) WHERE irn IS NULL`).catch(() => {});
 
+  // Free-text settlement remark, e.g. "Paid with event …" on an event room's hotel bill.
+  await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS settlement_note TEXT`).catch(() => {});
   await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS irn TEXT`).catch(() => {});
   await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS ack_no TEXT`).catch(() => {});
   await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS ack_date TIMESTAMP`).catch(() => {});

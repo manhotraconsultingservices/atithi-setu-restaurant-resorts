@@ -54324,11 +54324,37 @@ ${data.tenant.name}`;
       const fc: any = await tenantDb.get("SELECT id FROM guest_compliance_log WHERE booking_id = ? AND form_type = 'FORM_C' LIMIT 1", [bookingId]).catch(() => null);
       if (!fc) return { checked_in: false, reason: 'FORM_C_REQUIRED', message: 'Foreign guest: generate Form-C, then check in at the front desk.' };
     }
-    const room: any = await tenantDb.get("SELECT status, name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-    const roomLbl = room?.name || (room?.room_number ? `Room ${room.room_number}` : b.room_id);
-    if (['MAINTENANCE', 'BLOCKED'].includes(String(room?.status || '').toUpperCase())) return { checked_in: false, reason: 'ROOM_' + String(room.status).toUpperCase(), message: `${roomLbl} is under ${String(room.status).toLowerCase()}.` };
-    const other: any = await tenantDb.get("SELECT id FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' AND id <> ? LIMIT 1", [b.room_id, bookingId]).catch(() => null);
-    if (other) return { checked_in: false, reason: 'ROOM_OCCUPIED', message: `${roomLbl} still has another guest checked in; it will be tried again within the hour.` };
+    let room: any = await tenantDb.get("SELECT id, status, name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+    const lbl = (rm: any, fallback: string) => rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : fallback);
+    let roomLbl = lbl(room, b.room_id);
+    const outOfOrder = (rm: any) => ['MAINTENANCE', 'BLOCKED'].includes(String(rm?.status || '').toUpperCase());
+    const guestIn = async (roomId: string) => !!(await tenantDb.get("SELECT id FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' AND id <> ? LIMIT 1", [roomId, bookingId]).catch(() => null));
+    let problem: 'OUT_OF_ORDER' | 'OCCUPIED' | null = outOfOrder(room) ? 'OUT_OF_ORDER' : (await guestIn(b.room_id)) ? 'OCCUPIED' : null;
+    // A FLOATING reservation (room_locked = 0) only pencils a room in; the room is
+    // decided at check-in. When the pencilled room is still occupied (e.g. a guest
+    // who never checked out) or out of order, move it to another free room of the
+    // same type — exactly what the desk would do — instead of giving up.
+    // A room the staff fixed on purpose (room_locked = 1) is never moved.
+    let movedFrom: string | null = null;
+    if (problem && Number(b.room_locked || 0) === 0 && room?.type_id) {
+      const taken = await takenRoomIdsForRange(tenantDb, ci, co || ci, b.booking_type);
+      const inHouse = new Set<string>(((await tenantDb.query("SELECT DISTINCT room_id FROM room_bookings WHERE status = 'CHECKED_IN' AND room_id IS NOT NULL").catch(() => [])) as any[]).map((x: any) => String(x.room_id)));
+      const cands: any[] = await tenantDb.query(
+        `SELECT id, status, name, room_number, type_id FROM rooms
+          WHERE type_id = ? AND id <> ? AND COALESCE(status, 'VACANT') NOT IN ('MAINTENANCE', 'BLOCKED', 'OCCUPIED')
+          ORDER BY CASE COALESCE(status, 'VACANT') WHEN 'VACANT' THEN 0 ELSE 1 END, name`, [room.type_id, b.room_id]).catch(() => []);
+      const pick = cands.find((c: any) => !taken.has(String(c.id)) && !inHouse.has(String(c.id)));
+      if (pick) {
+        const mv = await tenantDb.run("UPDATE room_bookings SET room_id = ? WHERE id = ? AND status = 'BOOKED' AND room_id = ?", [pick.id, bookingId, b.room_id]);
+        if (mv && mv.changes > 0) {
+          movedFrom = roomLbl;
+          await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: bookingId, action: 'ROOM_MOVED', summary: `Moved from ${roomLbl} to ${lbl(pick, pick.id)} at event check-in — ${roomLbl} was ${problem === 'OCCUPIED' ? 'still occupied' : 'out of order'}`, before: { room_id: b.room_id }, after: { room_id: pick.id } }).catch(() => {});
+          b.room_id = pick.id; room = pick; roomLbl = lbl(pick, pick.id); problem = null;
+        }
+      }
+    }
+    if (problem === 'OUT_OF_ORDER') return { checked_in: false, reason: 'ROOM_' + String(room.status).toUpperCase(), message: `${roomLbl} is under ${String(room.status).toLowerCase()} and no other free room of this type was available.` };
+    if (problem === 'OCCUPIED') return { checked_in: false, reason: 'ROOM_OCCUPIED', message: `${roomLbl} still has another guest checked in and no other free room of this type was available; it will be tried again within the hour.` };
     const now = new Date().toISOString();
     const flip = await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_IN', actual_checkin_at = ?, room_locked = 1 WHERE id = ? AND status = 'BOOKED'", [now, bookingId]);
     if (!flip || flip.changes === 0) return { checked_in: true, already: true, room_id: b.room_id };
@@ -54339,7 +54365,7 @@ ${data.tenant.name}`;
     raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: roomLbl, source_ref: bookingId, guest_label: b.guest_name || null, room_type_id: room?.type_id || null, trigger: 'ROOM_OCCUPIED', blocks_release_override: 0 }).catch(() => {});
     await createFolioWithRoomCharges(restaurantId, b);   // opens EMPTY for an event room — extras only
     const docs: any = await tenantDb.get("SELECT COUNT(*)::int AS n FROM guest_documents WHERE booking_id = ?", [bookingId]).catch(() => ({ n: 0 }));
-    return { checked_in: true, id_missing: Number(docs?.n || 0) === 0, room_id: b.room_id };
+    return { checked_in: true, id_missing: Number(docs?.n || 0) === 0, room_id: b.room_id, ...(movedFrom ? { moved_from: movedFrom, room: roomLbl, message: `Moved from ${movedFrom} (still occupied) to ${roomLbl}.` } : {}) };
   };
   // Who may check an event room in/out: hotel room staff, or the events staff
   // running the event this reservation belongs to (the event's own gate).
@@ -54476,8 +54502,25 @@ ${data.tenant.name}`;
           const now = new Date().toISOString();
           const flip = await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ? AND status = 'CHECKED_IN'", [now, b.id]);
           if (flip && flip.changes > 0) {
-            if (folio) await tenantDb.run("UPDATE folios SET status = 'voided', cancelled_at = ?, cancelled_by = ?, cancel_reason = ? WHERE id = ? AND status = 'open'", [now, hkActor(req), 'Event room: nothing charged to the hotel bill (billed on the event invoice)', folio.id]).catch(() => {});
-            await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: b.id, action: 'CHECKED_OUT', summary: 'Checked out automatically — event completed, nothing on the hotel bill', before: { status: 'CHECKED_IN' }, after: { status: 'CHECKED_OUT', actual_checkout_at: now } }).catch(() => {});
+            // The room was paid for on the EVENT's invoice, so its hotel bill is
+            // SETTLED — paid with the event — not voided. It carries the event's own
+            // invoice number as its reference, which also means it never draws a GST
+            // tax-invoice serial of its own (nothing was sold on it). No ledger
+            // posting: the event invoice already booked the room revenue.
+            let evRef: any = null;
+            if (folio) {
+              evRef = await tenantDb.get(
+                `SELECT eb.id, eb.customer_name,
+                        (SELECT f.invoice_number FROM folios f WHERE f.event_booking_id = eb.id AND COALESCE(f.doc_type, 'INVOICE') = 'INVOICE'
+                            AND LOWER(COALESCE(f.status, '')) NOT IN ('voided', 'cancelled') ORDER BY f.created_at DESC LIMIT 1) AS event_invoice
+                   FROM event_booking_rooms x JOIN event_bookings eb ON eb.id = x.booking_id
+                  WHERE x.hotel_booking_id = ? LIMIT 1`, [b.id]).catch(() => null);
+              const ref = evRef?.event_invoice ? `Event invoice ${evRef.event_invoice}` : `Event ${evRef?.id || ''}`.trim();
+              const note = `Paid with event${evRef?.customer_name ? ` — ${evRef.customer_name}` : ''}${evRef?.event_invoice ? ` (invoice ${evRef.event_invoice})` : ''}`;
+              await tenantDb.run("UPDATE folios SET status = 'settled', settled_at = ?, payment_method = 'EVENT', settlement_note = ?, invoice_number = COALESCE(invoice_number, ?) WHERE id = ? AND status = 'open'",
+                [now, note, ref, folio.id]).catch(() => {});
+            }
+            await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: b.id, action: 'CHECKED_OUT', summary: `Checked out automatically — event completed; hotel bill settled, paid with the event${evRef?.customer_name ? ` (${evRef.customer_name})` : ''}`, before: { status: 'CHECKED_IN' }, after: { status: 'CHECKED_OUT', actual_checkout_at: now, folio_status: 'settled', payment_method: 'EVENT' } }).catch(() => {});
             await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]).catch(() => {});
             await _sendRoomToCleaning(tenantDb, req, req.params.id, { roomId: b.room_id, bookingId: b.id, guestName: b.guest_name, checkOutDate: b.check_out_date, summary: `Cleaning — event over (${b.guest_name || 'event guest'})` });
           }
@@ -67715,8 +67758,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'housekeeping-occupancy-check',
+    commit_marker: 'event-room-folio-settled-paid-with-event',
     code_features: [
+      'event-room-folio-settled-paid-with-event  Owner: at event completion an event room\'s empty hotel bill was voided at Rs 0; it must read Settled, paid with the event. It is now status settled, payment_method EVENT, settlement_note Paid with event (event name, event invoice number), and invoice_number = the event invoice reference so it never draws its own GST serial. No ledger posting (the event invoice carries the revenue). New folios.settlement_note column.',
+      'event-room-checkin-floating-repick  Owner bug (Ankur Cafe): with two rooms on an event, Start checked in one and refused the other because its pencilled room (a FLOATING reservation, shown Unassigned) still had guests checked in past their check-out dates. _eventRoomCheckin now moves a floating reservation (room_locked=0) whose pencilled room is occupied or out of order to another free room of the same type (not taken for the dates, no guest in house, not maintenance/blocked/occupied; vacant first), audits ROOM_MOVED, then checks in. A room fixed on purpose (room_locked=1) is never moved.',
       'housekeeping-occupancy-check  Owner request: a report of rooms and halls still tied up when they should be free. GET /housekeeping/occupancy-check (HOUSEKEEPING tab) lists: room Occupied with nobody checked in; guest checked in past the check-out date; event over but its room still booked or checked in; room or hall in Cleaning with no open cleaning task; hall in use with no event running; event past its end date never completed. Housekeeping gets an Occupancy check tab (smart table, what-to-do per row).',
       'event-room-checkin-stay-over-guard  Auto check-in of an event room checked that the stay had started but not that it had ended, so the hourly job checked in a stay from two weeks earlier (restored from NO_SHOW) and it took Room 205 that a later event stay needed. _eventRoomCheckin now refuses a stay whose check-out date has passed (overnight: on the check-out day; day-use: after its day) with reason STAY_OVER.',
       'event-rooms-billing-display-restore  Owner report: an event room showed its room price as outstanding on the hotel booking although the money is collected on the event invoice (the hotel screen computed total_amount minus hotel payments). The booking screen now shows Billed on the event invoice with the event total / paid / balance (GET /hotel/bookings/:bookingId/event-billing); the pay link never asks for an event room price (only hotel extras); no early check-in fee on an event room. Repair: POST /hotel/event-rooms/restore-no-shows (owner/manager, dry_run) puts back to BOOKED the event rooms the nightly sweep flagged NO_SHOW before it knew about events, when the event is still live and the room is not taken.',
