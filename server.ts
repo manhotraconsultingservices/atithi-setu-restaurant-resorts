@@ -54372,6 +54372,7 @@ ${data.tenant.name}`;
     // same type — exactly what the desk would do — instead of giving up.
     // A room the staff fixed on purpose (room_locked = 1) is never moved.
     let movedFrom: string | null = null;
+    let movedWhy = '';
     if (problem && Number(b.room_locked || 0) === 0 && room?.type_id) {
       const taken = await takenRoomIdsForRange(tenantDb, ci, co || ci, b.booking_type);
       const inHouse = new Set<string>(((await tenantDb.query("SELECT DISTINCT room_id FROM room_bookings WHERE status = 'CHECKED_IN' AND room_id IS NOT NULL").catch(() => [])) as any[]).map((x: any) => String(x.room_id)));
@@ -54383,7 +54384,7 @@ ${data.tenant.name}`;
       if (pick) {
         const mv = await tenantDb.run("UPDATE room_bookings SET room_id = ? WHERE id = ? AND status = 'BOOKED' AND room_id = ?", [pick.id, bookingId, b.room_id]);
         if (mv && mv.changes > 0) {
-          movedFrom = roomLbl;
+          movedFrom = roomLbl; movedWhy = problem === 'OCCUPIED' ? 'still occupied' : 'out of order';
           await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: bookingId, action: 'ROOM_MOVED', summary: `Moved from ${roomLbl} to ${lbl(pick, pick.id)} at event check-in — ${roomLbl} was ${problem === 'OCCUPIED' ? 'still occupied' : 'out of order'}`, before: { room_id: b.room_id }, after: { room_id: pick.id } }).catch(() => {});
           b.room_id = pick.id; room = pick; roomLbl = lbl(pick, pick.id); problem = null;
         }
@@ -54401,7 +54402,7 @@ ${data.tenant.name}`;
     raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: roomLbl, source_ref: bookingId, guest_label: b.guest_name || null, room_type_id: room?.type_id || null, trigger: 'ROOM_OCCUPIED', blocks_release_override: 0 }).catch(() => {});
     await createFolioWithRoomCharges(restaurantId, b);   // opens EMPTY for an event room — extras only
     const docs: any = await tenantDb.get("SELECT COUNT(*)::int AS n FROM guest_documents WHERE booking_id = ?", [bookingId]).catch(() => ({ n: 0 }));
-    return { checked_in: true, id_missing: Number(docs?.n || 0) === 0, room_id: b.room_id, ...(movedFrom ? { moved_from: movedFrom, room: roomLbl, message: `Moved from ${movedFrom} (still occupied) to ${roomLbl}.` } : {}) };
+    return { checked_in: true, id_missing: Number(docs?.n || 0) === 0, room_id: b.room_id, ...(movedFrom ? { moved_from: movedFrom, room: roomLbl, message: `Moved from ${movedFrom} (${movedWhy}) to ${roomLbl}.` } : {}) };
   };
   // Who may check an event room in/out: hotel room staff, or the events staff
   // running the event this reservation belongs to (the event's own gate).
@@ -67794,7 +67795,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'expense-journal-recorded-by',
+    commit_marker: 'expense-journal-recorded-by-2',
     code_features: [
       'expense-journal-recorded-by  Owner bug: Finance > Expenses, Recorded by was blank on every row. The /petty-cash list never returned it. Now each row carries recorded_by: the manual entry recorder, else the ledger line posted_by, resolved to a staff or user name (_resolveActorNames); lines with no posted_by are named from the statutory books audit trail. _postGlEntries now falls back to the request user when a caller passes no actor (folio settlement, event and staff advances posted none).',
       'event-room-folio-settled-paid-with-event  Owner: at event completion an event room\'s empty hotel bill was voided at Rs 0; it must read Settled, paid with the event. It is now status settled, payment_method EVENT, settlement_note Paid with event (event name, event invoice number), and invoice_number = the event invoice reference so it never draws its own GST serial. No ledger posting (the event invoice carries the revenue). New folios.settlement_note column.',
