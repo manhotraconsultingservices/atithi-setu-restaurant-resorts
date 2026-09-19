@@ -45128,7 +45128,10 @@ ${data.tenant.name}`;
           recorded_by: nameFor(String(r.id)),
         };
       });
-      const shown = wantMods ? rows.filter((x: any) => wantMods.includes(String(x.module || 'SHARED').toUpperCase())) : rows;
+      // In the expense view a ledger line coming IN can only be a manual line whose
+      // entry was deleted (an orphan)  never an expense.
+      const kept = expensesView ? rows.filter((x: any) => !(x.readonly && x.direction === 'IN')) : rows;
+      const shown = wantMods ? kept.filter((x: any) => wantMods.includes(String(x.module || 'SHARED').toUpperCase())) : kept;
       for (const x of shown) {
         const shared = String(x.module || '').toUpperCase() === 'SHARED';
         if (x.direction === 'IN') { totalIn += x.amount; if (shared) sharedIn += x.amount; }
@@ -68319,8 +68322,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gl-dates-ist',
+    commit_marker: 'dates-ist-frontend',
     code_features: [
+      'dates-ist-frontend  The app date pickers defaulted to the UTC date (yesterday between 00:00 and 05:30 IST), so an expense, payment or booking entered after midnight was dated the day before even after the server fix. New todayIST() in src/lib/utils.ts replaces all 121 toISOString today defaults in the frontend. Expense view drops orphan manual lines coming in.',
       'gl-dates-ist  Day Book showed postings on the previous day: every today in the server was new Date().toISOString().slice(0,10), the UTC date, which is yesterday between 00:00 and 05:30 IST; _glPostDate converted timestamps through UTC too; and _glEntryDate had lost the backslashes in its date pattern so it never matched. New _istDate/_todayIST (Asia/Kolkata); all server today defaults use it; timestamps become their IST calendar day. Existing mis-dated lines are not changed (repair is separate, dry run first).',
       'expense-journal-expenses-only  Expense Journal listed guest settlements, advances and sales as Income: it read the whole Cash (1000) book. GET /petty-cash?view=expenses now returns only money spent: a cash or bank (10xx) payment whose journal debits an expense account (5xxx/6xxx), named by that account, plus manual entries (read from Cash only). The module filter now applies to ledger lines too (cost_centre, none = SHARED), with the include_shared overlay for any module; before, ledger lines had no module and the filter ignored them. The cash book (no view) is unchanged apart from the module filter. Chips offer every module the property runs, incl. Wellness and Events; ledger lines cannot be deleted from the journal.',
       'admin-console-phase23  Admin redesign phases 2 and 3. Super Admin, Sales Rep and CTO consoles share one frame (src/admin/ConsoleShell.tsx): a left menu grouped Tenants / Platform / Operations / Tools with live counts, and a Ctrl K finder that opens any tenant. New screens: Approvals (directory pinned to waiting sign-ups, bulk approve) and Subscription prices (src/admin/SubscriptionPrices.tsx, shared with CTO). Tenant panel gains Maintenance: Data loader (Hotel/Spa/Events), SQL console and Role access opened on that tenant, demo tariff, DNS, invoice-deletion switch, danger zone. Sales Rep tile list replaced by the directory scoped to the rep; a rep can approve a waiting business and load the demo tariff before go-live (server rules unchanged).',

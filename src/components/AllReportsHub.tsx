@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { RefreshCw, BarChart3, AlertCircle } from 'lucide-react';
 import { DataTable, ColDef } from './DataTable';
+import { todayIST } from '../lib/utils';
 
 interface Props {
   restaurantId: string;
@@ -483,7 +484,7 @@ const ReportCard: React.FC<ReportCardProps> = ({ report, isActive, loading, onRu
 // ─── main component ───────────────────────────────────────────────────────────
 
 export function AllReportsHub({ restaurantId, token }: Props) {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = todayIST();
   const firstOfMonth = todayStr.slice(0, 8) + '01';
 
   const [category, setCategory] = useState<Category>('front-office');

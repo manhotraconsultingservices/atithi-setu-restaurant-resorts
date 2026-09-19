@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { ChecklistDetail } from './MyChecklists';
 import { DataTable, type ColDef } from './components/DataTable';
+import { todayIST } from './lib/utils';
 
 // ── Checklist Board — the manager/owner cockpit over EVERY checklist instance in
 // the property: what's pending, who owns it, how old it is. It's a smart table
@@ -47,7 +48,7 @@ const statePill = (s: string) => {
 const dueCell = (due: any, complete: boolean) => {
   const d = String(due || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return <span className="text-[#c9bcae]">—</span>;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIST();
   const overdue = !complete && d < today;
   return <span className={`text-[11px] whitespace-nowrap ${overdue ? 'text-rose-600 font-bold' : 'text-[#6b5d52]'}`}>{d}{overdue ? ' ⏰' : ''}</span>;
 };

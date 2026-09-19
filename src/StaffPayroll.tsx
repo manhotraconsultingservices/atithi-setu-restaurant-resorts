@@ -6,6 +6,7 @@ import {
 // RBAC — View roles must not write here. Backend enforces; this hides/guards
 // the controls so a View user isn't led into a 403 (see src/perm.ts).
 import { canWriteTab } from './perm';
+import { todayIST } from './lib/utils';
 
 // Cross-module operational payroll (Hotel / Spa / Restaurant / Events) built on
 // the shared attendance_staff roster. Hourly wages come from the timesheet
@@ -42,9 +43,9 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
   const [edits, setEdits] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const [advOpen, setAdvOpen] = useState(false);
-  const [adv, setAdv] = useState({ staff_id: '', amount: '', advance_date: new Date().toISOString().slice(0, 10), note: '', payment_method: 'CASH', payment_reference: '' });
+  const [adv, setAdv] = useState({ staff_id: '', amount: '', advance_date: todayIST(), note: '', payment_method: 'CASH', payment_reference: '' });
   const [payOpen, setPayOpen] = useState(false);
-  const [payForm, setPayForm] = useState({ pay_date: new Date().toISOString().slice(0, 10), pay_method: 'BANK', pay_reference: '' });
+  const [payForm, setPayForm] = useState({ pay_date: todayIST(), pay_method: 'BANK', pay_reference: '' });
 
   const load = async () => {
     setLoading(true);
@@ -72,7 +73,7 @@ export function StaffPayrollGrid({ token }: { restaurantId: string; token: strin
     try {
       const r = await fetch('/api/owner/staff-advances', { method: 'POST', headers: auth, body: JSON.stringify({ ...adv, amount }) });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'Failed'); }
-      setAdvOpen(false); setAdv({ staff_id: '', amount: '', advance_date: new Date().toISOString().slice(0, 10), note: '', payment_method: 'CASH', payment_reference: '' }); await load();
+      setAdvOpen(false); setAdv({ staff_id: '', amount: '', advance_date: todayIST(), note: '', payment_method: 'CASH', payment_reference: '' }); await load();
     } catch (e: any) { alert(e.message); } finally { setBusy(false); }
   };
 

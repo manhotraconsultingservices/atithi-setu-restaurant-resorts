@@ -16,6 +16,7 @@ import { moduleOn } from './tenantModules';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { useConfirm } from './components/ConfirmDialog';
+import { todayIST } from './lib/utils';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
@@ -698,7 +699,7 @@ function EventBookings({ restaurantId, token }: Props) {
   const [showNew, setShowNew] = useState(false);
   const [linkRow, setLinkRow] = useState<any>(null); // booking a payment link is being sent for
   const editGst = useBuyerGstEditor(restaurantId, token);
-  const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', half_day_slot: 'AM', venue_rate: '', guest_count: '', special_requests: '' };
+  const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: todayIST(), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', half_day_slot: 'AM', venue_rate: '', guest_count: '', special_requests: '' };
   const [form, setForm] = useState<any>(blank);
   const [avail, setAvail] = useState<{ available: boolean; reason: string; rate: number } | null>(null);
 
@@ -974,8 +975,8 @@ function PaymentPanel({ restaurantId, token, booking, editable, canRecord, onCha
   const bid = booking.id;
   const [sched, setSched] = useState<any[]>([]);
   const [pay, setPay] = useState<any>({ payments: [], paid: 0, total: 0, balance: 0 });
-  const [form, setForm] = useState<{ open: boolean; schedule_id: string | null; amount: string; method: string; paid_at: string; reference: string }>({ open: false, schedule_id: null, amount: '', method: 'UPI', paid_at: new Date().toISOString().slice(0, 10), reference: '' });
-  const today = new Date().toISOString().slice(0, 10);
+  const [form, setForm] = useState<{ open: boolean; schedule_id: string | null; amount: string; method: string; paid_at: string; reference: string }>({ open: false, schedule_id: null, amount: '', method: 'UPI', paid_at: todayIST(), reference: '' });
+  const today = todayIST();
   const dOnly = (v: any) => String(v || '').slice(0, 10);
   const [linkOpen, setLinkOpen] = useState(false);
 
@@ -1196,7 +1197,7 @@ function StaffPanel({ restaurantId, token, booking, editable, onChanged }: Props
   const api = makeApi(restaurantId, token);
   const bid = booking.id;
   const dOnly = (v: any) => String(v || '').slice(0, 10);
-  const startDate = dOnly(booking.event_date) || new Date().toISOString().slice(0, 10);
+  const startDate = dOnly(booking.event_date) || todayIST();
   const blank = () => ({ open: false, staff_id: '', assigned_date: startDate, shift_start: booking.start_time || '', shift_end: booking.end_time || '', note: '' });
   const [roster, setRoster] = useState<any[]>([]);
   const [rows, setRows] = useState<any[]>([]);
@@ -2316,7 +2317,7 @@ const EV_CAL = {
   FREE:      { bg: '#f7faf7', fg: '#1f513f', border: '#dcecdf' },   // available (green tint)
 };
 const WD = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
-const todayIso = () => new Date().toISOString().slice(0, 10);
+const todayIso = () => todayIST();
 /** An event's last day (end_date, else the event date), as YYYY-MM-DD. */
 const evEndDate = (b: any): string => {
   const s = String(b?.event_date || '').slice(0, 10);

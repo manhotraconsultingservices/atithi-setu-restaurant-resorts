@@ -293,7 +293,7 @@ function csvMoney(v: any): string {
 // This app serves India hotels; "today" and date labels must be the
 // Asia/Kolkata calendar day. toISOString() returns the UTC day, which is a
 // day behind for the first 5.5h of every IST day — the source of repeated
-// off-by-one bugs. Use these instead of `new Date().toISOString().slice(0,10)`.
+// off-by-one bugs. Use these instead of `todayIST()`.
 function todayISO(): string {
   return new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
 }
@@ -371,7 +371,7 @@ function computeOtaInventoryMatrix(data: any): { dates: string[]; rows: Array<{ 
 // derivation.
 export type BookingLifecycle = 'ASSIGNED' | 'CHECKED_IN' | 'CHECKING_OUT' | 'CHECKED_OUT' | 'CANCELLED';
 export function bookingLifecycleState(booking: any, todayIso?: string): BookingLifecycle {
-  const today = (todayIso || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const today = (todayIso || todayIST()).slice(0, 10);
   const status = String(booking?.status || '').toUpperCase();
   if (status === 'CANCELLED') return 'CANCELLED';
   if (status === 'CHECKED_OUT') return 'CHECKED_OUT';
@@ -522,7 +522,7 @@ function parseCsv(text: string): { headers: string[]; rows: Record<string, strin
   });
   return { headers, rows };
 }
-import { cn } from './lib/utils';
+import { cn, todayIST } from './lib/utils';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import {
   BarChart,
@@ -4554,7 +4554,7 @@ function AttendanceManagement({ role, token, restaurantId, manage }: { role: Use
   const [hours, setHours] = useState('8');
   const [type, setType] = useState('WORK');
   const [note, setNote] = useState('');
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().slice(0, 10));
+  const [selectedDate, setSelectedDate] = useState(todayIST());
   const [selectedDays, setSelectedDays] = useState<string[]>([]);
   const [staffList, setStaffList] = useState<any[]>([]);
   const [user, setUser] = useState<any>(null);
@@ -5087,7 +5087,7 @@ function AttendanceManagement({ role, token, restaurantId, manage }: { role: Use
               <input 
                 type="date" 
                 required
-                max={new Date().toISOString().slice(0, 10)}
+                max={todayIST()}
                 value={selectedDate}
                 onChange={e => setSelectedDate(e.target.value)}
                 className="w-full bg-[#faf7f2] border-none rounded-2xl px-6 py-4 focus:ring-2 ring-brand/20 outline-none font-bold"
@@ -5183,7 +5183,7 @@ function AttendanceManagement({ role, token, restaurantId, manage }: { role: Use
                         if (e.target.checked) {
                           const pastDaysWithoutLogs = getDaysInMonth(month).filter(day => {
                             const log = logs.find(l => String(l.date).slice(0, 10) === day);
-                            const isFuture = day > new Date().toISOString().slice(0, 10);
+                            const isFuture = day > todayIST();
                             return !log && !isFuture;
                           });
                           setSelectedDays(pastDaysWithoutLogs);
@@ -5206,7 +5206,7 @@ function AttendanceManagement({ role, token, restaurantId, manage }: { role: Use
                     const d = l.date ? String(l.date).slice(0, 10) : '';
                     return d === day;
                   });
-                  const isFuture = day > new Date().toISOString().slice(0, 10);
+                  const isFuture = day > todayIST();
                   const isSelected = selectedDays.includes(day);
                   return (
                     <tr key={day} className={cn("hover:bg-[#faf7f2]/30 transition-colors", isFuture && "opacity-40")}>
@@ -5679,7 +5679,7 @@ function AnalyticsDashboard({
   const [dateFrom, setDateFrom] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 30); return d.toISOString().slice(0, 10);
   });
-  const [dateTo, setDateTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [dateTo, setDateTo] = useState(() => todayIST());
   // Hotel analytics state (Phase 3)
   const isHotelEnabled = !hideHotelSection && !!restaurant && ((restaurant as any).property_type === 'HOTEL' || (restaurant as any).property_type === 'BOTH');
   const [hotelAnalytics, setHotelAnalytics] = useState<any>(null);
@@ -6543,7 +6543,7 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
 
   // stock adjustment modal
   const [adjItem, setAdjItem] = useState<any>(null);
-  const [adjForm, setAdjForm] = useState({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
+  const [adjForm, setAdjForm] = useState({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: todayIST() });
   const [adjSaving, setAdjSaving] = useState(false);
 
   const api = async (path: string, init: RequestInit = {}) => {
@@ -6614,7 +6614,7 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
 
   const openAdj = (it: any) => {
     setAdjItem(it);
-    setAdjForm({ movement_type: 'RECEIVE', quantity: '', unit_price: it.default_unit_price ? String(it.default_unit_price) : '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
+    setAdjForm({ movement_type: 'RECEIVE', quantity: '', unit_price: it.default_unit_price ? String(it.default_unit_price) : '', notes: '', movement_date: todayIST() });
   };
 
   const saveAdj = async () => {
@@ -6775,7 +6775,7 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
                 { key: 'actions', label: 'Actions', searchable: false, exportValue: () => '', render: (it: any) => (
                   <div className="flex items-center gap-1">
                     {canWriteTab('HOTEL_INVENTORY') && <button onClick={() => openAdj(it)} className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-[10px] font-bold hover:bg-emerald-100 border border-emerald-200">Receive</button>}
-                    {canWriteTab('HOTEL_INVENTORY') && <button onClick={() => { setAdjItem(it); setAdjForm({ movement_type: 'CONSUME', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }} className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-[10px] font-bold hover:bg-amber-100 border border-amber-200">Use</button>}
+                    {canWriteTab('HOTEL_INVENTORY') && <button onClick={() => { setAdjItem(it); setAdjForm({ movement_type: 'CONSUME', quantity: '', unit_price: '', notes: '', movement_date: todayIST() }); }} className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-[10px] font-bold hover:bg-amber-100 border border-amber-200">Use</button>}
                     {canWriteTab('HOTEL_INVENTORY') && <button onClick={() => openEdit(it)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-brand text-[10px] font-bold hover:bg-brand/10 border border-brand/20">Edit</button>}
                     {canDeleteTab('HOTEL_INVENTORY') && <button onClick={() => deleteItem(it.id)} className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>}
                   </div>
@@ -7037,7 +7037,7 @@ function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, o
   const toast = useToast();
   const [form, setForm] = useState({ name: '', category: '', unit: 'unit', current_stock_qty: '', par_level: '', reorder_point: '', default_unit_price: '' });
   const [stockModal, setStockModal] = useState<any | null>(null);
-  const [stockForm, setStockForm] = useState({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
+  const [stockForm, setStockForm] = useState({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: todayIST() });
   const [stockSaving, setStockSaving] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [movements, setMovements] = useState<Record<string, any[]>>({});
@@ -7067,7 +7067,7 @@ function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, o
       });
       if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || 'Failed'); }
       setStockModal(null);
-      setStockForm({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
+      setStockForm({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: todayIST() });
       if (expanded === stockModal.id) {
         const r2 = await fetch(`/api/restaurant/${restaurantId}/hotel-inventory/${stockModal.id}/movements`, { headers: { Authorization: `Bearer ${token}` } });
         const d2 = await r2.json();
@@ -7175,7 +7175,7 @@ function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, o
           { key: 'default_unit_price', label: 'Price', sortable: true, align: 'right', getValue: (it: any) => Number(it.default_unit_price || 0), render: (it: any) => it.default_unit_price ? `₹${Number(it.default_unit_price).toFixed(2)}` : '—' },
           { key: 'actions', label: 'Actions', sortable: false, align: 'right', searchable: false, exportValue: () => '', render: (it: any) => (
             <div className="flex justify-end gap-2">
-              <button onClick={() => { setStockModal(it); setStockForm({ movement_type: 'RECEIVE', quantity: '', unit_price: it.default_unit_price ? String(it.default_unit_price) : '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }} className="text-xs font-bold text-brand hover:underline">Receive</button>
+              <button onClick={() => { setStockModal(it); setStockForm({ movement_type: 'RECEIVE', quantity: '', unit_price: it.default_unit_price ? String(it.default_unit_price) : '', notes: '', movement_date: todayIST() }); }} className="text-xs font-bold text-brand hover:underline">Receive</button>
               <button onClick={() => loadMovements(it.id)} className="text-xs text-[#6b5d52] hover:underline">{expanded === it.id ? 'Hide' : 'History'}</button>
               <button onClick={() => onDelete(it.id)} className="text-xs text-red-700 hover:underline">Remove</button>
             </div>
@@ -8170,7 +8170,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [ownerForm, setOwnerForm] = useState<any>(ownerBlank);
   const [ownerEditing, setOwnerEditing] = useState<string | null>(null);
   const [ownerBusy, setOwnerBusy] = useState(false);
-  const txnBlank = { txn_type: 'INVEST', amount: '', txn_date: new Date().toISOString().slice(0, 10), bank_account_id: '', note: '' };
+  const txnBlank = { txn_type: 'INVEST', amount: '', txn_date: todayIST(), bank_account_id: '', note: '' };
   const [txnOwner, setTxnOwner] = useState<any>(null);
   const [txnForm, setTxnForm] = useState<any>(txnBlank);
   const [txnBusy, setTxnBusy] = useState(false);
@@ -8379,7 +8379,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
   const [g2bBusy, setG2bBusy] = useState(false);
   const [g2bFilter, setG2bFilter] = useState<string>('ALL');
   const [r37, setR37] = useState<any>(null);
-  const [r37AsOf, setR37AsOf] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [r37AsOf, setR37AsOf] = useState<string>(todayIST());
   const [r37Busy, setR37Busy] = useState(false);
   const [agingAr, setAgingAr] = useState<any>(null);
   const [agingAp, setAgingAp] = useState<any>(null);
@@ -11190,7 +11190,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [channelPnl, setChannelPnl] = useState<any | null>(null);
   const [pnlRange, setPnlRange] = useState<{ from: string; to: string }>({
     from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
-    to: new Date().toISOString().slice(0, 10),
+    to: todayIST(),
   });
   // State backing the DELIVERY tab
   const [deliveryChannels, setDeliveryChannels] = useState<any[]>([]);
@@ -11206,12 +11206,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [varianceReport, setVarianceReport] = useState<any | null>(null);
   const [varianceRange, setVarianceRange] = useState<{ from: string; to: string }>({
     from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
-    to: new Date().toISOString().slice(0, 10),
+    to: todayIST(),
   });
   const [cogsReport, setCogsReport] = useState<any | null>(null);
   const [cogsRange, setCogsRange] = useState<{ from: string; to: string }>({
     from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
-    to: new Date().toISOString().slice(0, 10),
+    to: todayIST(),
   });
   const [costPerDish, setCostPerDish] = useState<any | null>(null);
   const [supplierPrices, setSupplierPrices] = useState<any[]>([]);
@@ -11405,7 +11405,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const openWalkInModal = () => {
     // Auto-pick the first VACANT, non-blocked room that has no
     // overlapping booking today.
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIST();
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
     const todayBooked = new Set(
       hotelBookings
@@ -11477,7 +11477,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     setWalkInDraft({ ...walkInDraft, saving: true });
     let createdBookingId: string | null = null;
     try {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayIST();
       const co = new Date(Date.now() + walkInDraft.nights * 86400000).toISOString().slice(0, 10);
       // 1. Create booking — server applies rate plans when room_rate is 0.
       //    BCG Tariff Phase 3: also forward meal_plan_id + extra_adults so
@@ -11596,7 +11596,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     promo_code_id: string;
   } | null>(null);
   const openGroupBookingModal = () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIST();
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
     setGroupBookingDraft({
       open: true, name: '', contact_name: '', contact_phone: '', contact_email: '',
@@ -11711,7 +11711,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // scope so the collapse + date range survives the user toggling
   // between LIST / CALENDAR / DASHBOARD views without re-fetching.
   const [foReportsOpen, setFoReportsOpen] = useState(false);
-  const _today = new Date().toISOString().slice(0, 10);
+  const _today = todayIST();
   const [foDateFrom, setFoDateFrom] = useState<string>(_today);
   const [foDateTo,   setFoDateTo]   = useState<string>(_today);
   const [foLoading,  setFoLoading]  = useState<string | null>(null);   // which report is loading right now
@@ -11859,7 +11859,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   );
 
   const bookingTabCounts = useMemo(() => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIST();
     const arr = hotelBookings.filter((b: any) =>
       (b.status === 'BOOKED' || b.status === 'CHECKED_IN') &&
       String(b.check_in_date || '').slice(0, 10) === today
@@ -11882,7 +11882,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   }, [hotelBookings]);
 
   const switchBookingTab = async (tab: 'ARR'|'INH'|'DEP'|'UPC'|'HIS') => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIST();
     setBookingViewTab(tab);
     setBookingsPage(1);
     const params: Record<string,string> = {};
@@ -11967,7 +11967,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [findRoomsCategoryFilter, setFindRoomsCategoryFilter] = useState<string | null>(null);
   const [findRoomsLoading, setFindRoomsLoading] = useState(false);
   const [findRoomsParams, setFindRoomsParams] = useState<{ start: string; end: string; guests: number }>({
-    start: new Date().toISOString().slice(0, 10),
+    start: todayIST(),
     end: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
     guests: 1,
   });
@@ -12686,7 +12686,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [rateGrid, setRateGrid] = useState<{ dates: string[]; meta: Record<string,any>; room_types: any[] } | null>(null);
   const [rateGridLoading, setRateGridLoading] = useState(false);
   const [rateGridDirty, setRateGridDirty] = useState<Record<string,Record<string,number>>>({}); // {roomTypeId: {date: rate}}
-  const [rateGridFrom, setRateGridFrom] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [rateGridFrom, setRateGridFrom] = useState<string>(() => todayIST());
   const [rateGridSaving, setRateGridSaving] = useState(false);
   const [bulkRateForm, setBulkRateForm] = useState<any>({ type: 'rate', room_type_ids: [], from_date: '', to_date: '', value: '', apply_days: [] });
   const [bulkRateSaving, setBulkRateSaving] = useState(false);
@@ -12694,7 +12694,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [invGrid, setInvGrid] = useState<{ dates: string[]; room_types: any[] } | null>(null);
   const [invGridLoading, setInvGridLoading] = useState(false);
   const [invGridDirty, setInvGridDirty] = useState<Record<string,Record<string,number>>>({});
-  const [invGridFrom, setInvGridFrom] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [invGridFrom, setInvGridFrom] = useState<string>(() => todayIST());
   const [invGridSaving, setInvGridSaving] = useState(false);
   const fetchInvGrid = async (from?: string) => {
     if (!isHotelEnabled) return;
@@ -12826,14 +12826,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [receivablesAging, setReceivablesAging] = useState<any>(null);
   // Accounts financial reports state
   const [accountsPnlData, setAccountsPnlData] = useState<any>(null);
-  const [accountsPnlRange, setAccountsPnlRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: new Date().toISOString().slice(0,10) });
+  const [accountsPnlRange, setAccountsPnlRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: todayIST() });
   const [cashFlowData, setCashFlowData] = useState<any>(null);
-  const [cashFlowRange, setCashFlowRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: new Date().toISOString().slice(0,10) });
+  const [cashFlowRange, setCashFlowRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: todayIST() });
   const [gstLedgerData, setGstLedgerData] = useState<any>(null);
   const [gstMonth, setGstMonth] = useState(new Date().toISOString().slice(0,7));
   const [vendorAgingData, setVendorAgingData] = useState<any>(null);
   const [spaBillingData, setSpaBillingData] = useState<any>(null);
-  const [spaBillingRange, setSpaBillingRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: new Date().toISOString().slice(0,10) });
+  const [spaBillingRange, setSpaBillingRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: todayIST() });
   // Outstanding-payments report (per-booking, sortable + filterable).
   // Populated by the new /reports/outstanding-payments endpoint.
   const [outstandingReport, setOutstandingReport] = useState<any>(null);
@@ -14717,7 +14717,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       i.current_stock_qty, i.reorder_point, i.par_level,
       i.default_unit_price ?? '', i.gst_percent ?? 0, i.sku || '', i.notes || '',
     ]);
-    downloadCsv(`ingredients_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, rows);
+    downloadCsv(`ingredients_${restaurantId}_${todayIST()}.csv`, header, rows);
   };
   const exportIngredientsTemplate = () => {
     const header = ['name','item_type','category','unit','current_stock_qty','reorder_point','par_level','default_unit_price','gst_percent','sku','notes'];
@@ -14736,7 +14736,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       s.address || '', s.gst_number || '', s.lead_time_days ?? 1,
       s.payment_terms || '', s.notes || '',
     ]);
-    downloadCsv(`suppliers_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, rows);
+    downloadCsv(`suppliers_${restaurantId}_${todayIST()}.csv`, header, rows);
   };
   const exportSuppliersTemplate = () => {
     const header = ['name','contact_name','phone','email','address','gst_number','lead_time_days','payment_terms','notes'];
@@ -14772,7 +14772,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
     }
     const header = ['po_id','supplier_name','status','expected_delivery_date','raised_at','ingredient_name','qty_ordered','unit','unit_price','qty_received','fully_received','notes'];
-    downloadCsv(`purchase_orders_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, rows);
+    downloadCsv(`purchase_orders_${restaurantId}_${todayIST()}.csv`, header, rows);
   };
 
   // GRN export — one row per line item
@@ -14799,7 +14799,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
     }
     const header = ['grn_id','po_id','supplier_name','received_at','bill_number','ingredient_name','qty_received','unit','unit_price','batch_number','expiry_date','condition','notes'];
-    downloadCsv(`goods_receipts_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, rows);
+    downloadCsv(`goods_receipts_${restaurantId}_${todayIST()}.csv`, header, rows);
   };
 
   // ─── Inventory CSV import handlers ────────────────────────────────────────
@@ -16471,7 +16471,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const fetchReports = async (from?: string, to?: string) => {
     try {
       const f = from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-      const t = to   || new Date().toISOString().slice(0, 10);
+      const t = to   || todayIST();
       const res = await fetch(`/api/restaurant/${restaurantId}/reports?from=${f}&to=${t}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -16687,7 +16687,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const blob = new Blob(['﻿' + csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
-    a.download = `menu_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`;
+    a.download = `menu_${restaurantId}_${todayIST()}.csv`;
     a.click(); URL.revokeObjectURL(url);
   };
 
@@ -16801,7 +16801,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         r.size_variant || 'BOTH',
         r.notes || '',
       ]);
-      downloadCsv(`recipes_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, csvRows);
+      downloadCsv(`recipes_${restaurantId}_${todayIST()}.csv`, header, csvRows);
     } catch (e) {
       toast.error('Recipe export failed: ' + (e as any).message);
     }
@@ -20896,7 +20896,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const csv = [headers,...rows].map(r=>r.map(esc).join(',')).join('\n');
                   const blob = new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'});
                   const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a'); a.href=url; a.download=`receivables-aging-${receivablesAging.as_of||new Date().toISOString().slice(0,10)}.csv`;
+                  const a = document.createElement('a'); a.href=url; a.download=`receivables-aging-${receivablesAging.as_of||todayIST()}.csv`;
                   document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
                 }}
                 className="px-3 py-1.5 rounded-xl bg-white border border-rose-300 text-rose-700 text-xs font-bold hover:bg-rose-50"
@@ -23532,7 +23532,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      const today = new Date().toISOString().slice(0, 10);
+                                      const today = todayIST();
                                       setTariffData(prev => ({
                                         ...prev,
                                         season_periods: [
@@ -23910,7 +23910,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     onClick={() => {
                       const typeName = (id?: string) => hotelRoomTypes.find((t: any) => t.id === id)?.name || '';
                       downloadCsv(
-                        `rooms-${new Date().toISOString().slice(0, 10)}.csv`,
+                        `rooms-${todayIST()}.csv`,
                         ['Room', 'Number', 'Floor', 'Type', 'Category', 'Capacity', 'Base Rate (INR)', 'Status', 'Smoking', 'Amenities', 'Notes'],
                         filteredRooms.map((r: any) => [
                           r.name || '', r.room_number || '', r.floor ?? '',
@@ -24157,7 +24157,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 type="button"
                 disabled={hotelRequests.length === 0}
                 onClick={() => downloadCsv(
-                  `service-requests-${new Date().toISOString().slice(0, 10)}.csv`,
+                  `service-requests-${todayIST()}.csv`,
                   ['Request ID', 'Service', 'Category', 'Room', 'Guest', 'Priority',
                    'Status', 'Assigned Role', 'Requested At', 'Notes'],
                   hotelRequests.map((r: any) => [
@@ -24259,7 +24259,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               {canWriteTab('HOTEL_BOOKINGS') && <button onClick={openGroupBookingModal} className="px-4 py-2.5 rounded-2xl border border-brand/30 text-brand text-sm font-bold hover:bg-brand/5 transition-all flex items-center gap-2">
                 <Plus size={14} /> {tr('Group')}
               </button>}
-              {canWriteTab('HOTEL_BOOKINGS') && <button onClick={() => { setEditingBooking({ check_in_date: new Date().toISOString().slice(0,10), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-brand text-white text-sm font-bold hover:bg-brand-dark transition-all flex items-center gap-2 shadow-md shadow-brand/20">
+              {canWriteTab('HOTEL_BOOKINGS') && <button onClick={() => { setEditingBooking({ check_in_date: todayIST(), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-brand text-white text-sm font-bold hover:bg-brand-dark transition-all flex items-center gap-2 shadow-md shadow-brand/20">
                 <Plus size={16} /> {tr('New Booking')}
               </button>}
             </div>
@@ -24362,7 +24362,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
           {/* ── Sub-tab strip: Reservations / Groups / Room Assignment ── */}
           {(() => {
-            const today = new Date().toISOString().slice(0, 10);
+            const today = todayIST();
             const horizon = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
             const raCount = hotelBookings.filter((b: any) =>
               String(b.status || '').toUpperCase() === 'BOOKED' &&
@@ -25057,7 +25057,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   onClick={() => {
                     const fmtINR = (n: any) => Number(n || 0);
                     downloadCsv(
-                      `hotel-bookings-${new Date().toISOString().slice(0, 10)}.csv`,
+                      `hotel-bookings-${todayIST()}.csv`,
                       ['Booking ID', 'Guest', 'Phone', 'Email', 'Room', 'Room #',
                        'Check-in', 'Check-out', 'Nights', 'Guests',
                        'Meal Plan', 'Extra Adults', 'Rate/Night', 'Total',
@@ -27460,7 +27460,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     const url  = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `receivables-aging-${receivablesAging.as_of || new Date().toISOString().slice(0,10)}.csv`;
+                    a.download = `receivables-aging-${receivablesAging.as_of || todayIST()}.csv`;
                     document.body.appendChild(a); a.click(); document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                   }}
@@ -27606,7 +27606,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     csvRows.push([]);
                     csvRows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', 'TOTAL OUTSTANDING', '', fmt(s.total_outstanding || 0), '']);
                     csvRows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', `Overdue: ${s.overdue_bookings || 0} bookings`, '', fmt(s.overdue_amount || 0), '']);
-                    downloadCsv(`outstanding-payments-${outstandingReport.as_of || new Date().toISOString().slice(0,10)}.csv`, header, csvRows);
+                    downloadCsv(`outstanding-payments-${outstandingReport.as_of || todayIST()}.csv`, header, csvRows);
                   }}
                   className="text-[10px] font-bold text-[#3d3128] hover:underline"
                 >📥 Export CSV</button>
@@ -28512,7 +28512,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     f.status||'', Number(f.subtotal||0), Number(f.discount||0), Number(f.gst_amount||0), Number(f.grand_total||0),
                     f.payment_method||'', String(f.settled_at||'').slice(0,16).replace('T',' '),
                   ]);
-                  downloadCsv(`folios-${new Date().toISOString().slice(0,10)}.csv`,
+                  downloadCsv(`folios-${todayIST()}.csv`,
                     ['Folio ID','Invoice #','Guest','Room','Check-in','Check-out','Status','Subtotal','Discount','GST','Grand Total','Payment Method','Settled At'],
                     rows);
                 }}
@@ -28699,7 +28699,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <button
                   type="button"
                   onClick={() => downloadCsv(
-                    `compliance-form-c-${new Date().toISOString().slice(0, 10)}.csv`,
+                    `compliance-form-c-${todayIST()}.csv`,
                     ['Booking ID', 'Guest', 'Nationality', 'ID Proof', 'Room', 'Check-in', 'Check-out', 'Phone', 'Form-C Status'],
                     complianceList.map((b: any) => [
                       b.id || '', b.guest_name || '', b.guest_nationality || '',
@@ -33020,7 +33020,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       {walkInDraft?.open && (() => {
         const draft = walkInDraft;
         const setDraft = (patch: any) => setWalkInDraft({ ...draft, ...patch });
-        const today = new Date().toISOString().slice(0, 10);
+        const today = todayIST();
         // Vacant rooms for today — show in dropdown for manual override.
         const todayBooked = new Set(
           hotelBookings
@@ -33387,7 +33387,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     submit. If they typed a manual rate (room_rate > 0), that
                     wins; otherwise the matrix-resolved total appears. */}
                 {(() => {
-                  const today = new Date().toISOString().slice(0, 10);
+                  const today = todayIST();
                   const co    = new Date(Date.now() + draft.nights * 86400000).toISOString().slice(0, 10);
                   const preview = previewMatrixPrice({
                     room_id: draft.room_id, check_in_date: today, check_out_date: co,
@@ -33890,7 +33890,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in *</label>
                     <input
                       required type="date"
-                      min={new Date().toISOString().slice(0, 10)}
+                      min={todayIST()}
                       value={draft.check_in_date}
                       onChange={e => {
                         const v = e.target.value;
@@ -34295,7 +34295,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in</label>
                   <input
                     type="date"
-                    min={new Date().toISOString().slice(0, 10)}
+                    min={todayIST()}
                     value={findRoomsParams.start}
                     onChange={e => {
                       const v = e.target.value;
@@ -34312,7 +34312,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out</label>
                   <input
                     type="date"
-                    min={findRoomsParams.start || new Date().toISOString().slice(0,10)}
+                    min={findRoomsParams.start || todayIST()}
                     value={findRoomsParams.end}
                     onChange={e => setFindRoomsParams(p => ({ ...p, end: e.target.value }))}
                     className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-brand/20 outline-none"
@@ -34856,7 +34856,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                   </div>
                   <button
-                    onClick={() => setRecordingPaymentFor({ partner_type: p.type, partner_code: p.code, partner_name: partnerStatement.partner?.name, payment_date: new Date().toISOString().slice(0, 10), amount_received: t.outstanding || 0, payment_method: 'BANK_TRANSFER', reference_number: '', allocated_to_invoice_id: '', notes: '' })}
+                    onClick={() => setRecordingPaymentFor({ partner_type: p.type, partner_code: p.code, partner_name: partnerStatement.partner?.name, payment_date: todayIST(), amount_received: t.outstanding || 0, payment_method: 'BANK_TRANSFER', reference_number: '', allocated_to_invoice_id: '', notes: '' })}
                     className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700"
                   >+ Record Payment</button>
                   {/* Invoices */}
@@ -35475,7 +35475,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From *</label>
                   <input
                     required type="date"
-                    min={new Date().toISOString().slice(0, 10)}
+                    min={todayIST()}
                     value={holdForm.start_date}
                     onChange={e => setHoldForm(f => ({ ...f, start_date: e.target.value, end_date: f.end_date && f.end_date < e.target.value ? e.target.value : f.end_date }))}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-brand/20 outline-none"
@@ -35485,7 +35485,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To *</label>
                   <input
                     required type="date"
-                    min={holdForm.start_date || new Date().toISOString().slice(0, 10)}
+                    min={holdForm.start_date || todayIST()}
                     value={holdForm.end_date}
                     onChange={e => setHoldForm(f => ({ ...f, end_date: e.target.value }))}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-brand/20 outline-none"
@@ -35808,7 +35808,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     // enforces the same rule in validateBookingRequest()
                     // for direct API callers. We allow today, not just
                     // tomorrow, since same-day check-ins are common.
-                    min={new Date().toISOString().slice(0, 10)}
+                    min={todayIST()}
                     value={(editingBooking.check_in_date || '').slice(0,10)}
                     onChange={e => {
                       const v = e.target.value;
@@ -35959,7 +35959,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     onClick={() => {
                       // Pre-fill the search from whatever dates the booking
                       // form already has (or sensible defaults).
-                      const ci = (editingBooking.check_in_date || new Date().toISOString().slice(0,10)).slice(0,10);
+                      const ci = (editingBooking.check_in_date || todayIST()).slice(0,10);
                       const co = (editingBooking.check_out_date || new Date(Date.now()+86400000).toISOString().slice(0,10)).slice(0,10);
                       setFindRoomsParams({ start: ci, end: co, guests: Number(editingBooking.num_guests) || 1 });
                       setFindRoomsResults(null);
@@ -36873,7 +36873,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Early check-in = the booking's check-in date is still in the future.
         // The wizard shows a warning + we pass force=true so the server's
         // date guard lets it through (reassignment/upgrade still available).
-        const todayIso = new Date().toISOString().slice(0, 10);
+        const todayIso = todayIST();
         const scheduled = normaliseBookingDate(b.check_in_date);
         const isEarly = !!(scheduled && scheduled > todayIso);
         return (
@@ -40695,7 +40695,7 @@ const HotelCommandCenter: React.FC<{
   }, [fetchAll]);
 
   // ── Derivations ───────────────────────────────────────────────
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIST();
   const occupied = rooms.filter(r => r.status === 'OCCUPIED').length;
   const total    = rooms.length;
   const occupancyPct = total > 0 ? Math.round((occupied * 100) / total) : 0;
@@ -41439,7 +41439,7 @@ const AvailabilityDashboard: React.FC<{
   const fetchData = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const start = new Date().toISOString().slice(0, 10);
+      const start = todayIST();
       const res = await fetch(
         `/api/restaurant/${restaurantId}/hotel/availability?start=${start}&days=${windowDays}`,
         { headers: { Authorization: `Bearer ${token}` } }
@@ -41783,7 +41783,7 @@ const RoomAssignmentBoard: React.FC<{
     document.addEventListener('mouseup', onUp);
   };
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIST();
   const horizon = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
 
   const allItems = (bookings || [])
@@ -41992,7 +41992,7 @@ const AvailabilityCalendar: React.FC<{
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState<number>(14);
-  const [start, setStart] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [start, setStart] = useState<string>(() => todayIST());
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   // Increment 2 (17 Jun 2026) — collapse a room-type's individual room rows so
   // the calendar reads as a TYPE/inventory view ("Deluxe: 2 of 5 left" per
@@ -42097,7 +42097,7 @@ const AvailabilityCalendar: React.FC<{
   //   • Hold/Comp  — rooms with HOLD or BLOCKED today
   // Recalculated whenever data changes; cheap O(rooms) pass.
   const todayKpis = useMemo(() => {
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = todayIST();
     if (!data?.rooms) return { guests: 0, checkedIn: 0, checkingOut: 0, available: 0, assigned: 0, maintenance: 0, hold: 0 };
     // LIFECYCLE-KPIS (client request 7 Jun 2026): split "Occupied"
     // into "Checked-in" (still staying) + "Checking out" (departing
@@ -42164,7 +42164,7 @@ const AvailabilityCalendar: React.FC<{
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 border-b border-brand/10 bg-[#faf7f2]">
         <div className="flex items-center gap-1">
           <button onClick={() => shiftStart(-7)} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs font-bold text-[#3d3128] hover:bg-white">‹ Prev week</button>
-          <button onClick={() => setStart(new Date().toISOString().slice(0,10))} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs font-bold text-[#3d3128] hover:bg-white">Today</button>
+          <button onClick={() => setStart(todayIST())} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs font-bold text-[#3d3128] hover:bg-white">Today</button>
           <button onClick={() => shiftStart(7)} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs font-bold text-[#3d3128] hover:bg-white">Next week ›</button>
         </div>
         <input
@@ -42289,7 +42289,7 @@ const AvailabilityCalendar: React.FC<{
                 {data.dates.map((d: string) => {
                   const dt = new Date(d + 'T00:00:00');
                   const isWeekend = dt.getDay() === 0 || dt.getDay() === 6;
-                  const isToday = d === new Date().toISOString().slice(0,10);
+                  const isToday = d === todayIST();
                   return (
                     <th
                       key={d}
@@ -42442,7 +42442,7 @@ const AvailabilityCalendarV2: React.FC<{
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState<number>(14);
-  const [start, setStart] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [start, setStart] = useState<string>(() => todayIST());
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   // V2 default is the room-ID-light "Type" view: bookings shown as guest chips
@@ -42562,7 +42562,7 @@ const AvailabilityCalendarV2: React.FC<{
   }, [allBookingsByGroup]);
 
   const todayKpis = useMemo(() => {
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = todayIST();
     if (!data?.rooms) return { guests: 0, checkedIn: 0, checkingOut: 0, available: 0, assigned: 0, maintenance: 0, hold: 0 };
     let guests = 0, checkedIn = 0, checkingOut = 0, available = 0, assigned = 0, maintenance = 0, hold = 0;
     for (const room of data.rooms) {
@@ -42648,7 +42648,7 @@ const AvailabilityCalendarV2: React.FC<{
         <span className="text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md bg-emerald-600 text-white">Calendar</span>
         <div className="flex items-center gap-1">
           <button onClick={() => shiftStart(-7)} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs font-bold text-[#3d3128] hover:bg-white">‹ Prev week</button>
-          <button onClick={() => setStart(new Date().toISOString().slice(0,10))} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs font-bold text-[#3d3128] hover:bg-white">Today</button>
+          <button onClick={() => setStart(todayIST())} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs font-bold text-[#3d3128] hover:bg-white">Today</button>
           <button onClick={() => shiftStart(7)} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs font-bold text-[#3d3128] hover:bg-white">Next week ›</button>
         </div>
         <input type="date" value={start} onChange={e => setStart(e.target.value)} className="px-2 py-1.5 rounded-lg border border-brand/20 text-xs bg-white" />
@@ -42711,7 +42711,7 @@ const AvailabilityCalendarV2: React.FC<{
                 {data.dates.map((d: string) => {
                   const dt = new Date(d + 'T00:00:00');
                   const isWeekend = dt.getDay() === 0 || dt.getDay() === 6;
-                  const isToday = d === new Date().toISOString().slice(0,10);
+                  const isToday = d === todayIST();
                   return (
                     <th key={d} className={cn('border-b border-brand/10 px-1 py-2 text-center text-[9px] font-bold uppercase tracking-widest min-w-[44px]',
                       isWeekend ? 'bg-brand/5 text-brand' : 'bg-white text-[#9c8e85]',
@@ -47124,7 +47124,7 @@ const EXP_MOD_SHORT: Record<string, string> = { RESTAURANT: 'Restaurant', HOTEL:
 function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; token: string }) {
   const toast = useToast();
   const showConfirm = useConfirm();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIST();
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const [from, setFrom] = useState(monthAgo);
   const [to, setTo] = useState(today);
@@ -47341,7 +47341,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
 function ManagementReports({ restaurantId, token, audience, onOpenTab }: { restaurantId: string; token: string; audience: 'FRONT_DESK' | 'OWNER'; onOpenTab: (tab: string) => void }) {
   const toast = useToast();
   const showConfirm = useConfirm();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIST();
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const [from, setFrom] = useState(monthAgo);
   const [to, setTo] = useState(today);
@@ -48139,7 +48139,7 @@ function Ota360Report({ restaurantId, token }: { restaurantId: string; token: st
                     const url  = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `receivables-aging-${receivablesAging.as_of || new Date().toISOString().slice(0,10)}.csv`;
+                    a.download = `receivables-aging-${receivablesAging.as_of || todayIST()}.csv`;
                     document.body.appendChild(a); a.click(); document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                   }}
@@ -48258,12 +48258,12 @@ function InventoryInsightsReport({ restaurantId, token }: { restaurantId: string
   const [varianceReport, setVarianceReport] = useState<any | null>(null);
   const [varianceRange, setVarianceRange] = useState<{ from: string; to: string }>({
     from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
-    to: new Date().toISOString().slice(0, 10),
+    to: todayIST(),
   });
   const [cogsReport, setCogsReport] = useState<any | null>(null);
   const [cogsRange, setCogsRange] = useState<{ from: string; to: string }>({
     from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
-    to: new Date().toISOString().slice(0, 10),
+    to: todayIST(),
   });
   const [costPerDish, setCostPerDish] = useState<any | null>(null);
   const [supplierPrices, setSupplierPrices] = useState<any[]>([]);
@@ -48789,7 +48789,7 @@ function InventoryInsightsReport({ restaurantId, token }: { restaurantId: string
 
 function ChannelPnlReport({ restaurantId, token }: { restaurantId: string; token: string }) {
   const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-  const [to, setTo] = useState(new Date().toISOString().slice(0, 10));
+  const [to, setTo] = useState(todayIST());
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
   const run = async () => {
@@ -49352,7 +49352,7 @@ function BookingLeadTimeReport({ restaurantId, token }: { restaurantId: string; 
 // the heavy dashboards (full Analytics, Inventory insights, Delivery P&L,
 // Invoices). Self-contained state; mirrors the Operations/Management split.
 function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: string; token: string; onOpenTab: (tab: string) => void }) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIST();
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const [from, setFrom] = useState(monthAgo);
   const [to, setTo] = useState(today);
@@ -49645,7 +49645,7 @@ function HotelStaffDashboard({ restaurantId, token, userRole }: {
   restaurantId: string; token: string; userRole: string;
 }) {
   // IST calendar date (en-CA → YYYY-MM-DD), matching the server's stats endpoint.
-  // Was new Date().toISOString().slice(0,10) — a UTC date that never === the
+  // Was todayIST() — a UTC date that never === the
   // full-ISO-timestamp check_in_date/check_out_date the API returns (pg DATE →
   // JS Date → ".....T00:00:00.000Z"), so Arrivals/Departures always read 0.
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -55021,7 +55021,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIST();
     a.download = `atithi-setu_billing-ageing_${today}.csv`;
     document.body.appendChild(a);
     a.click();
@@ -59884,7 +59884,7 @@ function WastageLogModal({ token, restaurantId, ingredients, onClose, onSaved }:
 function StartCountModal({ token, restaurantId, onClose, onStarted }: {
   token: string; restaurantId: string; onClose: () => void; onStarted: (id: string) => void;
 }) {
-  const [countDate, setCountDate] = useState(new Date().toISOString().slice(0, 10));
+  const [countDate, setCountDate] = useState(todayIST());
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -62545,7 +62545,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
 function CustomerReservationView({ restaurantId, onBack }: { restaurantId: string; onBack: () => void }) {
   const toast = useToast();
   const [step, setStep] = useState<'PICK' | 'DETAILS' | 'SUCCESS'>('PICK');
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = todayIST();
   const [selectedDate, setSelectedDate] = useState(todayStr);
   const [slots, setSlots] = useState<any[]>([]);
   const [slotsLoading, setSlotsLoading] = useState(false);
@@ -65171,7 +65171,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
     { channel: 'gommt', label: 'MakeMyTrip / Goibibo (GoMMT)', mult: '1.00' },
   ]);
   const [multResult, setMultResult] = useState<any>(null);
-  const [fetchFrom, setFetchFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [fetchFrom, setFetchFrom] = useState(() => todayIST());
   const [fetchTo, setFetchTo] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
   const [fetchIngest, setFetchIngest] = useState(true);
   const [fetchResult, setFetchResult] = useState<any>(null);
@@ -65182,7 +65182,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
 
   // Room status / stop-sell (O-3)
   const [stRoom, setStRoom] = useState('');
-  const [stFrom, setStFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [stFrom, setStFrom] = useState(() => todayIST());
   const [stTo, setStTo] = useState(() => new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10));
   const [stStop, setStStop] = useState(false);          // false = Open, true = Stop-sell
   const [stMinStay, setStMinStay] = useState('');
@@ -65193,7 +65193,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
 
   // Channel bookings report (which OTA + what to collect) — defaults to month-to-date
   const [rpFrom, setRpFrom] = useState(() => `${new Date().toISOString().slice(0, 7)}-01`);
-  const [rpTo, setRpTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [rpTo, setRpTo] = useState(() => todayIST());
   const [rpData, setRpData] = useState<any>(null);
   const [rpLoading, setRpLoading] = useState(false);
 
@@ -67283,7 +67283,7 @@ function InventoryMonthEnd({ restaurantId, token, module }: { restaurantId: stri
   // than discovered when a wastage entry is rejected next week.
   const [yy, mm] = period.split('-').map(Number);
   const periodEnd = (yy && mm) ? new Date(Date.UTC(yy, mm, 0)).toISOString().slice(0, 10) : '';
-  const inProgress = !!periodEnd && periodEnd > new Date().toISOString().slice(0, 10);
+  const inProgress = !!periodEnd && periodEnd > todayIST();
 
   const runClose = async () => {
     setBusy(true);
@@ -67549,7 +67549,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   const [showInvModal, setShowInvModal] = useState(false);
   const [editInv, setEditInv] = useState<any>(null);
   const [invForm, setInvForm] = useState({
-    supplier_id: '', invoice_number: '', invoice_date: new Date().toISOString().slice(0, 10),
+    supplier_id: '', invoice_number: '', invoice_date: todayIST(),
     due_date: '', module: 'RESTAURANT', subtotal: '', gst_amount: '', total_amount: '', notes: '',
     // Input tax credit. '' leaves the decision to the server: automatic on a new
     // bill, unchanged on an edit.
@@ -67559,11 +67559,11 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
 
   // ── pay modal ────────────────────────────────────────────────────────────
   const [payTarget, setPayTarget] = useState<any>(null);
-  const [payForm, setPayForm] = useState({ amount: '', payment_method: 'CASH', payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' });
+  const [payForm, setPayForm] = useState({ amount: '', payment_method: 'CASH', payment_date: todayIST(), reference_number: '', notes: '' });
   const [paySaving, setPaySaving] = useState(false);
   const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
   const [bulkPayModal, setBulkPayModal] = useState(false);
-  const [bulkPayForm, setBulkPayForm] = useState({ payment_method: 'CASH', payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' });
+  const [bulkPayForm, setBulkPayForm] = useState({ payment_method: 'CASH', payment_date: todayIST(), reference_number: '', notes: '' });
   const [bulkPaySaving, setBulkPaySaving] = useState(false);
   const [bulkPayError, setBulkPayError] = useState('');
 
@@ -67726,7 +67726,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     setEditInv(null);
     setInvForm({
       supplier_id: po.supplier_id || '', invoice_number: '',
-      invoice_date: new Date().toISOString().slice(0, 10), due_date: '',
+      invoice_date: todayIST(), due_date: '',
       module: po.module || 'RESTAURANT',
       subtotal: String(po.total_amount || ''), gst_amount: String(po.gst_amount || ''),
       total_amount: String(po.grand_total || ''), notes: `PO ref: ${po.id}`,
@@ -67737,7 +67737,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
 
   const openCreateInvoice = (prefill?: Partial<typeof invForm>) => {
     setEditInv(null);
-    setInvForm({ supplier_id: '', invoice_number: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', module: 'RESTAURANT', subtotal: '', gst_amount: '', total_amount: '', notes: '', itc_eligibility: '', itc_block_reason: '', is_interstate: '', ...prefill });
+    setInvForm({ supplier_id: '', invoice_number: '', invoice_date: todayIST(), due_date: '', module: 'RESTAURANT', subtotal: '', gst_amount: '', total_amount: '', notes: '', itc_eligibility: '', itc_block_reason: '', is_interstate: '', ...prefill });
     setShowInvModal(true);
   };
   const openEditInvoice = (inv: any) => {
@@ -67773,7 +67773,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
 
   const openPayModal = (inv: any) => {
     setPayTarget(inv);
-    setPayForm({ amount: String(inv.outstanding_amount || ''), payment_method: 'CASH', payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' });
+    setPayForm({ amount: String(inv.outstanding_amount || ''), payment_method: 'CASH', payment_date: todayIST(), reference_number: '', notes: '' });
   };
 
   const savePayment = async () => {
@@ -68242,7 +68242,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                   </button>
                   {bulkSelected.size > 0 && (
                     <button
-                      onClick={() => { setBulkPayForm(f => ({ ...f, payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' })); setBulkPayModal(true); }}
+                      onClick={() => { setBulkPayForm(f => ({ ...f, payment_date: todayIST(), reference_number: '', notes: '' })); setBulkPayModal(true); }}
                       className="text-xs px-3 py-1.5 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 whitespace-nowrap"
                     >
                       Pay {bulkSelected.size} invoice{bulkSelected.size !== 1 ? 's' : ''} · {fmtAmt(bulkTotal)}
@@ -69881,7 +69881,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<any>({
-    effective_from: new Date().toISOString().slice(0, 10),
+    effective_from: todayIST(),
     gross_monthly: 0, basic: 0, hra: 0, special: 0, conveyance: 0, medical: 0, other_allowances: 0,
     tds_regime: 'NEW', section_80c_declared: 0, hra_exemption_declared: 0, notes: '',
   });
@@ -69944,7 +69944,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
                 {canEdit && <button onClick={() => {
                   if (structure) {
                     setForm({
-                      effective_from: new Date().toISOString().slice(0, 10),
+                      effective_from: todayIST(),
                       gross_monthly: Number(structure.gross_monthly) || 0,
                       basic: Number(structure.basic) || 0, hra: Number(structure.hra) || 0,
                       special: Number(structure.special) || 0, conveyance: Number(structure.conveyance) || 0,
@@ -70644,7 +70644,7 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
       const url = URL.createObjectURL(await res.blob());
       const a = document.createElement('a');
       a.href = url;
-      a.download = `employees-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      a.download = `employees-${todayIST()}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -71278,7 +71278,7 @@ function SelectField({ label, value, onChange, options }: { label: string; value
 function RosterManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
   const canEdit = canWriteTab('ROSTER');
   const [view, setView] = useState<'WEEK' | 'FORTNIGHT' | 'MONTH'>('WEEK');
-  const [anchor, setAnchor] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [anchor, setAnchor] = useState<string>(() => todayIST());
   const [staff, setStaff] = useState<any[]>([]);
   const [slots, setSlots] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
@@ -71385,7 +71385,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
   }, [staff, filterRole]);
 
   // Today's date as ISO for the "today column" highlight
-  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const todayIso = useMemo(() => todayIST(), []);
 
   const saveSlot = async (payload: any, opts: { silentNotify?: boolean } = {}) => {
     if (!canEdit) { setMessage('View-only access — you cannot create or edit shifts.'); return; }
@@ -71551,7 +71551,7 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
           <button onClick={() => shift(view === 'WEEK' ? -7 : view === 'FORTNIGHT' ? -14 : -28)}
             title="Previous"
             className="w-8 h-8 flex items-center justify-center bg-white border border-brand/15 rounded-xl text-sm font-bold hover:bg-brand/5">←</button>
-          <button onClick={() => setAnchor(new Date().toISOString().slice(0, 10))}
+          <button onClick={() => setAnchor(todayIST())}
             className="px-3 py-1.5 bg-white border border-brand/15 rounded-xl text-xs font-bold hover:bg-brand/5">Today</button>
           <button onClick={() => shift(view === 'WEEK' ? 7 : view === 'FORTNIGHT' ? 14 : 28)}
             title="Next"
@@ -72634,7 +72634,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
   };
 
   // Config edit panel state
-  const [configDate, setConfigDate] = useState(new Date().toISOString().split('T')[0]);
+  const [configDate, setConfigDate] = useState(todayIST());
   const [configForm, setConfigForm] = useState<{ max_tables: number; time_slots: Array<{ time: string; max_tables: number }>; is_open: boolean; notes: string }>({
     max_tables: 10, time_slots: DEFAULT_SLOTS, is_open: true, notes: ''
   });
@@ -72643,7 +72643,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
 
   // Bulk apply state
   const [bulkForm, setBulkForm] = useState({
-    from_date: new Date().toISOString().split('T')[0],
+    from_date: todayIST(),
     to_date: new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0],
     day_of_week: [0, 1, 2, 3, 4, 5, 6] as number[],
     max_tables: 10,
@@ -72654,7 +72654,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
   // New booking form state
-  const [nbForm, setNbForm] = useState({ customer_name: '', customer_phone: '', customer_email: '', booking_date: new Date().toISOString().split('T')[0], booking_time: '19:00', guests: 2, notes: '' });
+  const [nbForm, setNbForm] = useState({ customer_name: '', customer_phone: '', customer_email: '', booking_date: todayIST(), booking_time: '19:00', guests: 2, notes: '' });
   const [savingBooking, setSavingBooking] = useState(false);
 
   const authHeaders = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -72758,7 +72758,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setShowNewBooking(false);
-        setNbForm({ customer_name: '', customer_phone: '', customer_email: '', booking_date: new Date().toISOString().split('T')[0], booking_time: '19:00', guests: 2, notes: '' });
+        setNbForm({ customer_name: '', customer_phone: '', customer_email: '', booking_date: todayIST(), booking_time: '19:00', guests: 2, notes: '' });
         setTimeout(() => fetchBookings(), 100);
       } else {
         toast.error(data.error || 'Failed to create booking');
@@ -72793,7 +72793,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
     return cells;
   }, [availMonth, configs]);
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayIST();
   const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
   const todayCount = bookings.filter(b => String(b.booking_date).slice(0, 10) === today && b.status !== 'CANCELLED').length;
   const tomorrowCount = bookings.filter(b => String(b.booking_date).slice(0, 10) === tomorrow && b.status !== 'CANCELLED').length;
@@ -74417,7 +74417,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
   // the popover when the guest opens it; defaults to 10 yrs each
   // (above the typical 5-yr free threshold).
   const [searchParams, setSearchParams] = useState({
-    start: new Date().toISOString().slice(0, 10),
+    start: todayIST(),
     end: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
     rooms: 1,
     adults: 2,
@@ -74488,7 +74488,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
         setHotelInfo(info);
         // Fire-and-forget: fetch "starting from" rate per category for
         // the default date range so room cards show real prices.
-        const today = new Date().toISOString().slice(0, 10);
+        const today = todayIST();
         const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
         const realTenant = sessionStorage.getItem(cacheKey) || tenantId;
         for (const rt of (info.room_types || [])) {
@@ -74910,7 +74910,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in</label>
                     <input
-                      required type="date" min={new Date().toISOString().slice(0, 10)}
+                      required type="date" min={todayIST()}
                       value={searchParams.start}
                       onChange={e => setSearchParams(p => ({ ...p, start: e.target.value, end: p.end <= e.target.value ? new Date(new Date(e.target.value).getTime() + 86400000).toISOString().slice(0, 10) : p.end }))}
                       className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm focus:ring-2 ring-brand/30 outline-none"
@@ -74919,7 +74919,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out</label>
                     <input
-                      required type="date" min={searchParams.start || new Date().toISOString().slice(0, 10)}
+                      required type="date" min={searchParams.start || todayIST()}
                       value={searchParams.end}
                       onChange={e => setSearchParams(p => ({ ...p, end: e.target.value }))}
                       className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm focus:ring-2 ring-brand/30 outline-none"
@@ -75320,7 +75320,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                   <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in</label>
                   <input
                     required type="date"
-                    min={new Date().toISOString().slice(0, 10)}
+                    min={todayIST()}
                     value={searchParams.start}
                     onChange={e => setSearchParams(p => ({ ...p, start: e.target.value, end: p.end <= e.target.value ? new Date(new Date(e.target.value).getTime() + 86400000).toISOString().slice(0, 10) : p.end }))}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-brand/20 outline-none"
@@ -75330,7 +75330,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                   <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out</label>
                   <input
                     required type="date"
-                    min={searchParams.start || new Date().toISOString().slice(0, 10)}
+                    min={searchParams.start || todayIST()}
                     value={searchParams.end}
                     onChange={e => setSearchParams(p => ({ ...p, end: e.target.value }))}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-brand/20 outline-none"

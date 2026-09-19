@@ -8,6 +8,7 @@ import { Search, X, Copy, ExternalLink, ChevronLeft, ChevronRight, Download } fr
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { usePaymentDialog } from '../components/PaymentDialog';
+import { todayIST } from '../lib/utils';
 
 type TRow = any;
 const CHIPS: [string, string][] = [
@@ -127,7 +128,7 @@ export function TenantDirectory({ token, role, fixedChip, heading, blurb, openRe
     const esc = (v: any) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const csv = [cols.join(','), ...rows.map(r => cols.map(k => esc(r[k])).join(','))].join('\n');
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    a.download = `tenants-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    a.download = `tenants-${todayIST()}.csv`; a.click();
   };
   const selectedRows = data.rows.filter(r => sel.has(r.id));
   const bulkApprove = async () => {
