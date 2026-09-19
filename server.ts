@@ -2986,7 +2986,10 @@ async function buildHotelPaymentLinkPayload(
     [bookingId]
   );
   const breakup: Array<{ label: string; amount: number; qty?: number }> = [];
-  let grandTotal = Number(booking.total_amount || 0);
+  // An EVENT room's nights are billed on the event invoice: without a hotel bill
+  // there is nothing due here, and with one only its extras are.
+  const isEventRoom = String(booking.booking_source || '').toUpperCase() === 'EVENT';
+  let grandTotal = isEventRoom ? 0 : Number(booking.total_amount || 0);
   if (folio?.id) {
     // Group folio entries by entry_type for a clean breakup.
     //   ROOM_CHARGE      → "Room charges"
@@ -3027,7 +3030,7 @@ async function buildHotelPaymentLinkPayload(
     // adjustments). Falls back to subtotal + GST if not yet recomputed.
     grandTotal = Number(folio.grand_total || (subtotal + runningGst));
   } else {
-    breakup.push({ label: 'Room booking', amount: grandTotal });
+    if (!isEventRoom) breakup.push({ label: 'Room booking', amount: grandTotal });
   }
 
   const upiVpa = String(restaurant?.upi_vpa || '').trim();
@@ -53778,7 +53781,9 @@ ${data.tenant.name}`;
           room_rate: Number(b.room_rate || 0),
         });
         earlyFeeInfo = eFee;
-        if (eFee.applies && eFee.fee_amount > 0 && !waiveEarly && folio?.id) {
+        // Event rooms are billed on the event invoice — no early check-in charge here.
+        if (String(b.booking_source || '').toUpperCase() === 'EVENT') earlyFeeInfo = { ...eFee, applies: false };
+        else if (eFee.applies && eFee.fee_amount > 0 && !waiveEarly && folio?.id) {
           await addEarlyCheckinFolioEntry(req.params.id, folio.id, eFee.fee_amount);
           await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'EARLY_CHECKIN_FEE', summary: eFee.policy_text });
         } else if (eFee.applies && waiveEarly) {
@@ -54281,6 +54286,64 @@ ${data.tenant.name}`;
     } catch (err: any) {
       console.error('[hotel] event-checkin failed:', err);
       res.status(500).json({ error: 'Failed to check the event room in' });
+    }
+  });
+
+  // For a room reserved for an EVENT: which event it belongs to and that event's
+  // money. The hotel booking screen shows this instead of a hotel "outstanding",
+  // because the room is paid on the event invoice, not at the hotel.
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/event-billing", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const ev: any = await tenantDb.get(
+        `SELECT eb.id, eb.customer_name, eb.event_type, eb.status, eb.event_date, eb.total_amount, eb.advance_amount
+           FROM event_booking_rooms r JOIN event_bookings eb ON eb.id = r.booking_id
+          WHERE r.hotel_booking_id = ? LIMIT 1`, [req.params.bookingId]).catch(() => null);
+      if (!ev) return res.json({ event: null });
+      const total = Number(ev.total_amount || 0), paid = Number(ev.advance_amount || 0);
+      res.json({ event: { id: ev.id, customer_name: ev.customer_name, event_type: ev.event_type, status: ev.status, event_date: normaliseDateIso(ev.event_date), total, paid, balance: Math.max(0, Math.round((total - paid) * 100) / 100) } });
+    } catch (err: any) {
+      res.status(500).json({ error: 'Failed to load the event billing' });
+    }
+  });
+
+  // Put back to BOOKED the event rooms the nightly sweep wrongly flagged NO_SHOW
+  // (before it knew about events), so the event automation can check them in.
+  // Only rooms whose event is still Confirmed / In progress, and only when no other
+  // guest now holds that room on those dates. dry_run lists without changing.
+  app.post("/api/restaurant/:id/hotel/event-rooms/restore-no-shows", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    if (!(String(req.user?.role || '').toUpperCase() === 'MANAGER' || (await _roleHasTab(req, 'HOTEL_BOOKINGS', 3)))) return res.status(403).json({ error: 'Only an owner or manager can restore bookings.' });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const dry = req.body?.dry_run === true;
+      const rows: any[] = await tenantDb.query(
+        `SELECT rb.id, rb.room_id, rb.guest_name, rb.check_in_date, rb.check_out_date, eb.id AS event_id, eb.customer_name, eb.status AS event_status
+           FROM event_booking_rooms r
+           JOIN event_bookings eb ON eb.id = r.booking_id
+           JOIN room_bookings rb ON rb.id = r.hotel_booking_id
+          WHERE rb.status = 'NO_SHOW' AND UPPER(COALESCE(rb.booking_source, '')) = 'EVENT'
+            AND eb.status IN ('CONFIRMED','IN_PROGRESS')`).catch(() => []);
+      const out: any[] = [];
+      for (const r of rows) {
+        const clash: any = r.room_id ? await tenantDb.get(
+          `SELECT id FROM room_bookings WHERE room_id = ? AND id <> ? AND status IN ('BOOKED','CHECKED_IN')
+              AND check_in_date <= ? AND check_out_date >= ? LIMIT 1`,
+          [r.room_id, r.id, r.check_out_date, r.check_in_date]).catch(() => null) : null;
+        if (clash) { out.push({ id: r.id, event: r.customer_name, restored: false, reason: 'ROOM_TAKEN', message: 'Another guest holds this room on those dates.' }); continue; }
+        if (!dry) {
+          const u = await tenantDb.run("UPDATE room_bookings SET status = 'BOOKED', no_show = 0 WHERE id = ? AND status = 'NO_SHOW'", [r.id]);
+          if (u?.changes) await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: r.id, action: 'RESTORED', summary: `No-show undone: room belongs to event ${r.customer_name} (${r.event_status}), which checks its guests in`, before: { status: 'NO_SHOW' }, after: { status: 'BOOKED' } }).catch(() => {});
+        }
+        out.push({ id: r.id, event: r.customer_name, event_status: r.event_status, restored: !dry, would_restore: dry });
+      }
+      res.json({ dry_run: dry, count: out.filter(o => o.restored || o.would_restore).length, rows: out });
+    } catch (err: any) {
+      console.error('[hotel] restore-no-shows failed:', err);
+      res.status(500).json({ error: 'Failed to restore the bookings' });
     }
   });
 
@@ -67577,8 +67640,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-rooms-auto-checkin-checkout-2',
+    commit_marker: 'event-rooms-billing-display-restore',
     code_features: [
+      'event-rooms-billing-display-restore  Owner report: an event room showed its room price as outstanding on the hotel booking although the money is collected on the event invoice (the hotel screen computed total_amount minus hotel payments). The booking screen now shows Billed on the event invoice with the event total / paid / balance (GET /hotel/bookings/:bookingId/event-billing); the pay link never asks for an event room price (only hotel extras); no early check-in fee on an event room. Repair: POST /hotel/event-rooms/restore-no-shows (owner/manager, dry_run) puts back to BOOKED the event rooms the nightly sweep flagged NO_SHOW before it knew about events, when the event is still live and the room is not taken.',
       'event-rooms-auto-checkin-checkout  Owner request: event guests no longer end up NO_SHOW. Starting an event checks in its reserved hotel rooms through a new Hotel route POST /hotel/bookings/:bookingId/event-checkin (_eventRoomCheckin: date must have come, Form-C still enforced for foreign guests, room must not be occupied or out of order; a missing ID does not block — the room is listed by GET /hotel/reports/missing-guest-id, shown to the front desk on Hotel Bookings). An hourly job checks in later nights of multi-day events. Completing the event checks the rooms out: nothing on the hotel bill closes it quietly (no zero-value tax invoice), extras go through the normal check-out, unpaid extras are left for the desk. Billing: createFolioWithRoomCharges never seeds room charges for booking_source EVENT (the rooms are on the event invoice), which also fixes charge-to-room on an event room billing the nights twice; no late-checkout night on event rooms. The nightly no-show sweep skips rooms of events still confirmed or running.',
       'events-rooms-cleaning-rental-shortage-calendar-completed  Owner bug batch. (1) Completing an event sent only the hall to cleaning; every hotel room reserved for the event now goes to CLEANING with the departure checklist, through a new Hotel route POST /hotel/bookings/:bookingId/release-for-cleaning (skips a guest still checked in, a room another guest occupies, maintenance/blocked rooms). The check-out cleaning steps moved into one helper, _sendRoomToCleaning, used by both. (2) Rental items could be added beyond stock with no warning. Booking create/edit and rental add-ons now return 409 RENTAL_SHORTAGE with the per-item shortfall unless confirm_shortage is sent; an accepted shortage is audited. Availability now counts multi-day overlap and add-on rentals. New GET /events/reports/rental-shortages lists upcoming bookings short of stock. (3) The events calendar shows completed bookings.',
       'wa-not-in-plan-status  A WhatsApp notification for a property without the WhatsApp add-on is logged NOT_IN_PLAN (with the upgrade hint), not FAILED, and nothing is attempted, so the failed counters and log only show real delivery problems. Older rows blocked for the same reason are relabelled once per tenant.',

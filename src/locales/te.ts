@@ -770,4 +770,10 @@ export const te: Record<string, string> = {
   'hotel.missingId.checkOut': 'చెక్-అవుట్',
   'events.start.roomsCheckedIn': 'ఈవెంట్ {total} గదుల్లో {sent} చెక్-ఇన్ అయ్యాయి.',
   'events.start.idMissing': '{n} గదులకు ఇంకా అతిథి గుర్తింపు పత్రం లేదు — ఫ్రంట్ డెస్క్ వీటిని హోటల్ బుకింగ్స్‌లో చూస్తుంది.',
+  // ── Hotel: event room billed on the event invoice ──
+  'hotel.eventBilling.title': 'ఈవెంట్ ఇన్‌వాయిస్‌పై బిల్ చేయబడింది',
+  'hotel.eventBilling.sub': 'ఈ గదికి చెల్లింపు దాని ఈవెంట్ ద్వారా జరుగుతుంది, హోటల్‌లో కాదు. ఇక్కడ అదనపువి (రూమ్ సర్వీస్, మినీబార్) మాత్రమే వసూలు.',
+  'hotel.eventBilling.total': 'ఈవెంట్ మొత్తం',
+  'hotel.eventBilling.paid': 'ఈవెంట్ చెల్లింపు',
+  'hotel.eventBilling.balance': 'ఈవెంట్ బాకీ',
 };

@@ -837,4 +837,10 @@ export const en: Record<string, string> = {
   'hotel.missingId.checkOut': 'Check-out',
   'events.start.roomsCheckedIn': '{sent} of {total} event room(s) checked in.',
   'events.start.idMissing': '{n} room(s) have no guest ID yet — the front desk sees them under Hotel Bookings.',
+  // ── Hotel: event room billed on the event invoice ──
+  'hotel.eventBilling.title': 'Billed on the event invoice',
+  'hotel.eventBilling.sub': 'This room is paid through its event, not at the hotel. Only extras (room service, minibar) are charged here.',
+  'hotel.eventBilling.total': 'Event total',
+  'hotel.eventBilling.paid': 'Event paid',
+  'hotel.eventBilling.balance': 'Event balance',
 };

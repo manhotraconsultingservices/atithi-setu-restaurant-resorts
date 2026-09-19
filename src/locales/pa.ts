@@ -834,4 +834,10 @@ export const pa: Record<string, string> = {
   'hotel.missingId.checkOut': 'ਚੈੱਕ-ਆਊਟ',
   'events.start.roomsCheckedIn': 'ਇਵੈਂਟ ਦੇ {total} ਵਿੱਚੋਂ {sent} ਕਮਰੇ ਚੈੱਕ-ਇਨ ਹੋਏ।',
   'events.start.idMissing': '{n} ਕਮਰਿਆਂ ਵਿੱਚ ਅਜੇ ਮਹਿਮਾਨ ਦੀ ਆਈਡੀ ਨਹੀਂ — ਫਰੰਟ ਡੈਸਕ ਇਨ੍ਹਾਂ ਨੂੰ ਹੋਟਲ ਬੁਕਿੰਗਾਂ ਵਿੱਚ ਦੇਖੇਗਾ।',
+  // ── Hotel: event room billed on the event invoice ──
+  'hotel.eventBilling.title': 'ਇਵੈਂਟ ਇਨਵੌਇਸ \'ਤੇ ਬਿੱਲ ਕੀਤਾ',
+  'hotel.eventBilling.sub': 'ਇਸ ਕਮਰੇ ਦਾ ਭੁਗਤਾਨ ਇਸਦੇ ਇਵੈਂਟ ਰਾਹੀਂ ਹੁੰਦਾ ਹੈ, ਹੋਟਲ \'ਤੇ ਨਹੀਂ। ਇੱਥੇ ਸਿਰਫ਼ ਵਾਧੂ (ਰੂਮ ਸਰਵਿਸ, ਮਿਨੀਬਾਰ) ਦਾ ਖ਼ਰਚਾ ਲੱਗਦਾ ਹੈ।',
+  'hotel.eventBilling.total': 'ਇਵੈਂਟ ਕੁੱਲ',
+  'hotel.eventBilling.paid': 'ਇਵੈਂਟ ਭੁਗਤਾਨ',
+  'hotel.eventBilling.balance': 'ਇਵੈਂਟ ਬਕਾਇਆ',
 };

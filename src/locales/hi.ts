@@ -873,4 +873,10 @@ export const hi: Record<string, string> = {
   'hotel.missingId.checkOut': 'चेक-आउट',
   'events.start.roomsCheckedIn': 'इवेंट के {total} में से {sent} कमरे चेक-इन हुए।',
   'events.start.idMissing': '{n} कमरों में अभी मेहमान की आईडी नहीं है — फ्रंट डेस्क इन्हें होटल बुकिंग में देखेगा।',
+  // ── Hotel: event room billed on the event invoice ──
+  'hotel.eventBilling.title': 'इवेंट इनवॉइस पर बिल किया गया',
+  'hotel.eventBilling.sub': 'इस कमरे का भुगतान इसके इवेंट से होता है, होटल पर नहीं। यहाँ केवल अतिरिक्त (रूम सर्विस, मिनीबार) का शुल्क लगता है।',
+  'hotel.eventBilling.total': 'इवेंट कुल',
+  'hotel.eventBilling.paid': 'इवेंट भुगतान',
+  'hotel.eventBilling.balance': 'इवेंट बकाया',
 };

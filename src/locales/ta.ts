@@ -770,4 +770,10 @@ export const ta: Record<string, string> = {
   'hotel.missingId.checkOut': 'செக்-அவுட்',
   'events.start.roomsCheckedIn': 'நிகழ்வின் {total} அறைகளில் {sent} செக்-இன் ஆயின.',
   'events.start.idMissing': '{n} அறைகளில் விருந்தினர் அடையாள அட்டை இன்னும் இல்லை — முன் மேசை இவற்றை ஹோட்டல் முன்பதிவுகளில் பார்க்கும்.',
+  // ── Hotel: event room billed on the event invoice ──
+  'hotel.eventBilling.title': 'நிகழ்வு விலைப்பட்டியலில் கட்டணம்',
+  'hotel.eventBilling.sub': 'இந்த அறைக்கான கட்டணம் அதன் நிகழ்வு மூலம் செலுத்தப்படுகிறது, ஹோட்டலில் அல்ல. கூடுதல் (அறை சேவை, மினிபார்) மட்டுமே இங்கே வசூலிக்கப்படும்.',
+  'hotel.eventBilling.total': 'நிகழ்வு மொத்தம்',
+  'hotel.eventBilling.paid': 'நிகழ்வு செலுத்தியது',
+  'hotel.eventBilling.balance': 'நிகழ்வு நிலுவை',
 };

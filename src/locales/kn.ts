@@ -772,4 +772,10 @@ export const kn: Record<string, string> = {
   'hotel.missingId.checkOut': 'ಚೆಕ್-ಔಟ್',
   'events.start.roomsCheckedIn': 'ಕಾರ್ಯಕ್ರಮದ {total} ಕೊಠಡಿಗಳಲ್ಲಿ {sent} ಚೆಕ್-ಇನ್ ಆದವು.',
   'events.start.idMissing': '{n} ಕೊಠಡಿಗಳಿಗೆ ಇನ್ನೂ ಅತಿಥಿ ಗುರುತಿನ ಚೀಟಿ ಇಲ್ಲ — ಮುಂಭಾಗದ ಮೇಜು ಇವನ್ನು ಹೋಟೆಲ್ ಬುಕಿಂಗ್‌ಗಳಲ್ಲಿ ನೋಡುತ್ತದೆ.',
+  // ── Hotel: event room billed on the event invoice ──
+  'hotel.eventBilling.title': 'ಕಾರ್ಯಕ್ರಮದ ಇನ್‌ವಾಯ್ಸ್‌ನಲ್ಲಿ ಬಿಲ್ ಆಗಿದೆ',
+  'hotel.eventBilling.sub': 'ಈ ಕೊಠಡಿಯ ಪಾವತಿ ಅದರ ಕಾರ್ಯಕ್ರಮದ ಮೂಲಕ, ಹೋಟೆಲ್‌ನಲ್ಲಿ ಅಲ್ಲ. ಇಲ್ಲಿ ಹೆಚ್ಚುವರಿ (ರೂಮ್ ಸರ್ವಿಸ್, ಮಿನಿಬಾರ್) ಮಾತ್ರ ಶುಲ್ಕ.',
+  'hotel.eventBilling.total': 'ಕಾರ್ಯಕ್ರಮ ಒಟ್ಟು',
+  'hotel.eventBilling.paid': 'ಕಾರ್ಯಕ್ರಮ ಪಾವತಿ',
+  'hotel.eventBilling.balance': 'ಕಾರ್ಯಕ್ರಮ ಬಾಕಿ',
 };

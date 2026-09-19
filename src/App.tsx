@@ -24,6 +24,7 @@ import { ThemeColorSettings, applyThemeColor } from './ThemeColorSettings';
 import { PayOnlineButton, PaymentResultPage, usePublicPayOptions, PayChoicePicker, HoldCountdown } from './PublicPay';
 import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, spanInRange, type DateRange } from './components/ListFilters';
 import { MissingGuestIdPanel } from './MissingGuestIdPanel';
+import { EventRoomBilling } from './EventRoomBilling';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules } from './tenantModules';
@@ -36782,8 +36783,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Total</span><span className="font-mono font-bold">{inr(bd.total_amount)}</span></div>
                       {bdCommission > 0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">OTA commission{bd.commission_pct?` (${Number(bd.commission_pct)}%)`:''}</span><span className="font-mono font-bold text-rose-600">− {inr(bdCommission)}</span></div>}
                       {bdCommission > 0 && bdNet > 0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Net to property</span><span className="font-mono font-bold">{inr(bdNet)}</span></div>}
+                      {/* An event room is paid on the event invoice: show the event's money, never a hotel "outstanding". */}
+                      {String(bd.booking_source || '').toUpperCase() === 'EVENT' ? (
+                        <EventRoomBilling restaurantId={restaurantId} token={token} bookingId={bd.id} />
+                      ) : (<>
                       <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Advance paid</span><span className="font-mono font-bold text-emerald-700">{inr(bd.advance_paid)}</span></div>
                       <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Outstanding</span><span className={cn('font-mono font-bold', outstanding>0?'text-rose-600':'text-emerald-700')}>{inr(outstanding)}</span></div>
+                      </>)}
                     </div>
                   </div>
 
